@@ -45,6 +45,9 @@ base64 = "0.22"
 # Logging
 log = "0.4"
 env_logger = "0.11"
+# Persistent file logging (console + rotating file in <datadir>/logs/).
+# Implements the `log` facade so all existing log:: calls flow through unchanged.
+flexi_logger = "0.29"
 
 # Crypto libraries (self-contained, no external wallet-core dependency)
 secp256k1 = { version = "0.28", features = ["rand-std"] }

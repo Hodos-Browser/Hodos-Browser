@@ -47,6 +47,54 @@ fn app_dir_name() -> &'static str {
     }
 }
 
+/// Cross-platform base data directory for this app instance.
+/// `<dirs::data_dir()>/<app_dir_name()>` — e.g.
+/// Windows dev: `%APPDATA%\HodosBrowserDev`, macOS: `~/Library/Application Support/HodosBrowser`.
+/// Subdirs `wallet/` (db) and `logs/` (rotating log files) hang off this root.
+fn data_root() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| match std::env::var("APPDATA") {
+            Ok(appdata) => PathBuf::from(appdata),
+            Err(_) => PathBuf::from("."),
+        })
+        .join(app_dir_name())
+}
+
+/// Initialize logging: every `log::` record goes to a rotating file in
+/// `<data_root>/logs/` AND is duplicated to stderr (so the dev terminal is
+/// unchanged). Production installs get logs too — essential for supporting a
+/// wallet that moves real money. Level honors `RUST_LOG` (default `info`).
+/// `WriteMode::Direct` flushes each record so the file can be tailed live.
+/// Returns the `LoggerHandle`, which MUST be kept alive for the process
+/// lifetime (dropping it stops logging/flushing).
+fn init_logging() -> flexi_logger::LoggerHandle {
+    let logs_dir = data_root().join("logs");
+    let _ = std::fs::create_dir_all(&logs_dir);
+    // Option A (privacy-conscious prod default): dev logs at `info` (full
+    // operational detail for debugging); production logs at `warn` so installed
+    // users don't accumulate a local on-disk trail of every domain/payment at
+    // info level. `RUST_LOG` overrides either default. Revisited holistically in
+    // development-docs/0.4.0/HelicOps/LOGGING_REVIEW_AND_UPGRADE.md.
+    let default_level = if app_dir_name() == "HodosBrowserDev" { "info" } else { "warn" };
+    flexi_logger::Logger::try_with_env_or_str(default_level)
+        .expect("flexi_logger: invalid RUST_LOG spec")
+        .log_to_file(
+            flexi_logger::FileSpec::default()
+                .directory(&logs_dir)
+                .basename("wallet"),
+        )
+        .duplicate_to_stderr(flexi_logger::Duplicate::Info)
+        .rotate(
+            flexi_logger::Criterion::Size(10_000_000), // 10 MB per file
+            flexi_logger::Naming::Numbers,
+            flexi_logger::Cleanup::KeepLogFiles(10), // ~100 MB ceiling
+        )
+        .write_mode(flexi_logger::WriteMode::Direct)
+        .format_for_files(flexi_logger::detailed_format)
+        .start()
+        .expect("flexi_logger: failed to start")
+}
+
 /// Safeguard: if running from a cargo build directory (dev build), require HODOS_DEV=1.
 /// Installed app runs from a different path, so this check won't trigger for real users.
 fn enforce_dev_safeguard() {
@@ -155,58 +203,49 @@ impl AppState {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    // Initialize logging
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-
+    // Dev safeguard runs FIRST — before any logging or data-dir creation — so a
+    // mis-launched dev build (HODOS_DEV unset) bails via eprintln! before we
+    // touch the production data directory.
     enforce_dev_safeguard();
 
-    println!("🦀 Bitcoin Browser Wallet (Rust)");
-    println!("=================================");
-    println!();
+    // Initialize logging: console + rotating file in <data_root>/logs/.
+    // Held for the process lifetime (drop = logging stops).
+    let _logger = init_logging();
+
+    log::info!("🦀 Bitcoin Browser Wallet (Rust)");
+    log::info!("=================================");
 
     if app_dir_name() == "HodosBrowserDev" {
-        println!("🔧 DEV MODE: Using HodosBrowserDev data directory");
+        log::info!("🔧 DEV MODE: Using HodosBrowserDev data directory");
     }
 
-    // Get wallet path (cross-platform)
-    let wallet_dir = dirs::data_dir()
-        .unwrap_or_else(|| {
-            // Fallback: try APPDATA (Windows) or current directory
-            match std::env::var("APPDATA") {
-                Ok(appdata) => PathBuf::from(appdata),
-                Err(_) => {
-                    println!("⚠️  Could not determine data directory, using current directory");
-                    PathBuf::from(".")
-                }
-            }
-        })
-        .join(app_dir_name())
-        .join("wallet");
+    // Get wallet path (cross-platform) — shares the data_root() resolver with logs.
+    let wallet_dir = data_root().join("wallet");
 
     // Ensure wallet directory exists (needed for both JSON and database)
     if let Err(e) = std::fs::create_dir_all(&wallet_dir) {
-        eprintln!("❌ Failed to create wallet directory: {}", e);
-        eprintln!("   Path: {}", wallet_dir.display());
+        log::error!("❌ Failed to create wallet directory: {}", e);
+        log::warn!("   Path: {}", wallet_dir.display());
         return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, e));
     }
 
     // Database is now the primary storage - no JSON files needed
-    println!("📁 Wallet directory: {}", wallet_dir.display());
+    log::info!("📁 Wallet directory: {}", wallet_dir.display());
 
     // Initialize BRC-103/104 auth session manager
     let auth_sessions = Arc::new(AuthSessionManager::new());
-    println!("✅ Auth session manager initialized");
+    log::info!("✅ Auth session manager initialized");
 
     // Initialize database (primary storage)
     let db_path = wallet_dir.join("wallet.db");
     let (database, default_user_id, wallet_exists) = match WalletDatabase::new(db_path.clone()) {
         Ok(mut db) => {
-            println!("✅ Database initialized");
-            println!("   Database path: {}", db_path.display());
+            log::info!("✅ Database initialized");
+            log::info!("   Database path: {}", db_path.display());
 
             // Test connection
             if let Err(e) = db.test_connection() {
-                eprintln!("⚠️  Database connection test failed: {}", e);
+                log::warn!("⚠️  Database connection test failed: {}", e);
             }
 
             // Check if wallet exists in database
@@ -214,8 +253,8 @@ async fn main() -> std::io::Result<()> {
             let wallet_repo = WalletRepository::new(db.connection());
             let wallet_exists = match wallet_repo.get_primary_wallet() {
                 Ok(Some(wallet)) => {
-                    println!("📋 Wallet found in database (ID: {})", wallet.id.unwrap());
-                    println!("   Addresses: {}", wallet.current_index + 1);
+                    log::info!("📋 Wallet found in database (ID: {})", wallet.id.unwrap());
+                    log::info!("   Addresses: {}", wallet.current_index + 1);
 
                     let wallet_id = wallet.id.unwrap();
                     let has_dpapi = wallet.mnemonic_dpapi.is_some();
@@ -224,26 +263,26 @@ async fn main() -> std::io::Result<()> {
                     // Auto-unlock via DPAPI (Windows user account binding)
                     match db.try_dpapi_unlock() {
                         Ok(true) => {
-                            println!("🔓 DPAPI auto-unlock succeeded");
+                            log::info!("🔓 DPAPI auto-unlock succeeded");
                         }
                         Ok(false) => {
                             // No DPAPI blob — legacy wallet or non-Windows
                             if !is_pin_protected {
                                 // Legacy unencrypted wallet: cache mnemonic directly
-                                println!("🔓 Legacy wallet (no PIN, no DPAPI) — caching plaintext mnemonic");
+                                log::info!("🔓 Legacy wallet (no PIN, no DPAPI) — caching plaintext mnemonic");
                                 db.cache_mnemonic(wallet.mnemonic.clone());
                             } else {
                                 // PIN-protected but no DPAPI blob — backfill if we can unlock
                                 // This case shouldn't happen for new wallets but handles
                                 // wallets created before DPAPI support was added
-                                println!("🔒 PIN-protected wallet without DPAPI blob — wallet locked");
-                                println!("   Use POST /wallet/unlock with PIN to unlock");
+                                log::info!("🔒 PIN-protected wallet without DPAPI blob — wallet locked");
+                                log::info!("   Use POST /wallet/unlock with PIN to unlock");
                             }
                         }
                         Err(e) => {
                             // DPAPI blob exists but decryption failed (DB moved to another machine/user)
-                            println!("🔒 DPAPI unlock failed: {} — wallet locked", e);
-                            println!("   Use POST /wallet/unlock with PIN to unlock");
+                            log::info!("🔒 DPAPI unlock failed: {} — wallet locked", e);
+                            log::info!("   Use POST /wallet/unlock with PIN to unlock");
                         }
                     }
 
@@ -259,22 +298,22 @@ async fn main() -> std::io::Result<()> {
 
                         // Ensure master pubkey address exists (needs cached mnemonic)
                         if let Err(e) = db.ensure_master_address_exists() {
-                            eprintln!("   ⚠️  Failed to ensure master address exists: {}", e);
+                            log::warn!("   ⚠️  Failed to ensure master address exists: {}", e);
                         }
 
                         // Ensure backup address exists (needs cached mnemonic)
                         if let Err(e) = db.ensure_backup_address_exists() {
-                            eprintln!("   ⚠️  Failed to ensure backup address exists: {}", e);
+                            log::warn!("   ⚠️  Failed to ensure backup address exists: {}", e);
                         }
                     }
                     true
                 }
                 Ok(None) => {
-                    println!("🔑 No wallet in database - server ready for user-initiated creation");
+                    log::info!("🔑 No wallet in database - server ready for user-initiated creation");
                     false
                 }
                 Err(e) => {
-                    eprintln!("   ⚠️  Error checking for wallet: {}", e);
+                    log::warn!("   ⚠️  Error checking for wallet: {}", e);
                     false
                 }
             };
@@ -283,7 +322,7 @@ async fn main() -> std::io::Result<()> {
 
                 // Ensure "default" basket exists (for existing wallets created before BRC-100 support)
                 if let Err(e) = db.ensure_default_basket_exists() {
-                    eprintln!("   ⚠️  Failed to ensure default basket exists: {}", e);
+                    log::warn!("   ⚠️  Failed to ensure default basket exists: {}", e);
                 }
 
                 // Cleanup stale pending transactions (created but never broadcast)
@@ -297,14 +336,14 @@ async fn main() -> std::io::Result<()> {
                     // Find transactions stuck in 'unsigned' (never broadcast) for more than 5 minutes
                     match tx_repo.get_stale_pending_transactions(300) {
                         Ok(stale_txs) if !stale_txs.is_empty() => {
-                            println!("🧹 Found {} stale pending transaction(s) - cleaning up...", stale_txs.len());
+                            log::info!("🧹 Found {} stale pending transaction(s) - cleaning up...", stale_txs.len());
                             let output_repo = OutputRepository::new(conn);
 
                             for (txid, inputs) in &stale_txs {
                                 // 1. Delete ghost change outputs (outputs of the never-broadcast tx)
                                 match output_repo.delete_by_txid(txid) {
                                     Ok(count) if count > 0 => {
-                                        println!("   🗑️  Deleted {} ghost output(s) from tx {}", count, &txid[..std::cmp::min(16, txid.len())]);
+                                        log::info!("   🗑️  Deleted {} ghost output(s) from tx {}", count, &txid[..std::cmp::min(16, txid.len())]);
                                     }
                                     _ => {}
                                 }
@@ -312,25 +351,25 @@ async fn main() -> std::io::Result<()> {
                                 // 2. Restore input outputs that were marked as spent by this tx
                                 match output_repo.restore_by_spending_description(txid) {
                                     Ok(count) if count > 0 => {
-                                        println!("   ♻️  Restored {} input output(s) from tx {}", count, &txid[..std::cmp::min(16, txid.len())]);
+                                        log::info!("   ♻️  Restored {} input output(s) from tx {}", count, &txid[..std::cmp::min(16, txid.len())]);
                                     }
                                     _ => {}
                                 }
 
                                 // 3. Mark the transaction as 'failed'
                                 if let Err(e) = tx_repo.update_broadcast_status(txid, "failed") {
-                                    eprintln!("   ⚠️  Failed to update status for {}: {}", &txid[..std::cmp::min(16, txid.len())], e);
+                                    log::warn!("   ⚠️  Failed to update status for {}: {}", &txid[..std::cmp::min(16, txid.len())], e);
                                 }
 
-                                println!("   ✅ Cleaned up stale tx {} ({} inputs)", &txid[..std::cmp::min(16, txid.len())], inputs.len());
+                                log::info!("   ✅ Cleaned up stale tx {} ({} inputs)", &txid[..std::cmp::min(16, txid.len())], inputs.len());
                             }
-                            println!("   ✅ Stale transaction cleanup complete");
+                            log::info!("   ✅ Stale transaction cleanup complete");
                         }
                         Ok(_) => {
                             // No stale transactions - normal case
                         }
                         Err(e) => {
-                            eprintln!("   ⚠️  Failed to check for stale pending transactions: {}", e);
+                            log::warn!("   ⚠️  Failed to check for stale pending transactions: {}", e);
                         }
                     }
                 }
@@ -345,11 +384,11 @@ async fn main() -> std::io::Result<()> {
 
                     match output_repo.restore_pending_placeholders() {
                         Ok(count) if count > 0 => {
-                            println!("♻️  Restored {} output(s) with stale placeholder reservations", count);
+                            log::info!("♻️  Restored {} output(s) with stale placeholder reservations", count);
                         }
                         Ok(_) => {}
                         Err(e) => {
-                            eprintln!("   ⚠️  Failed to restore placeholder outputs: {}", e);
+                            log::warn!("   ⚠️  Failed to restore placeholder outputs: {}", e);
                         }
                     }
                 }
@@ -387,7 +426,7 @@ async fn main() -> std::io::Result<()> {
                                 );
                                 let deleted = output_repo.delete_by_txid(txid).unwrap_or(0);
                                 let restored = output_repo.restore_by_spending_description(txid).unwrap_or(0);
-                                println!(
+                                log::info!(
                                     "🧹 Cleaned up stuck backup tx {}: deleted {} ghost output(s), restored {} input(s)",
                                     &txid[..16.min(txid.len())], deleted, restored
                                 );
@@ -405,7 +444,7 @@ async fn main() -> std::io::Result<()> {
                         [],
                     ).unwrap_or(0);
                     if restored > 0 {
-                        println!("🧹 Restored {} backup output(s) incorrectly marked stale", restored);
+                        log::info!("🧹 Restored {} backup output(s) incorrectly marked stale", restored);
                     }
                 }
 
@@ -428,7 +467,7 @@ async fn main() -> std::io::Result<()> {
                         [],
                     ).unwrap_or(0);
                     if fixed > 0 {
-                        println!("🧹 Reset {} certificate(s) whose publish token was spent externally", fixed);
+                        log::info!("🧹 Reset {} certificate(s) whose publish token was spent externally", fixed);
                     }
                 }
 
@@ -446,7 +485,7 @@ async fn main() -> std::io::Result<()> {
                         [],
                     ).unwrap_or(0);
                     if fixed > 0 {
-                        println!("🧹 Tagged {} master-key output(s) with derivation prefix", fixed);
+                        log::info!("🧹 Tagged {} master-key output(s) with derivation prefix", fixed);
                     }
                 }
             }
@@ -459,15 +498,15 @@ async fn main() -> std::io::Result<()> {
                 match user_repo.get_default() {
                     Ok(Some(user)) => {
                         let uid = user.user_id.unwrap_or(1);
-                        println!("👤 Default user ID: {}", uid);
+                        log::info!("👤 Default user ID: {}", uid);
                         uid
                     }
                     Ok(None) => {
-                        println!("⚠️  No default user found (new database without wallet)");
+                        log::info!("⚠️  No default user found (new database without wallet)");
                         1  // Placeholder - will be created when wallet is created
                     }
                     Err(e) => {
-                        eprintln!("   ⚠️  Failed to get default user: {}", e);
+                        log::warn!("   ⚠️  Failed to get default user: {}", e);
                         1  // Fallback to user ID 1
                     }
                 }
@@ -476,9 +515,9 @@ async fn main() -> std::io::Result<()> {
             (Arc::new(Mutex::new(db)), default_user_id, wallet_exists)
         }
         Err(e) => {
-            eprintln!("❌ Failed to initialize database: {}", e);
-            eprintln!("   Database path: {}", db_path.display());
-            eprintln!("   Continuing with JSON storage only...");
+            log::error!("❌ Failed to initialize database: {}", e);
+            log::warn!("   Database path: {}", db_path.display());
+            log::warn!("   Continuing with JSON storage only...");
             // Continue without database for now (backward compatibility)
             return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Database init failed: {}", e)));
         }
@@ -496,17 +535,17 @@ async fn main() -> std::io::Result<()> {
         match output_repo.calculate_balance(current_user_id) {
             Ok(bal) => {
                 balance_cache.set(bal);
-                println!("✅ Balance cache initialized (seeded: {} satoshis)", bal);
+                log::info!("✅ Balance cache initialized (seeded: {} satoshis)", bal);
             }
             Err(e) => {
-                eprintln!("⚠️  Balance cache initialized (seed failed: {})", e);
+                log::warn!("⚠️  Balance cache initialized (seed failed: {})", e);
             }
         }
     }
 
     // Initialize fee rate cache (fetches from ARC /v1/policy)
     let fee_rate_cache = Arc::new(fee_rate_cache::FeeRateCache::new());
-    println!("✅ Fee rate cache initialized (ARC policy, 1-hour TTL)");
+    log::info!("✅ Fee rate cache initialized (ARC policy, 1-hour TTL)");
 
     // Initialize BSV/USD price cache (2026-06-09: WhatsOnChain primary,
     // CoinGecko fallback, MEXC final fallback). Loads the last known good
@@ -514,20 +553,20 @@ async fn main() -> std::io::Result<()> {
     // fallback when all three live sources are down.
     let price_cache = Arc::new(price_cache::PriceCache::new(Some(database.clone())));
     price_cache.load_persisted();
-    println!("✅ Price cache initialized (BSV/USD, 5-min TTL, restart-survival via V21)");
+    log::info!("✅ Price cache initialized (BSV/USD, 5-min TTL, restart-survival via V21)");
 
     // Create shutdown token for graceful shutdown (Phase 8D)
     let shutdown_token = tokio_util::sync::CancellationToken::new();
 
     // Phase 1.6d.B: WalletServices facade — dormant infrastructure; 1.6d.C wires call sites
     let services = Arc::new(services::WalletServices::new());
-    println!("✅ WalletServices facade initialized (dormant — 1.6d.C wires call sites)");
+    log::info!("✅ WalletServices facade initialized (dormant — 1.6d.C wires call sites)");
 
     // Phase 1.6d polish Step 1: SHIP discovery SWR cache.
     // Eliminates the ~75s blocking SHIP round-trip on every certificate
     // publish/unpublish. Kept warm by monitor::task_refresh_ship_cache.
     let ship_cache = overlay::ship_cache::ShipDiscoveryCache::new();
-    println!("✅ SHIP discovery cache initialized (SWR: 5-min fresh, 30-min stale)");
+    log::info!("✅ SHIP discovery cache initialized (SWR: 5-min fresh, 30-min stale)");
 
     // Phase 2.6-A.6 / C.2: build permission_service.
     //
@@ -542,9 +581,9 @@ async fn main() -> std::io::Result<()> {
     // Only HODOS_ENGINE_SHADOW_LOG (diagnostic) survives as a flag.
     let engine_flags = permission_service::EngineFlags::from_env();
     let permission = Arc::new(permission_service::PermissionService::new(engine_flags));
-    println!("✅ Permission engine: Privacy Perimeter is Rust-authoritative (Phase 2.6-C.2)");
+    log::info!("✅ Permission engine: Privacy Perimeter is Rust-authoritative (Phase 2.6-C.2)");
     if engine_flags.shadow_log_enabled {
-        println!("🧪 Permission engine shadow log: ENABLED (HODOS_ENGINE_SHADOW_LOG=1) — /engine/shadow-decide writes to engine_shadow_log");
+        log::info!("🧪 Permission engine shadow log: ENABLED (HODOS_ENGINE_SHADOW_LOG=1) — /engine/shadow-decide writes to engine_shadow_log");
     }
 
     // Create app state
@@ -567,63 +606,63 @@ async fn main() -> std::io::Result<()> {
         pay402_reuse: Arc::new(Mutex::new(HashMap::new())),
         permission,  // Phase 2.6-A.6: hodos_permission_engine actix wrapper (dormant)
     });
-    println!("✅ UTXO selection lock initialized");
-    println!("✅ createAction serialization lock initialized");
+    log::info!("✅ UTXO selection lock initialized");
+    log::info!("✅ createAction serialization lock initialized");
 
-    println!();
-    println!("🌐 Starting HTTP server...");
-    println!("   Port: 31301");
-    println!("   URL: http://localhost:31301");
-    println!();
-    println!("📋 Available endpoints:");
-    println!("   GET  /health");
-    println!("   GET  /brc100/status");
-    println!("   POST /getVersion");
-    println!("   POST /getPublicKey");
-    println!("   POST /isAuthenticated");
-    println!("   POST /createHmac");
-    println!("   POST /verifyHmac");
-    println!("   POST /encrypt");
-    println!("   POST /decrypt");
-    println!("   POST /verifySignature");
-    println!("   POST /.well-known/auth");
-    println!("   GET  /wallet/status");
-    println!("   GET  /wallet/balance");
-    println!("   POST /wallet/sync");
-    println!();
-    println!("📬 PeerPay (BRC-29) endpoints:");
-    println!("   POST /wallet/peerpay/send");
-    println!("   POST /wallet/peerpay/check");
-    println!("   GET  /wallet/peerpay/status");
-    println!("   POST /wallet/peerpay/dismiss");
-    println!();
-    println!("💳 BRC-121 Simple HTTP 402 Payment:");
-    println!("   POST /wallet/pay402");
-    println!("   POST /wallet/broadcast-nosend");
-    println!();
-    println!("📧 Paymail (bsvalias) endpoints:");
-    println!("   POST /wallet/paymail/send");
-    println!("   GET  /wallet/paymail/resolve");
-    println!();
-    println!("📊 Blockchain Query endpoints (Group C - Part 2):");
-    println!("   POST /getHeight");
-    println!("   POST /getHeaderForHeight");
-    println!("   POST /getNetwork");
-    println!();
-    println!("📊 Blockchain Query endpoints:");
-    println!("   POST /getHeight");
-    println!("   POST /getHeaderForHeight");
-    println!("   POST /getNetwork");
-    println!();
-    println!("✅ Server ready - CEF browser can now connect!");
-    println!();
+    log::info!("");
+    log::info!("🌐 Starting HTTP server...");
+    log::info!("   Port: 31301");
+    log::info!("   URL: http://localhost:31301");
+    log::info!("");
+    log::info!("📋 Available endpoints:");
+    log::info!("   GET  /health");
+    log::info!("   GET  /brc100/status");
+    log::info!("   POST /getVersion");
+    log::info!("   POST /getPublicKey");
+    log::info!("   POST /isAuthenticated");
+    log::info!("   POST /createHmac");
+    log::info!("   POST /verifyHmac");
+    log::info!("   POST /encrypt");
+    log::info!("   POST /decrypt");
+    log::info!("   POST /verifySignature");
+    log::info!("   POST /.well-known/auth");
+    log::info!("   GET  /wallet/status");
+    log::info!("   GET  /wallet/balance");
+    log::info!("   POST /wallet/sync");
+    log::info!("");
+    log::info!("📬 PeerPay (BRC-29) endpoints:");
+    log::info!("   POST /wallet/peerpay/send");
+    log::info!("   POST /wallet/peerpay/check");
+    log::info!("   GET  /wallet/peerpay/status");
+    log::info!("   POST /wallet/peerpay/dismiss");
+    log::info!("");
+    log::info!("💳 BRC-121 Simple HTTP 402 Payment:");
+    log::info!("   POST /wallet/pay402");
+    log::info!("   POST /wallet/broadcast-nosend");
+    log::info!("");
+    log::info!("📧 Paymail (bsvalias) endpoints:");
+    log::info!("   POST /wallet/paymail/send");
+    log::info!("   GET  /wallet/paymail/resolve");
+    log::info!("");
+    log::info!("📊 Blockchain Query endpoints (Group C - Part 2):");
+    log::info!("   POST /getHeight");
+    log::info!("   POST /getHeaderForHeight");
+    log::info!("   POST /getNetwork");
+    log::info!("");
+    log::info!("📊 Blockchain Query endpoints:");
+    log::info!("   POST /getHeight");
+    log::info!("   POST /getHeaderForHeight");
+    log::info!("   POST /getNetwork");
+    log::info!("");
+    log::info!("✅ Server ready - CEF browser can now connect!");
+    log::info!("");
 
     // Wire up Ctrl+C signal handler for graceful shutdown (Phase 8D)
     let signal_token = shutdown_token.clone();
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
-        println!();
-        println!("🛑 Ctrl+C received, shutting down gracefully...");
+        log::info!("");
+        log::info!("🛑 Ctrl+C received, shutting down gracefully...");
         signal_token.cancel();
     });
 
@@ -763,13 +802,13 @@ async fn main() -> std::io::Result<()> {
             });
         }
 
-        println!("🔄 Starting Monitor (background task scheduler)...");
+        log::info!("🔄 Starting Monitor (background task scheduler)...");
         monitor::Monitor::start(app_state.clone());
-        println!("   ✅ Monitor started with 7 tasks");
-        println!();
+        log::info!("   ✅ Monitor started with 7 tasks");
+        log::info!("");
     } else {
-        println!("⏸️  Monitor skipped (no wallet yet)");
-        println!();
+        log::info!("⏸️  Monitor skipped (no wallet yet)");
+        log::info!("");
     }
 
     // Start HTTP server with graceful shutdown support (Phase 8D)
@@ -1002,7 +1041,7 @@ async fn main() -> std::io::Result<()> {
     let server_handle = server.handle();
     tokio::spawn(async move {
         shutdown_token.cancelled().await;
-        println!("🛑 Stopping HTTP server...");
+        log::info!("🛑 Stopping HTTP server...");
         server_handle.stop(true).await; // graceful: finish in-flight requests
     });
 
