@@ -6,6 +6,7 @@
 #include "../../include/core/TabManager.h"
 #include "../../include/core/WindowManager.h"
 #include "../../include/core/EphemeralCookieManager.h"
+#include "../../include/core/SessionManager.h"
 #include "../../include/core/Logger.h"
 #include "../../include/handlers/simple_handler.h"
 #include "include/cef_app.h"
@@ -183,9 +184,16 @@ bool TabManager::CloseTab(int tab_id) {
         active_tab_id_ = -1;
     }
 
-    // Notify ephemeral cookie manager before closing
+    // Notify ephemeral cookie manager + reset payment session before closing.
+    // (Phase 2.6-E migrated payment counters to Rust; the legacy SessionManager
+    //  is still used by the BRC-121 inline cascade, so both clears happen in tandem.
+    //  Mirrors Windows TabManager.cpp::CloseTab.)
     if (tab.browser) {
-        EphemeralCookieManager::GetInstance().OnTabClosed(tab.browser->GetIdentifier());
+        int browserId = tab.browser->GetIdentifier();
+        SessionManager::GetInstance().clearSession(browserId);
+        extern void ClearRustPaymentSessionForBrowser(int);
+        ClearRustPaymentSessionForBrowser(browserId);
+        EphemeralCookieManager::GetInstance().OnTabClosed(browserId);
     }
 
     // Mute audio before closing to prevent background playback during async teardown
