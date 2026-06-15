@@ -17051,6 +17051,37 @@ pub async fn pay_402(
         }));
     }
 
+    // OQ5 — BRC-121 payment decision now runs in Rust (mirrors createAction's
+    // dispatch_payment). This makes Rust the single source of truth for the
+    // per-tx / per-session / max-tx / rate-limit cap decision; the duplicate
+    // C++ cap cascade in TryHandleBrc121_402 + its SessionManager reads are
+    // deleted once this is live (and SessionManager itself dies in 2.6-H).
+    //
+    // Rollout gate: engage ONLY when the CEF interceptor sends the engine
+    // headers (X-Payment-* for a fresh decision, or X-User-Approved for the
+    // post-modal replay). Old/internal callers that send neither fall through
+    // to the legacy mint path unchanged — so this Rust step is dormant until
+    // the paired C++ flip lands (which sends the headers + reads the 202).
+    //
+    // dispatch_payment outcomes:
+    //   Proceed       → Silent (within caps) OR approved replay → mint below.
+    //   EarlyReturn    → 202 prompt (no mint, C++ surfaces the modal) or 403 deny.
+    let brc121_engine_headers_present = http_req.headers().contains_key("X-Payment-Satoshis")
+        || http_req.headers().contains_key("X-User-Approved");
+    if brc121_engine_headers_present {
+        let outcome = crate::permission_service::dispatch_payment(
+            &state.permission,
+            &state.database,
+            state.current_user_id,
+            &http_req,
+            &body,
+            "/wallet/pay402",
+        );
+        if let crate::permission_service::GateOutcome::EarlyReturn(resp) = outcome {
+            return resp;
+        }
+    }
+
     // Reuse-don't-recreate (Phase 1 polish). If we just paid for this exact
     // (URL, sats) within the last 25 seconds and the tx is still in nosend
     // status (i.e. the server returned non-2xx so we never broadcast), reuse

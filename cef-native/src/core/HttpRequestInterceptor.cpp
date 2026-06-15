@@ -1477,7 +1477,10 @@ void OnWalletCallSuccess(int browserId,
                          const std::string& endpoint) {
     if (!wasAutoApprovedPayment) return;
 
-    SessionManager::GetInstance().recordSpending(browserId, cents);
+    // OQ5 — session spend is now recorded in Rust at payment-decision time
+    // (dispatch_payment on Silent / X-User-Approved replay) for both
+    // createAction and BRC-121. The former C++ SessionManager::recordSpending
+    // was removed here; this helper keeps ONLY the gold-pill IPC below.
 
     CefRefPtr<CefBrowser> headerBrowser = SimpleHandler::GetHeaderBrowser();
     if (!headerBrowser || !headerBrowser->GetMainFrame()) return;
@@ -4288,28 +4291,11 @@ void handleAuthResponse(const std::string& requestId, const std::string& respons
             // was unreliable under CEF 136 (status=UR_SUCCESS with empty
             // bodies — see resumeHttpCallbackResponse docstring).
             LOG_DEBUG_HTTP("🔐 Found pending HTTP auth request for domain: " + req.domain);
-            // Record spending for user-approved payment confirmations BEFORE
-            // re-issue. Matches pre-fix behavior where this fired on the
-            // way out of handleAuthResponse.
-            AsyncWalletResourceHandler* walletHandler =
-                static_cast<AsyncWalletResourceHandler*>(req.handler.get());
-            if (walletHandler) {
-                int64_t cents = walletHandler->getPreCalculatedCents();
-                if (cents > 0) {
-                    bool respIsError = false;
-                    try {
-                        auto rj = nlohmann::json::parse(responseData);
-                        respIsError = rj.contains("error");
-                    } catch (...) {}
-                    if (!respIsError) {
-                        int browserId = walletHandler->getBrowserId();
-                        SessionManager::GetInstance().recordSpending(browserId, cents);
-                        LOG_DEBUG_HTTP("💰 Recorded user-approved spending: "
-                            + std::to_string(cents) + " cents for browser "
-                            + std::to_string(browserId));
-                    }
-                }
-            }
+            // OQ5 — user-approved over-cap spend is now recorded in Rust by
+            // dispatch_payment's X-User-Approved replay path (request_gate.rs),
+            // for both createAction and BRC-121. The former C++ SessionManager
+            // ::recordSpending here was removed to avoid double-counting once
+            // Rust owns the per-session counters.
             resumeHttpCallbackResponse(req, responseData);
         } else if (req.resumeKind == ResumeKind::kIpcResponse) {
             // Phase 2.5 Commit 6 sub-step 6.d.BE — IPC resume branch.
@@ -5046,23 +5032,34 @@ struct Brc121FailedEntry {
 std::mutex s_brc121_failed_urls_mutex;
 std::unordered_map<std::string, Brc121FailedEntry> s_brc121_failed_urls;
 
-// B+3 polish — one-shot approved-URL registry for BRC-121 over-cap modals.
-// Populated by MarkBrc121PaymentApproved() (called from simple_handler.cpp's
-// brc100_auth_response approval handler) when the user approves a
-// payment_confirmation / rate_limit_exceeded modal whose stored endpoint is
-// an http(s) article URL. Atomically popped by TryHandleBrc121_402 BEFORE
-// the cap-check on the reload that follows approval, so the user's just-
-// approved payment proceeds without re-prompting. Strict one-shot: pop
-// consumes, so subsequent visits to the same URL re-check caps normally —
+// OQ5 — BRC-121 over-cap approval registry. When Rust returns 202 for a
+// payment_confirmation / rate_limit_exceeded prompt, TryHandleBrc121_402
+// stashes the Rust approvalId here (PENDING) keyed by URL. When the user clicks
+// Approve, MarkBrc121PaymentApproved (called from simple_handler.cpp's
+// brc100_auth_response handler) moves it PENDING → ARMED. The reload that
+// follows pops the ARMED approvalId and re-POSTs /wallet/pay402 with
+// X-User-Approved, so Rust's dispatch_payment replay records the spend +
+// proceeds. Two states keep consent honest: a reload WITHOUT an Approve (e.g.
+// a manual refresh) finds nothing armed and gets a fresh engine decision —
 // no permanent cap bypass, no infinite-loop risk.
-std::mutex s_brc121_approved_urls_mutex;
-std::unordered_set<std::string> s_brc121_approved_urls;
+std::mutex s_brc121_approvals_mutex;
+std::unordered_map<std::string, std::string> s_brc121_pending_approvals;  // url → approvalId (from 202)
+std::unordered_map<std::string, std::string> s_brc121_armed_approvals;    // url → approvalId (user approved)
 
-bool popBrc121ApprovedUrl(const std::string& url) {
-    std::lock_guard<std::mutex> lock(s_brc121_approved_urls_mutex);
-    auto it = s_brc121_approved_urls.find(url);
-    if (it == s_brc121_approved_urls.end()) return false;
-    s_brc121_approved_urls.erase(it);
+// Stash the Rust approvalId for a 202-prompted URL (pending user approval).
+void SetBrc121PendingApproval(const std::string& url, const std::string& approvalId) {
+    std::lock_guard<std::mutex> lock(s_brc121_approvals_mutex);
+    s_brc121_pending_approvals[url] = approvalId;
+}
+
+// Pop an ARMED approvalId for this URL. Returns true if the user had approved
+// (approvalIdOut set — may be empty if Rust sent no id); false if not armed.
+bool PopBrc121ArmedApproval(const std::string& url, std::string& approvalIdOut) {
+    std::lock_guard<std::mutex> lock(s_brc121_approvals_mutex);
+    auto it = s_brc121_armed_approvals.find(url);
+    if (it == s_brc121_armed_approvals.end()) return false;
+    approvalIdOut = it->second;
+    s_brc121_armed_approvals.erase(it);
     return true;
 }
 
@@ -5478,25 +5475,19 @@ private:
     }
 
     void firePaymentSuccessIpc() {
-        // Phase 2.5 Commit 6 sub-step 6.b — fire indicator + record spending
-        // via the shared OnWalletCallSuccess helper. BRC-121 ALSO needs to
-        // increment the per-session rate / payment counters here (NOT inside
-        // OnWalletCallSuccess) because BRC-121 has no Open()-stage
-        // silent-approve step — the createAction path increments at Open()
-        // time, BRC-121 increments at success time. The 2-line counter block
-        // below intentionally lives adjacent to the call so a future reader
-        // sees the timing-difference at a glance.
+        // Phase 2.5 Commit 6 sub-step 6.b — fire the gold-pill indicator via the
+        // shared OnWalletCallSuccess helper. OQ5: the per-session rate / payment
+        // counters + spend are now recorded in Rust at pay_402 decision time
+        // (dispatch_payment, on Silent / X-User-Approved replay), mirroring
+        // createAction — so the former C++ SessionManager increments here were
+        // removed. This keeps ONLY the gold-pill payment_success_indicator IPC,
+        // which MUST still fire on every auto-approved BRC-121 payment.
         int cefBrowserId = browser_ ? browser_->GetIdentifier() : 0;
         OnWalletCallSuccess(cefBrowserId,
                             ctx_.domain,
                             ctx_.cents,
                             /*wasAutoApprovedPayment=*/true,
                             /*endpoint=*/"pay402");
-
-        // BRC-121-specific counter increments (no Open()-stage silent-approve
-        // to do these at gate-decision time).
-        SessionManager::GetInstance().incrementRateCounter(cefBrowserId);
-        SessionManager::GetInstance().incrementPaymentCount(cefBrowserId);
     }
 
     void broadcastNosendAsync() {
@@ -5689,151 +5680,108 @@ bool TryHandleBrc121_402(CefRefPtr<CefBrowser> browser,
                        // approval auto-pays.
     }
 
-    // B+3 polish — one-shot bypass for previously-approved over-cap payments.
-    // If the user approved this exact URL on a prior payment_confirmation /
-    // rate_limit_exceeded modal, MarkBrc121PaymentApproved put the URL in
-    // s_brc121_approved_urls. popBrc121ApprovedUrl consumes the entry
-    // atomically; subsequent visits to the same URL re-check caps normally
-    // (no permanent bypass). When set, skip ALL cap-check branches below
-    // and fall through to the auto-approve path.
-    const bool oneShotApproved = popBrc121ApprovedUrl(url);
-    if (oneShotApproved) {
-        LOG_INFO_HTTP("💰 BRC-121: one-shot approved URL — bypassing cap check for "
-                      + url);
-    }
-
-    // Sats → USD cents. If BSV price is unavailable, fire payment_confirmation
-    // with exceededLimit=price_unavailable (same as createAction's safety branch).
+    // OQ5 — the per-tx / per-session / max-tx / rate / price_unavailable
+    // DECISION now lives in Rust. C++ extracts the payee + sats (above) and
+    // computes cents (BSVPriceCache, kept C++-side per the createAction
+    // contract), then forwards to /wallet/pay402 via the X-Payment-* headers —
+    // exactly mirroring createAction's dispatch_payment path. Rust returns:
+    //   200 → Silent (within caps) OR user-approved replay → BEEF minted below
+    //   202 → prompt (cap/rate/price_unavailable) — no mint; surface the modal
+    //   403 → deny (e.g. domain blocked mid-flight) — page sees native 402
+    // SessionManager and the C++ cap cascade are GONE from this path.
     double bsvPrice = BSVPriceCache::GetInstance().getPrice();
     int browserId = browser ? browser->GetIdentifier() : 0;
-    SessionManager::GetInstance().getSession(browserId, domain);
-
-    if (!oneShotApproved && bsvPrice <= 0) {
-        LOG_DEBUG_HTTP("💰 BRC-121: BSV price unavailable — firing payment_confirmation modal");
-        bool modalAlreadyShowing = PendingRequestManager::GetInstance().hasPendingForDomain(domain);
-        PendingRequestManager::GetInstance().addRequest(
-            domain, "GET", url, "", nullptr, "payment_confirmation");
-        // Register the pending reload + price so OnLoadError swaps the
-        // failed-load page for /payment-pending and TriggerPendingBrc121Reloads
-        // can re-navigate the tab after approval (mirrors the unapproved-
-        // domain branch above).
-        registerPendingBrc121Reload(domain, browser, url);
-        SetPendingBrc121PriceForDomain(domain, satoshis);
-        if (!modalAlreadyShowing) {
-            std::string extraParams = "&satoshis=" + std::to_string(satoshis)
-                                    + "&cents=0"
-                                    + "&bsvPrice=0"
-                                    + "&exceededLimit=price_unavailable"
-                                    + "&perTxLimit=" + std::to_string(perm.perTxLimitCents)
-                                    + "&perSessionLimit=" + std::to_string(perm.perSessionLimitCents)
-                                    + "&sessionSpent=0";
-            CefPostTask(TID_UI, new CreateNotificationOverlayTask("payment_confirmation", domain, extraParams));
-        }
-        return false;
-    }
-
     int64_t cents = (bsvPrice > 0)
         ? static_cast<int64_t>(
             (static_cast<double>(satoshis) / 100000000.0) * bsvPrice * 100.0)
         : 0;
-    int64_t spent = SessionManager::GetInstance().getSpentCents(browserId, domain);
-    int txCount = SessionManager::GetInstance().getPaymentCount(browserId, domain);
 
-    // Helper lambda: fire payment_confirmation modal with limit context.
-    // Also registers the pending reload + per-domain price so OnLoadError
-    // swaps the failed-load page for /payment-pending (matches the
-    // unapproved-domain branch) and TriggerPendingBrc121Reloads can
-    // re-navigate the tab after the user clicks Approve.
-    auto firePaymentModal = [&](const std::string& exceededLimit) {
-        bool modalAlreadyShowing = PendingRequestManager::GetInstance().hasPendingForDomain(domain);
-        PendingRequestManager::GetInstance().addRequest(
-            domain, "GET", url, "", nullptr, "payment_confirmation");
-        registerPendingBrc121Reload(domain, browser, url);
-        SetPendingBrc121PriceForDomain(domain, satoshis);
-        if (!modalAlreadyShowing) {
-            std::string extraParams = "&satoshis=" + std::to_string(satoshis)
-                                    + "&cents=" + std::to_string(cents)
-                                    + "&bsvPrice=" + std::to_string(bsvPrice)
-                                    + "&exceededLimit=" + exceededLimit
-                                    + "&perTxLimit=" + std::to_string(perm.perTxLimitCents)
-                                    + "&perSessionLimit=" + std::to_string(perm.perSessionLimitCents)
-                                    + "&sessionSpent=" + std::to_string(spent);
-            CefPostTask(TID_UI, new CreateNotificationOverlayTask("payment_confirmation", domain, extraParams));
-        }
-    };
+    // Post-modal approval replay: if the user approved this exact URL on a
+    // prior 202 prompt, MarkBrc121PaymentApproved armed the Rust approvalId.
+    // Send it as X-User-Approved so Rust's dispatch_payment replay path records
+    // the spend + proceeds (single-use, body-sha256-bound). Not armed ⇒ fresh
+    // engine decision. Loop-safe: arming is consumed by the pop.
+    std::string armedApprovalId;
+    const bool replayApproved = PopBrc121ArmedApproval(url, armedApprovalId);
 
-    // Auto-approve gates (mirrors createAction logic at AsyncWalletResourceHandler::Open).
-    bool withinTxLimit = cents <= perm.perTxLimitCents;
-    bool withinSessionLimit = (spent + cents) <= perm.perSessionLimitCents;
-
-    if (!oneShotApproved && (!withinTxLimit || !withinSessionLimit)) {
-        std::string exceeded = "both";
-        if (withinTxLimit && !withinSessionLimit) exceeded = "per_session";
-        else if (!withinTxLimit && withinSessionLimit) exceeded = "per_tx";
-        LOG_DEBUG_HTTP("💰 BRC-121: spend cap exceeded (" + exceeded
-                       + ") — firing payment_confirmation modal");
-        firePaymentModal(exceeded);
-        return false;
-    }
-
-    if (!oneShotApproved && txCount >= perm.maxTxPerSession) {
-        LOG_DEBUG_HTTP("💰 BRC-121: max-tx-per-session reached — firing rate_limit_exceeded modal");
-        bool modalAlreadyShowing = PendingRequestManager::GetInstance().hasPendingForDomain(domain);
-        PendingRequestManager::GetInstance().addRequest(
-            domain, "GET", url, "", nullptr, "rate_limit_exceeded");
-        registerPendingBrc121Reload(domain, browser, url);
-        SetPendingBrc121PriceForDomain(domain, satoshis);
-        if (!modalAlreadyShowing) {
-            std::string extraParams = "&satoshis=" + std::to_string(satoshis)
-                                    + "&cents=" + std::to_string(cents)
-                                    + "&bsvPrice=" + std::to_string(bsvPrice)
-                                    + "&rateLimit=" + std::to_string(perm.rateLimitPerMin)
-                                    + "&perTxLimit=" + std::to_string(perm.perTxLimitCents)
-                                    + "&perSessionLimit=" + std::to_string(perm.perSessionLimitCents)
-                                    + "&exceededLimit=session_tx_count"
-                                    + "&maxTxPerSession=" + std::to_string(perm.maxTxPerSession)
-                                    + "&txCount=" + std::to_string(txCount);
-            CefPostTask(TID_UI, new CreateNotificationOverlayTask("rate_limit_exceeded", domain, extraParams));
-        }
-        return false;
-    }
-
-    if (!oneShotApproved && !SessionManager::GetInstance().checkRateLimit(browserId, perm.rateLimitPerMin)) {
-        LOG_DEBUG_HTTP("💰 BRC-121: rate limit (" + std::to_string(perm.rateLimitPerMin)
-                       + "/min) exceeded — firing rate_limit_exceeded modal");
-        bool modalAlreadyShowing = PendingRequestManager::GetInstance().hasPendingForDomain(domain);
-        PendingRequestManager::GetInstance().addRequest(
-            domain, "GET", url, "", nullptr, "rate_limit_exceeded");
-        registerPendingBrc121Reload(domain, browser, url);
-        SetPendingBrc121PriceForDomain(domain, satoshis);
-        if (!modalAlreadyShowing) {
-            std::string extraParams = "&satoshis=" + std::to_string(satoshis)
-                                    + "&cents=" + std::to_string(cents)
-                                    + "&bsvPrice=" + std::to_string(bsvPrice)
-                                    + "&rateLimit=" + std::to_string(perm.rateLimitPerMin)
-                                    + "&perTxLimit=" + std::to_string(perm.perTxLimitCents)
-                                    + "&perSessionLimit=" + std::to_string(perm.perSessionLimitCents);
-            CefPostTask(TID_UI, new CreateNotificationOverlayTask("rate_limit_exceeded", domain, extraParams));
-        }
-        return false;
-    }
-
-    // All gates passed — call the Rust wallet to build the BRC-29 BEEF.
     nlohmann::json reqBody;
     reqBody["server_pubkey_hex"] = serverPubkey;
     reqBody["satoshis"] = satoshis;
     reqBody["original_url"] = url;
     std::string body = reqBody.dump();
 
-    LOG_INFO_HTTP("💰 BRC-121 auto-approved (" + std::to_string(cents) + " cents) — calling /wallet/pay402");
+    std::map<std::string, std::string> payHeaders;
+    payHeaders["Content-Type"] = "application/json";
+    payHeaders["X-Requesting-Domain"] = domain;  // payee host — Rust caps key on this
+    payHeaders["X-Browser-Id"] = std::to_string(browserId);
+    payHeaders["X-Payment-Satoshis"] = std::to_string(satoshis);
+    payHeaders["X-Payment-Cents"] = std::to_string(cents);
+    payHeaders["X-Bsv-Price-Available"] = (bsvPrice > 0) ? "1" : "0";
+    if (replayApproved && !armedApprovalId.empty()) {
+        payHeaders["X-User-Approved"] = armedApprovalId;
+    }
+
+    LOG_INFO_HTTP("💰 BRC-121 → /wallet/pay402 (" + std::to_string(cents) + " cents, "
+                  + (replayApproved ? "user-approved replay" : "engine decision") + ")");
 
     // Synchronous: localhost wallet, fast path. 10s ceiling — createAction may need
     // to fetch BEEF ancestry from external indexers in worst cases.
     HttpResponse rresp = SyncHttpClient::Post(
         "http://localhost:31301/wallet/pay402",
         body,
-        "application/json",
+        payHeaders,
         10000);
+
+    // 202 → Rust's engine prompted. Surface the matching modal from the Rust
+    // promptPayload and arm the BRC-121 reload machinery; on Approve the reload
+    // re-POSTs with the armed X-User-Approved approvalId (stashed here).
+    if (rresp.statusCode == 202) {
+        std::string approvalId;
+        std::string promptType = "payment_confirmation";
+        std::string extraParams;
+        try {
+            auto pj = nlohmann::json::parse(rresp.body);
+            approvalId = pj.value("approvalId", "");
+            promptType = pj.value("promptType", "payment_confirmation");
+            auto pp = pj.value("promptPayload", nlohmann::json::object());
+            // Rust hardcodes bsvPrice=0 in the payload — use C++'s real price.
+            extraParams = "&satoshis=" + std::to_string(pp.value("satoshis", satoshis))
+                        + "&cents=" + std::to_string(pp.value("cents", cents))
+                        + "&bsvPrice=" + std::to_string(bsvPrice)
+                        + "&exceededLimit=" + pp.value("exceededLimit", std::string())
+                        + "&perTxLimit=" + std::to_string(pp.value("perTxLimit", static_cast<int64_t>(0)))
+                        + "&perSessionLimit=" + std::to_string(pp.value("perSessionLimit", static_cast<int64_t>(0)))
+                        + "&sessionSpent=" + std::to_string(pp.value("sessionSpent", static_cast<int64_t>(0)));
+            if (promptType == "rate_limit_exceeded") {
+                extraParams += "&rateLimit=" + std::to_string(pp.value("rateLimit", static_cast<int64_t>(0)))
+                             + "&maxTxPerSession=" + std::to_string(pp.value("maxTxPerSession", static_cast<int64_t>(0)))
+                             + "&txCount=" + std::to_string(pp.value("txCount", static_cast<int64_t>(0)));
+            }
+        } catch (const std::exception& e) {
+            LOG_WARNING_HTTP("💰 BRC-121: 202 payload parse failed: " + std::string(e.what())
+                             + " — falling through to native 402");
+            return false;
+        }
+        LOG_INFO_HTTP("💰 BRC-121: Rust prompted (" + promptType + ") — surfacing modal for " + domain);
+        // Stash the Rust approvalId keyed by URL (PENDING); MarkBrc121PaymentApproved
+        // arms it (PENDING → ARMED) when the user clicks Approve.
+        SetBrc121PendingApproval(url, approvalId);
+        bool modalAlreadyShowing = PendingRequestManager::GetInstance().hasPendingForDomain(domain);
+        PendingRequestManager::GetInstance().addRequest(
+            domain, "GET", url, "", nullptr, promptType);
+        registerPendingBrc121Reload(domain, browser, url);
+        SetPendingBrc121PriceForDomain(domain, satoshis);
+        if (!modalAlreadyShowing) {
+            CefPostTask(TID_UI, new CreateNotificationOverlayTask(promptType, domain, extraParams));
+        }
+        return false;
+    }
+
+    // 403 → Rust denied (domain blocked, etc.). Page sees the native 402.
+    if (rresp.statusCode == 403) {
+        LOG_WARNING_HTTP("💰 BRC-121: /wallet/pay402 denied (403) — falling through to native 402");
+        return false;
+    }
 
     if (!rresp.success || rresp.statusCode != 200) {
         LOG_WARNING_HTTP("💰 BRC-121: /wallet/pay402 failed (status="
@@ -5944,10 +5892,16 @@ int64_t GetPendingBrc121PriceForDomain(const std::string& domain) {
 // registry; TryHandleBrc121_402 atomically pops it on the next 402 for
 // the same URL and bypasses the cap-check exactly once.
 void MarkBrc121PaymentApproved(const std::string& url) {
-    std::lock_guard<std::mutex> lock(s_brc121_approved_urls_mutex);
-    s_brc121_approved_urls.insert(url);
-    LOG_INFO_HTTP("💰 BRC-121: URL marked one-shot approved (will bypass next cap check): "
-                  + url);
+    std::lock_guard<std::mutex> lock(s_brc121_approvals_mutex);
+    // Move the Rust approvalId from PENDING (stashed when the 202 arrived) to
+    // ARMED so the post-approval reload replays it via X-User-Approved. If no
+    // pending id exists (shouldn't happen in the engine flow), arm empty — the
+    // reload then gets a fresh engine decision rather than silently bypassing caps.
+    auto it = s_brc121_pending_approvals.find(url);
+    std::string id = (it != s_brc121_pending_approvals.end()) ? it->second : std::string();
+    if (it != s_brc121_pending_approvals.end()) s_brc121_pending_approvals.erase(it);
+    s_brc121_armed_approvals[url] = id;
+    LOG_INFO_HTTP("💰 BRC-121: payment approved — armed replay approvalId for " + url);
 }
 
 // Phase 1 polish — failed-URL registry. RegisterBrc121FailedUrl is called
