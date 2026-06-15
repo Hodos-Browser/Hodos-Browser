@@ -728,266 +728,6 @@ private:
     std::set<std::string> shownDomains_;
 };
 
-// Phase 1.5 Step 1 -- in-memory "Always allow for this site" caches for the two
-// new privacy-perimeter prompt types. Step 2 will replace these with SQLite
-// columns on the domain_permissions row (or a parallel child table). For Step
-// 1 the cache is process-lifetime only; on browser restart the user re-prompts.
-class IdentityKeyApprovalCache {
-public:
-    static IdentityKeyApprovalCache& GetInstance() {
-        static IdentityKeyApprovalCache instance;
-        return instance;
-    }
-    bool isApproved(const std::string& domain) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return approved_.count(domain) > 0;
-    }
-    void approve(const std::string& domain) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        approved_.insert(domain);
-    }
-    void revoke(const std::string& domain) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        approved_.erase(domain);
-    }
-private:
-    IdentityKeyApprovalCache() = default;
-    std::mutex mutex_;
-    std::set<std::string> approved_;
-};
-
-class KeyLinkageApprovalCache {
-public:
-    static KeyLinkageApprovalCache& GetInstance() {
-        static KeyLinkageApprovalCache instance;
-        return instance;
-    }
-    bool isApproved(const std::string& domain) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return approved_.count(domain) > 0;
-    }
-    void approve(const std::string& domain) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        approved_.insert(domain);
-    }
-    void revoke(const std::string& domain) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        approved_.erase(domain);
-    }
-private:
-    KeyLinkageApprovalCache() = default;
-    std::mutex mutex_;
-    std::set<std::string> approved_;
-};
-
-// ============================================================================
-// Phase 1.5 Step 6 (Commit A) — SubPermissionCache
-// ============================================================================
-// Caches the {protocol, basket, counterparty} sub-permission lookups from the
-// V18 child tables (queried via the Step 3 /domain/permissions/{kind} GET
-// endpoints). Without this, the engine would HTTP round-trip on every BRC-100
-// call to decide if a scope is granted.
-//
-// Mirrors DomainPermissionCache's pattern:
-//   - One read miss → blocking sync HTTP to Rust → populate cache → return
-//   - Subsequent reads hit the cache
-//   - Explicit invalidation on domain_permission_invalidate IPC
-//
-// Cache shape: per-domain map of (scope-tuple → bool). Cleared on any change
-// to a domain's perms so re-grant / re-revoke take effect immediately.
-class SubPermissionCache {
-public:
-    static SubPermissionCache& GetInstance() {
-        static SubPermissionCache instance;
-        return instance;
-    }
-
-    // Protocol grant: (level, name, keyId, counterparty) → granted-or-not.
-    // Honors '*' wildcard keyId on the Rust side; we just relay the result.
-    bool isProtocolGranted(const std::string& domain, int level, const std::string& name,
-                            const std::string& keyId, const std::string& counterparty) {
-        const std::string key = "p:" + std::to_string(level) + ":" + name + ":" + keyId + ":" + counterparty;
-        return queryAndCache(domain, key, [&]() {
-            LOG_DEBUG_HTTP("🛡️ isProtocolGranted FETCH domain=" + domain
-                           + " level=" + std::to_string(level)
-                           + " name='" + name + "'"
-                           + " keyId.size=" + std::to_string(keyId.size())
-                           + " counterparty.empty=" + (counterparty.empty() ? "1" : "0"));
-            return fetchBool("/domain/permissions/protocol", domain, [&](const nlohmann::json& perms) {
-                LOG_DEBUG_HTTP("🛡️ isProtocolGranted GOT " + std::to_string(perms.size())
-                               + " rows for " + domain);
-                int row = 0;
-                for (const auto& p : perms) {
-                    const int rowIdx = row++;
-                    // Per-row try/catch: one malformed legacy row (binary
-                    // keyId, null where string expected, etc.) must NOT
-                    // poison the entire scan. Log the offender and skip.
-                    try {
-                        // nlohmann::json gotcha: p.value(key, default) throws
-                        // json::type_error if the stored value is null and the
-                        // default's type doesn't match. Counterparty IS null on
-                        // every protocol row that's not counterparty-bound, so
-                        // we MUST use null-safe accessors here. This bug was
-                        // silently aborting the entire scan and triggering
-                        // spurious "Always allow doesn't stick" reports.
-                        auto safeStr = [](const nlohmann::json& obj, const char* key) -> std::string {
-                            auto it = obj.find(key);
-                            if (it == obj.end() || !it->is_string()) return "";
-                            return it->get<std::string>();
-                        };
-                        int plvl = -1;
-                        if (auto it = p.find("securityLevel"); it != p.end() && it->is_number_integer()) {
-                            plvl = it->get<int>();
-                        }
-                        std::string pname = safeStr(p, "protocolName");
-                        std::string pkey = safeStr(p, "keyId");
-                        std::string pcp = safeStr(p, "counterparty");
-                        const bool levelMatch = (plvl == level);
-                        const bool nameMatch = (pname == name);
-                        const bool keyMatch = (pkey == keyId || pkey == "*");
-                        const bool cpMatch = (counterparty.empty() || pcp.empty() || pcp == counterparty);
-                        LOG_DEBUG_HTTP("🛡️   row[" + std::to_string(rowIdx) + "]: lvl=" + std::to_string(plvl)
-                                       + " name='" + pname + "'"
-                                       + " keyStored=" + (pkey == "*" ? "WILDCARD" : ("size=" + std::to_string(pkey.size())))
-                                       + " pcp.empty=" + (pcp.empty() ? "1" : "0")
-                                       + " | levelMatch=" + (levelMatch ? "1" : "0")
-                                       + " nameMatch=" + (nameMatch ? "1" : "0")
-                                       + " keyMatch=" + (keyMatch ? "1" : "0")
-                                       + " cpMatch=" + (cpMatch ? "1" : "0"));
-                        if (levelMatch && nameMatch && keyMatch && cpMatch) {
-                            LOG_DEBUG_HTTP("🛡️   → MATCH, returning true");
-                            return true;
-                        }
-                    } catch (const std::exception& e) {
-                        LOG_DEBUG_HTTP("🛡️   row[" + std::to_string(rowIdx)
-                                       + "] EXCEPTION (" + std::string(e.what())
-                                       + ") — skipping. Raw: "
-                                       + p.dump().substr(0, std::min<size_t>(p.dump().size(), 200)));
-                    } catch (...) {
-                        LOG_DEBUG_HTTP("🛡️   row[" + std::to_string(rowIdx)
-                                       + "] UNKNOWN EXCEPTION — skipping");
-                    }
-                }
-                LOG_DEBUG_HTTP("🛡️   no row matched, returning false");
-                return false;
-            });
-        });
-    }
-
-    // Basket grant: read_write satisfies a read check; read alone does not satisfy read_write.
-    bool isBasketGranted(const std::string& domain, const std::string& basket, const std::string& requiredAccess) {
-        const std::string key = "b:" + basket + ":" + requiredAccess;
-        return queryAndCache(domain, key, [&]() {
-            return fetchBool("/domain/permissions/basket", domain, [&](const nlohmann::json& perms) {
-                // Same null-safe accessor as the protocol scan — nlohmann's
-                // p.value(key, default) throws on null values.
-                auto safeStr = [](const nlohmann::json& obj, const char* k) -> std::string {
-                    auto it = obj.find(k);
-                    if (it == obj.end() || !it->is_string()) return "";
-                    return it->get<std::string>();
-                };
-                for (const auto& p : perms) {
-                    try {
-                        if (safeStr(p, "basket") != basket) continue;
-                        const std::string access = safeStr(p, "access");
-                        if (access == "read_write") return true;
-                        if (access == "read" && requiredAccess == "read") return true;
-                    } catch (...) {
-                        // Skip malformed row, continue.
-                    }
-                }
-                return false;
-            });
-        });
-    }
-
-    bool isCounterpartyGranted(const std::string& domain, const std::string& counterparty) {
-        const std::string key = "c:" + counterparty;
-        return queryAndCache(domain, key, [&]() {
-            return fetchBool("/domain/permissions/counterparty", domain, [&](const nlohmann::json& perms) {
-                auto safeStr = [](const nlohmann::json& obj, const char* k) -> std::string {
-                    auto it = obj.find(k);
-                    if (it == obj.end() || !it->is_string()) return "";
-                    return it->get<std::string>();
-                };
-                for (const auto& p : perms) {
-                    try {
-                        if (safeStr(p, "counterparty") == counterparty) return true;
-                    } catch (...) {
-                        // Skip malformed row, continue.
-                    }
-                }
-                return false;
-            });
-        });
-    }
-
-    void invalidate(const std::string& domain) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        cache_.erase(domain);
-    }
-    void clear() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        cache_.clear();
-    }
-
-private:
-    SubPermissionCache() = default;
-    std::mutex mutex_;
-    // Per-domain map of (scope-tuple-key → bool). Memoizes the lookup so
-    // a single BRC-100 call sequence doesn't HTTP-fetch repeatedly.
-    std::unordered_map<std::string, std::unordered_map<std::string, bool>> cache_;
-
-    template <typename Compute>
-    bool queryAndCache(const std::string& domain, const std::string& key, Compute compute) {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            auto domIt = cache_.find(domain);
-            if (domIt != cache_.end()) {
-                auto entryIt = domIt->second.find(key);
-                if (entryIt != domIt->second.end()) {
-                    return entryIt->second;
-                }
-            }
-        }
-        bool result = compute();
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            cache_[domain][key] = result;
-        }
-        return result;
-    }
-
-    // Helper: fetch the /domain/permissions/{kind} list and let the caller
-    // scan it for the specific tuple. Returns false on any HTTP / parse error
-    // (treat absence-of-grant as default-denied, callers will prompt).
-    // Timeout bumped from 1.5s → 3s — same rationale as DomainPermissionCache:
-    // Rust localhost can be busy during dApp page-load bursts (SocialCert hits
-    // 30+ wallet endpoints in 6 seconds), and an aggressive timeout silently
-    // turns "actually granted" into "default-denied" → spurious re-prompts.
-    template <typename Scan>
-    bool fetchBool(const std::string& endpoint, const std::string& domain, Scan scan) {
-        const std::string url = "http://localhost:31301" + endpoint
-            + "?domain=" + domain;
-        HttpResponse resp = SyncHttpClient::Get(url, 3000);
-        if (!resp.success || resp.statusCode != 200) return false;
-        try {
-            auto j = nlohmann::json::parse(resp.body);
-            if (!j.contains("permissions") || !j["permissions"].is_array()) return false;
-            return scan(j["permissions"]);
-        } catch (const std::exception& e) {
-            LOG_DEBUG_HTTP("🛡️ fetchBool EXCEPTION (" + std::string(e.what())
-                           + ") body preview: "
-                           + resp.body.substr(0, std::min<size_t>(resp.body.size(), 800)));
-            return false;
-        } catch (...) {
-            LOG_DEBUG_HTTP("🛡️ fetchBool UNKNOWN EXCEPTION, body preview: "
-                           + resp.body.substr(0, std::min<size_t>(resp.body.size(), 800)));
-            return false;
-        }
-    }
-};
-
 // ============================================================================
 // Phase 1.5 Step 6 (Commit A) — Body-peeking helpers
 // ============================================================================
@@ -1181,12 +921,14 @@ void fireSessionRevokeToRust(const std::string& domain) {
 }
 } // namespace
 
+// Phase 2.6-H.2 — the C++ session-opt-in caches were deleted; Rust now owns the
+// per-domain identity-key / key-linkage session approvals
+// (PermissionService::{identity_key,key_linkage}_session_approvals), populated
+// by these /wallet/session-approve POSTs and read by the privacy-perimeter gate.
 void MarkIdentityKeyRevealApproved(const std::string& domain) {
-    IdentityKeyApprovalCache::GetInstance().approve(domain);
     fireSessionApproveToRust(domain, "identity_key");
 }
 void MarkKeyLinkageRevealApproved(const std::string& domain) {
-    KeyLinkageApprovalCache::GetInstance().approve(domain);
     fireSessionApproveToRust(domain, "key_linkage");
 }
 
@@ -2018,13 +1760,6 @@ private:
     int64_t preCalculatedSatoshis_ = 0;
     bool preCalculatedBsvPriceAvailable_ = false;
 
-    // Phase 1.5 Step 1 — privacy-perimeter pre-approval flags. Set in Open() when
-    // the per-domain "Always allow" cache hit lets us skip the prompt; consumed in
-    // startAsyncHTTPRequest() to inject the corresponding pre-approval header so
-    // Rust's defense-in-depth gate passes through silently.
-    bool identityKeyApproved_ = false;
-    bool keyLinkageApproved_ = false;
-
     // Browser reference for modal triggering
     CefRefPtr<CefBrowser> browser_;
 
@@ -2768,13 +2503,6 @@ void addDomainPermissionAdvanced(const std::string& domain, int64_t perTxLimitCe
     perm.identityKeyDisclosureAllowed = identityKeyDisclosureAllowed;
     DomainPermissionCache::GetInstance().set(domain, perm);
 
-    // Also mirror into the session-level in-memory cache so drain-forwarded
-    // sibling requests (which bypass Open()) get the X-Identity-Key-Approved
-    // header injected by startAsyncHTTPRequest while the Rust DB write is in flight.
-    if (identityKeyDisclosureAllowed) {
-        IdentityKeyApprovalCache::GetInstance().approve(domain);
-    }
-
     // Phase 2.6-G G.4 — synchronous Rust DB write (see addDomainPermission for
     // the race rationale). The manifest_connect_bundle / advanced approval path
     // drains + re-issues immediately, so trust + caps must be committed to the
@@ -2823,10 +2551,6 @@ void addDomainPermission(const std::string& domain, bool identityKeyDisclosureAl
     perm.identityKeyDisclosureAllowed = identityKeyDisclosureAllowed;
     DomainPermissionCache::GetInstance().set(domain, perm);
 
-    if (identityKeyDisclosureAllowed) {
-        IdentityKeyApprovalCache::GetInstance().approve(domain);
-    }
-
     // Phase 2.6-G G.4 — synchronous Rust DB write. domain_trust_gate (now the
     // authoritative trust check) reads the Rust DB, and the add_domain_permission
     // IPC handler drains + re-issues the pending request immediately after this
@@ -2857,19 +2581,15 @@ void clearDomainPermissionCache() {
 }
 
 // ============================================================================
-// Phase 1.5 — session-scoped trust caches: domain-revoke helpers
+// Phase 1.5 — session-scoped trust: domain-revoke helpers
 // ============================================================================
-// IdentityKeyApprovalCache and KeyLinkageApprovalCache are in-memory caches
-// populated when the user clicks "Approve with Always allow" on the privacy-
-// perimeter prompts. They were designed as a fast-path while the V17 column /
-// future linkage column DB write is in flight. SubPermissionCache (Commit A)
-// memoizes V18 child-table lookups.
-//
-// Without these helpers, when the user toggles identity-key disclosure off in
-// DomainPermissionsTab or DomainPermissionForm, only the V17 column flips —
-// the session cache still says approved, so the inline gate's
-// `persistent_grant || cache_grant` test silently leaks identity keys until
-// the browser is restarted.
+// Phase 2.6-H.2 deleted the in-memory C++ session caches
+// (IdentityKeyApprovalCache / KeyLinkageApprovalCache / SubPermissionCache).
+// The per-domain identity-key / key-linkage session opt-ins now live entirely
+// in Rust (PermissionService::{identity_key,key_linkage}_session_approvals);
+// scoped grants live in the Rust V18 child tables. These revoke helpers just
+// forward to Rust so toggling identity-key disclosure off (or any permission
+// change) drops the session opt-in immediately rather than leaking until restart.
 //
 // Called from simple_handler.cpp's `domain_permission_invalidate` IPC, which
 // fires every time a domain's permissions change (revoke, edit, advanced
@@ -2911,24 +2631,15 @@ bool ResumeDrainedApprovedRequest(const PendingAuthRequest& req) {
 }
 
 void revokeIdentityKeyApprovalForDomain(const std::string& domain) {
-    IdentityKeyApprovalCache::GetInstance().revoke(domain);
-    // Phase 2.6-C.4 follow-up — also clear the Rust session cache. Same
-    // fire-and-forget pattern as MarkIdentityKeyRevealApproved. Note: the
-    // domain_permission_invalidate IPC at simple_handler.cpp:4411 calls
-    // BOTH revoke functions, so this fires twice (identity_key + key_linkage).
-    // That's fine — revoke_session_approvals_for_domain clears both caches
-    // in one call, so the second POST is a cheap no-op.
+    // Phase 2.6-H.2 — the C++ session caches were deleted; clear the Rust
+    // session cache instead. Rust's revoke_session_approvals_for_domain clears
+    // BOTH identity-key and key-linkage opt-ins, and the
+    // domain_permission_invalidate IPC calls both revoke functions, so this
+    // fires twice — the second POST is a cheap no-op.
     fireSessionRevokeToRust(domain);
 }
 void revokeKeyLinkageApprovalForDomain(const std::string& domain) {
-    KeyLinkageApprovalCache::GetInstance().revoke(domain);
     fireSessionRevokeToRust(domain);
-}
-void invalidateSubPermissionCacheForDomain(const std::string& domain) {
-    SubPermissionCache::GetInstance().invalidate(domain);
-}
-void clearSubPermissionCache() {
-    SubPermissionCache::GetInstance().clear();
 }
 
 // Cache-warming helpers (called from simple_handler.cpp startup / navigation)
@@ -3840,20 +3551,12 @@ void AsyncWalletResourceHandler::startAsyncHTTPRequest() {
         headers.insert(std::make_pair("X-Requesting-Domain", requestDomain_));
     }
 
-    // Phase 1.5 Step 1 — propagate privacy-perimeter pre-approval to Rust.
-    // X-Identity-Key-Approved: true lets get_public_key bypass its
-    // identity_key_prompt_required gate (defense-in-depth). The header is added
-    // when EITHER (a) Open() set identityKeyApproved_ after a cache hit, OR
-    // (b) we're being forwarded via the drain-after-domain-approval path (which
-    // skips Open()) and the in-memory IdentityKeyApprovalCache already says the
-    // domain is approved. Case (b) covers the race where Rust's DB write of
-    // identity_key_disclosure_allowed hasn't landed yet.
-    bool sendIdentityKeyApproved = identityKeyApproved_
-        || (!requestDomain_.empty()
-            && IdentityKeyApprovalCache::GetInstance().isApproved(requestDomain_));
-    if (sendIdentityKeyApproved) {
-        headers.insert(std::make_pair("X-Identity-Key-Approved", "true"));
-    }
+    // Phase 2.6-H.2 — the legacy X-Identity-Key-Approved header injection was
+    // removed. Rust's get_public_key stopped consulting that header post-2.6-C.2
+    // (handlers.rs: "Rust trusts only its own approval mechanism") and now
+    // authorizes identity-key disclosure via the V17 DB column + the
+    // X-User-Approved re-issue + its own session cache. The C++ session cache
+    // that fed this header was deleted in 2.6-H.2.
 
     // Phase 2.6-E — inject payment headers on payment endpoints so Rust's
     // dispatch_payment can build the PermissionContext server-side. LD4 keeps

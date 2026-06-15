@@ -4486,16 +4486,15 @@ bool SimpleHandler::OnProcessMessageReceived(
             extern void invalidateDomainPermissionCache(const std::string& domain);
             extern void revokeIdentityKeyApprovalForDomain(const std::string& domain);
             extern void revokeKeyLinkageApprovalForDomain(const std::string& domain);
-            extern void invalidateSubPermissionCacheForDomain(const std::string& domain);
             invalidateDomainPermissionCache(domain);
-            // Session-scoped trust caches must follow the V17/V18 row state.
-            // Without this, toggling identity-key disclosure off in the UI
-            // leaves the in-memory IdentityKeyApprovalCache approved and the
-            // inline gate silently passes (`persistent_grant || cache_grant`).
-            // Same shape for key-linkage and the V18 sub-permission cache.
+            // Session-scoped trust must follow the V17/V18 row state. The C++
+            // session caches were deleted in 2.6-H.2; these helpers now forward
+            // to Rust (revoke_session_approvals_for_domain) so toggling
+            // identity-key disclosure off drops the Rust session opt-in
+            // immediately instead of leaking until restart. Scoped grants live
+            // in the Rust V18 tables, re-read on the next call.
             revokeIdentityKeyApprovalForDomain(domain);
             revokeKeyLinkageApprovalForDomain(domain);
-            invalidateSubPermissionCacheForDomain(domain);
             // Also drain any stale pending requests for this domain. Trust
             // state changed (revoked, edited, etc.); leftover entries from
             // previous modal cycles would falsely return true from
@@ -4505,12 +4504,7 @@ bool SimpleHandler::OnProcessMessageReceived(
                               + " (drained " + std::to_string(drained.size()) + " stale pending request(s))");
         } else {
             extern void clearDomainPermissionCache();
-            extern void clearSubPermissionCache();
             clearDomainPermissionCache();
-            clearSubPermissionCache();
-            // Note: IdentityKeyApprovalCache / KeyLinkageApprovalCache have no
-            // bulk-clear helper because the all-domains invalidate path is
-            // only used at startup / shutdown when those caches are empty.
             LOG_DEBUG_BROWSER("🔐 Cleared entire domain permission cache");
         }
         return true;
@@ -4522,8 +4516,8 @@ bool SimpleHandler::OnProcessMessageReceived(
         // counterparty_permission_prompt modal. React fires this IPC FIRST
         // to write the V18 row, then fires brc100_auth_response which
         // re-issues the original request via the standard AuthResponseHandler
-        // flow. Future calls from the page query SubPermissionCache, find
-        // the new persistent grant, and proceed silently.
+        // flow. Future calls from the page hit Rust's scoped-grant gate, find
+        // the new persistent grant in the V18 tables, and proceed silently.
         //
         // Payload (JSON): {
         //   domain: string,
@@ -4565,8 +4559,9 @@ bool SimpleHandler::OnProcessMessageReceived(
                         HttpResponse resp = SyncHttpClient::Post(url_, body_, "application/json", 3000);
                         if (resp.success && resp.statusCode >= 200 && resp.statusCode < 300) {
                             LOG_INFO_BROWSER("🛡️ Scoped grant written for " + domain_);
-                            extern void invalidateSubPermissionCacheForDomain(const std::string& domain);
-                            invalidateSubPermissionCacheForDomain(domain_);
+                            // Phase 2.6-H.2 — no C++ cache to invalidate; Rust's
+                            // dispatch_scoped_grant re-reads the V18 table directly
+                            // on the next call, so the new grant takes effect at once.
                         } else {
                             LOG_DEBUG_BROWSER("🛡️ Scoped grant POST failed for " + domain_
                                               + " (status=" + std::to_string(resp.statusCode) + ")");
@@ -4590,9 +4585,9 @@ bool SimpleHandler::OnProcessMessageReceived(
                     // dApps (e.g. SocialCert) generate session-unique keyIds
                     // (often raw pubkey bytes) — saving the specific keyId
                     // would mean each new session re-prompts even after the
-                    // user said "always allow." SubPermissionCache.isProtocolGranted
-                    // already treats stored "*" as matching any lookup keyId
-                    // (HttpRequestInterceptor.cpp:769), so this preserves the
+                    // user said "always allow." Rust's scoped-grant gate
+                    // already treats stored "*" as matching any lookup keyId,
+                    // so this preserves the
                     // user's "trust this protocol on this site forever" intent.
                     // Allow-once does NOT call this IPC, so it stays per-call
                     // by virtue of writing nothing.
@@ -4746,9 +4741,9 @@ bool SimpleHandler::OnProcessMessageReceived(
                     // Drop the row-level DomainPermissionCache directly so the
                     // next Open() picks up the fresh V17 value. We deliberately
                     // do NOT call the full `domain_permission_invalidate` IPC,
-                    // which would also revoke IdentityKeyApprovalCache — that
-                    // cache is the fast-path we want to keep set for the
-                    // queued requests that haven't drained yet.
+                    // which would revoke the Rust identity-key session opt-in we
+                    // are about to set on the very next line (via
+                    // MarkIdentityKeyRevealApproved → /wallet/session-approve).
                     extern void invalidateDomainPermissionCache(const std::string& domain);
                     invalidateDomainPermissionCache(domain);
                     MarkIdentityKeyRevealApproved(domain);
