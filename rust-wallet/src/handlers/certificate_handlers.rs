@@ -729,6 +729,16 @@ pub async fn acquire_certificate(
 ) -> HttpResponse {
     log::info!("📋 /acquireCertificate called");
 
+    // Phase 2.6-G G.3b — domain-trust pre-gate (before the payment dispatch).
+    if let crate::permission_service::GateOutcome::EarlyReturn(resp) =
+        crate::permission_service::domain_trust_gate(
+            &state.permission, &state.database, state.current_user_id,
+            &http_req, &body, "/acquireCertificate",
+        ).await
+    {
+        return resp;
+    }
+
     // Phase 2.6-E — payment gate. dispatch_payment reads X-Requesting-Domain
     // + X-User-Approved + X-Payment-* internally. Internal calls (no
     // X-Requesting-Domain) skip the gate; cap-modal Approve replays
@@ -3183,6 +3193,16 @@ pub async fn prove_certificate(
     body: web::Bytes,
 ) -> HttpResponse {
     log::info!("📋 /proveCertificate called");
+
+    // Phase 2.6-G G.3b — domain-trust pre-gate (before the cert dispatch).
+    if let crate::permission_service::GateOutcome::EarlyReturn(resp) =
+        crate::permission_service::domain_trust_gate(
+            &state.permission, &state.database, state.current_user_id,
+            &http_req, &body, "/proveCertificate",
+        ).await
+    {
+        return resp;
+    }
 
     // Phase 2.6-C.2 — extractor refactored from web::Json<ProveCertificateRequest>
     // to (HttpRequest, web::Bytes) so the privacy-perimeter gate can inspect

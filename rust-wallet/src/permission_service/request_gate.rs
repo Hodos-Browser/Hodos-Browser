@@ -771,32 +771,16 @@ pub async fn domain_trust_gate(
         None => return GateOutcome::Proceed,
     };
 
-    // X-User-Approved replay — the user approved the connect; the domain row is
-    // now approved (written by the modal's add_domain_permission), so consume the
-    // approval and proceed.
-    if let Some(approval_id) = http_req
-        .headers()
-        .get(X_USER_APPROVED)
-        .and_then(|v| v.to_str().ok())
-        .filter(|s| !s.is_empty())
-    {
-        let now = chrono::Utc::now().timestamp();
-        match permission.consume_and_verify(approval_id, body, now) {
-            Ok(approval) => {
-                log::info!(
-                    "🔐 X-User-Approved consumed (domain-trust) for domain={} endpoint={} id={}",
-                    approval.domain, approval.endpoint, approval_id,
-                );
-                return GateOutcome::Proceed;
-            }
-            Err(ApprovalConsumeError::BodyMismatch) => {
-                return GateOutcome::EarlyReturn(forbidden_envelope("body_mismatch"));
-            }
-            Err(ApprovalConsumeError::Expired) | Err(ApprovalConsumeError::NotFound) => {
-                return GateOutcome::EarlyReturn(forbidden_envelope("approval_expired_or_consumed"));
-            }
-        }
-    }
+    // NOTE: this gate is intentionally trust-ONLY — it never inspects or
+    // consumes `X-User-Approved`. That token is owned exclusively by the
+    // kind-specific dispatch (payment / scoped / cert), which runs AFTER this
+    // pre-gate returns Proceed. An approved domain's over-cap replay carries
+    // its kind-dispatch token; if this pre-gate consumed it here, the kind
+    // dispatch would then see NotFound and wrongly 403. Domain-trust approval
+    // works by a different mechanism: the modal writes trust=approved, so by
+    // re-issue time `get_by_domain` returns "approved" and we Proceed below
+    // without any token. (G.4 must ensure that trust write commits before the
+    // request is re-issued — see the C++ approval path.)
 
     let perm_row = {
         let db_guard = match database.lock() {

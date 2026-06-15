@@ -263,6 +263,16 @@ pub async fn get_public_key(
 ) -> HttpResponse {
     log::info!("📋 /getPublicKey called");
 
+    // Phase 2.6-G G.3b — domain-trust pre-gate (before the kind dispatch).
+    if let crate::permission_service::GateOutcome::EarlyReturn(resp) =
+        crate::permission_service::domain_trust_gate(
+            &state.permission, &state.database, state.current_user_id,
+            &http_req, &body, "/getPublicKey",
+        ).await
+    {
+        return resp;
+    }
+
     // Parse optional JSON body (empty body = return identity key)
     let req: serde_json::Value = if body.is_empty() {
         serde_json::json!({})
@@ -927,6 +937,16 @@ pub async fn create_hmac(
     body: web::Bytes,
 ) -> HttpResponse {
     log::info!("📋 /createHmac called");
+
+    // Phase 2.6-G G.3b — domain-trust pre-gate (before the kind dispatch).
+    if let crate::permission_service::GateOutcome::EarlyReturn(resp) =
+        crate::permission_service::domain_trust_gate(
+            &state.permission, &state.database, state.current_user_id,
+            &http_req, &body, "/createHmac",
+        ).await
+    {
+        return resp;
+    }
 
     // Phase 2.6-D scoped-grant gate (see create_signature for full rationale).
     if let Some((level, name, key_id, counterparty)) =
@@ -1657,6 +1677,16 @@ pub async fn encrypt(
 ) -> HttpResponse {
     log::info!("📋 /encrypt called");
 
+    // Phase 2.6-G G.3b — domain-trust pre-gate (before the kind dispatch).
+    if let crate::permission_service::GateOutcome::EarlyReturn(resp) =
+        crate::permission_service::domain_trust_gate(
+            &state.permission, &state.database, state.current_user_id,
+            &http_req, &body, "/encrypt",
+        ).await
+    {
+        return resp;
+    }
+
     // Phase 2.6-D scoped-grant gate (see create_signature for full rationale).
     if let Some((level, name, key_id, counterparty)) =
         peek_scoped_grant_scope_protocol(&body)
@@ -1870,6 +1900,16 @@ pub async fn decrypt(
     body: web::Bytes,
 ) -> HttpResponse {
     log::info!("📋 /decrypt called");
+
+    // Phase 2.6-G G.3b — domain-trust pre-gate (before the kind dispatch).
+    if let crate::permission_service::GateOutcome::EarlyReturn(resp) =
+        crate::permission_service::domain_trust_gate(
+            &state.permission, &state.database, state.current_user_id,
+            &http_req, &body, "/decrypt",
+        ).await
+    {
+        return resp;
+    }
 
     // Phase 2.6-D scoped-grant gate (see create_signature for full rationale).
     if let Some((level, name, key_id, counterparty)) =
@@ -2376,6 +2416,16 @@ pub async fn reveal_counterparty_key_linkage(
 ) -> HttpResponse {
     log::info!("📋 /revealCounterpartyKeyLinkage called");
 
+    // Phase 2.6-G G.3b — domain-trust pre-gate (before the kind dispatch).
+    if let crate::permission_service::GateOutcome::EarlyReturn(resp) =
+        crate::permission_service::domain_trust_gate(
+            &state.permission, &state.database, state.current_user_id,
+            &http_req, &body, "/revealCounterpartyKeyLinkage",
+        ).await
+    {
+        return resp;
+    }
+
     // Defense-in-depth: verify domain is approved
     {
         let db = state.database.lock().unwrap();
@@ -2561,6 +2611,16 @@ pub async fn reveal_specific_key_linkage(
     body: web::Bytes,
 ) -> HttpResponse {
     log::info!("📋 /revealSpecificKeyLinkage called");
+
+    // Phase 2.6-G G.3b — domain-trust pre-gate (before the kind dispatch).
+    if let crate::permission_service::GateOutcome::EarlyReturn(resp) =
+        crate::permission_service::domain_trust_gate(
+            &state.permission, &state.database, state.current_user_id,
+            &http_req, &body, "/revealSpecificKeyLinkage",
+        ).await
+    {
+        return resp;
+    }
 
     // Defense-in-depth: verify domain is approved
     {
@@ -3651,6 +3711,16 @@ pub async fn create_signature(
 ) -> HttpResponse {
     log::info!("📋 /createSignature called");
 
+    // Phase 2.6-G G.3b — domain-trust pre-gate (before the kind dispatch).
+    if let crate::permission_service::GateOutcome::EarlyReturn(resp) =
+        crate::permission_service::domain_trust_gate(
+            &state.permission, &state.database, state.current_user_id,
+            &http_req, &body, "/createSignature",
+        ).await
+    {
+        return resp;
+    }
+
     // Phase 2.6-D scoped-grant gate. Runs BEFORE check_domain_approved (mirrors
     // C++ inline cascade: extractProtocolScope at HttpRequestInterceptor.cpp:1053).
     // The dispatch helper handles the X-User-Approved replay path and the
@@ -4277,6 +4347,16 @@ pub async fn create_action(
     body: web::Bytes,
 ) -> HttpResponse {
     log::info!("📋 /createAction called");
+
+    // Phase 2.6-G G.3b — domain-trust pre-gate (before the payment dispatch).
+    if let crate::permission_service::GateOutcome::EarlyReturn(resp) =
+        crate::permission_service::domain_trust_gate(
+            &state.permission, &state.database, state.current_user_id,
+            &http_req, &body, "/createAction",
+        ).await
+    {
+        return resp;
+    }
     log::info!("📋 Raw request body ({} bytes):", body.len());
     // Log full request in chunks of 2000 chars for complete visibility
     let body_str = String::from_utf8_lossy(&body);
@@ -9002,6 +9082,16 @@ pub async fn yours_legacy_addresses(
     http_req: HttpRequest,
     body: web::Bytes,
 ) -> HttpResponse {
+    // Phase 2.6-G G.3b — domain-trust pre-gate (before the kind dispatch).
+    if let crate::permission_service::GateOutcome::EarlyReturn(resp) =
+        crate::permission_service::domain_trust_gate(
+            &state.permission, &state.database, state.current_user_id,
+            &http_req, &body, "/wallet/yours-legacy-addresses",
+        ).await
+    {
+        return resp;
+    }
+
     // Phase 2.6-C.2 follow-up — extractor refactored from
     // web::Json<YoursLegacyAddressesRequest> to web::Bytes so the
     // privacy-perimeter gate can inspect headers (X-Requesting-Domain,
@@ -10882,6 +10972,16 @@ pub async fn send_message(
     req: HttpRequest,
 ) -> impl Responder {
     log::info!("📨 /sendMessage called");
+
+    // Phase 2.6-G G.3b — domain-trust pre-gate (before the payment dispatch).
+    if let crate::permission_service::GateOutcome::EarlyReturn(resp) =
+        crate::permission_service::domain_trust_gate(
+            &state.permission, &state.database, state.current_user_id,
+            &req, &body, "/sendMessage",
+        ).await
+    {
+        return resp;
+    }
 
     // Phase 2.6-E — payment gate. dispatch_payment reads X-Requesting-Domain
     // + X-User-Approved + X-Payment-* internally. Internal calls (no
@@ -15459,6 +15559,16 @@ pub async fn list_outputs(
 ) -> HttpResponse {
     log::info!("📋 /listOutputs called");
 
+    // Phase 2.6-G G.3b — domain-trust pre-gate (before the kind dispatch).
+    if let crate::permission_service::GateOutcome::EarlyReturn(resp) =
+        crate::permission_service::domain_trust_gate(
+            &state.permission, &state.database, state.current_user_id,
+            &http_req, &body, "/listOutputs",
+        ).await
+    {
+        return resp;
+    }
+
     // Phase 2.6-D scoped-grant gate (basket access, read).
     if let Some(basket_name) = peek_scoped_grant_scope_basket(&body) {
         let outcome = crate::permission_service::dispatch_scoped_grant(
@@ -15791,6 +15901,16 @@ pub async fn relinquish_output(
     body: web::Bytes,
 ) -> HttpResponse {
     log::info!("📋 /relinquishOutput called");
+
+    // Phase 2.6-G G.3b — domain-trust pre-gate (before the kind dispatch).
+    if let crate::permission_service::GateOutcome::EarlyReturn(resp) =
+        crate::permission_service::domain_trust_gate(
+            &state.permission, &state.database, state.current_user_id,
+            &http_req, &body, "/relinquishOutput",
+        ).await
+    {
+        return resp;
+    }
 
     // Phase 2.6-D scoped-grant gate (basket access, read_write — destructive).
     if let Some(basket_name) = peek_scoped_grant_scope_basket(&body) {
