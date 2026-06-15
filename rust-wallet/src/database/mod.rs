@@ -28,9 +28,9 @@ pub mod settings_repo;
 pub mod sync_state_repo;
 pub mod domain_permission_repo;
 pub mod peerpay_repo;
-// Phase 2.6-A.5 — engine-to-Rust scaffolding repos (V20).
+// Phase 2.6-A.5 — engine-to-Rust audit repo (V20).
+// (engine_shadow_repo removed in 2.6-H along with the shadow-log infra.)
 pub mod permission_audit_repo;
-pub mod engine_shadow_repo;
 
 pub use connection::WalletDatabase;
 pub use models::{Wallet, User, Address, Output, ParentTransaction, BlockHeader, ProvenTx, ProvenTxReq, Basket, OutputTag, OutputTagMap};
@@ -66,6 +66,5 @@ pub use settings_repo::SettingsRepository;
 pub use sync_state_repo::SyncStateRepository;
 pub use domain_permission_repo::DomainPermissionRepository;
 pub use peerpay_repo::PeerPayRepository;
-// Phase 2.6-A.5 — engine-to-Rust scaffolding repos.
+// Phase 2.6-A.5 — engine-to-Rust audit repo.
 pub use permission_audit_repo::{PermissionAuditEntry, PermissionAuditRepository};
-pub use engine_shadow_repo::{EngineShadowEntry, EngineShadowRepository};

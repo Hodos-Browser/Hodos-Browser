@@ -17,7 +17,6 @@ use std::sync::{Arc, RwLock};
 use hodos_permission_engine::{decide as engine_decide, PermissionContext, PermissionDecision};
 
 use super::audit::body_hash;
-use super::flags::EngineFlags;
 
 /// Default TTL for a minted pending approval (10 minutes).
 ///
@@ -118,13 +117,7 @@ pub struct PendingApproval {
 /// `PermissionService` — the actix-integrated layer above the pure engine.
 ///
 /// One instance lives on `AppState.permission` (wired up in sub-phase 2.6-A.6).
-/// Constructor reads `EngineFlags::from_env()` so per-class migration flags
-/// are visible at request time.
 pub struct PermissionService {
-    /// Per-CallKind-class flags. Read at startup; immutable for the process
-    /// lifetime. Flag flip requires a wallet restart.
-    flags: EngineFlags,
-
     /// Pending approvals map indexed by `approval_id`. RwLock because reads
     /// (lookup on X-User-Approved re-issue) are far more common than writes
     /// (initial mint + atomic consume on re-issue).
@@ -170,23 +163,14 @@ pub struct PermissionService {
 }
 
 impl PermissionService {
-    /// Construct a new PermissionService. Takes the env-derived flags; caller
-    /// is responsible for env loading at startup (done in main.rs in 2.6-A.6).
-    pub fn new(flags: EngineFlags) -> Self {
+    /// Construct a new PermissionService.
+    pub fn new() -> Self {
         Self {
-            flags,
             pending_approvals: Arc::new(RwLock::new(HashMap::new())),
             identity_key_session_approvals: Arc::new(RwLock::new(HashSet::new())),
             key_linkage_session_approvals: Arc::new(RwLock::new(HashSet::new())),
             session_counters: Arc::new(RwLock::new(HashMap::new())),
         }
-    }
-
-    /// Return the engine flags. Used by request handlers to decide which
-    /// engine path (C++ via existing handlers, or Rust via this service) to
-    /// take.
-    pub fn flags(&self) -> EngineFlags {
-        self.flags
     }
 
     /// Pure-logic decision. Delegates to `hodos_permission_engine::decide`.
@@ -593,14 +577,13 @@ mod tests {
 
     #[test]
     fn new_service_has_no_pending_approvals() {
-        let svc = PermissionService::new(EngineFlags::default());
+        let svc = PermissionService::new();
         assert_eq!(svc.pending_approval_count(), 0);
-        assert!(!svc.flags().shadow_log_enabled);
     }
 
     #[test]
     fn insert_and_consume_single_use() {
-        let svc = PermissionService::new(EngineFlags::default());
+        let svc = PermissionService::new();
         svc.insert_pending_approval(sample_approval("abc", 1_700_000_600));
         assert_eq!(svc.pending_approval_count(), 1);
 
@@ -616,7 +599,7 @@ mod tests {
 
     #[test]
     fn expired_approval_returns_none_on_consume() {
-        let svc = PermissionService::new(EngineFlags::default());
+        let svc = PermissionService::new();
         svc.insert_pending_approval(sample_approval("abc", 100));
         let consumed = svc.consume_pending_approval("abc", 999); // now > expires_at
         assert!(consumed.is_none());
@@ -626,7 +609,7 @@ mod tests {
 
     #[test]
     fn purge_expired_drops_only_expired_entries() {
-        let svc = PermissionService::new(EngineFlags::default());
+        let svc = PermissionService::new();
         svc.insert_pending_approval(sample_approval("old", 100));
         svc.insert_pending_approval(sample_approval("fresh", 1_700_000_600));
         let purged = svc.purge_expired_approvals(500);
@@ -640,7 +623,7 @@ mod tests {
     fn decide_delegates_to_pure_engine() {
         use hodos_permission_engine::{CallKind, PermissionContext, TrustLevel};
 
-        let svc = PermissionService::new(EngineFlags::default());
+        let svc = PermissionService::new();
         let ctx = PermissionContext {
             call_kind: CallKind::Payment,
             trust_level: TrustLevel::Blocked,
@@ -671,7 +654,7 @@ mod tests {
 
     #[test]
     fn mint_pending_approval_inserts_and_returns_id() {
-        let svc = PermissionService::new(EngineFlags::default());
+        let svc = PermissionService::new();
         let id = svc.mint_pending_approval(
             "example.com",
             "/getPublicKey",
@@ -684,7 +667,7 @@ mod tests {
 
     #[test]
     fn mint_then_consume_with_matching_body_succeeds() {
-        let svc = PermissionService::new(EngineFlags::default());
+        let svc = PermissionService::new();
         let body = b"{\"identityKey\":true}";
         let id = svc.mint_pending_approval("example.com", "/getPublicKey", body, 1_700_000_000);
         let result = svc.consume_and_verify(&id, body, 1_700_000_100);
@@ -701,7 +684,7 @@ mod tests {
 
     #[test]
     fn consume_with_mismatched_body_returns_body_mismatch() {
-        let svc = PermissionService::new(EngineFlags::default());
+        let svc = PermissionService::new();
         let body = b"{\"identityKey\":true}";
         let tampered = b"{\"identityKey\":false}";
         let id = svc.mint_pending_approval("example.com", "/getPublicKey", body, 1_700_000_000);
@@ -715,7 +698,7 @@ mod tests {
 
     #[test]
     fn consume_after_expiry_returns_expired() {
-        let svc = PermissionService::new(EngineFlags::default());
+        let svc = PermissionService::new();
         let body = b"{}";
         let id = svc.mint_pending_approval("example.com", "/getPublicKey", body, 1_000);
         // now > created_at + APPROVAL_TTL_SECS
@@ -729,7 +712,7 @@ mod tests {
 
     #[test]
     fn consume_unknown_id_returns_not_found() {
-        let svc = PermissionService::new(EngineFlags::default());
+        let svc = PermissionService::new();
         assert!(matches!(
             svc.consume_and_verify("0".repeat(32).as_str(), b"{}", 1_700_000_100),
             Err(ApprovalConsumeError::NotFound)
@@ -746,7 +729,7 @@ mod tests {
 
     #[test]
     fn identity_key_session_approve_then_check() {
-        let svc = PermissionService::new(EngineFlags::default());
+        let svc = PermissionService::new();
         assert!(!svc.is_identity_key_session_approved("example.com"));
         svc.approve_identity_key_session("example.com");
         assert!(svc.is_identity_key_session_approved("example.com"));
@@ -756,7 +739,7 @@ mod tests {
 
     #[test]
     fn identity_key_session_approve_is_idempotent() {
-        let svc = PermissionService::new(EngineFlags::default());
+        let svc = PermissionService::new();
         svc.approve_identity_key_session("example.com");
         svc.approve_identity_key_session("example.com");
         svc.approve_identity_key_session("example.com");
@@ -765,7 +748,7 @@ mod tests {
 
     #[test]
     fn key_linkage_session_approve_then_check() {
-        let svc = PermissionService::new(EngineFlags::default());
+        let svc = PermissionService::new();
         assert!(!svc.is_key_linkage_session_approved("example.com"));
         svc.approve_key_linkage_session("example.com");
         assert!(svc.is_key_linkage_session_approved("example.com"));
@@ -774,7 +757,7 @@ mod tests {
 
     #[test]
     fn identity_key_and_key_linkage_session_caches_are_independent() {
-        let svc = PermissionService::new(EngineFlags::default());
+        let svc = PermissionService::new();
         svc.approve_identity_key_session("example.com");
         assert!(svc.is_identity_key_session_approved("example.com"));
         assert!(!svc.is_key_linkage_session_approved("example.com"));
@@ -786,7 +769,7 @@ mod tests {
 
     #[test]
     fn revoke_session_approvals_clears_both_caches() {
-        let svc = PermissionService::new(EngineFlags::default());
+        let svc = PermissionService::new();
         svc.approve_identity_key_session("example.com");
         svc.approve_key_linkage_session("example.com");
         assert!(svc.is_identity_key_session_approved("example.com"));
@@ -799,7 +782,7 @@ mod tests {
 
     #[test]
     fn revoke_session_approvals_is_idempotent_when_domain_absent() {
-        let svc = PermissionService::new(EngineFlags::default());
+        let svc = PermissionService::new();
         // No prior approvals — revoke should be a no-op, not a panic.
         svc.revoke_session_approvals_for_domain("never-approved.com");
         assert!(!svc.is_identity_key_session_approved("never-approved.com"));
@@ -812,7 +795,7 @@ mod tests {
 
     #[test]
     fn snapshot_with_no_session_returns_zeroed_with_domain() {
-        let svc = PermissionService::new(EngineFlags::default());
+        let svc = PermissionService::new();
         let c = svc.get_session_counters_snapshot(42, "example.com", T0);
         assert_eq!(c.domain, "example.com");
         assert_eq!(c.spent_cents, 0);
@@ -824,7 +807,7 @@ mod tests {
 
     #[test]
     fn record_spending_creates_then_accumulates() {
-        let svc = PermissionService::new(EngineFlags::default());
+        let svc = PermissionService::new();
         svc.record_spending(42, "example.com", 50, T0);
         let c = svc.get_session_counters_snapshot(42, "example.com", T0);
         assert_eq!(c.spent_cents, 50);
@@ -837,7 +820,7 @@ mod tests {
 
     #[test]
     fn record_spending_with_different_domain_resets_spent_and_rate() {
-        let svc = PermissionService::new(EngineFlags::default());
+        let svc = PermissionService::new();
         svc.record_spending(42, "example.com", 100, T0);
         svc.increment_payment_rate_counter(42, "example.com", T0);
         // Switch domain — spent + rate reset, payment_count carries over
@@ -854,7 +837,7 @@ mod tests {
 
     #[test]
     fn increment_rate_counter_within_window_accumulates() {
-        let svc = PermissionService::new(EngineFlags::default());
+        let svc = PermissionService::new();
         svc.increment_payment_rate_counter(42, "example.com", T0);
         svc.increment_payment_rate_counter(42, "example.com", T0 + 5);
         svc.increment_payment_rate_counter(42, "example.com", T0 + 10);
@@ -865,7 +848,7 @@ mod tests {
 
     #[test]
     fn increment_rate_counter_after_window_expiry_resets_minute_only() {
-        let svc = PermissionService::new(EngineFlags::default());
+        let svc = PermissionService::new();
         svc.increment_payment_rate_counter(42, "example.com", T0);
         svc.increment_payment_rate_counter(42, "example.com", T0 + 30);
         // 60s elapsed since window started at T0 — next increment opens a new
@@ -880,7 +863,7 @@ mod tests {
 
     #[test]
     fn snapshot_applies_window_expiry_on_read() {
-        let svc = PermissionService::new(EngineFlags::default());
+        let svc = PermissionService::new();
         svc.increment_payment_rate_counter(42, "example.com", T0);
         svc.increment_payment_rate_counter(42, "example.com", T0 + 30);
         // Read at T0+65 — window has expired, snapshot should report 0 even
@@ -893,7 +876,7 @@ mod tests {
 
     #[test]
     fn snapshot_with_mismatched_domain_returns_zeroed() {
-        let svc = PermissionService::new(EngineFlags::default());
+        let svc = PermissionService::new();
         svc.record_spending(42, "example.com", 100, T0);
         let c = svc.get_session_counters_snapshot(42, "other.com", T0 + 1);
         assert_eq!(c.spent_cents, 0);
@@ -903,7 +886,7 @@ mod tests {
 
     #[test]
     fn clear_session_for_browser_drops_entry() {
-        let svc = PermissionService::new(EngineFlags::default());
+        let svc = PermissionService::new();
         svc.record_spending(42, "example.com", 100, T0);
         svc.record_spending(43, "other.com", 50, T0);
         assert_eq!(svc.session_counter_browser_count(), 2);
@@ -918,14 +901,14 @@ mod tests {
 
     #[test]
     fn clear_session_for_unknown_browser_is_noop() {
-        let svc = PermissionService::new(EngineFlags::default());
+        let svc = PermissionService::new();
         svc.clear_session_for_browser(999);
         assert_eq!(svc.session_counter_browser_count(), 0);
     }
 
     #[test]
     fn per_browser_isolation() {
-        let svc = PermissionService::new(EngineFlags::default());
+        let svc = PermissionService::new();
         svc.record_spending(1, "example.com", 100, T0);
         svc.record_spending(2, "example.com", 50, T0);
         let c1 = svc.get_session_counters_snapshot(1, "example.com", T0);

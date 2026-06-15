@@ -26,8 +26,7 @@
 //! returns `Proceed`. Both gates apply independently per kickoff invariant.
 //!
 //! Lib-crate constraint: AppState lives in the binary so this module takes
-//! individual `web::Data` extractors (matches the existing `shadow_decide`
-//! pattern).
+//! individual `web::Data` extractors (rather than going through `AppState`).
 
 use std::sync::{Arc, Mutex};
 

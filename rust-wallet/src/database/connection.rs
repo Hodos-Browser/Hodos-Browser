@@ -949,6 +949,17 @@ impl WalletDatabase {
             info!("   ✅ Schema V22 applied");
         }
 
+        if current_version < 23 {
+            // Phase 2.6-H: the C++ PermissionEngine + the engine-to-Rust
+            // shadow-comparison infrastructure were deleted. Drop the now-dead
+            // engine_shadow_log table. permission_audit_log (the long-lived
+            // audit surface) is kept.
+            info!("   Applying migration V23 (drop engine_shadow_log)...");
+            migrations::migrate_v22_to_v23(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (23)", [])?;
+            info!("   ✅ Schema V23 applied");
+        }
+
         // Startup repair: V12 migration may have recorded version but failed to add columns
         // (INSERT INTO schema_version succeeded but ALTER TABLE was skipped/failed).
         // Re-run the column checks unconditionally to patch any inconsistent DBs.

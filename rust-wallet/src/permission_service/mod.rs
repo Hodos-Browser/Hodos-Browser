@@ -7,14 +7,12 @@
 //! the shadow comparison writer.
 //!
 //! Module structure:
-//!   - `flags`           — EngineFlags struct + env-var parser (Phase 2.6-C.2:
-//!                          per-class booleans removed; only shadow flag survives)
 //!   - `state`           — PermissionService struct + pending approvals
-//!   - `audit`           — audit + shadow log write helpers
+//!   - `audit`           — permission_audit_log write helpers
 //!   - `context_builder` — request → PermissionContext (per-CallKind builders)
 //!   - `request_gate`    — Phase 2.6-C.2 dispatch helper for the 4
 //!                          privacy-perimeter handlers
-//!   - `handlers`        — HTTP handlers (shadow-decide today; more in 2.6-D+)
+//!   - `handlers`        — small session-cache HTTP handlers (approve/revoke/close)
 //!
 //! Phase 2.6-C.2: Privacy Perimeter migration complete. The four
 //! privacy-perimeter handlers (`get_public_key` identityKey path,
@@ -28,12 +26,10 @@
 
 pub mod audit;
 pub mod context_builder;
-pub mod flags;
 pub mod handlers;
 pub mod request_gate;
 pub mod state;
 
-pub use flags::EngineFlags;
 pub use request_gate::{
     dispatch_cert_disclosure, dispatch_payment, dispatch_privacy_perimeter, dispatch_scoped_grant,
     domain_trust_gate, is_protected_basket, GateOutcome, PaymentCall, ScopedCall, X_BROWSER_ID,

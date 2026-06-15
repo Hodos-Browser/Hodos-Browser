@@ -1,5 +1,4 @@
 #include "../../include/core/TabManager.h"
-#include "../../include/core/SessionManager.h"
 #include "../../include/core/EphemeralCookieManager.h"
 #include "../../include/core/WindowManager.h"
 #include "../../include/handlers/simple_handler.h"
@@ -173,14 +172,12 @@ bool TabManager::CloseTab(int tab_id) {
     }
 
     // Clear session spending and notify ephemeral cookie manager.
-    // Phase 2.6-E — also fire fire-and-forget POST to Rust so the migrated
-    // engine-driven payment counters (Rust SessionCounters) drop the same
-    // browser_id. C++ SessionManager continues to live for BRC-121's inline
-    // cascade (see PHASE_2_6_ENGINE_TO_RUST.md OQ5 — BRC-121 cascade
-    // migration is post-2.6 polish), so both clears happen here in tandem.
+    // Phase 2.6-E/H — payment session counters now live entirely in Rust
+    // (`PermissionService::session_counters`, incl. the BRC-121 path after
+    // OQ5). Fire a fire-and-forget POST so Rust drops this browser_id's
+    // counters. The C++ SessionManager was deleted in 2.6-H.
     if (tab.browser) {
         int browserId = tab.browser->GetIdentifier();
-        SessionManager::GetInstance().clearSession(browserId);
         extern void ClearRustPaymentSessionForBrowser(int);
         ClearRustPaymentSessionForBrowser(browserId);
         EphemeralCookieManager::GetInstance().OnTabClosed(browserId);

@@ -1127,7 +1127,7 @@ pub fn migrate_v19_to_v20(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_audit_approval   ON permission_audit_log(approval_id);"
     )?;
 
-    // engine_shadow_log — dropped in 2.6-H cleanup (V21).
+    // engine_shadow_log — dropped in 2.6-H cleanup (V23, migrate_v22_to_v23).
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS engine_shadow_log (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1232,5 +1232,23 @@ pub fn migrate_v21_to_v22(conn: &Connection) -> Result<()> {
         info!("   ℹ️  V22 migration: bundled_scope_grant column already exists, skipping");
     }
 
+    Ok(())
+}
+
+/// V22 → V23 — Phase 2.6-H cleanup.
+///
+/// Drops the `engine_shadow_log` table created in V20. The shadow-comparison
+/// infrastructure (C++ `EngineShadow` + the Rust `/engine/shadow-decide`
+/// handler + `engine_shadow_repo`) was deleted in 2.6-H along with the rest of
+/// the C++ PermissionEngine — all permission decisions are now Rust-native, so
+/// there is no second engine to compare against. `permission_audit_log` (the
+/// long-lived audit surface) is intentionally kept.
+///
+/// Idempotent: `DROP TABLE IF EXISTS` is a no-op on a DB that never had the
+/// table (or already dropped it).
+pub fn migrate_v22_to_v23(conn: &Connection) -> Result<()> {
+    info!("   Dropping engine_shadow_log table (V23)...");
+    conn.execute_batch("DROP TABLE IF EXISTS engine_shadow_log;")?;
+    info!("   ✅ V23 migration applied (engine_shadow_log dropped)");
     Ok(())
 }

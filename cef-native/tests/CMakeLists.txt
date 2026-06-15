@@ -31,23 +31,18 @@ FetchContent_MakeAvailable(googletest)
 # Test executable. Sources listed individually — keeps the build deterministic
 # and forces an explicit choice when a new test file is added.
 add_executable(hodos_tests
-    permission_engine_test.cpp
-    permission_gate_test.cpp
     manifest_fetcher_test.cpp
     sensitive_cert_fields_test.cpp
 
     # Production sources under test (built into the test exe directly).
-    # PermissionEngine is pure logic with no CEF deps, so it links cleanly.
-    # PermissionGate is the same — wraps PermissionEngine with callback-based
-    # side effects; pulls in PermissionEngine.cpp (already listed below).
+    # (Phase 2.6-H removed permission_engine_test / permission_gate_test along
+    # with the C++ PermissionEngine — all permission decisions are now in Rust.)
     # ManifestFetcher's parse path is pure, but it lives in the same TU as
     # Fetch (which references SyncHttpClient::Get + Logger::Log). To keep
     # the linker happy without inflating the test binary, we pull in the
     # SyncHttpClient + Logger implementations too — both are small and
     # have no external deps beyond stdlib + platform HTTP libs.
     # SensitiveCertFields.h is header-only — no production .cpp needed.
-    ../src/core/PermissionEngine.cpp
-    ../src/core/PermissionGate.cpp
     ../src/core/ManifestFetcher.cpp
     ../src/core/SyncHttpClient.cpp
     ../src/core/Logger.cpp

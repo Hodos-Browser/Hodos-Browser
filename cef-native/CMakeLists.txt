@@ -202,7 +202,6 @@ if(APPLE)
         # Cross-platform modules needed by simple_handler.cpp on macOS
         src/core/BrowserWindow.cpp
         src/core/WindowManager.cpp
-        src/core/SessionManager.cpp
         src/core/SettingsManager.cpp
         src/core/EphemeralCookieManager.cpp
         src/core/ProfileImporter.cpp
@@ -210,9 +209,6 @@ if(APPLE)
         src/core/BRC100Bridge.cpp
         src/core/BRC100Handler.cpp
         src/core/HttpRequestInterceptor.cpp
-        src/core/PermissionEngine.cpp
-        src/core/PermissionGate.cpp
-        src/core/EngineShadow.cpp
         src/core/ManifestFetcher.cpp
         src/core/AutoUpdater_mac.mm
     )
@@ -254,16 +250,8 @@ elseif(WIN32)
         src/core/BRC100Bridge.cpp
         src/core/BRC100Handler.cpp
         src/core/HttpRequestInterceptor.cpp
-        include/core/PermissionEngine.h
-        src/core/PermissionEngine.cpp
-        include/core/PermissionGate.h
-        src/core/PermissionGate.cpp
-        include/core/EngineShadow.h
-        src/core/EngineShadow.cpp
         include/core/ManifestFetcher.h
         src/core/ManifestFetcher.cpp
-        include/core/SessionManager.h
-        src/core/SessionManager.cpp
         include/core/Tab.h
         include/core/TabManager.h
         src/core/TabManager.cpp

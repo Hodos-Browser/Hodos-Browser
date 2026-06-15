@@ -635,19 +635,11 @@ async fn main() -> std::io::Result<()> {
     //
     // Phase 2.6-C dropped the per-class env-var fallback model (kickoff Q1) —
     // each CallKind class becomes Rust-authoritative the instant its sub-commit
-    // lands, with no runtime opt-out. C.2 makes Privacy Perimeter authoritative:
-    //   - /getPublicKey identityKey-style requests
-    //   - /revealCounterpartyKeyLinkage
-    //   - /revealSpecificKeyLinkage
-    //   - /proveCertificate touching a sensitive field (per C.1 classifier)
-    //
-    // Only HODOS_ENGINE_SHADOW_LOG (diagnostic) survives as a flag.
-    let engine_flags = permission_service::EngineFlags::from_env();
-    let permission = Arc::new(permission_service::PermissionService::new(engine_flags));
-    log::info!("✅ Permission engine: Privacy Perimeter is Rust-authoritative (Phase 2.6-C.2)");
-    if engine_flags.shadow_log_enabled {
-        log::info!("🧪 Permission engine shadow log: ENABLED (HODOS_ENGINE_SHADOW_LOG=1) — /engine/shadow-decide writes to engine_shadow_log");
-    }
+    // lands, with no runtime opt-out. By 2.6-G every permission gate (domain
+    // trust, payment, scoped-grant, cert disclosure, privacy perimeter) decides
+    // in Rust; 2.6-H removed the last engine flag (shadow-log) and its handler.
+    let permission = Arc::new(permission_service::PermissionService::new());
+    log::info!("✅ Permission engine: all gates are Rust-authoritative (Phase 2.6)");
 
     // Create app state
     let app_state = web::Data::new(AppState {
@@ -1053,11 +1045,6 @@ async fn main() -> std::io::Result<()> {
             .route("/domain/permissions/counterparty", web::delete().to(handlers::revoke_counterparty_permission))
             .route("/domain/permissions/counterparty", web::get().to(handlers::list_counterparty_permissions))
 
-            // Phase 2.6-B.2 — engine shadow comparison endpoint. Dormant until
-            // HODOS_ENGINE_SHADOW_LOG=1 is exported AND a caller in 2.6-B.3+
-            // wires SubmitShadowComparison(...) on the C++ side. With the flag
-            // OFF, returns 204 No Content immediately.
-            .route("/engine/shadow-decide", web::post().to(permission_service::handlers::shadow_decide))
             .route("/wallet/session-approve", web::post().to(permission_service::handlers::session_approve))
             .route("/wallet/session-revoke", web::post().to(permission_service::handlers::session_revoke))
             .route("/wallet/session/close", web::post().to(permission_service::handlers::session_close))
