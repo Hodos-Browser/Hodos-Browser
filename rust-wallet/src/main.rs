@@ -1,4 +1,6 @@
-use actix_web::{web, App, HttpServer, middleware};
+use actix_web::{web, App, HttpServer, middleware, Error};
+use actix_web::dev::{ServiceRequest, ServiceResponse};
+use actix_web::body::{BoxBody, MessageBody};
 use actix_cors::Cors;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -35,6 +37,66 @@ mod manifest;  // Phase 2.6-G: Rust port of C++ ManifestFetcher (fetch + lenient
 
 // Re-export for monitor tasks (avoids rust-analyzer resolution issues when only lib is checked)
 pub use cache_helpers::verify_tsc_proof_against_block;
+
+/// Phase 2.6-G — universal domain-trust gate (actix middleware).
+///
+/// Runs ahead of every wallet route. Internal calls (no `X-Requesting-Domain`)
+/// pass straight through — that header is injected by the C++ layer ONLY for
+/// external (dApp) origins, so its absence means the wallet UI is calling its
+/// own backend and domain-trust doesn't apply. External origins are gated by
+/// `domain_trust_gate`:
+///   - approved → Proceed (handler runs; its per-handler kind gate, if any,
+///     runs after — this middleware never touches `X-User-Approved`)
+///   - blocked  → 403
+///   - unknown  → 202 (`domain_approval` / `manifest_connect_bundle`). C++ opens
+///     the connect modal, writes trust=approved synchronously on Approve, and
+///     re-issues; the re-issue sees "approved" here and Proceeds.
+///
+/// This single choke-point makes Rust authoritative for domain trust across
+/// BOTH transports (IPC shim + direct-fetch `Open()`), per the Phase 2.6 goal:
+/// "every API surface that talks to Rust automatically gets the engine."
+async fn domain_trust_mw(
+    req: ServiceRequest,
+    next: middleware::Next<impl MessageBody + 'static>,
+) -> Result<ServiceResponse<BoxBody>, Error> {
+    let domain = req
+        .request()
+        .headers()
+        .get("X-Requesting-Domain")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    // Internal call → no gate.
+    let domain = match domain {
+        Some(d) => d,
+        None => return Ok(next.call(req).await?.map_into_boxed_body()),
+    };
+
+    let permission = req
+        .app_data::<web::Data<Arc<permission_service::PermissionService>>>()
+        .expect("PermissionService Data registered in App")
+        .get_ref()
+        .clone();
+    let database = req
+        .app_data::<web::Data<Arc<Mutex<WalletDatabase>>>>()
+        .expect("WalletDatabase Data registered in App")
+        .get_ref()
+        .clone();
+    let user_id = req
+        .app_data::<web::Data<AppState>>()
+        .map(|s| s.current_user_id)
+        .unwrap_or(1);
+    let endpoint = req.request().path().to_string();
+
+    match permission_service::domain_trust_gate(&permission, &database, user_id, &domain, &endpoint).await {
+        permission_service::GateOutcome::Proceed => {
+            Ok(next.call(req).await?.map_into_boxed_body())
+        }
+        // 202 connect prompt / 403 blocked — short-circuit, handler never runs.
+        permission_service::GateOutcome::EarlyReturn(resp) => Ok(req.into_response(resp)),
+    }
+}
 
 use auth_session::AuthSessionManager;
 use database::WalletDatabase;  // NEW: Import WalletDatabase
@@ -851,6 +913,10 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::PayloadConfig::new(100 * 1024 * 1024))  // 100MB limit for web::Bytes
             .wrap(cors)
             .wrap(middleware::Logger::new("%a \"%r\" %s %b \"%{Referer}i\" %T"))
+            // Phase 2.6-G — universal domain-trust gate. Runs per-request before
+            // the route handler; external origins are trust-checked in Rust, the
+            // single source of truth. Internal (wallet-UI) calls pass through.
+            .wrap(middleware::from_fn(domain_trust_mw))
 
             // Health check
             .route("/health", web::get().to(handlers::health))

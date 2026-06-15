@@ -757,30 +757,26 @@ pub async fn domain_trust_gate(
     permission: &Arc<PermissionService>,
     database: &Arc<Mutex<WalletDatabase>>,
     current_user_id: i64,
-    http_req: &HttpRequest,
-    body: &[u8],
+    domain: &str,
     endpoint: &str,
 ) -> GateOutcome {
-    let domain = match http_req
-        .headers()
-        .get(X_REQUESTING_DOMAIN)
-        .and_then(|v| v.to_str().ok())
-        .filter(|s| !s.is_empty())
-    {
-        Some(d) => d.to_string(),
-        None => return GateOutcome::Proceed,
-    };
-
+    // `domain` is the requesting origin (non-empty). The domain-trust actix
+    // middleware (main.rs `domain_trust_mw`) is the sole caller: it passes
+    // internal calls (no `X-Requesting-Domain`) straight through and only
+    // invokes this for external origins, so we never see an empty domain here.
+    // Running as middleware makes domain-trust universal — every external call
+    // to any wallet endpoint is gated, with no per-handler opt-in to forget.
+    //
     // NOTE: this gate is intentionally trust-ONLY — it never inspects or
     // consumes `X-User-Approved`. That token is owned exclusively by the
     // kind-specific dispatch (payment / scoped / cert), which runs AFTER this
-    // pre-gate returns Proceed. An approved domain's over-cap replay carries
-    // its kind-dispatch token; if this pre-gate consumed it here, the kind
-    // dispatch would then see NotFound and wrongly 403. Domain-trust approval
-    // works by a different mechanism: the modal writes trust=approved, so by
-    // re-issue time `get_by_domain` returns "approved" and we Proceed below
-    // without any token. (G.4 must ensure that trust write commits before the
-    // request is re-issued — see the C++ approval path.)
+    // pre-gate returns Proceed (inside the handler). An approved domain's
+    // over-cap replay carries its kind-dispatch token; if this pre-gate
+    // consumed it, the kind dispatch would then see NotFound and wrongly 403.
+    // Domain-trust approval works by a different mechanism: the modal writes
+    // trust=approved, so by re-issue time `get_by_domain` returns "approved"
+    // and we Proceed without any token. (The C++ approval path writes trust
+    // SYNCHRONOUSLY before re-issuing — see addDomainPermission.)
 
     let perm_row = {
         let db_guard = match database.lock() {
@@ -794,7 +790,7 @@ pub async fn domain_trust_gate(
             }
         };
         let repo = DomainPermissionRepository::new(db_guard.connection());
-        match repo.get_by_domain(current_user_id, &domain) {
+        match repo.get_by_domain(current_user_id, domain) {
             Ok(p) => p,
             Err(e) => {
                 log::error!(
@@ -817,7 +813,7 @@ pub async fn domain_trust_gate(
     let manifest = if trust == "blocked" {
         None
     } else {
-        crate::manifest::fetch_manifest(&domain).await
+        crate::manifest::fetch_manifest(domain).await
     };
     let manifest_present = manifest.is_some();
 
@@ -828,7 +824,11 @@ pub async fn domain_trust_gate(
         PermissionDecision::Silent { .. } => GateOutcome::Proceed,
         PermissionDecision::Prompt { ref prompt_type, ref reason } => {
             let now = chrono::Utc::now().timestamp();
-            let approval_id = permission.mint_pending_approval(&domain, endpoint, body, now);
+            // Empty body: domain-trust approvals are never replayed via
+            // X-User-Approved (the connect re-issue relies on trust=approved),
+            // so the stored body_hash is never consumed. The approval entry
+            // exists only to give the 202 envelope an approvalId.
+            let approval_id = permission.mint_pending_approval(domain, endpoint, b"", now);
             let prompt_payload = if matches!(
                 *prompt_type,
                 hodos_permission_engine::PromptType::ManifestConnectBundle

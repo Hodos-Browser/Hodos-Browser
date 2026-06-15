@@ -1,0 +1,46 @@
+{
+  "version": "1.0",
+  "name": "Hodos Manifest Test dApp",
+  "description": "Fixture dApp for exercising the manifest_connect_bundle prompt (Phase 2.6-G G.4).",
+  "iconUrl": "https://example.com/icon.png",
+  "permissions": {
+    "protocols": [
+      {
+        "protocolID": [1, "test messaging"],
+        "keyID": "1",
+        "purpose": "Sign and verify in-app messages."
+      },
+      {
+        "protocolID": [2, "test payments"],
+        "keyID": "*",
+        "purpose": "Derive payment keys for micropayments."
+      }
+    ],
+    "baskets": [
+      {
+        "name": "test-app-items",
+        "access": "read_write",
+        "purpose": "Store and update this app's tokenized items."
+      }
+    ],
+    "certificates": [
+      {
+        "type": "vdDWvftf1H+5+ZprUw123kjHlywH+v20aPQTuXgMpNc=",
+        "fields": ["userName", "profilePhoto"],
+        "purpose": "Display your public profile inside the app."
+      }
+    ],
+    "spending": {
+      "perTransactionUsd": 1,
+      "perSessionUsd": 5,
+      "purpose": "Pay for in-app actions without re-prompting each time."
+    },
+    "counterparties": [
+      {
+        "type": "anyone",
+        "counterparty": "",
+        "purpose": "Interact with other app users."
+      }
+    ]
+  }
+}

@@ -2531,16 +2531,15 @@ void runIpcEngineCascade(const std::string& requestId,
     // can build the PermissionContext server-side. LD4 keeps satoshi/cents
     // derivation on the C++ side (BSVPriceCache) — values already computed
     // above at L2434-2440.
-    if (callKind == hodos::PermissionCallKind::IdentityKeyReveal
-        || callKind == hodos::PermissionCallKind::CounterpartyKeyLinkage
-        || callKind == hodos::PermissionCallKind::SpecificKeyLinkage
-        || callKind == hodos::PermissionCallKind::SensitiveCertField
-        || callKind == hodos::PermissionCallKind::CertificateDisclosure
-        || callKind == hodos::PermissionCallKind::ProtocolUse
-        || callKind == hodos::PermissionCallKind::BasketAccess
-        || callKind == hodos::PermissionCallKind::CounterpartyUse
-        || callKind == hodos::PermissionCallKind::Payment) {
-        LOG_DEBUG_HTTP("🚪 IPC: Rust-authoritative kind, forward to Rust (no inline gate, no shadow) for "
+    // Phase 2.6-G — C++ is now a thin proxy. Domain-trust runs as a Rust
+    // middleware and the per-handler kind gates (payment/scoped/cert/privacy)
+    // already run in Rust, so EVERY external IPC call forwards to Rust
+    // unconditionally; Rust returns 200 / 202 (connect or kind prompt) / 403.
+    // The C++ engine path below (buildPermissionContext + RunPermissionGate +
+    // shadow) is now unreachable and is deleted in 2.6-H with the rest of the
+    // C++ engine.
+    {
+        LOG_DEBUG_HTTP("🚪 IPC: forward to Rust (thin proxy, all kinds) for "
                        + origin + " endpoint=" + endpoint);
         CefPostTask(TID_FILE_USER_BLOCKING, base::BindOnce([](
             std::string requestId, std::string endpoint, std::string bodyJson,
@@ -2909,21 +2908,16 @@ void HandleIpcWalletCall(
     auto perm = DomainPermissionCache::GetInstance().getPermission(origin);
     LOG_DEBUG_HTTP("🔒 IPC: domain " + origin + " trust_level: " + perm.trustLevel);
 
-    if (perm.trustLevel == "blocked") {
-        LOG_DEBUG_HTTP("🔒 IPC: domain " + origin + " is blocked, rejecting");
-        sendWalletResponseIpc(capturedFrame, requestId, false,
-            "{\"error\":\"Domain blocked\",\"status\":\"error\"}");
-        return;
-    }
-
-    if (perm.trustLevel == "unknown") {
-        LOG_DEBUG_HTTP("🔒 IPC: domain " + origin + " unknown — attempting manifest fetch");
-        handleIpcUnknownTrust(requestId, methodName, endpoint, bodyJson, httpMethod,
-                              origin, capturedFrame, browserId);
-        return;
-    }
-
-    // 4. Approved trust → engine cascade.
+    // Phase 2.6-G G.4 — domain-trust is now Rust-authoritative. Blocked and
+    // unknown are no longer intercepted here; the call forwards to Rust where
+    // domain_trust_gate (wired into every shim handler in G.3b) runs FIRST and
+    // returns 403 (blocked) or 202 domain_approval / manifest_connect_bundle
+    // (unknown). The forward worker hops to TID_UI on 202 →
+    // tryHandlePendingResponse, which opens the matching modal — the same path
+    // the payment/scoped/cert prompts already use. (Pre-G.4 this rejected
+    // blocked inline and ran handleIpcUnknownTrust for a C++-side manifest
+    // fetch; both are superseded. handleIpcUnknownTrust is now dead code,
+    // slated for removal in 2.6-H.)
     runIpcEngineCascade(requestId, methodName, endpoint, bodyJson, httpMethod,
                         origin, capturedFrame, browserId, perm);
 }
@@ -2979,67 +2973,59 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
         return true;
     }
 
-    // Check domain permission from DB-backed cache
+    // Phase 2.6-G — C++ Open() is now a THIN PROXY. Domain-trust and all kind
+    // gates (payment / scoped / cert / privacy) are Rust-authoritative: Rust's
+    // domain-trust middleware runs on every external call and returns 200 /
+    // 202 (connect prompt OR kind prompt) / 403. A 202 is intercepted in
+    // AsyncHTTPClient::OnRequestComplete -> tryHandlePendingResponse, which
+    // opens the matching modal; a 200 payment fires the gold pill there too.
+    // So we forward EVERY external origin to Rust regardless of trust level.
+    //
+    // The DomainPermissionCache lookup is kept only for the ancillary BRC-100
+    // auth-handshake modal below (a distinct login UX, not the engine's
+    // domain_approval) — per the plan, the cache lingers for ancillary uses +
+    // IsInternalOrigin even after the engine path stops consulting it.
     auto perm = DomainPermissionCache::GetInstance().getPermission(requestDomain_);
-    LOG_DEBUG_HTTP("🔒 Domain " + requestDomain_ + " trust_level: " + perm.trustLevel);
+    LOG_DEBUG_HTTP("🚪 Open: domain " + requestDomain_ + " trust_level: "
+                   + perm.trustLevel + " — forwarding to Rust (thin proxy)");
 
-    if (perm.trustLevel == "blocked") {
-        // Silently reject blocked domains
-        LOG_DEBUG_HTTP("🔒 Domain " + requestDomain_ + " is blocked, rejecting request");
-        onHTTPResponseReceived("{\"error\":\"Domain blocked\",\"status\":\"error\"}");
-        handle_request = true;
-        return true;
-    }
-
-    if (perm.trustLevel == "unknown") {
-        // Domain has no permission record — needs approval.
-        //
-        // Phase 1.5 Step 5: three-mode dispatch documented in Phase 1.5 README's
-        // Step 5 section. Before firing the existing domain_approval modal, try
-        // to fetch the dApp's /.well-known/wallet-manifest.json. If it succeeds
-        // with declared permissions, fire the new manifest_connect_bundle modal
-        // instead. If the fetch 404s, times out, or returns nothing actionable,
-        // fall back to the existing flow with ZERO regression.
-        //
-        // PendingRequestManager queue interaction is UNCHANGED — concurrent calls
-        // from the same fresh origin still stack under whichever modal fires.
-
-        if (endpoint_.find("/brc100/auth/") != std::string::npos) {
-            // BRC-100 auth handshake — manifest UX doesn't apply here.
-            LOG_DEBUG_HTTP("🔐 BRC-100 auth request from unknown domain: " + requestDomain_);
-            triggerBRC100AuthApprovalModal(requestDomain_, method_, endpoint_, body_, this);
-        } else {
-            LOG_DEBUG_HTTP("🔒 Domain " + requestDomain_ + " unknown — attempting manifest fetch first");
-            hodos::Manifest manifest = hodos::ManifestFetcher::Fetch(requestDomain_);
-            const bool hasDeclaredPerms = manifest.valid
-                && (!manifest.protocols.empty()
-                    || !manifest.baskets.empty()
-                    || !manifest.certificates.empty()
-                    || !manifest.counterparties.empty()
-                    || manifest.spending.perTransactionUsd > 0);
-
-            if (hasDeclaredPerms) {
-                LOG_DEBUG_HTTP("📦 Manifest found for " + requestDomain_
-                                + " — firing manifest_connect_bundle prompt");
-                triggerManifestConnectBundleModal(requestDomain_, manifest);
-            } else {
-                // Mode 1 (404 / no permissions declared) or Mode 3 (timeout).
-                // Both fall through to the existing pre-Step-5 flow.
-                if (!manifest.valid) {
-                    LOG_DEBUG_HTTP("✗ No manifest at " + requestDomain_
-                                    + "/.well-known/wallet-manifest.json — using domain_approval");
-                } else {
-                    LOG_DEBUG_HTTP("✗ Manifest at " + requestDomain_
-                                    + " declared no permissions — using domain_approval");
-                }
-                triggerDomainApprovalModal(requestDomain_, method_, endpoint_);
-            }
-        }
-
+    if (perm.trustLevel == "unknown"
+        && endpoint_.find("/brc100/auth/") != std::string::npos) {
+        LOG_DEBUG_HTTP("🔐 BRC-100 auth request from unknown domain: " + requestDomain_);
+        triggerBRC100AuthApprovalModal(requestDomain_, method_, endpoint_, body_, this);
         postAuthTimeout(kPromptAuthTimeoutMs, "{\"error\":\"Approval timeout\",\"status\":\"error\"}");
         handle_request = true;
         return true;
     }
+
+    // LD4: derive + stash payment cost for payment endpoints BEFORE forwarding,
+    // so the eventual re-issue (after a connect prompt) still carries X-Payment-*
+    // for Rust's payment gate and the gold-pill indicator fires. Done for every
+    // trust level since the first call may be a connect that re-issues later.
+    if (isPaymentEndpoint(endpoint_)) {
+        int64_t satoshis = extractOutputSatoshis(body_);
+        double bsvPrice = BSVPriceCache::GetInstance().getPrice();
+        const bool priceAvailable = (bsvPrice > 0);
+        int64_t cents = 0;
+        if (priceAvailable && satoshis > 0) {
+            cents = static_cast<int64_t>((static_cast<double>(satoshis) / 100000000.0) * bsvPrice * 100.0);
+        }
+        preCalculatedCents_ = cents;
+        preCalculatedSatoshis_ = satoshis;
+        preCalculatedBsvPriceAvailable_ = priceAvailable;
+    }
+
+    handle_request = true;
+    CefPostTask(TID_IO, new StartAsyncHTTPRequestTask(this));
+    return true;
+
+    // ---------------------------------------------------------------------
+    // DEAD CODE below (unreachable after the unconditional forward above).
+    // The old inline trust/cert/payment cascade is superseded by the Rust
+    // middleware + per-handler kind gates; it is deleted in 2.6-H together
+    // with the rest of the C++ PermissionEngine. Left in place for now to
+    // keep this diff reviewable.
+    // ---------------------------------------------------------------------
 
     // "approved" — auto-approve engine with spending limits and rate limiting
     if (perm.trustLevel == "approved") {
@@ -3534,10 +3520,23 @@ void addDomainPermissionAdvanced(const std::string& domain, int64_t perTxLimitCe
         IdentityKeyApprovalCache::GetInstance().approve(domain);
     }
 
-    // Post async DB write
-    CefPostTask(TID_UI, new AdvancedDomainPermissionTask(
-        domain, perTxLimitCents, perSessionLimitCents, rateLimitPerMin,
-        maxTxPerSession, identityKeyDisclosureAllowed, bundledScopeGrant));
+    // Phase 2.6-G G.4 — synchronous Rust DB write (see addDomainPermission for
+    // the race rationale). The manifest_connect_bundle / advanced approval path
+    // drains + re-issues immediately, so trust + caps must be committed to the
+    // Rust DB before domain_trust_gate reads it on the re-issue.
+    nlohmann::json permBody;
+    permBody["domain"] = domain;
+    permBody["trustLevel"] = "approved";
+    permBody["perTxLimitCents"] = perTxLimitCents;
+    permBody["perSessionLimitCents"] = perSessionLimitCents;
+    permBody["rateLimitPerMin"] = rateLimitPerMin;
+    permBody["maxTxPerSession"] = maxTxPerSession;
+    permBody["identityKeyDisclosureAllowed"] = identityKeyDisclosureAllowed;
+    permBody["bundledScopeGrant"] = bundledScopeGrant;
+    HttpResponse permResp = SyncHttpClient::Post(
+        "http://localhost:31301/domain/permissions", permBody.dump());
+    LOG_DEBUG_HTTP("🔐 Advanced domain permission sync write for " + domain
+        + " -> status " + std::to_string(permResp.statusCode));
 }
 
 // Phase 1.5 Step 1 — defined here (after AsyncWalletResourceHandler +
@@ -3573,10 +3572,23 @@ void addDomainPermission(const std::string& domain, bool identityKeyDisclosureAl
         IdentityKeyApprovalCache::GetInstance().approve(domain);
     }
 
-    // Post task to UI thread for the async DB write
-    CefPostTask(TID_UI, new DomainPermissionTask(domain, identityKeyDisclosureAllowed,
-                                                 bundledScopeGrant));
-    LOG_DEBUG_HTTP("🔐 Domain permission task posted to UI thread");
+    // Phase 2.6-G G.4 — synchronous Rust DB write. domain_trust_gate (now the
+    // authoritative trust check) reads the Rust DB, and the add_domain_permission
+    // IPC handler drains + re-issues the pending request immediately after this
+    // returns. A fire-and-forget write could lose that race (re-issue reaches
+    // Rust before trust=approved lands → domain_trust_gate re-prompts → loop).
+    // Block here so trust is committed first. Runs on TID_UI during a one-time
+    // user approval; the localhost POST is ~ms. SyncHttpClient bypasses the CEF
+    // interceptor, so there is no resource-handler reentrancy.
+    nlohmann::json permBody;
+    permBody["domain"] = domain;
+    permBody["trustLevel"] = "approved";
+    permBody["identityKeyDisclosureAllowed"] = identityKeyDisclosureAllowed;
+    permBody["bundledScopeGrant"] = bundledScopeGrant;
+    HttpResponse permResp = SyncHttpClient::Post(
+        "http://localhost:31301/domain/permissions", permBody.dump());
+    LOG_DEBUG_HTTP("🔐 Domain permission sync write for " + domain
+        + " -> status " + std::to_string(permResp.statusCode));
 }
 
 // Invalidate a single domain in the permission cache (called from simple_handler.cpp IPC)
@@ -3817,7 +3829,22 @@ static bool tryHandlePendingResponse(
     // resume re-issue carries the X-User-Approved header that Rust's
     // request_gate consumes (consume_and_verify + sha256 body check per LD2).
     resume.isInternalResume = true;
-    resume.headersOnApprove["X-User-Approved"] = env.approvalId;
+
+    // Phase 2.6-G G.4 — domain-trust prompts (domain_approval /
+    // manifest_connect_bundle) are satisfied by the add_domain_permission write
+    // (trust=approved), NOT by replaying X-User-Approved. The re-issue must be
+    // evaluated FRESH by the kind gate so the privacy-perimeter / payment / cert
+    // gates still apply — e.g. getPublicKey({identityKey:true}) must still
+    // prompt for identity-key reveal when the user left "allow identify"
+    // unchecked on the connect modal. Propagating the connect approval token
+    // here would let the kind gate's replay path Proceed without re-checking
+    // that grant (a privacy-perimeter bypass). Only kind-dispatch prompts carry
+    // the replay token.
+    const bool isDomainTrustPrompt =
+        env.promptType == "domain_approval" || env.promptType == "manifest_connect_bundle";
+    if (!isDomainTrustPrompt) {
+        resume.headersOnApprove["X-User-Approved"] = env.approvalId;
+    }
 
     std::string newRequestId;
     if (env.promptType == "certificate_disclosure") {
@@ -3840,12 +3867,26 @@ static bool tryHandlePendingResponse(
         }
         newRequestId = openCertificateDisclosureModal(modalCtx, resume, info);
     } else if (env.promptType == "manifest_connect_bundle") {
-        // Manifest connect bundle from Rust isn't wired yet — the Rust gate
-        // would need to embed the manifest as a JSON string in promptPayload.
-        // Wire when a Rust-authoritative call site emits this promptType.
-        LOG_WARNING_HTTP(
-            "tryHandlePendingResponse: manifest_connect_bundle from Rust not yet supported");
-        return false;
+        // Phase 2.6-G G.4 — Rust's domain_trust_gate embeds the served manifest
+        // bytes as a JSON string in promptPayload.manifest. Re-parse to the
+        // typed Manifest the modal opener needs (ParseFromJson is pure +
+        // lenient). If the manifest is missing/unparseable, fall back to the
+        // plain domain_approval modal so the connect still works.
+        hodos::Manifest manifest;
+        if (env.promptPayload.is_object()
+            && env.promptPayload.contains("manifest")
+            && env.promptPayload["manifest"].is_string()) {
+            manifest = hodos::ManifestFetcher::ParseFromJson(
+                env.promptPayload["manifest"].get<std::string>());
+        }
+        if (manifest.valid) {
+            newRequestId = openManifestConnectBundleModal(modalCtx, resume, manifest);
+        } else {
+            LOG_WARNING_HTTP("tryHandlePendingResponse: manifest_connect_bundle with "
+                "unparseable manifest from " + modalCtx.domain
+                + " — falling back to domain_approval");
+            newRequestId = openDomainApprovalModal(modalCtx, resume);
+        }
     } else {
         std::string extraParams = buildExtraParamsFromPayload(env.promptType, env.promptPayload);
         newRequestId = OpenPromptModal(env.promptType, modalCtx, resume, extraParams);
