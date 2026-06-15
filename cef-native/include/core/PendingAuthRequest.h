@@ -139,6 +139,28 @@ public:
         return true;
     }
 
+    // Cert-replay fix — set a header to inject on the re-issued wallet call.
+    // Used by simple_handler's brc100_auth_response dispatcher: when the user
+    // approves a certificate_disclosure modal, the approved field set is only
+    // known at approve-time (the 202-intercept already populated
+    // X-User-Approved when the modal opened). This stashes
+    // X-Cert-Approved-Fields onto the stored entry so resumeIpcResponse
+    // carries it. Rust's dispatch_cert_disclosure replay path consumes the
+    // approval id (single-use) and verifies requested ⊆ approved from this
+    // header instead of body-sha256 (which a narrowed cert body would fail).
+    // Returns true if the entry existed and was updated.
+    bool setApproveHeader(const std::string& requestId,
+                          const std::string& name,
+                          const std::string& value) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = requests_.find(requestId);
+        if (it == requests_.end()) {
+            return false;
+        }
+        it->second.headersOnApprove[name] = value;
+        return true;
+    }
+
     // Check if any request is pending for a domain (for duplicate modal suppression)
     bool hasPendingForDomain(const std::string& domain) {
         std::lock_guard<std::mutex> lock(mutex_);

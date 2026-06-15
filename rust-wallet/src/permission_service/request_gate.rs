@@ -61,6 +61,15 @@ pub const X_USER_APPROVED: &str = "X-User-Approved";
 /// origin. Pre-existing — used by `check_domain_approved` too.
 pub const X_REQUESTING_DOMAIN: &str = "X-Requesting-Domain";
 
+/// Header name C++ injects on a certificate-disclosure replay carrying the
+/// user-approved field set (a JSON array of field names). The cert replay
+/// path narrows the request body to the approved subset, which breaks the
+/// body-sha256 binding `consume_and_verify` relies on — so instead the gate
+/// consumes the approval id (single-use) and checks `requested ⊆ approved`
+/// against this header. C++-injected (trusted), never page-supplied on the
+/// IPC resume path.
+pub const X_CERT_APPROVED_FIELDS: &str = "X-Cert-Approved-Fields";
+
 /// Dispatch the engine gate for a privacy-perimeter CallKind.
 ///
 /// `call_kind` MUST be one of the 4 privacy-perimeter variants —
@@ -490,6 +499,27 @@ pub fn dispatch_scoped_grant(
 // Phase 2.6-F — certificate disclosure dispatch (non-sensitive)
 // ============================================================================
 
+/// Parse the `X-Cert-Approved-Fields` header into the user-approved field set.
+/// The header value is a JSON array of field-name strings (C++-injected on the
+/// cert replay). Returns `None` when the header is absent, empty, or malformed
+/// — the caller then falls back to body-sha256 verification so a missing
+/// header never weakens the gate below today's payment-style binding.
+fn parse_approved_cert_fields(http_req: &HttpRequest) -> Option<Vec<String>> {
+    http_req
+        .headers()
+        .get(X_CERT_APPROVED_FIELDS)
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+}
+
+/// True iff every requested field is contained in the approved set. Bounds a
+/// cert replay's disclosure to exactly what the user checked, even if an
+/// approval id were replayed with a tampered (expanded) body.
+fn cert_fields_subset(requested: &[String], approved: &[String]) -> bool {
+    requested.iter().all(|f| approved.contains(f))
+}
+
 /// Dispatch the engine gate for the non-sensitive `CertificateDisclosure`
 /// CallKind (`/proveCertificate`). Mirrors `dispatch_scoped_grant`: domain
 /// header → X-User-Approved replay → perm-row read → resolve "every requested
@@ -522,9 +552,22 @@ pub fn dispatch_cert_disclosure(
         None => return GateOutcome::Proceed,
     };
 
-    // X-User-Approved replay path (same shape as scoped grant / privacy
-    // perimeter). The actual cert_field_permissions persistence happens via the
-    // modal's approve_cert_fields IPC, not here — replay just proceeds.
+    // X-User-Approved replay path. Unlike payment / scoped-grant replays, the
+    // cert path CANNOT body-sha256-verify: C++ narrows the request body's
+    // `fieldsToReveal` to the user-approved subset before re-issuing, so the
+    // replayed body never matches the hash minted at prompt time (that was
+    // the "first-approve 403 body_mismatch" bug). Instead, when C++ injects
+    // the trusted `X-Cert-Approved-Fields` header, consume the approval id
+    // single-use (TTL-checked, no body hash) and verify the replayed request's
+    // `requested_fields ⊆ approved_fields`. This bounds disclosure to exactly
+    // what the user checked even if an approval id were replayed with a
+    // tampered (expanded) body. Persistence of "remember" selections stays in
+    // the separate approve_cert_fields IPC, so no DB read here → no race.
+    //
+    // Defensive fallback: if the header is absent (should not happen on the
+    // IPC resume path post-fix; the direct-fetch cert path is still C++ inline
+    // and never reaches this branch), fall back to body-sha256 verification so
+    // we never regress below the existing payment-style binding.
     if let Some(approval_id) = http_req
         .headers()
         .get(X_USER_APPROVED)
@@ -532,10 +575,52 @@ pub fn dispatch_cert_disclosure(
         .filter(|s| !s.is_empty())
     {
         let now = chrono::Utc::now().timestamp();
+
+        let approved_fields: Option<Vec<String>> = parse_approved_cert_fields(http_req);
+
+        if let Some(approved) = approved_fields {
+            // Header present → id-only single-use consume + subset check.
+            match permission.consume_pending_approval(approval_id, now) {
+                Some(approval) => {
+                    if cert_fields_subset(requested_fields, &approved) {
+                        log::info!(
+                            "🔐 X-User-Approved consumed (cert) for domain={} endpoint={} id={} \
+                             requested={} approved={}",
+                            approval.domain, approval.endpoint, approval_id,
+                            requested_fields.len(), approved.len(),
+                        );
+                        return GateOutcome::Proceed;
+                    }
+                    log::warn!(
+                        "🛡️ cert replay requested fields NOT a subset of approved \
+                         (domain={} id={} requested={} approved={}) — denying",
+                        domain, approval_id, requested_fields.len(), approved.len(),
+                    );
+                    return GateOutcome::EarlyReturn(forbidden_envelope("fields_not_approved"));
+                }
+                None => {
+                    log::warn!(
+                        "🛡️ X-User-Approved not consumable (cert, domain={} id={})",
+                        domain, approval_id,
+                    );
+                    return GateOutcome::EarlyReturn(forbidden_envelope(
+                        "approval_expired_or_consumed",
+                    ));
+                }
+            }
+        }
+
+        // Fallback: no X-Cert-Approved-Fields header → body-sha256 verify.
+        log::warn!(
+            "🛡️ cert replay missing X-Cert-Approved-Fields (domain={} id={}) — \
+             falling back to body-sha256 verification",
+            domain, approval_id,
+        );
         match permission.consume_and_verify(approval_id, body, now) {
             Ok(approval) => {
                 log::info!(
-                    "🔐 X-User-Approved consumed (cert) for domain={} endpoint={} id={}",
+                    "🔐 X-User-Approved consumed (cert, body-hash fallback) for \
+                     domain={} endpoint={} id={}",
                     approval.domain, approval.endpoint, approval_id,
                 );
                 return GateOutcome::Proceed;
@@ -1518,5 +1603,82 @@ mod tests {
             &PromptType::RateLimitExceeded,
         );
         assert_eq!(p["exceededLimit"], "session_tx_count");
+    }
+
+    // -- Phase 2.6-F.fix -- cert-replay subset + header parse
+
+    use actix_web::test::TestRequest;
+
+    fn fields(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn cert_subset_exact_match_passes() {
+        // The common case: body narrowed to exactly the approved set.
+        assert!(cert_fields_subset(&fields(&["name", "email"]), &fields(&["name", "email"])));
+    }
+
+    #[test]
+    fn cert_subset_proper_subset_passes() {
+        assert!(cert_fields_subset(&fields(&["email"]), &fields(&["name", "email"])));
+    }
+
+    #[test]
+    fn cert_subset_empty_requested_passes() {
+        // Vacuously true; the handler separately rejects empty fieldsToReveal.
+        assert!(cert_fields_subset(&[], &fields(&["name"])));
+    }
+
+    #[test]
+    fn cert_subset_extra_field_denied() {
+        // Replay body requests a field the user did NOT approve → must fail.
+        assert!(!cert_fields_subset(&fields(&["name", "ssn"]), &fields(&["name"])));
+    }
+
+    #[test]
+    fn cert_subset_empty_approved_denies_nonempty() {
+        assert!(!cert_fields_subset(&fields(&["name"]), &[]));
+    }
+
+    #[test]
+    fn parse_approved_fields_valid_json_array() {
+        let req = TestRequest::default()
+            .insert_header((X_CERT_APPROVED_FIELDS, r#"["name","email"]"#))
+            .to_http_request();
+        assert_eq!(parse_approved_cert_fields(&req), Some(fields(&["name", "email"])));
+    }
+
+    #[test]
+    fn parse_approved_fields_absent_is_none() {
+        let req = TestRequest::default().to_http_request();
+        assert_eq!(parse_approved_cert_fields(&req), None);
+    }
+
+    #[test]
+    fn parse_approved_fields_empty_is_none() {
+        let req = TestRequest::default()
+            .insert_header((X_CERT_APPROVED_FIELDS, ""))
+            .to_http_request();
+        assert_eq!(parse_approved_cert_fields(&req), None);
+    }
+
+    #[test]
+    fn parse_approved_fields_malformed_is_none() {
+        // Not a JSON array → None → caller falls back to body-sha256.
+        let req = TestRequest::default()
+            .insert_header((X_CERT_APPROVED_FIELDS, "name,email"))
+            .to_http_request();
+        assert_eq!(parse_approved_cert_fields(&req), None);
+    }
+
+    #[test]
+    fn parse_approved_fields_empty_array_is_some_empty() {
+        // A well-formed empty array is distinct from absent: header present,
+        // zero approved fields → any non-empty requested set is denied.
+        let req = TestRequest::default()
+            .insert_header((X_CERT_APPROVED_FIELDS, "[]"))
+            .to_http_request();
+        assert_eq!(parse_approved_cert_fields(&req), Some(vec![]));
     }
 }

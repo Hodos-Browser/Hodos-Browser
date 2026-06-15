@@ -4237,6 +4237,20 @@ bool SimpleHandler::OnProcessMessageReceived(
                                     LOG_DEBUG_BROWSER("📋 Updated PendingRequestManager body — fieldsToReveal reduced to "
                                         + std::to_string(responseData["selectedFields"].size()) + " field(s)");
                                 }
+                                // Cert-replay fix — the narrowed body no longer
+                                // matches the sha256 minted at prompt time, so
+                                // Rust's cert replay path can't body-hash-verify.
+                                // Carry the user-approved field set in a
+                                // C++-injected header instead; Rust consumes the
+                                // approval id (single-use) and checks
+                                // requested ⊆ approved. JSON array per design.
+                                std::string approvedFieldsHeader =
+                                    nlohmann::json(responseData["selectedFields"]).dump();
+                                if (PendingRequestManager::GetInstance().setApproveHeader(
+                                        requestId, "X-Cert-Approved-Fields", approvedFieldsHeader)) {
+                                    LOG_DEBUG_BROWSER("📋 Injected X-Cert-Approved-Fields for cert replay ("
+                                        + std::to_string(responseData["selectedFields"].size()) + " field(s))");
+                                }
                             } catch (const std::exception& e) {
                                 LOG_DEBUG_BROWSER("📋 Failed to modify cert body: " + std::string(e.what()));
                             }
