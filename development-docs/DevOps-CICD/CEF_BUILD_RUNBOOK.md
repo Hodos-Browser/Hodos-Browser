@@ -34,6 +34,14 @@ video.canPlayType('video/mp4; codecs="avc1.42E01E"')  // H.264
 audio.canPlayType('audio/mp4; codecs="mp4a.40.2"')    // AAC
 ```
 
+## What "CEF-based" means for us (capability, not a black box)
+
+We **build custom Chromium+CEF from source** and apply source patches via `cef/patch/`. Our capability is therefore **not** limited to stock CEF API behavior — it is bounded by **patch scale + per-Chromium-bump maintenance**:
+- **Small / localized patches** (farbling: a handful of Blink functions) — cheap, low churn.
+- **Browser-UI-layer patches** (e.g. surfacing Chrome extensions in our *custom* header — the "Vivaldi model") — a large patch set against `chrome/browser/ui`, heavy per-bump rebase, approaching fork-level maintenance.
+
+Both use the **same patch toolchain** (`cef/patch/patch.cfg`). The decision for any such feature is **effort / maintenance / risk — not "can CEF do it."** We remain a CEF *embedder* (not a full Chromium fork like Vivaldi), so the more we patch the UI layer, the closer we move to fork-level upkeep.
+
 ## Current known-good configuration (from our scripts + the 2026-03-12 build)
 
 | Setting | Value | Source |

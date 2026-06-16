@@ -69,6 +69,8 @@ Bitcoin SV Blockchain (WhatsOnChain, GorillaPool)
 
 **Overlay Model**: Settings, Wallet Panel, Backup Modal, and BRC-100 Auth each run as separate CEF subprocesses with isolated V8 contexts.
 
+> **⚠️ "CEF-based" ≠ "limited to prebuilt CEF."** We **build our own custom Chromium+CEF from source** (see `development-docs/DevOps-CICD/CEF_BUILD_RUNBOOK.md`) and apply source patches via `cef/patch/` (farbling is the first). CEF is our *embedding API*, but the underlying Chromium is **ours to patch** — so capability is bounded by **patch scale + per-Chromium-bump maintenance, NOT by CEF's stock behavior.** When weighing a feature, don't reason "CEF won't let us"; reason "how large is the patch and how much does it churn each Chromium bump." (We remain a CEF *embedder*, not a full fork like Vivaldi — the more we patch the browser-UI layer, the closer we move to fork-level upkeep.)
+
 ---
 
 ## ⚠️ CRITICAL: UI Architecture Rules
