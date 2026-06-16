@@ -191,7 +191,7 @@ If the chain shows `Microsoft ID Verified CS EOC CA 03`, you're on the post-Marc
 - CI triggers on tags pushed to the release repo only.
 - If `git push release main` is rejected, run `git pull release main` first to merge any divergence.
 - Install directory is `{localappdata}\HodosBrowser` (per-user, no UAC) since v0.2.0.
-- Dependabot is enabled via GitHub UI on the dev repo (no `.github/dependabot.yml` checked in). Manage dependency updates manually via the PRs it raises.
+- Dependabot is **NOT configured** (no `.github/dependabot.yml` in the tree; UI-enablement unconfirmed as of 2026-06-16). Dependency updates are currently **manual** — see §7.3.
 - DSA private key is in GitHub Secret `WINSPARKLE_DSA_PRIVATE_KEY`. EdDSA key in `SPARKLE_EDDSA_PRIVATE_KEY`.
 - Local key files are in `external/keys/` (gitignored). Back them up securely.
 
@@ -342,10 +342,15 @@ Filename: "{app}\HodosBrowser.exe"; Flags: nowait postinstall
 - CEF subprocess executable
 - `HodosBrowser-X.Y.Z-beta.N-setup.exe` (the installer itself)
 
-**Sign command:**
+**Sign command (local, with a `.pfx`):**
+> **Note:** CI does **not** use this path or this timestamp URL. The real `release.yml` signs with
+> **Azure Trusted Signing** (`azure/trusted-signing-action`) and timestamps via
+> **`http://timestamp.acs.microsoft.com`** — *not* `timestamp.sectigo.com`. The `signtool`/`.pfx`
+> command below is for **local/manual** signing only.
+
 ```powershell
 signtool sign /f "hodos-codesign.pfx" /p "$PASSWORD" `
-  /tr http://timestamp.sectigo.com /td sha256 /fd sha256 `
+  /tr http://timestamp.acs.microsoft.com /td sha256 /fd sha256 `
   "HodosBrowser-X.Y.Z-beta.N-setup.exe"
 ```
 
@@ -516,8 +521,9 @@ cargo build --release --manifest-path adblock-engine/Cargo.toml
 
 # 4. Sign if requested
 if ($Sign) {
+    # Local signing only. CI uses Azure Trusted Signing with timestamp.acs.microsoft.com.
     signtool sign /f $env:CERT_PATH /p $env:CERT_PASSWORD `
-      /tr http://timestamp.sectigo.com /td sha256 /fd sha256 `
+      /tr http://timestamp.acs.microsoft.com /td sha256 /fd sha256 `
       "dist\HodosBrowser-$Version-setup.exe"
 }
 ```
@@ -548,16 +554,22 @@ Hodos.app/
 
 > **Important:** `codesign --deep` can miss nested frameworks. Explicitly sign `Chromium Embedded Framework.framework` before signing the outer `.app` bundle.
 
+> **Signing identity (verify against `release.yml`).** CI signs with
+> **`Developer ID Application: Matthew Archbold`** (a personal Apple Developer account), **not** an org
+> identity. ⚠️ **This SHOULD migrate to the org identity ("Marston Enterprises") before GA** — see
+> `AUTO_UPDATE.md` and the master plan **PIPE-IDENTITY** item. The snippet below shows the structure
+> (sign nested framework before the outer `.app`); use the real identity above.
+
 ```bash
 # Sign CEF framework first
 codesign --force --options runtime \
-  --sign "Developer ID Application: Marston Enterprises (TEAMID)" \
+  --sign "Developer ID Application: Matthew Archbold" \
   "Hodos.app/Contents/Frameworks/Chromium Embedded Framework.framework"
 
 # Then sign the app bundle
 codesign --force --deep --options runtime \
   --entitlements macos/entitlements.plist \
-  --sign "Developer ID Application: Marston Enterprises (TEAMID)" \
+  --sign "Developer ID Application: Matthew Archbold" \
   Hodos.app
 ```
 
@@ -701,10 +713,15 @@ void OnBrowserExit() {
 
 **Framework:** [Sparkle 2.x](https://sparkle-project.org/)
 
+> **Single appcast (verified in `generate-appcast.py` + `release.yml`).** There is **one
+> `appcast.xml`** containing both a Windows `<item>` (`sparkle:os=windows`) and a macOS `<item>`
+> (`sparkle:os=macos`) — there is **no separate `appcast-mac.xml`**. The macOS feed URL points at the
+> same `https://hodosbrowser.com/appcast.xml`.
+
 ```xml
 <!-- Info.plist -->
 <key>SUFeedURL</key>
-<string>https://hodosbrowser.com/appcast-mac.xml</string>
+<string>https://hodosbrowser.com/appcast.xml</string>
 <key>SUAutomaticallyUpdate</key>
 <true/>
 <key>SUPublicEDKey</key>
@@ -752,6 +769,10 @@ void OnBrowserExit() {
 ### 4.6 Update Signing
 
 **Windows (DSA):**
+> ⚠️ **EdDSA migration pending.** Windows still signs the appcast with **DSA** (WinSparkle 0.8.1 is
+> DSA-only). macOS already uses **EdDSA** (Sparkle 2). Migrating Windows to EdDSA is tracked in
+> `AUTO_UPDATE.md` (requires a WinSparkle version that supports it).
+
 ```bash
 # Generate keys (one-time)
 openssl dsaparam -genkey 2048 -out dsa_priv.pem
@@ -783,12 +804,21 @@ openssl dgst -sha1 -binary "HodosBrowser-1.1.0-setup.exe" | \
 
 ### 5.1 GitHub Actions Overview
 
-| Workflow | Trigger | What it Does |
-|----------|---------|--------------|
-| `ci.yml` | Push/PR to main | Rust check, test, clippy; Frontend build, lint |
-| `release.yml` | Tag `v*` | Build, sign, create installer, publish to Releases |
+> ⚠️ **Reality check (verified 2026-06-16 against `.github/workflows/`).** Only **`release.yml`**
+> exists today. **There is NO `ci.yml`**, and `release.yml` runs **ZERO tests** before signing. The
+> `ci.yml` workflow and the release **test-gate** described in §5.2/§5.3 are **PLANNED, not built** —
+> see the master plan **PIPE-CI** and **PIPE-TESTGATE** items (`../0.4.0/SPRINT_0_4_0_MASTER_PLAN.md`
+> §3). The YAML in §5.2/§5.3 is **target/aspirational**, not what runs.
 
-### 5.2 CI Workflow (ci.yml)
+| Workflow | Trigger | What it Does | Status |
+|----------|---------|--------------|--------|
+| `ci.yml` | Push/PR to main | Rust check, test, clippy; Frontend build, lint | **PLANNED (not yet built)** — no such file in the tree |
+| `release.yml` | Tag `v*` | Build, sign, notarize, create installer, publish to Releases | **WORKING** — but runs **no tests** before signing (test-gate is PLANNED) |
+
+### 5.2 CI Workflow (ci.yml) — ⚠️ PLANNED (not yet built)
+
+> **This workflow does not exist yet.** The YAML below is the proposed `ci.yml` (PIPE-CI in the master
+> plan). No push/PR-triggered CI runs today.
 
 > ***Needs a decision:*** Should CI run Rust tests on both `windows-latest` and `macos-latest`? Currently only Windows. Since we ship on both platforms, running on both catches platform-specific issues on PRs rather than at release time. Trade-off is doubled GitHub Actions minutes.
 
@@ -860,6 +890,16 @@ jobs:
 
 ### 5.3 Release Workflow (release.yml)
 
+> ⚠️ **The `test-gate` job below is PLANNED, not built.** The **real** `release.yml` (verified
+> 2026-06-16) has **no `test-gate` job** — `build-windows` and `build-macos` run with **no `needs:`
+> test dependency**, so installers are built and **signed without any tests running first**. Adding the
+> gate is tracked as **PIPE-TESTGATE** (master plan §3). The block below is the *target* shape.
+>
+> Other deltas vs the real workflow (see `.github/workflows/release.yml` for source of truth): the real
+> workflow uses Azure Trusted Signing (not a raw `.pfx`), timestamps via
+> `http://timestamp.acs.microsoft.com` (**not** `timestamp.sectigo.com`), pulls prebuilt CEF from the
+> `cef-binaries` release, and notarizes/staples both the `.app` and the `.dmg` on macOS.
+
 ```yaml
 name: Release
 
@@ -869,6 +909,7 @@ on:
       - 'v*'
 
 jobs:
+  # PLANNED — does NOT exist in the real release.yml yet (PIPE-TESTGATE).
   # Gate: run full test suite before building installers
   test-gate:
     runs-on: windows-latest
@@ -879,7 +920,7 @@ jobs:
       - run: cargo test --manifest-path adblock-engine/Cargo.toml
 
   build-windows:
-    needs: [test-gate]
+    needs: [test-gate]   # PLANNED — real workflow has no test-gate dependency
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -1061,9 +1102,14 @@ See the 9-step checklist at the top of this file ("How to Release a New Version 
 
 ### 7.3 Rust/npm Dependencies
 
-**Automation:** Dependabot is enabled via GitHub UI on the dev repo (no `.github/dependabot.yml` checked into the tree). It raises weekly PRs for `cargo` (rust-wallet, adblock-engine) and `npm` (frontend), plus GitHub Actions and the Azure trusted-signing-action.
+**Automation:** ⚠️ **Dependabot is NOT configured (verified 2026-06-16 — there is no
+`.github/dependabot.yml` in the tree, and no evidence it's enabled via the GitHub UI either).** Earlier
+docs claimed it was "enabled via UI"; treat that as **unconfirmed/PLANNED**. Until a `dependabot.yml`
+lands (or UI config is verified), dependency updates are **manual**. The intended config: weekly PRs for
+`cargo` (rust-wallet, adblock-engine), `npm` (frontend), GitHub Actions, and the Azure
+trusted-signing-action.
 
-**Review PRs weekly.** Don't auto-merge — review changelog for breaking changes.
+**When enabled: review PRs weekly.** Don't auto-merge — review changelog for breaking changes.
 
 ---
 
@@ -1260,8 +1306,8 @@ Hodos-Browser/
 git tag v0.3.0-beta.7
 git push release v0.3.0-beta.7
 
-# Sign manually
-signtool sign /f cert.pfx /p "password" /tr http://timestamp.sectigo.com /td sha256 /fd sha256 "file.exe"
+# Sign manually (local). CI uses Azure Trusted Signing + timestamp.acs.microsoft.com.
+signtool sign /f cert.pfx /p "password" /tr http://timestamp.acs.microsoft.com /td sha256 /fd sha256 "file.exe"
 
 # Verify signature + cert chain (PowerShell native — no signtool on PATH needed)
 $sig = Get-AuthenticodeSignature "HodosBrowser-X.Y.Z-beta.N-setup.exe"

@@ -16,21 +16,36 @@ version bumping, CI gates, release, and post-release. Layer-specific details sta
 
 ---
 
-## Build / release / update docs (now consolidated in THIS folder)
+## Document index (everything in this folder)
 
-> Moved here 2026-06-16 (docs re-org). This folder is the **canonical, permanent home** for build/release/update Process & Procedures (per root CLAUDE.md Invariant #12).
+> This folder is the **canonical, permanent home** for build/release/update/process docs (per root
+> CLAUDE.md Invariant #12). Layer-specific details stay in each layer's `CLAUDE.md`; cross-layer
+> build/release/process concerns live here. Re-org consolidated here 2026-06-16.
 
-| Topic | Doc | State |
-|-------|-----|-------|
-| Tier-2 build & release (signing, AV) | `BUILD_AND_RELEASE.md` | WORKING (has stale claims — reconcile on next touch) |
-| Auto-update (CANONICAL) | `AUTO_UPDATE.md` (consolidates old impl-plan + `research/A6_*`) | built; notify-only — silent + Windows EdDSA pending |
-| CEF version cadence / bump log | `CEF_VERSION_UPDATE_TRACKER.md` | reference (living log) |
-| Tier-1 CEF build guide | `CEF_BUILD_FROM_SOURCE_GUIDE.md` (to be merged into `CEF_BUILD_RUNBOOK.md`) | reference |
-| Build scripts | `scripts/build_hodos_cef.bat`, `scripts/build_hodos_cef_mac.sh` | reference |
-| Dependency verification (every CEF bump) | `DEPENDENCY_VERIFICATION.md` | 🆕 procedure |
-| Release CI | `../../.github/workflows/release.yml` | WORKING (tag-triggered) |
-| Release orchestrator | `../../scripts/build-release.ps1`, `../../scripts/generate-appcast.py` | WORKING |
-| Build instructions | `../../build-instructions/` | reference |
+| Doc | Purpose | State |
+|-----|---------|-------|
+| `README.md` (this file) | Process home + index + terminology + two-tier model + open questions | living |
+| `TRIAGE.md` | Master backlog: every item → category/size/0.4.0/deps/research-depth | 🚧 live |
+| `CEF_BUILD_RUNBOOK.md` | **Tier-1** full CEF/Chromium build (A1/A2/A3/A5): env → depot_tools → automate-git → GN flags → deps → verify. Now includes the merged-in from-source steps + LTS cadence | ✅ WORKING |
+| `CEF_VERSION_UPDATE_TRACKER.md` | CEF version cadence / per-bump changelog | reference (living log) |
+| `BUILD_AND_RELEASE.md` | **Tier-2** app build & release: installers, signing, AV/SmartScreen, release checklist | WORKING (some PLANNED/stale claims now flagged inline — reconciled 2026-06-16) |
+| `AUTO_UPDATE.md` | Auto-update CANONICAL (consolidates old impl-plan + `research/A6_*`) | built; notify-only — silent + Windows EdDSA pending |
+| `DEPENDENCY_VERIFICATION.md` | Procedure: verify Hodos-owned deps on **every CEF bump** | 🆕 procedure |
+| `WSL_HYBRID_WORKSPACE.md` | Dev-environment strategy: repo location + WSL/Windows split + GitHub-mediated sync | 📋 planned |
+| `scripts/` | `build_hodos_cef.bat`, `build_hodos_cef_mac.sh` (Tier-1 build scripts) | reference |
+| `research/BRAVE_FORK_FEASIBILITY.md` | Keystone spike — build-from-Brave vs upstream CEF; Widevine path | ✅ done (2026-06-01) — verdict: STAY ON CEF |
+| `research/A1_BUILD_STRATEGY.md` | A1 self-build pain-reduction research (caching / remote build) | research |
+| `research/A6_AUTO_UPDATE.md` | Auto-update research input (folded into `AUTO_UPDATE.md`) | research (retained) |
+| `research/A6_SILENT_UPDATE_TEST_PLAN.md` | Silent-update test plan research input (folded into `AUTO_UPDATE.md`) | research (retained) |
+
+**Related, out of this folder (cross-referenced):**
+
+| Doc | Purpose |
+|-----|---------|
+| `../../.github/workflows/release.yml` | Tag-triggered release CI (Windows + macOS build/sign/notarize/publish) |
+| `../../scripts/build-release.ps1`, `../../scripts/generate-appcast.py` | Release orchestrator + appcast generator |
+| `../../build-instructions/` | Platform-specific first-time build setup |
+| `../0.4.0/SPRINT_0_4_0_MASTER_PLAN.md` | 0.4.0 master plan (PIPE-* pipeline items, §3 / §7.3 build research) |
 
 ## Source-of-truth code pointers
 
@@ -43,14 +58,6 @@ version bumping, CI gates, release, and post-release. Layer-specific details sta
   `cef-native/mac_build_run.sh` (all gate on `HODOS_DEV=1`).
 
 ---
-
-## Initiative documents (this folder)
-
-| Doc | Purpose | Status |
-|-----|---------|--------|
-| `TRIAGE.md` | Master backlog: every item → category/size/0.4.0/deps/research-depth | 🚧 live |
-| `CEF_BUILD_RUNBOOK.md` | Tier-1 full-build checklist (A1/A2/A3/A5): latest Chromium → codec flags → farbling patches → deps → verify | 🚧 draft skeleton |
-| `research/BRAVE_FORK_FEASIBILITY.md` | Keystone spike — build-from-Brave vs upstream CEF; Widevine path | ✅ done (2026-06-01) — verdict: STAY ON CEF |
 
 ## Terminology (settle this once)
 
