@@ -112,3 +112,31 @@ in `services/call_class.rs` (`IndexerSync` 8s / `IndexerAsync` 15s / `IndexerBul
   `project-fallback-indexer-research`, Phase 1.6 design notes
 - HelicOps finding: "Hardcoded secret in source" → `arc_taal.rs:16` (routed CLARIFY in
   `HelicOps/HELICOPS_FEEDBACK.md`, deferred here for the real decision)
+
+---
+
+## Research Findings (2026-06-16, spike `wc9dzecdq` — medium-weight, verifier-checked)
+
+> Compared how **@bsv/sdk (ts-sdk)**, **@bsv/wallet-toolbox**, **Yours Wallet**, and **Dolphin Milk** broadcast. **Bottom line: Hodos is in the right camp** (wallet-toolbox model: GorillaPool-primary → TAAL-fallback, `UntilSuccess`), already more robust than Dolphin. The fixes below are correctness/freshness, not a redesign.
+
+**🕹 "ARCADE" IS REAL (user was right — not a mishearing of ARC).** `github.com/bsv-blockchain/arcade` = a **P2P-first, Teranode-era, ARC-*compatible* broadcaster** (ARC's successor: single-binary+SQLite, listens to gossip, Teranode-only). Drop-in at the *client/API* level. **One real difference: path is `/tx` + `/tx/{txid}` (NOT ARC's `/v1/tx`)** — a provider-config flag, not a redesign. Same `X-Callback*`/`X-Skip*` headers, SSE `/events`, same status enum.
+
+**Teranode impact (node-less SPV wallet):** essentially **none to our model.** We never talk to Teranode directly — we still POST to an ARC/Arcade endpoint a provider operates. Keep the ARC-shaped facade; add Arcade later as a provider variant (just the `/tx` path). Status-mapping logic carries over verbatim.
+
+**Highest-priority Hodos actions (from the synthesis):**
+1. **Broadcast success predicate (CVE-2026-40069 bug class):** ALLOWLIST success (`SEEN_ON_NETWORK`, `MINED`), don't denylist only `REJECTED`. Confirm `arc_status.rs` also fails on **`INVALID`, `MALFORMED`, `MINED_IN_STALE_BLOCK`, any ORPHAN** in extraInfo/txStatus, and treats an **unknown status as in-flight (not success).** ← single most important correctness item.
+2. **HTTP 200 ≠ mempool acceptance.** On 200, only `DOUBLE_SPEND_ATTEMPTED` + `SEEN_IN_ORPHAN_MEMPOOL` are hard fails (set doubleSpend, capture `competingTxs`, don't retry on other miners). Gate *durable* success on `SEEN_ON_NETWORK`; poll `GET /v1/tx/{txid}` for `RECEIVED/STORED/ANNOUNCED`.
+3. **Always submit full BEEF/EF ancestry** — `SEEN_IN_ORPHAN_MEMPOOL` = parent not found; full ancestry avoids it.
+4. **Map TAAL 401/403 (expired key) → provider-DOWN → fail over** to GorillaPool, **NOT** a tx rejection. (Critical given the hardcoded key likely expired.)
+5. **Rich result taxonomy:** distinguish rejection vs double-spend vs transport/serviceError (wallet-toolbox `{status, doubleSpend?, competingTxs?, serviceError?, notes[]}`).
+6. **Keep GorillaPool-primary/TAAL-fallback** (upstream-canonical; GorillaPool `/v1/policy` live-verified keyless). **Add Bitails + WoC as 3rd/4th *broadcast* fallbacks** (`postBeef` only — keep Bitails demoted on reads per the 500-poisoning memory).
+7. **Send `XDeployment-ID` header** (`hodos-{hex}`) for ARC traceability; optionally `X-WaitFor=SEEN_ON_NETWORK` + `X-MaxTimeout` (default 5s/max 30s — pull `bitcoin-sv/arc` `arc.yaml` to lock exact semantics).
+8. **Trusted-header proof validation:** validate BUMP/TSC merkle roots against a trusted-header layer, **not** the same indexer that served the proof (wallet-toolbox uses a Chaintracks ChainTracker). Use WoC `GetMerkleProofTSC`.
+9. **Drop GorillaPool mAPI** (deprecated in favor of ARC). WoC keyless ≈3 req/s; a WoC API key (platform.teranode.group) gives 10/20/40 tiers if read volume grows.
+10. **Audit synchronous broadcast** (Dolphin E16: async/delayed broadcast returned local success while tx never propagated) + **concurrency stress-test** the Rust wallet (Dolphin E15: 96/100 createActions rejected at P=8 — UTXO-lock contention; relevant to BRC-121 paid-retry storms).
+
+**TAAL key decision:** **De-hardcode it** → optional injected `Option<String>` defaulting to `None`/keyless. The whole first-party ecosystem (wallet-toolbox, Yours) treats ARC keys as caller-supplied config and runs **both ARCs keyless by default**; ARC only sends `Authorization: Bearer` when a key is set. Keep GorillaPool keyless as primary (safer — TAAL keys expire monthly). **Open:** whether TAAL's *server* accepts keyless in 2026 was NOT confirmed (couldn't fetch docs.taal.com/arc) — do one `docs.taal.com/arc` fetch or a keyless probe of TAAL `/v1/tx` before building any key-rotation tooling; if keyless/metered exists, drop the key entirely.
+
+**Open items / verifier corrections:** ts-sdk double-spend `competingTxs` is on the **failure** path (`BroadcastFailure.more.competingTxs`), not success — capture from failure. Bitails is in `getMerklePath`+`postBeef` only, NOT `getRawTx`. TAAL & GorillaPool auth/rate-limit terms not confirmed from docs bodies (rendered empty). Pull `bitcoin-sv/arc` `arc.yaml` for exact wait-header semantics.
+
+> **NEXT SESSION:** act on items 1–4 first (correctness + the expired-key failover); they're the real "we've had trouble understanding miner responses" fixes. This review's status can move from "Scoping" to "Findings in — ready to implement."
