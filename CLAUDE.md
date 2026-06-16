@@ -478,7 +478,7 @@ Every outgoing transaction includes a **1000-satoshi service fee** output sent t
 | `development-docs/Final-MVP-Sprint/macos-port/` | macOS port tracking: progress, handover docs, archived milestones |
 | `development-docs/Sigma-BRC121-Sprint/` | Active sprint: BRC-100 surface completion (Phase 1.5 permission UX, Phase 2 window-CWI shim, Phase 2.5 IPC bridge in progress) |
 | `archived-docs/UX_UI/` | Wallet UI phases (setup, notifications, wallet panel polish) — completed sprint, archived |
-| `development-docs/Possible-MVP-Features/` | Roadmap items and feature research |
+| `development-docs/Future-Features/` | Future feature docs (e.g. extensions) deferred beyond the current sprint |
 | `build-instructions/` | Platform-specific build guides (Windows, macOS) |
 
 ### Active sprint status (2026-05-30)

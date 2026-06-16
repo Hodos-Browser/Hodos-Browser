@@ -499,7 +499,7 @@ See [SOCIALCERT_DEEP_DIVE.md](./SOCIALCERT_DEEP_DIVE.md) for full details.
 
 - **Certificate management must be complete** — see `development-docs/CERTIFICATE_UI_AND_LIFECYCLE.md` for implementation plan
 - Certificates need to be acquirable, displayable, publishable, and provable before content signing can work
-- SocialCert deep dive: `Possible-MVP-Features/SOCIALCERT_DEEP_DIVE.md`
+- SocialCert deep dive: `Future-Features/SOCIALCERT_DEEP_DIVE.md`
 
 ## References
 

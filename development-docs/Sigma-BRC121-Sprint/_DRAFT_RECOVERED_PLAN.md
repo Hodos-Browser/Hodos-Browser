@@ -153,7 +153,7 @@ These are exactly the values the C++ side needs to emit as `x-bsv-beef`, `x-bsv-
 
 #### 2A — Rust signing primitives (build immediately, ~300 LOC, independent of Phase 0)
 
-These are useful regardless of how interception resolves; they also unlock content-signing/tipping use cases referenced in `development-docs/Possible-MVP-Features/`.
+These are useful regardless of how interception resolves; they also unlock content-signing/tipping use cases referenced in `development-docs/Future-Features/`.
 
 **`rust-wallet/src/crypto/bsm.rs`** (new, ~100 LOC):
 - `sign_message_bsm(privkey, message)` — `sha256d("\x18Bitcoin Signed Message:\n" + varint(len) + msg)`, ECDSA with recovery flag, base64 65-byte output.

@@ -114,7 +114,7 @@ Diff CEF's release notes between branches and run the **dependency-verification*
    Chromium source before compile. The B1 Blink farbling work **rides on this build** — see
    `../0.4.0/B1-farbling-in-source.md`. Log "same as last build, or with these changes: ___" per build.
 3. **Extensions** — **N/A on CEF.** Extensions are chrome-layer; self-build does NOT unlock them. Do
-   not add extension patches here. (Strategic future item; see `../0.4.0/B4-extensions.md`.)
+   not add extension patches here. (Strategic future item; see `../Future-Features/B4-extensions.md`.)
 4. **Any other custom patches** — list and version them.
 
 ### Step 3 — Build

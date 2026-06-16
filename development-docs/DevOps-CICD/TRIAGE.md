@@ -99,7 +99,7 @@ assuming C++ is the fix.
 Buttons exist, non-functional today (verify). Research other browsers' bookmark UX.
 
 ### B4. Extensions/plugins (security-focused)
-Untrusted research moved to `../0.4.0/browser-extensions/` (verify every claim against source).
+Untrusted research moved to `../Future-Features/browser-extensions/` (verify every claim against source).
 Likely Chromium-approved extensions. **Wallet deconfliction:** block conflicting BSV wallets (vs our
 native wallet), ALLOW Ethereum wallets (MetaMask, etc.). Research other browsers' extension models
 for UX + security. **Colored by A4** (CEF's extension API is limited vs full Chromium).

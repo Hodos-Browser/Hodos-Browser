@@ -37,8 +37,8 @@ Driving principle: *do it the right way the first time — no re-refactor in two
 | `B1-farbling-in-source.md` | B1 |
 | `B2-header-to-cpp.md` | B2 |
 | `B3-bookmarks.md` | B3 |
-| `B4-extensions.md` | B4 |
-| `browser-extensions/` | B4 background research — **UNTRUSTED**, relocated from `../browser-extensions/` |
+| `../Future-Features/B4-extensions.md` | B4 — **OUT of 0.4.0 scope; moved to a separate future sprint** (see `../Future-Features/`) |
+| `../Future-Features/browser-extensions/` | B4 background research — **UNTRUSTED**, moved out of 0.4.0 to `../Future-Features/` |
 
 ## What this sprint does NOT do
 
