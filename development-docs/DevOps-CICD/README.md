@@ -31,6 +31,7 @@ version bumping, CI gates, release, and post-release. Layer-specific details sta
 | `BUILD_AND_RELEASE.md` | **Tier-2** app build & release: installers, signing, AV/SmartScreen, release checklist | WORKING (some PLANNED/stale claims now flagged inline — reconciled 2026-06-16) |
 | `AUTO_UPDATE.md` | Auto-update CANONICAL (consolidates old impl-plan + `research/A6_*`) | built; notify-only — silent + Windows EdDSA pending |
 | `DEPENDENCY_VERIFICATION.md` | Procedure: verify Hodos-owned deps on **every CEF bump** | 🆕 procedure |
+| `TESTING.md` | CANONICAL cross-stack testing strategy (the audit↔CI overlap, done once): census, pyramid, CI gating, coverage, anti-gaming, secret-log gate, capped live-e2e harness | 🆕 strategy |
 | `WSL_HYBRID_WORKSPACE.md` | Dev-environment strategy: repo location + WSL/Windows split + GitHub-mediated sync | 📋 planned |
 | `scripts/` | `build_hodos_cef.bat`, `build_hodos_cef_mac.sh` (Tier-1 build scripts) | reference |
 | `research/BRAVE_FORK_FEASIBILITY.md` | Keystone spike — build-from-Brave vs upstream CEF; Widevine path | ✅ done (2026-06-01) — verdict: STAY ON CEF |
