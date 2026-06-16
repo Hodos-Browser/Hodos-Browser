@@ -32,6 +32,7 @@ version bumping, CI gates, release, and post-release. Layer-specific details sta
 | `AUTO_UPDATE.md` | Auto-update CANONICAL (consolidates old impl-plan + `research/A6_*`) | built; notify-only — silent + Windows EdDSA pending |
 | `DEPENDENCY_VERIFICATION.md` | Procedure: verify Hodos-owned deps on **every CEF bump** | 🆕 procedure |
 | `TESTING.md` | CANONICAL cross-stack testing strategy (the audit↔CI overlap, done once): census, pyramid, CI gating, coverage, anti-gaming, secret-log gate, capped live-e2e harness | 🆕 strategy |
+| `TEST_PLAN.md` | Detailed test plan/catalog + manual QA checklists: ts-sdk vectors to port, Vitest blueprint, e2e/adblock/C++ test inventory, reconciled census. The PLAN that TESTING.md (strategy) points to | ⚠️ inherited (was `UNIT_TESTING.md`), reconciled 2026-06-16, mostly unverified/proposed |
 | `WSL_HYBRID_WORKSPACE.md` | Dev-environment strategy: repo location + WSL/Windows split + GitHub-mediated sync | 📋 planned |
 | `scripts/` | `build_hodos_cef.bat`, `build_hodos_cef_mac.sh` (Tier-1 build scripts) | reference |
 | `research/BRAVE_FORK_FEASIBILITY.md` | Keystone spike — build-from-Brave vs upstream CEF; Widevine path | ✅ done (2026-06-01) — verdict: STAY ON CEF |
@@ -53,8 +54,9 @@ version bumping, CI gates, release, and post-release. Layer-specific details sta
 - Version sources (5, manual): `frontend/src/components/settings/AboutSettings.tsx` (`APP_VERSION`),
   `rust-wallet/Cargo.toml`, `cef-native/CMakeLists.txt` (`-DAPP_VERSION`),
   `installer/hodos-browser.iss`, git tag.
-- Tests: `rust-wallet/tests/` (cargo, ~55), `cef-native/tests/` (GoogleTest, ~46, opt-in
-  `-DHODOS_BUILD_TESTS=ON`), `frontend/e2e/` (Playwright, ~6). `adblock-engine/` = none.
+- Tests (verified 2026-06, see `TESTING.md` §2 / `TEST_PLAN.md`): `rust-wallet/` ~491 (inline + `tests/`),
+  `adblock-engine/` 23, `cef-native/tests/` 39 (GoogleTest, opt-in `-DHODOS_BUILD_TESTS=ON`),
+  `frontend/e2e/` 54 (Playwright), Vitest **0**. ⚠️ Pass-status NOT verified (no recent run on record).
 - Dev launchers: root `dev-wallet.{ps1,sh}`, `dev-adblock.{ps1,sh}`, `cef-native/win_build_run.ps1`,
   `cef-native/mac_build_run.sh` (all gate on `HODOS_DEV=1`).
 
@@ -80,7 +82,7 @@ chrome-layer and are NOT unlocked by self-building. See `research/BRAVE_FORK_FEA
 
 - A1: self-build is mandatory (codecs — settled). Real question: how to make it not take ~2 weeks —
   caching (sccache), remote/cloud build execution (GitHub-hosted runners can't), reproducible runbook.
-- A2: how to source latest-stable Chromium/CEF + detect what a new version breaks (we are ~6 mo behind)?
+- A2: how to source latest-stable Chromium/CEF + detect what a new version breaks (we are **~12 mo behind**; M136 predates the M138 LTS program — see `CEF_BUILD_RUNBOOK.md` §1)?
 - A3: post-CEF dependency-bump process (deps are pinned to current CEF).
 - A6: Omaha 4 (silent background updates) vs Sparkle (notify-only) — feasible for a small team?
 - A7: where tests run (GitHub pre-build gate / cloud / local), on which platforms, naming conventions.

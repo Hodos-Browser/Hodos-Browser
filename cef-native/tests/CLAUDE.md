@@ -1,6 +1,8 @@
 # CEF Native — C++ Unit Tests
 
-> Pure-logic C++ unit tests for the Hodos browser shell. First infrastructure of its kind in the project — designed as a reference example per `development-docs/UNIT_TESTING.md` §1.3 + §5.
+> Pure-logic C++ unit tests for the Hodos browser shell. First infrastructure of its kind in the project — designed as a reference example per `development-docs/DevOps-CICD/TEST_PLAN.md` §5 (and the canonical strategy in `DevOps-CICD/TESTING.md`).
+>
+> ⚠️ **This file is partly STALE (flagged 2026-06-16).** It still describes `permission_engine_test.cpp` (the C++ `PermissionEngine` was deleted in Phase 2.6-H). The test files that actually exist here today are **`manifest_fetcher_test.cpp` (13 tests)** and **`sensitive_cert_fields_test.cpp` (26 tests)** = 39 GoogleTest cases. Treat the per-class "What's Tested" section below as needing a rewrite.
 
 ## Overview
 
@@ -64,7 +66,7 @@ The PermissionEngine test is the reference template. To add a new test target:
 
 | Aspect | Choice | Reason |
 |--------|--------|--------|
-| Framework | Google Test 1.14 | Industry standard; matches `UNIT_TESTING.md` §5.2 plan |
+| Framework | Google Test 1.14 | Industry standard; matches `DevOps-CICD/TEST_PLAN.md` §5.2 plan |
 | Dependency mgmt | CMake `FetchContent` (not vcpkg) | Zero install friction; reproducible by version pin |
 | Opt-in | `-DHODOS_BUILD_TESTS=ON` | Default shell build stays fast; CI / contributors opt in |
 | Naming | `<class>_test.cpp` | Mirrors `<class>.cpp` for grep-friendliness |
@@ -80,7 +82,7 @@ The PermissionEngine test is the reference template. To add a new test target:
 
 ## What Should Be Tested Next (Roadmap)
 
-Per `development-docs/UNIT_TESTING.md` §5.1:
+Per `development-docs/DevOps-CICD/TEST_PLAN.md` §5.1:
 
 - **`SessionManager`** — spending counters, rate-limit windows, per-tab reset on close
 - **`DomainPermissionCache`** — cache hit / miss / negative cache TTL, invalidation
@@ -118,5 +120,6 @@ Adding `cpp-test` to the gate alongside `rust-test` and `frontend-test` would me
 
 - `cef-native/CLAUDE.md` — build instructions, HWND hierarchy, IPC flow
 - `cef-native/src/core/CLAUDE.md` — production source under test
-- `development-docs/UNIT_TESTING.md` — overall testing strategy this file implements
+- `development-docs/DevOps-CICD/TESTING.md` — canonical cross-stack testing strategy
+- `development-docs/DevOps-CICD/TEST_PLAN.md` — detailed test plan/catalog this file implements (was `UNIT_TESTING.md`)
 - `rust-wallet/tests/CLAUDE.md` — Rust test conventions (different framework, same spirit)

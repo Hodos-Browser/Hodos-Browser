@@ -4,7 +4,7 @@
 **Per root CLAUDE.md Invariant #12** — keep current; append to §13 Lessons Learned.
 
 > **This is the ONE testing strategy.** The HelicOps audit's "coverage gaps" and the pipeline's "CI test gate" are the **same problem** — solved once, here. Layer-specific test *details* live in each layer; this doc is the cross-stack strategy + the rules CI enforces.
-> **Relationship to other docs:** `BUILD_AND_RELEASE.md` §5 holds the actual CI/release **workflow** (today PLANNED — no `ci.yml` exists); this doc defines **what** that workflow runs and **why**. `DEPENDENCY_VERIFICATION.md` is the per-CEF-bump dep checklist. Master plan items: **PIPE-A7** (this strategy), **PIPE-CI** (build `ci.yml`), **PIPE-TESTGATE** (gate release), **TEST-HARNESS** (capped live e2e), **AUDIT-F8** (secret-log gate).
+> **Relationship to other docs:** `BUILD_AND_RELEASE.md` §5 holds the actual CI/release **workflow** (today PLANNED — no `ci.yml` exists); this doc defines **what** that workflow runs and **why**. **`TEST_PLAN.md`** is the detailed PLAN/CATALOG this strategy points to — ts-sdk vectors to port, the Vitest blueprint, the e2e/adblock/C++ inventory, manual QA checklists, and the reconciled per-file census. `DEPENDENCY_VERIFICATION.md` is the per-CEF-bump dep checklist. Master plan items: **PIPE-A7** (this strategy), **PIPE-CI** (build `ci.yml`), **PIPE-TESTGATE** (gate release), **TEST-HARNESS** (capped live e2e), **AUDIT-F8** (secret-log gate).
 
 ---
 
@@ -80,11 +80,11 @@ A **smoke test** is a quick, shallow "did we fundamentally break it" check acros
 - Pin all action versions; cache cargo/npm; vendor or cache test deps so CI is reproducible.
 
 ## 12. Decisions to lock (when we build PIPE-CI)
-- Build the thin **Vitest** layer (recommended) vs formally retire UNIT_TESTING.md §3 — **recommend build.**
+- Build the thin **Vitest** layer (recommended) vs formally retire `TEST_PLAN.md` §3 (the Vitest blueprint) — **recommend build.**
 - Where C++/coverage runs (Linux for coverage; matrix for tests).
 - Crypto coverage threshold + whether mutation testing is a gate or a periodic report.
 
 ## 13. Lessons Learned (append per Invariant #12)
 - *(2026-06-16)* Test census was inflated across docs ("780+") — real ~480 Rust / 39 C++ / 23 adblock / 54 e2e / 0 Vitest. Trust source counts, not doc claims.
-- *(2026-06-16)* The "CI gate exists" claims in BUILD_AND_RELEASE/UNIT_TESTING were fiction — there is no `ci.yml`. Build it; don't trust the doc.
+- *(2026-06-16)* The "CI gate exists" claims in BUILD_AND_RELEASE/`UNIT_TESTING` (now `TEST_PLAN.md`) were fiction — there is no `ci.yml`. Build it; don't trust the doc.
 - *(add new lessons as the workflow lands…)*
