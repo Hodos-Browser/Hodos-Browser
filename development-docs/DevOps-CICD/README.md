@@ -23,7 +23,7 @@ version bumping, CI gates, release, and post-release. Layer-specific details sta
 | Topic | Doc | State |
 |-------|-----|-------|
 | Tier-2 build & release (signing, AV) | `BUILD_AND_RELEASE.md` | WORKING (has stale claims — reconcile on next touch) |
-| Auto-update design (WinSparkle / Sparkle 2) | `AUTO_UPDATE_IMPLEMENTATION_PLAN.md` → consolidating into `AUTO_UPDATE.md` | built; notify-only (silent pending) |
+| Auto-update (CANONICAL) | `AUTO_UPDATE.md` (consolidates old impl-plan + `research/A6_*`) | built; notify-only — silent + Windows EdDSA pending |
 | CEF version cadence / bump log | `CEF_VERSION_UPDATE_TRACKER.md` | reference (living log) |
 | Tier-1 CEF build guide | `CEF_BUILD_FROM_SOURCE_GUIDE.md` (to be merged into `CEF_BUILD_RUNBOOK.md`) | reference |
 | Build scripts | `scripts/build_hodos_cef.bat`, `scripts/build_hodos_cef_mac.sh` | reference |
