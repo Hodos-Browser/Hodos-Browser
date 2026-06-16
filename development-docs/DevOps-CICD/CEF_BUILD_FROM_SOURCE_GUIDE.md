@@ -248,7 +248,7 @@ Invoke-WebRequest -Uri "https://raw.githubusercontent.com/chromiumembedded/cef/m
 
 ### Step 4: Create the Build Script
 
-Create `C:\cef\chromium_git\build_cef.bat` (also saved as `development-docs/build_hodos_cef.bat`):
+Create `C:\cef\chromium_git\build_cef.bat` (also saved as `development-docs/DevOps-CICD/scripts/build_hodos_cef.bat`):
 
 ```batch
 @echo off
@@ -741,7 +741,7 @@ macOS requires a **separate build** — Windows DLLs cannot be used on macOS. Th
 
 ### macOS Build Script
 
-A macOS build script is provided at `development-docs/build_hodos_cef_mac.sh`.
+A macOS build script is provided at `development-docs/DevOps-CICD/scripts/build_hodos_cef_mac.sh`.
 
 ### Key Differences from Windows
 

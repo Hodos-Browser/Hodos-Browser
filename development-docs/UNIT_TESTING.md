@@ -1,10 +1,10 @@
 # Hodos Browser — Testing, CI/CD & Quality Strategy
 
 **Created:** 2026-03-20
-**Priority:** 🟡 Post-MVP (testing expansion) / 🔴 MVP (CI/CD pipeline — see BUILD_AND_RELEASE.md §5)
+**Priority:** 🟡 Post-MVP (testing expansion) / 🔴 MVP (CI/CD pipeline — see DevOps-CICD/BUILD_AND_RELEASE.md §5)
 **Purpose:** Comprehensive testing strategy for long-term product quality and CI/CD integration
 
-> **Relationship to BUILD_AND_RELEASE.md:** The CI/CD pipeline defined in BUILD_AND_RELEASE.md §5 runs the tests defined here. The `ci.yml` workflow runs on every PR. The `release.yml` workflow gates installer builds on passing tests. Security scanning (`cargo audit`, `npm audit`) runs in both workflows.
+> **Relationship to DevOps-CICD/BUILD_AND_RELEASE.md:** The CI/CD pipeline defined there runs the tests defined here. ⚠️ **NOTE (2026-06): these workflows are PLANNED, not built** — there is no `ci.yml` today and `release.yml` runs no tests (see SPRINT_0_4_0_MASTER_PLAN §3, PIPE-CI/PIPE-TESTGATE). *Intended:* `ci.yml` runs on every PR; `release.yml` gates installer builds on passing tests; security scanning (`cargo audit`, `npm audit`) in both.
 
 ---
 
@@ -459,7 +459,7 @@ For MVP, these replace automated E2E tests.
 
 ## 7. CI/CD Pipeline Integration
 
-> **The authoritative CI/CD workflow files are defined in BUILD_AND_RELEASE.md §5.** This section describes how testing plugs into that pipeline.
+> **The authoritative CI/CD workflow files are defined in DevOps-CICD/BUILD_AND_RELEASE.md §5.** This section describes how testing plugs into that pipeline. (⚠️ PLANNED — no `ci.yml` exists yet; see SPRINT_0_4_0_MASTER_PLAN §3.)
 
 ### 7.0 Integration with Build & Release
 

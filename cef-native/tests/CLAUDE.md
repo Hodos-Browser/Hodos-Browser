@@ -98,7 +98,7 @@ Each of these is mostly pure logic; the small amount of platform-specific HTTP c
 
 ## CI Integration (Future)
 
-When `BUILD_AND_RELEASE.md` §5's CI pipeline lands, this test target should be added to the `cpp-test` job:
+When `DevOps-CICD/BUILD_AND_RELEASE.md` §5's CI pipeline lands (PLANNED — no `ci.yml` yet), this test target should be added to the `cpp-test` job:
 
 ```yaml
 cpp-test:

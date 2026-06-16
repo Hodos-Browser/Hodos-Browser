@@ -349,6 +349,7 @@ cmake --build build --config Release
 8. CEF lifecycle & threading rules are fragile — do not change message loop, browser creation timing, or render-process handlers without asking first.
 9. **macOS cross-platform readiness**: All new C++ code must use `#ifdef _WIN32` / `#elif defined(__APPLE__)` platform conditionals. Never use raw WinHTTP for new singletons — use `SyncHttpClient` (or add macOS `#elif` with libcurl). New overlays need a macOS creation function in `cef_browser_shell_mac.mm`. New file paths must use cross-platform resolution, not hardcoded Windows paths.
 11. **Update docs with features**: When completing a sprint or feature that changes architecture, APIs, endpoints, or user-facing behavior, update CLAUDE.md Key Files table and any affected top-level docs. Don't let docs drift.
+12. **Document lessons learned → update Process & Procedures**: Whenever a build, dependency, codec, signing, release, or auto-update step surprises us, breaks, or teaches us something, write it down AND update the permanent Process & Procedures docs in `development-docs/DevOps-CICD/` (the CEF build runbook, build/release, auto-update, dependency-verification checklist). Goal: repeatable, automated, *testable* procedures a small team — or a small team of AI agents — can follow step-by-step with unit/integration tests at each stage. Treat P&P as code: keep it current or it rots. The DevOps-CICD folder is the canonical home; CLAUDE.md and sprint docs only point to it.
 
 
 ---

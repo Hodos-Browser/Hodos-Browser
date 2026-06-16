@@ -1,7 +1,7 @@
 # CEF/Chromium Full-Build Runbook (Tier 1)
 
 **Created:** 2026-06-01
-**Status:** 🚧 DRAFT skeleton — grounded in `../build_hodos_cef.bat` + `../build_hodos_cef_mac.sh`;
+**Status:** 🚧 DRAFT skeleton — grounded in `scripts/build_hodos_cef.bat` + `scripts/build_hodos_cef_mac.sh`;
 sections marked **TODO** need to be filled/verified before we rely on this for a real build.
 **Owner:** DevOps/CI-CD · **Covers:** A1 (self-build), A2 (latest stable), A3 (dependency bump), A5 (Tier 1)
 
@@ -59,7 +59,7 @@ Trigger is one of: (a) Chromium/CEF version bump (A2), (b) new/changed farbling 
 4. **Any other custom patches** — list and version them. **TODO:** enumerate any existing patches.
 
 ### Step 3 — Build
-- Windows: `build_hodos_cef.bat` (from `C:\cef\chromium_git\`). Mac: `build_hodos_cef_mac.sh`.
+- Windows: `scripts/build_hodos_cef.bat` (from `C:\cef\chromium_git\`). Mac: `scripts/build_hodos_cef_mac.sh`.
 - **A1 pain-reduction (the real A1 work) — TODO/research:**
   - **sccache / caching** to avoid full recompiles.
   - **Remote/cloud build execution** or a dedicated build machine (GitHub-hosted runners CANNOT do a

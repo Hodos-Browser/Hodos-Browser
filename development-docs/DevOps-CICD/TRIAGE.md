@@ -47,7 +47,7 @@ Keystone: **A4 Brave-fork feasibility** gates/colors A1, B1, B2, B4 → it goes 
 
 ### A1. Self-build CEF binaries (PROPRIETARY CODECS — settled)
 Win + Mac now, Linux placeholders. **Why:** stock CEF lacks H.264/AAC/MP3; we build with
-`proprietary_codecs=true ffmpeg_branding=Chrome` (confirmed in `../build_hodos_cef*.{bat,sh}`).
+`proprietary_codecs=true ffmpeg_branding=Chrome` (confirmed in `scripts/build_hodos_cef*.{bat,sh}`).
 Mandatory, not going away. Also the host for farbling patches (B1). Existing scripts noted (Mac built
 by someone else; user now has a Mac). **Real A1 work:** make the build not take ~2 weeks — caching
 (sccache), remote/cloud execution (GitHub-hosted runners can't do full Chromium builds), reproducible

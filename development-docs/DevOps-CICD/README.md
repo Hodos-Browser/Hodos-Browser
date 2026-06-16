@@ -16,14 +16,18 @@ version bumping, CI gates, release, and post-release. Layer-specific details sta
 
 ---
 
-## What already exists (canonical until migrated here)
+## Build / release / update docs (now consolidated in THIS folder)
 
-| Topic | Canonical doc (today) | State |
-|-------|----------------------|-------|
-| Build & release (9-step checklist, signing, AV) | `../BUILD_AND_RELEASE.md` | WORKING |
-| Auto-update design (WinSparkle / Sparkle 2) | `../AUTO_UPDATE_IMPLEMENTATION_PLAN.md` | WORKING (notify-only) |
-| CEF version cadence | `../CEF_VERSION_UPDATE_TRACKER.md` | reference |
-| CEF binary mgmt / build guides | `../CEF_*.md`, `../build_hodos_cef.bat`, `../build_hodos_cef_mac.sh` | reference |
+> Moved here 2026-06-16 (docs re-org). This folder is the **canonical, permanent home** for build/release/update Process & Procedures (per root CLAUDE.md Invariant #12).
+
+| Topic | Doc | State |
+|-------|-----|-------|
+| Tier-2 build & release (signing, AV) | `BUILD_AND_RELEASE.md` | WORKING (has stale claims — reconcile on next touch) |
+| Auto-update design (WinSparkle / Sparkle 2) | `AUTO_UPDATE_IMPLEMENTATION_PLAN.md` → consolidating into `AUTO_UPDATE.md` | built; notify-only (silent pending) |
+| CEF version cadence / bump log | `CEF_VERSION_UPDATE_TRACKER.md` | reference (living log) |
+| Tier-1 CEF build guide | `CEF_BUILD_FROM_SOURCE_GUIDE.md` (to be merged into `CEF_BUILD_RUNBOOK.md`) | reference |
+| Build scripts | `scripts/build_hodos_cef.bat`, `scripts/build_hodos_cef_mac.sh` | reference |
+| Dependency verification (every CEF bump) | `DEPENDENCY_VERIFICATION.md` | 🆕 procedure |
 | Release CI | `../../.github/workflows/release.yml` | WORKING (tag-triggered) |
 | Release orchestrator | `../../scripts/build-release.ps1`, `../../scripts/generate-appcast.py` | WORKING |
 | Build instructions | `../../build-instructions/` | reference |
@@ -53,7 +57,7 @@ version bumping, CI gates, release, and post-release. Layer-specific details sta
 We are a **CEF-based browser that does custom Chromium builds** — not "CEF vs our own Chromium."
 CEF's `automate-git.py` pulls the full Chromium source, applies the CEF embedding layer, and compiles
 `libcef`, which our `cef-native/` shell drives. We self-build for **proprietary codecs**
-(`proprietary_codecs=true ffmpeg_branding=Chrome`) — confirmed in `../build_hodos_cef*.{bat,sh}`.
+(`proprietary_codecs=true ffmpeg_branding=Chrome`) — confirmed in `scripts/build_hodos_cef*.{bat,sh}`.
 Farbling (B1) is a renderer-layer patch that rides on this same build. Extensions (B4) are
 chrome-layer and are NOT unlocked by self-building. See `research/BRAVE_FORK_FEASIBILITY.md`.
 

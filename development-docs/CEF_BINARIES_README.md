@@ -53,9 +53,9 @@ cmake --build build --config Release
 | cef_sandbox.lib | 86 MB | |
 
 ## Build Source
-Full build instructions: `development-docs/CEF_BUILD_FROM_SOURCE_GUIDE.md`
-Build script (Windows): `development-docs/build_hodos_cef.bat`
-Build script (macOS): `development-docs/build_hodos_cef_mac.sh`
+Full build instructions: `development-docs/DevOps-CICD/CEF_BUILD_FROM_SOURCE_GUIDE.md`
+Build script (Windows): `development-docs/DevOps-CICD/scripts/build_hodos_cef.bat`
+Build script (macOS): `development-docs/DevOps-CICD/scripts/build_hodos_cef_mac.sh`
 Build output location: `C:\cef\chromium_git\chromium\src\cef\binary_distrib\`
 
 ## macOS
