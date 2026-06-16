@@ -71,6 +71,24 @@ CEF's `automate-git.py` pulls the full Chromium source, applies the CEF embeddin
 Farbling (B1) is a renderer-layer patch that rides on this same build. Extensions (B4) are
 chrome-layer and are NOT unlocked by self-building. See `research/BRAVE_FORK_FEASIBILITY.md`.
 
+## Branch & Remote Workflow (canonical)
+
+> Mirrored concisely in root `CLAUDE.md → "Branch & Remote Workflow"`.
+
+**Remotes:**
+- **`origin`** (`github.com/BSVArchie/Hodos-Browser`, = `personal`) — **development.** ALL code changes land here first.
+- **`release`** (`github.com/Hodos-Browser/Hodos-Browser`) — **the signed-build repo**; GitHub holds the code-signing keys here. The actual public `BUILD_AND_RELEASE` runs here.
+
+**Flow:**
+1. Author on a **feature branch** in `origin` → merge to **`origin/staging`** (integration; internal test builds are fetched from here) → merge to **`origin/main`** (blessed release-candidate; what `release` pulls from).
+2. **Internal / beta test builds** run the full (eventually new) pipeline but are versioned **`0.3.x-beta`** and stay **private** (fetched locally for testing; NOT the newest GitHub release).
+3. When ready for a **public** release: push `main` → **`release`**, tag it the real version (e.g. `0.4.0`), and run the signed `BUILD_AND_RELEASE` there.
+
+**Rules / notes:**
+- **Code originates in `origin` first**, always. Never author feature code directly on `release`.
+- **`release` may be AHEAD of `origin`** — currently mostly release-specific auto-update commits. That's tolerated. ⚠️ **TODO before executing the new `AUTO_UPDATE.md` plan:** diff `release` vs `origin` for the auto-update code, learn what differs, then re-implement in `origin` (don't fork logic onto `release`).
+- *Open question:* keep `staging` as a separate branch once `main` has CI-gated PRs? For now **keep it** as the integration / internal-beta branch.
+
 ## The two-tier model (A5 — to be fully documented)
 
 - **Tier 1 — binary build:** build CEF/Brave Chromium **binaries** (infrequent, expensive, hours).

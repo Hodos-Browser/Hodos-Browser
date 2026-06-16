@@ -307,6 +307,15 @@ When asked to run/test the wallet, adblock, or CEF browser during development:
 
 ---
 
+## Branch & Remote Workflow
+
+> Canonical detail in `development-docs/DevOps-CICD/README.md`. The short version every session must know:
+
+- **`origin` = development** (BSVArchie fork). **ALL code changes land here first.** Flow: feature branch → `origin/staging` → `origin/main`. `staging` = integration + where internal test builds are fetched from; `main` = blessed release-candidate.
+- **`release` = the signed-build remote** (Hodos-Browser org; holds the GitHub signing keys). When ready for a **public** build, push `main` → `release` and run `BUILD_AND_RELEASE` there. `release` may be **ahead of** `origin` (e.g., release-specific auto-update commits) — that's tolerated, but **code originates in `origin` first**; `release` only consumes + adds release-specific bits.
+- **Rule:** never author feature code directly on `release`. Internal/beta test builds are versioned `0.3.x-beta` and stay private (fetched locally, not the newest GitHub release); only the deliberate public release is tagged `0.4.0` and pushed to `release`.
+- *Open question:* whether `staging` stays a separate branch once `main` has CI-gated PRs — for now KEEP it as the integration / internal-beta branch.
+
 ## Build
 
 **Prerequisites**: Rust, Node.js 18+, CEF binaries (download from https://cef-builds.spotifycdn.com/index.html → `./cef-binaries/`)

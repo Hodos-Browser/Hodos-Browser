@@ -440,15 +440,15 @@ These are the doc claims found contradicted by current source during the kickoff
 
 ## 12. Tentative release sequencing (2026-06-16 — owner's working plan)
 
-> Branch model: `feature/brc121-phase1` = Sigma-BRC121 sprint (tested & good, → staging); **`0.4.0`** = this sprint's work (→ staging). Phase-3 ordinals (1Sat) is being pulled to sit **between** a test build and the real 0.4.0 release rather than strictly after.
+> Branch/remote model: see **CLAUDE.md → "Branch & Remote Workflow"** + `DevOps-CICD/README.md`. All code lands in `origin` (feature → `staging` → `main`); the signed **public** build happens on the `release` remote (holds the signing keys). Phase-3 ordinals (1Sat) is pulled to sit **between** an internal test build and the **public** 0.4.0 release.
 
-1. **Push both branches to staging** — Sigma-BRC121 (tested) + 0.4.0 (this design work).
-2. **Optional pre-0.4.0 test build + smoke** — exercises the **current** release pipeline (baseline; the new CI/CD + test gates don't exist yet, so this validates today's pipeline, not the new one).
-3. **0.4.0 sprint execution** — Phase-0 secret-scrub first (live leaks), then audit fixes ∥ pipeline foundation (CI/test gate, signing), then features (header opt, bookmarks, B1).
-4. **1Sat ordinals (Phase 3)** — slot in here (note: a slight pull-forward from "strictly after this sprint"; confirm scope).
-5. **Actual 0.4.0 release** — the **first real exercise of the new unit tests + DevOps CI/CD processes** (validates everything built in steps 3).
+1. **Push this sprint's work to `origin`** — `origin/staging` → `origin/main` (clean fast-forward; `0.4.0` already contains the Sigma work).
+2. **0.4.0 sprint EXECUTION (all in origin)** — implement everything: Phase-0 secret-log fixes, audit fixes, features (header opt, bookmarks, B1), **and the full CI/CD pipeline + unit tests.**
+3. **Internal beta build through the NEW pipeline** — build the *entire* thing through the new CI/CD + unit tests, version it **`0.3.x-beta`**, and **fetch it on our machines for testing only — NOT public** (don't make it the newest GitHub release). **This is the FIRST real exercise of the new pipeline.**
+4. **1Sat ordinals (Phase 3)** — implemented + tested here (the 0.4.0 sprint work is already done + privately validated by now).
+5. **Public 0.4.0 release** — run the pipeline again (unit tests + everything; may **reuse the CEF binaries**, no full CEF rebuild), call it **0.4.0**, push `main` → `release` for the signed public build. **SECOND exercise of the new pipeline.**
 
-**My notes:** (a) Phase-0 secret-scrub should ship ASAP regardless of this ordering — F1/F2 are live wallet-compromise leaks. (b) The pre-0.4.0 build tests the *old* pipeline; that's a fine baseline but don't read it as validating the new gates. (c) Pulling ordinals before the 0.4.0 release extends 0.4.0 scope — intentional, just flagging. (d) Treating the 0.4.0 release as the validation run for the new CI/CD is exactly right.
+**Notes:** (a) **Phase-0 secret-log fixes (F1/F2/F3): do early as code hygiene, but NO urgent patch release needed** — no public users yet, so the live-leak urgency is low (owner's call 2026-06-16). (b) Corrected: the internal beta (step 3) runs through the **NEW** pipeline (built in step 2), so it **does** validate the new CI/CD — both step 3 and step 5 are real exercises, with ordinals between. (c) Pulling ordinals before the public 0.4.0 release is an intentional scope choice.
 
 ---
 
