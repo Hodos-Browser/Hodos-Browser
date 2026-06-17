@@ -139,4 +139,22 @@ in `services/call_class.rs` (`IndexerSync` 8s / `IndexerAsync` 15s / `IndexerBul
 
 **Open items / verifier corrections:** ts-sdk double-spend `competingTxs` is on the **failure** path (`BroadcastFailure.more.competingTxs`), not success — capture from failure. Bitails is in `getMerklePath`+`postBeef` only, NOT `getRawTx`. TAAL & GorillaPool auth/rate-limit terms not confirmed from docs bodies (rendered empty). Pull `bitcoin-sv/arc` `arc.yaml` for exact wait-header semantics.
 
-> **NEXT SESSION:** act on items 1–4 first (correctness + the expired-key failover); they're the real "we've had trouble understanding miner responses" fixes. This review's status can move from "Scoping" to "Findings in — ready to implement."
+> **NEXT SESSION:** act on items 1–4 first (correctness + the expired-key failover); they're the real "we've had trouble understanding miner responses" fixes. This review's status can move from "Scoping" to "Findings in."
+
+---
+
+## Owner notes + required follow-up (2026-06-17) — VERIFY, don't blind-implement
+
+> ⚠️ **The findings above describe how the mature SDKs behave — they are a CHECKLIST TO VERIFY against our ACTUAL code, not a blind to-do.** We have already reviewed miner responses before and already attach ancestry when it isn't proven, so several fixes may be **largely done**. Be careful changing the broadcast path. Confirm current behavior in source FIRST, then change only what's genuinely missing.
+
+- **Fix 1 (success predicate):** prior memory says `arc_status.rs` already treats `REJECTED`/`DOUBLE_SPEND_ATTEMPTED`/`MINED_IN_STALE_BLOCK`/orphan as errors → **likely mostly done.** VERIFY it also fails on `INVALID`/`MALFORMED` and treats unknown/early statuses as in-flight (not success).
+- **Fix 3 (ancestry):** we already send ancestry when unproven → **likely done.** VERIFY it's attached on EVERY broadcast path.
+- **Fix 2 (poll for durable status) & Fix 4 (401/403 → provider-down failover):** verify against current code; Fix 4 matters because the hardcoded TAAL key is likely expired.
+
+**ARCADE — ADD THIS SPRINT (0.4.0).** Owner decision: Arcade should be live + growing; add it as a provider, **and make it PRIMARY if it tests well**, keeping current ARC (GorillaPool) as fallback. Notes: Arcade = Arc-*compatible* (same status enum/response — NOT more info), backend differs (P2P-first, Teranode-only) so it may give a **fresher `SEEN_ON_NETWORK`**; wire path is **`/tx`** not `/v1/tx`. **OPEN: find a live public Arcade endpoint** (from `bsv-blockchain/arcade` + provider announcements) — not confirmed yet.
+
+**TAAL — ⏰ REMINDER:** when we reach this work, re-check the TAAL ARC API for updates (keyless/metered tier?) AND **get a new key** (current one likely expired). Owner thinks it still needs a key — **just test it** (probe TAAL `/v1/tx` keyless / fetch docs.taal.com/arc) before deciding.
+
+**Bitails + WoC broadcast fallbacks — add CAUTIOUSLY.** We've had issues with these before (Bitails 500-poisoning → demoted on reads). Adding them as `postBeef` *broadcast* fallbacks is a different path, but **verify Bitails BEEF-broadcast support** and don't reintroduce the read problems.
+
+**→ A follow-up verification review / light deep-research is required before implementing:** (1) find live Arcade endpoint(s); (2) confirm TAAL keyless-vs-key; (3) source-verify our `arc_status`/ancestry/poll behavior; (4) confirm Bitails BEEF-broadcast. Then implement only the genuine gaps.
