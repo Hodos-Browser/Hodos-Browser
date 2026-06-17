@@ -88,7 +88,6 @@ The primary goal was ensuring the Rust wallet produces identical outputs (CSR bo
 | `test_server_connection.ps1` | Tests basic server connectivity |
 | `test_interoperability.ps1` | PowerShell interoperability tests |
 | `delete_db.ps1` | Utility: deletes wallet SQLite database for clean test runs |
-| `extract_key.ps1` | Utility: extracts key material for debugging |
 
 ### Shell Scripts
 
