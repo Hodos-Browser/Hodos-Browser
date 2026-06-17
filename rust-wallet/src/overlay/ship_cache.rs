@@ -88,6 +88,14 @@ impl ShipDiscoveryCache {
 
     /// Pure state-machine classification — no I/O. Exposed for unit testing.
     pub fn classify(&self, topic: &str) -> CacheStatus {
+        self.classify_at(topic, Instant::now())
+    }
+
+    /// Classify against an explicit `now` — pure, reads no clock. Lets unit tests
+    /// simulate arbitrary ages with `base + dur` instead of `Instant::now() - dur`,
+    /// which PANICS when the machine's uptime is shorter than `dur` (e.g. a freshly
+    /// booted CI runner). Production calls `classify`, which passes the real `Instant::now()`.
+    fn classify_at(&self, topic: &str, now: Instant) -> CacheStatus {
         let entries = match self.entries.read() {
             Ok(g) => g,
             Err(_) => return CacheStatus::Empty,
@@ -95,7 +103,7 @@ impl ShipDiscoveryCache {
         match entries.get(topic) {
             None => CacheStatus::Empty,
             Some(entry) => {
-                let age = entry.fetched_at.elapsed();
+                let age = now.saturating_duration_since(entry.fetched_at);
                 if age < FRESH_TTL {
                     CacheStatus::Fresh(entry.hosts.clone())
                 } else if age < STALE_TTL {
@@ -304,10 +312,11 @@ mod tests {
     #[test]
     fn classify_stale_after_fresh_ttl() {
         let cache = ShipDiscoveryCache::new();
-        // 10 min old: past FRESH_TTL (5 min), within STALE_TTL (30 min)
-        let ten_min_ago = Instant::now() - Duration::from_secs(600);
-        cache.set_for_test("tm_identity", hosts(&["https://a"]), ten_min_ago);
-        match cache.classify("tm_identity") {
+        let base = Instant::now();
+        cache.set_for_test("tm_identity", hosts(&["https://a"]), base);
+        // Classify as if 10 min later: past FRESH_TTL (5 min), within STALE_TTL (30 min).
+        // `base + dur` never underflows, unlike `Instant::now() - dur` on a fresh runner.
+        match cache.classify_at("tm_identity", base + Duration::from_secs(600)) {
             CacheStatus::Stale(h) => assert_eq!(h, hosts(&["https://a"])),
             other => panic!("expected Stale, got {:?}", other),
         }
@@ -316,10 +325,10 @@ mod tests {
     #[test]
     fn classify_very_stale_after_stale_ttl() {
         let cache = ShipDiscoveryCache::new();
-        // 1 hour old: past STALE_TTL (30 min)
-        let hour_ago = Instant::now() - Duration::from_secs(3600);
-        cache.set_for_test("tm_identity", hosts(&["https://a"]), hour_ago);
-        match cache.classify("tm_identity") {
+        let base = Instant::now();
+        cache.set_for_test("tm_identity", hosts(&["https://a"]), base);
+        // Classify as if 1 hour later: past STALE_TTL (30 min).
+        match cache.classify_at("tm_identity", base + Duration::from_secs(3600)) {
             CacheStatus::VeryStale(h) => assert_eq!(h, hosts(&["https://a"])),
             other => panic!("expected VeryStale, got {:?}", other),
         }
@@ -354,8 +363,8 @@ mod tests {
     #[test]
     fn set_overwrites_with_new_timestamp() {
         let cache = ShipDiscoveryCache::new();
-        let old = Instant::now() - Duration::from_secs(3600);
-        cache.set_for_test("tm_identity", hosts(&["https://old"]), old);
+        // Seed an entry — its age is irrelevant; the point is that set() overwrites it.
+        cache.set_for_test("tm_identity", hosts(&["https://old"]), Instant::now());
         // Fresh write
         cache.set("tm_identity", hosts(&["https://new"]));
         match cache.classify("tm_identity") {
