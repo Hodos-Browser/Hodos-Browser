@@ -52,7 +52,10 @@ jobs:
       # BLOCKING — full suite: lib + integration tiers + doctests. Verified green
       # locally (17 targets ok; 2 network tests #[ignore]d).
       - name: cargo test
-        run: cargo test --release
+        # --nocapture so the check!-macro FAIL labels are visible in CI logs
+        # (these diagnostic tests print pass/fail to stderr, which cargo otherwise
+        # swallows for the "passing" section test that hosts a failing check).
+        run: cargo test --release -- --nocapture
       # INFORMATIONAL — tighten to `-D warnings` after a dedicated warnings-cleanup chunk.
       - name: cargo clippy
         run: cargo clippy --release --all-targets
