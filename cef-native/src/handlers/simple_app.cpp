@@ -476,7 +476,6 @@ void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser) {
                                                  console.log('✅ Address generated:', response.data);
                                                  console.log('🔍 Address field:', response.data.address);
                                                  console.log('🔍 PublicKey field:', response.data.publicKey);
-                                                 console.log('🔍 PrivateKey field:', response.data.privateKey);
                                                  resolve(response.data);
                                              } else {
                                                  debugDiv.innerHTML += '❌ Address generation failed<br>';

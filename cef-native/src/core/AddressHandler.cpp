@@ -68,13 +68,11 @@ bool AddressHandler::Execute(const CefString& name,
                         std::cout << "✅ Address generated directly: " << addressData.dump() << std::endl;
                         std::cout << "✅ Address: " << addressData["address"].get<std::string>() << std::endl;
                         std::cout << "✅ Public Key: " << addressData["publicKey"].get<std::string>() << std::endl;
-                        std::cout << "✅ Private Key: " << addressData["privateKey"].get<std::string>() << std::endl;
 
                         // Create V8 object from JSON
                         CefRefPtr<CefV8Value> result = CefV8Value::CreateObject(nullptr, nullptr);
                         result->SetValue("address", CefV8Value::CreateString(addressData["address"].get<std::string>()), V8_PROPERTY_ATTRIBUTE_NONE);
                         result->SetValue("publicKey", CefV8Value::CreateString(addressData["publicKey"].get<std::string>()), V8_PROPERTY_ATTRIBUTE_NONE);
-                        result->SetValue("privateKey", CefV8Value::CreateString(addressData["privateKey"].get<std::string>()), V8_PROPERTY_ATTRIBUTE_NONE);
                         result->SetValue("index", CefV8Value::CreateInt(addressData["index"].get<int>()), V8_PROPERTY_ATTRIBUTE_NONE);
 
                         std::cout << "🔍 V8 object created, setting retval..." << std::endl;
