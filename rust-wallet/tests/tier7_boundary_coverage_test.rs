@@ -405,8 +405,8 @@ fn t7_03_dpapi() {
                 return Err("DPAPI encrypt should fail on non-Windows".into());
             }
             let err = result.unwrap_err();
-            if !err.contains("Windows") {
-                return Err(format!("error should mention Windows, got: {}", err));
+            if !err.contains("not available") {
+                return Err(format!("error should mention unavailability, got: {}", err));
             }
             Ok(())
         });
