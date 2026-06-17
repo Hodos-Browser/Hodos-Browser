@@ -34,14 +34,24 @@ permissions:
 
 jobs:
   rust:
-    name: Rust — rust-wallet (test + clippy)
-    runs-on: ubuntu-latest
+    name: Rust — rust-wallet (${{ matrix.os }})
+    # Matrix: run the Rust suite on BOTH Linux and Windows so the platform-gated
+    # paths each get CI coverage — #[cfg(windows)] DPAPI auto-unlock (Windows) and
+    # the #[cfg(not(windows))] stub (Linux). fail-fast:false so one OS failing
+    # still lets the other report. (macOS Rust deferred: 10x runner cost + headless
+    # Keychain; macOS coverage belongs to the cpp matrix where the platform code lives.)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: rust-wallet
     steps:
       - uses: actions/checkout@v4
-      - name: Install system deps
+      - name: Install system deps (Linux)
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config libsqlite3-dev
       - uses: dtolnay/rust-toolchain@stable
         with:

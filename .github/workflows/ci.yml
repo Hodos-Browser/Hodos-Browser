@@ -1,0 +1,24 @@
+# PR gate (Track E) — runs the reusable test workflow on pull requests and on
+# the integration branches by calling .github/workflows/test.yml.
+#
+# Once this is green on PRs, set it as a REQUIRED status check in branch
+# protection so failing tests block merge. (See development-docs/DevOps-CICD/TESTING.md.)
+#
+# Triggers note: the active sprint branch 0.4.0 is already covered by test.yml's
+# own temporary `push: branches: [0.4.0]` trigger, so it is NOT listed here (avoids
+# double runs). Remove that temporary trigger when 0.4.0 merges and this becomes
+# the canonical gate.
+
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main, staging]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    uses: ./.github/workflows/test.yml
