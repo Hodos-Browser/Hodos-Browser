@@ -18239,24 +18239,40 @@ pub async fn reveal_mnemonic(
 
     let mut db = state.database.lock().unwrap();
 
-    // If wallet is already unlocked, just return the cached mnemonic
-    if db.is_unlocked() {
-        match db.get_cached_mnemonic() {
-            Ok(mnemonic) => {
-                let m = mnemonic.to_string();
-                drop(db);
-                return HttpResponse::Ok().json(serde_json::json!({"mnemonic": m}));
-            }
+    // Always re-verify the PIN before revealing the seed — even if the wallet is
+    // already unlocked this session (e.g. DPAPI/Keychain auto-unlock at startup).
+    // Defense for an unattended-but-unlocked machine: viewing the recovery phrase
+    // must require the PIN every time. Normal wallet ops still use the cached
+    // mnemonic without re-prompting — only this reveal path re-verifies.
+    if db.is_pin_protected() {
+        // unlock() re-decrypts the PIN-encrypted mnemonic, so it verifies the PIN
+        // whether or not the wallet was already unlocked.
+        match db.unlock(&pin) {
+            Ok(()) => match db.get_cached_mnemonic() {
+                Ok(mnemonic) => {
+                    let m = mnemonic.to_string();
+                    drop(db);
+                    HttpResponse::Ok().json(serde_json::json!({"mnemonic": m}))
+                }
+                Err(e) => {
+                    drop(db);
+                    HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
+                }
+            },
             Err(e) => {
+                let err_msg = e.to_string();
                 drop(db);
-                return HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}));
+                if err_msg.contains("Wrong PIN") || err_msg.contains("Invalid PIN") || err_msg.contains("decryption failed") {
+                    HttpResponse::Unauthorized().json(serde_json::json!({"error": "Invalid PIN"}))
+                } else {
+                    HttpResponse::InternalServerError().json(serde_json::json!({"error": err_msg}))
+                }
             }
         }
-    }
-
-    // Wallet is locked — need to verify PIN
-    match db.unlock(&pin) {
-        Ok(()) => {
+    } else {
+        // Wallet has no PIN (legacy / DPAPI-only without a pin_salt) — there is
+        // nothing to verify. Return the cached mnemonic if the wallet is unlocked.
+        if db.is_unlocked() {
             match db.get_cached_mnemonic() {
                 Ok(mnemonic) => {
                     let m = mnemonic.to_string();
@@ -18268,15 +18284,9 @@ pub async fn reveal_mnemonic(
                     HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
                 }
             }
-        }
-        Err(e) => {
-            let err_msg = e.to_string();
+        } else {
             drop(db);
-            if err_msg.contains("Wrong PIN") || err_msg.contains("Invalid PIN") || err_msg.contains("decryption failed") {
-                HttpResponse::Unauthorized().json(serde_json::json!({"error": "Invalid PIN"}))
-            } else {
-                HttpResponse::InternalServerError().json(serde_json::json!({"error": err_msg}))
-            }
+            HttpResponse::Unauthorized().json(serde_json::json!({"error": "Wallet is locked"}))
         }
     }
 }
