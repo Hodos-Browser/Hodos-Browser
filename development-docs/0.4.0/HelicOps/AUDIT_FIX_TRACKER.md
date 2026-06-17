@@ -21,9 +21,9 @@ signal-to-noise accounting.
 
 | ID | Finding (cat / current file:line) | Severity | What's wrong | Fix | 0.4.0? | Status |
 |----|---|---|---|---|---|---|
-| **F1** | Secret→log / `cef-native/src/core/WalletService.cpp:440` | 🔴 **Critical** | `std::cout << "🔑 Mnemonic: " << response["mnemonic"]` — the **full BIP39 mnemonic** is printed on every `createWallet`. Per `cef-native/CLAUDE.md`, stdout is redirected to `build/bin/Release/debug_output.log`, so the seed phrase is **written to disk in cleartext**. Total wallet compromise. Also violates the project's own "never use `std::cout`" logging rule. | Delete the line (one line). Audit the rest of `createWallet`'s logging for other response-field leaks. | **IN** | ☐ |
-| **F2** | Secret→log / `rust-wallet/src/handlers/certificate_handlers.rs:1710-1711, 1744` | 🔴 **Critical** | Full **32-byte cert-field symmetric key** logged untruncated at `log::info!` (hex **and** base64, plus "original symmetric key"). Full key compromise for that field. | Delete the log lines. | **IN** | ☐ |
-| **F3** | Secret→log / ~13 sites: `crypto/brc2.rs:75,111,112,150,277,281` · `certificate/verifier.rs:310,324` · `handlers.rs:7346` · `certificate_handlers.rs:1445,1747,2261,2265` | 🟠 **High** | Private-key fragments, full HMAC scalar, ECDH shared secrets, master-key halves logged at `log::info!`/`std::cout` (production-visible, persists to disk). Violates `crypto/CLAUDE.md` invariant. | Delete, or gate every crypto-debug log behind a compile-time flag that is **OFF in release**. Pairs with **F8** sweep. | **IN** | ☐ |
+| **F1** | Secret→log / `cef-native/src/core/WalletService.cpp:440` | 🔴 **Critical** | `std::cout << "🔑 Mnemonic: " << response["mnemonic"]` — the **full BIP39 mnemonic** is printed on every `createWallet`. Per `cef-native/CLAUDE.md`, stdout is redirected to `build/bin/Release/debug_output.log`, so the seed phrase is **written to disk in cleartext**. Total wallet compromise. Also violates the project's own "never use `std::cout`" logging rule. | Delete the line (one line). Audit the rest of `createWallet`'s logging for other response-field leaks. | **IN** | ✅ |
+| **F2** | Secret→log / `rust-wallet/src/handlers/certificate_handlers.rs:1710-1711, 1744` | 🔴 **Critical** | Full **32-byte cert-field symmetric key** logged untruncated at `log::info!` (hex **and** base64, plus "original symmetric key"). Full key compromise for that field. | Delete the log lines. | **IN** | ✅ |
+| **F3** | Secret→log / ~13 sites: `crypto/brc2.rs:75,111,112,150,277,281` · `certificate/verifier.rs:310,324` · `handlers.rs:7346` · `certificate_handlers.rs:1445,1747,2261,2265` | 🟠 **High** | Private-key fragments, full HMAC scalar, ECDH shared secrets, master-key halves logged at `log::info!`/`std::cout` (production-visible, persists to disk). Violates `crypto/CLAUDE.md` invariant. | Delete, or gate every crypto-debug log behind a compile-time flag that is **OFF in release**. Pairs with **F8** sweep. | **IN** | ✅ |
 | **F4** | Unhandled unwrap (DoS) — **systemic** / shared `Arc<Mutex<WalletDatabase>>`: ~194 sites `handlers.rs` + ~59 `certificate_handlers.rs`; root state `main.rs:~83`; narrower: `PENDING_TRANSACTIONS` (`handlers.rs:~4017`) + `sync_status` RwLock | 🟠 **High** | `std::sync::Mutex` **poisons** if a thread panics while holding the guard. The DB handle is shared across all handlers and `.lock().unwrap()`'d everywhere with **no `clear_poison`/`into_inner` anywhere**. One panic-while-holding-the-guard permanently poisons the mutex → every subsequent `.lock().unwrap()` panics → **durable, self-cascading DoS of the wallet core**. (R1 research: a *bare* Actix handler panic is only a per-request connection reset — low; the poison cascade is the real high.) | **Migrate `AppState.database` (and `PENDING_TRANSACTIONS` + `sync_status`) from `std::sync::Mutex`/`RwLock` → `parking_lot::Mutex`/`RwLock`** (does not poison; eliminates the class permanently). `tokio::sync::Mutex` locks (`utxo_selection_lock`, `create_action_lock`) don't poison — exempt. ⚠️ Touches `AppState` → follow CLAUDE.md invariant #4: understand all dependent handlers, migrate carefully, mechanical removal of `.unwrap()` on `.lock()` across ~253 sites. | **IN** | ☐ |
 | **F5** | Command exec / `cef-native/src/core/ProfileManager.cpp:435-437` (entry: `simple_handler.cpp:~2913` `profiles_switch` IPC) | 🟠 **High** | macOS-only: `profileId` interpolated into `"/usr/bin/open … --args \"--profile=" + profileId + "\""` passed to `system()`. A `"` in `profileId` breaks out of the quoted literal → command injection. Windows branch uses `CreateProcessW` (safe). | Replace `system()` with `posix_spawn`/`execv` (argv array, no shell), **and** validate `profileId` against `GetProfiles()` before use. | **IN** | ☐ |
 | **F6** | Injection / `cef-native/src/handlers/simple_render_process_handler.cpp` — `brc100_auth_request` (~1245-1265), `escapeJsonForJs` helper (~52-81), `tab_list_response` second escaper (~930-959) | 🟠 **High** | `brc100_auth_request` interpolates **dApp-controlled** domain/endpoint/body raw into single-quoted JS literals injected into the **trusted BRC-100 auth overlay UI** (127.0.0.1:5137) — genuine cross-context injection. `escapeJsonForJs` is incomplete (no `"`, `</script>`, U+2028/U+2029); a second ad-hoc escaper doesn't match its own quote style. | One hardened JS-string encoder (JSON-serialize + escape `< > &`, `</script>`, U+2028/9, `\uXXXX` for control/non-ASCII); route **all** injection sites through it. Prefer `JSON.parse` of a fully-escaped literal over string concatenation. | **IN** | ☐ |
@@ -56,3 +56,49 @@ signal-to-noise accounting.
 - The TAAL hardcoded-key "critical" was a **fair call-out but a deliberate decision** — routed to
   `HELICOPS_FEEDBACK.md` (CLARIFY) and `development-docs/0.4.0/BROADCAST_AND_EXPLORER_REVIEW.md` for
   the real long-term decision. Not a 0.4.0 code fix beyond optional key rotation.
+
+## Wave 0 closure — F1/F2/F3 fixed (2026-06-17)
+
+Implemented as the **Wave 0 secret-log commit** on branch `0.4.0` (this tracker update is part of it).
+**Approach: delete** (not compile-gate) — these are BRC-42/BRC-2 interop-debugging leftovers with no
+production value; deletion leaves zero residual and realigns with the `crypto/CLAUDE.md` invariant
+("private keys … never serialized to strings or logged").
+
+**Verified before deleting:** F1 is real — `/wallet/create` returns `"mnemonic"` (`handlers.rs:2836`),
+so `WalletService.cpp:440` wrote the live BIP39 seed to `debug_output.log` on every wallet creation.
+
+**Actual deleted sites (audit file:line citations were drifted — corrected here):**
+- **F1** — `WalletService.cpp:440` (mnemonic `std::cout`).
+- **F2** — `certificate_handlers.rs:1727-1730` (plaintext value+bytes, field symmetric key hex+base64)
+  and `1763-1764` (original symmetric key + stripped revelation key). *Audit cited `1710-1711,1744` —
+  drifted ~20 lines; `1763-1764` were uncited.*
+- **F3** — `brc2.rs:75,111,112,148,150,277,281` · `verifier.rs:276,310,317,324` ·
+  `certificate_handlers.rs:1464,2280,2284` · `handlers.rs:7387`. `verifier.rs:322` renamed
+  `hmac_secret`→`_hmac_secret` to keep its validation side-effect. *Kept `handlers.rs:7346` (sighash =
+  public data, not a secret). Audit's `certificate_handlers.rs:1445/1747/2261/2265` were NOT log-leaks
+  (error handler / comment / non-log code).*
+
+**The thorough sweep found 6 sites the audit (syntactic SAST) missed** — all same-class, now deleted:
+cert symmetric key `1763`, subject privkey `1766`, master/child privkeys `2280/2284`, signing privkey
+`handlers.rs:7387`, and `verifier.rs:317` (`hmac_output` = same scalar as `:324`). **Lesson:** the F8 CI
+grep-gate against `log::*`/`std::cout` of crypto material is the durable fix — a targeted grep beat the
+audit tool. (A first naive regex missed two paren-containing log messages; a second robust pass caught
+them — note for the grep-gate authoring.)
+
+**Build/test:** `cargo check --release` clean (no new warnings); `cargo test --lib` 370/375 (4
+pre-existing unrelated: 3 `selective_disclosure` FK-fixture + 1 `utxo_fetcher` network). C++ deletions
+ride the next CEF build. **Mac-parity:** no delta (swept `_mac`/`.mm`; `AddressHandler` is a single
+cross-platform file).
+
+### AddressHandler — investigated, FALSE ALARM (handled separately)
+`AddressHandler.cpp:71/76` reference a phantom `addressData["privateKey"]`, but Rust
+`/wallet/address/generate` returns only `{address,index,publicKey}` (`handlers.rs:9413-9417`). The
+non-const `json["privateKey"].get<string>()` would **throw**, not leak — no key ever reached disk or
+JS. Removed as a separate `fix(correctness)`: `AddressHandler.cpp:71/76`, `simple_app.cpp:479` (legacy
+injected debug-JS), `frontend/src/types/address.d.ts:4`.
+
+### New item — `privateKey` in the JS type surface (UNVERIFIED, needs investigation)
+The `privateKey`-in-JS pattern also appears in `frontend/src/types/identity.d.ts`
+(`IdentityData.privateKey`) and `frontend/src/bridge/brc100.ts:241` (`deriveType42Keys` typed to
+**return** `privateKey`). Not yet verified whether the Rust side actually returns a key there (a real
+Invariant-#1 leak) or whether these are more phantom types. **Owns its own investigation chunk.**

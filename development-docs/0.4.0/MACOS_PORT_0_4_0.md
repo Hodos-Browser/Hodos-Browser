@@ -32,4 +32,12 @@
 > - **Mac equivalent:** `file_mac.mm:fn` (or `#elif __APPLE__` block) — what to do.
 > - **Risk / notes:** platform-specific gotchas, test to run.
 
-_(empty — first entries land with Wave 0 work)_
+### Wave 0 — secret-log removal (2026-06-17, branch `0.4.0`)
+- **Windows change:** `WalletService.cpp::createWallet` — deleted mnemonic `std::cout`. Plus Rust deletions in `crypto/brc2.rs`, `certificate/verifier.rs`, `handlers/certificate_handlers.rs`, `handlers.rs`.
+- **Mac equivalent:** **None required.** `WalletService_mac.cpp` (libcurl) never logged the mnemonic — swept all `*_mac.*` + `*.mm` for secret `cout`/`NSLog`/`os_log`, zero siblings. Rust is single cross-platform source (no `_mac` variant).
+- **Risk / notes:** Nothing to port. Verified by grep over `*_mac.*` and `*.mm`.
+
+### Wave 0 follow-up — AddressHandler phantom-`privateKey` removal (2026-06-17, branch `0.4.0`)
+- **Windows change:** `AddressHandler.cpp` (delete phantom `privateKey` cout + V8 `SetValue`), `simple_app.cpp:479` (legacy injected debug-JS), `frontend/src/types/address.d.ts:4` (type field).
+- **Mac equivalent:** **None required.** `AddressHandler.cpp` and `simple_app.cpp` are single cross-platform files; injected JS + TS type are platform-agnostic. No Mac-specific address-gen path.
+- **Risk / notes:** Zero functional impact — the `privateKey` field is never returned by Rust nor consumed by JS (phantom).

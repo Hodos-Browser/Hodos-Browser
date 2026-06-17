@@ -273,7 +273,6 @@ pub fn verify_certificate_signature_with_keyid(
     let mut anyone_private_key = [0u8; 32];
     anyone_private_key[31] = 1; // Private key with value 1 (public key is 1*G = anyone)
     log::info!("      Using 'anyone' (private key 1) as sender for public derivation");
-    log::info!("      Anyone private key (hex): {}", hex::encode(&anyone_private_key));
     log::info!("      Counterparty: certifier's public key ({})", hex::encode(&certificate.certifier));
     log::info!("      This matches SDK's verify() which uses: verifier = new ProtoWallet('anyone'), counterparty: this.certifier");
 
@@ -307,21 +306,18 @@ pub fn verify_certificate_signature_with_keyid(
     // Step 1: Compute shared secret
     let shared_secret = compute_shared_secret(&anyone_private_key, &certificate.certifier)
         .map_err(|e| CertificateError::SignatureVerification(format!("Shared secret computation failed: {}", e)))?;
-    log::info!("         Shared secret (ECDH result, hex, first 16): {}", hex::encode(&shared_secret[..std::cmp::min(16, shared_secret.len())]));
     log::info!("         Shared secret length: {} bytes", shared_secret.len());
 
     // Step 2: Compute HMAC over invoice number
     log::info!("         Step 2: Compute HMAC-SHA256(shared_secret, invoice_number)");
     let hmac_output = compute_invoice_hmac(&shared_secret, &invoice.to_string())
         .map_err(|e| CertificateError::SignatureVerification(format!("HMAC computation failed: {}", e)))?;
-    log::info!("         HMAC output (32 bytes, hex): {}", hex::encode(&hmac_output));
 
     // Step 3: Convert HMAC to scalar
     log::info!("         Step 3: Convert HMAC to scalar (for BRC-42 child key derivation)");
     use secp256k1::SecretKey;
-    let hmac_secret = SecretKey::from_slice(&hmac_output)
+    let _hmac_secret = SecretKey::from_slice(&hmac_output)
         .map_err(|e| CertificateError::SignatureVerification(format!("Invalid HMAC for scalar: {}", e)))?;
-    log::info!("         HMAC scalar (hex): {}", hex::encode(&hmac_secret.secret_bytes()));
 
     // Step 4 & 5: Compute child public key = certifier_pubkey + (HMAC_scalar * G)
     log::info!("         Step 4-5: Compute child_pubkey = certifier_pubkey + (HMAC_scalar * G)");

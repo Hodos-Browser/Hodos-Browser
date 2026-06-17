@@ -437,7 +437,6 @@ nlohmann::json WalletService::createWallet() {
 
     if (response.contains("success") && response["success"].get<bool>()) {
         std::cout << "✅ Wallet created successfully" << std::endl;
-        std::cout << "🔑 Mnemonic: " << response["mnemonic"].get<std::string>() << std::endl;
         return response;
     } else {
         std::cerr << "❌ Failed to create wallet from Rust wallet" << std::endl;

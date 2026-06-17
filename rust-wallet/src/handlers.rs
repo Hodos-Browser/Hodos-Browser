@@ -7384,7 +7384,6 @@ pub async fn sign_action(
 
         log::info!("   Public key length: {} bytes", pubkey_bytes.len());
         log::info!("   Public key: {}", hex::encode(&pubkey_bytes));
-        log::info!("   Private key (first 8 bytes): {}...", hex::encode(&private_key_bytes[..8]));
 
         // Detect script type from the locking script to choose signing format.
         // P2PK (PushDrop tokens): locking script starts with <33-byte pubkey push> OP_CHECKSIG

@@ -72,7 +72,6 @@ pub fn derive_symmetric_key(
 ) -> Result<Vec<u8>, Brc2Error> {
     log::info!("   🔐 BRC-2 derive_symmetric_key:");
     log::info!("      Invoice number: {}", invoice_number);
-    log::info!("      Sender private key (hex, first 16): {}", hex::encode(&sender_private_key[..16]));
     log::info!("      Recipient public key (hex): {}", hex::encode(recipient_public_key));
     // 1. Derive child public key for recipient
     let child_pubkey = brc42::derive_child_public_key(
@@ -108,9 +107,6 @@ pub fn derive_symmetric_key(
     let uncompressed = shared_point.serialize_uncompressed();
     let symmetric_key = uncompressed[1..33].to_vec();
 
-    log::info!("      Shared secret (hex, first 16): {}", hex::encode(&shared_secret[..16]));
-    log::info!("      Symmetric key (hex, first 16): {}", hex::encode(&symmetric_key[..16]));
-
     Ok(symmetric_key)
 }
 
@@ -145,9 +141,7 @@ pub fn encrypt_brc2(
 
     log::info!("   🔐 Custom AESGCM encryption:");
     log::info!("      Plaintext length: {} bytes", plaintext.len());
-    log::info!("      Plaintext (hex, first 32): {}", hex::encode(&plaintext[..plaintext.len().min(32)]));
     log::info!("      IV (hex): {}", hex::encode(&iv_bytes));
-    log::info!("      Key (hex, first 16): {}", hex::encode(&symmetric_key[..16]));
 
     let (ciphertext, auth_tag) = aesgcm_custom::aesgcm_custom(
         plaintext,
@@ -274,11 +268,8 @@ pub fn encrypt_certificate_field(
         &invoice_string,
     )?;
 
-    log::debug!("   BRC-2 encrypt_certificate_field: derived symmetric key (hex, first 16) = {}", hex::encode(&symmetric_key[..16]));
-
     // 3. Encrypt with AES-256-GCM
     log::info!("      Plaintext length: {} bytes", plaintext.len());
-    log::info!("      Derived symmetric key (hex, first 16): {}", hex::encode(&symmetric_key[..16]));
     let result = encrypt_brc2(plaintext, &symmetric_key)?;
     log::info!("      Ciphertext length: {} bytes", result.len());
     Ok(result)

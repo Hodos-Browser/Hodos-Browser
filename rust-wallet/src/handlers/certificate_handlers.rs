@@ -1461,7 +1461,6 @@ async fn acquire_certificate_issuance(
         drop(db);
 
         log::info!("   🔑 Key derivation:");
-        log::info!("      Our master privkey (first 8 bytes): {}", hex::encode(&our_master_privkey[..8]));
         log::info!("      Server identity pubkey: {}", hex::encode(&server_identity_bytes));
         log::info!("      Invoice number: {}", verify_invoice_number);
 
@@ -1724,10 +1723,6 @@ async fn acquire_certificate_issuance(
         let field_value_bytes = field_value_str.as_bytes();
 
         log::info!("   🔐 Field '{}' encryption details:", field_name_str);
-        log::info!("      Plaintext value: {} ({} bytes)", field_value_str, field_value_bytes.len());
-        log::info!("      Plaintext bytes (hex): {}", hex::encode(field_value_bytes));
-        log::info!("      Symmetric key (hex, full 32 bytes): {}", hex::encode(&field_symmetric_key));
-        log::info!("      Symmetric key (base64): {}", base64::engine::general_purpose::STANDARD.encode(&field_symmetric_key));
         log::info!("      ⚠️  NOTE: TypeScript SymmetricKey.toArray('be', 32) pads with leading zeros if needed");
         log::info!("      ⚠️  Our key is already 32 bytes, so no padding needed");
         let encrypted_field_value = match brc2::encrypt_brc2(field_value_bytes, &field_symmetric_key) {
@@ -1760,10 +1755,7 @@ async fn acquire_certificate_issuance(
         };
 
         log::info!("   🔐 Revelation key encryption for field '{}':", field_name_str);
-        log::info!("      Original symmetric key (32 bytes, hex): {}", hex::encode(&field_symmetric_key));
-        log::info!("      Revelation key after stripping leading zeros ({} bytes, hex): {}", revelation_key_bytes.len(), hex::encode(&revelation_key_bytes));
         log::info!("      ⚠️  TypeScript toArray() strips leading zeros - we must match this!");
-        log::info!("      Subject private key (hex, first 16): {}", hex::encode(&subject_private_key[..16]));
         log::info!("      Certifier public key (for encryption, hex): {}", hex::encode(encryption_key));
         log::info!("      Field name: {}", field_name_str);
         log::info!("      Serial number: None (master keyring)");
@@ -2277,11 +2269,9 @@ async fn acquire_certificate_issuance(
     log::info!("      Signature length: {} bytes", signature_der2.len());
     log::info!("      CSR JSON length: {} bytes", csr_json_string.len());
     log::info!("   🔐 BRC-42 Key Derivation for Signing:");
-    log::info!("      Our master private key (hex, first 16): {}", hex::encode(&master_privkey[..16]));
     log::info!("      Server identity key (counterparty, hex): {}", hex::encode(&server_identity_bytes));
     log::info!("      Invoice number: {}", csr_invoice_number_str);
     log::info!("      KeyID: {}", csr_key_id);
-    log::info!("      Derived child private key (hex, first 16): {}", hex::encode(&csr_child_private_key[..16]));
 
     // Verify we can derive the public key from our child private key
     let secp_test = Secp256k1::new();
