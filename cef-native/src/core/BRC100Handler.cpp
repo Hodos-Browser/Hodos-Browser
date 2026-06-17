@@ -33,8 +33,6 @@ bool BRC100Handler::Execute(const CefString& name,
         return HandleGenerateChallenge(object, arguments, retval, exception);
     } else if (methodName == "authenticate") {
         return HandleAuthenticate(object, arguments, retval, exception);
-    } else if (methodName == "deriveType42Keys") {
-        return HandleDeriveType42Keys(object, arguments, retval, exception);
     } else if (methodName == "createSession") {
         return HandleCreateSession(object, arguments, retval, exception);
     } else if (methodName == "validateSession") {
@@ -83,7 +81,6 @@ void BRC100Handler::RegisterBRC100API(CefRefPtr<CefV8Context> context) {
     // Authentication methods
     brc100->SetValue("generateChallenge", CefV8Value::CreateFunction("generateChallenge", handler), V8_PROPERTY_ATTRIBUTE_NONE);
     brc100->SetValue("authenticate", CefV8Value::CreateFunction("authenticate", handler), V8_PROPERTY_ATTRIBUTE_NONE);
-    brc100->SetValue("deriveType42Keys", CefV8Value::CreateFunction("deriveType42Keys", handler), V8_PROPERTY_ATTRIBUTE_NONE);
 
     // Session methods
     brc100->SetValue("createSession", CefV8Value::CreateFunction("createSession", handler), V8_PROPERTY_ATTRIBUTE_NONE);
@@ -211,23 +208,6 @@ bool BRC100Handler::HandleAuthenticate(CefRefPtr<CefV8Value> object, const CefV8
         return true;
     } catch (const std::exception& e) {
         exception = "Authentication failed: " + std::string(e.what());
-        return false;
-    }
-}
-
-bool BRC100Handler::HandleDeriveType42Keys(CefRefPtr<CefV8Value> object, const CefV8ValueList& arguments, CefRefPtr<CefV8Value>& retval, CefString& exception) {
-    if (arguments.size() != 1 || !arguments[0]->IsObject()) {
-        exception = "Invalid arguments for deriveType42Keys";
-        return false;
-    }
-
-    try {
-        auto keyData = V8ValueToJSON(arguments[0]);
-        auto response = bridge_->deriveType42Keys(keyData);
-        retval = JSONToV8Value(response);
-        return true;
-    } catch (const std::exception& e) {
-        exception = "Type-42 key derivation failed: " + std::string(e.what());
         return false;
     }
 }

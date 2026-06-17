@@ -234,14 +234,6 @@ export class BRC100Bridge {
     return this.callNativeMethod('authenticate', request);
   }
 
-  async deriveType42Keys(keyData: {
-    sessionId: string;
-    purpose: string;
-    timestamp: string;
-  }): Promise<APIResponse<{ publicKey: string; privateKey: string }>> {
-    return this.callNativeMethod('deriveType42Keys', keyData);
-  }
-
   // Session Management
   async createSession(sessionData: Partial<SessionData>): Promise<APIResponse<SessionData>> {
     return this.callNativeMethod('createSession', sessionData);

@@ -32,7 +32,6 @@ public:
     // Authentication
     nlohmann::json generateChallenge(const nlohmann::json& challengeData);
     nlohmann::json authenticate(const nlohmann::json& authData);
-    nlohmann::json deriveType42Keys(const nlohmann::json& keyData);
 
     // Session Management
     nlohmann::json createSession(const nlohmann::json& sessionData);

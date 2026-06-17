@@ -289,10 +289,6 @@ nlohmann::json BRC100Bridge::authenticate(const nlohmann::json& authData) {
     return makeHttpRequest("POST", "/brc100/auth/authenticate", authData);
 }
 
-nlohmann::json BRC100Bridge::deriveType42Keys(const nlohmann::json& keyData) {
-    return makeHttpRequest("POST", "/brc100/auth/type42", keyData);
-}
-
 // Session Management
 nlohmann::json BRC100Bridge::createSession(const nlohmann::json& sessionData) {
     return makeHttpRequest("POST", "/brc100/session/create", sessionData);

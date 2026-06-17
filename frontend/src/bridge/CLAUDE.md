@@ -85,7 +85,7 @@ const bridge = BRC100Bridge.getInstance();
 |----------|---------|
 | **Status** | `status()`, `isAvailable()` |
 | **Identity** | `generateIdentity()`, `validateIdentity()`, `selectiveDisclosure()` |
-| **Auth** | `generateChallenge()`, `authenticate()`, `deriveType42Keys()` |
+| **Auth** | `generateChallenge()`, `authenticate()` |
 | **Sessions** | `createSession()`, `validateSession()`, `revokeSession()` |
 | **BEEF** | `createBEEF()`, `verifyBEEF()`, `broadcastBEEF()` |
 | **SPV** | `verifySPV()`, `createSPVProof()` |
