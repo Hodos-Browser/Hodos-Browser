@@ -23,6 +23,11 @@ name: test
 on:
   workflow_call:
   workflow_dispatch:
+  # Temporary: run on push to the active sprint branch so the pipeline gets
+  # continuous smoke feedback now (workflow_dispatch only shows in the UI for
+  # workflows on the default branch). Remove once ci.yml (pull_request gate) lands.
+  push:
+    branches: [0.4.0]
 
 permissions:
   contents: read
