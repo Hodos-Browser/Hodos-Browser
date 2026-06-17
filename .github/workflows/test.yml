@@ -1,0 +1,134 @@
+# Reusable test workflow for Hodos Browser CI (Track E).
+#
+# Triggered two ways:
+#   - workflow_call     : reused by ci.yml (pull_request gate) and release.yml.
+#   - workflow_dispatch : manual run from the Actions tab. USE THIS TO SMOKE-TEST
+#                         the pipeline before wiring it as a required check.
+#                         (See development-docs/DevOps-CICD/TESTING.md.)
+#
+# STATUS — Track E first cut. The proven-green layers GATE; the rest are staged:
+#   BLOCKING (real gates):     rust tests, adblock tests, secret-log gate (F8).
+#   INFORMATIONAL (continue-on-error until their own cleanup chunk):
+#                              clippy (codebase has ~198 pre-existing warnings),
+#                              cargo-audit, npm-audit.
+#   TODO (own follow-up Track E steps — commented skeletons at the bottom):
+#                              cpp ctest matrix, frontend Vitest + Playwright, coverage.
+#
+# NOTE: the Rust tests are verified green locally on Windows; this is their FIRST
+# run on Linux. Expect the smoke run to surface any missing apt deps / Linux-only
+# test quirks — that's normal (fix-and-re-push loop).
+
+name: test
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust — rust-wallet (test + clippy)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust-wallet
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config libsqlite3-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-wallet
+      # BLOCKING — full suite: lib + integration tiers + doctests. Verified green
+      # locally (17 targets ok; 2 network tests #[ignore]d).
+      - name: cargo test
+        run: cargo test --release
+      # INFORMATIONAL — tighten to `-D warnings` after a dedicated warnings-cleanup chunk.
+      - name: cargo clippy
+        run: cargo clippy --release --all-targets
+        continue-on-error: true
+
+  adblock:
+    name: Rust — adblock-engine (test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: adblock-engine
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: adblock-engine
+      # BLOCKING — verified green locally (23 tests).
+      - name: cargo test
+        run: cargo test --release
+
+  security:
+    name: Security — secret-log gate (F8) + audits
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # BLOCKING — F8: no private keys / seeds / mnemonics in any log/print sink.
+      # Patterns validated to return 0 matches on a clean tree (post-Wave-0).
+      # Catches: a logging sink that hex/base64-encodes a secret-named variable (Rust),
+      # or a cout/printf that prints a secret JSON field or variable (C++).
+      # Tuning notes live in development-docs/DevOps-CICD/TESTING.md.
+      - name: Secret-log gate (F8)
+        run: |
+          set -uo pipefail
+          rust_hits=$(grep -rEn --include='*.rs' \
+            '(log::(info|debug|trace|warn)!|println!|eprintln!|print!)\(.*(hex::encode|base64|\.encode)\(&?[A-Za-z0-9_]*(priv|secret|symmetric|mnemonic|seed|wif|xpriv|revelation|hmac_output|hmac_secret)' \
+            rust-wallet/src adblock-engine/src | grep -vE '^[^:]*:[0-9]+:[[:space:]]*//' || true)
+          cpp_hits=$(grep -rEn --include='*.cpp' --include='*.h' --include='*.mm' \
+            '(std::cout|std::cerr|printf|fprintf|OutputDebugString)[^;]*(\["(mnemonic|privateKey|private_key|seed)"\]|<<[^;]*\b(mnemonic|privateKey)\b)' \
+            cef-native/src cef-native/include | grep -vE '^[^:]*:[0-9]+:[[:space:]]*//' || true)
+          if [ -n "$rust_hits$cpp_hits" ]; then
+            echo "::error::Secret material appears in a log/print sink (F8 gate):"
+            echo "$rust_hits"
+            echo "$cpp_hits"
+            exit 1
+          fi
+          echo "secret-log gate: clean ✓"
+      # INFORMATIONAL — flip to blocking after a dependency-advisory triage chunk.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: cargo-audit
+        continue-on-error: true
+        run: |
+          (cd rust-wallet && cargo audit) || true
+          (cd adblock-engine && cargo audit) || true
+      - name: npm-audit (frontend)
+        continue-on-error: true
+        run: cd frontend && npm audit --audit-level=high || true
+
+  # ===========================================================================
+  # STAGED Track E jobs — each is its own follow-up step (see TESTING.md).
+  # Left commented so this workflow stays GREEN until each layer is built out.
+  #
+  # cpp:
+  #   strategy: { matrix: { os: [windows-latest, macos-latest] } }
+  #   runs-on: ${{ matrix.os }}
+  #   - cmake configure with -DHODOS_BUILD_TESTS=ON (needs CEF binaries + vcpkg)
+  #   - cmake --build + ctest
+  #   - Pin GoogleTest by tag + actions/cache (NOT FetchContent-at-CI).
+  #
+  # frontend:
+  #   runs-on: ubuntu-latest
+  #   - npm ci
+  #   - npm run test:unit      # Vitest — to be added (hooks + validators first)
+  #   - npx playwright install --with-deps && npx playwright test   # e2e already exist
+  #
+  # coverage:
+  #   runs-on: ubuntu-latest
+  #   - cargo-llvm-cov (NOT tarpaulin); thresholds crypto>=90, certificate>=80, general>=60
+  #   - publish to $GITHUB_STEP_SUMMARY
+  # ===========================================================================
