@@ -68,6 +68,7 @@ WAVE 1 (parallel tracks — run concurrently)
 CEF LONG-POLE (start EARLY, parallel with Wave 1; mostly sequential within)
   A1 patch toolchain (greenfield)
      └─> CEF bump → stable M149 (Q16; closes M136 zero-patch gap + targets B1's patch base)
+            ├─ build-config/file-manifest DRIFT AUDIT (CEF_BUILD_RUNBOOK Step 5.5; automate via A1)
             └─> FEAT-B1 Blink farbling
                    └─> B1-VERIFY (CreepJS/browserleaks + cross-session login, Win first)
                           └─> remove JS-injection farbling

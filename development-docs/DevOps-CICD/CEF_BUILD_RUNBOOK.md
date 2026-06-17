@@ -233,6 +233,26 @@ engine and **annotate** what needs updating:
 - C++: vcpkg deps (nlohmann-json, sqlite3, OpenSSL), quirc.
 - Record a per-bump "dependencies touched / deferred" table (the verification doc captures this).
 
+### Step 5.5 — Build-config & file-manifest drift audit (CEF-bump only)
+A successful compile does **NOT** prove the build is correct after a bump. Compile-time CEF API changes
+fail loudly; **silent config drift survives a green build.** On every CEF/Chromium bump, audit OUR build
+glue (not just deps) for drift:
+- **Runtime file manifest** — diff the new CEF dist's file list (DLLs, `.bin`, `.pak`, `resources/`,
+  `locales/`) against the hardcoded copy-lists in `cef-native/CMakeLists.txt` ("Copying CEF binaries"
+  step) **and** the macOS framework-embed list in the mac build script. A new/renamed/removed file we
+  don't copy = green build, runtime crash or missing feature. Cross-check the **Output file checklist**
+  below.
+- **GN args / `args.gn`** — diff our pinned `GN_DEFINES` against the new CEF's defaults; confirm the
+  proprietary-codec flag (`ffmpeg_branding=Chrome`) and other required overrides still take effect (a
+  flipped default ships a green build with no codecs).
+- **cmake / toolchain** — CEF version macro, sandbox/linking changes, vcpkg ABI, wrapper rebuild
+  (`Unsupported CEF version` ⇒ delete `CMakeCache`, rebuild — see Lessons).
+- **Patches** — re-apply `cef/patch/` (farbling) and report any fuzz/failures (the A1 patch toolchain
+  owns this).
+- **macOS parity** — `Info.plist` CEF framework version, helper-app embedding, entitlements.
+Emit a **human-review diff report** (manifest + args diffs are scriptable; cmake changes need judgment —
+never auto-apply). Until scripted (see Open TODOs), run this as a checklist on every bump.
+
 ### Step 6 — Widevine / premium DRM (separate track)
 - Basic DRM (CDM auto-download) works on the codec build already: `enable_widevine=true` is set
   automatically by CEF's build system (no manual flag). The actual `widevinecdm.dll` is **NOT** in the
@@ -300,3 +320,7 @@ attribution to the About page; consult legal if Hodos grows significantly.
       third-party REAPI backend** (EngFlow / BuildBuddy / NativeLink) for distributed builds.
 - [ ] B1: farbling patch set + `patch.cfg` integration (own design session — `../0.4.0/B1-farbling-in-source.md`).
 - [ ] Decide whether premium DRM (VMP) is a product goal (own mini-spike).
+- [ ] Automate the **Step 5.5 build-config / file-manifest drift audit**: a CEF-version-pin–triggered
+      `cef-bump-audit` script that diffs the new CEF dist manifest vs our cmake/mac copy-lists +
+      `args.gn`, re-applies `cef/patch/` and reports fuzz, emitting a human-review diff. Build it
+      alongside the A1 patch toolchain (`../0.4.0/B1-farbling-in-source.md` / CEF track).
