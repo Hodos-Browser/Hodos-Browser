@@ -52,7 +52,7 @@ impl std::fmt::Display for SecurityLevel {
 ///
 /// ## Example
 /// ```
-/// use wallet_core::keys::brc43::{InvoiceNumber, SecurityLevel};
+/// use hodos_wallet::crypto::brc43::{InvoiceNumber, SecurityLevel};
 ///
 /// let invoice = InvoiceNumber {
 ///     security_level: SecurityLevel::NoPermissions,
@@ -145,7 +145,7 @@ impl std::fmt::Display for InvoiceNumber {
 ///
 /// ## Example
 /// ```
-/// use wallet_core::keys::brc43::normalize_protocol_id;
+/// use hodos_wallet::crypto::brc43::normalize_protocol_id;
 ///
 /// let normalized = normalize_protocol_id("  Hello   World  ").unwrap();
 /// assert_eq!(normalized, "hello world");

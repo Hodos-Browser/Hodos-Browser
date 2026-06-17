@@ -33,6 +33,7 @@ use super::models::Basket;
 ///
 /// # Examples
 /// ```
+/// use hodos_wallet::database::basket_repo::validate_and_normalize_basket_name;
 /// assert_eq!(validate_and_normalize_basket_name("Game Items").unwrap(), "game items");
 /// assert!(validate_and_normalize_basket_name("default").is_err());
 /// assert!(validate_and_normalize_basket_name("p mytoken").is_err());

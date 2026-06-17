@@ -1195,7 +1195,7 @@ fn t7_09_caches() {
 
     // PriceCache: new → get_cached returns None
     check!("cache/01", "price-cache-new-is-empty", {
-        let cache = PriceCache::new();
+        let cache = PriceCache::new(None);
         let price = cache.get_cached();
         if price.is_some() {
             return Err(format!("new cache should be empty, got {:?}", price));
@@ -1205,7 +1205,7 @@ fn t7_09_caches() {
 
     // PriceCache: get_stale also None on new
     check!("cache/02", "price-cache-stale-none-on-new", {
-        let cache = PriceCache::new();
+        let cache = PriceCache::new(None);
         let stale = cache.get_stale();
         if stale.is_some() {
             return Err(format!("new cache stale should be None, got {:?}", stale));

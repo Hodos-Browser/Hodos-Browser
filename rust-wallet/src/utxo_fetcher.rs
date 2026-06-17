@@ -480,6 +480,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore] // Network test — hits WhatsOnChain. Run with `cargo test -- --ignored`.
     async fn test_fetch_utxos_nonexistent_address() {
         // Test address with no UTXOs (Satoshi's genesis address)
         let result = fetch_utxos_for_address("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", 0).await;

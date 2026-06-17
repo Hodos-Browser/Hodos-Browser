@@ -1642,7 +1642,7 @@ fn test_recovery_misc(r: &mut TestResults) {
     // rec/10 — PriceCache: new returns None
     check!(r, "rec/10 price-cache-empty", {
         use hodos_wallet::price_cache::PriceCache;
-        let cache = PriceCache::new();
+        let cache = PriceCache::new(None);
         if cache.get_cached().is_some() {
             return Err("New PriceCache should return None for get_cached".into());
         }

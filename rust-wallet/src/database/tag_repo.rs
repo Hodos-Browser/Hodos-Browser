@@ -30,6 +30,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 ///
 /// # Examples
 /// ```
+/// use hodos_wallet::database::tag_repo::validate_and_normalize_tag;
 /// assert_eq!(validate_and_normalize_tag("Weapon").unwrap(), "weapon");
 /// assert_eq!(validate_and_normalize_tag("  RARE  ").unwrap(), "rare");
 /// assert!(validate_and_normalize_tag("").is_err());

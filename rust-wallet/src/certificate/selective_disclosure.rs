@@ -205,6 +205,11 @@ mod tests {
             std::collections::HashMap::new(),
         );
 
+        // Seed the default user (id=1) — certificates.user_id FK requires it.
+        // Production seeds this at wallet creation; the test fixture must too.
+        use crate::database::user_repo::UserRepository;
+        UserRepository::new(&conn).create(&hex::encode(&subject_public_key_bytes)).unwrap();
+
         // Insert certificate into database
         use crate::database::certificate_repo::CertificateRepository;
         let cert_repo = CertificateRepository::new(&conn);

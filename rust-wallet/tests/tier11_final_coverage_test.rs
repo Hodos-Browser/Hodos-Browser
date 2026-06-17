@@ -418,14 +418,14 @@ fn t11_05_domain_permission() {
 
     check!("domain/04 defaults-spending-limits", {
         let dp = DomainPermission::defaults(1, "shop.com");
-        if dp.per_tx_limit_cents != 10 {
-            return Err(format!("per_tx: {} != 10", dp.per_tx_limit_cents));
+        if dp.per_tx_limit_cents != 100 {
+            return Err(format!("per_tx: {} != 100", dp.per_tx_limit_cents));
         }
-        if dp.per_session_limit_cents != 300 {
-            return Err(format!("per_session: {} != 300", dp.per_session_limit_cents));
+        if dp.per_session_limit_cents != 1000 {
+            return Err(format!("per_session: {} != 1000", dp.per_session_limit_cents));
         }
-        if dp.rate_limit_per_min != 10 {
-            return Err(format!("rate_limit: {} != 10", dp.rate_limit_per_min));
+        if dp.rate_limit_per_min != 30 {
+            return Err(format!("rate_limit: {} != 30", dp.rate_limit_per_min));
         }
         Ok(())
     });
@@ -465,7 +465,7 @@ fn t11_06_price_cache_brc43() {
     eprintln!("\n[6/7] PriceCache Default + Brc43 edges");
 
     check!("misc/01 price-cache-default-impl", {
-        let pc = PriceCache::default();
+        let pc = PriceCache::new(None);
         // Default should behave same as new()
         if pc.get_cached().is_some() {
             return Err("default cache should be empty".into());
