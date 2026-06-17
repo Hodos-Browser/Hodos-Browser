@@ -82,6 +82,7 @@ WAVE 2 (gated)
 SEPARATE TRACK (own kickoff)
   └─ Broadcast/Explorer: VERIFICATION REVIEW FIRST (not blind) → fresh TAAL key → implement + Arcade
        ⏰ TAAL ARC key re-check trigger lives here
+       🕹 Live Arcade v2 endpoints found (2026-06-17 Slack) + batch=NON-atomic contract → see BROADCAST_AND_EXPLORER_REVIEW "Live Arcade endpoints + batch semantics"
 
 ══════════════ CONVERGENCE GATE (synchronous) ══════════════
   ALL of the above green → run the WHOLE thing through the NEW pipeline

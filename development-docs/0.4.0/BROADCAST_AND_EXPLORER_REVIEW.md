@@ -151,10 +151,24 @@ in `services/call_class.rs` (`IndexerSync` 8s / `IndexerAsync` 15s / `IndexerBul
 - **Fix 3 (ancestry):** we already send ancestry when unproven → **likely done.** VERIFY it's attached on EVERY broadcast path.
 - **Fix 2 (poll for durable status) & Fix 4 (401/403 → provider-down failover):** verify against current code; Fix 4 matters because the hardcoded TAAL key is likely expired.
 
-**ARCADE — ADD THIS SPRINT (0.4.0).** Owner decision: Arcade should be live + growing; add it as a provider, **and make it PRIMARY if it tests well**, keeping current ARC (GorillaPool) as fallback. Notes: Arcade = Arc-*compatible* (same status enum/response — NOT more info), backend differs (P2P-first, Teranode-only) so it may give a **fresher `SEEN_ON_NETWORK`**; wire path is **`/tx`** not `/v1/tx`. **OPEN: find a live public Arcade endpoint** (from `bsv-blockchain/arcade` + provider announcements) — not confirmed yet.
+**ARCADE — ADD THIS SPRINT (0.4.0).** Owner decision: Arcade should be live + growing; add it as a provider, **and make it PRIMARY if it tests well**, keeping current ARC (GorillaPool) as fallback. Notes: Arcade = Arc-*compatible* (same status enum/response — NOT more info), backend differs (P2P-first, Teranode-only) so it may give a **fresher `SEEN_ON_NETWORK`**; wire path is **`/tx`** not `/v1/tx`. **✅ Live public Arcade endpoints FOUND** (2026-06-17 BSV Association Slack — see "Live Arcade endpoints + batch semantics" below). Still probe them + confirm which network before integrating.
 
 **TAAL — ⏰ REMINDER:** when we reach this work, re-check the TAAL ARC API for updates (keyless/metered tier?) AND **get a new key** (current one likely expired). Owner thinks it still needs a key — **just test it** (probe TAAL `/v1/tx` keyless / fetch docs.taal.com/arc) before deciding.
 
 **Bitails + WoC broadcast fallbacks — add CAUTIOUSLY.** We've had issues with these before (Bitails 500-poisoning → demoted on reads). Adding them as `postBeef` *broadcast* fallbacks is a different path, but **verify Bitails BEEF-broadcast support** and don't reintroduce the read problems.
 
-**→ A follow-up verification review / light deep-research is required before implementing:** (1) find live Arcade endpoint(s); (2) confirm TAAL keyless-vs-key; (3) source-verify our `arc_status`/ancestry/poll behavior; (4) confirm Bitails BEEF-broadcast. Then implement only the genuine gaps.
+**→ A follow-up verification review / light deep-research is required before implementing:** (1) **✅ live Arcade endpoint(s) found** (below — still probe them); (2) confirm TAAL keyless-vs-key; (3) source-verify our `arc_status`/ancestry/poll behavior; (4) confirm Bitails BEEF-broadcast. Then implement only the genuine gaps.
+
+### Live Arcade endpoints + batch semantics (BSV Association Slack, 2026-06-17 — Deggen / NotSneakyFox)
+
+**✅ Live public Arcade v2 endpoints** (answers follow-up (1); probe before integrating — treat as moving targets):
+- `https://arcade-v2-us-1.bsvblockchain.tech/` — mainnet (US-1); **the only one currently serving an HTTP landing/docs page** (others may be API-only but functional).
+- `https://arcade-v2-ttn-us-1.bsvblockchain.tech/` — TTN (Teratestnet).
+- `https://arcade-v2-testnet-us-1.bsvblockchain.tech/` — testnet.
+> Operator (Deggen): "always updating these to latest code, so may be unstable." Confirm each network + probe `/tx`-shaped paths (NOT ARC's `/v1/tx`).
+
+**Batch broadcast is NOT atomic across txs** (matters for any batched/chained broadcast design):
+- A validation failure → **HTTP 400** with the offending **txid + reason**; that tx is recorded **REJECTED**.
+- Failures caught **before** broadcast stop the batch. But a failure only discoverable **at the Teranode** (e.g. an input already spent) means **earlier txs in the batch may already be broadcast** — no rollback. **Atomicity is guaranteed only WITHIN a single tx.** Batches **do support chains** (dependent txs). → Design any batch path for **partial success**: track per-tx REJECTED, assume earlier txs may be live, and **pre-validate** before submitting.
+
+**No `X-SkipValidation` needed.** That ARC header existed only to bridge a **go-bt ↔ SV-node** validation mismatch. Post-**Chronicle**, SV Node / Teranode / Arcade all run the **same validation code**, so results are consistent — we just **pre-validate locally** (no skip header). Reinforces the "Arcade = ARC-compatible, same status enum" finding above.
