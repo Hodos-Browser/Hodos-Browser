@@ -12499,6 +12499,7 @@ pub struct BackupResponse {
 /// }
 pub async fn wallet_backup(
     state: web::Data<AppState>,
+    http_req: HttpRequest,
     req: web::Json<BackupRequest>,
 ) -> HttpResponse {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -12508,14 +12509,53 @@ pub async fn wallet_backup(
     log::info!("   Destination: {}", req.destination);
     log::info!("   Format: {:?}", req.format);
 
-    let format = req.format.as_deref().unwrap_or("file");
-    let dest_path = Path::new(&req.destination);
+    // F7 (audit): backup writes the entire wallet DB (encrypted mnemonic + every
+    // row) to disk — a user/wallet-internal operation only. No external site, even
+    // an approved dApp, may trigger it. External origins carry `X-Requesting-Domain`
+    // (injected by the C++ layer); reject them. Internal callers send no such header.
+    if let Some(domain) = http_req
+        .headers()
+        .get("X-Requesting-Domain")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+    {
+        log::warn!("   🛡️  Rejected external backup request from '{}'", domain);
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "success": false,
+            "error": "Backup is a local-only operation and cannot be triggered by a website"
+        }));
+    }
 
-    // Get database path
+    let format = req.format.as_deref().unwrap_or("file");
+
+    // Get database path (also locates the allow-listed backup directory).
     let db_path = {
         let db = state.database.lock().unwrap();
         db.path().to_path_buf()
     };
+
+    // F7: confine the destination to `<data_root>/backups/` and reject path
+    // traversal / arbitrary absolute paths — BEFORE any directory creation or copy.
+    let allowed_root = match crate::backup::backups_dir_for_db(&db_path) {
+        Some(root) => root,
+        None => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": "Could not resolve backup directory"
+            }));
+        }
+    };
+    let dest_pathbuf = match crate::backup::validate_backup_path(Path::new(&req.destination), &allowed_root) {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("   🛡️  Rejected backup destination '{}': {}", req.destination, e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "success": false,
+                "error": e
+            }));
+        }
+    };
+    let dest_path = dest_pathbuf.as_path();
 
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -12534,7 +12574,7 @@ pub async fn wallet_backup(
 
                     HttpResponse::Ok().json(BackupResponse {
                         success: true,
-                        backup_path: req.destination.clone(),
+                        backup_path: dest_path.display().to_string(),
                         size_bytes,
                         timestamp,
                         format: "file".to_string(),
@@ -12561,7 +12601,7 @@ pub async fn wallet_backup(
 
                     HttpResponse::Ok().json(BackupResponse {
                         success: true,
-                        backup_path: req.destination.clone(),
+                        backup_path: dest_path.display().to_string(),
                         size_bytes,
                         timestamp,
                         format: "json".to_string(),
@@ -14482,6 +14522,7 @@ async fn refetch_stripped_data(
 /// }
 pub async fn wallet_restore(
     state: web::Data<AppState>,
+    http_req: HttpRequest,
     req: web::Json<RestoreRequest>,
 ) -> HttpResponse {
     use std::path::Path;
@@ -14498,7 +14539,50 @@ pub async fn wallet_restore(
         }));
     }
 
-    let backup_path = Path::new(&req.backup_path);
+    // F7 (audit): restore OVERWRITES the live wallet DB from a caller-supplied
+    // path — user/wallet-internal only, same as backup. Reject external origins
+    // (they carry `X-Requesting-Domain`, injected by the C++ layer).
+    if let Some(domain) = http_req
+        .headers()
+        .get("X-Requesting-Domain")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+    {
+        log::warn!("   🛡️  Rejected external restore request from '{}'", domain);
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "success": false,
+            "error": "Restore is a local-only operation and cannot be triggered by a website"
+        }));
+    }
+
+    // Get current database path (also locates the allow-listed backup directory).
+    let db_path = {
+        let db = state.database.lock().unwrap();
+        db.path().to_path_buf()
+    };
+
+    // F7: the restore source must live inside `<data_root>/backups/` and be free
+    // of path traversal — validate BEFORE any filesystem read.
+    let allowed_root = match crate::backup::backups_dir_for_db(&db_path) {
+        Some(root) => root,
+        None => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": "Could not resolve backup directory"
+            }));
+        }
+    };
+    let backup_pathbuf = match crate::backup::validate_backup_path(Path::new(&req.backup_path), &allowed_root) {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("   🛡️  Rejected restore source '{}': {}", req.backup_path, e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "success": false,
+                "error": e
+            }));
+        }
+    };
+    let backup_path = backup_pathbuf.as_path();
 
     // Verify backup exists and is valid
     match crate::backup::verify_backup(backup_path) {
@@ -14520,12 +14604,6 @@ pub async fn wallet_restore(
             }));
         }
     }
-
-    // Get current database path
-    let db_path = {
-        let db = state.database.lock().unwrap();
-        db.path().to_path_buf()
-    };
 
     // Create backup of current database before restore (safety measure)
     let safety_backup_path = db_path.with_extension("db.backup");

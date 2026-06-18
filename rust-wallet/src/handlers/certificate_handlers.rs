@@ -1080,6 +1080,17 @@ async fn acquire_certificate_issuance(
         }
     };
 
+    // F9 (audit): `fields` is later iterated as an object
+    // (`fields.as_object().unwrap()` at the masterKeyring step). A non-object
+    // value (array / string / number / bool) from a malformed request body would
+    // panic the handler. Reject early with 400 instead.
+    if !fields.is_object() {
+        log::warn!("   ⚠️  'fields' must be a JSON object");
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "fields must be a JSON object"
+        }));
+    }
+
     // Get subject's public key (wallet's identity key)
     let db = state.database.lock().unwrap();
     let subject_public_key = match crate::database::get_master_public_key_from_db(&db) {

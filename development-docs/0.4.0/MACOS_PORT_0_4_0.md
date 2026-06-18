@@ -41,3 +41,9 @@
 - **Windows change:** `AddressHandler.cpp` (delete phantom `privateKey` cout + V8 `SetValue`), `simple_app.cpp:479` (legacy injected debug-JS), `frontend/src/types/address.d.ts:4` (type field).
 - **Mac equivalent:** **None required.** `AddressHandler.cpp` and `simple_app.cpp` are single cross-platform files; injected JS + TS type are platform-agnostic. No Mac-specific address-gen path.
 - **Risk / notes:** Zero functional impact — the `privateKey` field is never returned by Rust nor consumed by JS (phantom).
+
+### Wave 1 Track A — F7 backup/restore path-traversal + internal-only gate; F9 cert malformed-fields panic (2026-06-18, branch `0.4.0`)
+- **Windows change:** Pure Rust (platform-agnostic backend). `backup.rs` (`backups_dir_for_db`, `lexical_normalize_abs`, `validate_backup_path`), `handlers.rs` (`wallet_backup` + `wallet_restore`: internal-only `X-Requesting-Domain` gate + path validation before any FS touch), `handlers/certificate_handlers.rs` (`acquire_certificate_issuance` `is_object()` guard).
+- **Mac equivalent:** **None required.** Single cross-platform Rust source — no `_mac` variant. Path logic is cross-platform: the `\\?\`/UNC/`\\.\`-rejection test is `#[cfg(windows)]`; the POSIX accept/reject variants already run on the macOS leg.
+- **Risk / notes:** At Mac smoke, sanity-check `lexical_normalize_abs`/`validate_backup_path` against a real macOS data path (`~/Library/Application Support/HodosBrowser/backups`) — the unit tests cover the POSIX shape but confirm `data_root()` resolution end-to-end. No Mac code to port.
+- **Future (deferred, not built):** the user-facing "copy the file"/cloud-backup buttons must obtain the destination from the **OS save dialog driven by the C++ shell** (authenticated path), not an HTTP body — at which point the `backups/` confinement relaxes for that dialog-returned path. Mac side: native save dialog via `cef_browser_shell_mac.mm`.

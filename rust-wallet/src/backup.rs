@@ -9,7 +9,7 @@
 use crate::database::WalletDatabase;
 use rusqlite::{Connection, Result};
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf, Prefix};
 use log::info;
 use serde::{Serialize, Deserialize};
 
@@ -1639,6 +1639,86 @@ fn import_entities(conn: &Connection, payload: &BackupPayload, target_wallet_id:
 // Legacy file-based backup/restore (unchanged)
 // ============================================================================
 
+// ============================================================================
+// F7 (audit) — backup/restore path hardening
+//
+// File backup/restore write or overwrite the live wallet DB (encrypted mnemonic
+// + every row). The destination/source arrives as a caller-supplied string, so
+// it must be confined to a known directory and stripped of path-traversal tricks
+// before any filesystem touch. The future user-facing "save anywhere" flow will
+// obtain its path from the OS save dialog (driven by the trusted C++ shell), not
+// from an HTTP body — at which point this confinement is relaxed for that
+// authenticated path. Until then, all caller paths are confined here.
+// ============================================================================
+
+/// The only directory backups/restores may touch: `<data_root>/backups/`,
+/// derived from the live DB path (`<data_root>/wallet/wallet.db`).
+pub fn backups_dir_for_db(db_path: &Path) -> Option<PathBuf> {
+    // <data_root>/wallet/wallet.db → parent = <data_root>/wallet → <data_root>
+    db_path.parent()?.parent().map(|root| root.join("backups"))
+}
+
+/// Lexically normalize an absolute path (collapse `.`/`..`) WITHOUT touching the
+/// filesystem. Returns `None` for non-absolute paths, Windows verbatim/UNC/device
+/// prefixes, or a `..` that escapes above the root.
+///
+/// We deliberately avoid `std::fs::canonicalize` here: it requires the path to
+/// already exist (which a brand-new backup destination does not) and resolves
+/// symlinks via syscalls. Lexical normalization is existence-independent and is
+/// the correct primitive for validating a *to-be-created* path against an
+/// allow-listed root.
+pub fn lexical_normalize_abs(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::Prefix(prefix) => {
+                // Only a plain drive letter (`C:`) is allowed. Verbatim (`\\?\`),
+                // UNC (`\\server\share`) and device (`\\.\`) prefixes are rejected:
+                // they bypass Win32 normalization or are network/device paths.
+                if !matches!(prefix.kind(), Prefix::Disk(_)) {
+                    return None;
+                }
+                out.push(comp.as_os_str());
+            }
+            Component::RootDir => out.push(comp.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    return None; // `..` escaped above the root
+                }
+            }
+            Component::Normal(seg) => out.push(seg),
+        }
+    }
+    Some(out)
+}
+
+/// Validate a caller-supplied backup/restore path. It must lexically normalize to
+/// an absolute path confined within `allowed_root`. Returns the normalized path or
+/// a user-facing error string.
+///
+/// NOTE: this is a lexical (not symlink-resolving) confinement check. A symlink
+/// planted *inside* `allowed_root` could still redirect outside it, but planting
+/// one requires write access to the backup dir — i.e. the local machine is already
+/// compromised, in which case the on-disk DB is readable directly regardless.
+pub fn validate_backup_path(candidate: &Path, allowed_root: &Path) -> std::result::Result<PathBuf, String> {
+    let norm = lexical_normalize_abs(candidate).ok_or_else(|| {
+        "path must be absolute and free of '..' or special (UNC/verbatim/device) prefixes".to_string()
+    })?;
+    let root = lexical_normalize_abs(allowed_root)
+        .ok_or_else(|| "backup directory is misconfigured".to_string())?;
+    if !norm.starts_with(&root) {
+        return Err(format!(
+            "path must be inside the wallet backup directory ({})",
+            root.display()
+        ));
+    }
+    Ok(norm)
+}
+
 /// Backup the database using file copy
 pub fn backup_database_file(source_path: &Path, dest_path: &Path) -> Result<()> {
     info!("Starting database backup...");
@@ -1947,6 +2027,86 @@ pub fn export_to_json(db: &WalletDatabase, dest_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- F7 path-hardening tests -------------------------------------------
+
+    #[cfg(windows)]
+    const ROOT: &str = r"C:\Users\u\AppData\Roaming\HodosBrowser\backups";
+    #[cfg(not(windows))]
+    const ROOT: &str = "/home/u/.local/share/HodosBrowser/backups";
+
+    #[cfg(windows)]
+    fn p(s: &str) -> PathBuf { PathBuf::from(s.replace('/', r"\")) }
+    #[cfg(not(windows))]
+    fn p(s: &str) -> PathBuf { PathBuf::from(s) }
+
+    #[test]
+    fn backups_dir_is_data_root_sibling_of_wallet() {
+        // <data_root>/wallet/wallet.db → <data_root>/backups
+        let db = p("/home/u/.local/share/HodosBrowser/wallet/wallet.db");
+        let got = backups_dir_for_db(&db).unwrap();
+        assert!(got.ends_with("backups"));
+        assert_eq!(got.parent().unwrap().file_name().unwrap(), "HodosBrowser");
+    }
+
+    #[test]
+    fn valid_path_inside_root_is_accepted() {
+        let root = p(ROOT);
+        let cand = root.join("my_backup.db");
+        let got = validate_backup_path(&cand, &root).expect("should accept in-root path");
+        assert!(got.starts_with(&root));
+    }
+
+    #[test]
+    fn dotdot_traversal_back_into_root_is_normalized_and_accepted() {
+        // `<root>/sub/../ok.db` collapses to `<root>/ok.db` — still inside root.
+        let root = p(ROOT);
+        let cand = root.join("sub").join("..").join("ok.db");
+        let got = validate_backup_path(&cand, &root).expect("normalizes inside root");
+        assert_eq!(got, root.join("ok.db"));
+    }
+
+    #[test]
+    fn dotdot_escaping_root_is_rejected() {
+        let root = p(ROOT);
+        // `<root>/../../evil.db` climbs above the backups dir → reject.
+        let cand = root.join("..").join("..").join("evil.db");
+        assert!(validate_backup_path(&cand, &root).is_err());
+    }
+
+    #[test]
+    fn absolute_path_outside_root_is_rejected() {
+        // The key bypass the audit missed: an absolute path with NO `..`.
+        let root = p(ROOT);
+        #[cfg(windows)]
+        let cand = p(r"C:\Windows\System32\evil.db");
+        #[cfg(not(windows))]
+        let cand = p("/etc/cron.d/evil");
+        assert!(validate_backup_path(&cand, &root).is_err());
+    }
+
+    #[test]
+    fn relative_path_is_rejected() {
+        let root = p(ROOT);
+        assert!(validate_backup_path(Path::new("backup.db"), &root).is_err());
+        assert!(validate_backup_path(Path::new("./backup.db"), &root).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_verbatim_and_unc_prefixes_are_rejected() {
+        let root = p(ROOT);
+        // \\?\ verbatim bypasses Win32 normalization; \\server\share is a network path.
+        assert!(validate_backup_path(Path::new(r"\\?\C:\Users\u\AppData\Roaming\HodosBrowser\backups\x.db"), &root).is_err());
+        assert!(validate_backup_path(Path::new(r"\\server\share\x.db"), &root).is_err());
+    }
+
+    #[test]
+    fn lexical_normalize_rejects_non_absolute() {
+        assert!(lexical_normalize_abs(Path::new("relative/path")).is_none());
+    }
+
+    // ---- existing tests -----------------------------------------------------
 
     /// Test that the on-chain encryption key derivation is deterministic
     #[test]
