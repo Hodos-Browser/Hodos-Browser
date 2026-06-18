@@ -522,12 +522,12 @@ void ShutdownApplication() {
     }
     LOG_INFO("🔄 Both servers stopped.");
 
-    // Release profile lock early — all profile data (session, settings, wallet)
-    // is already saved and servers are stopped. Everything after this is CEF
-    // browser teardown which doesn't touch the profile directory. Releasing here
-    // lets a new instance acquire the lock immediately instead of waiting for
-    // the slow CefShutdown() to complete.
-    ReleaseProfileLock();
+    // R2/R3: the profile lock is intentionally NOT released here anymore. It used
+    // to be freed early (for fast relaunch), but the SQLite browser DBs stay open
+    // until much later (singleton destructors at process exit) — so a quick
+    // relaunch could win the freed lock and open a live-WAL DB (SQLITE_BUSY). The
+    // lock is now released in main()'s final cleanup, AFTER an explicit DB-close
+    // cascade. See the "final cleanup" block in main().
 
     // Step 1: Force-close ALL CEF browsers (tabs, overlays, header)
     // Using CloseBrowser(true) = force close, skips beforeunload handlers.
@@ -3740,7 +3740,22 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     LOG_INFO("Stopping adblock engine...");
     StopAdblockServer();
 
-    // Profile lock already released in ShutdownApplication() after servers stopped.
+    // R2/R3: deterministically checkpoint + close the SQLite browser DBs while the
+    // profile lock is STILL held, THEN release the lock. All browsers are closed
+    // (message loop exited above), so the DBs are quiescent. This closes the
+    // quick-restart SQLITE_BUSY race where a relaunch won the freed lock while the
+    // old process still held live-WAL DB handles. CloseDatabase() is idempotent, so
+    // the singleton destructors at process exit become no-ops. Done before
+    // Logger::Shutdown() so the close logs are captured, and before CefShutdown()
+    // (the DBs aren't CEF-managed) per the conventional teardown shape.
+    LOG_INFO("Closing browser databases (checkpoint + close)...");
+    HistoryManager::GetInstance().Shutdown();
+    BookmarkManager::GetInstance().Shutdown();
+    CookieBlockManager::GetInstance().Shutdown();
+    PaidContentCache::GetInstance().Shutdown();
+
+    LOG_INFO("Releasing profile lock...");
+    ReleaseProfileLock();
 
     Logger::Shutdown();
     CefShutdown();

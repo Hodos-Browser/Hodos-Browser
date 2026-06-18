@@ -78,3 +78,15 @@ Legend — disposition: **keep** / **modify** (refined by the adversarial review
 - **R2/R3/R8 touch the CEF shutdown lifecycle** (invariant #8). Each needs its own kickoff + explicit go before code.
 - **R5** changes registry-write timing — confirm the desired `lastUsedProfile` semantics before designing.
 - **R14** introduces a new C++-side domain→profile store — confirm that's wanted vs. out-of-scope for 0.4.0.
+
+---
+
+## Implementation status (2026-06-18)
+
+- **R1 (F5)** — ✅ landed (commit `92b4f24`): `IsValidProfileId` + `posix_spawn`.
+- **R2 + R3** — ✅ landed (this commit): explicit 4-manager DB `Shutdown()` cascade (checkpoint + close) in `main()` final cleanup **before** `ReleaseProfileLock()`; early `:530` release removed. Plus the gate-2 refinements: `PaidContentCache::CloseDatabase()` now checkpoints (parity), and macOS `StopServers()` uses an adaptive `waitpid` poll (early-exit; SIGTERM after a 5s wallet / 1.5s adblock cap) replacing the blind `usleep(1s)`.
+- **R9** — ✅ resolved as **already handled**: Windows `StopWalletServer` already does an adaptive `WaitForSingleObject(5000)` (early-exit), actix-web sets `SO_REUSEADDR` by default (so `:31301` rebind is fine), and `wallet.db` is WAL → quick restart self-recovers. The only real gap (macOS's blind 1s wait) was fixed under R2/R3. No standalone R9 work needed.
+- **R8 (macOS shutdown)** — ⏳ partially addressed (the `waitpid` reorder). The macOS **DB-close cascade is deferred** until the mac build wires up all 4 SQLite managers (link-risk + no live mac DB race today) — TODO documented in `MACOS_PORT_0_4_0.md`.
+- **R5 / R6 / R7 / R10–R14** — not yet implemented (tracked above).
+
+> Verification is **live** (shutdown ordering has no meaningful unit test) — see the `MACOS_PORT_0_4_0.md` test notes; validated in the next dev-run smoke session.

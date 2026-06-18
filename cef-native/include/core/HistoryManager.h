@@ -34,6 +34,11 @@ class HistoryManager {
 public:
     static HistoryManager& GetInstance();
 
+    // Explicit shutdown entrypoint (R2/R3 clean-shutdown): deterministically
+    // checkpoint + close the SQLite DB on the exit path, BEFORE the profile lock
+    // is released, so a quick relaunch never opens a live-WAL DB. Idempotent.
+    void Shutdown() { CloseDatabase(); }
+
     // Initialize with CEF user data path - creates our own History database
     bool Initialize(const std::string& user_data_path);
 

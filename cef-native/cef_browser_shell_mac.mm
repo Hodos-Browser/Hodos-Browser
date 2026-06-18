@@ -4476,32 +4476,33 @@ static void StopServers() {
         SendShutdownRequest(31302);
     }
 
-    // Wait briefly for graceful shutdown
-    usleep(1000000); // 1 second
-
-    // Force kill if still running
-    if (g_wallet_server_pid > 0) {
+    // R2/R3: adaptive wait for graceful exit instead of a blind 1s sleep. Poll for
+    // the process to exit, returning the instant it's reaped, up to a bounded cap;
+    // only force-kill (SIGTERM) if it overruns. Mirrors Windows StopWalletServer's
+    // WaitForSingleObject(5000) early-exit semantics. The wallet gets the full
+    // window (it owns the money DB + may be mid-broadcast); adblock a shorter one.
+    // (waitpid: >0 == reaped, <0 == already gone/ECHILD, 0 == still running.)
+    auto stopPid = [](pid_t& pid, int max_wait_ms, const char* name) {
+        if (pid <= 0) return;
         int status;
-        pid_t result = waitpid(g_wallet_server_pid, &status, WNOHANG);
-        if (result == 0) {
-            // Still running — send SIGTERM
-            kill(g_wallet_server_pid, SIGTERM);
-            usleep(500000);
-            waitpid(g_wallet_server_pid, &status, WNOHANG);
+        const int step_ms = 50;
+        for (int waited = 0; waited < max_wait_ms; waited += step_ms) {
+            if (waitpid(pid, &status, WNOHANG) != 0) {  // reaped or already gone
+                pid = -1;
+                return;
+            }
+            usleep(step_ms * 1000);
         }
-        g_wallet_server_pid = -1;
-    }
+        LOG_WARNING(std::string(name) + " did not exit gracefully — sending SIGTERM");
+        kill(pid, SIGTERM);
+        for (int i = 0; i < 10 && waitpid(pid, &status, WNOHANG) == 0; i++) {
+            usleep(50000);
+        }
+        pid = -1;
+    };
 
-    if (g_adblock_server_pid > 0) {
-        int status;
-        pid_t result = waitpid(g_adblock_server_pid, &status, WNOHANG);
-        if (result == 0) {
-            kill(g_adblock_server_pid, SIGTERM);
-            usleep(500000);
-            waitpid(g_adblock_server_pid, &status, WNOHANG);
-        }
-        g_adblock_server_pid = -1;
-    }
+    stopPid(g_wallet_server_pid, 5000, "Wallet server");   // money process — full window
+    stopPid(g_adblock_server_pid, 1500, "Adblock engine"); // shorter window
 }
 
 // ============================================================================

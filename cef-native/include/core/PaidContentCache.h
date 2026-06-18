@@ -30,6 +30,10 @@ class PaidContentCache {
 public:
     static PaidContentCache& GetInstance();
 
+    // Explicit shutdown entrypoint (R2/R3 clean-shutdown): checkpoint + close the
+    // SQLite DB on the exit path BEFORE the profile lock is released. Idempotent.
+    void Shutdown() { CloseDatabase(); }
+
     // Open / create the SQLite store at <profile>/paid_content_cache.db.
     // Safe to call multiple times; only the first call opens.
     bool Initialize(const std::string& user_data_path);

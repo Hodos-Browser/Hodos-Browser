@@ -116,6 +116,10 @@ bool PaidContentCache::OpenDatabase() {
 
 void PaidContentCache::CloseDatabase() {
     if (db_) {
+        // R2/R3: fold the WAL back into the main DB before closing so a quick
+        // relaunch doesn't open against a live -wal (parity with History/
+        // Bookmark/CookieBlock managers).
+        sqlite3_exec(db_, "PRAGMA wal_checkpoint(RESTART)", nullptr, nullptr, nullptr);
         sqlite3_close(db_);
         db_ = nullptr;
     }

@@ -33,6 +33,10 @@ class CookieBlockManager {
 public:
     static CookieBlockManager& GetInstance();
 
+    // Explicit shutdown entrypoint (R2/R3 clean-shutdown): checkpoint + close the
+    // SQLite DB on the exit path BEFORE the profile lock is released. Idempotent.
+    void Shutdown() { CloseDatabase(); }
+
     // Initialize with CEF user data path - creates cookie_blocks.db
     bool Initialize(const std::string& user_data_path);
 
