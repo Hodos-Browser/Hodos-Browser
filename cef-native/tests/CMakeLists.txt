@@ -33,6 +33,7 @@ FetchContent_MakeAvailable(googletest)
 add_executable(hodos_tests
     manifest_fetcher_test.cpp
     sensitive_cert_fields_test.cpp
+    js_string_escape_test.cpp           # F6 — JsStringEscape.h is header-only, no production .cpp
 
     # Production sources under test (built into the test exe directly).
     # (Phase 2.6-H removed permission_engine_test / permission_gate_test along

@@ -10,6 +10,7 @@
 #include "../../include/core/HistoryManager.h"
 #include "../../include/core/AddressHandler.h"
 #include "../../include/core/AppPaths.h"
+#include "../../include/core/JsStringEscape.h"  // F6: canonical escapeJsonForJs encoder
 
 #include "wrapper/cef_helpers.h"
 #include "include/cef_v8.h"
@@ -47,38 +48,9 @@ static std::unordered_set<std::string> s_fingerprintDisabledUrls;
 #define LOG_WARNING_RENDER(msg) Logger::Log(msg, 2, 1)
 #define LOG_ERROR_RENDER(msg) Logger::Log(msg, 3, 1)
 
-// Helper function to escape JSON string for safe insertion into JavaScript
-// Uses a simple approach: escape only the critical characters for single-quoted strings
-static std::string escapeJsonForJs(const std::string& json) {
-    std::string escaped;
-    escaped.reserve(json.length() * 2); // Reserve space for worst case
-
-    for (char c : json) {
-        switch (c) {
-            case '\\': escaped += "\\\\"; break;
-            case '\'': escaped += "\\'"; break;  // Critical for single-quoted strings
-            case '\n': escaped += "\\n"; break;
-            case '\r': escaped += "\\r"; break;
-            case '\t': escaped += "\\t"; break;
-            case '\0': escaped += "\\0"; break;
-            default:
-                // For most characters, just append them
-                // JSON should only contain valid UTF-8, so this should be safe
-                if (static_cast<unsigned char>(c) >= 32 || c == '\t' || c == '\n' || c == '\r') {
-                    escaped += c;
-                } else {
-                    // Escape other control characters as \xXX (snprintf avoids heap alloc — F7 perf fix)
-                    char buf[5];
-                    snprintf(buf, sizeof(buf), "\\x%02x",
-                             static_cast<unsigned int>(static_cast<unsigned char>(c)));
-                    escaped.append(buf, 4);
-                }
-                break;
-        }
-    }
-
-    return escaped;
-}
+// escapeJsonForJs() is the canonical JS-string-literal encoder — now defined in
+// include/core/JsStringEscape.h (F6: hardened + extracted so it can be unit-tested
+// without CEF, and so all injection sites share one correct implementation).
 
 // Handler for cefMessage.send() function
 class CefMessageSendHandler : public CefV8Handler {
@@ -933,18 +905,10 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
 
             LOG_DEBUG_RENDER("📑 Tab list response received, dispatching to React");
 
-            // Escape the JSON string for JavaScript
-            std::string escaped_json = tabListJson;
-            size_t pos = 0;
-            while ((pos = escaped_json.find("\\", pos)) != std::string::npos) {
-                escaped_json.replace(pos, 1, "\\\\");
-                pos += 2;
-            }
-            pos = 0;
-            while ((pos = escaped_json.find("\"", pos)) != std::string::npos) {
-                escaped_json.replace(pos, 1, "\\\"");
-                pos += 2;
-            }
+            // F6: route through the canonical encoder. The old ad-hoc escaper
+            // handled only `\` and `"` and MISSED `'` — an apostrophe in a tab
+            // title broke out of the single-quoted literal below.
+            std::string escaped_json = escapeJsonForJs(tabListJson);
 
             // Send message to React component
             std::string js = R"(
@@ -1258,11 +1222,11 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
                     data: {
                         type: 'brc100_auth_request',
                         payload: {
-                            domain: ')" + domain + R"(',
-                            method: ')" + method + R"(',
-                            endpoint: ')" + endpoint + R"(',
-                            body: ')" + body + R"(',
-                            notificationType: ')" + notifType + R"('
+                            domain: ')" + escapeJsonForJs(domain) + R"(',
+                            method: ')" + escapeJsonForJs(method) + R"(',
+                            endpoint: ')" + escapeJsonForJs(endpoint) + R"(',
+                            body: ')" + escapeJsonForJs(body) + R"(',
+                            notificationType: ')" + escapeJsonForJs(notifType) + R"('
                         }
                     }
                 }));
@@ -1857,7 +1821,7 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         LOG_DEBUG_RENDER("🔍 Omnibox select received in renderer: " + direction);
 
         std::string js = "window.dispatchEvent(new CustomEvent('omniboxSelect', "
-                         "{ detail: { direction: '" + direction + "' } }));";
+                         "{ detail: { direction: '" + escapeJsonForJs(direction) + "' } }));";
         frame->ExecuteJavaScript(js, frame->GetURL(), 0);
 
         LOG_DEBUG_RENDER("🔍 omniboxSelect event dispatched");
