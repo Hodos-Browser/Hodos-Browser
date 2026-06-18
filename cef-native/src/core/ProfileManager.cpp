@@ -14,6 +14,11 @@
 #include <mach-o/dyld.h>
 #include <unistd.h>
 #include <limits.h>
+#include <spawn.h>      // F5: posix_spawn (no shell)
+#include <sys/wait.h>   // F5: waitpid
+#include <cstring>      // strerror
+#include <cerrno>
+extern char** environ;  // pass the real environment to `open`
 #endif
 
 using json = nlohmann::json;
@@ -377,6 +382,13 @@ void ProfileManager::SetShowPickerOnStartup(bool show) {
 }
 
 bool ProfileManager::LaunchWithProfile(const std::string& profileId) {
+    // F5 (audit): reject any id that isn't a well-formed profile id BEFORE it
+    // reaches a process-launch boundary (or, on macOS, the shell). Cross-platform
+    // primary gate; the macOS branch below additionally avoids the shell entirely.
+    if (!IsValidProfileId(profileId)) {
+        std::cerr << "❌ Refusing to launch: invalid profile id" << std::endl;
+        return false;
+    }
 #ifdef _WIN32
     // Get current executable path
     wchar_t exePath[MAX_PATH];
@@ -431,17 +443,32 @@ bool ProfileManager::LaunchWithProfile(const std::string& profileId) {
         return false;
     }
 
-    // Use `open -n -a` to launch a new instance of the app bundle
-    std::string cmd = "/usr/bin/open -n -a \"" + appPath + "\" --args \"--profile=" + profileId + "\"";
-    std::cout << "🚀 Profile launch command: " << cmd << std::endl;
-    int ret = system(cmd.c_str());
-    if (ret == 0) {
-        std::cout << "🚀 Launched new instance with profile: " << profileId << std::endl;
-        return true;
-    } else {
-        std::cerr << "❌ Failed to launch new instance (exit code " << ret << ")" << std::endl;
+    // F5: launch via posix_spawn with an explicit argv array — NO shell, so the
+    // (already-validated) profileId cannot be interpreted as a command even if a
+    // future change weakened the validation. `open -n -a <app> --args <arg…>`.
+    std::string profileArg = "--profile=" + profileId;
+    const char* argv[] = {
+        "/usr/bin/open", "-n", "-a", appPath.c_str(),
+        "--args", profileArg.c_str(), nullptr
+    };
+    pid_t pid;
+    int spawn_rc = posix_spawn(&pid, "/usr/bin/open", nullptr, nullptr,
+                               const_cast<char* const*>(argv), environ);
+    if (spawn_rc != 0) {
+        std::cerr << "❌ Failed to spawn /usr/bin/open: " << strerror(spawn_rc) << std::endl;
         return false;
     }
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) {
+        std::cerr << "❌ waitpid failed for open: " << strerror(errno) << std::endl;
+        return false;
+    }
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        std::cout << "🚀 Launched new instance with profile: " << profileId << std::endl;
+        return true;
+    }
+    std::cerr << "❌ open did not exit cleanly (status " << status << ")" << std::endl;
+    return false;
 #else
     std::cerr << "❌ LaunchWithProfile not implemented for this platform" << std::endl;
     return false;

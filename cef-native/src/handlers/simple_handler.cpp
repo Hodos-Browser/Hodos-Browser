@@ -2911,8 +2911,14 @@ bool SimpleHandler::OnProcessMessageReceived(
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         if (args->GetSize() >= 1) {
             std::string id = args->GetString(0).ToString();
-            LOG_INFO_BROWSER("👤 Launching new instance with profile: " + id);
-            ProfileManager::GetInstance().LaunchWithProfile(id);
+            // F5 (audit): defense-in-depth — reject a malformed id at the IPC
+            // boundary before it reaches LaunchWithProfile (which also validates).
+            if (!ProfileManager::IsValidProfileId(id)) {
+                LOG_WARNING_BROWSER("👤 Rejected profiles_switch: invalid profile id");
+            } else {
+                LOG_INFO_BROWSER("👤 Launching new instance with profile: " + id);
+                ProfileManager::GetInstance().LaunchWithProfile(id);
+            }
         }
         return true;
     }

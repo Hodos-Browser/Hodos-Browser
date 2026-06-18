@@ -50,6 +50,25 @@ public:
     // Launch new instance with profile
     bool LaunchWithProfile(const std::string& profileId);
 
+    // F5 (audit): syntactic validation of a profile id. The id is generated
+    // internally ("Default", "Profile_N", legacy "Profile N") and is used BOTH
+    // as a directory name AND, historically, interpolated toward a process-launch
+    // argument. Allow only [A-Za-z0-9_ -]: that covers every generated shape
+    // (including the legacy space form) while excluding all shell metacharacters
+    // and path separators (no '.', '/', '\\', '"', '\'', ';', '$', backtick…),
+    // so a hostile id can neither traverse paths nor inject a command. Inline so
+    // it can be unit-tested without linking the CEF-heavy .cpp.
+    static bool IsValidProfileId(const std::string& id) {
+        if (id.empty() || id.size() > 64) return false;
+        for (unsigned char c : id) {
+            const bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                            (c >= '0' && c <= '9') ||
+                            c == '_' || c == ' ' || c == '-';
+            if (!ok) return false;
+        }
+        return true;
+    }
+
     // Parse --profile argument from command line
     static std::string ParseProfileArgument(int argc, char* argv[]);
     static std::string ParseProfileArgument(const std::wstring& cmdLine);
