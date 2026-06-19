@@ -7,6 +7,7 @@ import {
     Snackbar,
     Alert,
     CircularProgress,
+    Grow,
 } from '@mui/material';
 import { HodosButton } from '../components/HodosButton';
 import { tokens } from '../theme/tokens';
@@ -340,6 +341,20 @@ const MainBrowserView: React.FC = () => {
         () => hasDownloads && downloads.every(d => d.isComplete || d.isCanceled),
         [hasDownloads, downloads]
     );
+
+    // One-shot pulse on the download icon when downloads transition to all-complete
+    // (Chrome-like completion feedback). Cleared after the animation runs.
+    const [downloadJustCompleted, setDownloadJustCompleted] = useState(false);
+    const prevAllCompleteRef = useRef(false);
+    useEffect(() => {
+        if (allComplete && !prevAllCompleteRef.current) {
+            setDownloadJustCompleted(true);
+            const t = setTimeout(() => setDownloadJustCompleted(false), 700);
+            prevAllCompleteRef.current = true;
+            return () => clearTimeout(t);
+        }
+        if (!allComplete) prevAllCompleteRef.current = false;
+    }, [allComplete]);
 
     // Toast state (for misc actions)
     const [toastOpen, setToastOpen] = useState(false);
@@ -814,42 +829,60 @@ const MainBrowserView: React.FC = () => {
                 {/* Right-side toolbar buttons */}
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25, flexShrink: 0 }}>
 
-                {/* Download Button */}
-                <HodosButton
-                    variant="icon"
-                    size="small"
-                    onClick={(e) => {
-                        const rect = e.currentTarget.getBoundingClientRect();
-                        const iconRightOffset = Math.round(window.innerWidth - rect.right + rect.width / 2);
-                        window.cefMessage?.send('download_panel_show', [iconRightOffset.toString()]);
-                    }}
-                    aria-label="Downloads"
-                    title="Downloads"
-                    style={{
-                        flexShrink: 0,
-                        position: 'relative',
-                        color: allComplete ? '#188038' : hasActiveDownloads ? undefined : '#9ca3af',
-                    }}
-                >
-                    <DownloadIcon fontSize="small" />
-                    {/* Circular progress ring around icon when downloading */}
-                    {hasActiveDownloads && (
-                        <CircularProgress
-                            size={28}
-                            thickness={3}
-                            variant={downloadProgress !== null && downloadProgress >= 0 ? 'determinate' : 'indeterminate'}
-                            value={downloadProgress !== null && downloadProgress >= 0 ? downloadProgress : undefined}
-                            sx={{
-                                position: 'absolute',
-                                top: '50%',
-                                left: '50%',
-                                marginTop: '-14px',
-                                marginLeft: '-14px',
-                                color: 'primary.main',
+                {/* Download Button — Chrome-like: hidden until a download exists,
+                    animates in/out, progress ring while active, pulse on complete. */}
+                <Grow in={hasDownloads} unmountOnExit>
+                    <Box
+                        sx={{
+                            display: 'inline-flex',
+                            flexShrink: 0,
+                            ...(downloadJustCompleted && {
+                                animation: 'hodosDownloadPulse 0.6s ease',
+                                '@keyframes hodosDownloadPulse': {
+                                    '0%': { transform: 'scale(1)' },
+                                    '40%': { transform: 'scale(1.25)' },
+                                    '100%': { transform: 'scale(1)' },
+                                },
+                            }),
+                        }}
+                    >
+                        <HodosButton
+                            variant="icon"
+                            size="small"
+                            onClick={(e) => {
+                                const rect = e.currentTarget.getBoundingClientRect();
+                                const iconRightOffset = Math.round(window.innerWidth - rect.right + rect.width / 2);
+                                window.cefMessage?.send('download_panel_show', [iconRightOffset.toString()]);
                             }}
-                        />
-                    )}
-                </HodosButton>
+                            aria-label="Downloads"
+                            title="Downloads"
+                            style={{
+                                flexShrink: 0,
+                                position: 'relative',
+                                color: allComplete ? '#188038' : hasActiveDownloads ? undefined : '#9ca3af',
+                            }}
+                        >
+                            <DownloadIcon fontSize="small" />
+                            {/* Circular progress ring around icon when downloading */}
+                            {hasActiveDownloads && (
+                                <CircularProgress
+                                    size={28}
+                                    thickness={3}
+                                    variant={downloadProgress !== null && downloadProgress >= 0 ? 'determinate' : 'indeterminate'}
+                                    value={downloadProgress !== null && downloadProgress >= 0 ? downloadProgress : undefined}
+                                    sx={{
+                                        position: 'absolute',
+                                        top: '50%',
+                                        left: '50%',
+                                        marginTop: '-14px',
+                                        marginLeft: '-14px',
+                                        color: 'primary.main',
+                                    }}
+                                />
+                            )}
+                        </HodosButton>
+                    </Box>
+                </Grow>
 
                 {/* Wallet Button */}
                 <HodosButton

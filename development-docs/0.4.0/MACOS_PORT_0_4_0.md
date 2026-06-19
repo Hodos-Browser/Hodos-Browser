@@ -94,3 +94,10 @@ Root cause (Windows + macOS): the **render-process** `HistoryManager` init hardc
   - `cef-native/mac/process_helper_mac.mm:~58` and `cef_browser_shell_mac.mm:~4877` init `HistoryManager` with a `cache_path` — verify whether the **render/helper** path is profile-aware or hardcoded like Windows was. The macOS render helper needs to read the active profile (macOS has no `OnBeforeChildProcessLaunch` wired yet — add the equivalent child-arg propagation, or derive the profile in the helper) and bind History to the correct profile dir. Until then, macOS multi-profile history may leak the same way.
   - The `OnBeforeChildProcessLaunch` override is cross-platform (CefBrowserProcessHandler) — it will run on macOS too once the mac render helper consumes `--profile`.
 - **Live smoke (Windows, next dev run):** open a non-Default profile → New-Tab tiles show only the 2 placeholders (CoinGeek/MetaNet), NOT Default's tiles; omnibox suggestions don't include Default's history; Default itself unchanged. R6: a profile named with a `"` doesn't break the picker.
+
+### Header/Omnibox UX pass — B2-FILL + (d) Downloads auto-hide (2026-06-19, branch `0.4.0`)
+
+Design: `development-docs/0.4.0/HEADER_UX_PHASE.md`. First two pieces of the header pass; both **frontend-only / cross-platform** — they port to macOS for free (the header React app renders identically under the mac CEF shell).
+
+- **B2-FILL** (`MainBrowserView.tsx` root Box): dropped the vestigial `calc(100% + 16px)` / `margin: -8px` hack (compensated for an 8px UA body margin already reset to 0). No mac-specific work — the same React fix applies under `cef_browser_shell_mac.mm`'s header NSView. Worth an eyeball on mac that the header fills its 96px region (mac header height is also 96).
+- **(d) Downloads auto-hide** (`MainBrowserView.tsx`): download toolbar button now hidden until a download exists, `Grow`-animates in/out, pulses green on complete. Pure React. **Optional mac-only nicety deferred:** a Dock bounce / `requestUserAttention:` on download-complete (no Windows analog). Not built; queue for the Mac sprint if wanted.
