@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <mutex>
+#include <algorithm>
 
 struct ProfileInfo {
     std::string id;
@@ -35,8 +36,13 @@ public:
     bool SetDefaultProfile(const std::string& id);
     std::string GetDefaultProfileId() const;
 
-    // Current profile management
-    void SetCurrentProfileId(const std::string& id);
+    // Current profile management.
+    // `persist` controls R5 semantics: write lastUsedProfile to profiles.json
+    // ONLY on an explicit user/shortcut choice (a valid --profile= or a picker
+    // selection). A plain no-arg last-used launch sets the in-memory current id
+    // WITHOUT rewriting the registry (avoids the boot-rewrite churn + torn-write
+    // race the old unconditional Save() caused).
+    void SetCurrentProfileId(const std::string& id, bool persist);
     std::string GetCurrentProfileId() const;
     
     // Path helpers
@@ -69,6 +75,57 @@ public:
         return true;
     }
 
+    // Result of resolving which profile a process should open at startup.
+    struct StartupResolution {
+        std::string profileId;     // profile to open (ignored when showPicker)
+        bool showPicker = false;   // enter the pre-window picker instead? (Windows)
+    };
+
+    // Pure startup-profile resolver (R7 + picker gate). Header-only so it can be
+    // unit-tested without linking the CEF-heavy .cpp. Decision table:
+    //   - explicit --profile, valid AND exists  -> open it
+    //   - explicit --profile, invalid/unknown   -> COHERENT default fallback (R7)
+    //   - no --profile, <=1 profile             -> the sole/default profile
+    //   - no --profile, >1, pickerEnabled        -> PICKER mode
+    //   - no --profile, >1, picker disabled      -> the default (starred) profile
+    // There is intentionally NO "last-used" concept: with the picker the user
+    // chooses each cold start, and when the picker is off a deterministic default
+    // beats a surprising last-used. Exact registry-existence match is the R7
+    // coherence guarantee — a mangled id (e.g. a quote-stripped legacy "Profile 2")
+    // misses the registry and falls back to the default coherently, never silently
+    // landing in the wrong profile. The default fallback is itself guarded:
+    // defaultProfileId is persisted independently and could name a deleted profile,
+    // so we drop to the first real profile rather than return an id with no dir.
+    static StartupResolution ResolveStartup(
+            const std::string& argProfile,
+            const std::vector<std::string>& existingIds,
+            const std::string& defaultProfileId,
+            bool pickerEnabled) {
+        auto exists = [&](const std::string& id) {
+            return std::find(existingIds.begin(), existingIds.end(), id) != existingIds.end();
+        };
+        auto coherentDefault = [&]() -> std::string {
+            if (exists(defaultProfileId)) return defaultProfileId;
+            return existingIds.empty() ? std::string("Default") : existingIds.front();
+        };
+        StartupResolution r;
+        if (!argProfile.empty()) {
+            r.profileId = (IsValidProfileId(argProfile) && exists(argProfile))
+                ? argProfile
+                : coherentDefault();   // R7 coherent fallback
+            return r;
+        }
+        // No --profile argument.
+        if (existingIds.size() <= 1) {
+            r.profileId = coherentDefault();
+            return r;
+        }
+        // More than one profile: picker (if enabled) else the default profile.
+        r.profileId = coherentDefault();   // also the bypass target if the picker is skipped
+        r.showPicker = pickerEnabled;
+        return r;
+    }
+
     // Parse --profile argument from command line
     static std::string ParseProfileArgument(int argc, char* argv[]);
     static std::string ParseProfileArgument(const std::wstring& cmdLine);
@@ -78,7 +135,8 @@ private:
     ~ProfileManager() = default;
 
     void Load();
-    void Save();
+    void Save();          // acquires the cross-process registry lock, then SaveUnlocked()
+    void SaveUnlocked();  // atomic tmp+rename write; caller already holds the registry lock
     std::string GenerateProfileId();
     std::string GetCurrentTimestamp();
 
@@ -87,7 +145,7 @@ private:
     std::string profiles_file_path_;
     std::vector<ProfileInfo> profiles_;
     std::string currentProfileId_ = "Default";
-    bool showPickerOnStartup_ = false;
+    bool showPickerOnStartup_ = true;   // CHUNK 2: picker ON by default (gated to >1 profile at the call site)
     std::string defaultProfileId_ = "Default";
     bool initialized_ = false;
 

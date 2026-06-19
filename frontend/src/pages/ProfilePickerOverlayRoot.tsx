@@ -42,6 +42,16 @@ const ProfilePickerOverlayRoot: React.FC = () => {
         fetchProfiles,
     } = useProfiles();
 
+    // Pre-window picker mode (CHUNK 2): the C++ shell loads this route as a
+    // full-window chooser with `?mode=window` when launched with no profile and
+    // >1 profile exists. In that mode this process owns NO profile, so EVERY
+    // selection must launch a profile — the same-id short-circuit the in-session
+    // dropdown uses would otherwise hang (clicking the last-used profile would
+    // do nothing). C++ closes this window after the spawn.
+    const isPickerWindow =
+        typeof window !== 'undefined' &&
+        new URLSearchParams(window.location.search).get('mode') === 'window';
+
     // Create form state
     const [showCreateForm, setShowCreateForm] = useState(false);
     const [newProfileName, setNewProfileName] = useState('');
@@ -118,10 +128,15 @@ const ProfilePickerOverlayRoot: React.FC = () => {
     };
 
     const handleSwitchProfile = (profileId: string) => {
-        if (profileId !== currentProfile?.id) {
+        // Picker-window mode: always launch (no real "current" profile here).
+        // Dropdown mode: only launch when switching to a different profile.
+        if (isPickerWindow || profileId !== currentProfile?.id) {
             switchProfile(profileId);
         }
-        handleClose();
+        // Dropdown closes itself; the picker window is closed by C++ after spawn.
+        if (!isPickerWindow) {
+            handleClose();
+        }
     };
 
     const handleCreateProfile = () => {

@@ -18,11 +18,83 @@
 #include <sys/wait.h>   // F5: waitpid
 #include <cstring>      // strerror
 #include <cerrno>
+#include <fcntl.h>      // R5: open() for the registry lock file
+#include <sys/file.h>   // R5: flock()
 extern char** environ;  // pass the real environment to `open`
 #endif
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
+
+namespace {
+
+// R5: cross-process lock around profiles.json read+write. The per-process
+// std::mutex in ProfileManager guards threads within ONE process; it does NOT
+// protect the shared registry file when several profile instances (separate
+// processes) run concurrently. Without this, a Save() (non-atomic truncate-
+// rewrite) interleaving with another process's Load() can produce a torn read
+// → the reader hits the empty-profiles catch and Save()s, DESTROYING the list.
+//
+// Scoped RAII. Acquired as the first statement inside Load()/SaveUnlocked()'s
+// callers so the lock order is always per-process mutex_ -> this cross-process
+// lock (no deadlock). On acquisition timeout/failure we proceed anyway (best
+// effort) rather than block startup forever.
+//
+// NOTE: do NOT nest two RegistryLocks on one thread on macOS — flock() on a
+// second fd from the same process would deadlock. Hence Load() and Save() take
+// the lock and call SaveUnlocked() (no re-lock) internally.
+class RegistryLock {
+public:
+    explicit RegistryLock(const std::string& appDataPath) {
+#ifdef _WIN32
+        // Name the mutex per data-root so dev (HodosBrowserDev) and prod don't
+        // cross-lock. Local\ namespace = per-session, fine for same-user instances.
+        std::string name = "Local\\HodosProfilesLock_";
+        for (char c : appDataPath) name += (c == '\\' || c == '/' || c == ':') ? '_' : c;
+        if (name.size() > 240) name.resize(240);
+        handle_ = CreateMutexA(nullptr, FALSE, name.c_str());
+        if (handle_) {
+            // WAIT_ABANDONED (prior owner crashed) still grants ownership — fine.
+            DWORD w = WaitForSingleObject(handle_, 5000);
+            owned_ = (w == WAIT_OBJECT_0 || w == WAIT_ABANDONED);
+            if (!owned_) {
+                // Best-effort: proceed without the lock rather than block startup
+                // forever, but make the degraded (unlocked) window observable.
+                std::cerr << "⚠️ RegistryLock: profiles.json lock wait timed out; "
+                             "proceeding unlocked" << std::endl;
+            }
+        }
+#elif defined(__APPLE__)
+        lockPath_ = appDataPath + "/.profiles.lock";
+        fd_ = open(lockPath_.c_str(), O_CREAT | O_RDWR, 0600);
+        if (fd_ >= 0) flock(fd_, LOCK_EX);
+#else
+        (void)appDataPath;
+#endif
+    }
+    ~RegistryLock() {
+#ifdef _WIN32
+        if (handle_) {
+            if (owned_) ReleaseMutex(handle_);  // never release a mutex we don't own
+            CloseHandle(handle_);
+        }
+#elif defined(__APPLE__)
+        if (fd_ >= 0) { flock(fd_, LOCK_UN); close(fd_); }
+#endif
+    }
+    RegistryLock(const RegistryLock&) = delete;
+    RegistryLock& operator=(const RegistryLock&) = delete;
+private:
+#ifdef _WIN32
+    HANDLE handle_ = nullptr;
+    bool owned_ = false;
+#elif defined(__APPLE__)
+    int fd_ = -1;
+    std::string lockPath_;
+#endif
+};
+
+}  // namespace
 
 ProfileManager& ProfileManager::GetInstance() {
     static ProfileManager instance;
@@ -57,6 +129,10 @@ bool ProfileManager::Initialize(const std::string& app_data_path) {
 }
 
 void ProfileManager::Load() {
+    // R5: hold the cross-process registry lock for the whole read (and any
+    // first-run write below) so we never read a half-written profiles.json.
+    RegistryLock registryLock(app_data_path_);
+
     // Check if profiles.json exists
     if (!fs::exists(profiles_file_path_)) {
         std::cout << "📁 No profiles.json found, creating default profile" << std::endl;
@@ -77,8 +153,8 @@ void ProfileManager::Load() {
         try {
             fs::create_directories(app_data_path_ + "/Default");
         } catch (...) {}
-        
-        Save();
+
+        SaveUnlocked();  // registry lock already held by this Load()
         return;
     }
 
@@ -114,11 +190,23 @@ void ProfileManager::Load() {
         }
 
         // Parse other settings
+        int loadedVersion = j.value("version", 1);
         currentProfileId_ = j.value("lastUsedProfile", "Default");
-        showPickerOnStartup_ = j.value("showPickerOnStartup", false);
+        showPickerOnStartup_ = j.value("showPickerOnStartup", true);  // CHUNK 2: default ON
         defaultProfileId_ = j.value("defaultProfileId", "Default");
 
         std::cout << "📁 Loaded " << profiles_.size() << " profiles from profiles.json" << std::endl;
+
+        // CHUNK 2 — one-time migration to v2: turn the startup picker ON for
+        // existing users (v1 persisted it false by the old default). Runs once;
+        // SaveUnlocked() bumps version to 2 so a later explicit user choice (or a
+        // manual edit) is respected and the flag is never auto-flipped again.
+        if (loadedVersion < 2) {
+            showPickerOnStartup_ = true;
+            std::cout << "🔁 Migrating profiles.json to v2: enabling startup picker"
+                      << std::endl;
+            SaveUnlocked();  // registry lock already held by this Load()
+        }
 
     } catch (const std::exception& e) {
         std::cerr << "❌ Error parsing profiles.json: " << e.what() << std::endl;
@@ -135,14 +223,25 @@ void ProfileManager::Load() {
         defaultProfile.avatarInitial = "D";
         profiles_.push_back(defaultProfile);
         currentProfileId_ = "Default";
-        Save();
+        SaveUnlocked();  // registry lock already held by this Load()
     }
 }
 
 void ProfileManager::Save() {
+    // R5: take the cross-process registry lock, then do the atomic write.
+    RegistryLock registryLock(app_data_path_);
+    SaveUnlocked();
+}
+
+void ProfileManager::SaveUnlocked() {
+    // R5: atomic write — serialize to a sibling .tmp then rename() over the
+    // target. rename() is atomic on the same volume, so a crash mid-write can
+    // never leave a truncated/torn profiles.json (the failure mode that, on the
+    // next Load(), makes a reader fall into the empty-profiles path and clobber
+    // the list). The caller already holds the registry lock.
     try {
         json j;
-        j["version"] = 1;
+        j["version"] = 2;  // CHUNK 2: v2 = startup-picker migration applied
         j["lastUsedProfile"] = currentProfileId_;
         j["showPickerOnStartup"] = showPickerOnStartup_;
         j["defaultProfileId"] = defaultProfileId_;
@@ -162,12 +261,34 @@ void ProfileManager::Save() {
         }
         j["profiles"] = profilesArray;
 
-        std::ofstream file(profiles_file_path_);
-        if (file.is_open()) {
-            file << j.dump(2);
+        const std::string payload = j.dump(2);
+        const std::string tmpPath = profiles_file_path_ + ".tmp";
+
+        {
+            std::ofstream file(tmpPath, std::ios::binary | std::ios::trunc);
+            if (!file.is_open()) {
+                std::cerr << "❌ Error saving profiles.json: cannot open temp file" << std::endl;
+                return;
+            }
+            file << payload;
+            file.flush();
             file.close();
-            std::cout << "💾 Saved profiles.json" << std::endl;
         }
+
+        std::error_code ec;
+        fs::rename(tmpPath, profiles_file_path_, ec);
+        if (ec) {
+            // rename can fail across devices or on transient locks — fall back to
+            // a direct write so we never silently lose the registry, and clean up.
+            std::ofstream file(profiles_file_path_, std::ios::binary | std::ios::trunc);
+            if (file.is_open()) {
+                file << payload;
+                file.close();
+            }
+            std::error_code rmEc;
+            fs::remove(tmpPath, rmEc);
+        }
+        std::cout << "💾 Saved profiles.json" << std::endl;
     } catch (const std::exception& e) {
         std::cerr << "❌ Error saving profiles.json: " << e.what() << std::endl;
     }
@@ -345,10 +466,15 @@ std::string ProfileManager::GetDefaultProfileId() const {
     return defaultProfileId_;
 }
 
-void ProfileManager::SetCurrentProfileId(const std::string& id) {
+void ProfileManager::SetCurrentProfileId(const std::string& id, bool persist) {
     std::lock_guard<std::mutex> lock(mutex_);
     currentProfileId_ = id;
-    Save();
+    // R5: only an explicit choice (valid --profile= / picker selection) writes
+    // lastUsedProfile. A plain no-arg last-used launch sets the in-memory id
+    // only — no registry rewrite, no torn-write exposure, no boot churn.
+    if (persist) {
+        Save();
+    }
 }
 
 std::string ProfileManager::GetCurrentProfileId() const {

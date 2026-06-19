@@ -4637,23 +4637,31 @@ int main(int argc, char* argv[]) {
         }
 
         // Parse --profile argument from command line
-        // macOS: use argc/argv from main_args
-        std::string profileId = "";
+        // macOS: extract --profile from NSProcessInfo, then resolve via the shared
+        // CHUNK 1 + R5 + R7 logic. Picker MODE is Windows-first (no _mac.mm picker
+        // path yet), so macOS ignores res.showPicker and simply opens the resolved
+        // profile (= last-used for a no-arg launch with >1 profile). See
+        // PROFILE_STARTUP_PICKER_DESIGN.md §4 / MACOS_PORT_0_4_0.md TODO.
+        std::string argProfile = "";
         NSArray* arguments = [[NSProcessInfo processInfo] arguments];
         for (NSString* arg in arguments) {
             std::string argStr = [arg UTF8String];
             if (argStr.find("--profile=") == 0) {
-                profileId = argStr.substr(10);
+                argProfile = argStr.substr(10);
                 // Remove quotes if present
-                if (!profileId.empty() && profileId.front() == '"') profileId = profileId.substr(1);
-                if (!profileId.empty() && profileId.back() == '"') profileId.pop_back();
+                if (!argProfile.empty() && argProfile.front() == '"') argProfile = argProfile.substr(1);
+                if (!argProfile.empty() && argProfile.back() == '"') argProfile.pop_back();
                 break;
             }
         }
-        if (profileId.empty()) {
-            profileId = ProfileManager::GetInstance().GetDefaultProfileId();
-        }
-        ProfileManager::GetInstance().SetCurrentProfileId(profileId);
+        auto& pm = ProfileManager::GetInstance();
+        std::vector<std::string> existingIds;
+        for (const auto& p : pm.GetAllProfiles()) existingIds.push_back(p.id);
+        ProfileManager::StartupResolution res = ProfileManager::ResolveStartup(
+            argProfile, existingIds, pm.GetDefaultProfileId(),
+            /*pickerEnabled=*/false);  // picker is Windows-first
+        std::string profileId = res.profileId;
+        pm.SetCurrentProfileId(profileId, /*persist=*/false);
         LOG_INFO("Using profile: " + profileId);
 
         // Get profile-specific data directory

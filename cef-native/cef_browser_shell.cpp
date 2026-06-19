@@ -91,6 +91,13 @@ bool g_file_dialog_active = false;
 // Wallet close prevention — prevents overlay close during mnemonic display / PIN creation
 bool g_wallet_overlay_prevent_close = false;
 
+// Pre-window profile-picker mode (CHUNK 2). When true, THIS process owns no
+// profile: it shows the chooser window (React /profile-picker), then spawns the
+// chosen profile via --profile= and exits. Set once in main() before window
+// creation; read by ShellWindowProc (WM_SIZE), SimpleApp::OnContextInitialized
+// (URL + skip tabs), and the profiles_switch IPC (spawn-then-close).
+bool g_picker_mode = false;
+
 // Timestamps of last hide — used to suppress toggle race condition
 // (WM_ACTIVATE hides overlay before toggle IPC arrives, causing re-open)
 ULONGLONG g_wallet_last_hide_tick = 0;
@@ -974,6 +981,25 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             GetClientRect(hwnd, &rect);
             int width = rect.right - rect.left;
             int height = rect.bottom - rect.top;
+
+            // Picker mode: one full-window chooser browser, no tabs. Fill the
+            // client with the header browser and skip the normal header/tab layout.
+            if (g_picker_mode) {
+                if (g_header_hwnd && IsWindow(g_header_hwnd)) {
+                    SetWindowPos(g_header_hwnd, nullptr, 0, 0, width, height,
+                                 SWP_NOZORDER | SWP_NOACTIVATE);
+                    CefRefPtr<CefBrowser> hb = SimpleHandler::GetHeaderBrowser();
+                    if (hb) {
+                        HWND ch = hb->GetHost()->GetWindowHandle();
+                        if (ch && IsWindow(ch)) {
+                            SetWindowPos(ch, nullptr, 0, 0, width, height,
+                                         SWP_NOZORDER | SWP_NOACTIVATE);
+                            hb->GetHost()->WasResized();
+                        }
+                    }
+                }
+                return 0;
+            }
 
             // If in fullscreen mode, keep tabs filling entire window
             if (g_is_fullscreen) {
@@ -3216,17 +3242,30 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         LOG_ERROR("Failed to initialize ProfileManager");
     }
 
-    // Parse --profile argument from command line (empty = no flag provided)
-    std::string profileId = ProfileManager::ParseProfileArgument(GetCommandLineW());
-    if (profileId.empty()) {
-        profileId = ProfileManager::GetInstance().GetDefaultProfileId();
-    }
-    ProfileManager::GetInstance().SetCurrentProfileId(profileId);
-    LOG_INFO(elapsed() + "STARTUP: Profile parsed: " + profileId);
+    // Resolve which profile this process opens (CHUNK 1 + R7 + picker gate).
+    // ParseProfileArgument returns "" when no --profile flag was passed (the
+    // taskbar/desktop/Start no-arg launch). ResolveStartup then decides:
+    //   explicit valid --profile -> that profile
+    //   no-arg + 1 profile        -> that profile
+    //   no-arg + >1 + picker on   -> picker mode (branch below)
+    //   no-arg + >1 + picker off  -> the default (starred) profile
+    std::string argProfile = ProfileManager::ParseProfileArgument(GetCommandLineW());
+    auto& pm = ProfileManager::GetInstance();
+    std::vector<std::string> existingIds;
+    for (const auto& p : pm.GetAllProfiles()) existingIds.push_back(p.id);
+    ProfileManager::StartupResolution res = ProfileManager::ResolveStartup(
+        argProfile, existingIds, pm.GetDefaultProfileId(), pm.ShouldShowPickerOnStartup());
+    std::string profileId = res.profileId;
+    // In-memory only — startup never rewrites the registry (R5: no boot churn).
+    pm.SetCurrentProfileId(profileId, /*persist=*/false);
+    LOG_INFO(elapsed() + "STARTUP: Profile resolved: " + profileId +
+             (argProfile.empty() ? " (no-arg)" : " (--profile)") +
+             (res.showPicker ? " [picker-pending]" : ""));
+    g_picker_mode = res.showPicker;
 
-    // Set process AUMID early (before window creation) so Windows groups
-    // taskbar buttons by profile from the start
-    if (ProfileManager::GetInstance().GetAllProfiles().size() > 1) {
+    // Set process AUMID early (before window creation) so Windows groups taskbar
+    // buttons by profile. The picker owns no profile -> keep the base AUMID.
+    if (!g_picker_mode && ProfileManager::GetInstance().GetAllProfiles().size() > 1) {
         std::wstring aumid = L"HodosBrowser";
         if (profileId != "Default") {
             std::wstring pw(profileId.begin(), profileId.end());
@@ -3236,10 +3275,30 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         LOG_INFO("AUMID set: " + profileId);
     }
 
-    // Get profile-specific data directory
-    std::string profile_cache = ProfileManager::GetInstance().GetCurrentProfileDataPath();
-    LOG_INFO("Profile data path: " + profile_cache);
+    // Data directory. Picker mode uses a NEUTRAL cache derived from the resolved
+    // dev/prod root (never hardcode HodosBrowser) so it touches no real profile
+    // and CEF's per-root SingletonLock can't collide with a running profile.
+    // remote_debugging_port is forced to 0 below for the same reason.
+    std::string profile_cache = g_picker_mode
+        ? (user_data_path + "\\.picker-cache")
+        : ProfileManager::GetInstance().GetCurrentProfileDataPath();
+    LOG_INFO(std::string(g_picker_mode ? "Picker cache path: " : "Profile data path: ") + profile_cache);
 
+    // Picker mode owns no profile: gate on a dedicated ".picker" pipe so a 2nd
+    // no-arg launch can't start a second picker (which would deadlock on CEF's
+    // own root-cache SingletonLock — see PROFILE_STARTUP_PICKER_DESIGN.md C-1).
+    // No listener thread, no profile lock, no backend processes. ('.' is not a
+    // valid profile id char, so the pipe name can never collide with a profile.)
+    if (g_picker_mode) {
+        if (!SingleInstance::TryAcquireInstance(".picker")) {
+            LOG_INFO("Picker: another instance is already showing the picker — exiting");
+            return 0;
+        }
+        LOG_INFO(elapsed() + "STARTUP: Picker instance gate acquired (no profile lock / backends)");
+    }
+
+    // The single-instance forward / profile-lock / backend-launch path is profile-only.
+    if (!g_picker_mode) {
     // B-6: Single-instance check — forward to running instance instead of error dialog.
     // Must be AFTER CefExecuteProcess (line 2968) so CEF subprocesses aren't affected,
     // and AFTER profile ID parsing so we use the correct pipe name.
@@ -3298,6 +3357,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     LOG_INFO(elapsed() + "STARTUP: Launching backend processes");
     LaunchWalletProcess();
     LaunchAdblockProcess();
+    }  // end if (!g_picker_mode) — profile single-instance / lock / backends
 
     // Initialize SettingsManager with profile-specific path
     SettingsManager::GetInstance().Initialize(profile_cache);
@@ -3327,8 +3387,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     CefString(&settings.cache_path).FromString(cache_subdir);
 
     // Remote debugging port: each profile gets a unique port so multiple instances can coexist
-    // Default=9222, others get 9223+ based on profile number, or 0 to disable
-    if (profileId == "Default") {
+    // Default=9222, others get 9223+ based on profile number, or 0 to disable.
+    // Picker mode owns no profile -> disable (0) so it can't collide with a
+    // running profile's DevTools port.
+    if (g_picker_mode) {
+        settings.remote_debugging_port = 0;
+    } else if (profileId == "Default") {
         settings.remote_debugging_port = 9222;
     } else {
         // Extract number from profile ID (e.g., "Profile_2" -> 2) for port offset
@@ -3525,8 +3589,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     DwmExtendFrameIntoClientArea(hwnd, &dwmMargins);
 
     const int rb = 5; // resize border inset — must match ShellWindowProc WM_NCHITTEST/WM_SIZE
+    // Picker mode shows a single full-window chooser browser (no tab strip), so
+    // the header child fills the whole client area. WM_SIZE mirrors this.
     HWND header_hwnd = CreateWindow(L"CEFHostWindow", nullptr,
-        WS_CHILD | WS_VISIBLE, rb, rb, width - 2 * rb, shellHeight, hwnd, nullptr, hInstance, nullptr);
+        WS_CHILD | WS_VISIBLE,
+        g_picker_mode ? 0 : rb,
+        g_picker_mode ? 0 : rb,
+        g_picker_mode ? width : (width - 2 * rb),
+        g_picker_mode ? height : shellHeight,
+        hwnd, nullptr, hInstance, nullptr);
 
     // OLD: Single webview window - NO LONGER USED WITH TAB SYSTEM
     // Kept for compatibility but made invisible (tabs now handle content display)
@@ -3574,8 +3645,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     DwmFlush();
     LOG_INFO(elapsed() + "STARTUP: Window shown + DwmFlush complete");
 
-    // Set per-profile taskbar grouping and icon badge (skips if single profile)
-    SetupTaskbarProfile(hwnd, hInstance);
+    // Set per-profile taskbar grouping and icon badge (skips if single profile).
+    // Picker owns no profile -> no badge.
+    if (!g_picker_mode) {
+        SetupTaskbarProfile(hwnd, hInstance);
+    }
 
     LOG_INFO(elapsed() + "STARTUP: CefInitialize starting...");
     bool success = CefInitialize(main_args, settings, app, nullptr);
@@ -3589,6 +3663,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     // Parallelize DB initialization. Backend processes were already launched
     // before CefInitialize (LaunchWalletProcess/LaunchAdblockProcess), so they've
     // had 2-5 seconds of head start. Health polling runs in detached threads.
+    // Picker mode opened no profile -> no per-profile DBs and no backend health
+    // to wait on. (Shutdown's DB cascade is null-guarded, so skipping init here
+    // is safe at teardown — PROFILE_STARTUP_PICKER_DESIGN.md L-1.)
+    if (!g_picker_mode) {
     LOG_INFO("Starting parallel initialization (3 DBs + 2 health checks)...");
     auto initStart = std::chrono::steady_clock::now();
 
@@ -3653,6 +3731,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     auto initMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - initStart).count();
     LOG_INFO(elapsed() + "STARTUP: DB init done in " + std::to_string(initMs) + "ms (server health in background)");
+    }  // end if (!g_picker_mode) — DB init + server health
 
     // Pass handles to app instance
     app->SetWindowHandles(hwnd, header_hwnd, webview_hwnd);
@@ -3674,7 +3753,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     // Staggered at 500ms intervals so they don't compete with the header browser
     // and initial tab creation for CPU/memory. Each overlay spawns a CEF subprocess
     // and loads React, which takes ~300-500ms per overlay.
-    {
+    if (!g_picker_mode) {
         extern void CreateCookiePanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
         extern void CreateDownloadPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
         extern void CreateProfilePanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
@@ -3692,7 +3771,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     // Initialize auto-updater after windows are created.
     // WinSparkle will check for updates in the background if auto-check is enabled.
-    {
+    // (Skip in picker mode — the chooser is transient and spawns the real instance.)
+    if (!g_picker_mode) {
         auto& settings = SettingsManager::GetInstance();
         auto browserSettings = settings.GetBrowserSettings();
         bool autoCheck = browserSettings.autoUpdateEnabled;

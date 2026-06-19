@@ -35,6 +35,7 @@ extern HWND g_backup_overlay_hwnd;
 extern HWND g_brc100_auth_overlay_hwnd;
 extern HWND g_omnibox_overlay_hwnd;
 extern HWND g_cookie_panel_overlay_hwnd;
+extern bool g_picker_mode;  // pre-window profile picker (CHUNK 2)
 #endif
 
 SimpleApp::SimpleApp()
@@ -183,7 +184,12 @@ void SimpleApp::OnContextInitialized() {
     CefRefPtr<SimpleHandler> header_handler = new SimpleHandler("header");
     CefBrowserSettings header_settings;
     header_settings.background_color = CefColorSetARGB(255, 26, 26, 26);
-    std::string header_url = "http://127.0.0.1:5137";
+    // Picker mode loads the chooser as a full-window page; normal mode loads the
+    // browser chrome (MainBrowserView). Tabs/session restore are skipped below
+    // when g_picker_mode is set.
+    std::string header_url = g_picker_mode
+        ? "http://127.0.0.1:5137/profile-picker?mode=window"
+        : "http://127.0.0.1:5137";
     std::cout << "Loading React header at: " << header_url << std::endl;
 
     try {
@@ -206,6 +212,8 @@ void SimpleApp::OnContextInitialized() {
         errLog.close();
     }
 
+    // Picker mode shows ONLY the chooser — no tabs, no session restore, no NTP.
+    if (!g_picker_mode) {
     // ───── Initial Tab Creation (replaces single webview) ─────
     RECT mainRect;
     GetClientRect(g_hwnd, &mainRect);
@@ -405,6 +413,7 @@ void SimpleApp::OnContextInitialized() {
             LOG(ERROR) << "Failed to create initial tab";
         }
     }
+    }  // end if (!g_picker_mode) — tabs / session restore / NTP
 
 #elif defined(__APPLE__)
     std::cout << "✅ OnContextInitialized CALLED (macOS)" << std::endl;

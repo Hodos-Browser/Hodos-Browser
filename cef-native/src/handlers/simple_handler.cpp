@@ -1236,21 +1236,13 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
             }
         }, browser_ref), 150);
 
-        // Auto-show profile picker on startup if configured
-        CefPostDelayedTask(TID_UI, base::BindOnce([]() {
-            auto& pm = ProfileManager::GetInstance();
-            if (pm.ShouldShowPickerOnStartup() && pm.GetAllProfiles().size() >= 2) {
-                extern void ShowProfilePanelOverlay(int, BrowserWindow* targetWin = nullptr);
-                extern void CreateProfilePanelOverlay(HINSTANCE, bool, int);
-                extern HWND g_profile_panel_overlay_hwnd;
-                extern HINSTANCE g_hInstance;
-                if (!g_profile_panel_overlay_hwnd || !IsWindow(g_profile_panel_overlay_hwnd)) {
-                    CreateProfilePanelOverlay(g_hInstance, true, 0);
-                } else {
-                    ShowProfilePanelOverlay(0);
-                }
-            }
-        }), 500);
+        // (Retired) Legacy startup picker: this used to open a window in the
+        // resolved profile and then show the profile dropdown OVER it. That is
+        // mutually exclusive with the pre-window picker MODE (CHUNK 2), which
+        // shows the chooser BEFORE any profile window opens. Startup-picker
+        // selection now happens in picker mode (see cef_browser_shell.cpp main()
+        // + PROFILE_STARTUP_PICKER_DESIGN.md §4 / M-1). The profile-icon dropdown
+        // remains for in-session switching.
 #endif
     } else if (role_ == "wallet_panel") {
         LOG_DEBUG_BROWSER("💰 Wallet panel browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
@@ -2917,7 +2909,31 @@ bool SimpleHandler::OnProcessMessageReceived(
                 LOG_WARNING_BROWSER("👤 Rejected profiles_switch: invalid profile id");
             } else {
                 LOG_INFO_BROWSER("👤 Launching new instance with profile: " + id);
-                ProfileManager::GetInstance().LaunchWithProfile(id);
+                bool launched = ProfileManager::GetInstance().LaunchWithProfile(id);
+#ifdef _WIN32
+                // Pre-window picker (CHUNK 2): this process owns no profile. Once
+                // the chosen profile is launching in its own process, close the
+                // chooser so this process exits cleanly (message loop -> CefShutdown;
+                // the shutdown cascade is a safe no-op since no DBs/lock were taken).
+                extern bool g_picker_mode;
+                if (g_picker_mode) {
+                    if (launched) {
+                        extern HWND g_hwnd;
+                        if (g_hwnd && IsWindow(g_hwnd)) {
+                            PostMessage(g_hwnd, WM_CLOSE, 0, 0);
+                        }
+                    } else {
+                        // G-1: spawn failed — keep the picker open, surface the error,
+                        // so the user is never left with nothing.
+                        LOG_ERROR_BROWSER("👤 Picker: failed to launch profile '" + id + "'");
+                        MessageBoxA(nullptr,
+                            ("Could not open profile \"" + id + "\".\n\nPlease try again.").c_str(),
+                            "Hodos Browser", MB_OK | MB_ICONERROR);
+                    }
+                }
+#else
+                (void)launched;
+#endif
             }
         }
         return true;
