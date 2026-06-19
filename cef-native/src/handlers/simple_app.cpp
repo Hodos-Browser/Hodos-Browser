@@ -55,6 +55,20 @@ CefRefPtr<CefRenderProcessHandler> SimpleApp::GetRenderProcessHandler() {
     return render_process_handler_;
 }
 
+void SimpleApp::OnBeforeChildProcessLaunch(CefRefPtr<CefCommandLine> command_line) {
+    // Per-profile isolation: tag every child process with the browser process's
+    // resolved profile id. Render subprocesses read this (--profile=) to bind
+    // their HistoryManager to the correct profile instead of a hardcoded Default
+    // (which previously leaked Default's history/omnibox into every profile).
+    // IsValidProfileId keeps the value shell-safe (F5).
+    if (command_line && !command_line->HasSwitch("profile")) {
+        std::string profileId = ProfileManager::GetInstance().GetCurrentProfileId();
+        if (ProfileManager::IsValidProfileId(profileId)) {
+            command_line->AppendSwitchWithValue("profile", profileId);
+        }
+    }
+}
+
 void SimpleApp::OnBeforeCommandLineProcessing(const CefString& process_type,
                                                CefRefPtr<CefCommandLine> command_line) {
     std::wcout << L"OnBeforeCommandLineProcessing for type: " << std::wstring(process_type) << std::endl;

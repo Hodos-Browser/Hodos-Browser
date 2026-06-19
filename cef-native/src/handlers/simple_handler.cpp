@@ -2832,21 +2832,26 @@ bool SimpleHandler::OnProcessMessageReceived(
         auto current = ProfileManager::GetInstance().GetCurrentProfile();
         std::string defaultId = ProfileManager::GetInstance().GetDefaultProfileId();
 
-        // Build JSON response
-        std::string json = "{\"currentProfileId\":\"" + current.id + "\",\"defaultProfileId\":\"" + defaultId + "\",\"profiles\":[";
-        for (size_t i = 0; i < profiles.size(); i++) {
-            if (i > 0) json += ",";
-            json += "{\"id\":\"" + profiles[i].id + "\"";
-            json += ",\"name\":\"" + profiles[i].name + "\"";
-            json += ",\"color\":\"" + profiles[i].color + "\"";
-            json += ",\"avatarInitial\":\"" + profiles[i].avatarInitial + "\"";
-            if (!profiles[i].avatarImage.empty()) {
-                // Avatar image is already base64 data URL, safe to include
-                json += ",\"avatarImage\":\"" + profiles[i].avatarImage + "\"";
+        // R6: build the picker payload with nlohmann::json (not hand-concatenation)
+        // so a profile NAME containing quotes/backslashes/control chars can't break
+        // the JSON and wedge the picker. (This is a JSON *document* — distinct from
+        // escapeJsonForJs/F6, which escapes for embedding into a JS string literal.)
+        nlohmann::json doc;
+        doc["currentProfileId"] = current.id;
+        doc["defaultProfileId"] = defaultId;
+        doc["profiles"] = nlohmann::json::array();
+        for (const auto& p : profiles) {
+            nlohmann::json pj;
+            pj["id"] = p.id;
+            pj["name"] = p.name;
+            pj["color"] = p.color;
+            pj["avatarInitial"] = p.avatarInitial;
+            if (!p.avatarImage.empty()) {
+                pj["avatarImage"] = p.avatarImage;
             }
-            json += "}";
+            doc["profiles"].push_back(pj);
         }
-        json += "]}";
+        std::string json = doc.dump();
         
         CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("profiles_result");
         response->GetArgumentList()->SetString(0, json);

@@ -10,6 +10,7 @@
 #include "../../include/core/HistoryManager.h"
 #include "../../include/core/AddressHandler.h"
 #include "../../include/core/AppPaths.h"
+#include "../../include/core/ProfileManager.h"  // ParseProfileArgument / IsValidProfileId (per-profile history)
 #include "../../include/core/JsStringEscape.h"  // F6: canonical escapeJsonForJs encoder
 
 #include "wrapper/cef_helpers.h"
@@ -510,15 +511,38 @@ SimpleRenderProcessHandler::SimpleRenderProcessHandler() {
     LOG_DEBUG_RENDER("🔧 Process ID: " + std::to_string(GetCurrentProcessId()));
     LOG_DEBUG_RENDER("🔧 Thread ID: " + std::to_string(GetCurrentThreadId()));
 
-    // Initialize HistoryManager for render process (Windows-only)
-    std::string appdata_path = std::getenv("APPDATA") ? std::getenv("APPDATA") : "";
-    std::string user_data_path = appdata_path + "\\" + AppPaths::GetAppDirName() + "\\Default";
+    // Initialize HistoryManager for render process (Windows-only).
+    //
+    // PER-PROFILE ISOLATION: this constructor runs in EVERY process (SimpleApp
+    // eagerly news this handler), including the browser process. We must:
+    //  (1) Only init here in a real renderer subprocess — the browser process
+    //      initializes its OWN HistoryManager with the resolved profile path
+    //      (cef_browser_shell.cpp DB-init). Running it here in the browser
+    //      process used to pre-open Default and, via OpenDatabase()'s already-open
+    //      guard, mask the correct per-profile init (history/omnibox leaked Default
+    //      into every profile).
+    //  (2) Use the ACTIVE profile, not a hardcoded "Default". The profile id is
+    //      propagated to child processes via SimpleApp::OnBeforeChildProcessLaunch
+    //      (--profile=). IsValidProfileId guards it; fall back to Default only if
+    //      absent/invalid.
+    std::wstring cmdlineW = GetCommandLineW();
+    const bool isRenderer = cmdlineW.find(L"--type=renderer") != std::wstring::npos;
+    if (isRenderer) {
+        std::string appdata_path = std::getenv("APPDATA") ? std::getenv("APPDATA") : "";
+        std::string profileId = ProfileManager::ParseProfileArgument(cmdlineW);
+        if (profileId.empty() || !ProfileManager::IsValidProfileId(profileId)) {
+            profileId = "Default";
+        }
+        std::string user_data_path = appdata_path + "\\" + AppPaths::GetAppDirName() + "\\" + profileId;
 
-    LOG_DEBUG_RENDER("🔧 Initializing HistoryManager in RENDER process");
-    if (HistoryManager::GetInstance().Initialize(user_data_path)) {
-        LOG_DEBUG_RENDER("✅ HistoryManager initialized in RENDER process");
+        LOG_DEBUG_RENDER("🔧 Initializing HistoryManager in RENDER process for profile: " + profileId);
+        if (HistoryManager::GetInstance().Initialize(user_data_path)) {
+            LOG_DEBUG_RENDER("✅ HistoryManager initialized in RENDER process");
+        } else {
+            LOG_ERROR_RENDER("❌ Failed to initialize HistoryManager in RENDER process");
+        }
     } else {
-        LOG_ERROR_RENDER("❌ Failed to initialize HistoryManager in RENDER process");
+        LOG_DEBUG_RENDER("🔧 Non-renderer process — HistoryManager left to the browser-process DB init");
     }
 #else
     LOG_DEBUG_RENDER("🔧 HistoryManager not available on macOS - stubbed");

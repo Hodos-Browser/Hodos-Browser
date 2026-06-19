@@ -86,6 +86,11 @@ public:
     void OnBeforeCommandLineProcessing(const CefString& process_type,
                                        CefRefPtr<CefCommandLine> command_line) override;
 
+    // Propagate the active profile id to child (renderer/GPU/utility) processes
+    // so per-process singletons (HistoryManager) bind to the correct profile
+    // rather than a hardcoded Default. CefBrowserProcessHandler override.
+    void OnBeforeChildProcessLaunch(CefRefPtr<CefCommandLine> command_line) override;
+
     void OnContextInitialized() override;
 
     // Platform-specific window handle methods
