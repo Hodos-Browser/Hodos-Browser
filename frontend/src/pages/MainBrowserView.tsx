@@ -22,6 +22,7 @@ import LockOpenIcon from '@mui/icons-material/LockOpen';
 import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
 import DownloadIcon from '@mui/icons-material/Download';
 import SecurityIcon from '@mui/icons-material/Security';
+import BookmarkBorderIcon from '@mui/icons-material/BookmarkBorder';
 // Settings panel now rendered in separate overlay process
 import { useHodosBrowser } from '../hooks/useHodosBrowser';
 import { useTabManager } from '../hooks/useTabManager';
@@ -595,6 +596,31 @@ const MainBrowserView: React.FC = () => {
 
                 {/* Spacer to help center address bar */}
                 <Box sx={{ flex: 1 }} />
+
+                {/* Bookmarks Button — right-justified in the space left of the address
+                    bar (hugs its left edge), opening the bookmarks dropdown.
+                    Distinct from the in-panel star toggle: this opens "my bookmarks". */}
+                <HodosButton
+                    variant="icon"
+                    size="small"
+                    onClick={(e) => {
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        const iconLeftOffset = Math.round(rect.left);
+                        // Use the committed tab URL (not the editable address-bar text)
+                        // so the panel's current-page/star state matches the page shown.
+                        const activeTab = tabs.find(t => t.id === activeTabId);
+                        window.cefMessage?.send('bookmarks_panel_show', [
+                            iconLeftOffset.toString(),
+                            activeTab?.url || '',
+                            activeTab?.title || '',
+                        ]);
+                    }}
+                    aria-label="Bookmarks"
+                    title="Bookmarks"
+                    style={{ flexShrink: 0 }}
+                >
+                    <BookmarkBorderIcon fontSize="small" />
+                </HodosButton>
 
                 {/* Address Bar with Inline Autocomplete - centered, constrained width */}
                 <Box sx={{ position: 'relative', flex: '0 1 1200px', minWidth: 200, maxWidth: 1200 }}>

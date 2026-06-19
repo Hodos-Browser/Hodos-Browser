@@ -15,6 +15,7 @@ const BRC100AuthOverlayRoot = React.lazy(() => import('./pages/BRC100AuthOverlay
 const OmniboxOverlayRoot = React.lazy(() => import('./pages/OmniboxOverlayRoot'));
 const PrivacyShieldOverlayRoot = React.lazy(() => import('./pages/PrivacyShieldOverlayRoot'));
 const DownloadsOverlayRoot = React.lazy(() => import('./pages/DownloadsOverlayRoot'));
+const BookmarksOverlayRoot = React.lazy(() => import('./pages/BookmarksOverlayRoot'));
 const ProfilePickerOverlayRoot = React.lazy(() => import('./pages/ProfilePickerOverlayRoot'));
 const MenuOverlayRoot = React.lazy(() => import('./pages/MenuOverlayRoot'));
 const HistoryPage = React.lazy(() => import('./pages/HistoryPage'));
@@ -187,6 +188,7 @@ const App = () => {
           <Route path="/omnibox" element={<OmniboxOverlayRoot />} />
           <Route path="/privacy-shield" element={<PrivacyShieldOverlayRoot />} />
           <Route path="/downloads" element={<DownloadsOverlayRoot />} />
+          <Route path="/bookmarks" element={<BookmarksOverlayRoot />} />
           <Route path="/profile-picker" element={<ProfilePickerOverlayRoot />} />
           <Route path="/menu" element={<MenuOverlayRoot />} />
         </Routes>

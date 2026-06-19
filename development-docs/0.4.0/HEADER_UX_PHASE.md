@@ -25,8 +25,10 @@ All §9 open questions resolved + two placement overrides from the owner:
 - **Q9/Q10 — FINAL 2026-06-19:** tune `⚙` icon (MUI `TuneIcon`) is the single clickable site-info control; **no standalone positive lock, no pipe divider**. Connection state shown via the tune icon's color + a "Not secure" pill for HTTP/cert-error. Removes the old passive `securityState` Lock indicator. (Modern Chrome/Brave pattern — see §5b.)
 
 ### Progress
-- **Pre-chunk B2-FILL — DONE (pending commit).** Root cause: a vestigial `width/height: calc(100% + 16px); margin: -8px` hack in `MainBrowserView.tsx` root Box compensating for an 8px UA body margin that `index.css`/`index.html` already reset to 0 → 16px overflow + `-8,-8` shift (top-clip + ~9px dark strip under the toolbar). Fixed to `width/height: 100%; margin: 0`. Frontend builds clean; owner confirmed header fills better. Not yet committed.
-- **Next chunk:** (d) Downloads auto-hide.
+- **Pre-chunk B2-FILL — ✅ committed `d103b89`.** Dropped the vestigial `calc(100% + 16px)` / `margin: -8px` root-Box hack (compensated for an 8px UA body margin already reset to 0) → header now fills its 96px viewport. Owner-confirmed.
+- **(d) Downloads auto-hide — ✅ committed `6989ef7`.** `Grow` animate-in/out, completion pulse, hidden-until-download restored. Pure React.
+- **(a) Bookmarks — ✅ done (this commit).** `BookmarksOverlayRoot` + `useBookmarks` + header button (right-justified left of the address bar) + C++ overlay (cloned the **profile-picker** pattern, not download — needs keyboard for search) + Ctrl+D toggle + menu un-stub. Adversarial review (reviewer+skeptic) found no critical/high/medium; 6 confirmed low/nits + 3 skeptic nits — fixed R1 (use committed tab URL), search-filter-preserved toggle, single `EscapeForSingleQuotedJs` helper (DRY + U+2028/29 harden), removed dead `g_bookmarks_last_hide_tick`, stale-`pending_` guard, star-effect flicker. Accepted: R2 (no right-click in a list), R4 (toggle-close race = shipped profile pattern), R6.1 (favicon cosmetic). macOS deferred — section appended to `MACOS_PORT_0_4_0.md`.
+- **Next chunk:** (b) Site-info + (c) wallet-perms rename, then (e) tab-list caret.
 
 ---
 

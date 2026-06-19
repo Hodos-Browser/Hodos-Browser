@@ -84,6 +84,7 @@ HWND g_download_panel_overlay_hwnd = nullptr;
 HWND g_profile_panel_overlay_hwnd = nullptr;
 HWND g_notification_overlay_hwnd = nullptr;
 HWND g_menu_overlay_hwnd = nullptr;
+HWND g_bookmarks_panel_overlay_hwnd = nullptr;
 
 // File dialog guard — prevents overlay close when a native file dialog is open
 bool g_file_dialog_active = false;
@@ -103,6 +104,7 @@ bool g_picker_mode = false;
 ULONGLONG g_wallet_last_hide_tick = 0;
 ULONGLONG g_profile_last_hide_tick = 0;
 ULONGLONG g_profile_last_show_tick = 0;  // Suppress immediate WM_ACTIVATE hide after show
+ULONGLONG g_bookmarks_last_show_tick = 0;  // Suppress immediate WM_ACTIVATE hide after show
 
 // Global mouse hooks for overlay click-outside detection
 HHOOK g_omnibox_mouse_hook = nullptr;
@@ -111,6 +113,7 @@ HHOOK g_download_panel_mouse_hook = nullptr;
 HHOOK g_profile_panel_mouse_hook = nullptr;
 HHOOK g_settings_mouse_hook = nullptr;
 HHOOK g_menu_mouse_hook = nullptr;
+HHOOK g_bookmarks_panel_mouse_hook = nullptr;
 
 // Stored icon right offsets for repositioning overlays on WM_SIZE/WM_MOVE
 // (physical pixel distance from icon's right edge to header's right edge)
@@ -120,6 +123,9 @@ int g_download_icon_right_offset = 0;
 int g_profile_icon_right_offset = 0;
 int g_wallet_icon_right_offset = 0;
 int g_menu_icon_right_offset = 0;
+// Bookmarks dropdown is LEFT-anchored (button sits left of the address bar), so it
+// stores a LEFT offset (physical px from header's left edge to the button's left).
+int g_bookmarks_icon_left_offset = 0;
 int g_peerpay_count = 0;
 int g_peerpay_amount = 0;
 
@@ -650,6 +656,17 @@ void ShutdownApplication() {
         }
         DestroyWindow(g_download_panel_overlay_hwnd);
         g_download_panel_overlay_hwnd = nullptr;
+    }
+
+    if (g_bookmarks_panel_overlay_hwnd && IsWindow(g_bookmarks_panel_overlay_hwnd)) {
+        LOG_INFO("Destroying bookmarks panel overlay window...");
+        if (g_bookmarks_panel_mouse_hook) {
+            UnhookWindowsHookEx(g_bookmarks_panel_mouse_hook);
+            g_bookmarks_panel_mouse_hook = nullptr;
+            LOG_INFO("Bookmarks panel mouse hook removed during shutdown");
+        }
+        DestroyWindow(g_bookmarks_panel_overlay_hwnd);
+        g_bookmarks_panel_overlay_hwnd = nullptr;
     }
 
     if (g_profile_panel_overlay_hwnd && IsWindow(g_profile_panel_overlay_hwnd)) {
@@ -2356,6 +2373,197 @@ LRESULT CALLBACK DownloadPanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lPa
     return CallNextHookEx(g_download_panel_mouse_hook, nCode, wParam, lParam);
 }
 
+// ========== BOOKMARKS PANEL OVERLAY ==========
+
+LRESULT CALLBACK BookmarksPanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode == HC_ACTION) {
+        if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN) {
+            if (g_bookmarks_panel_overlay_hwnd && IsWindow(g_bookmarks_panel_overlay_hwnd) && IsWindowVisible(g_bookmarks_panel_overlay_hwnd)) {
+                MSLLHOOKSTRUCT* mouseInfo = (MSLLHOOKSTRUCT*)lParam;
+                POINT clickPoint = mouseInfo->pt;
+                RECT overlayRect;
+                GetWindowRect(g_bookmarks_panel_overlay_hwnd, &overlayRect);
+                if (!PtInRect(&overlayRect, clickPoint)) {
+                    LOG_DEBUG("🖱️ Click detected outside bookmarks panel overlay bounds - dismissing");
+                    extern void HideBookmarksPanelOverlay();
+                    HideBookmarksPanelOverlay();
+                }
+            }
+        }
+    }
+    return CallNextHookEx(g_bookmarks_panel_mouse_hook, nCode, wParam, lParam);
+}
+
+// Mirrors ProfilePanelOverlayWndProc: a dropdown WITH a text input (search box),
+// so it takes activation (MA_ACTIVATE) + forwards keyboard, and closes on
+// WM_ACTIVATE(WA_INACTIVE) (click-outside) with a show-tick race guard.
+LRESULT CALLBACK BookmarksPanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_MOUSEACTIVATE:
+            return MA_ACTIVATE;
+
+        case WM_SETFOCUS: {
+            ImmAssociateContext(hwnd, nullptr);
+            CefRefPtr<CefBrowser> bm_browser = SimpleHandler::GetBookmarksPanelBrowser();
+            if (bm_browser) {
+                bm_browser->GetHost()->SetFocus(true);
+            }
+            return 0;
+        }
+
+        case WM_MOUSEMOVE: {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+            CefRefPtr<CefBrowser> bm_browser = SimpleHandler::GetBookmarksPanelBrowser();
+            if (bm_browser) {
+                bm_browser->GetHost()->SendMouseMoveEvent(mouse_event, false);
+            }
+            return 0;
+        }
+
+        case WM_LBUTTONDOWN: {
+            SetFocus(hwnd);
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = EVENTFLAG_LEFT_MOUSE_BUTTON;
+            CefRefPtr<CefBrowser> bm_browser = SimpleHandler::GetBookmarksPanelBrowser();
+            if (bm_browser) {
+                bm_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
+            }
+            return 0;
+        }
+
+        case WM_LBUTTONUP: {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+            CefRefPtr<CefBrowser> bm_browser = SimpleHandler::GetBookmarksPanelBrowser();
+            if (bm_browser) {
+                bm_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
+            }
+            return 0;
+        }
+
+        case WM_KEYDOWN: {
+            CefRefPtr<CefBrowser> bm_browser = SimpleHandler::GetBookmarksPanelBrowser();
+            if (bm_browser) {
+                CefKeyEvent key_event;
+                key_event.type = KEYEVENT_KEYDOWN;
+                key_event.windows_key_code = wParam;
+                key_event.native_key_code = lParam;
+                key_event.is_system_key = false;
+                int modifiers = 0;
+                if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= EVENTFLAG_CONTROL_DOWN;
+                if (GetKeyState(VK_SHIFT) & 0x8000) modifiers |= EVENTFLAG_SHIFT_DOWN;
+                if (GetKeyState(VK_MENU) & 0x8000) modifiers |= EVENTFLAG_ALT_DOWN;
+                key_event.modifiers = modifiers;
+                bm_browser->GetHost()->SendKeyEvent(key_event);
+            }
+            return 0;
+        }
+
+        case WM_KEYUP: {
+            CefRefPtr<CefBrowser> bm_browser = SimpleHandler::GetBookmarksPanelBrowser();
+            if (bm_browser) {
+                CefKeyEvent key_event;
+                key_event.type = KEYEVENT_KEYUP;
+                key_event.windows_key_code = wParam;
+                key_event.native_key_code = lParam;
+                key_event.is_system_key = false;
+                int modifiers = 0;
+                if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= EVENTFLAG_CONTROL_DOWN;
+                if (GetKeyState(VK_SHIFT) & 0x8000) modifiers |= EVENTFLAG_SHIFT_DOWN;
+                if (GetKeyState(VK_MENU) & 0x8000) modifiers |= EVENTFLAG_ALT_DOWN;
+                key_event.modifiers = modifiers;
+                bm_browser->GetHost()->SendKeyEvent(key_event);
+            }
+            return 0;
+        }
+
+        case WM_CHAR: {
+            CefRefPtr<CefBrowser> bm_browser = SimpleHandler::GetBookmarksPanelBrowser();
+            if (bm_browser) {
+                CefKeyEvent key_event;
+                key_event.type = KEYEVENT_CHAR;
+                key_event.windows_key_code = static_cast<int>(wParam);
+                key_event.native_key_code = static_cast<int>(lParam);
+                key_event.character = static_cast<char16_t>(wParam);
+                key_event.unmodified_character = static_cast<char16_t>(wParam);
+                key_event.is_system_key = false;
+                int modifiers = 0;
+                if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= EVENTFLAG_CONTROL_DOWN;
+                if (GetKeyState(VK_SHIFT) & 0x8000) modifiers |= EVENTFLAG_SHIFT_DOWN;
+                if (GetKeyState(VK_MENU) & 0x8000) modifiers |= EVENTFLAG_ALT_DOWN;
+                key_event.modifiers = modifiers;
+                bm_browser->GetHost()->SendKeyEvent(key_event);
+            }
+            return 0;
+        }
+
+        case WM_MOUSEWHEEL: {
+            POINT screenPt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            POINT clientPt = screenPt;
+            ScreenToClient(hwnd, &clientPt);
+            int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+            CefMouseEvent mouse_event;
+            mouse_event.x = clientPt.x;
+            mouse_event.y = clientPt.y;
+            mouse_event.modifiers = 0;
+            CefRefPtr<CefBrowser> bm_browser = SimpleHandler::GetBookmarksPanelBrowser();
+            if (bm_browser) {
+                bm_browser->GetHost()->SendMouseWheelEvent(mouse_event, 0, delta);
+            }
+            return 0;
+        }
+
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+
+        case WM_DESTROY:
+            return 0;
+
+        case WM_ACTIVATE:
+            if (LOWORD(wParam) != WA_INACTIVE) {
+                ImmAssociateContext(hwnd, nullptr);
+            } else {
+                if (g_file_dialog_active) return 0;
+                // Suppress immediate hide if just shown (<200ms) — SetForegroundWindow
+                // in ShowBookmarksPanelOverlay bounces focus and would otherwise self-close.
+                ULONGLONG elapsed = GetTickCount64() - g_bookmarks_last_show_tick;
+                if (elapsed < 200) {
+                    return 0;
+                }
+                LOG_INFO("Hiding bookmarks panel — lost activation (click-outside)");
+                extern void HideBookmarksPanelOverlay();
+                HideBookmarksPanelOverlay();
+                return 0;
+            }
+            break;
+
+        case WM_WINDOWPOSCHANGING:
+            break;
+
+        // IME suppression (same as wallet / profile)
+        case WM_IME_SETCONTEXT:
+            return 0;
+        case WM_IME_STARTCOMPOSITION:
+            return 0;
+        case WM_IME_COMPOSITION:
+            return 0;
+        case WM_IME_ENDCOMPOSITION:
+            return 0;
+    }
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
 // ========== PROFILE PANEL OVERLAY ==========
 
 LRESULT CALLBACK ProfilePanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
@@ -3549,6 +3757,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     if (!RegisterClass(&downloadPanelOverlayClass)) {
         LOG_DEBUG("Failed to register download panel overlay window class. Error: " + std::to_string(GetLastError()));
+    }
+
+    // Register Bookmarks Panel overlay window class
+    WNDCLASS bookmarksPanelOverlayClass = {};
+    bookmarksPanelOverlayClass.lpfnWndProc = BookmarksPanelOverlayWndProc;
+    bookmarksPanelOverlayClass.hInstance = hInstance;
+    bookmarksPanelOverlayClass.lpszClassName = L"CEFBookmarksPanelOverlayWindow";
+
+    if (!RegisterClass(&bookmarksPanelOverlayClass)) {
+        LOG_DEBUG("Failed to register bookmarks panel overlay window class. Error: " + std::to_string(GetLastError()));
     }
 
     // Register Profile Panel overlay window class

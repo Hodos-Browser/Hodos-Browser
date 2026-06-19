@@ -66,10 +66,16 @@ public:
     static CefRefPtr<CefBrowser> GetOmniboxBrowser();
     static CefRefPtr<CefBrowser> GetCookiePanelBrowser();
     static CefRefPtr<CefBrowser> GetDownloadPanelBrowser();
+    static CefRefPtr<CefBrowser> GetBookmarksPanelBrowser();
     static CefRefPtr<CefBrowser> GetProfilePanelBrowser();
     static CefRefPtr<CefBrowser> GetMenuBrowser();
     static std::string pending_panel_;
     static std::string pending_shield_domain_;
+    // Deferred current-page context for the bookmarks overlay (mirrors
+    // pending_shield_domain_): injected via window.setBookmarkContext once the
+    // overlay finishes loading, fixing the first-open race.
+    static std::string pending_bookmark_url_;
+    static std::string pending_bookmark_title_;
     static bool needs_overlay_reload_;
     static void TriggerDeferredPanel(const std::string& panel);
     static void NotifyTabListChanged();  // Notify ALL windows' frontends of tab list changes

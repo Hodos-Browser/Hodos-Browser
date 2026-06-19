@@ -419,6 +419,36 @@ CefRefPtr<CefBrowser> SimpleHandler::download_panel_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::profile_panel_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::menu_browser_ = nullptr;
 std::string SimpleHandler::pending_shield_domain_;
+std::string SimpleHandler::pending_bookmark_url_;
+std::string SimpleHandler::pending_bookmark_title_;
+
+// Escape an (attacker-controlled) string for embedding in a SINGLE-QUOTED JS string
+// literal passed to ExecuteJavaScript. Escapes backslash + single-quote, maps CR/LF
+// to spaces, and escapes the U+2028/U+2029 line/paragraph separators (3-byte UTF-8
+// E2 80 A8 / A9) so the literal stays valid regardless of V8 version. Single place
+// to harden — used by every setBookmarkContext injection site.
+static std::string EscapeForSingleQuotedJs(const std::string& in) {
+    std::string out;
+    out.reserve(in.size() + 8);
+    for (size_t i = 0; i < in.size(); ++i) {
+        unsigned char c = static_cast<unsigned char>(in[i]);
+        if (c == 0xE2 && i + 2 < in.size() &&
+            static_cast<unsigned char>(in[i + 1]) == 0x80 &&
+            (static_cast<unsigned char>(in[i + 2]) == 0xA8 ||
+             static_cast<unsigned char>(in[i + 2]) == 0xA9)) {
+            out += (static_cast<unsigned char>(in[i + 2]) == 0xA8) ? "\\u2028" : "\\u2029";
+            i += 2;
+            continue;
+        }
+        switch (c) {
+            case '\\': out += "\\\\"; break;
+            case '\'': out += "\\'"; break;
+            case '\n': case '\r': out += ' '; break;
+            default: out += static_cast<char>(c); break;
+        }
+    }
+    return out;
+}
 
 // QR scan: tracks which overlay browser initiated the scan so results route back correctly
 // Non-static — QRScreenCapture.cpp accesses this via extern to deliver results
@@ -440,6 +470,10 @@ CefRefPtr<CefJSDialogHandler> SimpleHandler::GetJSDialogHandler() {
 CefRefPtr<CefBrowser> SimpleHandler::GetDownloadPanelBrowser() {
     auto* win = WindowManager::GetInstance().GetPrimaryWindow();
     return win ? win->download_panel_browser : nullptr;
+}
+CefRefPtr<CefBrowser> SimpleHandler::GetBookmarksPanelBrowser() {
+    auto* win = WindowManager::GetInstance().GetPrimaryWindow();
+    return win ? win->bookmarks_panel_browser : nullptr;
 }
 CefRefPtr<CefBrowser> SimpleHandler::GetProfilePanelBrowser() {
     auto* win = WindowManager::GetInstance().GetPrimaryWindow();
@@ -953,6 +987,24 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
         }
     }
 
+    // Deferred bookmark-context injection: when the bookmarks panel finishes
+    // loading, inject the current page url/title via window.setBookmarkContext.
+    // Mirrors the cookie-panel deferred injection (fixes the first-open race).
+    if (!isLoading && role_ == "bookmarkspanel" &&
+        (!pending_bookmark_url_.empty() || !pending_bookmark_title_.empty())) {
+        CefRefPtr<CefFrame> frame = browser->GetMainFrame();
+        if (frame && frame->IsValid()) {
+            std::string url = pending_bookmark_url_;
+            std::string title = pending_bookmark_title_;
+            pending_bookmark_url_.clear();
+            pending_bookmark_title_.clear();
+            std::string js = "if (window.setBookmarkContext) { window.setBookmarkContext('" +
+                EscapeForSingleQuotedJs(url) + "', '" + EscapeForSingleQuotedJs(title) + "'); }";
+            frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+            LOG_INFO_BROWSER("Deferred bookmark context injected after page load: " + url);
+        }
+    }
+
     // API injection logic (cross-platform)
     if (!isLoading) {
         if (role_ == "overlay") {
@@ -1374,6 +1426,18 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
         LOG_DEBUG_BROWSER("⌨️ Download panel browser focus enabled");
 
         // Delayed resize/invalidate to fix first-render black screen issue
+        CefRefPtr<CefBrowser> browser_ref = browser;
+        CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
+            if (b && b->GetHost()) {
+                b->GetHost()->WasResized();
+                b->GetHost()->Invalidate(PET_VIEW);
+            }
+        }, browser_ref), 150);
+    } else if (role_ == "bookmarkspanel") {
+        LOG_DEBUG_BROWSER("🔖 Bookmarks panel overlay browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
+
+        browser->GetHost()->SetFocus(true);
+
         CefRefPtr<CefBrowser> browser_ref = browser;
         CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
             if (b && b->GetHost()) {
@@ -2532,8 +2596,32 @@ bool SimpleHandler::OnProcessMessageReceived(
             CreateNewTabWithUrl("http://127.0.0.1:5137/settings-page/privacy");
             SimpleHandler::NotifyTabListChanged();
         } else if (action == "bookmarks") {
-            // TODO: bookmarks page
-            LOG_DEBUG_BROWSER("Bookmarks action not yet implemented");
+#ifdef _WIN32
+            extern void CreateBookmarksPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconLeftOffset);
+            extern void ShowBookmarksPanelOverlay(int iconLeftOffset, BrowserWindow* targetWin);
+            extern HWND g_bookmarks_panel_overlay_hwnd;
+            extern HINSTANCE g_hInstance;
+            extern HWND g_hwnd;
+            // Current-page context from the active tab (the menu overlay can't supply it).
+            Tab* bmActiveTab = TabManager::GetInstance().GetActiveTab();
+            pending_bookmark_url_ = bmActiveTab ? bmActiveTab->url : "";
+            pending_bookmark_title_ = bmActiveTab ? bmActiveTab->title : "";
+            // Approximate anchor near the (left-of-address-bar) bookmark button.
+            int bmDefOff = g_hwnd ? ScalePx(140, g_hwnd) : 140;
+            if (!g_bookmarks_panel_overlay_hwnd || !IsWindow(g_bookmarks_panel_overlay_hwnd)) {
+                CreateBookmarksPanelOverlay(g_hInstance, true, bmDefOff);
+            } else {
+                ShowBookmarksPanelOverlay(bmDefOff, GetOwnerWindow());
+                CefRefPtr<CefBrowser> bm_browser = GetBookmarksPanelBrowser();
+                if (bm_browser && bm_browser->GetMainFrame()) {
+                    std::string js = "if (window.setBookmarkContext) { window.setBookmarkContext('" +
+                        EscapeForSingleQuotedJs(pending_bookmark_url_) + "', '" +
+                        EscapeForSingleQuotedJs(pending_bookmark_title_) + "'); }";
+                    bm_browser->GetMainFrame()->ExecuteJavaScript(js, bm_browser->GetMainFrame()->GetURL(), 0);
+                }
+            }
+            LOG_DEBUG_BROWSER("🔖 Bookmarks panel opened from menu");
+#endif
         }
 
         return true;
@@ -6364,6 +6452,71 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
+    if (message_name == "bookmarks_panel_show") {
+        int iconLeftOffset = 0;
+        std::string bmUrl, bmTitle;
+        CefRefPtr<CefListValue> bp_args = message->GetArgumentList();
+        if (bp_args->GetSize() > 0) {
+            try { iconLeftOffset = std::stoi(bp_args->GetString(0).ToString()); } catch(...) {}
+        }
+        if (bp_args->GetSize() > 1) bmUrl = bp_args->GetString(1).ToString();
+        if (bp_args->GetSize() > 2) bmTitle = bp_args->GetString(2).ToString();
+
+        // Store current-page context for the deferred (first-open) injection.
+        pending_bookmark_url_ = bmUrl;
+        pending_bookmark_title_ = bmTitle;
+
+#ifdef _WIN32
+        extern HWND g_hwnd;
+        if (g_hwnd) iconLeftOffset = ScalePx(iconLeftOffset, g_hwnd);
+
+        extern void CreateBookmarksPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconLeftOffset);
+        extern void ShowBookmarksPanelOverlay(int iconLeftOffset, BrowserWindow* targetWin);
+        extern void HideBookmarksPanelOverlay();
+        extern HWND g_bookmarks_panel_overlay_hwnd;
+        extern HINSTANCE g_hInstance;
+
+        bool willShow = true;
+        if (!g_bookmarks_panel_overlay_hwnd || !IsWindow(g_bookmarks_panel_overlay_hwnd)) {
+            CreateBookmarksPanelOverlay(g_hInstance, true, iconLeftOffset);
+        } else if (IsWindowVisible(g_bookmarks_panel_overlay_hwnd)) {
+            HideBookmarksPanelOverlay();
+            willShow = false;
+            // Toggle-off: drop the stashed context so it can't replay on a later reload.
+            pending_bookmark_url_.clear();
+            pending_bookmark_title_.clear();
+        } else {
+            ShowBookmarksPanelOverlay(iconLeftOffset, GetOwnerWindow());
+        }
+
+        // Immediate injection for the re-open case (browser already loaded). On the
+        // first open the browser isn't ready yet — the deferred OnLoadingStateChange
+        // path handles that via pending_bookmark_url_/title_.
+        if (willShow) {
+            CefRefPtr<CefBrowser> bm_browser = GetBookmarksPanelBrowser();
+            if (bm_browser && bm_browser->GetMainFrame()) {
+                std::string js = "if (window.setBookmarkContext) { window.setBookmarkContext('" +
+                    EscapeForSingleQuotedJs(bmUrl) + "', '" + EscapeForSingleQuotedJs(bmTitle) + "'); }";
+                bm_browser->GetMainFrame()->ExecuteJavaScript(js, bm_browser->GetMainFrame()->GetURL(), 0);
+            }
+        }
+        LOG_DEBUG_BROWSER("🔖 Bookmarks panel toggle handled (iconLeftOffset=" + std::to_string(iconLeftOffset) + ")");
+#elif defined(__APPLE__)
+        // macOS bookmarks overlay creation is a TODO for the Mac sprint.
+        LOG_DEBUG_BROWSER("Bookmarks panel overlay not yet implemented on macOS");
+#endif
+        return true;
+    }
+
+    if (message_name == "bookmarks_panel_hide") {
+#ifdef _WIN32
+        extern void HideBookmarksPanelOverlay();
+        HideBookmarksPanelOverlay();
+        LOG_DEBUG_BROWSER("🔖 Bookmarks panel overlay hidden");
+#endif
+        return true;
+    }
+
     // ========== FIND IN PAGE (JavaScript-based) ==========
     // CEF's CefBrowserHost::Find() / OnFindResult API does not callback in this
     // build (GetFindHandler never queried). Use window.find() + JS match counting.
@@ -7233,10 +7386,33 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
 #endif
                 Tab* activeTab = TabManager::GetInstance().GetActiveTab();
                 if (activeTab && !activeTab->url.empty()) {
-                    LOG_INFO_BROWSER("⌨️ Ctrl+D: Bookmarking " + activeTab->url);
-                    std::vector<std::string> emptyTags;
-                    BookmarkManager::GetInstance().AddBookmark(
-                        activeTab->url, activeTab->title, -1, emptyTags);
+                    auto& bm = BookmarkManager::GetInstance();
+                    // Toggle: remove if already bookmarked, else add.
+                    bool isMarked = false;
+                    try {
+                        auto j = nlohmann::json::parse(bm.IsBookmarked(activeTab->url));
+                        isMarked = j.value("bookmarked", false);
+                    } catch (...) {}
+
+                    if (isMarked) {
+                        // Look up the bookmark id by exact URL match, then remove.
+                        try {
+                            auto j = nlohmann::json::parse(bm.SearchBookmarks(activeTab->url, 50, 0));
+                            if (j.contains("bookmarks") && j["bookmarks"].is_array()) {
+                                for (const auto& b : j["bookmarks"]) {
+                                    if (b.value("url", std::string()) == activeTab->url) {
+                                        bm.RemoveBookmark(b.value("id", static_cast<int64_t>(0)));
+                                        LOG_INFO_BROWSER("⌨️ Ctrl+D: Removed bookmark " + activeTab->url);
+                                        break;
+                                    }
+                                }
+                            }
+                        } catch (...) {}
+                    } else {
+                        std::vector<std::string> emptyTags;
+                        bm.AddBookmark(activeTab->url, activeTab->title, -1, emptyTags);
+                        LOG_INFO_BROWSER("⌨️ Ctrl+D: Bookmarked " + activeTab->url);
+                    }
                 }
                 return true;
             }

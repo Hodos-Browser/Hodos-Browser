@@ -268,15 +268,6 @@ const SettingsOverlayRoot: React.FC = () => {
 
         <Box sx={sectionStyle}>
           <Typography variant="subtitle2">Appearance</Typography>
-          
-          <Box sx={settingRowStyle}>
-            <Typography variant="body2">Show bookmark bar</Typography>
-            <Switch
-              checked={settings.browser.showBookmarkBar}
-              onChange={(e) => updateSetting('browser.showBookmarkBar', e.target.checked)}
-              size="small"
-            />
-          </Box>
 
           <Box sx={{ py: 1 }}>
             <Typography variant="body2" gutterBottom>

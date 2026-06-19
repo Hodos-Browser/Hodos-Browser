@@ -1,7 +1,7 @@
 # B3 — Bookmarks (make functional)
 
-**Status:** ⏳ Research pending — **can start now** (not Brave-gated)
-**Type:** feature (med) · **0.4.0:** likely
+**Status:** ✅ DONE (2026-06-19) — landed as chunk (a) of the Header/Omnibox UX pass. See `HEADER_UX_PHASE.md` §5a for the as-built design. The "research pending / not source-verified" notes below were stale: `BookmarkManager` + the full `bookmark_*` IPC + the typed `window.hodosBrowser.bookmarks` bridge + Ctrl+D + browser-profile import were already built; this chunk added the UI (`BookmarksOverlayRoot` + `useBookmarks` + header button), un-stubbed the menu action, and made Ctrl+D a toggle. No bookmarks bar; HTML import/export deferred. macOS port deferred (see `MACOS_PORT_0_4_0.md`).
+**Type:** feature (med) · **0.4.0:** ✅ shipped (Win); mac deferred
 
 ## Summary
 Bookmark UI buttons exist but are non-functional. Make bookmarks actually work, with UX informed by

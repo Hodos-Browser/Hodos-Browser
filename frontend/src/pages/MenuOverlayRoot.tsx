@@ -154,7 +154,6 @@ const MenuOverlayRoot: React.FC = () => {
       <MenuItemRow
         icon={<BookmarkBorderIcon sx={{ fontSize: 18 }} />}
         label="Bookmarks"
-        shortcut="Cmd+D"
         onClick={() => handleAction('bookmarks')}
       />
       <MenuItemRow

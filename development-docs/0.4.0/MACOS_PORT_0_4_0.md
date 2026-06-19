@@ -101,3 +101,23 @@ Design: `development-docs/0.4.0/HEADER_UX_PHASE.md`. First two pieces of the hea
 
 - **B2-FILL** (`MainBrowserView.tsx` root Box): dropped the vestigial `calc(100% + 16px)` / `margin: -8px` hack (compensated for an 8px UA body margin already reset to 0). No mac-specific work — the same React fix applies under `cef_browser_shell_mac.mm`'s header NSView. Worth an eyeball on mac that the header fills its 96px region (mac header height is also 96).
 - **(d) Downloads auto-hide** (`MainBrowserView.tsx`): download toolbar button now hidden until a download exists, `Grow`-animates in/out, pulses green on complete. Pure React. **Optional mac-only nicety deferred:** a Dock bounce / `requestUserAttention:` on download-complete (no Windows analog). Not built; queue for the Mac sprint if wanted.
+
+### Header/Omnibox UX pass — (a) Bookmarks overlay (2026-06-19, branch `0.4.0`)
+
+The Bookmarks overlay is a **left-anchored, keyboard-capable dropdown** (search box). Its closest macOS sibling is the **profile picker** (`CreateProfilePanelOverlayMacOS`/`Show`/`Hide`, `cef_browser_shell_mac.mm:~4051/4038/4020`) — it uses `DropdownOverlayView` (keyboard-forwarding `keyDown:` at `~:943`) + the click-outside-monitor pattern. The one structural difference: bookmarks is **LEFT-anchored**, so positioning must be hand-rolled like the omnibox (`~:3787`), **not** `CalculateToolbarOverlayFrame` (`OverlayHelpers_mac.mm:267`, right-only). Verify all line numbers on the Mac branch before trusting them.
+
+**Already cross-platform (no mac work):**
+- `BrowserWindow` mac fields `bookmarks_panel_overlay_window` / `bookmarks_panel_event_monitor` / `bookmarks_icon_left_offset` (`BrowserWindow.h` `__APPLE__` section).
+- Role dispatch `"bookmarkspanel"` in `SetBrowserForRole`/`GetBrowserForRole` (`BrowserWindow.cpp`).
+- `GetBookmarksPanelBrowser()` — cross-platform static (`simple_handler.cpp`), callable from `.mm` like `GetProfilePanelBrowser()`.
+- Deferred `setBookmarkContext` injection in `OnLoadingStateChange` (role-gated, NOT `#ifdef`'d) + the shared `EscapeForSingleQuotedJs` helper + `OnAfterCreated` role branch + IPC arg parse/`pending_bookmark_*` stash (run before the `#ifdef` split).
+- React: `BookmarksOverlayRoot.tsx`, `useBookmarks.ts`, route `/bookmarks`, header button — all platform-agnostic.
+
+**New mac work required (checklist):**
+- [ ] Add `NSWindow* g_bookmarks_panel_overlay_window = nullptr;` + click-outside monitor + show-tick globals alongside the profile-panel ones (`cef_browser_shell_mac.mm:~256-266`, `~3992-4036`).
+- [ ] Implement `CreateBookmarksPanelOverlayMacOS(int iconLeftOffset)` / `Show` / `Hide` / `IsVisible` / `WasJustHidden` + `Install/RemoveBookmarksPanelClickOutsideMonitor`, cloned from the profile block (`~:3991-4118`). Use **`DropdownOverlayView`** (needs `keyDown:` for the search box), `browserAccessor = ^{ return SimpleHandler::GetBookmarksPanelBrowser(); }`, URL `/bookmarks`, role `"bookmarkspanel"`, then `makeKeyAndOrderFront` + `makeFirstResponder:contentView` (required for search focus).
+- [ ] **Left-anchor positioning** (hand-roll X like omnibox `~:3787`; do NOT use `CalculateToolbarOverlayFrame`). `iconLeftOffset` arrives as **CSS px / points** — apply directly to `contentScreen.origin.x` with **NO Windows-style `ScalePx`** (would double-offset on Retina); then `ClampOverlayToScreen` (`OverlayHelpers_mac.mm:~235`).
+- [ ] Replace the no-op `#elif defined(__APPLE__)` arms: `bookmarks_panel_show` (`simple_handler.cpp`, currently logs+returns) → create/show/hide toggle mirroring the download-panel mac block, **including the immediate `setBookmarkContext` re-open injection** (deferred path only fires on first load); add an `__APPLE__` arm to `bookmarks_panel_hide` (currently `_WIN32`-only); add an `__APPLE__` arm to the menu "bookmarks" action (currently `_WIN32`-only).
+- [ ] Add `g_bookmarks_panel_overlay_window` to `InstallAppFocusLossHandler`'s close list (`OverlayHelpers_mac.mm:~189-229`, has a "Future dropdown overlays" TODO) + to shutdown cleanup (`cef_browser_shell_mac.mm:~4210-4293`).
+
+**Risks to verify on mac:** Retina points-vs-pixels for the left X (no scaling); `makeFirstResponder` so the search box is typable (classic OSR-keyboard failure if omitted); first-open (deferred) vs re-open (immediate) context injection both wired; use `DropdownOverlayView` not `GenericOverlayView`.

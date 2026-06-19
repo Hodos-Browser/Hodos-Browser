@@ -2128,6 +2128,222 @@ void HideDownloadPanelOverlay() {
     LOG_INFO_APP("Download panel overlay hidden");
 }
 
+// ========== BOOKMARKS PANEL OVERLAY ==========
+// Mirrors the PROFILE panel pattern (MA_ACTIVATE dropdown with a text input), not
+// the download panel — the bookmarks dropdown has a search box that needs keyboard.
+// Difference: LEFT-anchored (the bookmark button sits left of the address bar), so
+// it stores/uses a LEFT offset instead of a right offset.
+
+void ShowBookmarksPanelOverlay(int iconLeftOffset = 0, BrowserWindow* targetWin = nullptr);
+
+void CreateBookmarksPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconLeftOffset) {
+    LOG_INFO_APP("Creating bookmarks panel overlay (showImmediately=" +
+                 std::string(showImmediately ? "true" : "false") + ", iconLeftOffset=" +
+                 std::to_string(iconLeftOffset) + ")");
+
+    extern int g_bookmarks_icon_left_offset;
+    if (iconLeftOffset > 0) {
+        g_bookmarks_icon_left_offset = iconLeftOffset;
+    }
+
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetPrimaryWindow();
+    if (mainWin) mainWin->bookmarks_icon_left_offset = g_bookmarks_icon_left_offset;
+
+    extern HWND g_bookmarks_panel_overlay_hwnd;
+    if (g_bookmarks_panel_overlay_hwnd && IsWindow(g_bookmarks_panel_overlay_hwnd)) {
+        LOG_INFO_APP("Bookmarks panel overlay already exists");
+        if (showImmediately) {
+            ShowBookmarksPanelOverlay(iconLeftOffset);
+        }
+        return;
+    }
+
+    extern HWND g_hwnd;
+    extern HWND g_header_hwnd;
+    RECT mainRect;
+    GetWindowRect(g_hwnd, &mainRect);
+    RECT headerRect;
+    GetWindowRect(g_header_hwnd, &headerRect);
+
+    // LEFT-anchored: panel left edge sits at the bookmark button's left.
+    int panelWidth = ScalePx(380, g_hwnd);
+    int panelHeight = ScalePx(480, g_hwnd);
+    int overlayX = headerRect.left + iconLeftOffset;
+    int overlayY = headerRect.top + ScalePx(104, g_hwnd);
+    // Clamp so the panel stays inside the main window horizontally.
+    if (overlayX + panelWidth > mainRect.right - ScalePx(8, g_hwnd)) {
+        overlayX = mainRect.right - panelWidth - ScalePx(8, g_hwnd);
+    }
+    if (overlayX < mainRect.left + ScalePx(8, g_hwnd)) {
+        overlayX = mainRect.left + ScalePx(8, g_hwnd);
+    }
+    if (overlayY + panelHeight > mainRect.bottom - ScalePx(20, g_hwnd)) {
+        panelHeight = mainRect.bottom - overlayY - ScalePx(20, g_hwnd);
+        if (panelHeight < ScalePx(280, g_hwnd)) panelHeight = ScalePx(280, g_hwnd);
+    }
+
+    // WS_VISIBLE needed for proper keyboard focus (same as profile/wallet overlays)
+    HWND bookmarks_panel_hwnd = CreateWindowEx(
+        WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+        L"CEFBookmarksPanelOverlayWindow",
+        L"Bookmarks Panel Overlay",
+        WS_POPUP | WS_VISIBLE,
+        overlayX, overlayY, panelWidth, panelHeight,
+        g_hwnd, nullptr, hInstance, nullptr);
+
+    if (!bookmarks_panel_hwnd) {
+        LOG_ERROR_APP("Failed to create bookmarks panel overlay HWND. Error: " + std::to_string(GetLastError()));
+        return;
+    }
+
+    UINT flags = SWP_NOACTIVATE;
+    flags |= showImmediately ? SWP_SHOWWINDOW : SWP_HIDEWINDOW;
+    SetWindowPos(bookmarks_panel_hwnd, HWND_TOPMOST,
+        overlayX, overlayY, panelWidth, panelHeight, flags);
+
+    g_bookmarks_panel_overlay_hwnd = bookmarks_panel_hwnd;
+    if (mainWin) mainWin->bookmarks_panel_overlay_hwnd = g_bookmarks_panel_overlay_hwnd;
+
+    LOG_INFO_APP("Bookmarks panel overlay HWND created: " + std::to_string(reinterpret_cast<intptr_t>(bookmarks_panel_hwnd)));
+
+    CefWindowInfo window_info;
+    window_info.windowless_rendering_enabled = true;
+    window_info.SetAsPopup(bookmarks_panel_hwnd, "BookmarksPanelOverlay");
+
+    CefBrowserSettings settings;
+    settings.windowless_frame_rate = 30;
+    settings.background_color = CefColorSetARGB(0, 0, 0, 0);
+    settings.javascript = STATE_ENABLED;
+    settings.javascript_access_clipboard = STATE_ENABLED;  // Needed for search input
+    settings.javascript_dom_paste = STATE_ENABLED;         // Needed for search input
+
+    CefRefPtr<SimpleHandler> bookmarks_panel_handler(new SimpleHandler("bookmarkspanel"));
+    CefRefPtr<MyOverlayRenderHandler> render_handler =
+        new MyOverlayRenderHandler(bookmarks_panel_hwnd, panelWidth, panelHeight);
+    bookmarks_panel_handler->SetRenderHandler(render_handler);
+
+    bool result = CefBrowserHost::CreateBrowser(
+        window_info, bookmarks_panel_handler,
+        "http://127.0.0.1:5137/bookmarks",
+        settings, nullptr,
+        CefRequestContext::GetGlobalContext());
+
+    if (result) {
+        LOG_INFO_APP("Bookmarks panel overlay browser created with subprocess");
+        if (showImmediately) {
+            LONG exStyle = GetWindowLong(bookmarks_panel_hwnd, GWL_EXSTYLE);
+            SetWindowLong(bookmarks_panel_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+            SetForegroundWindow(bookmarks_panel_hwnd);
+            extern ULONGLONG g_bookmarks_last_show_tick;
+            g_bookmarks_last_show_tick = GetTickCount64();
+        }
+    } else {
+        LOG_ERROR_APP("Failed to create bookmarks panel overlay browser");
+    }
+}
+
+void ShowBookmarksPanelOverlay(int iconLeftOffset, BrowserWindow* targetWin) {
+    extern HWND g_bookmarks_panel_overlay_hwnd;
+    if (!g_bookmarks_panel_overlay_hwnd || !IsWindow(g_bookmarks_panel_overlay_hwnd)) {
+        LOG_WARNING_APP("Cannot show bookmarks panel overlay - HWND does not exist");
+        return;
+    }
+
+    extern int g_bookmarks_icon_left_offset;
+    if (iconLeftOffset > 0) {
+        g_bookmarks_icon_left_offset = iconLeftOffset;
+    }
+
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetPrimaryWindow();
+    if (mainWin) mainWin->bookmarks_icon_left_offset = g_bookmarks_icon_left_offset;
+
+    LOG_INFO_APP("Showing bookmarks panel overlay");
+
+    extern HWND g_header_hwnd;
+    extern HWND g_hwnd;
+    HWND posHwnd = (targetWin && targetWin->hwnd) ? targetWin->hwnd : g_hwnd;
+    HWND posHeader = (targetWin && targetWin->header_hwnd) ? targetWin->header_hwnd : g_header_hwnd;
+
+    RECT headerRect;
+    GetWindowRect(posHeader, &headerRect);
+    RECT mainRect;
+    GetWindowRect(posHwnd, &mainRect);
+
+    int panelWidth = ScalePx(380, posHwnd);
+    int panelHeight = ScalePx(480, posHwnd);
+    int overlayX = headerRect.left + g_bookmarks_icon_left_offset;
+    int overlayY = headerRect.top + ScalePx(104, posHwnd);
+    if (overlayX + panelWidth > mainRect.right - ScalePx(8, posHwnd)) {
+        overlayX = mainRect.right - panelWidth - ScalePx(8, posHwnd);
+    }
+    if (overlayX < mainRect.left + ScalePx(8, posHwnd)) {
+        overlayX = mainRect.left + ScalePx(8, posHwnd);
+    }
+    if (overlayY + panelHeight > mainRect.bottom - ScalePx(20, posHwnd)) {
+        panelHeight = mainRect.bottom - overlayY - ScalePx(20, posHwnd);
+        if (panelHeight < ScalePx(280, posHwnd)) panelHeight = ScalePx(280, posHwnd);
+    }
+
+    CefRefPtr<CefBrowser> bm_browser = SimpleHandler::GetBookmarksPanelBrowser();
+    if (bm_browser) {
+        int targetWindowId = targetWin ? targetWin->window_id : 0;
+        SimpleHandler* handler = SimpleHandler::GetHandlerForBrowser(bm_browser->GetIdentifier());
+        if (handler) handler->SetWindowId(targetWindowId);
+    }
+
+    SetWindowPos(g_bookmarks_panel_overlay_hwnd, HWND_TOPMOST,
+        overlayX, overlayY, panelWidth, panelHeight,
+        SWP_SHOWWINDOW | SWP_NOACTIVATE);
+
+    LONG exStyle = GetWindowLong(g_bookmarks_panel_overlay_hwnd, GWL_EXSTYLE);
+    SetWindowLong(g_bookmarks_panel_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+
+    if (bm_browser) {
+        bm_browser->GetHost()->NotifyScreenInfoChanged();
+        bm_browser->GetHost()->WasResized();
+        bm_browser->GetHost()->Invalidate(PET_VIEW);
+    }
+
+    extern ULONGLONG g_bookmarks_last_show_tick;
+    g_bookmarks_last_show_tick = GetTickCount64();
+
+    SetForegroundWindow(g_bookmarks_panel_overlay_hwnd);
+
+    if (bm_browser) {
+        bm_browser->GetHost()->SetFocus(true);
+        bm_browser->GetHost()->Invalidate(PET_VIEW);
+    }
+
+    LOG_INFO_APP("Bookmarks panel overlay shown");
+}
+
+void HideBookmarksPanelOverlay() {
+    extern HWND g_bookmarks_panel_overlay_hwnd;
+    if (!g_bookmarks_panel_overlay_hwnd || !IsWindow(g_bookmarks_panel_overlay_hwnd)) {
+        return;
+    }
+
+    LOG_INFO_APP("Hiding bookmarks panel overlay");
+
+    CefRefPtr<CefBrowser> bm_browser = SimpleHandler::GetBookmarksPanelBrowser();
+    int bmTargetWinId = 0;
+    if (bm_browser) {
+        bm_browser->GetHost()->SetFocus(false);
+        SimpleHandler* handler = SimpleHandler::GetHandlerForBrowser(bm_browser->GetIdentifier());
+        if (handler) bmTargetWinId = handler->GetWindowId();
+    }
+
+    ShowWindow(g_bookmarks_panel_overlay_hwnd, SW_HIDE);
+
+    BrowserWindow* bmFocusWin = WindowManager::GetInstance().GetWindow(bmTargetWinId);
+    CefRefPtr<CefBrowser> header_browser = bmFocusWin ? bmFocusWin->header_browser : SimpleHandler::GetHeaderBrowser();
+    if (header_browser) {
+        header_browser->GetHost()->SetFocus(true);
+    }
+
+    LOG_INFO_APP("Bookmarks panel overlay hidden");
+}
+
 // ==================== MENU OVERLAY ====================
 
 void ShowMenuOverlay(int iconRightOffset = 0, BrowserWindow* targetWin = nullptr);
