@@ -16,6 +16,29 @@
 
 ---
 
+## 0.5 Release strategy — RESHAPED 2026-06-19 (read before the wave graph in §3)
+
+The sprint is now split into **two release milestones**. Rationale: the current public build has real bugs (incl. big ones); we've since landed a large pile of fixes (security F-track, profiles, history isolation). Ship those to users **now** in a fast, cheap build instead of holding them behind the ~10–12 h Chromium rebuild + farbling work.
+
+**Terminology (decided 2026-06-19):**
+- **Shell release** = rebuild Hodos's C++/Rust/React (the "CEF Shell" layer) on the **CURRENT, already-built CEF binaries**. Fast (~35 min CI). = the runbook's "Tier 2". This is the maintenance release.
+- **Engine release** = rebuild **Chromium + CEF from source** (CEF M149 bump + Blink farbling patches). Slow (~10–12 h), rare. = the runbook's "Tier 1". This is the CEF long-pole.
+
+**Milestone 1 — Shell release (current engine), CROSS-PLATFORM (Win + Mac).** Readiness checklist (rough order):
+1. **macOS parity first** (cross-platform decision): port the pre-window picker to an NSWindow path; apply the history-isolation fix in the mac render helper (`process_helper_mac.mm` / `cef_browser_shell_mac.mm` — same hardcoded-`Default` pattern). Plus the user's manual macOS smoke. (See `MACOS_PORT_0_4_0.md`.)
+2. **Bookmarks UI** (B3 — backend done; build `BookmarksOverlayRoot` + star icon + un-stub menu action).
+3. **Header** `B2-FILL` (the visible "React doesn't fill the header window" gap) + `B2-MEASURE`→`B2-SLIM`/`B2-WARM` (slow header load). Header stays React (no C++ port — confirmed).
+4. **FEAT-DPI** — multi-monitor mouse-offset / hit-testing across differently-scaled monitors. **Deep-research item** (medium-weight research pass first); coupled with `B2-FILL` (the gap may be DPI rounding).
+5. **Auto-update completion** — keystone, must ship IN this release so the NEXT release validates A→B updating: Windows DSA→EdDSA (WinSparkle 0.9.x), silent install-on-quit, decouple appcast publish from build. (`AUTO_UPDATE.md`: PIPE-DSA / PIPE-SILENT / PIPE-APPCAST.)
+6. **CI test-gate (Track E)** — wire the reusable `_tests.yml` (rust+adblock+**cpp** `hodos_tests`+frontend+security) into `release.yml` so the Shell release is test-gated. **cpp-CI wiring DEFERRED to this Track E push** (needs CEF binaries + vcpkg in the runner; tests pass locally meanwhile, 19 green).
+7. **Ship Shell release** (push `main` → `release` repo, tag, signed CI build).
+
+**Milestone 2 — Engine release (later):** CEF M149 bump → Blink farbling (B1) → B1-VERIFY → ship. This is the existing "CEF long-pole" (§3), now explicitly *after* the Shell release.
+
+> This re-sequences the original §3 wave graph: Wave-2 items (B2 optimization, auto-update) and the macOS parity work are pulled **forward** into the Shell release; the CEF long-pole is pushed **after** it. The §3 graph below is retained for the dependency detail but is superseded on *ordering* by this section.
+
+---
+
 ## 1. The implementation harness (per-chunk lifecycle)
 
 Every work-chunk — large or small — runs the same rails. Steps 2 and 5 are the verification gates.
