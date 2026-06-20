@@ -287,6 +287,12 @@ const BRC100AuthOverlayRoot: React.FC = () => {
   const [scopedBasketAccess, setScopedBasketAccess] = useState<string>('read');
   const [scopedCounterparty, setScopedCounterparty] = useState<string>('');
 
+  // b1b — site-permission prompt (camera/mic/location/notifications/clipboard).
+  // `permCode` selects the icon + wording; `permRequestId` keys the C++ callback.
+  const [permCode, setPermCode] = useState<string>('');
+  const [permRequestId, setPermRequestId] = useState<string>('');
+  const [permSubmitted, setPermSubmitted] = useState<boolean>(false);  // one decision per prompt
+
   // Phase 1.5 Step 1 — "Allow this site to identify you" checkbox in the
   // domain_approval modal. Defaults ON so the common case (user trusts the
   // site enough to approve it at all) avoids a second sequential popup for
@@ -355,6 +361,11 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     const params = new URLSearchParams(queryString);
     const type = params.get('type') || '';
     const domain = params.get('domain') || '';
+
+    // b1b — site-permission prompt params.
+    setPermCode(params.get('perm') || '');
+    setPermRequestId(params.get('requestId') || '');
+    setPermSubmitted(false);  // fresh prompt → re-enable buttons
 
     // Reset UI state for fresh notification
     setShowAdvanced(false);
@@ -1260,6 +1271,70 @@ const BRC100AuthOverlayRoot: React.FC = () => {
               </div>
             </>
           )}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Site permission prompt (b1b): camera / mic / location / notifications /
+  // clipboard. Replaces Chromium's stock prompt with the Hodos-branded one;
+  // the choice is resolved + persisted via the permission_response IPC. ──
+  if (notificationType === 'permission_request') {
+    const PERM: Record<string, { icon: string; label: string }> = {
+      camera:        { icon: '📷', label: 'use your camera' },
+      microphone:    { icon: '🎤', label: 'use your microphone' },
+      camera_mic:    { icon: '🎥', label: 'use your camera and microphone' },
+      location:      { icon: '📍', label: 'know your location' },
+      notifications: { icon: '🔔', label: 'show notifications' },
+      clipboard:     { icon: '📋', label: 'read your clipboard' },
+    };
+    const perm = PERM[permCode] || { icon: '🔐', label: 'access a device feature' };
+    const decide = (decision: 'allow_once' | 'allow_always' | 'block') => {
+      if (permSubmitted) return;       // exactly one decision per prompt
+      setPermSubmitted(true);
+      window.cefMessage?.send('permission_response', [JSON.stringify({ requestId: permRequestId, decision })]);
+      setNotificationType('');  // optimistic hide; C++ also hides the overlay
+    };
+    return (
+      <div style={overlayBackdrop}>
+        <div style={cardStyle}>
+          <HodosWalletHeader />
+          <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '20px' }}>
+            {!faviconError ? (
+              <img
+                src={`https://www.google.com/s2/favicons?domain=${notificationDomain}&sz=32`}
+                width={32}
+                height={32}
+                style={{ borderRadius: 4, flexShrink: 0 }}
+                onError={() => setFaviconError(true)}
+                alt=""
+              />
+            ) : (
+              <div style={avatarStyle}>{getDomainInitial(notificationDomain)}</div>
+            )}
+            <div>
+              <div style={{ fontSize: '16px', fontWeight: 700, color: COLORS.textDark }}>
+                {cleanDomain}
+              </div>
+              <div style={{ fontSize: '13px', color: COLORS.textMuted, marginTop: '2px' }}>
+                wants to {perm.label}
+              </div>
+            </div>
+          </div>
+
+          <div style={{ fontSize: '40px', textAlign: 'center', marginBottom: '22px' }}>{perm.icon}</div>
+
+          <div style={{ display: 'flex', gap: '12px', marginBottom: '10px' }}>
+            <HodosButton variant="secondary" disabled={permSubmitted} onClick={() => decide('allow_once')} style={{ flex: 1 }}>
+              Allow this time
+            </HodosButton>
+            <HodosButton variant="primary" disabled={permSubmitted} onClick={() => decide('allow_always')} style={{ flex: 1 }}>
+              Allow every visit
+            </HodosButton>
+          </div>
+          <HodosButton variant="secondary" disabled={permSubmitted} onClick={() => decide('block')} style={{ width: '100%' }}>
+            Don't allow
+          </HodosButton>
         </div>
       </div>
     );

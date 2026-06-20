@@ -34,6 +34,7 @@
 #include "../../include/core/EphemeralCookieManager.h"
 #include "../../include/core/BookmarkManager.h"
 #include "../../include/core/SitePermissionStore.h"
+#include "../../include/core/PendingPermissionRequest.h"
 #include "../../include/core/SettingsManager.h"
 #include "../../include/core/AutoUpdater.h"
 #include "../../include/core/FingerprintProtection.h"
@@ -449,6 +450,26 @@ static std::string EscapeForSingleQuotedJs(const std::string& in) {
         }
     }
     return out;
+}
+
+// b1b — resolve a parked site-permission whose originating request is dead /
+// abandoned (tab closed, navigated, or timed out). Media has no CEF dismiss
+// signal → Cancel(); prompt → Continue(DISMISS). Never persists. Defined here
+// (early) so both OnBeforeClose and the permission overrides can call it.
+static void ResolveDeadPermission(PendingPermissionRequest& pr) {
+    if (pr.isMedia) {
+        if (pr.mediaCb) pr.mediaCb->Cancel();
+    } else if (pr.promptCb) {
+        pr.promptCb->Continue(CEF_PERMISSION_RESULT_DISMISS);
+    }
+}
+
+// Watchdog: drop + resolve parked entries older than 60s so an unanswered prompt
+// (no-answer, occlusion, renderer crash, a stranded collision) can never hang a
+// callback forever or permanently jam the single-prompt-at-a-time gate.
+static void SweepStalePermissions() {
+    auto expired = PendingPermissionManager::GetInstance().popExpired(60000);
+    for (auto& pr : expired) ResolveDeadPermission(pr);
 }
 
 // QR scan: tracks which overlay browser initiated the scan so results route back correctly
@@ -1491,6 +1512,13 @@ void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
 
     // Unregister from handler map
     browser_handler_map_.erase(browser->GetIdentifier());
+
+    // b1b — resolve any site-permission prompt parked by this (closing) tab so its
+    // CEF callback can't leak (the media path has no CEF dismiss signal).
+    {
+        auto orphaned = PendingPermissionManager::GetInstance().popForBrowser(browser->GetIdentifier());
+        for (auto& pr : orphaned) ResolveDeadPermission(pr);
+    }
 
     // Check shutdown IMMEDIATELY after erase, before any early returns.
     // Tab and popup branches return early, so this must come first.
@@ -6518,6 +6546,56 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // b1b — resolve a Hodos site-permission prompt. {requestId, decision:
+    // "allow_once" | "allow_always" | "block"}. Resolves the parked CEF callback
+    // and persists always/block to the store (allow_once is not persisted).
+    if (message_name == "permission_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        if (args && args->GetSize() > 0) {
+            try {
+                nlohmann::json j = nlohmann::json::parse(args->GetString(0).ToString());
+                std::string requestId = j.value("requestId", std::string());
+                std::string decision = j.value("decision", std::string());
+                PendingPermissionRequest pr;
+                if (PendingPermissionManager::GetInstance().pop(requestId, pr)) {
+                    const bool grant = (decision == "allow_once" || decision == "allow_always");
+                    const bool persist = (decision == "allow_always" || decision == "block");
+                    if (persist) {
+                        auto st = (decision == "block") ? SitePermissionState::Block : SitePermissionState::Allow;
+                        for (auto t : pr.types) SitePermissionStore::GetInstance().SetState(pr.host, t, st);
+                    }
+                    if (pr.isMedia) {
+                        if (grant && pr.mediaCb) pr.mediaCb->Continue(pr.requestedMask);
+                        else if (pr.mediaCb) pr.mediaCb->Cancel();
+                    } else if (pr.promptCb) {
+                        pr.promptCb->Continue(grant ? CEF_PERMISSION_RESULT_ACCEPT : CEF_PERMISSION_RESULT_DENY);
+                    }
+                    LOG_INFO_BROWSER("🔔 permission_response '" + decision + "' for " + pr.host);
+                } else {
+                    LOG_DEBUG_BROWSER("🔔 permission_response: no parked request " + requestId);
+                }
+            } catch (...) {
+                LOG_ERROR_BROWSER("🔔 permission_response: parse error");
+            }
+        }
+#ifdef _WIN32
+        // Hide the notification overlay (mirror the auth-complete hide path), but
+        // ONLY if a wallet/auth modal hasn't taken over the shared overlay — else
+        // we'd tear down its UI while its request is still parked.
+        extern HWND g_notification_overlay_hwnd;
+        extern std::string g_pendingModalDomain;
+        if (g_pendingModalDomain.empty() &&
+            g_notification_overlay_hwnd && IsWindow(g_notification_overlay_hwnd)) {
+            ShowWindow(g_notification_overlay_hwnd, SW_HIDE);
+            CefRefPtr<CefBrowser> notif = GetNotificationBrowser();
+            if (notif && notif->GetMainFrame()) {
+                notif->GetMainFrame()->ExecuteJavaScript("window.hideNotification && window.hideNotification()", "", 0);
+            }
+        }
+#endif
+        return true;
+    }
+
     // ========== FIND IN PAGE (JavaScript-based) ==========
     // CEF's CefBrowserHost::Find() / OnFindResult API does not callback in this
     // build (GetFindHandler never queried). Use window.find() + JS match counting.
@@ -7197,7 +7275,53 @@ B1aDecision CollapseStates(const std::vector<SitePermissionState>& states, bool 
     if (allAllow) return isSecure ? B1aDecision::Grant : B1aDecision::Defer;
     return B1aDecision::Defer;                          // mixed or any Ask
 }
+
+bool AllAsk(const std::vector<SitePermissionState>& states) {
+    for (auto s : states) if (s != SitePermissionState::Ask) return false;
+    return !states.empty();
+}
+
+const char* PermCode(SitePermissionType t) {
+    switch (t) {
+        case SitePermissionType::Camera:        return "camera";
+        case SitePermissionType::Microphone:    return "microphone";
+        case SitePermissionType::Location:      return "location";
+        case SitePermissionType::Notifications: return "notifications";
+        case SitePermissionType::Clipboard:     return "clipboard";
+        default:                                return "";
+    }
+}
 }  // namespace
+
+// b1b — park the CEF callback and show the Hodos-branded prompt (notification
+// overlay, type="permission_request"). Windows-only for now; on mac (and if a
+// prompt is already parked) returns false so the caller falls back to Chromium's
+// stock prompt. Returns true iff the Hodos prompt was fired (caller returns true).
+// NOTE: file-scope static (NOT in the anonymous namespace) so the `extern
+// g_hInstance` below resolves to the real global rather than an internal-linkage
+// shadow (C7631).
+static bool FireHodosPermissionPrompt(const std::string& host, PendingPermissionRequest&& pr,
+                                      const std::string& permCode) {
+#ifdef _WIN32
+    if (permCode.empty()) return false;
+    if (PendingPermissionManager::GetInstance().hasPending()) return false;  // one permission prompt at a time
+    // Don't stomp a live wallet/auth modal sharing the notification overlay —
+    // fall back to Chromium's stock prompt instead (cross-registry guard).
+    extern std::string g_pendingModalDomain;
+    if (!g_pendingModalDomain.empty()) {
+        LOG_INFO_BROWSER("🔔 Permission prompt deferred to Chromium — a wallet modal owns the overlay (" + g_pendingModalDomain + ")");
+        return false;
+    }
+    std::string id = PendingPermissionManager::GetInstance().add(std::move(pr));
+    extern HINSTANCE g_hInstance;
+    extern void CreateNotificationOverlay(HINSTANCE, const std::string&, const std::string&, const std::string&);
+    CreateNotificationOverlay(g_hInstance, "permission_request", host, "&requestId=" + id + "&perm=" + permCode);
+    return true;
+#else
+    (void)host; (void)pr; (void)permCode;
+    return false;
+#endif
+}
 
 bool SimpleHandler::OnRequestMediaAccessPermission(
     CefRefPtr<CefBrowser> browser,
@@ -7205,6 +7329,7 @@ bool SimpleHandler::OnRequestMediaAccessPermission(
     const CefString& requesting_origin,
     uint32_t requested_permissions,
     CefRefPtr<CefMediaAccessCallback> callback) {
+    SweepStalePermissions();  // watchdog: clear any abandoned parked prompt first
     const std::string originStr = requesting_origin.ToString();
     const std::string host = SitePermissionStore::NormalizeHost(originStr);
 
@@ -7219,12 +7344,14 @@ bool SimpleHandler::OnRequestMediaAccessPermission(
         return false;
     }
 
+    const bool secure = IsSecureOrigin(originStr);
     auto& store = SitePermissionStore::GetInstance();
     std::vector<SitePermissionState> states;
-    if (wantAudio) states.push_back(store.GetState(host, SitePermissionType::Microphone));
-    if (wantVideo) states.push_back(store.GetState(host, SitePermissionType::Camera));
+    std::vector<SitePermissionType> types;  // parallel to states (persist on prompt)
+    if (wantAudio) { types.push_back(SitePermissionType::Microphone); states.push_back(store.GetState(host, SitePermissionType::Microphone)); }
+    if (wantVideo) { types.push_back(SitePermissionType::Camera);     states.push_back(store.GetState(host, SitePermissionType::Camera)); }
 
-    switch (CollapseStates(states, IsSecureOrigin(originStr))) {
+    switch (CollapseStates(states, secure)) {
         case B1aDecision::Deny:
             callback->Cancel();
             LOG_DEBUG_BROWSER("🔒 Media permission auto-denied (stored Block) for " + host);
@@ -7235,8 +7362,23 @@ bool SimpleHandler::OnRequestMediaAccessPermission(
             return true;
         case B1aDecision::Defer:
         default:
-            return false;  // Ask / mixed / insecure → Chromium prompt (b1b: Hodos prompt)
+            break;
     }
+
+    // Defer. Fire the Hodos prompt only for a clean all-Ask request on a secure
+    // origin; mixed/insecure → Chromium's stock prompt (no silent grant possible).
+    if (secure && AllAsk(states)) {
+        PendingPermissionRequest pr;
+        pr.host = host;
+        pr.isMedia = true;
+        pr.mediaCb = callback;
+        pr.requestedMask = requested_permissions;
+        pr.browserId = browser ? browser->GetIdentifier() : 0;
+        pr.types = types;
+        const std::string code = (wantAudio && wantVideo) ? "camera_mic" : (wantVideo ? "camera" : "microphone");
+        if (FireHodosPermissionPrompt(host, std::move(pr), code)) return true;
+    }
+    return false;  // mixed / insecure / mac / busy → Chromium prompt
 }
 
 bool SimpleHandler::OnShowPermissionPrompt(
@@ -7245,6 +7387,7 @@ bool SimpleHandler::OnShowPermissionPrompt(
     const CefString& requesting_origin,
     uint32_t requested_permissions,
     CefRefPtr<CefPermissionPromptCallback> callback) {
+    SweepStalePermissions();  // watchdog: clear any abandoned parked prompt first
     const std::string originStr = requesting_origin.ToString();
     const std::string host = SitePermissionStore::NormalizeHost(originStr);
     if (host.empty()) return false;
@@ -7262,12 +7405,13 @@ bool SimpleHandler::OnShowPermissionPrompt(
     // Not a v1-managed permission (MIDI, USB, etc.) → defer to Chromium.
     if (types.empty()) return false;
 
+    const bool secure = IsSecureOrigin(originStr);
     auto& store = SitePermissionStore::GetInstance();
     std::vector<SitePermissionState> states;
     states.reserve(types.size());
     for (auto t : types) states.push_back(store.GetState(host, t));
 
-    switch (CollapseStates(states, IsSecureOrigin(originStr))) {
+    switch (CollapseStates(states, secure)) {
         case B1aDecision::Deny:
             callback->Continue(CEF_PERMISSION_RESULT_DENY);
             LOG_DEBUG_BROWSER("🔒 Permission prompt auto-denied (stored Block) for " + host);
@@ -7278,7 +7422,47 @@ bool SimpleHandler::OnShowPermissionPrompt(
             return true;
         case B1aDecision::Defer:
         default:
-            return false;  // Ask / mixed / insecure → Chromium prompt (b1b: Hodos prompt)
+            break;
+    }
+
+    // Defer. Fire the Hodos prompt for a clean single-type all-Ask request on a
+    // secure origin; mixed/multi/insecure → Chromium's stock prompt.
+    if (secure && types.size() == 1 && AllAsk(states)) {
+        PendingPermissionRequest pr;
+        pr.host = host;
+        pr.isMedia = false;
+        pr.promptCb = callback;
+        pr.promptId = prompt_id;
+        pr.browserId = browser ? browser->GetIdentifier() : 0;
+        pr.types = types;
+        if (FireHodosPermissionPrompt(host, std::move(pr), PermCode(types[0]))) return true;
+    }
+    return false;  // mixed / multi-type / insecure / mac / busy → Chromium prompt
+}
+
+void SimpleHandler::OnDismissPermissionPrompt(
+    CefRefPtr<CefBrowser> browser,
+    uint64_t prompt_id,
+    cef_permission_request_result_t result) {
+    // CEF finalized a prompt we may have parked (e.g. the page navigated away).
+    // Drop the parked entry WITHOUT calling Continue — CEF already resolved it.
+    PendingPermissionRequest pr;
+    if (PendingPermissionManager::GetInstance().popByPromptId(prompt_id, pr)) {
+        LOG_DEBUG_BROWSER("🔔 Permission prompt dismissed by CEF; dropped parked request " + pr.requestId);
+#ifdef _WIN32
+        // Hide our overlay if it was showing this (now-dead) prompt — but not if a
+        // wallet/auth modal has since taken over the shared overlay.
+        extern HWND g_notification_overlay_hwnd;
+        extern std::string g_pendingModalDomain;
+        if (g_pendingModalDomain.empty() &&
+            g_notification_overlay_hwnd && IsWindow(g_notification_overlay_hwnd)) {
+            ShowWindow(g_notification_overlay_hwnd, SW_HIDE);
+            CefRefPtr<CefBrowser> notif = GetNotificationBrowser();
+            if (notif && notif->GetMainFrame()) {
+                notif->GetMainFrame()->ExecuteJavaScript("window.hideNotification && window.hideNotification()", "", 0);
+            }
+        }
+#endif
     }
 }
 

@@ -62,6 +62,11 @@ public:
                                 const CefString& requesting_origin,
                                 uint32_t requested_permissions,
                                 CefRefPtr<CefPermissionPromptCallback> callback) override;
+    // b1b — CEF dismissed a prompt we parked (e.g. navigation) → drop the parked
+    // entry without re-resolving (CEF already finalized it).
+    void OnDismissPermissionPrompt(CefRefPtr<CefBrowser> browser,
+                                   uint64_t prompt_id,
+                                   cef_permission_request_result_t result) override;
     CefRefPtr<CefDownloadHandler> GetDownloadHandler() override;
     CefRefPtr<CefFindHandler> GetFindHandler() override;
     CefRefPtr<CefJSDialogHandler> GetJSDialogHandler() override;
