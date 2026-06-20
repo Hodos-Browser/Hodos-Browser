@@ -34,6 +34,7 @@
 #include "include/core/HistoryManager.h"
 #include "include/core/CookieBlockManager.h"
 #include "include/core/BookmarkManager.h"
+#include "include/core/SitePermissionStore.h"
 #include "include/core/PaidContentCache.h"
 #include "include/core/SettingsManager.h"
 #include "include/core/FingerprintProtection.h"
@@ -3910,6 +3911,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         } else {
             LOG_ERROR("Failed to initialize BookmarkManager");
         }
+        // Site permission store (camera/mic/location/notifications/clipboard).
+        // Same SQLite/per-profile pattern; init alongside bookmarks.
+        if (SitePermissionStore::GetInstance().Initialize(profile_cache)) {
+            LOG_INFO("SitePermissionStore initialized successfully");
+        } else {
+            LOG_ERROR("Failed to initialize SitePermissionStore");
+        }
     });
 
     std::thread paidCacheThread([&profile_cache]() {
@@ -4049,6 +4057,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     LOG_INFO("Closing browser databases (checkpoint + close)...");
     HistoryManager::GetInstance().Shutdown();
     BookmarkManager::GetInstance().Shutdown();
+    SitePermissionStore::GetInstance().Shutdown();
     CookieBlockManager::GetInstance().Shutdown();
     PaidContentCache::GetInstance().Shutdown();
 

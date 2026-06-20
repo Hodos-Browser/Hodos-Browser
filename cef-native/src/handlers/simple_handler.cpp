@@ -33,6 +33,7 @@
 #include "../../include/core/CookieBlockManager.h"
 #include "../../include/core/EphemeralCookieManager.h"
 #include "../../include/core/BookmarkManager.h"
+#include "../../include/core/SitePermissionStore.h"
 #include "../../include/core/SettingsManager.h"
 #include "../../include/core/AutoUpdater.h"
 #include "../../include/core/FingerprintProtection.h"
@@ -7155,6 +7156,130 @@ CefRefPtr<CefKeyboardHandler> SimpleHandler::GetKeyboardHandler() {
 
 CefRefPtr<CefPermissionHandler> SimpleHandler::GetPermissionHandler() {
     return this;
+}
+
+// b1a — site permissions. Honor STORED Allow/Block silently; for "Ask" (or any
+// non-unanimous set) return false so Chromium's stock prompt shows (today's working
+// behavior). b1b replaces that "Ask" path with the Hodos-branded prompt + persists
+// the choice. All callbacks fire on the browser-process UI thread.
+
+namespace {
+// A requesting origin is a "secure context" only over https/wss, or on a
+// Chromium-trusted loopback host (localhost / 127.0.0.1 / [::1] / *.localhost) —
+// where http IS a secure context and DOES reach these handlers. We never silently
+// GRANT camera/mic/location/etc. on a non-secure origin (matches the design doc's
+// HTTPS-only rule and prevents an https-keyed Allow leaking to an http load).
+bool IsSecureOrigin(const std::string& origin) {
+    std::string lower = origin;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (lower.rfind("https://", 0) == 0 || lower.rfind("wss://", 0) == 0) return true;
+    const std::string host = SitePermissionStore::NormalizeHost(origin);
+    if (host == "localhost" || host == "127.0.0.1" || host == "[::1]") return true;
+    if (host.size() > 10 && host.compare(host.size() - 10, 10, ".localhost") == 0) return true;
+    return false;
+}
+
+enum class B1aDecision { Grant, Deny, Defer };
+
+// Silent decision for a set of stored states. Only UNANIMOUS sets resolve silently:
+// all-Allow → Grant (gated on secure context), all-Block → Deny. Anything mixed or
+// containing "Ask" → Defer (let Chromium / the b1b Hodos prompt handle it). This
+// avoids an all-or-nothing collapse wrongly denying an explicitly-allowed type.
+B1aDecision CollapseStates(const std::vector<SitePermissionState>& states, bool isSecure) {
+    if (states.empty()) return B1aDecision::Defer;
+    bool allAllow = true, allBlock = true;
+    for (auto s : states) {
+        if (s != SitePermissionState::Allow) allAllow = false;
+        if (s != SitePermissionState::Block) allBlock = false;
+    }
+    if (allBlock) return B1aDecision::Deny;            // deny on any origin (always safe)
+    if (allAllow) return isSecure ? B1aDecision::Grant : B1aDecision::Defer;
+    return B1aDecision::Defer;                          // mixed or any Ask
+}
+}  // namespace
+
+bool SimpleHandler::OnRequestMediaAccessPermission(
+    CefRefPtr<CefBrowser> browser,
+    CefRefPtr<CefFrame> frame,
+    const CefString& requesting_origin,
+    uint32_t requested_permissions,
+    CefRefPtr<CefMediaAccessCallback> callback) {
+    const std::string originStr = requesting_origin.ToString();
+    const std::string host = SitePermissionStore::NormalizeHost(originStr);
+
+    const bool wantAudio = (requested_permissions & CEF_MEDIA_PERMISSION_DEVICE_AUDIO_CAPTURE) != 0;
+    const bool wantVideo = (requested_permissions & CEF_MEDIA_PERMISSION_DEVICE_VIDEO_CAPTURE) != 0;
+    const bool wantDesktop = (requested_permissions &
+        (CEF_MEDIA_PERMISSION_DESKTOP_AUDIO_CAPTURE | CEF_MEDIA_PERMISSION_DESKTOP_VIDEO_CAPTURE)) != 0;
+
+    // We only manage page camera/mic capture. Desktop/screen capture or an empty
+    // request → defer to Chromium.
+    if (wantDesktop || (!wantAudio && !wantVideo) || host.empty()) {
+        return false;
+    }
+
+    auto& store = SitePermissionStore::GetInstance();
+    std::vector<SitePermissionState> states;
+    if (wantAudio) states.push_back(store.GetState(host, SitePermissionType::Microphone));
+    if (wantVideo) states.push_back(store.GetState(host, SitePermissionType::Camera));
+
+    switch (CollapseStates(states, IsSecureOrigin(originStr))) {
+        case B1aDecision::Deny:
+            callback->Cancel();
+            LOG_DEBUG_BROWSER("🔒 Media permission auto-denied (stored Block) for " + host);
+            return true;
+        case B1aDecision::Grant:
+            callback->Continue(requested_permissions);
+            LOG_DEBUG_BROWSER("🔓 Media permission auto-allowed (stored Allow) for " + host);
+            return true;
+        case B1aDecision::Defer:
+        default:
+            return false;  // Ask / mixed / insecure → Chromium prompt (b1b: Hodos prompt)
+    }
+}
+
+bool SimpleHandler::OnShowPermissionPrompt(
+    CefRefPtr<CefBrowser> browser,
+    uint64_t prompt_id,
+    const CefString& requesting_origin,
+    uint32_t requested_permissions,
+    CefRefPtr<CefPermissionPromptCallback> callback) {
+    const std::string originStr = requesting_origin.ToString();
+    const std::string host = SitePermissionStore::NormalizeHost(originStr);
+    if (host.empty()) return false;
+
+    // Map the requested CEF permission bits to our v1-managed types. PTZ is treated
+    // as Camera so a stored camera decision governs pan/tilt/zoom too.
+    std::vector<SitePermissionType> types;
+    if (requested_permissions & (CEF_PERMISSION_TYPE_CAMERA_STREAM | CEF_PERMISSION_TYPE_CAMERA_PAN_TILT_ZOOM))
+        types.push_back(SitePermissionType::Camera);
+    if (requested_permissions & CEF_PERMISSION_TYPE_MIC_STREAM)    types.push_back(SitePermissionType::Microphone);
+    if (requested_permissions & CEF_PERMISSION_TYPE_GEOLOCATION)   types.push_back(SitePermissionType::Location);
+    if (requested_permissions & CEF_PERMISSION_TYPE_NOTIFICATIONS) types.push_back(SitePermissionType::Notifications);
+    if (requested_permissions & CEF_PERMISSION_TYPE_CLIPBOARD)     types.push_back(SitePermissionType::Clipboard);
+
+    // Not a v1-managed permission (MIDI, USB, etc.) → defer to Chromium.
+    if (types.empty()) return false;
+
+    auto& store = SitePermissionStore::GetInstance();
+    std::vector<SitePermissionState> states;
+    states.reserve(types.size());
+    for (auto t : types) states.push_back(store.GetState(host, t));
+
+    switch (CollapseStates(states, IsSecureOrigin(originStr))) {
+        case B1aDecision::Deny:
+            callback->Continue(CEF_PERMISSION_RESULT_DENY);
+            LOG_DEBUG_BROWSER("🔒 Permission prompt auto-denied (stored Block) for " + host);
+            return true;
+        case B1aDecision::Grant:
+            callback->Continue(CEF_PERMISSION_RESULT_ACCEPT);
+            LOG_DEBUG_BROWSER("🔓 Permission prompt auto-allowed (stored Allow) for " + host);
+            return true;
+        case B1aDecision::Defer:
+        default:
+            return false;  // Ask / mixed / insecure → Chromium prompt (b1b: Hodos prompt)
+    }
 }
 
 bool SimpleHandler::OnFileDialog(CefRefPtr<CefBrowser> browser,

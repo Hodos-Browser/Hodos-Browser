@@ -47,6 +47,21 @@ public:
     CefRefPtr<CefDialogHandler> GetDialogHandler() override;
     CefRefPtr<CefKeyboardHandler> GetKeyboardHandler() override;
     CefRefPtr<CefPermissionHandler> GetPermissionHandler() override;
+
+    // CefPermissionHandler — site permissions (camera/mic via media; location/
+    // notifications/clipboard via prompt). b1a: honor STORED Allow/Block silently;
+    // return false on "Ask" so Chromium's stock prompt shows (b1b swaps in the
+    // Hodos-branded prompt + captures the choice).
+    bool OnRequestMediaAccessPermission(CefRefPtr<CefBrowser> browser,
+                                        CefRefPtr<CefFrame> frame,
+                                        const CefString& requesting_origin,
+                                        uint32_t requested_permissions,
+                                        CefRefPtr<CefMediaAccessCallback> callback) override;
+    bool OnShowPermissionPrompt(CefRefPtr<CefBrowser> browser,
+                                uint64_t prompt_id,
+                                const CefString& requesting_origin,
+                                uint32_t requested_permissions,
+                                CefRefPtr<CefPermissionPromptCallback> callback) override;
     CefRefPtr<CefDownloadHandler> GetDownloadHandler() override;
     CefRefPtr<CefFindHandler> GetFindHandler() override;
     CefRefPtr<CefJSDialogHandler> GetJSDialogHandler() override;

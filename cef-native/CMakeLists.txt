@@ -176,6 +176,7 @@ set(SOURCES
     src/core/CookieManager.cpp
     src/core/CookieBlockManager.cpp
     src/core/BookmarkManager.cpp
+    src/core/SitePermissionStore.cpp
     src/core/PaidContentCache.cpp
     src/core/ProfileLock.cpp
     src/core/SingleInstance.cpp
