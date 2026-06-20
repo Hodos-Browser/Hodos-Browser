@@ -256,6 +256,9 @@ Three ordered, independently-committable sub-chunks for the per-chunk harness.
 ### b1b — Hodos-branded prompt + parked-callback lifecycle  · RISK: MEDIUM · ✅ DONE (smoke-passed)
 > Replaces Chromium's "Ask" prompt with the Hodos prompt (notification overlay, `permission_request` type) + `PendingPermissionManager` (park/resolve), `permission_response` IPC, persist always/block to the store. Focused adversarial review found real lifecycle defects (media-callback leak on close/nav, no watchdog, shared-overlay modal collision, unconditional hide) — ALL fixed: parking `browserId` + `OnBeforeClose` drain, 60s `SweepStalePermissions`, wallet-modal guard (`g_pendingModalDomain`), guarded hides, button-disable, `popByPromptId` guard. Live smoke confirmed allow_always→silent, navigate-away→no hang. Residual (bounded): wallet-modal firing over a permission prompt cancels it via the watchdog (full prevention = wallet-side guard, deferred). **NEXT: b1b.1** = allow-once SESSION memory (per-tab, cleared on host-change/close) so "Allow this time" matches Chrome instead of re-prompting every request.
 
+### b1b.1 — Allow-once session memory  · RISK: LOW · ✅ DONE (smoke-passed)
+> Ephemeral per-tab "Allow this time" grants (Chrome parity): re-requests silently allowed until navigate-away (host change) or tab close; never persisted. In-memory in `PendingPermissionManager` + `EffectiveState` (Ask→Allow promotion) + clears in `OnAddressChange`/`OnBeforeClose`. **b1 (engine + prompt) COMPLETE. NEXT: b2** = site-info hub + in-UI management/reset.
+
 ### b1 — Permission engine + store + prompt  · RISK: MEDIUM
 The core new system; the only chunk that touches the live permission hot path.
 - Override `OnRequestMediaAccessPermission` / `OnShowPermissionPrompt` / `OnDismissPermissionPrompt` on `SimpleHandler`.

@@ -472,6 +472,18 @@ static void SweepStalePermissions() {
     for (auto& pr : expired) ResolveDeadPermission(pr);
 }
 
+// b1b.1 — effective state for a request: the persisted store decision, but an
+// ephemeral allow-once SESSION grant (this tab + host) promotes "Ask" → "Allow"
+// so re-requests don't re-prompt until the tab navigates away / closes.
+static SitePermissionState EffectiveState(int browserId, const std::string& host, SitePermissionType type) {
+    auto s = SitePermissionStore::GetInstance().GetState(host, type);
+    if (s == SitePermissionState::Ask &&
+        PendingPermissionManager::GetInstance().isSessionGranted(browserId, host, static_cast<int>(type))) {
+        return SitePermissionState::Allow;
+    }
+    return s;
+}
+
 // QR scan: tracks which overlay browser initiated the scan so results route back correctly
 // Non-static — QRScreenCapture.cpp accesses this via extern to deliver results
 CefRefPtr<CefBrowser> g_qr_scan_requester = nullptr;
@@ -654,6 +666,11 @@ void SimpleHandler::OnAddressChange(CefRefPtr<CefBrowser> browser,
     if (!frame->IsMain()) {
         return;
     }
+
+    // b1b.1 — navigating to a different host clears this tab's allow-once SESSION
+    // permission grants for the old host (same-host reload keeps them).
+    PendingPermissionManager::GetInstance().clearSessionForBrowserExceptHost(
+        browser->GetIdentifier(), SitePermissionStore::NormalizeHost(url.ToString()));
 
     // Check if this is a tab browser and update TabManager (both platforms)
     int tab_id = ExtractTabIdFromRole(role_);
@@ -1518,6 +1535,8 @@ void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
     {
         auto orphaned = PendingPermissionManager::GetInstance().popForBrowser(browser->GetIdentifier());
         for (auto& pr : orphaned) ResolveDeadPermission(pr);
+        // b1b.1 — drop this tab's allow-once session grants.
+        PendingPermissionManager::GetInstance().clearSessionForBrowser(browser->GetIdentifier());
     }
 
     // Check shutdown IMMEDIATELY after erase, before any early returns.
@@ -6563,6 +6582,11 @@ bool SimpleHandler::OnProcessMessageReceived(
                     if (persist) {
                         auto st = (decision == "block") ? SitePermissionState::Block : SitePermissionState::Allow;
                         for (auto t : pr.types) SitePermissionStore::GetInstance().SetState(pr.host, t, st);
+                    } else if (decision == "allow_once") {
+                        // b1b.1 — ephemeral per-tab+host grant (not persisted); silently
+                        // allows re-requests until navigate-away / tab close.
+                        for (auto t : pr.types)
+                            PendingPermissionManager::GetInstance().grantSession(pr.browserId, pr.host, static_cast<int>(t));
                     }
                     if (pr.isMedia) {
                         if (grant && pr.mediaCb) pr.mediaCb->Continue(pr.requestedMask);
@@ -7345,11 +7369,11 @@ bool SimpleHandler::OnRequestMediaAccessPermission(
     }
 
     const bool secure = IsSecureOrigin(originStr);
-    auto& store = SitePermissionStore::GetInstance();
+    const int browserId = browser ? browser->GetIdentifier() : 0;
     std::vector<SitePermissionState> states;
     std::vector<SitePermissionType> types;  // parallel to states (persist on prompt)
-    if (wantAudio) { types.push_back(SitePermissionType::Microphone); states.push_back(store.GetState(host, SitePermissionType::Microphone)); }
-    if (wantVideo) { types.push_back(SitePermissionType::Camera);     states.push_back(store.GetState(host, SitePermissionType::Camera)); }
+    if (wantAudio) { types.push_back(SitePermissionType::Microphone); states.push_back(EffectiveState(browserId, host, SitePermissionType::Microphone)); }
+    if (wantVideo) { types.push_back(SitePermissionType::Camera);     states.push_back(EffectiveState(browserId, host, SitePermissionType::Camera)); }
 
     switch (CollapseStates(states, secure)) {
         case B1aDecision::Deny:
@@ -7406,10 +7430,10 @@ bool SimpleHandler::OnShowPermissionPrompt(
     if (types.empty()) return false;
 
     const bool secure = IsSecureOrigin(originStr);
-    auto& store = SitePermissionStore::GetInstance();
+    const int browserId = browser ? browser->GetIdentifier() : 0;
     std::vector<SitePermissionState> states;
     states.reserve(types.size());
-    for (auto t : types) states.push_back(store.GetState(host, t));
+    for (auto t : types) states.push_back(EffectiveState(browserId, host, t));
 
     switch (CollapseStates(states, secure)) {
         case B1aDecision::Deny:

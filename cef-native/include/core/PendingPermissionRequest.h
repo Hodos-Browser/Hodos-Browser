@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <set>
 #include <mutex>
 #include <chrono>
 
@@ -98,6 +99,39 @@ public:
         return false;
     }
 
+    // --- b1b.1: allow-once SESSION grants (ephemeral; NOT persisted to SQLite).
+    // Keyed by (browserId, host, permission-type-int). "Allow this time" records
+    // one here so re-requests in the same tab/site are silently allowed (Chrome
+    // parity), cleared on navigate-away (host change) + tab close. ---
+    void grantSession(int browserId, const std::string& host, int type) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        sessionGrants_[browserId][host].insert(type);
+    }
+    bool isSessionGranted(int browserId, const std::string& host, int type) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto b = sessionGrants_.find(browserId);
+        if (b == sessionGrants_.end()) return false;
+        auto h = b->second.find(host);
+        if (h == b->second.end()) return false;
+        return h->second.count(type) > 0;
+    }
+    void clearSessionForBrowser(int browserId) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        sessionGrants_.erase(browserId);
+    }
+    // Navigate-away: drop a browser's session grants for hosts other than the one
+    // it just navigated to (same-host reload keeps the grant).
+    void clearSessionForBrowserExceptHost(int browserId, const std::string& host) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto b = sessionGrants_.find(browserId);
+        if (b == sessionGrants_.end()) return;
+        for (auto it = b->second.begin(); it != b->second.end();) {
+            if (it->first != host) it = b->second.erase(it);
+            else ++it;
+        }
+        if (b->second.empty()) sessionGrants_.erase(b);
+    }
+
 private:
     PendingPermissionManager() = default;
     PendingPermissionManager(const PendingPermissionManager&) = delete;
@@ -114,5 +148,7 @@ private:
 
     std::mutex mutex_;
     std::map<std::string, PendingPermissionRequest> requests_;
+    // browserId -> host -> set<permission-type-int> (ephemeral allow-once grants)
+    std::map<int, std::map<std::string, std::set<int>>> sessionGrants_;
     uint64_t counter_ = 0;
 };
