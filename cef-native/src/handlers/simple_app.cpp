@@ -2367,6 +2367,224 @@ void HideSiteInfoPanelOverlay() {
     LOG_INFO_APP("Site-info panel overlay hidden");
 }
 
+// ========== TAB-LIST PANEL OVERLAY ==========
+// Clone of the BOOKMARKS overlay (MA_ACTIVATE dropdown with a search box → keyboard
+// + show-tick close guard), LEFT-anchored at the caret on the tab strip.
+
+void ShowTabListPanelOverlay(int iconLeftOffset = 0, BrowserWindow* targetWin = nullptr);
+
+void CreateTabListPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconLeftOffset) {
+    LOG_INFO_APP("Creating tab-list panel overlay (showImmediately=" +
+                 std::string(showImmediately ? "true" : "false") + ", iconLeftOffset=" +
+                 std::to_string(iconLeftOffset) + ")");
+
+    extern int g_tablist_icon_left_offset;
+    if (iconLeftOffset > 0) {
+        g_tablist_icon_left_offset = iconLeftOffset;
+    }
+
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetPrimaryWindow();
+    if (mainWin) mainWin->tablist_icon_left_offset = g_tablist_icon_left_offset;
+
+    extern HWND g_tablist_panel_overlay_hwnd;
+    if (g_tablist_panel_overlay_hwnd && IsWindow(g_tablist_panel_overlay_hwnd)) {
+        LOG_INFO_APP("Tab-list panel overlay already exists");
+        if (showImmediately) {
+            ShowTabListPanelOverlay(iconLeftOffset);
+        }
+        return;
+    }
+
+    extern HWND g_hwnd;
+    extern HWND g_header_hwnd;
+    RECT mainRect;
+    GetWindowRect(g_hwnd, &mainRect);
+    RECT headerRect;
+    GetWindowRect(g_header_hwnd, &headerRect);
+
+    // LEFT-anchored: panel left edge sits at the caret's left.
+    int panelWidth = ScalePx(340, g_hwnd);
+    int panelHeight = ScalePx(480, g_hwnd);
+    int overlayX = headerRect.left + iconLeftOffset;
+    int overlayY = headerRect.top + ScalePx(104, g_hwnd);
+    if (overlayX + panelWidth > mainRect.right - ScalePx(8, g_hwnd)) {
+        overlayX = mainRect.right - panelWidth - ScalePx(8, g_hwnd);
+    }
+    if (overlayX < mainRect.left + ScalePx(8, g_hwnd)) {
+        overlayX = mainRect.left + ScalePx(8, g_hwnd);
+    }
+    if (overlayY + panelHeight > mainRect.bottom - ScalePx(20, g_hwnd)) {
+        panelHeight = mainRect.bottom - overlayY - ScalePx(20, g_hwnd);
+        if (panelHeight < ScalePx(280, g_hwnd)) panelHeight = ScalePx(280, g_hwnd);
+    }
+
+    HWND tablist_panel_hwnd = CreateWindowEx(
+        WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+        L"CEFTabListPanelOverlayWindow",
+        L"Tab List Panel Overlay",
+        WS_POPUP | WS_VISIBLE,
+        overlayX, overlayY, panelWidth, panelHeight,
+        g_hwnd, nullptr, hInstance, nullptr);
+
+    if (!tablist_panel_hwnd) {
+        LOG_ERROR_APP("Failed to create tab-list panel overlay HWND. Error: " + std::to_string(GetLastError()));
+        return;
+    }
+
+    UINT flags = SWP_NOACTIVATE;
+    flags |= showImmediately ? SWP_SHOWWINDOW : SWP_HIDEWINDOW;
+    SetWindowPos(tablist_panel_hwnd, HWND_TOPMOST,
+        overlayX, overlayY, panelWidth, panelHeight, flags);
+
+    g_tablist_panel_overlay_hwnd = tablist_panel_hwnd;
+    if (mainWin) mainWin->tablist_panel_overlay_hwnd = g_tablist_panel_overlay_hwnd;
+
+    LOG_INFO_APP("Tab-list panel overlay HWND created: " + std::to_string(reinterpret_cast<intptr_t>(tablist_panel_hwnd)));
+
+    CefWindowInfo window_info;
+    window_info.windowless_rendering_enabled = true;
+    window_info.SetAsPopup(tablist_panel_hwnd, "TabListPanelOverlay");
+
+    CefBrowserSettings settings;
+    settings.windowless_frame_rate = 30;
+    settings.background_color = CefColorSetARGB(0, 0, 0, 0);
+    settings.javascript = STATE_ENABLED;
+    settings.javascript_access_clipboard = STATE_ENABLED;  // search input
+    settings.javascript_dom_paste = STATE_ENABLED;         // search input
+
+    CefRefPtr<SimpleHandler> tablist_panel_handler(new SimpleHandler("tablistpanel"));
+    CefRefPtr<MyOverlayRenderHandler> render_handler =
+        new MyOverlayRenderHandler(tablist_panel_hwnd, panelWidth, panelHeight);
+    tablist_panel_handler->SetRenderHandler(render_handler);
+
+    bool result = CefBrowserHost::CreateBrowser(
+        window_info, tablist_panel_handler,
+        "http://127.0.0.1:5137/tab-list",
+        settings, nullptr,
+        CefRequestContext::GetGlobalContext());
+
+    if (result) {
+        LOG_INFO_APP("Tab-list panel overlay browser created with subprocess");
+        if (showImmediately) {
+            LONG exStyle = GetWindowLong(tablist_panel_hwnd, GWL_EXSTYLE);
+            SetWindowLong(tablist_panel_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+            SetForegroundWindow(tablist_panel_hwnd);
+            extern ULONGLONG g_tablist_last_show_tick;
+            g_tablist_last_show_tick = GetTickCount64();
+        }
+    } else {
+        LOG_ERROR_APP("Failed to create tab-list panel overlay browser");
+    }
+}
+
+void ShowTabListPanelOverlay(int iconLeftOffset, BrowserWindow* targetWin) {
+    extern HWND g_tablist_panel_overlay_hwnd;
+    if (!g_tablist_panel_overlay_hwnd || !IsWindow(g_tablist_panel_overlay_hwnd)) {
+        LOG_WARNING_APP("Cannot show tab-list panel overlay - HWND does not exist");
+        return;
+    }
+
+    extern int g_tablist_icon_left_offset;
+    if (iconLeftOffset > 0) {
+        g_tablist_icon_left_offset = iconLeftOffset;
+    }
+
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetPrimaryWindow();
+    if (mainWin) mainWin->tablist_icon_left_offset = g_tablist_icon_left_offset;
+
+    LOG_INFO_APP("Showing tab-list panel overlay");
+
+    extern HWND g_header_hwnd;
+    extern HWND g_hwnd;
+    HWND posHwnd = (targetWin && targetWin->hwnd) ? targetWin->hwnd : g_hwnd;
+    HWND posHeader = (targetWin && targetWin->header_hwnd) ? targetWin->header_hwnd : g_header_hwnd;
+
+    RECT headerRect;
+    GetWindowRect(posHeader, &headerRect);
+    RECT mainRect;
+    GetWindowRect(posHwnd, &mainRect);
+
+    int panelWidth = ScalePx(340, posHwnd);
+    int panelHeight = ScalePx(480, posHwnd);
+    int overlayX = headerRect.left + g_tablist_icon_left_offset;
+    int overlayY = headerRect.top + ScalePx(104, posHwnd);
+    if (overlayX + panelWidth > mainRect.right - ScalePx(8, posHwnd)) {
+        overlayX = mainRect.right - panelWidth - ScalePx(8, posHwnd);
+    }
+    if (overlayX < mainRect.left + ScalePx(8, posHwnd)) {
+        overlayX = mainRect.left + ScalePx(8, posHwnd);
+    }
+    if (overlayY + panelHeight > mainRect.bottom - ScalePx(20, posHwnd)) {
+        panelHeight = mainRect.bottom - overlayY - ScalePx(20, posHwnd);
+        if (panelHeight < ScalePx(280, posHwnd)) panelHeight = ScalePx(280, posHwnd);
+    }
+
+    CefRefPtr<CefBrowser> tl_browser = SimpleHandler::GetTabListPanelBrowser();
+    if (tl_browser) {
+        int targetWindowId = targetWin ? targetWin->window_id : 0;
+        SimpleHandler* handler = SimpleHandler::GetHandlerForBrowser(tl_browser->GetIdentifier());
+        if (handler) handler->SetWindowId(targetWindowId);
+    }
+
+    SetWindowPos(g_tablist_panel_overlay_hwnd, HWND_TOPMOST,
+        overlayX, overlayY, panelWidth, panelHeight,
+        SWP_SHOWWINDOW | SWP_NOACTIVATE);
+
+    LONG exStyle = GetWindowLong(g_tablist_panel_overlay_hwnd, GWL_EXSTYLE);
+    SetWindowLong(g_tablist_panel_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+
+    if (tl_browser) {
+        tl_browser->GetHost()->NotifyScreenInfoChanged();
+        tl_browser->GetHost()->WasResized();
+        tl_browser->GetHost()->Invalidate(PET_VIEW);
+    }
+
+    extern ULONGLONG g_tablist_last_show_tick;
+    g_tablist_last_show_tick = GetTickCount64();
+
+    SetForegroundWindow(g_tablist_panel_overlay_hwnd);
+
+    if (tl_browser) {
+        tl_browser->GetHost()->SetFocus(true);
+        tl_browser->GetHost()->Invalidate(PET_VIEW);
+        // Re-fetch tabs + recently-closed on each re-show (keep-alive overlay).
+        if (tl_browser->GetMainFrame()) {
+            tl_browser->GetMainFrame()->ExecuteJavaScript(
+                "if (window.tabListRefresh) window.tabListRefresh();",
+                tl_browser->GetMainFrame()->GetURL(), 0);
+        }
+    }
+
+    LOG_INFO_APP("Tab-list panel overlay shown");
+}
+
+void HideTabListPanelOverlay() {
+    extern HWND g_tablist_panel_overlay_hwnd;
+    if (!g_tablist_panel_overlay_hwnd || !IsWindow(g_tablist_panel_overlay_hwnd)) {
+        return;
+    }
+
+    LOG_INFO_APP("Hiding tab-list panel overlay");
+
+    CefRefPtr<CefBrowser> tl_browser = SimpleHandler::GetTabListPanelBrowser();
+    int tlTargetWinId = 0;
+    if (tl_browser) {
+        tl_browser->GetHost()->SetFocus(false);
+        SimpleHandler* handler = SimpleHandler::GetHandlerForBrowser(tl_browser->GetIdentifier());
+        if (handler) tlTargetWinId = handler->GetWindowId();
+    }
+
+    ShowWindow(g_tablist_panel_overlay_hwnd, SW_HIDE);
+
+    BrowserWindow* tlFocusWin = WindowManager::GetInstance().GetWindow(tlTargetWinId);
+    CefRefPtr<CefBrowser> header_browser = tlFocusWin ? tlFocusWin->header_browser : SimpleHandler::GetHeaderBrowser();
+    if (header_browser) {
+        header_browser->GetHost()->SetFocus(true);
+    }
+
+    LOG_INFO_APP("Tab-list panel overlay hidden");
+}
+
 // ========== BOOKMARKS PANEL OVERLAY ==========
 // Mirrors the PROFILE panel pattern (MA_ACTIVATE dropdown with a text input), not
 // the download panel — the bookmarks dropdown has a search box that needs keyboard.

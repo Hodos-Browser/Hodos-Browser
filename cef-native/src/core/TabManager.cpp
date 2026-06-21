@@ -162,6 +162,13 @@ bool TabManager::CloseTab(int tab_id) {
     int win_id = tab.window_id;
     LOG(INFO) << "Closing tab " << tab_id << " (URL: " << tab.url << ") in window " << win_id;
 
+    // Record for the tab-list overlay's "Recently closed" section — real web pages
+    // only (skip empty/NTP and the local app origin: settings, browser-data, etc.).
+    if ((tab.url.rfind("http://", 0) == 0 || tab.url.rfind("https://", 0) == 0) &&
+        tab.url.find("127.0.0.1:5137") == std::string::npos) {
+        RecordClosedTab(tab.url, tab.title);
+    }
+
     // If this is the active tab for its window, switch to another tab in the same window
     int activeForWindow = GetActiveTabIdForWindow(win_id);
     if (tab_id == activeForWindow) {

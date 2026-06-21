@@ -561,6 +561,10 @@ CefRefPtr<CefBrowser> SimpleHandler::GetSiteInfoPanelBrowser() {
     auto* win = WindowManager::GetInstance().GetPrimaryWindow();
     return win ? win->siteinfo_panel_browser : nullptr;
 }
+CefRefPtr<CefBrowser> SimpleHandler::GetTabListPanelBrowser() {
+    auto* win = WindowManager::GetInstance().GetPrimaryWindow();
+    return win ? win->tablist_panel_browser : nullptr;
+}
 CefRefPtr<CefBrowser> SimpleHandler::GetProfilePanelBrowser() {
     auto* win = WindowManager::GetInstance().GetPrimaryWindow();
     return win ? win->profile_panel_browser : nullptr;
@@ -617,6 +621,24 @@ static void SendTabListToWindow(BrowserWindow* bw) {
     response_args->SetString(0, json_str);
     bw->header_browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, cef_response);
     LOG_DEBUG_BROWSER("📑 Tab list sent to window " + std::to_string(bw->window_id) + ": " + json_str);
+
+#ifdef _WIN32
+    // Also push to the tab-list overlay if it's open, so header-initiated tab
+    // open/close reflect live instead of waiting for its 2s poll. The overlay is
+    // primary-window-scoped, so only push when this is the primary window's list.
+    if (bw->window_id == WindowManager::GetInstance().GetPrimaryWindowId()) {
+        extern HWND g_tablist_panel_overlay_hwnd;
+        if (g_tablist_panel_overlay_hwnd && IsWindow(g_tablist_panel_overlay_hwnd) &&
+            IsWindowVisible(g_tablist_panel_overlay_hwnd)) {
+            CefRefPtr<CefBrowser> tl = SimpleHandler::GetTabListPanelBrowser();
+            if (tl && tl->GetMainFrame()) {
+                CefRefPtr<CefProcessMessage> tl_msg = CefProcessMessage::Create("tab_list_response");
+                tl_msg->GetArgumentList()->SetString(0, json_str);
+                tl->GetMainFrame()->SendProcessMessage(PID_RENDERER, tl_msg);
+            }
+        }
+    }
+#endif
 }
 
 void SimpleHandler::NotifyTabListChanged() {
@@ -1560,6 +1582,18 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
 
         // Delayed resize/invalidate to fix the first-render black screen issue
         // (every keep-alive OSR overlay needs this).
+        CefRefPtr<CefBrowser> browser_ref = browser;
+        CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
+            if (b && b->GetHost()) {
+                b->GetHost()->WasResized();
+                b->GetHost()->Invalidate(PET_VIEW);
+            }
+        }, browser_ref), 150);
+    } else if (role_ == "tablistpanel") {
+        LOG_DEBUG_BROWSER("🗂️ Tab-list panel overlay browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
+
+        browser->GetHost()->SetFocus(true);
+
         CefRefPtr<CefBrowser> browser_ref = browser;
         CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
             if (b && b->GetHost()) {
@@ -6648,6 +6682,70 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // (e) tab-list caret — LEFT-anchored dropdown (clone of bookmarks). Arg:
+    // [iconLeftOffset]. Toggles the overlay; React fetches tabs + recently-closed.
+    if (message_name == "tablist_panel_show") {
+        int iconLeftOffset = 0;
+        CefRefPtr<CefListValue> tl_args = message->GetArgumentList();
+        if (tl_args->GetSize() > 0) {
+            try { iconLeftOffset = std::stoi(tl_args->GetString(0).ToString()); } catch(...) {}
+        }
+#ifdef _WIN32
+        extern HWND g_hwnd;
+        if (g_hwnd) iconLeftOffset = ScalePx(iconLeftOffset, g_hwnd);
+        extern void CreateTabListPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconLeftOffset);
+        extern void ShowTabListPanelOverlay(int iconLeftOffset, BrowserWindow* targetWin);
+        extern void HideTabListPanelOverlay();
+        extern HWND g_tablist_panel_overlay_hwnd;
+        extern HINSTANCE g_hInstance;
+        if (!g_tablist_panel_overlay_hwnd || !IsWindow(g_tablist_panel_overlay_hwnd)) {
+            CreateTabListPanelOverlay(g_hInstance, true, iconLeftOffset);
+        } else if (IsWindowVisible(g_tablist_panel_overlay_hwnd)) {
+            HideTabListPanelOverlay();
+        } else {
+            ShowTabListPanelOverlay(iconLeftOffset, GetOwnerWindow());
+        }
+        LOG_DEBUG_BROWSER("🗂️ Tab-list panel toggle (iconLeftOffset=" + std::to_string(iconLeftOffset) + ")");
+#elif defined(__APPLE__)
+        LOG_DEBUG_BROWSER("Tab-list panel overlay not yet implemented on macOS");
+#endif
+        return true;
+    }
+
+    if (message_name == "tablist_panel_hide") {
+#ifdef _WIN32
+        extern void HideTabListPanelOverlay();
+        HideTabListPanelOverlay();
+        LOG_DEBUG_BROWSER("🗂️ Tab-list panel overlay hidden");
+#endif
+        return true;
+    }
+
+    // (e) recently-closed tabs — read; replies via window.onRecentlyClosedResponse.
+    if (message_name == "get_recently_closed") {
+        nlohmann::json resp = nlohmann::json::array();
+        for (const auto& ct : TabManager::GetInstance().GetRecentlyClosed()) {
+            resp.push_back({{"url", ct.url}, {"title", ct.title}});
+        }
+        CefRefPtr<CefProcessMessage> rm = CefProcessMessage::Create("recently_closed_response");
+        rm->GetArgumentList()->SetString(0, resp.dump());
+        if (browser && browser->GetMainFrame())
+            browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, rm);
+        return true;
+    }
+
+    // (e) recently-closed tabs — reopen one (new tab + remove from the list).
+    if (message_name == "reopen_recently_closed") {
+        CefRefPtr<CefListValue> rc_args = message->GetArgumentList();
+        std::string url = rc_args->GetSize() > 0 ? rc_args->GetString(0).ToString() : "";
+        if (!url.empty()) {
+            TabManager::GetInstance().RemoveRecentlyClosed(url);
+            CreateNewTabWithUrl(url);
+            NotifyTabListChanged();
+        }
+        return true;
+    }
+
     // b2a — left-anchored site-info hub. Args: [iconLeftOffset, host, securityState].
     // Toggles the keep-alive overlay (download-style: MA_NOACTIVATE + mouse-hook).
     if (message_name == "siteinfo_panel_show") {
@@ -7965,6 +8063,34 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
                 } else {
                     CreateDownloadPanelOverlayMacOS(0);
                     NotifyDownloadStateChanged();
+                }
+#endif
+                return true;
+            }
+        }
+
+        // Ctrl+Shift+A / Cmd+Shift+A — Show tab-list overlay (Chrome tab search).
+        // Requires Shift so plain Ctrl+A (select-all) passes through untouched.
+        if (event.windows_key_code == 'A' && (event.modifiers & EVENTFLAG_SHIFT_DOWN)) {
+#ifdef __APPLE__
+            if (event.modifiers & EVENTFLAG_COMMAND_DOWN) {
+#else
+            if (event.modifiers & EVENTFLAG_CONTROL_DOWN) {
+#endif
+                LOG_INFO_BROWSER("⌨️ Ctrl+Shift+A: Showing tab-list overlay");
+#ifdef _WIN32
+                extern void CreateTabListPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconLeftOffset);
+                extern void ShowTabListPanelOverlay(int iconLeftOffset, BrowserWindow* targetWin = nullptr);
+                extern void HideTabListPanelOverlay();
+                extern HWND g_tablist_panel_overlay_hwnd;
+                extern HINSTANCE g_hInstance;
+                extern int g_tablist_icon_left_offset;
+                if (!g_tablist_panel_overlay_hwnd || !IsWindow(g_tablist_panel_overlay_hwnd)) {
+                    CreateTabListPanelOverlay(g_hInstance, true, g_tablist_icon_left_offset);
+                } else if (IsWindowVisible(g_tablist_panel_overlay_hwnd)) {
+                    HideTabListPanelOverlay();  // toggle-close (Chrome parity)
+                } else {
+                    ShowTabListPanelOverlay(g_tablist_icon_left_offset, GetOwnerWindow());
                 }
 #endif
                 return true;

@@ -87,6 +87,7 @@ HWND g_notification_overlay_hwnd = nullptr;
 HWND g_menu_overlay_hwnd = nullptr;
 HWND g_bookmarks_panel_overlay_hwnd = nullptr;
 HWND g_siteinfo_panel_overlay_hwnd = nullptr;
+HWND g_tablist_panel_overlay_hwnd = nullptr;
 
 // File dialog guard — prevents overlay close when a native file dialog is open
 bool g_file_dialog_active = false;
@@ -107,6 +108,7 @@ ULONGLONG g_wallet_last_hide_tick = 0;
 ULONGLONG g_profile_last_hide_tick = 0;
 ULONGLONG g_profile_last_show_tick = 0;  // Suppress immediate WM_ACTIVATE hide after show
 ULONGLONG g_bookmarks_last_show_tick = 0;  // Suppress immediate WM_ACTIVATE hide after show
+ULONGLONG g_tablist_last_show_tick = 0;    // Same guard for the tab-list overlay (MA_ACTIVATE)
 // Site-info hub: the mouse hook hides the panel on the SAME click that hits the
 // TuneIcon (the icon is outside the overlay rect), microseconds before the async
 // siteinfo_panel_show IPC arrives. Without this, the toggle-off re-opens instead of
@@ -122,6 +124,7 @@ HHOOK g_settings_mouse_hook = nullptr;
 HHOOK g_menu_mouse_hook = nullptr;
 HHOOK g_bookmarks_panel_mouse_hook = nullptr;
 HHOOK g_siteinfo_panel_mouse_hook = nullptr;
+HHOOK g_tablist_panel_mouse_hook = nullptr;
 
 // Stored icon right offsets for repositioning overlays on WM_SIZE/WM_MOVE
 // (physical pixel distance from icon's right edge to header's right edge)
@@ -136,6 +139,8 @@ int g_menu_icon_right_offset = 0;
 int g_bookmarks_icon_left_offset = 0;
 // Site-info dropdown is LEFT-anchored (TuneIcon at the address-bar left).
 int g_siteinfo_icon_left_offset = 0;
+// Tab-list caret is LEFT-anchored (caret at the left of the tab strip).
+int g_tablist_icon_left_offset = 0;
 int g_peerpay_count = 0;
 int g_peerpay_amount = 0;
 
@@ -688,6 +693,17 @@ void ShutdownApplication() {
         }
         DestroyWindow(g_siteinfo_panel_overlay_hwnd);
         g_siteinfo_panel_overlay_hwnd = nullptr;
+    }
+
+    if (g_tablist_panel_overlay_hwnd && IsWindow(g_tablist_panel_overlay_hwnd)) {
+        LOG_INFO("Destroying tab-list panel overlay window...");
+        if (g_tablist_panel_mouse_hook) {
+            UnhookWindowsHookEx(g_tablist_panel_mouse_hook);
+            g_tablist_panel_mouse_hook = nullptr;
+            LOG_INFO("Tab-list panel mouse hook removed during shutdown");
+        }
+        DestroyWindow(g_tablist_panel_overlay_hwnd);
+        g_tablist_panel_overlay_hwnd = nullptr;
     }
 
     if (g_profile_panel_overlay_hwnd && IsWindow(g_profile_panel_overlay_hwnd)) {
@@ -2650,6 +2666,174 @@ LRESULT CALLBACK BookmarksPanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
+// ========== TAB-LIST PANEL OVERLAY ==========
+// Mirrors the BOOKMARKS panel (MA_ACTIVATE dropdown WITH a search box → takes
+// activation, forwards keyboard, closes on WM_ACTIVATE(WA_INACTIVE) with a
+// show-tick race guard). LEFT-anchored at the caret on the tab strip.
+LRESULT CALLBACK TabListPanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_MOUSEACTIVATE:
+            return MA_ACTIVATE;
+
+        case WM_SETFOCUS: {
+            ImmAssociateContext(hwnd, nullptr);
+            CefRefPtr<CefBrowser> tl_browser = SimpleHandler::GetTabListPanelBrowser();
+            if (tl_browser) {
+                tl_browser->GetHost()->SetFocus(true);
+            }
+            return 0;
+        }
+
+        case WM_MOUSEMOVE: {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+            CefRefPtr<CefBrowser> tl_browser = SimpleHandler::GetTabListPanelBrowser();
+            if (tl_browser) {
+                tl_browser->GetHost()->SendMouseMoveEvent(mouse_event, false);
+            }
+            return 0;
+        }
+
+        case WM_LBUTTONDOWN: {
+            SetFocus(hwnd);
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = EVENTFLAG_LEFT_MOUSE_BUTTON;
+            CefRefPtr<CefBrowser> tl_browser = SimpleHandler::GetTabListPanelBrowser();
+            if (tl_browser) {
+                tl_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
+            }
+            return 0;
+        }
+
+        case WM_LBUTTONUP: {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+            CefRefPtr<CefBrowser> tl_browser = SimpleHandler::GetTabListPanelBrowser();
+            if (tl_browser) {
+                tl_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
+            }
+            return 0;
+        }
+
+        case WM_KEYDOWN: {
+            CefRefPtr<CefBrowser> tl_browser = SimpleHandler::GetTabListPanelBrowser();
+            if (tl_browser) {
+                CefKeyEvent key_event;
+                key_event.type = KEYEVENT_KEYDOWN;
+                key_event.windows_key_code = wParam;
+                key_event.native_key_code = lParam;
+                key_event.is_system_key = false;
+                int modifiers = 0;
+                if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= EVENTFLAG_CONTROL_DOWN;
+                if (GetKeyState(VK_SHIFT) & 0x8000) modifiers |= EVENTFLAG_SHIFT_DOWN;
+                if (GetKeyState(VK_MENU) & 0x8000) modifiers |= EVENTFLAG_ALT_DOWN;
+                key_event.modifiers = modifiers;
+                tl_browser->GetHost()->SendKeyEvent(key_event);
+            }
+            return 0;
+        }
+
+        case WM_KEYUP: {
+            CefRefPtr<CefBrowser> tl_browser = SimpleHandler::GetTabListPanelBrowser();
+            if (tl_browser) {
+                CefKeyEvent key_event;
+                key_event.type = KEYEVENT_KEYUP;
+                key_event.windows_key_code = wParam;
+                key_event.native_key_code = lParam;
+                key_event.is_system_key = false;
+                int modifiers = 0;
+                if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= EVENTFLAG_CONTROL_DOWN;
+                if (GetKeyState(VK_SHIFT) & 0x8000) modifiers |= EVENTFLAG_SHIFT_DOWN;
+                if (GetKeyState(VK_MENU) & 0x8000) modifiers |= EVENTFLAG_ALT_DOWN;
+                key_event.modifiers = modifiers;
+                tl_browser->GetHost()->SendKeyEvent(key_event);
+            }
+            return 0;
+        }
+
+        case WM_CHAR: {
+            CefRefPtr<CefBrowser> tl_browser = SimpleHandler::GetTabListPanelBrowser();
+            if (tl_browser) {
+                CefKeyEvent key_event;
+                key_event.type = KEYEVENT_CHAR;
+                key_event.windows_key_code = static_cast<int>(wParam);
+                key_event.native_key_code = static_cast<int>(lParam);
+                key_event.character = static_cast<char16_t>(wParam);
+                key_event.unmodified_character = static_cast<char16_t>(wParam);
+                key_event.is_system_key = false;
+                int modifiers = 0;
+                if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= EVENTFLAG_CONTROL_DOWN;
+                if (GetKeyState(VK_SHIFT) & 0x8000) modifiers |= EVENTFLAG_SHIFT_DOWN;
+                if (GetKeyState(VK_MENU) & 0x8000) modifiers |= EVENTFLAG_ALT_DOWN;
+                key_event.modifiers = modifiers;
+                tl_browser->GetHost()->SendKeyEvent(key_event);
+            }
+            return 0;
+        }
+
+        case WM_MOUSEWHEEL: {
+            POINT screenPt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            POINT clientPt = screenPt;
+            ScreenToClient(hwnd, &clientPt);
+            int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+            CefMouseEvent mouse_event;
+            mouse_event.x = clientPt.x;
+            mouse_event.y = clientPt.y;
+            mouse_event.modifiers = 0;
+            CefRefPtr<CefBrowser> tl_browser = SimpleHandler::GetTabListPanelBrowser();
+            if (tl_browser) {
+                tl_browser->GetHost()->SendMouseWheelEvent(mouse_event, 0, delta);
+            }
+            return 0;
+        }
+
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+
+        case WM_DESTROY:
+            return 0;
+
+        case WM_ACTIVATE:
+            if (LOWORD(wParam) != WA_INACTIVE) {
+                ImmAssociateContext(hwnd, nullptr);
+            } else {
+                if (g_file_dialog_active) return 0;
+                ULONGLONG elapsed = GetTickCount64() - g_tablist_last_show_tick;
+                if (elapsed < 200) {
+                    return 0;
+                }
+                LOG_INFO("Hiding tab-list panel — lost activation (click-outside)");
+                extern void HideTabListPanelOverlay();
+                HideTabListPanelOverlay();
+                return 0;
+            }
+            break;
+
+        case WM_WINDOWPOSCHANGING:
+            break;
+
+        case WM_IME_SETCONTEXT:
+            return 0;
+        case WM_IME_STARTCOMPOSITION:
+            return 0;
+        case WM_IME_COMPOSITION:
+            return 0;
+        case WM_IME_ENDCOMPOSITION:
+            return 0;
+    }
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
 // ========== PROFILE PANEL OVERLAY ==========
 
 LRESULT CALLBACK ProfilePanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
@@ -3950,6 +4134,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     if (!RegisterClass(&siteInfoPanelOverlayClass)) {
         LOG_DEBUG("Failed to register site-info panel overlay window class. Error: " + std::to_string(GetLastError()));
+    }
+
+    // Register Tab-List Panel overlay window class
+    WNDCLASS tabListPanelOverlayClass = {};
+    tabListPanelOverlayClass.lpfnWndProc = TabListPanelOverlayWndProc;
+    tabListPanelOverlayClass.hInstance = hInstance;
+    tabListPanelOverlayClass.lpszClassName = L"CEFTabListPanelOverlayWindow";
+
+    if (!RegisterClass(&tabListPanelOverlayClass)) {
+        LOG_DEBUG("Failed to register tab-list panel overlay window class. Error: " + std::to_string(GetLastError()));
     }
 
     // Register Profile Panel overlay window class

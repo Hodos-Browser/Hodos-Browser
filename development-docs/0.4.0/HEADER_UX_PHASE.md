@@ -308,7 +308,11 @@ This is **Brave's exact split** (left lock = site-info/permissions; right lion =
 
 ---
 
-### (e) Tab-list caret — `TabListOverlayRoot`
+### (e) Tab-list caret — `TabListOverlayRoot`  · ✅ DONE (smoke-passed, 2026-06-21)
+> Built as a clone of the **bookmarks** overlay (MA_ACTIVATE + search box + keyboard + show-tick), role `"tablistpanel"`, route `/tab-list`. Caret = first child of `TabBar` (rides the existing `paddingLeft` mac86/win6; right-margin 8px for spacing). Content: search + open tabs (`useTabManager`, live-filtered, live-pushed via `SendTabListToWindow`) + **recently-closed** (real in-memory store in `TabManager`: `ClosedTab`/`recently_closed_` inline in the header, recorded in `CloseTab` for http(s) non-local pages, cap 10; IPC `get_recently_closed`/`reopen_recently_closed`). Global **Ctrl/Cmd+Shift+A** (OnPreKeyEvent, toggle). Keep-alive overlay re-fetches both lists on each show via injected `window.tabListRefresh`. Code-reviewed (0 confirmed bugs). macOS = tracked TODO in `MACOS_PORT_0_4_0.md` (incl. the one-line `TabManager_mac.mm::CloseTab` RecordClosedTab parity add).
+
+(Original (e) plan below.)
+### (e) Tab-list caret — `TabListOverlayRoot` (original plan)
 
 **UX.** A caret (downward chevron) at the **LEFT of the tab strip** (§0 owner override): Windows far-left; macOS inset to start after the 86px traffic-light reservation (runtime-derived from `NSWindow.standardWindowButton`, never hardcoded). Click opens a dropdown copying the `DownloadsOverlayRoot` skeleton:
 

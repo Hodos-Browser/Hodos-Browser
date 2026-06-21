@@ -166,3 +166,23 @@ The Site-Info hub is a **left-anchored, NO-keyboard dropdown** (TuneIcon at the 
 ### Site-permission management — b2b (2026-06-21, branch `0.4.0`)
 
 The in-hub `Allow | Block | Ask` management UI. **Fully cross-platform — no mac work.** The 3 IPC handlers (`site_permissions_get/set/reset`) + the `SendSitePermissionsToBrowser` helper live in cross-platform `simple_handler.cpp` and operate purely on `SitePermissionStore` (already in the shared SOURCES) + send `site_permissions_response` back to the calling overlay via `browser->GetMainFrame()->SendProcessMessage` (platform-neutral). The render-side route → `window.onSitePermissionsResponse` is in cross-platform `simple_render_process_handler.cpp`. React (`useSitePermissions`, the collapsible segmented UI) is platform-agnostic. So b2b activates on mac automatically once the b2a `"siteinfopanel"` overlay shell exists there (see the b2a checklist above). The only b2a-side mac dependency carries over; b2b itself adds zero mac TODOs.
+
+### Tab-list caret + overlay — (e) (2026-06-21, branch `0.4.0`)
+
+A **keyboard-capable** (search box) LEFT-anchored dropdown — so its macOS sibling is the **bookmarks** overlay (MA_ACTIVATE + `DropdownOverlayView` + keyboard forwarding + click-outside via `WM_ACTIVATE`/NSEvent), NOT the mouse-only download/site-info pattern. New role `"tablistpanel"`, route `/tab-list`, `TabListOverlayRoot.tsx`.
+
+**Already cross-platform (no mac work):**
+- `BrowserWindow` mac fields `tablist_panel_overlay_window` / `tablist_panel_event_monitor` / `tablist_icon_left_offset`; role `"tablistpanel"` in `SetBrowserForRole`/`GetBrowserForRole`; `GetTabListPanelBrowser()` static.
+- Recently-closed store: `ClosedTab` + `recently_closed_` + `RecordClosedTab`/`GetRecentlyClosed`/`RemoveRecentlyClosed` are **inline in `TabManager.h`** (pure std::vector ops) → compile on both platforms. The `get_recently_closed`/`reopen_recently_closed` IPC + `recently_closed_response` route + `OnAfterCreated` branch + `tablist_panel_show/hide` arg-parse all live in cross-platform `simple_handler.cpp`/`simple_render_process_handler.cpp`.
+- **Global Ctrl/Cmd+Shift+A** is already wired in cross-platform `OnPreKeyEvent` with a working `#ifdef __APPLE__` Cmd arm + toggle-close.
+- React: `TabListOverlayRoot`, `useTabManager` in the overlay, the caret button in `TabBar` (rides the existing `paddingLeft: isMac ? '86px'` — starts after the traffic lights automatically), live-push (`SendTabListToWindow` → overlay) + `window.tabListRefresh` on show — all platform-agnostic.
+
+**New mac work required (checklist):**
+- [ ] **`TabManager_mac.mm::CloseTab` must call `RecordClosedTab(tab.url, tab.title)`** (same http(s) + non-`127.0.0.1:5137` filter as `TabManager.cpp`) — otherwise mac records nothing and the "Recently closed" section stays empty (graceful, no crash). One-line parity add.
+- [ ] `NSWindow* g_tablist_panel_overlay_window` + click-outside monitor + `g_tablist_last_show_tick` globals (alongside bookmarks, `cef_browser_shell_mac.mm`).
+- [ ] `CreateTabListPanelOverlayMacOS(int iconLeftOffset)` / `Show` / `Hide` / `IsVisible` / `WasJustHidden` + monitor install/remove, cloned from the **bookmarks** mac block (keyboard-capable: `DropdownOverlayView`, `makeFirstResponder:contentView` for the search box). `browserAccessor = ^{ return SimpleHandler::GetTabListPanelBrowser(); }`, URL `/tab-list`, role `"tablistpanel"`. On (re)show, inject `if(window.tabListRefresh)window.tabListRefresh();` (mirrors the Windows show path).
+- [ ] **LEFT-anchor X** hand-rolled like omnibox/bookmarks (NOT `CalculateToolbarOverlayFrame`); `iconLeftOffset` = CSS px, apply directly (no `ScalePx`), then `ClampOverlayToScreen`. Size 340×480.
+- [ ] Replace the no-op `#elif defined(__APPLE__)` arm for `tablist_panel_show` in `simple_handler.cpp` (currently logs) + add `__APPLE__` arms for the Ctrl/Cmd+Shift+A path (currently `_WIN32`-only) and `tablist_panel_hide`.
+- [ ] Add `g_tablist_panel_overlay_window` to `InstallAppFocusLossHandler`'s close list + shutdown cleanup.
+
+**Inherited limitations (shared with bookmarks, not (e)-specific):** multi-window first-open shows the primary window's tabs; Ctrl/Cmd+Shift+A before the first caret click positions at the window's far-left.

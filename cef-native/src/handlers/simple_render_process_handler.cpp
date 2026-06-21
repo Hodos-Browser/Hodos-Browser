@@ -2146,6 +2146,15 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         return true;
     }
 
+    if (message_name == "recently_closed_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string responseJson = args->GetString(0).ToString();
+        std::string escaped = escapeJsonForJs(responseJson);
+        std::string js = "if (window.onRecentlyClosedResponse) { window.onRecentlyClosedResponse(JSON.parse('" + escaped + "')); }";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        return true;
+    }
+
     if (message_name == "adblock_check_scriptlets_enabled_response") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string responseJson = args->GetString(0).ToString();

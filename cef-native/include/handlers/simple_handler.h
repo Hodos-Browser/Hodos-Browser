@@ -88,6 +88,7 @@ public:
     static CefRefPtr<CefBrowser> GetDownloadPanelBrowser();
     static CefRefPtr<CefBrowser> GetBookmarksPanelBrowser();
     static CefRefPtr<CefBrowser> GetSiteInfoPanelBrowser();
+    static CefRefPtr<CefBrowser> GetTabListPanelBrowser();
     static CefRefPtr<CefBrowser> GetProfilePanelBrowser();
     static CefRefPtr<CefBrowser> GetMenuBrowser();
     static std::string pending_panel_;

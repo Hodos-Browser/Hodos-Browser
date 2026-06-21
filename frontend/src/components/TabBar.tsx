@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { Box, Tooltip, CircularProgress, Typography } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
+import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
 import RemoveIcon from '@mui/icons-material/Remove';
 import CropSquareIcon from '@mui/icons-material/CropSquare';
 import CloseIcon from '@mui/icons-material/Close';
@@ -303,6 +304,25 @@ export const TabBar: React.FC<TabBarProps> = ({
         },
       }}
     >
+      {/* Tab-list caret — LEFT of the tab strip ([⌄][tab][tab][+]). Rides the
+          strip's existing paddingLeft (mac 86 / win 6), so it starts after the
+          macOS traffic-light reservation with no extra inset logic. Opens the
+          searchable tab-list overlay (also Ctrl/Cmd+Shift+A). */}
+      <Tooltip title="Search tabs (Ctrl+Shift+A)" placement="bottom">
+        <HodosButton
+          variant="icon"
+          size="small"
+          onClick={(e) => {
+            const left = Math.round(e.currentTarget.getBoundingClientRect().left);
+            window.cefMessage?.send('tablist_panel_show', [left.toString()]);
+          }}
+          aria-label="Search tabs"
+          style={{ flexShrink: 0, marginRight: '8px' }}
+        >
+          <KeyboardArrowDownIcon sx={{ fontSize: 18 }} />
+        </HodosButton>
+      </Tooltip>
+
       {/* Loading indicator or empty state */}
       {tabs.length === 0 && (
         <Box sx={{ display: 'flex', alignItems: 'center', px: 2, height: '100%' }}>

@@ -33,6 +33,13 @@
  * - All methods must be called on the CEF UI thread
  * - CEF_REQUIRE_UI_THREAD() checks are used where appropriate
  */
+// A recently-closed tab (url + title), surfaced in the tab-list overlay's
+// "Recently closed" section. In-memory only, capped to kMaxRecentlyClosed.
+struct ClosedTab {
+    std::string url;
+    std::string title;
+};
+
 class TabManager {
 public:
     /**
@@ -251,6 +258,33 @@ public:
      */
     void OnTabBrowserClosed(int tab_id);
 
+    // ========== Recently-closed tabs (tab-list overlay) ==========
+
+    // Inline (header) so they compile on both platforms — TabManager has a
+    // Windows .cpp and a macOS .mm impl, and these are called from cross-platform
+    // simple_handler.cpp. Pure std::vector ops, no platform deps.
+
+    /** @brief Record a just-closed tab's url/title (most-recent first, de-duped, capped). */
+    void RecordClosedTab(const std::string& url, const std::string& title) {
+        for (auto it = recently_closed_.begin(); it != recently_closed_.end(); ) {
+            if (it->url == url) it = recently_closed_.erase(it); else ++it;
+        }
+        recently_closed_.insert(recently_closed_.begin(), ClosedTab{url, title});
+        if (recently_closed_.size() > kMaxRecentlyClosed) {
+            recently_closed_.resize(kMaxRecentlyClosed);
+        }
+    }
+
+    /** @brief Recently-closed tabs, most-recent first. */
+    std::vector<ClosedTab> GetRecentlyClosed() const { return recently_closed_; }
+
+    /** @brief Drop recently-closed entries matching url (on reopen). */
+    void RemoveRecentlyClosed(const std::string& url) {
+        for (auto it = recently_closed_.begin(); it != recently_closed_.end(); ) {
+            if (it->url == url) it = recently_closed_.erase(it); else ++it;
+        }
+    }
+
 private:
     /**
      * @brief Private constructor (singleton pattern)
@@ -293,6 +327,10 @@ private:
 
     // Next tab ID to assign (monotonically increasing)
     int next_tab_id_;
+
+    // Recently-closed tabs (most-recent first), capped. In-memory only.
+    static constexpr size_t kMaxRecentlyClosed = 10;
+    std::vector<ClosedTab> recently_closed_;
 
     // Singleton instance
     static std::unique_ptr<TabManager> instance_;
