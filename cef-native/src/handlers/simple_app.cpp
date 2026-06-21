@@ -2128,6 +2128,245 @@ void HideDownloadPanelOverlay() {
     LOG_INFO_APP("Download panel overlay hidden");
 }
 
+// ========== SITE-INFO HUB OVERLAY ==========
+// Left-anchored dropdown (TuneIcon at the address-bar left). Clones the DOWNLOAD
+// panel (light MA_NOACTIVATE + installed mouse hook — no text input) but swaps the
+// right-anchor math for the bookmarks LEFT-anchor math.
+
+void ShowSiteInfoPanelOverlay(int iconLeftOffset = 0, BrowserWindow* targetWin = nullptr);
+
+void CreateSiteInfoPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconLeftOffset) {
+    LOG_INFO_APP("Creating site-info panel overlay (showImmediately=" +
+                 std::string(showImmediately ? "true" : "false") + ", iconLeftOffset=" +
+                 std::to_string(iconLeftOffset) + ")");
+
+    extern int g_siteinfo_icon_left_offset;
+    if (iconLeftOffset > 0) {
+        g_siteinfo_icon_left_offset = iconLeftOffset;
+    }
+
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetPrimaryWindow();
+    if (mainWin) mainWin->siteinfo_icon_left_offset = g_siteinfo_icon_left_offset;
+
+    extern HWND g_siteinfo_panel_overlay_hwnd;
+    if (g_siteinfo_panel_overlay_hwnd && IsWindow(g_siteinfo_panel_overlay_hwnd)) {
+        LOG_INFO_APP("Site-info panel overlay already exists");
+        if (showImmediately) {
+            ShowSiteInfoPanelOverlay(iconLeftOffset);
+        }
+        return;
+    }
+
+    extern HWND g_hwnd;
+    extern HWND g_header_hwnd;
+    RECT mainRect;
+    GetWindowRect(g_hwnd, &mainRect);
+    RECT headerRect;
+    GetWindowRect(g_header_hwnd, &headerRect);
+
+    // LEFT-anchored: panel left edge sits at the TuneIcon's left.
+    int panelWidth = ScalePx(360, g_hwnd);
+    int panelHeight = ScalePx(480, g_hwnd);
+    int overlayX = headerRect.left + iconLeftOffset;
+    int overlayY = headerRect.top + ScalePx(104, g_hwnd);
+    if (overlayX + panelWidth > mainRect.right - ScalePx(8, g_hwnd)) {
+        overlayX = mainRect.right - panelWidth - ScalePx(8, g_hwnd);
+    }
+    if (overlayX < mainRect.left + ScalePx(8, g_hwnd)) {
+        overlayX = mainRect.left + ScalePx(8, g_hwnd);
+    }
+    if (overlayY + panelHeight > mainRect.bottom - ScalePx(20, g_hwnd)) {
+        panelHeight = mainRect.bottom - overlayY - ScalePx(20, g_hwnd);
+        if (panelHeight < ScalePx(280, g_hwnd)) panelHeight = ScalePx(280, g_hwnd);
+    }
+
+    LOG_INFO_APP("Creating site-info panel overlay at position: (" + std::to_string(overlayX) + ", " +
+                 std::to_string(overlayY) + ") size: " + std::to_string(panelWidth) + "x" +
+                 std::to_string(panelHeight));
+
+    HWND siteinfo_panel_hwnd = CreateWindowEx(
+        WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+        L"CEFSiteInfoPanelOverlayWindow",
+        L"Site Info Panel Overlay",
+        WS_POPUP,
+        overlayX, overlayY, panelWidth, panelHeight,
+        g_hwnd, nullptr, hInstance, nullptr);
+
+    if (!siteinfo_panel_hwnd) {
+        LOG_ERROR_APP("Failed to create site-info panel overlay HWND. Error: " + std::to_string(GetLastError()));
+        return;
+    }
+
+    UINT flags = SWP_NOACTIVATE;
+    flags |= showImmediately ? SWP_SHOWWINDOW : SWP_HIDEWINDOW;
+    SetWindowPos(siteinfo_panel_hwnd, HWND_TOPMOST,
+        overlayX, overlayY, panelWidth, panelHeight, flags);
+
+    g_siteinfo_panel_overlay_hwnd = siteinfo_panel_hwnd;
+    if (mainWin) mainWin->siteinfo_panel_overlay_hwnd = g_siteinfo_panel_overlay_hwnd;
+
+    LOG_INFO_APP("Site-info panel overlay HWND created: " + std::to_string(reinterpret_cast<intptr_t>(siteinfo_panel_hwnd)) +
+                 " (visible=" + std::string(showImmediately ? "true" : "false") + ")");
+
+    CefWindowInfo window_info;
+    window_info.windowless_rendering_enabled = true;
+    window_info.SetAsPopup(siteinfo_panel_hwnd, "SiteInfoPanelOverlay");
+
+    CefBrowserSettings settings;
+    settings.windowless_frame_rate = 30;
+    settings.background_color = CefColorSetARGB(0, 0, 0, 0);  // transparent background
+    settings.javascript = STATE_ENABLED;
+
+    CefRefPtr<SimpleHandler> siteinfo_panel_handler(new SimpleHandler("siteinfopanel"));
+    CefRefPtr<MyOverlayRenderHandler> render_handler =
+        new MyOverlayRenderHandler(siteinfo_panel_hwnd, panelWidth, panelHeight);
+    siteinfo_panel_handler->SetRenderHandler(render_handler);
+
+    bool result = CefBrowserHost::CreateBrowser(
+        window_info, siteinfo_panel_handler,
+        "http://127.0.0.1:5137/site-info",
+        settings, nullptr,
+        CefRequestContext::GetGlobalContext());
+
+    if (result) {
+        LOG_INFO_APP("Site-info panel overlay browser created with subprocess");
+        if (showImmediately) {
+            extern HHOOK g_siteinfo_panel_mouse_hook;
+            extern LRESULT CALLBACK SiteInfoPanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+            if (!g_siteinfo_panel_mouse_hook) {
+                g_siteinfo_panel_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, SiteInfoPanelMouseHookProc, nullptr, 0);
+                if (mainWin) mainWin->siteinfo_panel_mouse_hook = g_siteinfo_panel_mouse_hook;
+                if (g_siteinfo_panel_mouse_hook) {
+                    LOG_INFO_APP("Site-info panel mouse hook installed for click-outside detection");
+                } else {
+                    LOG_WARNING_APP("Failed to install site-info panel mouse hook. Error: " + std::to_string(GetLastError()));
+                }
+            }
+            LONG exStyle = GetWindowLong(siteinfo_panel_hwnd, GWL_EXSTYLE);
+            SetWindowLong(siteinfo_panel_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+        }
+    } else {
+        LOG_ERROR_APP("Failed to create site-info panel overlay browser");
+    }
+}
+
+void ShowSiteInfoPanelOverlay(int iconLeftOffset, BrowserWindow* targetWin) {
+    extern HWND g_siteinfo_panel_overlay_hwnd;
+    if (!g_siteinfo_panel_overlay_hwnd || !IsWindow(g_siteinfo_panel_overlay_hwnd)) {
+        LOG_WARNING_APP("Cannot show site-info panel overlay - HWND does not exist");
+        return;
+    }
+
+    extern int g_siteinfo_icon_left_offset;
+    if (iconLeftOffset > 0) {
+        g_siteinfo_icon_left_offset = iconLeftOffset;
+    }
+
+    BrowserWindow* mainWin = WindowManager::GetInstance().GetPrimaryWindow();
+    if (mainWin) mainWin->siteinfo_icon_left_offset = g_siteinfo_icon_left_offset;
+
+    LOG_INFO_APP("Showing site-info panel overlay with iconLeftOffset=" + std::to_string(g_siteinfo_icon_left_offset));
+
+    extern HHOOK g_siteinfo_panel_mouse_hook;
+    extern LRESULT CALLBACK SiteInfoPanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+    if (!g_siteinfo_panel_mouse_hook) {
+        g_siteinfo_panel_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, SiteInfoPanelMouseHookProc, nullptr, 0);
+        if (mainWin) mainWin->siteinfo_panel_mouse_hook = g_siteinfo_panel_mouse_hook;
+        if (g_siteinfo_panel_mouse_hook) {
+            LOG_INFO_APP("Site-info panel mouse hook installed");
+        } else {
+            LOG_WARNING_APP("Failed to install site-info panel mouse hook. Error: " + std::to_string(GetLastError()));
+        }
+    }
+
+    extern HWND g_header_hwnd;
+    extern HWND g_hwnd;
+    HWND posHwnd = (targetWin && targetWin->hwnd) ? targetWin->hwnd : g_hwnd;
+    HWND posHeader = (targetWin && targetWin->header_hwnd) ? targetWin->header_hwnd : g_header_hwnd;
+
+    RECT headerRect;
+    GetWindowRect(posHeader, &headerRect);
+    RECT mainRect;
+    GetWindowRect(posHwnd, &mainRect);
+
+    int panelWidth = ScalePx(360, posHwnd);
+    int panelHeight = ScalePx(480, posHwnd);
+    int overlayX = headerRect.left + g_siteinfo_icon_left_offset;
+    int overlayY = headerRect.top + ScalePx(104, posHwnd);
+    if (overlayX + panelWidth > mainRect.right - ScalePx(8, posHwnd)) {
+        overlayX = mainRect.right - panelWidth - ScalePx(8, posHwnd);
+    }
+    if (overlayX < mainRect.left + ScalePx(8, posHwnd)) {
+        overlayX = mainRect.left + ScalePx(8, posHwnd);
+    }
+    if (overlayY + panelHeight > mainRect.bottom - ScalePx(20, posHwnd)) {
+        panelHeight = mainRect.bottom - overlayY - ScalePx(20, posHwnd);
+        if (panelHeight < ScalePx(280, posHwnd)) panelHeight = ScalePx(280, posHwnd);
+    }
+
+    SetWindowPos(g_siteinfo_panel_overlay_hwnd, HWND_TOPMOST,
+        overlayX, overlayY, panelWidth, panelHeight,
+        SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+    LONG exStyle = GetWindowLong(g_siteinfo_panel_overlay_hwnd, GWL_EXSTYLE);
+    SetWindowLong(g_siteinfo_panel_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+
+    CefRefPtr<CefBrowser> si_browser = SimpleHandler::GetSiteInfoPanelBrowser();
+    if (si_browser) {
+        int targetWindowId = targetWin ? targetWin->window_id : 0;
+        SimpleHandler* handler = SimpleHandler::GetHandlerForBrowser(si_browser->GetIdentifier());
+        if (handler) handler->SetWindowId(targetWindowId);
+
+        if (si_browser->GetHost()) {
+            si_browser->GetHost()->NotifyScreenInfoChanged();
+            si_browser->GetHost()->WasResized();
+            si_browser->GetHost()->Invalidate(PET_VIEW);
+        }
+    }
+
+    LOG_INFO_APP("Site-info panel overlay shown");
+}
+
+void HideSiteInfoPanelOverlay() {
+    extern HWND g_siteinfo_panel_overlay_hwnd;
+    if (!g_siteinfo_panel_overlay_hwnd || !IsWindow(g_siteinfo_panel_overlay_hwnd)) {
+        LOG_WARNING_APP("Cannot hide site-info panel overlay - HWND does not exist");
+        return;
+    }
+
+    LOG_INFO_APP("Hiding site-info panel overlay");
+
+    // Stamp the hide time so the toggle IPC can tell a same-click toggle-off (the
+    // mouse hook fired microseconds ago) from a deliberate later re-open.
+    extern ULONGLONG g_siteinfo_last_hide_tick;
+    g_siteinfo_last_hide_tick = GetTickCount64();
+
+    extern HHOOK g_siteinfo_panel_mouse_hook;
+    if (g_siteinfo_panel_mouse_hook) {
+        UnhookWindowsHookEx(g_siteinfo_panel_mouse_hook);
+        g_siteinfo_panel_mouse_hook = nullptr;
+        LOG_INFO_APP("Site-info panel mouse hook removed");
+    }
+
+    CefRefPtr<CefBrowser> si_browser = SimpleHandler::GetSiteInfoPanelBrowser();
+    int siTargetWinId = 0;
+    if (si_browser) {
+        si_browser->GetHost()->SetFocus(false);
+        SimpleHandler* handler = SimpleHandler::GetHandlerForBrowser(si_browser->GetIdentifier());
+        if (handler) siTargetWinId = handler->GetWindowId();
+    }
+
+    ShowWindow(g_siteinfo_panel_overlay_hwnd, SW_HIDE);
+
+    BrowserWindow* siFocusWin = WindowManager::GetInstance().GetWindow(siTargetWinId);
+    CefRefPtr<CefBrowser> header_browser = siFocusWin ? siFocusWin->header_browser : SimpleHandler::GetHeaderBrowser();
+    if (header_browser) {
+        header_browser->GetHost()->SetFocus(true);
+    }
+
+    LOG_INFO_APP("Site-info panel overlay hidden");
+}
+
 // ========== BOOKMARKS PANEL OVERLAY ==========
 // Mirrors the PROFILE panel pattern (MA_ACTIVATE dropdown with a text input), not
 // the download panel — the bookmarks dropdown has a search box that needs keyboard.

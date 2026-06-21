@@ -139,3 +139,30 @@ The Hodos-branded permission prompt (replaces Chromium's stock prompt on the "As
 ### Allow-once session memory — b1b.1 (2026-06-20, branch `0.4.0`)
 
 Ephemeral per-tab "Allow this time" grants (in `PendingPermissionManager`, NOT persisted), promoting Ask→Allow for the granting tab+host until navigate-away or tab close. Entirely cross-platform: the grant logic + the clear hooks (`OnAddressChange` host-change clear, `OnBeforeClose` clear) live in cross-platform `simple_handler.cpp`. No mac-specific work; it activates on mac as soon as the mac permission-prompt fire path exists (b1b mac TODO).
+
+### Site-info hub overlay — b2a (2026-06-21, branch `0.4.0`)
+
+The Site-Info hub is a **left-anchored, NO-keyboard dropdown** (TuneIcon at the address-bar left). Unlike bookmarks (which needed keyboard for its search box → `DropdownOverlayView` + `makeFirstResponder`), the hub has **no text input**, so its macOS sibling is the **download/cookie panel** pattern (mouse-only), NOT the profile/bookmarks keyboard pattern. On Windows it clones the DOWNLOAD panel (`MA_NOACTIVATE` + installed `WH_MOUSE_LL` click-outside hook) with the BOOKMARKS left-anchor math.
+
+**Already cross-platform (no mac work):**
+- `BrowserWindow` mac fields `siteinfo_panel_overlay_window` / `siteinfo_panel_event_monitor` / `siteinfo_icon_left_offset` (`BrowserWindow.h` `__APPLE__` section).
+- Role dispatch `"siteinfopanel"` in `SetBrowserForRole`/`GetBrowserForRole` (`BrowserWindow.cpp`).
+- `GetSiteInfoPanelBrowser()` — cross-platform static (`simple_handler.cpp`), callable from `.mm` like `GetDownloadPanelBrowser()`.
+- Deferred `setSiteInfoContext` injection in `OnLoadingStateChange` (role-gated, not `#ifdef`'d) + `OnAfterCreated` role branch (150ms WasResized+Invalidate) + IPC arg parse / `pending_siteinfo_host_`/`_security_` stash (runs before the `#ifdef` split).
+- `open_wallet_permissions` IPC already has a working `#elif defined(__APPLE__)` arm (calls the existing mac `CreateNotificationOverlay("edit_permissions", domain)`); the `siteinfo_panel_hide` no-op on mac is harmless (overlay doesn't exist there yet).
+- React: `SiteInfoOverlayRoot.tsx`, route `/site-info`, `usePrivacyShield(host)`, the TuneIcon in `MainBrowserView.tsx` — all platform-agnostic (the TuneIcon renders identically under the mac header NSView).
+
+**New mac work required (checklist):**
+- [ ] Add `NSWindow* g_siteinfo_panel_overlay_window = nullptr;` + click-outside monitor + a `g_siteinfo_last_hide_tick` analog alongside the download/profile globals (`cef_browser_shell_mac.mm:~256-266`).
+- [ ] Implement `CreateSiteInfoPanelOverlayMacOS(int iconLeftOffset)` / `Show` / `Hide` / `IsVisible` / `WasJustHidden` + `Install/RemoveSiteInfoPanelClickOutsideMonitor`, cloned from the **download** mac block (mouse-only — use `GenericOverlayView`, NOT `DropdownOverlayView`; no `makeFirstResponder`/keyboard needed). `browserAccessor = ^{ return SimpleHandler::GetSiteInfoPanelBrowser(); }`, URL `/site-info`, role `"siteinfopanel"`.
+- [ ] **Left-anchor positioning** (hand-roll X like omnibox/bookmarks `~:3787`; do NOT use `CalculateToolbarOverlayFrame`, right-only). `iconLeftOffset` arrives as **CSS px / points** — apply directly, **NO `ScalePx`** (double-offsets on Retina); then `ClampOverlayToScreen`. Size 360×480.
+- [ ] Replace the no-op `#elif defined(__APPLE__)` arm for `siteinfo_panel_show` in `simple_handler.cpp` (currently logs) → create/show/hide toggle mirroring the download-panel mac block, **including the immediate `setSiteInfoContext` re-open injection** (deferred path only fires on first load) **and a hide-tick toggle guard** if the mac path also installs a global mouse monitor that can pre-hide on the same click (verify whether the mac NSEvent monitor has the same same-click race as the Windows `WH_MOUSE_LL`; if it doesn't fire before the React click, the guard may be unnecessary on mac). Add an `__APPLE__` arm to `siteinfo_panel_hide` (currently `_WIN32`-only).
+- [ ] Add `g_siteinfo_panel_overlay_window` to `InstallAppFocusLossHandler`'s close list (`OverlayHelpers_mac.mm:~189-229`) + shutdown cleanup (`cef_browser_shell_mac.mm:~4210-4293`).
+
+**Risks to verify on mac:** Retina points-vs-pixels for the left X (no scaling); the toggle/click-outside race (the Windows fix is the `g_siteinfo_last_hide_tick` guard — confirm whether the mac NSEvent local monitor reproduces the "hook hides before IPC re-shows" sequence); first-open (deferred) vs re-open (immediate) `setSiteInfoContext` both wired. Connection-badge + shields + links are pure React and work as-is once the mac overlay shell exists.
+
+**Known Windows limitation (shared with bookmarks, NOT a regression):** the primary-window-handoff migration block (`cef_browser_shell.cpp` ~`overlayRoles[]`) does not transfer/null the siteinfo (or bookmarks) overlay on multi-window primary reassignment — worst case is a stale HWND. Fix both together if multi-window overlay lifecycle is ever hardened.
+
+### Site-permission management — b2b (2026-06-21, branch `0.4.0`)
+
+The in-hub `Allow | Block | Ask` management UI. **Fully cross-platform — no mac work.** The 3 IPC handlers (`site_permissions_get/set/reset`) + the `SendSitePermissionsToBrowser` helper live in cross-platform `simple_handler.cpp` and operate purely on `SitePermissionStore` (already in the shared SOURCES) + send `site_permissions_response` back to the calling overlay via `browser->GetMainFrame()->SendProcessMessage` (platform-neutral). The render-side route → `window.onSitePermissionsResponse` is in cross-platform `simple_render_process_handler.cpp`. React (`useSitePermissions`, the collapsible segmented UI) is platform-agnostic. So b2b activates on mac automatically once the b2a `"siteinfopanel"` overlay shell exists there (see the b2a checklist above). The only b2a-side mac dependency carries over; b2b itself adds zero mac TODOs.

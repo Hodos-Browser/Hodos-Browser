@@ -37,7 +37,7 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain, showCou
     fingerprintSiteEnabled,
     toggleFingerprintSite,
     fingerprintNeedsReload,
-  } = usePrivacyShield(domain);
+  } = usePrivacyShield(domain, showCount);
 
   const { settings, refresh } = useSettings();
 

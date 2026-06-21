@@ -17,9 +17,7 @@ import RefreshIcon from '@mui/icons-material/Refresh';
 import AccountBalanceWalletIcon from '@mui/icons-material/AccountBalanceWallet';
 import MoreVertIcon from '@mui/icons-material/MoreVert';
 import AccountCircleIcon from '@mui/icons-material/AccountCircle';
-import LockIcon from '@mui/icons-material/Lock';
-import LockOpenIcon from '@mui/icons-material/LockOpen';
-import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
+import TuneIcon from '@mui/icons-material/Tune';
 import DownloadIcon from '@mui/icons-material/Download';
 import SecurityIcon from '@mui/icons-material/Security';
 import BookmarkBorderIcon from '@mui/icons-material/BookmarkBorder';
@@ -624,28 +622,43 @@ const MainBrowserView: React.FC = () => {
 
                 {/* Address Bar with Inline Autocomplete - centered, constrained width */}
                 <Box sx={{ position: 'relative', flex: '0 1 1200px', minWidth: 200, maxWidth: 1200 }}>
+                    {/* Site-info "Site Controls" hub trigger (replaces the passive lock):
+                        a clickable TuneIcon whose color reflects the connection state.
+                        Opens the left-anchored site-info overlay. */}
                     {securityState !== 'none' && (
                         <Box
+                            onClick={(e) => {
+                                const left = Math.round(e.currentTarget.getBoundingClientRect().left);
+                                window.cefMessage?.send('siteinfo_panel_show', [
+                                    left.toString(),
+                                    currentDomain,
+                                    securityState,
+                                ]);
+                            }}
+                            aria-label="Site controls"
+                            title="Site controls"
                             sx={{
                                 position: 'absolute',
-                                left: 10,
+                                left: 4,
                                 top: '50%',
                                 transform: 'translateY(-50%)',
                                 display: 'flex',
                                 alignItems: 'center',
-                                zIndex: 1,
-                                pointerEvents: 'none',
+                                justifyContent: 'center',
+                                width: 24,
+                                height: 24,
+                                borderRadius: '50%',
+                                zIndex: 2,
+                                cursor: 'pointer',
+                                '&:hover': { backgroundColor: 'rgba(0,0,0,0.12)' },
                             }}
                         >
-                            {securityState === 'secure' && (
-                                <LockIcon sx={{ fontSize: 16, color: '#188038' }} />
-                            )}
-                            {securityState === 'insecure' && (
-                                <LockOpenIcon sx={{ fontSize: 16, color: '#666' }} />
-                            )}
-                            {securityState === 'error' && (
-                                <ErrorOutlineIcon sx={{ fontSize: 16, color: '#d93025' }} />
-                            )}
+                            <TuneIcon sx={{
+                                fontSize: 16,
+                                color: securityState === 'secure' ? '#188038'
+                                    : securityState === 'error' ? '#d93025'
+                                    : '#444',
+                            }} />
                         </Box>
                     )}
                     <input

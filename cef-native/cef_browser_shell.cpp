@@ -86,6 +86,7 @@ HWND g_profile_panel_overlay_hwnd = nullptr;
 HWND g_notification_overlay_hwnd = nullptr;
 HWND g_menu_overlay_hwnd = nullptr;
 HWND g_bookmarks_panel_overlay_hwnd = nullptr;
+HWND g_siteinfo_panel_overlay_hwnd = nullptr;
 
 // File dialog guard — prevents overlay close when a native file dialog is open
 bool g_file_dialog_active = false;
@@ -106,6 +107,11 @@ ULONGLONG g_wallet_last_hide_tick = 0;
 ULONGLONG g_profile_last_hide_tick = 0;
 ULONGLONG g_profile_last_show_tick = 0;  // Suppress immediate WM_ACTIVATE hide after show
 ULONGLONG g_bookmarks_last_show_tick = 0;  // Suppress immediate WM_ACTIVATE hide after show
+// Site-info hub: the mouse hook hides the panel on the SAME click that hits the
+// TuneIcon (the icon is outside the overlay rect), microseconds before the async
+// siteinfo_panel_show IPC arrives. Without this, the toggle-off re-opens instead of
+// closing. The IPC's "not visible" branch suppresses re-show within the guard window.
+ULONGLONG g_siteinfo_last_hide_tick = 0;
 
 // Global mouse hooks for overlay click-outside detection
 HHOOK g_omnibox_mouse_hook = nullptr;
@@ -115,6 +121,7 @@ HHOOK g_profile_panel_mouse_hook = nullptr;
 HHOOK g_settings_mouse_hook = nullptr;
 HHOOK g_menu_mouse_hook = nullptr;
 HHOOK g_bookmarks_panel_mouse_hook = nullptr;
+HHOOK g_siteinfo_panel_mouse_hook = nullptr;
 
 // Stored icon right offsets for repositioning overlays on WM_SIZE/WM_MOVE
 // (physical pixel distance from icon's right edge to header's right edge)
@@ -127,6 +134,8 @@ int g_menu_icon_right_offset = 0;
 // Bookmarks dropdown is LEFT-anchored (button sits left of the address bar), so it
 // stores a LEFT offset (physical px from header's left edge to the button's left).
 int g_bookmarks_icon_left_offset = 0;
+// Site-info dropdown is LEFT-anchored (TuneIcon at the address-bar left).
+int g_siteinfo_icon_left_offset = 0;
 int g_peerpay_count = 0;
 int g_peerpay_amount = 0;
 
@@ -670,6 +679,17 @@ void ShutdownApplication() {
         g_bookmarks_panel_overlay_hwnd = nullptr;
     }
 
+    if (g_siteinfo_panel_overlay_hwnd && IsWindow(g_siteinfo_panel_overlay_hwnd)) {
+        LOG_INFO("Destroying site-info panel overlay window...");
+        if (g_siteinfo_panel_mouse_hook) {
+            UnhookWindowsHookEx(g_siteinfo_panel_mouse_hook);
+            g_siteinfo_panel_mouse_hook = nullptr;
+            LOG_INFO("Site-info panel mouse hook removed during shutdown");
+        }
+        DestroyWindow(g_siteinfo_panel_overlay_hwnd);
+        g_siteinfo_panel_overlay_hwnd = nullptr;
+    }
+
     if (g_profile_panel_overlay_hwnd && IsWindow(g_profile_panel_overlay_hwnd)) {
         LOG_INFO("Destroying profile panel overlay window...");
         if (g_profile_panel_mouse_hook) {
@@ -717,6 +737,7 @@ void HideAllOverlays() {
     extern void HideDownloadPanelOverlay();
     extern void HideMenuOverlay();
     extern void HideProfilePanelOverlay();
+    extern void HideSiteInfoPanelOverlay();
 
     if (g_omnibox_overlay_hwnd && IsWindow(g_omnibox_overlay_hwnd) && IsWindowVisible(g_omnibox_overlay_hwnd))
         HideOmniboxOverlay();
@@ -724,6 +745,8 @@ void HideAllOverlays() {
         HideCookiePanelOverlay();
     if (g_download_panel_overlay_hwnd && IsWindow(g_download_panel_overlay_hwnd) && IsWindowVisible(g_download_panel_overlay_hwnd))
         HideDownloadPanelOverlay();
+    if (g_siteinfo_panel_overlay_hwnd && IsWindow(g_siteinfo_panel_overlay_hwnd) && IsWindowVisible(g_siteinfo_panel_overlay_hwnd))
+        HideSiteInfoPanelOverlay();
     if (g_menu_overlay_hwnd && IsWindow(g_menu_overlay_hwnd) && IsWindowVisible(g_menu_overlay_hwnd))
         HideMenuOverlay();
     if (g_profile_panel_overlay_hwnd && IsWindow(g_profile_panel_overlay_hwnd) && IsWindowVisible(g_profile_panel_overlay_hwnd))
@@ -939,6 +962,27 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 }
                 SetWindowPos(g_download_panel_overlay_hwnd, HWND_TOPMOST,
                     dpX, dpY, dpWidth, dpHeight,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            }
+
+            // Move site-info hub overlay if it exists and is visible (LEFT-anchored)
+            if (g_siteinfo_panel_overlay_hwnd && IsWindow(g_siteinfo_panel_overlay_hwnd) && IsWindowVisible(g_siteinfo_panel_overlay_hwnd)) {
+                RECT hdrRect;
+                GetWindowRect(g_header_hwnd, &hdrRect);
+                int siWidth = ScalePx(360, hwnd);
+                int siHeight = ScalePx(480, hwnd);
+                int siX = hdrRect.left + g_siteinfo_icon_left_offset;
+                int siY = hdrRect.top + ScalePx(104, hwnd);
+                if (siX + siWidth > mainRect.right - ScalePx(8, hwnd))
+                    siX = mainRect.right - siWidth - ScalePx(8, hwnd);
+                if (siX < mainRect.left + ScalePx(8, hwnd))
+                    siX = mainRect.left + ScalePx(8, hwnd);
+                if (siY + siHeight > mainRect.bottom - ScalePx(20, hwnd)) {
+                    siHeight = mainRect.bottom - siY - ScalePx(20, hwnd);
+                    if (siHeight < ScalePx(280, hwnd)) siHeight = ScalePx(280, hwnd);
+                }
+                SetWindowPos(g_siteinfo_panel_overlay_hwnd, HWND_TOPMOST,
+                    siX, siY, siWidth, siHeight,
                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
             }
 
@@ -1190,6 +1234,34 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 }
             }
 
+            // Reposition site-info hub overlay (LEFT-anchored, left edge under TuneIcon)
+            if (g_siteinfo_panel_overlay_hwnd && IsWindow(g_siteinfo_panel_overlay_hwnd) && IsWindowVisible(g_siteinfo_panel_overlay_hwnd)) {
+                RECT hdrRect;
+                GetWindowRect(g_header_hwnd, &hdrRect);
+                RECT siMainRect;
+                GetWindowRect(g_hwnd, &siMainRect);
+                int siWidth = ScalePx(360, hwnd);
+                int siHeight = ScalePx(480, hwnd);
+                int siX = hdrRect.left + g_siteinfo_icon_left_offset;
+                int siY = hdrRect.top + ScalePx(104, hwnd);
+                if (siX + siWidth > siMainRect.right - ScalePx(8, hwnd))
+                    siX = siMainRect.right - siWidth - ScalePx(8, hwnd);
+                if (siX < siMainRect.left + ScalePx(8, hwnd))
+                    siX = siMainRect.left + ScalePx(8, hwnd);
+                if (siY + siHeight > siMainRect.bottom - ScalePx(20, hwnd)) {
+                    siHeight = siMainRect.bottom - siY - ScalePx(20, hwnd);
+                    if (siHeight < ScalePx(280, hwnd)) siHeight = ScalePx(280, hwnd);
+                }
+                SetWindowPos(g_siteinfo_panel_overlay_hwnd, HWND_TOPMOST,
+                    siX, siY, siWidth, siHeight,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+                CefRefPtr<CefBrowser> si_browser = SimpleHandler::GetSiteInfoPanelBrowser();
+                if (si_browser) {
+                    si_browser->GetHost()->WasResized();
+                }
+            }
+
             // Resize wallet overlay (right-side panel below header)
             if (g_wallet_overlay_hwnd && IsWindow(g_wallet_overlay_hwnd) && IsWindowVisible(g_wallet_overlay_hwnd)) {
                 RECT hdrRect;
@@ -1309,6 +1381,14 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                     extern void HideOmniboxOverlay();
                     HideOmniboxOverlay();
                     LOG_DEBUG("🔍 Dismissed omnibox overlay on focus loss");
+                }
+
+                // Dismiss site-info hub on focus loss (MA_NOACTIVATE, so it can't
+                // close itself via WM_ACTIVATE — avoid a ghost panel on Alt+Tab).
+                if (g_siteinfo_panel_overlay_hwnd && IsWindow(g_siteinfo_panel_overlay_hwnd) && IsWindowVisible(g_siteinfo_panel_overlay_hwnd)) {
+                    extern void HideSiteInfoPanelOverlay();
+                    HideSiteInfoPanelOverlay();
+                    LOG_DEBUG("🛈 Dismissed site-info panel overlay on focus loss");
                 }
             } else {
                 // App regaining focus — clear file dialog guard
@@ -2647,6 +2727,89 @@ LRESULT CALLBACK DownloadPanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam,
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
+// ========== SITE-INFO HUB OVERLAY ==========
+// Left-anchored dropdown (TuneIcon at the address-bar left). No text input, so it
+// uses the light download-panel pattern: MA_NOACTIVATE + an installed low-level
+// mouse hook for click-outside (NOT the bookmarks MA_ACTIVATE/keyboard pattern).
+
+LRESULT CALLBACK SiteInfoPanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode == HC_ACTION) {
+        if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN) {
+            if (g_siteinfo_panel_overlay_hwnd && IsWindow(g_siteinfo_panel_overlay_hwnd) && IsWindowVisible(g_siteinfo_panel_overlay_hwnd)) {
+                MSLLHOOKSTRUCT* mouseInfo = (MSLLHOOKSTRUCT*)lParam;
+                POINT clickPoint = mouseInfo->pt;
+                RECT overlayRect;
+                GetWindowRect(g_siteinfo_panel_overlay_hwnd, &overlayRect);
+                if (!PtInRect(&overlayRect, clickPoint)) {
+                    LOG_DEBUG("🖱️ Click detected outside site-info panel overlay bounds - dismissing");
+                    extern void HideSiteInfoPanelOverlay();
+                    HideSiteInfoPanelOverlay();
+                }
+            }
+        }
+    }
+    return CallNextHookEx(g_siteinfo_panel_mouse_hook, nCode, wParam, lParam);
+}
+
+LRESULT CALLBACK SiteInfoPanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_MOUSEACTIVATE:
+            return MA_NOACTIVATE;
+
+        case WM_MOUSEMOVE: {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+            CefRefPtr<CefBrowser> si_browser = SimpleHandler::GetSiteInfoPanelBrowser();
+            if (si_browser) {
+                si_browser->GetHost()->SendMouseMoveEvent(mouse_event, false);
+            }
+            return 0;
+        }
+
+        case WM_LBUTTONDOWN: {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+            CefRefPtr<CefBrowser> si_browser = SimpleHandler::GetSiteInfoPanelBrowser();
+            if (si_browser) {
+                si_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
+                si_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
+            }
+            return 0;
+        }
+
+        case WM_MOUSEWHEEL: {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+            CefMouseEvent mouse_event;
+            mouse_event.x = pt.x;
+            mouse_event.y = pt.y;
+            mouse_event.modifiers = 0;
+            CefRefPtr<CefBrowser> si_browser = SimpleHandler::GetSiteInfoPanelBrowser();
+            if (si_browser) {
+                si_browser->GetHost()->SendMouseWheelEvent(mouse_event, 0, delta);
+            }
+            return 0;
+        }
+
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+
+        case WM_DESTROY:
+            return 0;
+
+        case WM_WINDOWPOSCHANGING:
+            break;
+    }
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
 // Profile Panel Overlay Window Procedure
 LRESULT CALLBACK ProfilePanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
@@ -3770,6 +3933,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         LOG_DEBUG("Failed to register bookmarks panel overlay window class. Error: " + std::to_string(GetLastError()));
     }
 
+    // Register Site-Info Panel overlay window class
+    WNDCLASS siteInfoPanelOverlayClass = {};
+    siteInfoPanelOverlayClass.lpfnWndProc = SiteInfoPanelOverlayWndProc;
+    siteInfoPanelOverlayClass.hInstance = hInstance;
+    siteInfoPanelOverlayClass.lpszClassName = L"CEFSiteInfoPanelOverlayWindow";
+
+    if (!RegisterClass(&siteInfoPanelOverlayClass)) {
+        LOG_DEBUG("Failed to register site-info panel overlay window class. Error: " + std::to_string(GetLastError()));
+    }
+
     // Register Profile Panel overlay window class
     WNDCLASS profilePanelOverlayClass = {};
     profilePanelOverlayClass.lpfnWndProc = ProfilePanelOverlayWndProc;
@@ -3985,6 +4158,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         extern void CreateProfilePanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
         extern void CreateMenuOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
         extern void CreateWalletOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
+        extern void CreateSiteInfoPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconLeftOffset);
 
         HINSTANCE hInst = g_hInstance;
         CefPostDelayedTask(TID_UI, base::BindOnce([](HINSTANCE h) { CreateMenuOverlay(h, false, 30); }, hInst), 1000);
@@ -3992,6 +4166,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         CefPostDelayedTask(TID_UI, base::BindOnce([](HINSTANCE h) { CreateDownloadPanelOverlay(h, false, 100); }, hInst), 2000);
         CefPostDelayedTask(TID_UI, base::BindOnce([](HINSTANCE h) { CreateCookiePanelOverlay(h, false, 100); }, hInst), 2500);
         CefPostDelayedTask(TID_UI, base::BindOnce([](HINSTANCE h) { CreateProfilePanelOverlay(h, false, 50); }, hInst), 3000);
+        // Site-info hub: pre-warm hidden so the first TuneIcon click just shows it
+        // (avoids the subprocess-creation hitch that repainted the header on first open).
+        CefPostDelayedTask(TID_UI, base::BindOnce([](HINSTANCE h) { CreateSiteInfoPanelOverlay(h, false, 100); }, hInst), 3500);
         LOG_INFO(elapsed() + "STARTUP: Overlay creation deferred");
     }
 

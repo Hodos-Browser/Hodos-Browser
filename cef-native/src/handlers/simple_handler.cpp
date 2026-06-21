@@ -423,6 +423,8 @@ CefRefPtr<CefBrowser> SimpleHandler::menu_browser_ = nullptr;
 std::string SimpleHandler::pending_shield_domain_;
 std::string SimpleHandler::pending_bookmark_url_;
 std::string SimpleHandler::pending_bookmark_title_;
+std::string SimpleHandler::pending_siteinfo_host_;
+std::string SimpleHandler::pending_siteinfo_security_;
 
 // Escape an (attacker-controlled) string for embedding in a SINGLE-QUOTED JS string
 // literal passed to ExecuteJavaScript. Escapes backslash + single-quote, maps CR/LF
@@ -484,6 +486,52 @@ static SitePermissionState EffectiveState(int browserId, const std::string& host
     return s;
 }
 
+// b2b — the 5 daily-driver capabilities surfaced in the site-info hub's permission
+// manager. Keep in sync with SitePermissionType + the React hook's CAPS list.
+struct SitePermCap { const char* code; SitePermissionType type; };
+static const SitePermCap kSitePermCaps[] = {
+    {"camera",        SitePermissionType::Camera},
+    {"microphone",    SitePermissionType::Microphone},
+    {"location",      SitePermissionType::Location},
+    {"notifications", SitePermissionType::Notifications},
+    {"clipboard",     SitePermissionType::Clipboard},
+};
+
+static const char* SitePermStateStr(SitePermissionState s) {
+    switch (s) {
+        case SitePermissionState::Allow: return "allow";
+        case SitePermissionState::Block: return "block";
+        default:                         return "ask";
+    }
+}
+
+// Map a React state code to the stored enum. Returns false on an unknown code.
+static bool ParseSitePermState(const std::string& s, SitePermissionState& out) {
+    if (s == "allow")      { out = SitePermissionState::Allow; return true; }
+    if (s == "block")      { out = SitePermissionState::Block; return true; }
+    if (s == "ask")        { out = SitePermissionState::Ask;   return true; }
+    return false;
+}
+
+// Emit the full 5-capability list (each with its current stored state, defaulting
+// to Ask) to a specific overlay browser via window.onSitePermissionsResponse.
+// `host` must be pre-normalized.
+static void SendSitePermissionsToBrowser(CefRefPtr<CefBrowser> browser, const std::string& host) {
+    nlohmann::json resp;
+    resp["host"] = host;
+    resp["permissions"] = nlohmann::json::array();
+    for (const auto& c : kSitePermCaps) {
+        SitePermissionState st = host.empty()
+            ? SitePermissionState::Ask
+            : SitePermissionStore::GetInstance().GetState(host, c.type);
+        resp["permissions"].push_back({{"code", c.code}, {"state", SitePermStateStr(st)}});
+    }
+    CefRefPtr<CefProcessMessage> rm = CefProcessMessage::Create("site_permissions_response");
+    rm->GetArgumentList()->SetString(0, resp.dump());
+    if (browser && browser->GetMainFrame())
+        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, rm);
+}
+
 // QR scan: tracks which overlay browser initiated the scan so results route back correctly
 // Non-static — QRScreenCapture.cpp accesses this via extern to deliver results
 CefRefPtr<CefBrowser> g_qr_scan_requester = nullptr;
@@ -508,6 +556,10 @@ CefRefPtr<CefBrowser> SimpleHandler::GetDownloadPanelBrowser() {
 CefRefPtr<CefBrowser> SimpleHandler::GetBookmarksPanelBrowser() {
     auto* win = WindowManager::GetInstance().GetPrimaryWindow();
     return win ? win->bookmarks_panel_browser : nullptr;
+}
+CefRefPtr<CefBrowser> SimpleHandler::GetSiteInfoPanelBrowser() {
+    auto* win = WindowManager::GetInstance().GetPrimaryWindow();
+    return win ? win->siteinfo_panel_browser : nullptr;
 }
 CefRefPtr<CefBrowser> SimpleHandler::GetProfilePanelBrowser() {
     auto* win = WindowManager::GetInstance().GetPrimaryWindow();
@@ -1044,6 +1096,23 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
         }
     }
 
+    // Deferred site-info-context injection: when the site-info hub finishes
+    // loading, inject the current host + security state via setSiteInfoContext.
+    if (!isLoading && role_ == "siteinfopanel" &&
+        (!pending_siteinfo_host_.empty() || !pending_siteinfo_security_.empty())) {
+        CefRefPtr<CefFrame> frame = browser->GetMainFrame();
+        if (frame && frame->IsValid()) {
+            std::string host = pending_siteinfo_host_;
+            std::string security = pending_siteinfo_security_;
+            pending_siteinfo_host_.clear();
+            pending_siteinfo_security_.clear();
+            std::string js = "if (window.setSiteInfoContext) { window.setSiteInfoContext('" +
+                EscapeForSingleQuotedJs(host) + "', '" + EscapeForSingleQuotedJs(security) + "'); }";
+            frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+            LOG_INFO_BROWSER("Deferred site-info context injected after page load: " + host);
+        }
+    }
+
     // API injection logic (cross-platform)
     if (!isLoading) {
         if (role_ == "overlay") {
@@ -1477,6 +1546,20 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
 
         browser->GetHost()->SetFocus(true);
 
+        CefRefPtr<CefBrowser> browser_ref = browser;
+        CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
+            if (b && b->GetHost()) {
+                b->GetHost()->WasResized();
+                b->GetHost()->Invalidate(PET_VIEW);
+            }
+        }, browser_ref), 150);
+    } else if (role_ == "siteinfopanel") {
+        LOG_DEBUG_BROWSER("🛈 Site-info panel overlay browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
+
+        browser->GetHost()->SetFocus(true);
+
+        // Delayed resize/invalidate to fix the first-render black screen issue
+        // (every keep-alive OSR overlay needs this).
         CefRefPtr<CefBrowser> browser_ref = browser;
         CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
             if (b && b->GetHost()) {
@@ -6562,6 +6645,147 @@ bool SimpleHandler::OnProcessMessageReceived(
         HideBookmarksPanelOverlay();
         LOG_DEBUG_BROWSER("🔖 Bookmarks panel overlay hidden");
 #endif
+        return true;
+    }
+
+    // b2a — left-anchored site-info hub. Args: [iconLeftOffset, host, securityState].
+    // Toggles the keep-alive overlay (download-style: MA_NOACTIVATE + mouse-hook).
+    if (message_name == "siteinfo_panel_show") {
+        int iconLeftOffset = 0;
+        std::string siHost, siSecurity;
+        CefRefPtr<CefListValue> si_args = message->GetArgumentList();
+        if (si_args->GetSize() > 0) {
+            try { iconLeftOffset = std::stoi(si_args->GetString(0).ToString()); } catch(...) {}
+        }
+        if (si_args->GetSize() > 1) siHost = si_args->GetString(1).ToString();
+        if (si_args->GetSize() > 2) siSecurity = si_args->GetString(2).ToString();
+
+        // Stash context for the deferred (first-open) injection.
+        pending_siteinfo_host_ = siHost;
+        pending_siteinfo_security_ = siSecurity;
+
+#ifdef _WIN32
+        extern HWND g_hwnd;
+        if (g_hwnd) iconLeftOffset = ScalePx(iconLeftOffset, g_hwnd);
+
+        extern void CreateSiteInfoPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconLeftOffset);
+        extern void ShowSiteInfoPanelOverlay(int iconLeftOffset, BrowserWindow* targetWin);
+        extern void HideSiteInfoPanelOverlay();
+        extern HWND g_siteinfo_panel_overlay_hwnd;
+        extern HINSTANCE g_hInstance;
+
+        extern ULONGLONG g_siteinfo_last_hide_tick;
+        bool willShow = true;
+        if (!g_siteinfo_panel_overlay_hwnd || !IsWindow(g_siteinfo_panel_overlay_hwnd)) {
+            CreateSiteInfoPanelOverlay(g_hInstance, true, iconLeftOffset);
+        } else if (IsWindowVisible(g_siteinfo_panel_overlay_hwnd)) {
+            HideSiteInfoPanelOverlay();
+            willShow = false;
+            pending_siteinfo_host_.clear();
+            pending_siteinfo_security_.clear();
+        } else if (GetTickCount64() - g_siteinfo_last_hide_tick < 250) {
+            // The mouse hook just hid the panel on THIS same TuneIcon click — this
+            // IPC is the toggle-off, not a re-open. Suppress the re-show.
+            willShow = false;
+            pending_siteinfo_host_.clear();
+            pending_siteinfo_security_.clear();
+        } else {
+            ShowSiteInfoPanelOverlay(iconLeftOffset, GetOwnerWindow());
+        }
+
+        // Immediate injection for the re-open case (browser already loaded). First
+        // open is handled by the deferred OnLoadingStateChange path.
+        if (willShow) {
+            CefRefPtr<CefBrowser> si_browser = GetSiteInfoPanelBrowser();
+            if (si_browser && si_browser->GetMainFrame()) {
+                std::string js = "if (window.setSiteInfoContext) { window.setSiteInfoContext('" +
+                    EscapeForSingleQuotedJs(siHost) + "', '" + EscapeForSingleQuotedJs(siSecurity) + "'); }";
+                si_browser->GetMainFrame()->ExecuteJavaScript(js, si_browser->GetMainFrame()->GetURL(), 0);
+            }
+        }
+        LOG_DEBUG_BROWSER("🛈 Site-info panel toggle handled (iconLeftOffset=" + std::to_string(iconLeftOffset) + ")");
+#elif defined(__APPLE__)
+        // macOS site-info overlay creation is a TODO for the Mac sprint.
+        LOG_DEBUG_BROWSER("Site-info panel overlay not yet implemented on macOS");
+#endif
+        return true;
+    }
+
+    if (message_name == "siteinfo_panel_hide") {
+#ifdef _WIN32
+        extern void HideSiteInfoPanelOverlay();
+        HideSiteInfoPanelOverlay();
+        LOG_DEBUG_BROWSER("🛈 Site-info panel overlay hidden");
+#endif
+        return true;
+    }
+
+    // b2a — "Manage Wallet Permissions" link in the site-info hub. Opens the SAME
+    // edit_permissions overlay the right-click menu uses. Arg: [domain].
+    if (message_name == "open_wallet_permissions") {
+        std::string domain;
+        CefRefPtr<CefListValue> wp_args = message->GetArgumentList();
+        if (wp_args->GetSize() > 0) domain = wp_args->GetString(0).ToString();
+        if (!domain.empty()) {
+#ifdef _WIN32
+            extern void HideSiteInfoPanelOverlay();
+            HideSiteInfoPanelOverlay();
+            extern void CreateNotificationOverlay(HINSTANCE hInstance, const std::string& type, const std::string& domain, const std::string& extraParams);
+            extern HINSTANCE g_hInstance;
+            CreateNotificationOverlay(g_hInstance, "edit_permissions", domain, "");
+#elif defined(__APPLE__)
+            extern void CreateNotificationOverlay(const std::string& type, const std::string& domain, const std::string& extraParams);
+            CreateNotificationOverlay("edit_permissions", domain, "");
+#endif
+            LOG_DEBUG_BROWSER("💼 Manage Wallet Permissions opened for: " + domain);
+        }
+        return true;
+    }
+
+    // b2b — site-permission management (read). Arg: [host]. Replies with the full
+    // 5-capability list via window.onSitePermissionsResponse on the calling browser.
+    if (message_name == "site_permissions_get") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string host = args->GetSize() > 0 ? args->GetString(0).ToString() : "";
+        host = SitePermissionStore::NormalizeHost(host);
+        SendSitePermissionsToBrowser(browser, host);
+        return true;
+    }
+
+    // b2b — set one capability's state. Args: [host, code, state]. Persists, then
+    // re-emits the authoritative list so the UI stays in sync with the store.
+    if (message_name == "site_permissions_set") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string host  = args->GetSize() > 0 ? args->GetString(0).ToString() : "";
+        std::string code  = args->GetSize() > 1 ? args->GetString(1).ToString() : "";
+        std::string stateS = args->GetSize() > 2 ? args->GetString(2).ToString() : "";
+        host = SitePermissionStore::NormalizeHost(host);
+
+        SitePermissionState st;
+        SitePermissionType type;
+        bool typeOk = false;
+        for (const auto& c : kSitePermCaps) {
+            if (code == c.code) { type = c.type; typeOk = true; break; }
+        }
+        if (typeOk && !host.empty() && ParseSitePermState(stateS, st)) {
+            SitePermissionStore::GetInstance().SetState(host, type, st);
+            LOG_DEBUG_BROWSER("🛈 site permission " + code + "=" + stateS + " for " + host);
+        }
+        SendSitePermissionsToBrowser(browser, host);
+        return true;
+    }
+
+    // b2b — reset all of this site's stored permissions (DELETE the rows → back to
+    // Ask). Arg: [host]. Re-emits the (now all-Ask) list.
+    if (message_name == "site_permissions_reset") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string host = args->GetSize() > 0 ? args->GetString(0).ToString() : "";
+        host = SitePermissionStore::NormalizeHost(host);
+        if (!host.empty()) {
+            SitePermissionStore::GetInstance().ResetDomain(host);
+            LOG_DEBUG_BROWSER("🛈 site permissions reset for " + host);
+        }
+        SendSitePermissionsToBrowser(browser, host);
         return true;
     }
 

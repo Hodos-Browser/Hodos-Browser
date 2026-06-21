@@ -9,7 +9,12 @@ declare global {
   }
 }
 
-export const usePrivacyShield = (domain: string) => {
+// `refreshKey` lets a keep-alive overlay force a re-fetch of per-site shield state
+// every time it's shown (not just when the domain changes). Without it, reopening an
+// overlay for the SAME domain shows stale toggle state cached on first load — so a
+// change made in one overlay (e.g. the site-info hub) wouldn't appear in another
+// (e.g. the right Shield panel) until the domain changed.
+export const usePrivacyShield = (domain: string, refreshKey: number = 0) => {
   const adblock = useAdblock();
   const cookie = useCookieBlocking();
 
@@ -44,14 +49,14 @@ export const usePrivacyShield = (domain: string) => {
     window.cefMessage?.send('cookie_check_site_allowed', [d]);
   }, []);
 
-  // Check on mount and when domain changes
+  // Check on mount, when domain changes, and whenever refreshKey bumps (re-show).
   useEffect(() => {
     if (domain) {
       checkCookieSiteAllowed(domain);
       adblock.checkSiteAdblock(domain);
       adblock.checkScriptlets(domain);
     }
-  }, [domain, checkCookieSiteAllowed, adblock.checkSiteAdblock, adblock.checkScriptlets]);
+  }, [domain, refreshKey, checkCookieSiteAllowed, adblock.checkSiteAdblock, adblock.checkScriptlets]);
 
   // Fetch per-site fingerprint enabled state when domain changes
   useEffect(() => {
@@ -75,7 +80,7 @@ export const usePrivacyShield = (domain: string) => {
       clearTimeout(timeout);
       delete window.onFingerprintSiteEnabledResponse;
     };
-  }, [domain]);
+  }, [domain, refreshKey]);
 
   // Toggle cookie blocking for site
   const toggleCookieBlocking = useCallback(async (d: string, enable: boolean) => {

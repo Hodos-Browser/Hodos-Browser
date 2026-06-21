@@ -49,6 +49,7 @@ public:
     HWND profile_panel_overlay_hwnd = nullptr;
     HWND menu_overlay_hwnd = nullptr;
     HWND bookmarks_panel_overlay_hwnd = nullptr;
+    HWND siteinfo_panel_overlay_hwnd = nullptr;
 
     // Mouse hooks for overlay click-outside detection (6 total)
     HHOOK omnibox_mouse_hook = nullptr;
@@ -59,6 +60,7 @@ public:
     HHOOK menu_mouse_hook = nullptr;
     HHOOK wallet_mouse_hook = nullptr;
     HHOOK bookmarks_panel_mouse_hook = nullptr;
+    HHOOK siteinfo_panel_mouse_hook = nullptr;
 
     // Icon offsets for right-side panel positioning (physical pixel distance
     // from icon's right edge to header's right edge)
@@ -70,6 +72,8 @@ public:
     int menu_icon_right_offset = 0;
     // Bookmarks dropdown is LEFT-anchored → stores a LEFT offset instead.
     int bookmarks_icon_left_offset = 0;
+    // Site-info dropdown is LEFT-anchored (TuneIcon at the address-bar left).
+    int siteinfo_icon_left_offset = 0;
 
 #elif defined(__APPLE__)
     void* ns_window = nullptr;        // NSWindow*
@@ -89,6 +93,7 @@ public:
     void* profile_panel_overlay_window = nullptr;
     void* menu_overlay_window = nullptr;
     void* bookmarks_panel_overlay_window = nullptr;
+    void* siteinfo_panel_overlay_window = nullptr;
 
     // NSEvent local monitors for overlay click-outside detection (6 total)
     void* omnibox_event_monitor = nullptr;
@@ -98,6 +103,7 @@ public:
     void* settings_menu_event_monitor = nullptr;
     void* menu_event_monitor = nullptr;
     void* bookmarks_panel_event_monitor = nullptr;
+    void* siteinfo_panel_event_monitor = nullptr;
 
     // Icon offsets for right-side panel positioning (physical pixel distance
     // from icon's right edge to header's right edge)
@@ -109,6 +115,8 @@ public:
     int menu_icon_right_offset = 0;
     // Bookmarks dropdown is LEFT-anchored → stores a LEFT offset instead.
     int bookmarks_icon_left_offset = 0;
+    // Site-info dropdown is LEFT-anchored (TuneIcon at the address-bar left).
+    int siteinfo_icon_left_offset = 0;
 #endif
 
     // ---- CEF browser refs (15 total — mirrors old SimpleHandler statics) ----
@@ -128,6 +136,7 @@ public:
     CefRefPtr<CefBrowser> profile_panel_browser;
     CefRefPtr<CefBrowser> menu_browser;
     CefRefPtr<CefBrowser> bookmarks_panel_browser;
+    CefRefPtr<CefBrowser> siteinfo_panel_browser;
 
     // ---- Browser ref accessors by role string ----
     void SetBrowserForRole(const std::string& role, CefRefPtr<CefBrowser> browser);
