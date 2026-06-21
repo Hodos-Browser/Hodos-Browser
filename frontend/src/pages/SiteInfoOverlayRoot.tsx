@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Box, Typography, Switch } from '@mui/material';
 import CloseIcon from '@mui/icons-material/Close';
 import LockIcon from '@mui/icons-material/Lock';
@@ -77,6 +77,17 @@ const SiteInfoOverlayRoot: React.FC = () => {
     const [permsOpen, setPermsOpen] = useState(false);
     const customizedCount = perms.permissions.filter((p) => p.state !== 'ask').length;
 
+    // Auto-size the native overlay HWND to the React content height: measure after
+    // each height-affecting change and ask C++ to resize (siteinfo_panel_resize).
+    // The root is height:auto, so the HWND resize can't feed back into this measure.
+    const rootRef = useRef<HTMLDivElement>(null);
+    useLayoutEffect(() => {
+        const el = rootRef.current;
+        if (!el) return;
+        const h = Math.ceil(el.getBoundingClientRect().height);
+        if (h > 0) window.cefMessage?.send('siteinfo_panel_resize', [String(h)]);
+    }, [host, security, permsOpen, perms.permissions, customizedCount, shield.masterEnabled, showCount]);
+
     // Register the C++ injection hook (mirrors PrivacyShield / bookmarks pattern).
     useEffect(() => {
         (window as any).setSiteInfoContext = (h: string, sec: string) => {
@@ -111,9 +122,11 @@ const SiteInfoOverlayRoot: React.FC = () => {
     };
 
     return (
-        <Box sx={{
+        <Box ref={rootRef} sx={{
             width: '100%',
-            height: '100%',
+            // height:auto so the box wraps its content — C++ sizes the HWND to match
+            // (siteinfo_panel_resize). Must NOT be height:100% or the measure loops.
+            height: 'auto',
             bgcolor: '#1a1d23',
             borderRadius: '8px',
             boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
@@ -141,7 +154,11 @@ const SiteInfoOverlayRoot: React.FC = () => {
                 </HodosButton>
             </Box>
 
-            <Box sx={{ flex: 1, overflow: 'auto' }}>
+            {/* Natural height — C++ auto-sizes the HWND to fit this content
+                (siteinfo_panel_resize), so no internal scroll/maxHeight is needed.
+                A vh-based maxHeight here would be circular (vh == the HWND we size to
+                the content) → a permanent scrollbar + shrink loop. */}
+            <Box>
                 {/* (1) Connection status */}
                 <Box sx={{ p: 1.5, borderBottom: '1px solid #2a2d35', display: 'flex', gap: 1.25, alignItems: 'flex-start' }}>
                     <ConnIcon sx={{ fontSize: 20, color: conn.color, mt: '2px', flexShrink: 0 }} />

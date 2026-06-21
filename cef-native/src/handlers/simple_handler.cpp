@@ -6720,6 +6720,43 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // b3-polish — auto-size the hub to its React content height (CSS px → physical),
+    // clamped to the screen. Resizes the live HWND; GetViewRect reads the new size
+    // back so the OSR view repaints. Root layout is height:auto, so changing the
+    // HWND height can't feed back into the measured content height (no loop).
+    if (message_name == "siteinfo_panel_resize") {
+#ifdef _WIN32
+        CefRefPtr<CefListValue> rs_args = message->GetArgumentList();
+        int cssH = 0;
+        if (rs_args->GetSize() > 0) {
+            try { cssH = std::stoi(rs_args->GetString(0).ToString()); } catch(...) {}
+        }
+        extern HWND g_siteinfo_panel_overlay_hwnd;
+        extern HWND g_hwnd;
+        if (cssH > 0 && g_siteinfo_panel_overlay_hwnd && IsWindow(g_siteinfo_panel_overlay_hwnd)
+            && IsWindowVisible(g_siteinfo_panel_overlay_hwnd)) {
+            int physH = ScalePx(cssH, g_hwnd);
+            RECT cur; GetWindowRect(g_siteinfo_panel_overlay_hwnd, &cur);
+            RECT mainR; GetWindowRect(g_hwnd, &mainR);
+            int minH = ScalePx(120, g_hwnd);
+            int maxH = mainR.bottom - cur.top - ScalePx(12, g_hwnd);
+            if (physH < minH) physH = minH;
+            if (maxH > minH && physH > maxH) physH = maxH;
+            if (physH != (cur.bottom - cur.top)) {
+                int w = cur.right - cur.left;
+                SetWindowPos(g_siteinfo_panel_overlay_hwnd, nullptr,
+                    0, 0, w, physH, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOZORDER);
+                CefRefPtr<CefBrowser> si_browser = SimpleHandler::GetSiteInfoPanelBrowser();
+                if (si_browser && si_browser->GetHost()) {
+                    si_browser->GetHost()->WasResized();
+                    si_browser->GetHost()->Invalidate(PET_VIEW);
+                }
+            }
+        }
+#endif
+        return true;
+    }
+
     // b2a — "Manage Wallet Permissions" link in the site-info hub. Opens the SAME
     // edit_permissions overlay the right-click menu uses. Arg: [domain].
     if (message_name == "open_wallet_permissions") {
@@ -8166,7 +8203,7 @@ void SimpleHandler::OnBeforeContextMenu(CefRefPtr<CefBrowser> browser,
 
     // --- Site permissions (always available on tab pages) ---
     model->AddSeparator();
-    model->AddItem(MENU_ID_MANAGE_PERMISSIONS, "Manage Site Permissions");
+    model->AddItem(MENU_ID_MANAGE_PERMISSIONS, "Manage Wallet Permissions");
 
     // --- Always add Inspect at the bottom ---
     model->AddSeparator();
@@ -8374,7 +8411,7 @@ bool SimpleHandler::OnContextMenuCommand(CefRefPtr<CefBrowser> browser,
         return true;
     }
 
-    // --- Manage Site Permissions ---
+    // --- Manage Wallet Permissions ---
     if (command_id == MENU_ID_MANAGE_PERMISSIONS) {
         std::string url = browser->GetMainFrame()->GetURL().ToString();
         if (!url.empty()) {

@@ -284,7 +284,11 @@ Pure additive overlay; no hot-path impact.
 - Post-decision crossed-out omnibox glyph (re-opens hub).
 - **Risk:** low — additive overlay, reuses existing state. Main risk is left-anchor positioning math (shared with bookmarks; already solved on Win).
 
-### b3 — Wallet-perms rename + site-data deep link  · RISK: LOW
+### b3 — Wallet-perms rename + site-data deep link  · RISK: LOW · ✅ DONE (smoke-passed)
+> **Progress (2026-06-21):** right-click label renamed `"Manage Site Permissions"` → `"Manage Wallet Permissions"` (`simple_handler.cpp`, entry kept). `/browser-data?domain=<host>` now filters: `HistoryPage` reads `?domain=`, defaults to the **Cookies** tab when present, and threads `initialSearch={domain}` into `HistoryPanel` (seeds search → `searchHistory`) + `CookiesPanel` (seeds the client-side domain-group filter). "This site's data" opens in a **new tab** (`tab_create`). **Plus hub-polish (post-smoke):** the site-info overlay now **auto-sizes** — React measures content (`siteinfo_panel_resize`), C++ resizes the live HWND (GetViewRect reads it back), move/resize handlers preserve the height. Killed a circular `vh`-maxHeight that caused a permanent scrollbar + shrink-loop; fixed `WM_MOUSEWHEEL` screen→client coords (mirroring the wallet panel). Address-bar trigger swapped from the 3-slider `TuneIcon` to a custom **2-slider** glyph. Known caveat: no internal scroll, so a window short enough that the *expanded* panel can't fit would clip the bottom (won't happen at 5 perms / normal screens; add a clamped-case scroll fallback if it ever surfaces).
+
+(Original b3 plan below.)
+### b3 (original plan) — Wallet-perms rename + site-data deep link  · RISK: LOW
 Smallest chunk; pure reuse + wiring.
 - Rename right-click label `"Manage Site Permissions"` → `"Manage Wallet Permissions"` (`simple_handler.cpp:7612`); keep the entry; hub fires the same `CreateNotificationOverlay("edit_permissions", domain)` path.
 - `/browser-data` reads `?domain=<host>` + `?tab=` query params, pre-selects tab and filters to origin (cookies via client-side group; history via `search_term=host`).

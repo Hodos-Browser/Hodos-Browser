@@ -970,7 +970,10 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 RECT hdrRect;
                 GetWindowRect(g_header_hwnd, &hdrRect);
                 int siWidth = ScalePx(360, hwnd);
-                int siHeight = ScalePx(480, hwnd);
+                // Preserve the auto-sized height (set by siteinfo_panel_resize); don't
+                // force a fixed height or a window move would undo the content fit.
+                RECT siCur; GetWindowRect(g_siteinfo_panel_overlay_hwnd, &siCur);
+                int siHeight = siCur.bottom - siCur.top;
                 int siX = hdrRect.left + g_siteinfo_icon_left_offset;
                 int siY = hdrRect.top + ScalePx(104, hwnd);
                 if (siX + siWidth > mainRect.right - ScalePx(8, hwnd))
@@ -979,7 +982,7 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                     siX = mainRect.left + ScalePx(8, hwnd);
                 if (siY + siHeight > mainRect.bottom - ScalePx(20, hwnd)) {
                     siHeight = mainRect.bottom - siY - ScalePx(20, hwnd);
-                    if (siHeight < ScalePx(280, hwnd)) siHeight = ScalePx(280, hwnd);
+                    if (siHeight < ScalePx(120, hwnd)) siHeight = ScalePx(120, hwnd);
                 }
                 SetWindowPos(g_siteinfo_panel_overlay_hwnd, HWND_TOPMOST,
                     siX, siY, siWidth, siHeight,
@@ -1241,7 +1244,9 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 RECT siMainRect;
                 GetWindowRect(g_hwnd, &siMainRect);
                 int siWidth = ScalePx(360, hwnd);
-                int siHeight = ScalePx(480, hwnd);
+                // Preserve the auto-sized height (set by siteinfo_panel_resize).
+                RECT siCur; GetWindowRect(g_siteinfo_panel_overlay_hwnd, &siCur);
+                int siHeight = siCur.bottom - siCur.top;
                 int siX = hdrRect.left + g_siteinfo_icon_left_offset;
                 int siY = hdrRect.top + ScalePx(104, hwnd);
                 if (siX + siWidth > siMainRect.right - ScalePx(8, hwnd))
@@ -1250,7 +1255,7 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                     siX = siMainRect.left + ScalePx(8, hwnd);
                 if (siY + siHeight > siMainRect.bottom - ScalePx(20, hwnd)) {
                     siHeight = siMainRect.bottom - siY - ScalePx(20, hwnd);
-                    if (siHeight < ScalePx(280, hwnd)) siHeight = ScalePx(280, hwnd);
+                    if (siHeight < ScalePx(120, hwnd)) siHeight = ScalePx(120, hwnd);
                 }
                 SetWindowPos(g_siteinfo_panel_overlay_hwnd, HWND_TOPMOST,
                     siX, siY, siWidth, siHeight,
@@ -2784,11 +2789,15 @@ LRESULT CALLBACK SiteInfoPanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam,
         }
 
         case WM_MOUSEWHEEL: {
-            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            // WM_MOUSEWHEEL provides SCREEN coords — convert to client (like the
+            // wallet panel) or the wheel target is wrong and scrolling won't work.
+            POINT screenPt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            POINT clientPt = screenPt;
+            ScreenToClient(hwnd, &clientPt);
             int delta = GET_WHEEL_DELTA_WPARAM(wParam);
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            mouse_event.x = clientPt.x;
+            mouse_event.y = clientPt.y;
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> si_browser = SimpleHandler::GetSiteInfoPanelBrowser();
             if (si_browser) {

@@ -17,7 +17,6 @@ import RefreshIcon from '@mui/icons-material/Refresh';
 import AccountBalanceWalletIcon from '@mui/icons-material/AccountBalanceWallet';
 import MoreVertIcon from '@mui/icons-material/MoreVert';
 import AccountCircleIcon from '@mui/icons-material/AccountCircle';
-import TuneIcon from '@mui/icons-material/Tune';
 import DownloadIcon from '@mui/icons-material/Download';
 import SecurityIcon from '@mui/icons-material/Security';
 import BookmarkBorderIcon from '@mui/icons-material/BookmarkBorder';
@@ -653,12 +652,21 @@ const MainBrowserView: React.FC = () => {
                                 '&:hover': { backgroundColor: 'rgba(0,0,0,0.12)' },
                             }}
                         >
-                            <TuneIcon sx={{
-                                fontSize: 16,
-                                color: securityState === 'secure' ? '#188038'
+                            {(() => {
+                                const ic = securityState === 'secure' ? '#188038'
                                     : securityState === 'error' ? '#d93025'
-                                    : '#444',
-                            }} />
+                                    : '#444';
+                                // Two-slider "controls" glyph (2 bars, not 3).
+                                return (
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                                         stroke={ic} strokeWidth="2" strokeLinecap="round">
+                                        <line x1="4" y1="9" x2="20" y2="9" />
+                                        <circle cx="10" cy="9" r="2.6" fill={ic} stroke="none" />
+                                        <line x1="4" y1="15" x2="20" y2="15" />
+                                        <circle cx="15" cy="15" r="2.6" fill={ic} stroke="none" />
+                                    </svg>
+                                );
+                            })()}
                         </Box>
                     )}
                     <input

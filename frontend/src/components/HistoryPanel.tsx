@@ -30,7 +30,7 @@ type TimeRange = 'hour' | 'day' | 'week' | 'all';
 
 const ITEMS_PER_PAGE = 20;
 
-export function HistoryPanel() {
+export function HistoryPanel({ initialSearch = '' }: { initialSearch?: string } = {}) {
   const {
     history,
     loading,
@@ -44,15 +44,20 @@ export function HistoryPanel() {
     dateToChromiumTime
   } = useHistory();
 
-  const [searchTerm, setSearchTerm] = useState('');
+  const [searchTerm, setSearchTerm] = useState(initialSearch);
   const [timeRange, setTimeRange] = useState<TimeRange>('all');
   const [confirmClearOpen, setConfirmClearOpen] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
 
+  // On mount, pre-filter by initialSearch (e.g. the site-info hub's "This site's
+  // data" deep link passes ?domain=). Falls back to the full list when absent.
   useEffect(() => {
-    console.log('📚 HistoryPanel mounted, fetching history...');
-    fetchHistory({ limit: 5000, offset: 0 }); // Fetch all for client-side pagination
-  }, [fetchHistory]);
+    if (initialSearch.trim()) {
+      searchHistory({ search: initialSearch, limit: 5000, offset: 0 });
+    } else {
+      fetchHistory({ limit: 5000, offset: 0 }); // Fetch all for client-side pagination
+    }
+  }, [fetchHistory, searchHistory, initialSearch]);
 
   // Filter history by time range
   const filteredHistory = useMemo(() => {

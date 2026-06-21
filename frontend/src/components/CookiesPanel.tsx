@@ -93,7 +93,7 @@ function truncateUrl(url: string, maxLen: number = 60): string {
   return url.slice(0, maxLen) + '...';
 }
 
-export function CookiesPanel() {
+export function CookiesPanel({ initialSearch = '' }: { initialSearch?: string } = {}) {
   const {
     cookies,
     domainGroups,
@@ -113,7 +113,9 @@ export function CookiesPanel() {
     clearBlockLog,
   } = useCookieBlocking();
 
-  const [searchTerm, setSearchTerm] = useState('');
+  // Seed from the site-info hub's "This site's data" deep link (?domain=). The
+  // domain-group filter (filteredAndSortedGroups) is client-side off searchTerm.
+  const [searchTerm, setSearchTerm] = useState(initialSearch);
   const [sortOption, setSortOption] = useState<SortOption>('default');
   const [currentPage, setCurrentPage] = useState(1);
   const [selectedCookie, setSelectedCookie] = useState<{

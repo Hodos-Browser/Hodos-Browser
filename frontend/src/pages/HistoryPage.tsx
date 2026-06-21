@@ -27,7 +27,15 @@ const sections: Section[] = [
 
 export function HistoryPage() {
   const [searchParams] = useSearchParams();
-  const initialSection = searchParams.get('tab') === 'cookies' ? 'cookies' : searchParams.get('tab') === 'cache' ? 'cache' : 'history';
+  // Site-info hub "This site's data" deep-links with ?domain=<host>; default that
+  // case to the Cookies tab (site data) and filter both panels to the host.
+  const domainFilter = searchParams.get('domain') || '';
+  const tabParam = searchParams.get('tab');
+  const initialSection = tabParam === 'cookies' ? 'cookies'
+    : tabParam === 'cache' ? 'cache'
+    : tabParam === 'history' ? 'history'
+    : domainFilter ? 'cookies'
+    : 'history';
   const [activeSection, setActiveSection] = useState(initialSection);
 
   useEffect(() => {
@@ -130,8 +138,8 @@ export function HistoryPage() {
 
         <Box sx={{ flex: 1, overflowY: 'auto', overflowX: 'hidden' }}>
           <Box sx={{ maxWidth: 780, mx: 'auto', p: 4 }}>
-            {activeSection === 'history' && <HistoryPanel />}
-            {activeSection === 'cookies' && <CookiesPanel />}
+            {activeSection === 'history' && <HistoryPanel initialSearch={domainFilter} />}
+            {activeSection === 'cookies' && <CookiesPanel initialSearch={domainFilter} />}
             {activeSection === 'cache' && <CachePanel />}
           </Box>
         </Box>
