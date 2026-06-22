@@ -439,8 +439,12 @@ elseif(WIN32)
         unofficial::sqlite3::sqlite3
     )
 
-    # Windows delay-load
-    set_property(TARGET HodosBrowserShell PROPERTY LINK_FLAGS "/DELAYLOAD:libcef.dll")
+    # Windows delay-load + app.manifest supportedOS merge (0.4.0 startup fix).
+    # /MANIFESTINPUT merges hodos.manifest (Win10/11 supportedOS GUID) into the
+    # linker-generated manifest so Chromium detects the real OS and enables HW GPU
+    # compositing. /MANIFEST:EMBED is explicit so MANIFESTINPUT is honored.
+    set_property(TARGET HodosBrowserShell PROPERTY LINK_FLAGS
+        "/DELAYLOAD:libcef.dll /MANIFEST:EMBED /MANIFESTINPUT:\"${CMAKE_CURRENT_SOURCE_DIR}/hodos.manifest\"")
 
     # Windows-specific macros
     add_definitions(-DUNICODE -D_UNICODE)
