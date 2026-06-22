@@ -1,16 +1,31 @@
 # Feedback for the HelicOps Team
 
-**Created:** 2026-06-09 · **Status:** ✅ Adjudicated
-**Audience:** the HelicOps audit tool/team. **Tone:** constructive — HelicOps is a new tool; this
-feedback helps it improve and helps our next audit be sharper.
+**Created:** 2026-06-09 · **Shared:** 2026-06-22 · **Status:** ✅ Adjudicated
+**Audience:** the HelicOps audit tool/team. **Spirit:** a genuine thank-you plus partnership
+feedback — HelicOps is a young tool with real promise, and the notes below are meant to help it (and
+our next audit together) get even sharper.
 
-> Adjudicated via a 17-agent zero-trust verification of all 479 findings against current source.
-> Every entry cites the code/design that supports it. Companion docs: `AUDIT_FIX_TRACKER.md` (what we
-> agreed with), `HELICOPS_META_ANALYSIS.md` (report-as-product assessment). **First — thank you:** the
-> audit found two genuinely critical secret-on-disk bugs we'd missed (see §5). That alone justified
-> the exercise.
+> Adjudicated via a 17-agent zero-trust verification of all 479 findings against current source, so we
+> could give you precise, code-cited feedback. Companion docs: `AUDIT_FIX_TRACKER.md` (what we agreed
+> with and are fixing), `HELICOPS_META_ANALYSIS.md` (report-as-product assessment).
 
-## 1. False positives / incorrect findings
+## Overall — thank you, this was a valuable first run
+
+The headline result speaks for itself: HelicOps surfaced **two critical secret-on-disk bugs we had
+missed** — a full mnemonic and full certificate keys written to disk — plus several other real,
+fixable issues (an arbitrary file-write in backup, a macOS command injection, and a systemic
+JS-escaping gap). Those alone more than justified the audit, and we've already fixed or scheduled
+every confirmed item (`AUDIT_FIX_TRACKER.md`). For an automated pass to catch the exact class of
+"simple but catastrophic" bug humans overlook is exactly the value we hoped for.
+
+We went deep on verification not to grade the tool, but because it's new and concrete, evidenced
+feedback now is the fastest way to make it great. The single biggest opportunity we see is
+**severity calibration via dataflow/taint analysis** plus **root-cause clustering** — most of the
+over-firing traces to token pattern-matching without source→sink tracing, and adding that lifts the
+signal-to-noise dramatically. Everything below is organized to support that, with per-finding
+evidence; the highest-value wins are recapped in the final section (§5).
+
+## 1. Findings we adjudicated as false positives (with evidence)
 
 | Finding (cat / file:line) | Claim | Why it's wrong | Evidence |
 |---|---|---|---|
@@ -42,17 +57,17 @@ feedback helps it improve and helps our next audit be sharper.
 |---|---|---|
 | 284× "unhandled unwrap / panic (DoS), **high**" | Flat high-severity, no runtime model. A bare Actix handler panic is caught at the tokio task boundary (`catch_unwind`) → **per-request connection reset on a localhost-only/CORS-locked/CEF-fronted port**, worker survives, no cumulative degradation. | Split into 3 tiers: **(i)** request-data unwrap = Low; **(ii)** `std::sync::Mutex .lock().unwrap()` on a shared handle = **High** (poison cascade — the real bug, which the flat rule both buried and under-explained); **(iii)** infallible/guarded constant = Info/none. |
 | C6 secret-to-log rated flat **high** | Under-rated. | Full-mnemonic-to-disk and full-32-byte-key-to-disk should **auto-escalate to Critical** (total compromise). |
-| C11 "critical" tier | **80% false-positive, 0% truly-critical.** | A criticals tier with no true criticals erodes trust fastest — gate critical/high behind confirmed attacker-reachable taint. |
+| C11 "critical" tier | This run, the critical tier was mostly false-positive with no confirmed-critical findings. | Highest-payoff calibration: gating critical/high behind confirmed attacker-reachable taint would make this tier the most trusted part of the report. |
 | QR / screen-capture splice — `simple_render_process_handler.cpp:~1003,1023` | Genuinely ambiguous (we agree). Raw-JSON splice with zero escaping; code comment asserts "our own scanner output." But QR/capture payloads decode **attacker-chosen bytes**. | Fold into the **F6** encoder; don't trust the scanner-output boundary. We're treating it as CLARIFY pending confirmation. |
 | `beef.rs:1268` recursion | Filed as perf. Bounded by parsed BUMP level count (tiny for real blocks), but a crafted proof declaring a huge level count is a **parse-validation/DoS** concern, not perf. | Re-file as robustness; confirm BUMP level-count is capped on parse. |
 
 ## 4. Process / tooling feedback (for HelicOps itself)
 
 1. **Add dataflow/taint analysis before assigning severity.** Every over-rated cluster (C1–C5 DoS, C9 path-traversal, C11 criticals, C8 injection) stems from token pattern-matching with no source→sink tracing.
-2. **Implement root-cause COLLAPSE.** ~245 unwrap findings are ~3 defects. Reporting them as 245 flat-high line-items inflates counts **and buries the one actionable fix** (poison-safe locking). Cluster "N instances → 1 remediation" and report the mechanism, not the symptom line.
+2. **Implement root-cause COLLAPSE.** ~245 unwrap findings map to ~3 defects. Reporting them as 245 flat-high line-items inflates counts and can obscure the one actionable fix (poison-safe locking). Clustering "N instances → 1 remediation" and reporting the mechanism rather than each symptom line would make the report much easier to act on.
 3. **Model the framework runtime.** Teach the analyzer Actix/tokio panic isolation (bare panic ≠ worker crash) **and** that `std::sync::Mutex` poisoning + shared handle + no `clear_poison` **is** the real durable DoS. Severity = frequency × data-scale × reachability — none currently modeled.
-4. **Fix the broken detectors outright.** *Mutable global state* (100% FP — matches forward decls, base-class lists, params, a TS `displayName`). *Weak randomness* (whitelist `rand`≥0.8 `ThreadRng`/`random`; fire only on `SmallRng`/`seed_from_u64`/Xoshiro). *Prototype pollution* (require bracket-assignment into a non-array object with an untrusted key). *Insecure deserialization* (don't fire on plain `JSON.parse` without a reviver). *memcpy/unsafe* (require absence of a clamped/validated length).
-5. **Fix the snippet-capture defect (most important for trust).** The audit's **most severe findings** (the mnemonic + private-key C++ leaks) and ~12 injection findings carried the garbage snippet `"requires login"` — a string that **exists nowhere in source**. A reviewer trusting snippets alone would dismiss the worst real bugs. Either fix C++ snippet extraction or never let a snippet override a `file:line` pointer.
+4. **Highest-impact detector tuning.** A few detectors over-fired this run and would gain the most from refinement: *Mutable global state* (fired only on false positives here — forward decls, base-class lists, params, a TS `displayName`). *Weak randomness* (whitelist `rand`≥0.8 `ThreadRng`/`random`; fire only on `SmallRng`/`seed_from_u64`/Xoshiro). *Prototype pollution* (require bracket-assignment into a non-array object with an untrusted key). *Insecure deserialization* (skip plain `JSON.parse` without a reviver). *memcpy/unsafe* (require absence of a clamped/validated length).
+5. **Snippet capture — the highest-leverage trust fix.** The most severe findings (the mnemonic + private-key C++ leaks) and ~12 injection findings carried a placeholder snippet `"requires login"` that doesn't appear anywhere in our source. Because a reviewer skimming snippets could overlook the most important real bugs, we'd suggest either fixing C++ snippet extraction or always preferring the `file:line` pointer over the snippet when they disagree.
 6. **Anchor on stable signatures, not line numbers.** Cited lines drifted **+550 to +2900** here (and some files moved entirely, e.g. the TAAL key relocated `handlers.rs` → `services/providers/arc_taal.rs`). Anchor on function name + content hash so findings survive normal file growth. Emit wider snippet windows for re-anchoring; suppress unanchorable bare-token findings.
 7. **Respect scope/reachability.** Honor `#[cfg(test)]` gating (≥8 FPs), detect dead/zero-caller code (the `migrate_json_to_database` FPs), exclude vendored `third_party/`, and distinguish a held-across-`await` lock from a scoped-and-dropped one.
 8. **Declare coverage explicitly.** State files-scanned (108) vs files-in-repo (far larger — `handlers.rs` alone is ~18.5k lines), mark which subsystems got only syntactic scanning, and state plainly that **no protocol/semantic analysis was performed**. (We told you not to expect BSV/BRC depth — that's fine — but it should be *declared*, not implied by "complete coverage.")
