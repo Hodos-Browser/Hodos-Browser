@@ -34,6 +34,17 @@ Where an upstream project doc is known-stale, this playbook says so explicitly a
    - `development-docs/0.4.0/STARTUP_OPTIMIZATION.md` — the macOS startup track (the strategic reason this sprint exists; see §4-A C12 + §6 for the measurement obligation).
 6. Follow the **Execution Protocol (§5)**: kickoff re-verify → author a fan-out review workflow → adversarial design+code gate per chunk → implement honoring invariants → build on Mac → smoke on real sites + wallet → **record first-paint/startup measurements**.
 
+### 1.1 Git workflow (Mac/Windows run in PARALLEL — read this before committing anything)
+
+This Mac catch-up runs **at the same time** as auto-update (Sparkle/WinSparkle) research on the owner's Windows machine. To avoid the two machines diverging on the shared `0.4.0` branch:
+
+- **Land all Mac work directly on `0.4.0`.** Do NOT create a feature branch unless the owner asks — the Windows side is doing **research/docs only (no code commits)** during this window, so `0.4.0` will not get conflicting code from Windows.
+- **Get current first:** `git fetch origin && git checkout 0.4.0 && git pull`. Confirm HEAD is `be60d76` (the playbook-complete commit) **or newer**. If you have local uncommitted changes on the wrong branch, surface them to the owner BEFORE switching — do not discard anything.
+- **Commit only when the owner asks** (harness rule). One commit per landed, tested chunk. End every commit message with the `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>` line.
+- **Push after each landed chunk** (`git push origin 0.4.0`) so the owner can pull progress to Windows and the two machines stay in sync.
+- **Before any commit, `git pull --rebase origin 0.4.0`** to absorb anything the owner pushed from Windows. Conflicts should be rare (different files/platforms); if one appears, resolve it on the Mac side (you own the `*_mac` files) or ask the owner.
+- The earlier "feature branch?" open question (§8) is **resolved: work on `0.4.0` directly** for this parallel window. Revisit only if the owner wants the mac work isolated for review.
+
 ---
 
 ## 2. Project orientation (minimal but sufficient)
