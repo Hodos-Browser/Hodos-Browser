@@ -468,30 +468,6 @@ export const BRIDGE_MOCK_SCRIPT = `
     };
   }
 
-  // BRC-100 (used by brc100 bridge)
-  if (!window.hodosBrowser.brc100) {
-    window.hodosBrowser.brc100 = {
-      status: function () {
-        return Promise.resolve({ available: true, version: '1.0.0', features: [] });
-      },
-      isAvailable: function () { return Promise.resolve(true); },
-      generateIdentity: function () { return Promise.resolve(null); },
-      validateIdentity: function () { return Promise.resolve(true); },
-      selectiveDisclosure: function () { return Promise.resolve(null); },
-      generateChallenge: function () { return Promise.resolve(null); },
-      authenticate: function () { return Promise.resolve({ success: true }); },
-      deriveType42Keys: function () { return Promise.resolve(null); },
-      createSession: function () { return Promise.resolve(null); },
-      validateSession: function () { return Promise.resolve(true); },
-      revokeSession: function () { return Promise.resolve(true); },
-      createBEEF: function () { return Promise.resolve(null); },
-      verifyBEEF: function () { return Promise.resolve(true); },
-      broadcastBEEF: function () { return Promise.resolve(null); },
-      verifySPV: function () { return Promise.resolve({ valid: true }); },
-      createSPVProof: function () { return Promise.resolve(null); },
-    };
-  }
-
   // Seed localStorage with wallet exists flag so WalletPanelPage shows the live wallet
   localStorage.setItem('hodos_wallet_exists', 'true');
   localStorage.setItem('hodos_identity_key', '02c5b4b8e7a9f4d6c2e8b3a7mock_identity_key_for_testing');

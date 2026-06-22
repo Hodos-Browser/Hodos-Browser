@@ -207,8 +207,6 @@ if(APPLE)
         src/core/EphemeralCookieManager.cpp
         src/core/ProfileImporter.cpp
         src/core/IdentityHandler.cpp
-        src/core/BRC100Bridge.cpp
-        src/core/BRC100Handler.cpp
         src/core/HttpRequestInterceptor.cpp
         src/core/ManifestFetcher.cpp
         src/core/AutoUpdater_mac.mm
@@ -225,8 +223,6 @@ if(APPLE)
         src/core/Logger.cpp
         src/core/HistoryManager.cpp
         src/core/IdentityHandler.cpp
-        src/core/BRC100Bridge.cpp
-        src/core/BRC100Handler.cpp
     )
 
     # Load CEF cmake utilities for helper generation
@@ -248,8 +244,6 @@ elseif(WIN32)
         src/core/IdentityHandler.cpp
         src/core/NavigationHandler.cpp
         src/core/AddressHandler.cpp
-        src/core/BRC100Bridge.cpp
-        src/core/BRC100Handler.cpp
         src/core/HttpRequestInterceptor.cpp
         include/core/ManifestFetcher.h
         src/core/ManifestFetcher.cpp

@@ -3,7 +3,6 @@
 
 // V8 handlers (cross-platform)
 #include "../../include/core/IdentityHandler.h"
-#include "BRC100Handler.h"
 
 // Cross-platform handlers (work on both platforms)
 #include "../../include/core/NavigationHandler.h"
@@ -860,8 +859,10 @@ void SimpleRenderProcessHandler::OnContextCreated(
         LOG_DEBUG_RENDER("🔍 Google Suggest API injected for omnibox overlay");
     }
 
-    // Register BRC-100 API (cross-platform)
-    BRC100Handler::RegisterBRC100API(context);
+    // (Removed) Legacy BRC-100 V8 bindings (BRC100Handler/BRC100Bridge) — a dead path
+    // that did synchronous WinHTTP on the render thread (its only caller was a startup
+    // probe that just logged). The live BRC-100 surfaces are the window.CWI shim (below)
+    // and the Phase 2.5 IPC auth bridge; wallet UI calls the Rust API directly.
 
     // Phase 2 Steps 1 + 2 — inject window.CWI / window.yours / window.panda shim.
     //
