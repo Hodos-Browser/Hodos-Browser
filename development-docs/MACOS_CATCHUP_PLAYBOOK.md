@@ -455,3 +455,102 @@ After writing each chunk, before build:
 ---
 
 *End of playbook. Boot from here + `MACOS_PORT_0_4_0.md` + `STARTUP_OPTIMIZATION.md`. Resolve the CEF framework prerequisite before building, re-verify every `file:line` before you touch it (they drift ~40–60 lines), and capture the first-paint/startup numbers on your first build — that measurement is the strategic point of the sprint.*
+
+---
+
+## 9. §5.1 Kickoff Re-Verification Results (2026-06-22, Mac agent, HEAD `27e8120`)
+
+> Performed by a fresh Claude Opus 4.6 agent on the owner's Mac. Read-only — no code changes, no builds, no commits. This section is appended so the Windows-side agent can see the Mac machine's ground truth.
+
+### 9.1 Build Blockers (§3.4)
+
+| # | Blocker | Status |
+|---|---------|--------|
+| **1** | **CEF framework at `../cef-binaries/`** | **HARD STOP — MISSING.** Directory does not exist on this Mac. No prebuilt from-source framework found anywhere on the machine. `CEF_BUILD_RUNBOOK.md` documents a ~10–12 hr from-source build via `scripts/build_hodos_cef_mac.sh`. **Owner must confirm acquisition path before any build attempt.** |
+| 2 | Homebrew deps (OpenSSL 3, nlohmann-json, sqlite3) | **ALL PRESENT** — OpenSSL 3.6.2, nlohmann-json 3.12.0, sqlite 3.53.0 |
+| 3 | cmake | **PRESENT** — cmake 4.3.1 (`/opt/homebrew/bin/cmake`) |
+| 4 | Sparkle framework (`../external/Sparkle.framework`) | **ABSENT** — not a blocker (auto-update disables gracefully via `#if SPARKLE_AVAILABLE`) |
+| 5 | Frontend/wallet not running | Expected — dev-time processes, not a build prerequisite |
+| 6 | Uncommitted perf instrumentation | **CLEAN** — `git status` shows pristine working tree; no dirty `index.html`/`main.tsx`/`MainBrowserView.tsx` |
+| 7 | Compile-verify gates (A2/A3/A4) | Cannot test until blocker #1 resolved |
+
+### 9.2 §4 Line-Reference Verification (30 items)
+
+All 30 `file:line` references from §4 were verified against current source (grep for symbol first, then confirm line). **The playbook's citations are remarkably accurate — essentially zero meaningful drift from HEAD `27e8120`.**
+
+| # | Reference | Status | Actual Line |
+|---|-----------|--------|-------------|
+| 1 | `process_helper_mac.mm:53-59` — `@"Default"` hardcode | CONFIRMED | :55 |
+| 2 | `simple_render_process_handler.cpp:509-548` — Win `#ifdef` + mac `#else` stub | CONFIRMED | :509-548 |
+| 3 | `ProfileManager.cpp:554-581` — `posix_spawn` `#elif __APPLE__` | MINOR DRIFT | :549-597 |
+| 4 | `ProfileManager.cpp:514` — `IsValidProfileId` gate | CONFIRMED | :514 |
+| 5 | `simple_app.cpp:64-68` — `IsValidProfileId` gate | CONFIRMED | :64-69 |
+| 6 | `simple_render_process_handler.cpp:862` — BRC100API removal comment | CONFIRMED | :864 |
+| 7 | `simple_render_process_handler.cpp:867-895` — CWI/yours/panda shim | CONFIRMED | :867-893 |
+| 8 | `cef_browser_shell_mac.mm:4470` — StopServers waitpid | CONFIRMED | :4470 |
+| 9 | `cef_browser_shell_mac.mm:4485` — stopPid lambda | CONFIRMED | :4485 |
+| 10 | `simple_handler.cpp:6620` — bookmarks_panel_show `#elif __APPLE__` | CONFIRMED | :6620 |
+| 11 | `cef_browser_shell_mac.mm:4084-4115` — profile-picker overlay template | CONFIRMED | :4084-4117 |
+| 12 | `simple_handler.cpp:6751` — siteinfo_panel_show `#elif __APPLE__` | CONFIRMED | :6751 |
+| 13 | `simple_handler.cpp:6687` — tablist_panel_show `#elif __APPLE__` | CONFIRMED | :6687 |
+| 14 | `TabManager_mac.mm:146` — CloseTab | CONFIRMED | :146 |
+| 15 | `TabManager_mac.mm:192-193` — ClearRustPaymentSessionForBrowser | CONFIRMED | :192-193 |
+| 16 | `cef_browser_shell_mac.mm:4711-4727` — startup inits | CONFIRMED | :4711-4728 |
+| 17 | `cef_browser_shell.cpp:4292` — Windows SitePermissionStore init | CONFIRMED | :4292 |
+| 18 | `simple_handler.cpp:7686` — FireHodosPermissionPrompt `#ifdef _WIN32` | CONFIRMED | :7686 |
+| 19 | `ProfileManager.cpp:70` — blocking `flock` | CONFIRMED | :70 |
+| 20 | `cef_browser_shell_mac.mm:4646-4664` — NSProcessInfo `--profile` | CONFIRMED | :4646-4664 |
+| 21 | `cef_browser_shell_mac.mm:4770-4771` — StartWalletServer/StartAdblockServer | CONFIRMED | :4770-4771 |
+| 22 | `OverlayHelpers_mac.mm:267` — CalculateToolbarOverlayFrame | CONFIRMED | :267 |
+| 23 | `OverlayHelpers_mac.mm:235` — ClampOverlayToScreen | CONFIRMED | :235 |
+| 24 | `OverlayHelpers_mac.mm:189` — InstallAppFocusLossHandler | CONFIRMED | :189 |
+| 25 | `cef_browser_shell_mac.mm:256-266` — overlay globals block | CONFIRMED | :248-274 |
+| 26 | `cef_browser_shell_mac.mm:3951` — download panel DropdownOverlayView alloc | CONFIRMED | :3951 |
+| 27 | `cef_browser_shell_mac.mm:3454-3462` — CreateNotificationOverlay 3-arg | CONFIRMED | :3454-3462 |
+| 28 | `simple_handler.cpp:3924` — wallet_delete_cancel `#ifdef _WIN32` | CONFIRMED | :3924 |
+| 29 | `cef_browser_shell_mac.mm:4877` — HistoryManager init | CONFIRMED | :4877 |
+| 30 | `simple_app.cpp:92-108` — mac Chromium dev flags | CONFIRMED | :92-108 |
+
+**Summary:** 28 CONFIRMED exact, 2 MINOR DRIFT (ProfileManager posix_spawn shifted ~5 lines, globals block shifted ~8 lines). Zero broken references.
+
+### 9.3 Deleted Files Confirmation
+
+All 9 files confirmed **gone from source tree and CMakeLists.txt**:
+
+- `BRC100Handler.{cpp,h}` — deleted
+- `BRC100Bridge.{cpp,h}` — deleted
+- `PermissionEngine.cpp` — deleted (test file `permission_engine_test.cpp` remains, as expected)
+- `EngineShadow.cpp` — deleted
+- `PermissionGate.cpp` — deleted
+- `SessionManager.{cpp,h}` — deleted
+
+Stale `.o` build artifacts exist in `CMakeFiles/` — harmless, cleared on next clean build.
+
+### 9.4 Companion Docs Status
+
+| Doc | Status | Key Takeaway |
+|-----|--------|-------------|
+| `MACOS_PORT_0_4_0.md` | Read, current | 7 waves logged; posix_spawn compile-verify + shutdown cascade + flock timeout are the open mac items |
+| `STARTUP_OPTIMIZATION.md` | Read, current | Root cause: sync `brc100.isAvailable()` blocks renderer ~1.9s. Frontend fix implemented but uncommitted. Mac measurement obligation open |
+| `MACOS_PARITY_REVIEW.md` | Read, trust-caveated per §4-B | Architecture verdict valid. Gap #1 stale (SessionManager deleted). Remaining debt is runtime-verification only |
+| `CEF_BUILD_RUNBOOK.md` | Exists, read | Mac build via `scripts/build_hodos_cef_mac.sh`, branch 7103 (Chromium 136), ~10–12 hr first build, needs Xcode + ~100 GB disk |
+
+### 9.5 Proposed Chunk Order (once CEF resolved)
+
+1. **First build session:** A2 + A3 + A4-DONE-verify (compile gates + first-paint measurement — §6 obligation)
+2. **A1** — per-profile history leak (S, low risk)
+3. **A5 → A6 → A7** — three overlay shells, sequential template-clone (M each)
+4. **A8** — SitePermissionStore init (XS, low risk)
+5. **A10** — flock timeout (XS, low risk)
+6. **A9** — Hodos permission prompt (S-M, medium risk)
+7. **A4-OPEN** — shutdown cascade (S, medium risk — **invariant #8, needs owner approval**)
+8. **A11 + C12** — picker + startup optimization (**gated on owner approval**, invariant #8)
+
+### 9.6 Blocking Question
+
+**CEF framework acquisition is the sole hard blocker.** The Mac machine has all other prerequisites. Owner must confirm one of:
+- (a) Location of an existing prebuilt from-source framework to copy/link into `../cef-binaries/`
+- (b) Whether to run the ~10–12 hr from-source build on this Mac
+- (c) An alternative transfer/fetch path
+
+Nothing else can proceed until this is resolved.
