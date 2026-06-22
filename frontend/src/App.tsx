@@ -5,7 +5,6 @@ import NewTabPage from './pages/NewTabPage';
 import BRC100AuthModal from './components/BRC100AuthModal';
 import PaymentPendingPage from './pages/PaymentPendingPage';
 import PaymentFailedPage from './pages/PaymentFailedPage';
-import { brc100 } from './bridge/brc100';
 
 // Lazy-load overlay and secondary routes (each loads in its own CEF subprocess)
 const SettingsOverlayRoot = React.lazy(() => import('./pages/SettingsOverlayRoot'));
@@ -128,22 +127,12 @@ const App = () => {
     checkWalletStatus();
     */
 
-    // Initialize BRC-100 API integration
-    const initializeBRC100 = async () => {
-      try {
-        // Check if BRC-100 is available
-        const isAvailable = await brc100.isAvailable();
-        console.log("🔐 BRC-100 available:", isAvailable);
-
-        if (isAvailable) {
-          console.log("🔐 BRC-100 API initialized");
-        }
-      } catch (error) {
-        console.warn("🔐 BRC-100 initialization failed:", error);
-      }
-    };
-
-    initializeBRC100();
+    // (Removed) BRC-100 startup probe. brc100.isAvailable() invoked a SYNCHRONOUS
+    // native WinHTTP call on the renderer main thread that blocked first paint by
+    // ~2s at startup (cold wallet + WPAD proxy auto-detect). Its result was only
+    // logged. The legacy window.hodosBrowser.brc100.* bindings are unused — wallet
+    // actions go direct to the Rust API at 127.0.0.1:31301.
+    // See development-docs/0.4.0/STARTUP_OPTIMIZATION.md.
 
     // Cleanup function to remove event listeners
     return () => {
