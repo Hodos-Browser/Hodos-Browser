@@ -553,4 +553,36 @@ Stale `.o` build artifacts exist in `CMakeFiles/` — harmless, cleared on next 
 - (b) Whether to run the ~10–12 hr from-source build on this Mac
 - (c) An alternative transfer/fetch path
 
+---
+
+## 10. Windows-side review + owner GREENLIGHT (2026-06-22) — CEF blocker RESOLVED, proceed
+
+> Written by the Windows-side agent after reviewing §9 with the owner. Your §9 kickoff was excellent (30/30 refs verified, deletions confirmed, tree clean). The CEF blocker is resolved — **do NOT run the 10–12 hr from-source build.** The framework is a prebuilt GitHub Release artifact. Owner confirmed: **Mac is a MacBook Pro M1 (Apple Silicon)** → the ARM64 build is correct; and `gh` is authenticated on this Mac.
+
+### 10.1 Get the CEF framework (do this first — minutes, not hours)
+The prebuilt mac framework is a GitHub Release on `origin` (`BSVArchie/Hodos-Browser`), tag **`cef-136.1.7-macosarm64-codecs`** (built from source: proprietary codecs H.264/AAC/MP3/Widevine, Chromium 136 / branch 7103 — the pinned version). It belongs at **repo-root `/cef-binaries`** (gitignored — that's why it wasn't on disk). From the **repo root**:
+```bash
+gh release download cef-136.1.7-macosarm64-codecs --repo BSVArchie/Hodos-Browser --pattern "*_macosarm64_minimal.tar.bz2"
+tar xjf cef_binary_136.1.7*_macosarm64_minimal.tar.bz2
+mv cef_binary_136.1.7*_macosarm64_minimal cef-binaries
+rm -f cef_binary_136.1.7*_macosarm64_minimal.tar.bz2
+# build the CEF wrapper static lib:
+cd cef-binaries && mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release && cmake --build . --target libcef_dll_wrapper --config Release
+```
+(If `gh` 404s, run `gh auth login` first, or download the `*_macosarm64_minimal.tar.bz2` asset from the release page in a browser and extract to repo-root `/cef-binaries`.) The `*_minimal` asset is the one for integration; there is also a full asset (headers/tests) you do **not** need.
+
+### 10.2 GREENLIGHT — what to do, and what to HOLD
+**Proceed in your §9.5 order, with these gates:**
+1. **First build session** (`cd cef-native && ./mac_build_run.sh`, with Rust wallet + Vite running per §5.5). This closes the **A2 / A3 / A4-DONE compile-verifies** and is your **only chance to capture the §6 measurements** — record first-paint / time-to-first-window **and** the `StartWalletServer`/`StartAdblockServer` block duration (C12-M1) on this run. Resolve any dangling symbol/include from the Windows-only deletions first.
+2. **Then the low-risk chunks, one at a time, each through the §5.3 adversarial design+code gate + build + smoke:** A1 (history leak), A5→A6→A7 (overlay shells — clone the verified templates; the `makeFirstResponder:contentView` keyboard-focus fix is the critical detail), A8 (SitePermissionStore init), A10 (flock timeout), A7's one-line `RecordClosedTab` parity.
+3. **Then A9** (Hodos permission prompt). If it needs `Info.plist` TCC keys (`NSCameraUsageDescription`/`NSMicrophoneUsageDescription`), surface to the owner first and **preserve the existing `SU*` Sparkle keys + no-silent-update posture exactly** (§4-D item 1).
+4. **HOLD for explicit owner approval (invariant #8 — do NOT implement without a direct go-ahead from the owner at the Mac):** **A4-OPEN** (shutdown DB cascade), **A11** (pre-window picker), **C12-M3** (non-blocking backend launch). C12-M1 *measurement* is fine to do; M3 *implementation* is gated.
+
+### 10.3 Working rules (from §1.1 + the harness)
+- **Commit only when the owner (at the Mac) approves**, one commit per landed+tested chunk, `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`. **Push per chunk** (`git push origin 0.4.0`). `git pull --rebase origin 0.4.0` before each commit (the Windows side is research-only, so conflicts should be rare).
+- After your first build + measurements, **report back to the owner** (and, if useful, append a §11 results section to this doc + push) so the Windows side can see the mac first-paint numbers.
+
+### 10.4 Known issue to note (do NOT fix in this catch-up)
+`.github/workflows/release.yml` (mac job, ~:264) downloads `gh release download cef-binaries --pattern "cef-binaries-macos.tar.bz2"` — but the **actual** release is tag `cef-136.1.7-macosarm64-codecs` / asset `*_macosarm64_minimal.tar.bz2`. The CI mac release job would fail as written. This is a real bug, but it belongs to the auto-update/release sprint — **note it, do not fix here.**
+
 Nothing else can proceed until this is resolved.
