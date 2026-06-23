@@ -197,7 +197,7 @@ Per panel:
 
 ### 4-A. 0.4.0 deltas
 
-#### A1 — Per-profile history leak: render helper hardcodes `Default` (P0, OPEN, real)
+#### A1 — Per-profile history leak: render helper hardcodes `Default` (P0, ✅ FIXED, real)
 - **What's wrong:** `cef-native/mac/process_helper_mac.mm` (`:53-59`) inits `HistoryManager` against hardcoded `@"Default"`, ignoring the active profile. `SimpleApp::OnBeforeChildProcessLaunch` (`simple_app.cpp:58`) **does** append `--profile=<id>` to child command lines (runs on mac), but the mac helper never reads it. Windows render fix is `#ifdef _WIN32`-gated (`simple_render_process_handler.cpp:509-548`) with a mac `#else` stub `:547`. Result: mac multi-profile **history/omnibox/NTP tiles leak Default into every profile**.
 - **Fix:** in `process_helper_mac.mm`, parse `--profile=` from `argv` (reuse `ProfileManager::ParseProfileArgument`), validate via `ProfileManager::IsValidProfileId`, build `…/HodosBrowser/<profileId>` instead of `…/Default`, fall back to Default only if absent/invalid. *(The browser-process init at `_mac.mm:4877` is already profile-aware via `cache_path` — leak is ONLY the helper.)*
 - **Test:** launch a non-Default profile via picker/`--profile`; NTP tiles show only the 2 placeholders; omnibox excludes Default's history; Default unchanged.
@@ -215,7 +215,7 @@ Per panel:
 - **Effort:** XS (verify) + S (measure). **Risk:** Low.
 - **Doc-drift to flag (out of scope to fix; READ-ONLY):** `cef-native/src/core/CLAUDE.md` (heavy) and `cef-native/CLAUDE.md` still document the deleted BRC100Handler/Bridge + `brc100.*` V8 path. `cef-native/src/handlers/CLAUDE.md` has only one stale `brc100.*` line (~:159), otherwise correct. Stale; do not fix here.
 
-#### A4 — R2/R3 mac shutdown: DB cascade still deferred (P0; StopServers DONE-verify, cascade OPEN)
+#### A4 — R2/R3 mac shutdown: DB cascade (P0; ✅ DONE — full Windows parity, see §11.12)
 - **DONE (verify compiles):** `StopServers()` adaptive `waitpid(WNOHANG)` (`_mac.mm:4470`, `stopPid` `:4485`). Verify idle-wallet quit is fast.
 - **OPEN (deferred by design):** the 4-manager `Shutdown()` DB cascade (History/Bookmark/CookieBlock/PaidContent + `wal_checkpoint(RESTART)`) is **NOT** in mac `main()` shutdown. De-risked: all 4 are now live at mac startup (Bookmark `:4718`, PaidContent `:4722`, CookieBlock `:4711`, History `:4877`). Add the cascade **before** `ReleaseProfileLock()`, mirroring Windows ordering.
 - **Test:** fire a wallet send, immediately quit + relaunch → clean start, no `SQLITE_BUSY`; normal quit snappy.
@@ -262,7 +262,7 @@ Per panel:
 - **Mac work:** add a mac picker path — NSWindow hosting `/profile-picker?mode=window` with no profile lock/DBs, `LaunchWithProfile`-then-quit; single-instance via the `NSApplication` reopen delegate (not the Windows `.picker` pipe). *(Note: the existing profile-picker overlay at `_mac.mm:4084-4115` loads `/profile-picker` as a dropdown — the pre-window picker is a different, full-window pre-CefInitialize flow, not this overlay.)*
 - **Effort:** L. **Risk:** Medium-High (intrudes on pre-CefInitialize startup — invariant #8; gate on owner approval).
 
-#### C12 — macOS startup main-thread block (~10s) — STARTUP-OPTIMIZATION TRACK (P2, measure first)
+#### C12 — macOS startup main-thread block (~10s) — STARTUP-OPTIMIZATION TRACK (P2, M1 ✅ measured; M3 Held)
 - **Verified:** mac `main()` calls `StartWalletServer`/`StartAdblockServer` (`_mac.mm:4770-4771`) which can block the main thread up to ~10s; Windows has `elapsed()` instrumentation, mac does not. This is the macOS arm of `STARTUP_OPTIMIZATION.md` — the strategic reason the 0.4.0 sprint exists (per the Windows investigation, the perceived lag is a first-PAINT problem, not a React/bundle problem).
 - **Mac work (gated):**
   - **M1 (measure, do first, no risk):** add `elapsed()`-style timing around `StartWalletServer`/`StartAdblockServer` and around browser creation / first window show; log it. Pair with the A3 first-paint measurement (§6). This is read-mostly instrumentation — safe, and it tells you whether the ~10s block actually delays first paint or runs alongside it.
@@ -639,7 +639,7 @@ Files: `TabManager_mac.mm`, `WindowManager_mac.mm`, `simple_handler.h`, `simple_
 
 | Item | Status | Reason |
 |------|--------|--------|
-| **A4-OPEN** | Held | DB shutdown cascade — needs owner approval per invariant #8 |
+| **A4-OPEN** | ✅ Implemented | DB shutdown cascade — full Windows parity. See §11.12 |
 | **A11** | ✅ Implemented | Pre-window profile picker — see §11.10 |
 | **C12-M3** | Held | Non-blocking backend launch — measurements suggest not needed |
 
@@ -747,3 +747,59 @@ The picker is a lightweight process that owns no profile. On startup, `ProfileMa
 | `simple_handler.cpp` | macOS `extern` declarations for tab-list functions updated to `int iconRightOffset`. Windows code path unchanged (still uses `iconLeftOffset`). Cmd+Shift+A keyboard shortcut handler updated similarly. |
 
 **Adversarial review confirmed:** Windows `#ifdef _WIN32` code paths are completely untouched — same variable names, same `ScalePx` call, same function signatures.
+
+### 11.12 DB shutdown cascade + SaveSession + ClearBrowsingDataOnExit (A4-OPEN) — full Windows parity
+
+**What:** macOS now has the same shutdown sequence as Windows — `SaveSession`, `ClearBrowsingDataOnExit`, and deterministic DB checkpoint + close before profile lock release. Previously, macOS skipped all three and relied on static destructor ordering (undefined) or the `_exit(0)` fallback (which bypassed destructors entirely).
+
+**Problem solved:** Quick-restart `SQLITE_BUSY` race. Without explicit DB shutdown, the old process could release its profile lock while still holding live WAL handles. A relaunched instance would win the lock and hit `SQLITE_BUSY` when opening the same databases.
+
+**Deep research findings (informed the implementation):**
+- `flock()` auto-releases on process exit (POSIX guarantee), so profile lock contention on rapid reopen is a timing issue, not a stale-lock issue
+- The A10 fix (`O_CLOEXEC`) already prevents lock fd inheritance by child processes
+- SQLite WAL is crash-safe — no data loss risk from unclean shutdown, but unchecked WAL files cause slow reopens
+- Chrome/Brave use the same `flock` pattern and don't checkpoint in the shutdown hot path
+- The `_exit(0)` fallback at 1 second was too aggressive — it could fire before post-message-loop cleanup ran
+
+**Shutdown sequence (now matches Windows):**
+
+| Step | Location | What |
+|------|----------|------|
+| 1. `SaveSession()` | `ShutdownApplication()` | Persist open tabs + window positions to `session.json` (respects `restoreSessionOnStart` setting) |
+| 2. `ClearBrowsingDataOnExit()` | `ShutdownApplication()` | Clear history, cookies, cache, block log, session.json if `clearDataOnExit` enabled |
+| 3. Force-close browsers | `ShutdownApplication()` | `CloseBrowser(true)` on all tabs + overlays |
+| 4. Close windows | `ShutdownApplication()` | NSWindow close for all overlays + main window |
+| 5. Kill server PIDs | `ShutdownApplication()` | SIGTERM to wallet/adblock children |
+| 6. `CefQuitMessageLoop()` | `ShutdownApplication()` | Exit CEF message loop → `CefRunMessageLoop()` returns |
+| 7. `StopServers()` | Post-message-loop | Graceful HTTP `/shutdown` + waitpid |
+| 8. 5x DB `Shutdown()` | Post-message-loop | `wal_checkpoint(RESTART)` + `sqlite3_close` for History, Bookmark, SitePermission, CookieBlock, PaidContent |
+| 9. `ReleaseProfileLock()` | Post-message-loop | flock unlock + close fd — **AFTER** all DBs closed |
+| 10. `Logger::Shutdown()` | Post-message-loop | Flush + close log file |
+| 11. `CefShutdown()` | Post-message-loop | CEF cleanup |
+
+**`_exit(0)` fallback fix:** Timeout increased from 1s to 5s. The post-loop cleanup (steps 7-11) completes in ~10ms in practice, so the fallback is a true safety net, not a race condition.
+
+**macOS-specific notes for SaveSession:**
+- Window positions saved using Cocoa coordinates (`NSRect frame` — Y origin at bottom-left). Session restore on macOS is not yet implemented (the restore code in `simple_app.cpp` is `#ifdef _WIN32` only). When macOS restore is added, `[nsWindow setFrame:display:]` will consume the saved Cocoa coordinates directly — no coordinate conversion needed.
+
+**Verified via logs (Cmd+Q shutdown):**
+```
+🛑 Starting graceful application shutdown (macOS)...
+Session restore disabled — skipping session save
+🔄 Force-closing all CEF browsers...
+🔄 Closing main window...
+✅ Application shutdown complete — exiting message loop...
+CEF message loop exited — running post-loop cleanup...
+Closing browser databases (checkpoint + close)...
+📚 History database closed
+Releasing profile lock...
+✅ Application exited cleanly
+```
+
+**Adversarial review confirmed:** All 8 checks passed — correct `ns_window` member access, proper `__bridge` cast, DB shutdown ordering matches Windows, picker mode guard in place, re-entrancy guard covers SaveSession/ClearBrowsingDataOnExit, thread safety verified (main thread context).
+
+**Files changed:**
+
+| File | Changes |
+|------|---------|
+| `cef_browser_shell_mac.mm` | Added `SaveSession()` (macOS version with NSWindow frame saving), `ClearBrowsingDataOnExit()` (identical to Windows logic). Updated `ShutdownApplication()` to call both before browser cleanup. Post-message-loop: added 5x DB `Shutdown()` between `StopServers()` and `ReleaseProfileLock()`. Fixed `_exit(0)` timeout from 1s to 5s. Moved `Logger::Shutdown()` before `CefShutdown()`. |

@@ -4636,6 +4636,165 @@ void ShowQuitConfirmationAndShutdown() {
 // Graceful Shutdown
 // ============================================================================
 
+static void SaveSession() {
+    auto browserSettings = SettingsManager::GetInstance().GetBrowserSettings();
+    if (!browserSettings.restoreSessionOnStart) {
+        LOG_INFO("Session restore disabled — skipping session save");
+        return;
+    }
+
+    std::string profilePath = ProfileManager::GetInstance().GetCurrentProfileDataPath();
+    if (profilePath.empty()) {
+        LOG_WARNING("No profile path — cannot save session");
+        return;
+    }
+
+    std::vector<Tab*> allTabs = TabManager::GetInstance().GetAllTabs();
+    int activeTabId = TabManager::GetInstance().GetActiveTabId();
+    std::vector<BrowserWindow*> windows = WindowManager::GetInstance().GetAllWindows();
+
+    nlohmann::json sessionJson;
+    sessionJson["version"] = 2;
+    sessionJson["windows"] = nlohmann::json::array();
+
+    int totalSavedTabs = 0;
+
+    for (BrowserWindow* bw : windows) {
+        if (!bw) continue;
+
+        nlohmann::json winJson;
+        winJson["tabs"] = nlohmann::json::array();
+        winJson["activeTabIndex"] = 0;
+
+        if (bw->ns_window) {
+            NSWindow* nsWin = (__bridge NSWindow*)bw->ns_window;
+            NSRect frame = [nsWin frame];
+            winJson["x"] = static_cast<int>(frame.origin.x);
+            winJson["y"] = static_cast<int>(frame.origin.y);
+            winJson["width"] = static_cast<int>(frame.size.width);
+            winJson["height"] = static_cast<int>(frame.size.height);
+        }
+
+        int tabIndex = 0;
+        int activeIndex = 0;
+        for (Tab* tab : allTabs) {
+            if (!tab || tab->window_id != bw->window_id) continue;
+
+            std::string url = tab->url;
+            if (url.empty() || url == "about:blank") continue;
+            if (url.find("127.0.0.1:5137") != std::string::npos) continue;
+
+            nlohmann::json tabEntry;
+            tabEntry["url"] = url;
+            tabEntry["title"] = tab->title;
+            winJson["tabs"].push_back(tabEntry);
+
+            if (tab->id == activeTabId) {
+                activeIndex = tabIndex;
+            }
+            tabIndex++;
+        }
+
+        winJson["activeTabIndex"] = activeIndex;
+
+        if (!winJson["tabs"].empty()) {
+            sessionJson["windows"].push_back(winJson);
+            totalSavedTabs += static_cast<int>(winJson["tabs"].size());
+        }
+    }
+
+    if (totalSavedTabs == 0) {
+        LOG_INFO("No restorable tabs — skipping session save");
+        return;
+    }
+
+    std::string sessionPath = profilePath + "/session.json";
+
+    try {
+        std::ofstream out(sessionPath);
+        if (out.is_open()) {
+            out << sessionJson.dump(2);
+            out.close();
+            LOG_INFO("Session saved: " + std::to_string(totalSavedTabs) + " tabs across " +
+                     std::to_string(sessionJson["windows"].size()) + " windows to " + sessionPath);
+        } else {
+            LOG_ERROR("Failed to open session.json for writing: " + sessionPath);
+        }
+    } catch (const std::exception& e) {
+        LOG_ERROR("Failed to save session: " + std::string(e.what()));
+    }
+}
+
+static void ClearBrowsingDataOnExit() {
+    auto privacySettings = SettingsManager::GetInstance().GetPrivacySettings();
+    if (!privacySettings.clearDataOnExit) {
+        return;
+    }
+
+    LOG_INFO("Clear-on-exit enabled — clearing browsing data...");
+
+    try {
+        if (HistoryManager::GetInstance().DeleteAllHistory()) {
+            LOG_INFO("History cleared");
+        }
+    } catch (const std::exception& e) {
+        LOG_ERROR("History clear exception: " + std::string(e.what()));
+    } catch (...) {
+        LOG_ERROR("History clear unknown exception");
+    }
+
+    try {
+        CefRefPtr<CefCookieManager> cookieMgr = CefCookieManager::GetGlobalManager(nullptr);
+        if (cookieMgr) {
+            cookieMgr->DeleteCookies("", "", nullptr);
+            LOG_INFO("Cookie deletion requested");
+        }
+    } catch (const std::exception& e) {
+        LOG_ERROR("Cookie clear exception: " + std::string(e.what()));
+    } catch (...) {
+        LOG_ERROR("Cookie clear unknown exception");
+    }
+
+    try {
+        CefRefPtr<CefBrowser> header_browser = SimpleHandler::GetHeaderBrowser();
+        if (header_browser) {
+            header_browser->GetHost()->ExecuteDevToolsMethod(0, "Network.clearBrowserCache", nullptr);
+            LOG_INFO("Cache clear requested via CDP");
+        }
+    } catch (const std::exception& e) {
+        LOG_ERROR("Cache clear exception: " + std::string(e.what()));
+    } catch (...) {
+        LOG_ERROR("Cache clear unknown exception");
+    }
+
+    try {
+        if (CookieBlockManager::GetInstance().ClearBlockLog()) {
+            LOG_INFO("Cookie block log cleared");
+        }
+    } catch (const std::exception& e) {
+        LOG_ERROR("Block log clear exception: " + std::string(e.what()));
+    } catch (...) {
+        LOG_ERROR("Block log clear unknown exception");
+    }
+
+    try {
+        std::string profilePath = ProfileManager::GetInstance().GetCurrentProfileDataPath();
+        if (!profilePath.empty()) {
+            std::string sessionPath = profilePath + "/session.json";
+            if (std::filesystem::exists(sessionPath)) {
+                std::filesystem::remove(sessionPath);
+                LOG_INFO("session.json deleted (clear-on-exit overrides session restore)");
+            }
+        }
+    } catch (const std::exception& e) {
+        LOG_ERROR("Session delete exception: " + std::string(e.what()));
+    } catch (...) {
+        LOG_ERROR("Session delete unknown exception");
+    }
+
+    LOG_INFO("Clear-on-exit complete");
+}
+
 void ShutdownApplication() {
     // Guard against re-entrant calls (terminate: → ShutdownApplication → terminate:)
     static bool shutting_down = false;
@@ -4644,11 +4803,8 @@ void ShutdownApplication() {
 
     LOG_INFO("🛑 Starting graceful application shutdown (macOS)...");
 
-    // TODO: Save session when macOS tab system is implemented
-    // (Windows implementation: SaveSession() in cef_browser_shell.cpp)
-
-    // TODO: Clear browsing data on exit (PS3) when macOS tab system is implemented
-    // (Windows implementation: ClearBrowsingDataOnExit() in cef_browser_shell.cpp)
+    SaveSession();
+    ClearBrowsingDataOnExit();
 
     // Step 1: Force-close ALL CEF browsers (tabs, overlays, header)
     // Using CloseBrowser(true) = force close, skips beforeunload handlers.
@@ -4790,16 +4946,19 @@ void ShutdownApplication() {
         kill(g_adblock_server_pid, SIGTERM);
     }
 
-    LOG_INFO("✅ Application shutdown complete (macOS)");
-    Logger::Shutdown();
+    LOG_INFO("✅ Application shutdown complete (macOS) — exiting message loop...");
 
     // Quit the CEF message loop, then exit the process.
     // Do NOT call [NSApp terminate:nil] — that re-enters our terminate: override.
     CefQuitMessageLoop();
 
-    // Post a delayed exit in case CefQuitMessageLoop doesn't fully tear down
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+    // Safety net: if CefQuitMessageLoop doesn't cause CefRunMessageLoop to return
+    // within 5 seconds, force-exit. The post-message-loop cleanup (DB shutdown,
+    // server stop, lock release) runs BEFORE this fires in the normal path —
+    // _exit here is a last resort, not the happy path.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
+        LOG_ERROR("Force-exiting after 5s — CefRunMessageLoop did not return");
         _exit(0);
     });
 }
@@ -5422,15 +5581,30 @@ int main(int argc, char* argv[]) {
         // Run CEF message loop (blocks until quit)
         CefRunMessageLoop();
 
-        LOG_INFO("CEF message loop exited - shutting down...");
+        LOG_INFO("CEF message loop exited — running post-loop cleanup...");
         if (!g_picker_mode) {
             StopServers();
+
+            // R2/R3: deterministically checkpoint + close the SQLite browser DBs
+            // while the profile lock is STILL held, THEN release the lock. All
+            // browsers are closed (message loop exited above), so the DBs are
+            // quiescent. This closes the quick-restart SQLITE_BUSY race where a
+            // relaunch won the freed lock while the old process still held
+            // live-WAL DB handles. Matches Windows post-loop cleanup ordering.
+            LOG_INFO("Closing browser databases (checkpoint + close)...");
+            HistoryManager::GetInstance().Shutdown();
+            BookmarkManager::GetInstance().Shutdown();
+            SitePermissionStore::GetInstance().Shutdown();
+            CookieBlockManager::GetInstance().Shutdown();
+            PaidContentCache::GetInstance().Shutdown();
+
+            LOG_INFO("Releasing profile lock...");
             ReleaseProfileLock();
         }
-        CefShutdown();
 
         LOG_INFO("✅ Application exited cleanly");
         Logger::Shutdown();
+        CefShutdown();
 
         return 0;
     }
