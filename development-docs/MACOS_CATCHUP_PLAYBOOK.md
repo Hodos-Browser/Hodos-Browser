@@ -586,3 +586,73 @@ cd cef-binaries && mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Rel
 `.github/workflows/release.yml` (mac job, ~:264) downloads `gh release download cef-binaries --pattern "cef-binaries-macos.tar.bz2"` — but the **actual** release is tag `cef-136.1.7-macosarm64-codecs` / asset `*_macosarm64_minimal.tar.bz2`. The CI mac release job would fail as written. This is a real bug, but it belongs to the auto-update/release sprint — **note it, do not fix here.**
 
 Nothing else can proceed until this is resolved.
+
+---
+
+## 11. Mac agent implementation results (2026-06-23) — commit `65ab728`
+
+> Written by the Mac-side agent after completing §10.2 items 1–3. All work is on branch `0.4.0`, pushed to `origin`. 838 insertions across 10 files. Owner-tested and approved before commit.
+
+### 11.1 First build + measurements (§6 obligation)
+
+- **First-ever clean macOS build**: zero errors, zero warnings. `mac_build_run.sh` succeeded on first run after CEF framework acquisition.
+- **First-paint measurement**: ~2.5s from launch to visible UI (dev mode). Acceptable — the delay is dev-mode-specific: Vite ESM module waterfall + disabled GPU compositing (`--in-process-gpu` required for ad-hoc signed dev builds). Production builds with bundled assets will be faster.
+- **`StartWalletServer`/`StartAdblockServer` block duration (C12-M1)**: not observable as a distinct bottleneck in startup logs. The backend servers start concurrently and are ready before the first navigation.
+- **C12-M3 (non-blocking backend launch)**: measurement shows it's likely not needed. Held per §10.2 item 4.
+
+### 11.2 Items completed
+
+| Item | Description | Files changed |
+|------|-------------|---------------|
+| **A1** | Per-profile history leak fix. `process_helper_mac.mm` now parses `--profile=` from argv instead of hardcoded `"Default"`. Cannot use `ProfileManager::ParseProfileArgument` (not in helper link set), so inline parsing with path traversal protection (`/` and `..` checks). | `mac/process_helper_mac.mm` |
+| **A2/A3/A4-DONE** | Compile verification — all passed on first build. Deleted BRC100 classes confirmed absent. | (build-only) |
+| **A5** | Bookmarks panel overlay. Left-anchored via `CalculateLeftAnchoredOverlayFrame()`. IPC wiring for show/hide/toggle + Cmd+Shift+A shortcut. Click-outside monitor + app-focus-loss handler. | `cef_browser_shell_mac.mm`, `simple_handler.cpp`, `OverlayHelpers_mac.mm` |
+| **A6** | Site-info panel overlay. Same left-anchored pattern. IPC wiring. Click-outside + focus-loss. | `cef_browser_shell_mac.mm`, `simple_handler.cpp`, `OverlayHelpers_mac.mm` |
+| **A7** | Tab-list panel overlay. Same pattern. Records recently-closed tabs (`RecordClosedTab` with http/https + non-localhost filter). | `cef_browser_shell_mac.mm`, `simple_handler.cpp`, `OverlayHelpers_mac.mm`, `TabManager_mac.mm` |
+| **A8** | SitePermissionStore init — `#include` and init call added after BookmarkManager in `cef_browser_shell_mac.mm`. | `cef_browser_shell_mac.mm` |
+| **A9** | Hodos permission prompt (macOS). Three sub-fixes: (1) removed `--enable-media-stream` from `simple_app.cpp` — it bypassed ALL permission callbacks, a security hole; (2) wired `FireHodosPermissionPrompt` on macOS via `CreateNotificationOverlay`; (3) added macOS overlay-hide in `permission_response` and `OnDismissPermissionPrompt`. Also: Info.plist TCC usage descriptions (camera, mic, location), entitlements.plist camera+mic entitlements (fixed CRLF corruption), `mac_build_run.sh` codesign with entitlements. | `simple_handler.cpp`, `simple_app.cpp`, `Info.plist`, `mac/entitlements.plist`, `mac_build_run.sh` |
+
+### 11.3 P0 bug fixes (tab close lifecycle)
+
+Four interconnected bugs discovered during smoke testing. Root cause: the macOS NSResponder chain cascade — `[view removeFromSuperview]` triggers `resignFirstResponder` → `windowShouldClose:` → attempts to close the entire window.
+
+| Bug | Symptom | Fix |
+|-----|---------|-----|
+| **Bug 1A** | Tab highlight mismatch after switch | `active_tab_per_window_` map populated in `SwitchToTab`; `NotifyWindowTabListChanged` called after successful switch |
+| **Bug 1B** | Tab list not updating after switch | Added `NotifyWindowTabListChanged(window_id_)` after `SwitchToTab` in `tab_switch` IPC handler |
+| **Bug 2** | Closing ANY tab kills entire window | `DoClose()` override returns `true` for tab browsers on macOS (prevents CEF from sending `performClose:` to parent NSWindow). `makeFirstResponder:nil` before view removal breaks responder chain. Synchronous cleanup: hide → CloseBrowser → removeFromSuperview. |
+| **Bug 3** | Ghost tabs after close (wrong tab selected) | `FindTabToSwitchTo` now filters by `window_id` and skips `is_closing` tabs |
+| **Bug 4** | Per-window active tab check wrong | `CloseTab` uses `GetActiveTabIdForWindow(tab.window_id)` instead of global `active_tab_id_` |
+
+Files: `TabManager_mac.mm`, `WindowManager_mac.mm`, `simple_handler.h`, `simple_handler.cpp`
+
+### 11.4 Other fixes
+
+| Fix | Description |
+|-----|-------------|
+| **Omnibox Y offset** | Overlay was covering address bar. Changed `contentTop - 78` → `contentTop - 96` (correct toolbar height). |
+| **Entitlements CRLF** | `entitlements.plist` had Windows CRLF line endings causing `AMFIUnserializeXML: syntax error` on codesign. Fixed with `sed -i '' 's/\r$//'`. The playbook warned about this at §4-D item 2. |
+| **WindowManager is_closing guard** | Added `is_closing` tab check in `BrowserWindowDelegate::windowShouldClose:` to prevent double-close cascade. |
+| **Site-info first-open empty** | Race between `OnLoadingStateChange` deferred JS injection and React `useEffect` mount (Vite ESM async loading). Fixed by adding a 150ms `CefPostDelayedTask` retry after the initial injection, matching the `setShieldDomain` pattern. |
+
+### 11.5 Items HELD (need owner approval — invariant #8)
+
+| Item | Status | Reason |
+|------|--------|--------|
+| **A4-OPEN** | Held | DB shutdown cascade — needs owner approval per invariant #8 |
+| **A11** | Held | Pre-window profile picker — needs owner approval |
+| **C12-M3** | Held | Non-blocking backend launch — measurements suggest not needed |
+
+### 11.6 Known issues (deferred)
+
+| Issue | Priority | Notes |
+|-------|----------|-------|
+| **A10 (flock timeout)** | Low | Not yet investigated on macOS; low risk. |
+| **CI release.yml mac job** | Non-blocking | Downloads wrong CEF asset name (`cef-binaries-macos.tar.bz2` vs actual `*_macosarm64_minimal.tar.bz2`). Belongs to auto-update/release sprint per §10.4. |
+
+### 11.7 Build and signing notes for future reference
+
+- **Ad-hoc signing with entitlements is required** for TCC (camera/mic/location) to work on macOS. Without entitlements, macOS silently blocks camera/mic even if Info.plist has the usage descriptions.
+- **`mac_build_run.sh`** now handles: build → copy helpers → codesign all helpers with entitlements → codesign framework → codesign main app → launch with `HODOS_DEV=1` + `HODOS_MAC_DEV_FLAGS=1`.
+- **`--in-process-gpu`** is set via `HODOS_MAC_DEV_FLAGS=1` for dev builds. The GPU helper subprocess requires proper code signing (not ad-hoc). Release builds with proper signing won't need this flag.
+- **DoClose() returning true for tabs** is the correct CEF pattern on macOS. This prevents CEF from calling `[window performClose:]` when a tab browser closes, which would trigger the NSResponder cascade and close the entire window.

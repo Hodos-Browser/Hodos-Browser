@@ -1120,6 +1120,9 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
 
     // Deferred site-info-context injection: when the site-info hub finishes
     // loading, inject the current host + security state via setSiteInfoContext.
+    // On first open with the Vite dev server, React's useEffect that registers
+    // setSiteInfoContext may not have run yet when OnLoadingStateChange fires
+    // (ESM modules load async). Retry after 150ms to cover that race.
     if (!isLoading && role_ == "siteinfopanel" &&
         (!pending_siteinfo_host_.empty() || !pending_siteinfo_security_.empty())) {
         CefRefPtr<CefFrame> frame = browser->GetMainFrame();
@@ -1132,6 +1135,17 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
                 EscapeForSingleQuotedJs(host) + "', '" + EscapeForSingleQuotedJs(security) + "'); }";
             frame->ExecuteJavaScript(js, frame->GetURL(), 0);
             LOG_INFO_BROWSER("Deferred site-info context injected after page load: " + host);
+
+            CefRefPtr<CefBrowser> retry_browser = browser;
+            std::string retry_host = host;
+            std::string retry_security = security;
+            CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b, std::string h, std::string s) {
+                if (b && b->GetMainFrame()) {
+                    std::string retryJs = "if (window.setSiteInfoContext) { window.setSiteInfoContext('" +
+                        EscapeForSingleQuotedJs(h) + "', '" + EscapeForSingleQuotedJs(s) + "'); }";
+                    b->GetMainFrame()->ExecuteJavaScript(retryJs, b->GetMainFrame()->GetURL(), 0);
+                }
+            }, retry_browser, retry_host, retry_security), 150);
         }
     }
 
