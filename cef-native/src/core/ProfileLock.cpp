@@ -64,7 +64,7 @@ bool AcquireProfileLock(const std::string& profile_path) {
     const useconds_t RETRY_DELAY_US = 500000;  // 500ms
 
     for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
-        int fd = open(lock_file.c_str(), O_WRONLY | O_CREAT, 0644);
+        int fd = open(lock_file.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
         if (fd < 0) {
             if (attempt < MAX_RETRIES - 1) {
                 usleep(RETRY_DELAY_US);

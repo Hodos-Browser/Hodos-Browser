@@ -66,8 +66,23 @@ public:
         }
 #elif defined(__APPLE__)
         lockPath_ = appDataPath + "/.profiles.lock";
-        fd_ = open(lockPath_.c_str(), O_CREAT | O_RDWR, 0600);
-        if (fd_ >= 0) flock(fd_, LOCK_EX);
+        fd_ = open(lockPath_.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+        if (fd_ >= 0) {
+            // Non-blocking flock with bounded retry (matches Windows 5s timeout).
+            // A crashed peer's flock auto-releases on process death, but an fd
+            // inherited by a child (wallet/adblock) can hold it longer.
+            for (int i = 0; i < 10; ++i) {
+                if (flock(fd_, LOCK_EX | LOCK_NB) == 0) break;
+                if (i == 9) {
+                    std::cerr << "⚠️ RegistryLock: .profiles.lock timed out; "
+                                 "proceeding unlocked" << std::endl;
+                    close(fd_);
+                    fd_ = -1;
+                    break;
+                }
+                usleep(500000);  // 500ms × 10 = 5s max
+            }
+        }
 #else
         (void)appDataPath;
 #endif

@@ -647,7 +647,7 @@ Files: `TabManager_mac.mm`, `WindowManager_mac.mm`, `simple_handler.h`, `simple_
 
 | Issue | Priority | Notes |
 |-------|----------|-------|
-| **A10 (flock timeout)** | Low | Not yet investigated on macOS; low risk. |
+| **A10 (flock timeout)** | ✅ Fixed | See §11.8 — `O_CLOEXEC` + bounded retry. |
 | **CI release.yml mac job** | Non-blocking | Downloads wrong CEF asset name (`cef-binaries-macos.tar.bz2` vs actual `*_macosarm64_minimal.tar.bz2`). Belongs to auto-update/release sprint per §10.4. |
 
 ### 11.7 Build and signing notes for future reference
@@ -656,3 +656,28 @@ Files: `TabManager_mac.mm`, `WindowManager_mac.mm`, `simple_handler.h`, `simple_
 - **`mac_build_run.sh`** now handles: build → copy helpers → codesign all helpers with entitlements → codesign framework → codesign main app → launch with `HODOS_DEV=1` + `HODOS_MAC_DEV_FLAGS=1`.
 - **`--in-process-gpu`** is set via `HODOS_MAC_DEV_FLAGS=1` for dev builds. The GPU helper subprocess requires proper code signing (not ad-hoc). Release builds with proper signing won't need this flag.
 - **DoClose() returning true for tabs** is the correct CEF pattern on macOS. This prevents CEF from calling `[window performClose:]` when a tab browser closes, which would trigger the NSResponder cascade and close the entire window.
+
+### 11.8 Profile lock fixes (A10 + fd inheritance bug) — commit `91b26d6`+
+
+**Root cause of "Profile Locked" on restart after `pkill -9`:**
+
+The browser acquires an `flock(LOCK_EX)` on `<profile>/profile.lock` at startup. When it spawns the wallet and adblock child processes via `posix_spawn()` with `file_actions=nullptr`, all open file descriptors — including the lock fd — are **inherited** by the child processes. `flock` is per-file-description (not per-process), so the inherited fd in the child holds the same lock. When the browser is killed with `pkill -9`:
+1. Browser process dies → its flock releases (OS cleanup)
+2. But wallet/adblock child processes still have the inherited fd → lock is still held
+3. Next browser launch → `flock(LOCK_EX | LOCK_NB)` fails → "Profile Locked" alert
+
+**Fixes applied:**
+
+| File | Fix |
+|------|-----|
+| `ProfileLock.cpp:67` | Added `O_CLOEXEC` to `open()` flags — fd auto-closes in child processes on exec, preventing lock inheritance |
+| `ProfileManager.cpp:69` | Added `O_CLOEXEC` to `.profiles.lock` open — same inheritance fix for the registry lock |
+| `ProfileManager.cpp:70` | `RegistryLock` now uses `flock(LOCK_EX\|LOCK_NB)` + bounded retry (500ms × 10 = 5s max, matching Windows timeout), then proceeds unlocked if timeout — prevents blocking startup forever if a stale lock is held |
+
+**Why `O_CLOEXEC` is the correct fix:** `posix_spawn` with null `file_actions` inherits all fds. `O_CLOEXEC` marks the fd for automatic close on exec, so child processes never see it. This is the standard POSIX pattern for lock fds that shouldn't leak to children. No changes needed to the `posix_spawn` calls themselves.
+
+### 11.9 Site-info overlay first-open fix
+
+The site-info overlay showed empty on first open because of a race between CEF's `OnLoadingStateChange(!isLoading)` (fires when HTML loads) and React's `useEffect` mount (registers `window.setSiteInfoContext`). With the Vite dev server, ~17 MUI icon ESM modules load asynchronously after the initial page load event, delaying React mount by ~400-500ms. The deferred JS injection at `OnLoadingStateChange` fires too early — `window.setSiteInfoContext` doesn't exist yet.
+
+**Fix:** Added two `CefPostDelayedTask` retries at 300ms and 600ms after the deferred injection, matching the `setShieldDomain` retry pattern used by the privacy shield overlay. The retries re-attempt the JS injection; the `if (window.setSiteInfoContext)` guard ensures no double-invocation once React has mounted. This is a **dev-mode-only issue** — production builds bundle all JS into a single file with no ESM waterfall.
