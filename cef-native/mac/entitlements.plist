@@ -11,5 +11,11 @@
     <!-- JavaScript JIT compilation -->
     <key>com.apple.security.cs.allow-jit</key>
     <true/>
+    <!-- Camera access for websites (e.g. video calls) -->
+    <key>com.apple.security.device.camera</key>
+    <true/>
+    <!-- Microphone access for websites (e.g. video calls, voice recording) -->
+    <key>com.apple.security.device.microphone</key>
+    <true/>
 </dict>
 </plist>

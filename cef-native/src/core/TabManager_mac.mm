@@ -153,8 +153,9 @@ bool TabManager::CloseTab(int tab_id) {
     }
 
     Tab& tab = it->second;
+    int closed_window_id = tab.window_id;
     LOG_INFO("=== CLOSE TAB START ===");
-    LOG_INFO("Closing tab " + std::to_string(tab_id));
+    LOG_INFO("Closing tab " + std::to_string(tab_id) + " (window " + std::to_string(closed_window_id) + ")");
     LOG_INFO("Active tab ID: " + std::to_string(active_tab_id_));
     LOG_INFO("Total tabs: " + std::to_string(tabs_.size()));
     LOG_INFO("Is active tab: " + std::string(tab_id == active_tab_id_ ? "YES" : "NO"));
@@ -166,8 +167,9 @@ bool TabManager::CloseTab(int tab_id) {
     // Mark as closing
     tab.is_closing = true;
 
-    // If this is the active tab, switch to another tab FIRST
-    if (tab_id == active_tab_id_ && tabs_.size() > 1) {
+    // If this is the active tab for its window, switch to another tab FIRST
+    int activeForWindow = GetActiveTabIdForWindow(tab.window_id);
+    if (tab_id == activeForWindow) {
         int next_tab = FindTabToSwitchTo(tab_id);
         if (next_tab != -1) {
             Tab* next_tab_ptr = GetTab(next_tab);
@@ -181,6 +183,13 @@ bool TabManager::CloseTab(int tab_id) {
         }
     } else if (tab_id == active_tab_id_) {
         active_tab_id_ = -1;
+    }
+
+    // Record for the tab-list overlay's "Recently closed" section — real web pages
+    // only (skip empty/NTP and the local app origin: settings, browser-data, etc.).
+    if ((tab.url.rfind("http://", 0) == 0 || tab.url.rfind("https://", 0) == 0) &&
+        tab.url.find("127.0.0.1:5137") == std::string::npos) {
+        RecordClosedTab(tab.url, tab.title);
     }
 
     // Notify ephemeral cookie manager + reset payment session before closing.
@@ -199,37 +208,59 @@ bool TabManager::CloseTab(int tab_id) {
         tab.browser->GetHost()->SetAudioMuted(true);
     }
 
-    // Initiate browser close
-    if (tab.browser) {
-        tab.browser->GetHost()->CloseBrowser(false);
-        LOG_INFO("CloseBrowser called for tab " + std::to_string(tab_id));
-    }
-
-    LOG_INFO("CloseBrowser returned, about to remove view");
-
-    // CRITICAL: Remove view IMMEDIATELY after CloseBrowser() returns
+    // Move first responder AWAY from the closing tab's view hierarchy BEFORE
+    // any view changes or CloseBrowser. This prevents the NSResponder chain
+    // from cascading to windowShouldClose when CEF resigns first responder.
     if (tab.view_ptr) {
         NSView* view = (__bridge NSView*)tab.view_ptr;
-        LOG_INFO("Hiding view...");
+        NSWindow* window = [view window];
+        if (window) {
+            NSResponder* fr = [window firstResponder];
+            if (fr && [fr isKindOfClass:[NSView class]]) {
+                NSView* frView = (NSView*)fr;
+                if ([frView isDescendantOf:view] || frView == view) {
+                    [window makeFirstResponder:nil];
+                }
+            }
+        }
         [view setHidden:YES];
-        LOG_INFO("Removing from superview...");
-        [view removeFromSuperview];
-        LOG_INFO("View removed from superview");
-        tab.view_ptr = nullptr;
-        LOG_INFO("Tab " + std::to_string(tab_id) + " view removed synchronously");
+        LOG_INFO("Tab " + std::to_string(tab_id) + " view hidden, first responder cleared");
     }
 
-    // Clear browser reference immediately (don't wait for OnBeforeClose)
+    // Tell CEF to close. DoClose() returns true for tabs on macOS, which
+    // prevents CEF from sending performClose: to the parent window.
+    if (tab.browser) {
+        tab.browser->GetHost()->CloseBrowser(true);
+        LOG_INFO("CloseBrowser(true) called for tab " + std::to_string(tab_id));
+    }
+
+    // When DoClose returns true, CEF expects us to destroy the browser host
+    // (remove the NSView) to complete the lifecycle. OnBeforeClose only fires
+    // AFTER the view is removed. The makeFirstResponder:nil above prevents
+    // the removeFromSuperview from cascading to windowShouldClose.
+    if (tab.view_ptr) {
+        NSView* view = (__bridge NSView*)tab.view_ptr;
+        [view removeFromSuperview];
+        tab.view_ptr = nullptr;
+        LOG_INFO("Tab " + std::to_string(tab_id) + " view removed from superview");
+    }
+
+    // Clear browser reference — CEF will call OnBeforeClose asynchronously
     tab.browser = nullptr;
-    LOG_INFO("Browser reference cleared");
 
     // Remove from display order and map
     tab_order_.erase(std::remove(tab_order_.begin(), tab_order_.end(), tab_id), tab_order_.end());
     tabs_.erase(it);
     LOG_INFO("Tab " + std::to_string(tab_id) + " removed from map. Remaining: " + std::to_string(tabs_.size()));
 
-    // Update active tab if all tabs closed
-    if (tabs_.empty()) {
+    // Auto-close window when its last tab closes (Chrome/Brave behavior)
+    int remaining_in_window = 0;
+    for (const auto& pair : tabs_) {
+        if (pair.second.window_id == closed_window_id && !pair.second.is_closing) {
+            remaining_in_window++;
+        }
+    }
+    if (remaining_in_window == 0 && tabs_.empty()) {
         active_tab_id_ = -1;
         LOG_INFO("All tabs closed");
     }
@@ -291,6 +322,7 @@ bool TabManager::SwitchToTab(int tab_id) {
     }
 
     active_tab_id_ = tab_id;
+    active_tab_per_window_[target_window_id] = tab_id;
     LOG_INFO("Switched to tab " + std::to_string(tab_id) + " (URL: " + tab.url + ")");
 
     return true;
@@ -522,28 +554,49 @@ bool TabManager::RegisterTabBrowser(int tab_id, CefRefPtr<CefBrowser> browser) {
 void TabManager::OnTabBrowserClosed(int tab_id) {
     auto it = tabs_.find(tab_id);
     if (it == tabs_.end()) {
-        LOG_WARNING("OnTabBrowserClosed called for non-existent tab " + std::to_string(tab_id));
+        LOG_INFO("OnTabBrowserClosed: tab " + std::to_string(tab_id) + " already cleaned up");
         return;
     }
 
     Tab& tab = it->second;
-    LOG_INFO("OnBeforeClose callback for tab " + std::to_string(tab_id));
+    int closed_window_id = tab.window_id;
+    LOG_INFO("OnTabBrowserClosed: cleaning up tab " + std::to_string(tab_id) +
+             " (window " + std::to_string(closed_window_id) + ")");
 
-    // ONLY clear browser reference (view already removed in CloseTab)
+    // CEF is fully done with the browser — safe to remove the view now.
+    if (tab.view_ptr) {
+        NSView* view = (__bridge NSView*)tab.view_ptr;
+        [view removeFromSuperview];
+        tab.view_ptr = nullptr;
+        LOG_INFO("Tab " + std::to_string(tab_id) + " view removed from superview");
+    }
+
     tab.browser = nullptr;
-
-    // Remove from display order and map
-    tab_order_.erase(std::remove(tab_order_.begin(), tab_order_.end(), tab_id), tab_order_.end());
     tabs_.erase(it);
-    LOG_INFO("Tab " + std::to_string(tab_id) + " removed from map. Remaining: " + std::to_string(tabs_.size()));
+    LOG_INFO("Tab " + std::to_string(tab_id) + " erased from map. Remaining: " + std::to_string(tabs_.size()));
 
-    // Update active tab if needed
+    // Update active tab if all tabs closed
     if (tabs_.empty()) {
         active_tab_id_ = -1;
         LOG_INFO("All tabs closed");
     }
 
-    // Notify frontend
+    // Auto-close window when its last tab closes (Chrome/Brave behavior)
+    int remaining_in_window = 0;
+    for (const auto& pair : tabs_) {
+        if (pair.second.window_id == closed_window_id && !pair.second.is_closing) {
+            remaining_in_window++;
+        }
+    }
+    if (remaining_in_window == 0) {
+        LOG_INFO("Last tab closed in window " + std::to_string(closed_window_id) + " — closing window");
+        BrowserWindow* bw = WindowManager::GetInstance().GetWindow(closed_window_id);
+        if (bw && bw->ns_window) {
+            NSWindow* window = (__bridge NSWindow*)bw->ns_window;
+            [window performClose:nil];
+        }
+    }
+
     SimpleHandler::NotifyTabListChanged();
 }
 
@@ -554,17 +607,22 @@ int TabManager::FindTabToSwitchTo(int closing_tab_id) {
         return -1;  // No other tabs
     }
 
-    // Find most recently accessed tab (excluding the closing one)
+    auto closing_it = tabs_.find(closing_tab_id);
+    if (closing_it == tabs_.end()) return -1;
+    int closing_window = closing_it->second.window_id;
+
+    // Find most recently accessed tab in the SAME window (excluding the closing one)
     int best_tab_id = -1;
     auto latest_time = std::chrono::system_clock::time_point::min();
 
     for (const auto& pair : tabs_) {
-        if (pair.first != closing_tab_id) {
-            const Tab& tab = pair.second;
-            if (tab.last_accessed > latest_time) {
-                latest_time = tab.last_accessed;
-                best_tab_id = pair.first;
-            }
+        if (pair.first == closing_tab_id) continue;
+        if (pair.second.is_closing) continue;
+        if (pair.second.window_id != closing_window) continue;
+        const Tab& tab = pair.second;
+        if (tab.last_accessed > latest_time) {
+            latest_time = tab.last_accessed;
+            best_tab_id = pair.first;
         }
     }
 

@@ -131,6 +131,7 @@ namespace fs = std::filesystem;
 #include "include/core/CookieBlockManager.h"
 #include "include/core/BookmarkManager.h"
 #include "include/core/PaidContentCache.h"
+#include "include/core/SitePermissionStore.h"
 #include "include/core/WindowManager.h"
 
 // ============================================================================
@@ -264,6 +265,9 @@ NSWindow* g_cookie_panel_overlay_window = nullptr;
 NSWindow* g_omnibox_overlay_window = nullptr;
 NSWindow* g_download_panel_overlay_window = nullptr;
 NSWindow* g_profile_panel_overlay_window = nullptr;
+NSWindow* g_bookmarks_panel_overlay_window = nullptr;
+NSWindow* g_siteinfo_panel_overlay_window = nullptr;
+NSWindow* g_tablist_panel_overlay_window = nullptr;
 
 // QR screen capture overlay
 static NSWindow* g_qr_selection_window = nullptr;
@@ -297,6 +301,18 @@ static int g_mac_download_panel_icon_right_offset = 0;
 static id g_profile_panel_click_monitor = nil;
 static CFAbsoluteTime g_profile_panel_last_hide_time = 0;
 static int g_mac_profile_panel_icon_right_offset = 0;
+
+// Bookmarks panel overlay monitors
+static id g_bookmarks_panel_click_monitor = nil;
+static CFAbsoluteTime g_bookmarks_panel_last_hide_time = 0;
+
+// Site-info panel overlay monitors
+static id g_siteinfo_panel_click_monitor = nil;
+static CFAbsoluteTime g_siteinfo_panel_last_hide_time = 0;
+
+// Tab-list panel overlay monitors
+static id g_tablist_panel_click_monitor = nil;
+static CFAbsoluteTime g_tablist_panel_last_hide_time = 0;
 
 // Server process management
 static pid_t g_wallet_server_pid = -1;
@@ -579,6 +595,21 @@ void HideDownloadPanelOverlayMacOS();
 void CreateProfilePanelOverlayMacOS(int iconRightOffset);
 void ShowProfilePanelOverlayMacOS(int iconRightOffset);
 void HideProfilePanelOverlayMacOS();
+void CreateBookmarksPanelOverlayMacOS(int iconLeftOffset);
+void ShowBookmarksPanelOverlayMacOS(int iconLeftOffset);
+void HideBookmarksPanelOverlayMacOS();
+bool IsBookmarksPanelOverlayVisible();
+bool WasBookmarksPanelJustHidden();
+void CreateSiteInfoPanelOverlayMacOS(int iconLeftOffset);
+void ShowSiteInfoPanelOverlayMacOS(int iconLeftOffset);
+void HideSiteInfoPanelOverlayMacOS();
+bool IsSiteInfoPanelOverlayVisible();
+bool WasSiteInfoPanelJustHidden();
+void CreateTabListPanelOverlayMacOS(int iconLeftOffset);
+void ShowTabListPanelOverlayMacOS(int iconLeftOffset);
+void HideTabListPanelOverlayMacOS();
+bool IsTabListPanelOverlayVisible();
+bool WasTabListPanelJustHidden();
 void ShutdownApplication();
 void ToggleFullScreenMacOS();
 
@@ -2304,10 +2335,18 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
 }
 
 - (BOOL)windowShouldClose:(NSWindow *)sender {
-    // Reject close if it's a cascade from tab/browser teardown (not user-initiated)
+    // Reject close if any tab in this window is mid-close (async CloseBrowser
+    // triggers focus changes that cascade to windowShouldClose via the responder
+    // chain). Check both the synchronous guard AND per-tab is_closing state.
     if (g_closing_tab) {
         LOG_WARNING("❌ Window close rejected — tab close in progress (responder chain cascade)");
         return NO;
+    }
+    for (auto* tab : TabManager::GetInstance().GetAllTabs()) {
+        if (tab->window_id == 0 && tab->is_closing) {
+            LOG_WARNING("❌ Window close rejected — tab " + std::to_string(tab->id) + " still closing async");
+            return NO;
+        }
     }
 
     // Close only this window's tabs and remove the window record. Do NOT call
@@ -3766,7 +3805,7 @@ void ShowOmniboxOverlayMacOS() {
         int omniboxHeight = 420;
         CGFloat overlayX = contentScreen.origin.x + (contentScreen.size.width - omniboxWidth) / 2;
         CGFloat contentTop = contentScreen.origin.y + contentScreen.size.height;
-        CGFloat overlayY = contentTop - 78 - omniboxHeight;
+        CGFloat overlayY = contentTop - 96 - omniboxHeight;
         [g_omnibox_overlay_window setFrame:NSMakeRect(overlayX, overlayY, omniboxWidth, omniboxHeight) display:YES];
 
         [g_omnibox_overlay_window orderFront:nil];
@@ -3786,7 +3825,7 @@ void CreateOmniboxOverlayMacOS() {
     // Center horizontally, position below header
     CGFloat overlayX = contentScreen.origin.x + (contentScreen.size.width - omniboxWidth) / 2;
     CGFloat contentTop = contentScreen.origin.y + contentScreen.size.height;
-    CGFloat overlayY = contentTop - 78 - omniboxHeight;
+    CGFloat overlayY = contentTop - 96 - omniboxHeight;
     NSRect omniboxFrame = NSMakeRect(overlayX, overlayY, omniboxWidth, omniboxHeight);
 
     // Keep-alive: don't destroy existing window
@@ -4115,6 +4154,427 @@ void CreateProfilePanelOverlayMacOS(int iconRightOffset) {
     [g_profile_panel_overlay_window makeFirstResponder:contentView];
     InstallProfilePanelClickOutsideMonitor();
     LOG_INFO("Profile panel overlay created successfully");
+}
+
+// ============================================================================
+// Left-anchored overlay frame helper (for bookmarks, site-info, tab-list)
+// ============================================================================
+
+static NSRect CalculateLeftAnchoredOverlayFrame(NSWindow* mainWindow, CGFloat width, CGFloat height, CGFloat toolbarHeight, int iconLeftOffset) {
+    NSRect contentScreen = [mainWindow convertRectToScreen:[[mainWindow contentView] frame]];
+    CGFloat x = contentScreen.origin.x + (CGFloat)iconLeftOffset;
+    CGFloat contentTop = contentScreen.origin.y + contentScreen.size.height;
+    CGFloat y = contentTop - toolbarHeight - height;
+
+    // Clamp to screen
+    NSRect screenFrame = [[mainWindow screen] visibleFrame];
+    if (x + width > NSMaxX(screenFrame)) x = NSMaxX(screenFrame) - width;
+    if (x < NSMinX(screenFrame)) x = NSMinX(screenFrame);
+    if (y < NSMinY(screenFrame)) y = NSMinY(screenFrame);
+
+    return NSMakeRect(x, y, width, height);
+}
+
+// ============================================================================
+// Bookmarks Panel Overlay (macOS) — A5
+// ============================================================================
+
+static void RemoveBookmarksPanelClickOutsideMonitor() {
+    if (g_bookmarks_panel_click_monitor) {
+        [NSEvent removeMonitor:g_bookmarks_panel_click_monitor];
+        g_bookmarks_panel_click_monitor = nil;
+    }
+}
+
+static void InstallBookmarksPanelClickOutsideMonitor() {
+    if (g_bookmarks_panel_click_monitor) return;
+
+    g_bookmarks_panel_click_monitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown
+        handler:^NSEvent*(NSEvent* event) {
+            if (!g_bookmarks_panel_overlay_window || ![g_bookmarks_panel_overlay_window isVisible]) {
+                return event;
+            }
+            if (g_file_dialog_active) {
+                return event;
+            }
+            NSPoint screenLocation = [NSEvent mouseLocation];
+            NSRect overlayFrame = [g_bookmarks_panel_overlay_window frame];
+            if (!NSPointInRect(screenLocation, overlayFrame)) {
+                [g_bookmarks_panel_overlay_window orderOut:nil];
+                RemoveBookmarksPanelClickOutsideMonitor();
+                g_bookmarks_panel_last_hide_time = CFAbsoluteTimeGetCurrent();
+            }
+            return event;
+        }];
+}
+
+void HideBookmarksPanelOverlayMacOS() {
+    if (g_bookmarks_panel_overlay_window) {
+        [g_bookmarks_panel_overlay_window orderOut:nil];
+        RemoveBookmarksPanelClickOutsideMonitor();
+        g_bookmarks_panel_last_hide_time = CFAbsoluteTimeGetCurrent();
+        LOG_INFO("Bookmarks panel overlay hidden (macOS)");
+    }
+}
+
+bool IsBookmarksPanelOverlayVisible() {
+    return g_bookmarks_panel_overlay_window && [g_bookmarks_panel_overlay_window isVisible];
+}
+
+bool WasBookmarksPanelJustHidden() {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    return (now - g_bookmarks_panel_last_hide_time) < 0.3;
+}
+
+void ShowBookmarksPanelOverlayMacOS(int iconLeftOffset) {
+    if (g_bookmarks_panel_overlay_window) {
+        NSRect panelFrame = CalculateLeftAnchoredOverlayFrame(g_main_window, 380, 520, 96, iconLeftOffset);
+        [g_bookmarks_panel_overlay_window setFrame:panelFrame display:YES];
+
+        [g_bookmarks_panel_overlay_window makeKeyAndOrderFront:nil];
+        NSView* cv = [g_bookmarks_panel_overlay_window contentView];
+        [g_bookmarks_panel_overlay_window makeFirstResponder:cv];
+        InstallBookmarksPanelClickOutsideMonitor();
+        LOG_INFO("Bookmarks panel overlay shown (macOS)");
+    }
+}
+
+void CreateBookmarksPanelOverlayMacOS(int iconLeftOffset) {
+    LOG_INFO("Creating bookmarks panel overlay (macOS) iconLeftOffset=" + std::to_string(iconLeftOffset));
+
+    CGFloat panelWidth = 380;
+    CGFloat panelHeight = 520;
+    NSRect panelFrame = CalculateLeftAnchoredOverlayFrame(g_main_window, panelWidth, panelHeight, 96, iconLeftOffset);
+
+    if (g_bookmarks_panel_overlay_window) {
+        [g_bookmarks_panel_overlay_window close];
+        g_bookmarks_panel_overlay_window = nullptr;
+    }
+
+    g_bookmarks_panel_overlay_window = [[DropdownOverlayWindow alloc]
+        initWithContentRect:panelFrame
+        styleMask:NSWindowStyleMaskBorderless
+        backing:NSBackingStoreBuffered
+        defer:NO];
+
+    if (!g_bookmarks_panel_overlay_window) {
+        LOG_ERROR("Failed to create bookmarks panel overlay window");
+        return;
+    }
+
+    [g_bookmarks_panel_overlay_window setOpaque:NO];
+    [g_bookmarks_panel_overlay_window setBackgroundColor:[NSColor clearColor]];
+    [g_bookmarks_panel_overlay_window setLevel:NSPopUpMenuWindowLevel];
+    [g_bookmarks_panel_overlay_window setIgnoresMouseEvents:NO];
+    [g_bookmarks_panel_overlay_window setReleasedWhenClosed:NO];
+    [g_bookmarks_panel_overlay_window setHasShadow:YES];
+    [g_bookmarks_panel_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
+    [g_bookmarks_panel_overlay_window setAcceptsMouseMovedEvents:YES];
+
+    DropdownOverlayView* contentView = [[DropdownOverlayView alloc]
+        initWithFrame:NSMakeRect(0, 0, panelWidth, panelHeight)];
+    contentView.browserAccessor = ^CefRefPtr<CefBrowser>{ return SimpleHandler::GetBookmarksPanelBrowser(); };
+    [g_bookmarks_panel_overlay_window setContentView:contentView];
+
+    CefWindowInfo window_info;
+    window_info.SetAsWindowless((__bridge void*)contentView);
+
+    CefBrowserSettings settings;
+    settings.windowless_frame_rate = 30;
+    settings.background_color = CefColorSetARGB(0, 0, 0, 0);
+    settings.javascript = STATE_ENABLED;
+    settings.javascript_access_clipboard = STATE_ENABLED;
+    settings.javascript_dom_paste = STATE_ENABLED;
+
+    CefRefPtr<SimpleHandler> handler(new SimpleHandler("bookmarkspanel"));
+    CefRefPtr<MyOverlayRenderHandler> render_handler =
+        new MyOverlayRenderHandler((__bridge void*)contentView, (int)panelWidth, (int)panelHeight);
+    handler->SetRenderHandler(render_handler);
+
+    bool result = CefBrowserHost::CreateBrowser(
+        window_info, handler,
+        "http://127.0.0.1:5137/bookmarks",
+        settings, nullptr, CefRequestContext::GetGlobalContext());
+
+    if (!result) {
+        LOG_ERROR("Failed to create bookmarks panel overlay CEF browser");
+        return;
+    }
+
+    [g_bookmarks_panel_overlay_window makeKeyAndOrderFront:nil];
+    [g_bookmarks_panel_overlay_window makeFirstResponder:contentView];
+    InstallBookmarksPanelClickOutsideMonitor();
+    LOG_INFO("Bookmarks panel overlay created successfully");
+}
+
+// ============================================================================
+// Site-Info Panel Overlay (macOS) — A6
+// ============================================================================
+
+static void RemoveSiteInfoPanelClickOutsideMonitor() {
+    if (g_siteinfo_panel_click_monitor) {
+        [NSEvent removeMonitor:g_siteinfo_panel_click_monitor];
+        g_siteinfo_panel_click_monitor = nil;
+    }
+}
+
+static void InstallSiteInfoPanelClickOutsideMonitor() {
+    if (g_siteinfo_panel_click_monitor) return;
+
+    g_siteinfo_panel_click_monitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown
+        handler:^NSEvent*(NSEvent* event) {
+            if (!g_siteinfo_panel_overlay_window || ![g_siteinfo_panel_overlay_window isVisible]) {
+                return event;
+            }
+            if (g_file_dialog_active) {
+                return event;
+            }
+            NSPoint screenLocation = [NSEvent mouseLocation];
+            NSRect overlayFrame = [g_siteinfo_panel_overlay_window frame];
+            if (!NSPointInRect(screenLocation, overlayFrame)) {
+                [g_siteinfo_panel_overlay_window orderOut:nil];
+                RemoveSiteInfoPanelClickOutsideMonitor();
+                g_siteinfo_panel_last_hide_time = CFAbsoluteTimeGetCurrent();
+            }
+            return event;
+        }];
+}
+
+void HideSiteInfoPanelOverlayMacOS() {
+    if (g_siteinfo_panel_overlay_window) {
+        [g_siteinfo_panel_overlay_window orderOut:nil];
+        RemoveSiteInfoPanelClickOutsideMonitor();
+        g_siteinfo_panel_last_hide_time = CFAbsoluteTimeGetCurrent();
+        LOG_INFO("Site-info panel overlay hidden (macOS)");
+    }
+}
+
+bool IsSiteInfoPanelOverlayVisible() {
+    return g_siteinfo_panel_overlay_window && [g_siteinfo_panel_overlay_window isVisible];
+}
+
+bool WasSiteInfoPanelJustHidden() {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    return (now - g_siteinfo_panel_last_hide_time) < 0.3;
+}
+
+void ShowSiteInfoPanelOverlayMacOS(int iconLeftOffset) {
+    if (g_siteinfo_panel_overlay_window) {
+        NSRect panelFrame = CalculateLeftAnchoredOverlayFrame(g_main_window, 360, 480, 96, iconLeftOffset);
+        [g_siteinfo_panel_overlay_window setFrame:panelFrame display:YES];
+
+        [g_siteinfo_panel_overlay_window makeKeyAndOrderFront:nil];
+        InstallSiteInfoPanelClickOutsideMonitor();
+        LOG_INFO("Site-info panel overlay shown (macOS)");
+    }
+}
+
+void CreateSiteInfoPanelOverlayMacOS(int iconLeftOffset) {
+    LOG_INFO("Creating site-info panel overlay (macOS) iconLeftOffset=" + std::to_string(iconLeftOffset));
+
+    CGFloat panelWidth = 360;
+    CGFloat panelHeight = 480;
+    NSRect panelFrame = CalculateLeftAnchoredOverlayFrame(g_main_window, panelWidth, panelHeight, 96, iconLeftOffset);
+
+    if (g_siteinfo_panel_overlay_window) {
+        [g_siteinfo_panel_overlay_window close];
+        g_siteinfo_panel_overlay_window = nullptr;
+    }
+
+    g_siteinfo_panel_overlay_window = [[DropdownOverlayWindow alloc]
+        initWithContentRect:panelFrame
+        styleMask:NSWindowStyleMaskBorderless
+        backing:NSBackingStoreBuffered
+        defer:NO];
+
+    if (!g_siteinfo_panel_overlay_window) {
+        LOG_ERROR("Failed to create site-info panel overlay window");
+        return;
+    }
+
+    [g_siteinfo_panel_overlay_window setOpaque:NO];
+    [g_siteinfo_panel_overlay_window setBackgroundColor:[NSColor clearColor]];
+    [g_siteinfo_panel_overlay_window setLevel:NSPopUpMenuWindowLevel];
+    [g_siteinfo_panel_overlay_window setIgnoresMouseEvents:NO];
+    [g_siteinfo_panel_overlay_window setReleasedWhenClosed:NO];
+    [g_siteinfo_panel_overlay_window setHasShadow:YES];
+    [g_siteinfo_panel_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
+    [g_siteinfo_panel_overlay_window setAcceptsMouseMovedEvents:YES];
+
+    DropdownOverlayView* contentView = [[DropdownOverlayView alloc]
+        initWithFrame:NSMakeRect(0, 0, panelWidth, panelHeight)];
+    contentView.browserAccessor = ^CefRefPtr<CefBrowser>{ return SimpleHandler::GetSiteInfoPanelBrowser(); };
+    [g_siteinfo_panel_overlay_window setContentView:contentView];
+
+    CefWindowInfo window_info;
+    window_info.SetAsWindowless((__bridge void*)contentView);
+
+    CefBrowserSettings settings;
+    settings.windowless_frame_rate = 30;
+    settings.background_color = CefColorSetARGB(0, 0, 0, 0);
+    settings.javascript = STATE_ENABLED;
+    settings.javascript_access_clipboard = STATE_ENABLED;
+    settings.javascript_dom_paste = STATE_ENABLED;
+
+    CefRefPtr<SimpleHandler> handler(new SimpleHandler("siteinfopanel"));
+    CefRefPtr<MyOverlayRenderHandler> render_handler =
+        new MyOverlayRenderHandler((__bridge void*)contentView, (int)panelWidth, (int)panelHeight);
+    handler->SetRenderHandler(render_handler);
+
+    bool result = CefBrowserHost::CreateBrowser(
+        window_info, handler,
+        "http://127.0.0.1:5137/site-info",
+        settings, nullptr, CefRequestContext::GetGlobalContext());
+
+    if (!result) {
+        LOG_ERROR("Failed to create site-info panel overlay CEF browser");
+        return;
+    }
+
+    [g_siteinfo_panel_overlay_window makeKeyAndOrderFront:nil];
+    InstallSiteInfoPanelClickOutsideMonitor();
+    LOG_INFO("Site-info panel overlay created successfully");
+}
+
+// ============================================================================
+// Tab-List Panel Overlay (macOS) — A7
+// ============================================================================
+
+static void RemoveTabListPanelClickOutsideMonitor() {
+    if (g_tablist_panel_click_monitor) {
+        [NSEvent removeMonitor:g_tablist_panel_click_monitor];
+        g_tablist_panel_click_monitor = nil;
+    }
+}
+
+static void InstallTabListPanelClickOutsideMonitor() {
+    if (g_tablist_panel_click_monitor) return;
+
+    g_tablist_panel_click_monitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown
+        handler:^NSEvent*(NSEvent* event) {
+            if (!g_tablist_panel_overlay_window || ![g_tablist_panel_overlay_window isVisible]) {
+                return event;
+            }
+            if (g_file_dialog_active) {
+                return event;
+            }
+            NSPoint screenLocation = [NSEvent mouseLocation];
+            NSRect overlayFrame = [g_tablist_panel_overlay_window frame];
+            if (!NSPointInRect(screenLocation, overlayFrame)) {
+                [g_tablist_panel_overlay_window orderOut:nil];
+                RemoveTabListPanelClickOutsideMonitor();
+                g_tablist_panel_last_hide_time = CFAbsoluteTimeGetCurrent();
+            }
+            return event;
+        }];
+}
+
+void HideTabListPanelOverlayMacOS() {
+    if (g_tablist_panel_overlay_window) {
+        [g_tablist_panel_overlay_window orderOut:nil];
+        RemoveTabListPanelClickOutsideMonitor();
+        g_tablist_panel_last_hide_time = CFAbsoluteTimeGetCurrent();
+        LOG_INFO("Tab-list panel overlay hidden (macOS)");
+    }
+}
+
+bool IsTabListPanelOverlayVisible() {
+    return g_tablist_panel_overlay_window && [g_tablist_panel_overlay_window isVisible];
+}
+
+bool WasTabListPanelJustHidden() {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    return (now - g_tablist_panel_last_hide_time) < 0.3;
+}
+
+void ShowTabListPanelOverlayMacOS(int iconLeftOffset) {
+    if (g_tablist_panel_overlay_window) {
+        NSRect panelFrame = CalculateLeftAnchoredOverlayFrame(g_main_window, 340, 480, 96, iconLeftOffset);
+        [g_tablist_panel_overlay_window setFrame:panelFrame display:YES];
+
+        [g_tablist_panel_overlay_window makeKeyAndOrderFront:nil];
+        NSView* cv = [g_tablist_panel_overlay_window contentView];
+        [g_tablist_panel_overlay_window makeFirstResponder:cv];
+        InstallTabListPanelClickOutsideMonitor();
+
+        // Inject tabListRefresh on (re)show
+        CefRefPtr<CefBrowser> tl_browser = SimpleHandler::GetTabListPanelBrowser();
+        if (tl_browser && tl_browser->GetMainFrame()) {
+            tl_browser->GetMainFrame()->ExecuteJavaScript(
+                "if(window.tabListRefresh)window.tabListRefresh();",
+                tl_browser->GetMainFrame()->GetURL(), 0);
+        }
+
+        LOG_INFO("Tab-list panel overlay shown (macOS)");
+    }
+}
+
+void CreateTabListPanelOverlayMacOS(int iconLeftOffset) {
+    LOG_INFO("Creating tab-list panel overlay (macOS) iconLeftOffset=" + std::to_string(iconLeftOffset));
+
+    CGFloat panelWidth = 340;
+    CGFloat panelHeight = 480;
+    NSRect panelFrame = CalculateLeftAnchoredOverlayFrame(g_main_window, panelWidth, panelHeight, 96, iconLeftOffset);
+
+    if (g_tablist_panel_overlay_window) {
+        [g_tablist_panel_overlay_window close];
+        g_tablist_panel_overlay_window = nullptr;
+    }
+
+    g_tablist_panel_overlay_window = [[DropdownOverlayWindow alloc]
+        initWithContentRect:panelFrame
+        styleMask:NSWindowStyleMaskBorderless
+        backing:NSBackingStoreBuffered
+        defer:NO];
+
+    if (!g_tablist_panel_overlay_window) {
+        LOG_ERROR("Failed to create tab-list panel overlay window");
+        return;
+    }
+
+    [g_tablist_panel_overlay_window setOpaque:NO];
+    [g_tablist_panel_overlay_window setBackgroundColor:[NSColor clearColor]];
+    [g_tablist_panel_overlay_window setLevel:NSPopUpMenuWindowLevel];
+    [g_tablist_panel_overlay_window setIgnoresMouseEvents:NO];
+    [g_tablist_panel_overlay_window setReleasedWhenClosed:NO];
+    [g_tablist_panel_overlay_window setHasShadow:YES];
+    [g_tablist_panel_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
+    [g_tablist_panel_overlay_window setAcceptsMouseMovedEvents:YES];
+
+    DropdownOverlayView* contentView = [[DropdownOverlayView alloc]
+        initWithFrame:NSMakeRect(0, 0, panelWidth, panelHeight)];
+    contentView.browserAccessor = ^CefRefPtr<CefBrowser>{ return SimpleHandler::GetTabListPanelBrowser(); };
+    [g_tablist_panel_overlay_window setContentView:contentView];
+
+    CefWindowInfo window_info;
+    window_info.SetAsWindowless((__bridge void*)contentView);
+
+    CefBrowserSettings settings;
+    settings.windowless_frame_rate = 30;
+    settings.background_color = CefColorSetARGB(0, 0, 0, 0);
+    settings.javascript = STATE_ENABLED;
+    settings.javascript_access_clipboard = STATE_ENABLED;
+    settings.javascript_dom_paste = STATE_ENABLED;
+
+    CefRefPtr<SimpleHandler> handler(new SimpleHandler("tablistpanel"));
+    CefRefPtr<MyOverlayRenderHandler> render_handler =
+        new MyOverlayRenderHandler((__bridge void*)contentView, (int)panelWidth, (int)panelHeight);
+    handler->SetRenderHandler(render_handler);
+
+    bool result = CefBrowserHost::CreateBrowser(
+        window_info, handler,
+        "http://127.0.0.1:5137/tab-list",
+        settings, nullptr, CefRequestContext::GetGlobalContext());
+
+    if (!result) {
+        LOG_ERROR("Failed to create tab-list panel overlay CEF browser");
+        return;
+    }
+
+    [g_tablist_panel_overlay_window makeKeyAndOrderFront:nil];
+    [g_tablist_panel_overlay_window makeFirstResponder:contentView];
+    InstallTabListPanelClickOutsideMonitor();
+    LOG_INFO("Tab-list panel overlay created successfully");
 }
 
 // ============================================================================
@@ -4717,6 +5177,13 @@ int main(int argc, char* argv[]) {
         // Initialize BookmarkManager
         BookmarkManager::GetInstance().Initialize(profile_cache);
         LOG_INFO("BookmarkManager initialized");
+
+        // Initialize SitePermissionStore (persists Allow/Block site permissions)
+        if (SitePermissionStore::GetInstance().Initialize(profile_cache)) {
+            LOG_INFO("SitePermissionStore initialized successfully");
+        } else {
+            LOG_ERROR("Failed to initialize SitePermissionStore");
+        }
 
         // Initialize PaidContentCache (BRC-121 paid response cache)
         if (PaidContentCache::GetInstance().Initialize(profile_cache)) {

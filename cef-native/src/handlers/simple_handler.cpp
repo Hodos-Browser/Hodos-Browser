@@ -1641,6 +1641,20 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
     LOG_DEBUG_BROWSER("🧭 Browser Created → role: " + role_ + ", ID: " + std::to_string(browser->GetIdentifier()) + ", IsPopup: " + (browser->IsPopup() ? "true" : "false") + ", MainFrame URL: " + browser->GetMainFrame()->GetURL().ToString());
 }
 
+bool SimpleHandler::DoClose(CefRefPtr<CefBrowser> browser) {
+    CEF_REQUIRE_UI_THREAD();
+#if defined(__APPLE__)
+    int tab_id = ExtractTabIdFromRole(role_);
+    if (tab_id != -1) {
+        // Tab browser embedded in a shared window. Return true to prevent
+        // CEF from sending performClose: to the parent NSWindow (which would
+        // cascade-close ALL tabs). Cleanup happens in OnBeforeClose.
+        return true;
+    }
+#endif
+    return false;
+}
+
 void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
     CEF_REQUIRE_UI_THREAD();
 
@@ -1982,6 +1996,9 @@ bool SimpleHandler::OnProcessMessageReceived(
             int tab_id = args->GetInt(0);
             bool success = TabManager::GetInstance().SwitchToTab(tab_id);
 
+            if (success) {
+                NotifyWindowTabListChanged(window_id_);
+            }
             LOG_DEBUG_BROWSER("📑 Tab switch: ID " + std::to_string(tab_id) +
                              (success ? " succeeded" : " failed"));
         }
@@ -2786,6 +2803,27 @@ bool SimpleHandler::OnProcessMessageReceived(
                 }
             }
             LOG_DEBUG_BROWSER("🔖 Bookmarks panel opened from menu");
+#elif defined(__APPLE__)
+            extern void CreateBookmarksPanelOverlayMacOS(int iconLeftOffset);
+            extern void ShowBookmarksPanelOverlayMacOS(int iconLeftOffset);
+            extern NSWindow* g_bookmarks_panel_overlay_window;
+            Tab* bmActiveTab = TabManager::GetInstance().GetActiveTab();
+            pending_bookmark_url_ = bmActiveTab ? bmActiveTab->url : "";
+            pending_bookmark_title_ = bmActiveTab ? bmActiveTab->title : "";
+            int bmDefOff = 140;  // approximate anchor near bookmark button (points)
+            if (!g_bookmarks_panel_overlay_window) {
+                CreateBookmarksPanelOverlayMacOS(bmDefOff);
+            } else {
+                ShowBookmarksPanelOverlayMacOS(bmDefOff);
+                CefRefPtr<CefBrowser> bm_browser = GetBookmarksPanelBrowser();
+                if (bm_browser && bm_browser->GetMainFrame()) {
+                    std::string js = "if (window.setBookmarkContext) { window.setBookmarkContext('" +
+                        EscapeForSingleQuotedJs(pending_bookmark_url_) + "', '" +
+                        EscapeForSingleQuotedJs(pending_bookmark_title_) + "'); }";
+                    bm_browser->GetMainFrame()->ExecuteJavaScript(js, bm_browser->GetMainFrame()->GetURL(), 0);
+                }
+            }
+            LOG_DEBUG_BROWSER("Bookmarks panel opened from menu (macOS)");
 #endif
         }
 
@@ -6667,8 +6705,38 @@ bool SimpleHandler::OnProcessMessageReceived(
         }
         LOG_DEBUG_BROWSER("🔖 Bookmarks panel toggle handled (iconLeftOffset=" + std::to_string(iconLeftOffset) + ")");
 #elif defined(__APPLE__)
-        // macOS bookmarks overlay creation is a TODO for the Mac sprint.
-        LOG_DEBUG_BROWSER("Bookmarks panel overlay not yet implemented on macOS");
+        extern void CreateBookmarksPanelOverlayMacOS(int iconLeftOffset);
+        extern void ShowBookmarksPanelOverlayMacOS(int iconLeftOffset);
+        extern void HideBookmarksPanelOverlayMacOS();
+        extern bool IsBookmarksPanelOverlayVisible();
+        extern bool WasBookmarksPanelJustHidden();
+        extern NSWindow* g_bookmarks_panel_overlay_window;
+
+        bool willShow = true;
+        if (!g_bookmarks_panel_overlay_window) {
+            CreateBookmarksPanelOverlayMacOS(iconLeftOffset);
+        } else if (IsBookmarksPanelOverlayVisible()) {
+            HideBookmarksPanelOverlayMacOS();
+            willShow = false;
+            pending_bookmark_url_.clear();
+            pending_bookmark_title_.clear();
+        } else if (WasBookmarksPanelJustHidden()) {
+            willShow = false;
+            pending_bookmark_url_.clear();
+            pending_bookmark_title_.clear();
+        } else {
+            ShowBookmarksPanelOverlayMacOS(iconLeftOffset);
+        }
+
+        if (willShow) {
+            CefRefPtr<CefBrowser> bm_browser = GetBookmarksPanelBrowser();
+            if (bm_browser && bm_browser->GetMainFrame()) {
+                std::string js = "if (window.setBookmarkContext) { window.setBookmarkContext('" +
+                    EscapeForSingleQuotedJs(bmUrl) + "', '" + EscapeForSingleQuotedJs(bmTitle) + "'); }";
+                bm_browser->GetMainFrame()->ExecuteJavaScript(js, bm_browser->GetMainFrame()->GetURL(), 0);
+            }
+        }
+        LOG_DEBUG_BROWSER("Bookmarks panel toggle handled (macOS, iconLeftOffset=" + std::to_string(iconLeftOffset) + ")");
 #endif
         return true;
     }
@@ -6678,6 +6746,10 @@ bool SimpleHandler::OnProcessMessageReceived(
         extern void HideBookmarksPanelOverlay();
         HideBookmarksPanelOverlay();
         LOG_DEBUG_BROWSER("🔖 Bookmarks panel overlay hidden");
+#elif defined(__APPLE__)
+        extern void HideBookmarksPanelOverlayMacOS();
+        HideBookmarksPanelOverlayMacOS();
+        LOG_DEBUG_BROWSER("Bookmarks panel overlay hidden (macOS)");
 #endif
         return true;
     }
@@ -6707,7 +6779,23 @@ bool SimpleHandler::OnProcessMessageReceived(
         }
         LOG_DEBUG_BROWSER("🗂️ Tab-list panel toggle (iconLeftOffset=" + std::to_string(iconLeftOffset) + ")");
 #elif defined(__APPLE__)
-        LOG_DEBUG_BROWSER("Tab-list panel overlay not yet implemented on macOS");
+        extern void CreateTabListPanelOverlayMacOS(int iconLeftOffset);
+        extern void ShowTabListPanelOverlayMacOS(int iconLeftOffset);
+        extern void HideTabListPanelOverlayMacOS();
+        extern bool IsTabListPanelOverlayVisible();
+        extern bool WasTabListPanelJustHidden();
+        extern NSWindow* g_tablist_panel_overlay_window;
+
+        if (!g_tablist_panel_overlay_window) {
+            CreateTabListPanelOverlayMacOS(iconLeftOffset);
+        } else if (IsTabListPanelOverlayVisible()) {
+            HideTabListPanelOverlayMacOS();
+        } else if (WasTabListPanelJustHidden()) {
+            // Suppress re-show — the click-outside monitor just hid it
+        } else {
+            ShowTabListPanelOverlayMacOS(iconLeftOffset);
+        }
+        LOG_DEBUG_BROWSER("Tab-list panel toggle handled (macOS, iconLeftOffset=" + std::to_string(iconLeftOffset) + ")");
 #endif
         return true;
     }
@@ -6717,6 +6805,10 @@ bool SimpleHandler::OnProcessMessageReceived(
         extern void HideTabListPanelOverlay();
         HideTabListPanelOverlay();
         LOG_DEBUG_BROWSER("🗂️ Tab-list panel overlay hidden");
+#elif defined(__APPLE__)
+        extern void HideTabListPanelOverlayMacOS();
+        HideTabListPanelOverlayMacOS();
+        LOG_DEBUG_BROWSER("Tab-list panel overlay hidden (macOS)");
 #endif
         return true;
     }
@@ -6803,8 +6895,38 @@ bool SimpleHandler::OnProcessMessageReceived(
         }
         LOG_DEBUG_BROWSER("🛈 Site-info panel toggle handled (iconLeftOffset=" + std::to_string(iconLeftOffset) + ")");
 #elif defined(__APPLE__)
-        // macOS site-info overlay creation is a TODO for the Mac sprint.
-        LOG_DEBUG_BROWSER("Site-info panel overlay not yet implemented on macOS");
+        extern void CreateSiteInfoPanelOverlayMacOS(int iconLeftOffset);
+        extern void ShowSiteInfoPanelOverlayMacOS(int iconLeftOffset);
+        extern void HideSiteInfoPanelOverlayMacOS();
+        extern bool IsSiteInfoPanelOverlayVisible();
+        extern bool WasSiteInfoPanelJustHidden();
+        extern NSWindow* g_siteinfo_panel_overlay_window;
+
+        bool willShow = true;
+        if (!g_siteinfo_panel_overlay_window) {
+            CreateSiteInfoPanelOverlayMacOS(iconLeftOffset);
+        } else if (IsSiteInfoPanelOverlayVisible()) {
+            HideSiteInfoPanelOverlayMacOS();
+            willShow = false;
+            pending_siteinfo_host_.clear();
+            pending_siteinfo_security_.clear();
+        } else if (WasSiteInfoPanelJustHidden()) {
+            willShow = false;
+            pending_siteinfo_host_.clear();
+            pending_siteinfo_security_.clear();
+        } else {
+            ShowSiteInfoPanelOverlayMacOS(iconLeftOffset);
+        }
+
+        if (willShow) {
+            CefRefPtr<CefBrowser> si_browser = GetSiteInfoPanelBrowser();
+            if (si_browser && si_browser->GetMainFrame()) {
+                std::string js = "if (window.setSiteInfoContext) { window.setSiteInfoContext('" +
+                    EscapeForSingleQuotedJs(siHost) + "', '" + EscapeForSingleQuotedJs(siSecurity) + "'); }";
+                si_browser->GetMainFrame()->ExecuteJavaScript(js, si_browser->GetMainFrame()->GetURL(), 0);
+            }
+        }
+        LOG_DEBUG_BROWSER("Site-info panel toggle handled (macOS, iconLeftOffset=" + std::to_string(iconLeftOffset) + ")");
 #endif
         return true;
     }
@@ -6814,6 +6936,10 @@ bool SimpleHandler::OnProcessMessageReceived(
         extern void HideSiteInfoPanelOverlay();
         HideSiteInfoPanelOverlay();
         LOG_DEBUG_BROWSER("🛈 Site-info panel overlay hidden");
+#elif defined(__APPLE__)
+        extern void HideSiteInfoPanelOverlayMacOS();
+        HideSiteInfoPanelOverlayMacOS();
+        LOG_DEBUG_BROWSER("Site-info panel overlay hidden (macOS)");
 #endif
         return true;
     }
@@ -6970,6 +7096,14 @@ bool SimpleHandler::OnProcessMessageReceived(
         if (g_pendingModalDomain.empty() &&
             g_notification_overlay_hwnd && IsWindow(g_notification_overlay_hwnd)) {
             ShowWindow(g_notification_overlay_hwnd, SW_HIDE);
+            CefRefPtr<CefBrowser> notif = GetNotificationBrowser();
+            if (notif && notif->GetMainFrame()) {
+                notif->GetMainFrame()->ExecuteJavaScript("window.hideNotification && window.hideNotification()", "", 0);
+            }
+        }
+#elif defined(__APPLE__)
+        if (g_pendingModalDomain.empty()) {
+            HideNotificationOverlayWindow();
             CefRefPtr<CefBrowser> notif = GetNotificationBrowser();
             if (notif && notif->GetMainFrame()) {
                 notif->GetMainFrame()->ExecuteJavaScript("window.hideNotification && window.hideNotification()", "", 0);
@@ -7700,6 +7834,17 @@ static bool FireHodosPermissionPrompt(const std::string& host, PendingPermission
     extern void CreateNotificationOverlay(HINSTANCE, const std::string&, const std::string&, const std::string&);
     CreateNotificationOverlay(g_hInstance, "permission_request", host, "&requestId=" + id + "&perm=" + permCode);
     return true;
+#elif defined(__APPLE__)
+    if (permCode.empty()) return false;
+    if (PendingPermissionManager::GetInstance().hasPending()) return false;
+    if (!g_pendingModalDomain.empty()) {
+        LOG_INFO_BROWSER("🔔 Permission prompt deferred to Chromium — a wallet modal owns the overlay (" + g_pendingModalDomain + ")");
+        return false;
+    }
+    std::string id = PendingPermissionManager::GetInstance().add(std::move(pr));
+    extern void CreateNotificationOverlay(const std::string& type, const std::string& domain, const std::string& extraParams);
+    CreateNotificationOverlay("permission_request", host, "&requestId=" + id + "&perm=" + permCode);
+    return true;
 #else
     (void)host; (void)pr; (void)permCode;
     return false;
@@ -7840,6 +7985,14 @@ void SimpleHandler::OnDismissPermissionPrompt(
         if (g_pendingModalDomain.empty() &&
             g_notification_overlay_hwnd && IsWindow(g_notification_overlay_hwnd)) {
             ShowWindow(g_notification_overlay_hwnd, SW_HIDE);
+            CefRefPtr<CefBrowser> notif = GetNotificationBrowser();
+            if (notif && notif->GetMainFrame()) {
+                notif->GetMainFrame()->ExecuteJavaScript("window.hideNotification && window.hideNotification()", "", 0);
+            }
+        }
+#elif defined(__APPLE__)
+        if (g_pendingModalDomain.empty()) {
+            HideNotificationOverlayWindow();
             CefRefPtr<CefBrowser> notif = GetNotificationBrowser();
             if (notif && notif->GetMainFrame()) {
                 notif->GetMainFrame()->ExecuteJavaScript("window.hideNotification && window.hideNotification()", "", 0);
@@ -8091,6 +8244,20 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
                     HideTabListPanelOverlay();  // toggle-close (Chrome parity)
                 } else {
                     ShowTabListPanelOverlay(g_tablist_icon_left_offset, GetOwnerWindow());
+                }
+#elif defined(__APPLE__)
+                extern void CreateTabListPanelOverlayMacOS(int iconLeftOffset);
+                extern void ShowTabListPanelOverlayMacOS(int iconLeftOffset);
+                extern void HideTabListPanelOverlayMacOS();
+                extern bool IsTabListPanelOverlayVisible();
+                extern NSWindow* g_tablist_panel_overlay_window;
+                int tlDefOff = 60;  // approximate anchor near tab-list icon (points)
+                if (!g_tablist_panel_overlay_window) {
+                    CreateTabListPanelOverlayMacOS(tlDefOff);
+                } else if (IsTabListPanelOverlayVisible()) {
+                    HideTabListPanelOverlayMacOS();
+                } else {
+                    ShowTabListPanelOverlayMacOS(tlDefOff);
                 }
 #endif
                 return true;

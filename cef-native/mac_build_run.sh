@@ -33,6 +33,23 @@ cp -r "HodosBrowser Helper.app" \
       "HodosBrowser Helper (Renderer).app" \
       HodosBrowser.app/Contents/Frameworks/
 
+# Ad-hoc sign with entitlements (required for macOS TCC: camera, mic, etc.)
+echo "Code signing with entitlements..."
+ENTITLEMENTS="$SCRIPT_DIR/mac/entitlements.plist"
+for helper in \
+    "HodosBrowser Helper.app" \
+    "HodosBrowser Helper (Alerts).app" \
+    "HodosBrowser Helper (GPU).app" \
+    "HodosBrowser Helper (Plugin).app" \
+    "HodosBrowser Helper (Renderer).app"; do
+    codesign --force --sign - --entitlements "$ENTITLEMENTS" \
+        "HodosBrowser.app/Contents/Frameworks/$helper"
+done
+codesign --force --sign - \
+    "HodosBrowser.app/Contents/Frameworks/Chromium Embedded Framework.framework"
+codesign --force --sign - --entitlements "$ENTITLEMENTS" \
+    "HodosBrowser.app"
+
 # Kill any existing instance
 pkill -9 HodosBrowser 2>/dev/null || true
 

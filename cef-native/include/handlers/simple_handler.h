@@ -144,6 +144,7 @@ public:
 
     void OnAfterCreated(CefRefPtr<CefBrowser> browser) override;
 
+    bool DoClose(CefRefPtr<CefBrowser> browser) override;
     void OnBeforeClose(CefRefPtr<CefBrowser> browser) override;
 
     bool OnBeforePopup(CefRefPtr<CefBrowser> browser,

@@ -28,6 +28,12 @@
 	<true/>
 	<key>NSSupportsAutomaticGraphicsSwitching</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Hodos Browser needs camera access for websites that request it, such as video calls.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Hodos Browser needs microphone access for websites that request it, such as video calls and voice recording.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Hodos Browser needs location access for websites that request it, such as maps and local search.</string>
 	<key>SUFeedURL</key>
 	<string>https://hodosbrowser.com/appcast.xml</string>
 	<key>SUPublicEDKey</key>

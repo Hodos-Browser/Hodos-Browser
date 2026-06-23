@@ -44,16 +44,32 @@ int main(int argc, char* argv[]) {
   // Create main args
   CefMainArgs main_args(argc, argv);
 
-  // Initialize HistoryManager for render processes (so V8 API can access it)
-  // Use same path as main process
+  // Initialize HistoryManager for render processes (so V8 API can access it).
+  // Parse --profile= from argv (propagated by SimpleApp::OnBeforeChildProcessLaunch)
+  // to use the correct per-profile history DB, matching the Windows render-process fix.
   NSArray* paths = NSSearchPathForDirectoriesInDomains(
       NSApplicationSupportDirectory, NSUserDomainMask, YES);
   if (paths && [paths count] > 0) {
       NSString* appSupport = [paths firstObject];
       NSString* hodosBrowserDir = [appSupport stringByAppendingPathComponent:
           [NSString stringWithUTF8String:AppPaths::GetAppDirName().c_str()]];
-      NSString* defaultDir = [hodosBrowserDir stringByAppendingPathComponent:@"Default"];
-      std::string cache_path = [defaultDir UTF8String];
+
+      std::string profileId;
+      for (int i = 1; i < argc; i++) {
+          std::string arg = argv[i];
+          if (arg.find("--profile=") == 0) {
+              profileId = arg.substr(10);
+              break;
+          }
+      }
+      if (profileId.empty() || profileId.find('/') != std::string::npos ||
+          profileId.find("..") != std::string::npos) {
+          profileId = "Default";
+      }
+
+      NSString* profileDir = [hodosBrowserDir stringByAppendingPathComponent:
+          [NSString stringWithUTF8String:profileId.c_str()]];
+      std::string cache_path = [profileDir UTF8String];
 
       HistoryManager::GetInstance().Initialize(cache_path);
   }

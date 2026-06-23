@@ -72,6 +72,22 @@ extern void ShutdownApplication();
 }
 
 - (BOOL)windowShouldClose:(NSWindow *)sender {
+    // Reject close if any tab in this window is mid-close (async CloseBrowser
+    // triggers focus changes that cascade to windowShouldClose via the responder
+    // chain). This guard catches both the synchronous cascade during CloseTab
+    // AND the async cascade from CEF's CloseBrowser cleanup.
+    extern bool g_closing_tab;
+    if (g_closing_tab) {
+        LOG_INFO_WM("Window close rejected — tab close in progress (responder chain cascade)");
+        return NO;
+    }
+    for (auto* tab : TabManager::GetInstance().GetAllTabs()) {
+        if (tab->window_id == self.window_id && tab->is_closing) {
+            LOG_INFO_WM("Window close rejected — tab " + std::to_string(tab->id) + " still closing async");
+            return NO;
+        }
+    }
+
     // Close only this window's tabs and remove the window record. Do NOT call
     // ShutdownApplication() on last window — macOS keeps the process alive
     // after all windows close (Chromium convention). Quit routes through

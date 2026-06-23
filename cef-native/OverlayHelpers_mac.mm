@@ -213,8 +213,29 @@ void InstallAppFocusLossHandler() {
                 HideMenuOverlay();
             }
 
-            // Future dropdown overlays (cookie panel, downloads, omnibox, profile picker)
-            // will be added here as they are ported.
+            // Close bookmarks panel overlay
+            extern NSWindow* g_bookmarks_panel_overlay_window;
+            if (g_bookmarks_panel_overlay_window && [g_bookmarks_panel_overlay_window isVisible]) {
+                LOG_INFO("OverlayHelpers: Closing bookmarks panel overlay on app focus loss");
+                extern void HideBookmarksPanelOverlayMacOS();
+                HideBookmarksPanelOverlayMacOS();
+            }
+
+            // Close site-info panel overlay
+            extern NSWindow* g_siteinfo_panel_overlay_window;
+            if (g_siteinfo_panel_overlay_window && [g_siteinfo_panel_overlay_window isVisible]) {
+                LOG_INFO("OverlayHelpers: Closing site-info panel overlay on app focus loss");
+                extern void HideSiteInfoPanelOverlayMacOS();
+                HideSiteInfoPanelOverlayMacOS();
+            }
+
+            // Close tab-list panel overlay
+            extern NSWindow* g_tablist_panel_overlay_window;
+            if (g_tablist_panel_overlay_window && [g_tablist_panel_overlay_window isVisible]) {
+                LOG_INFO("OverlayHelpers: Closing tab-list panel overlay on app focus loss");
+                extern void HideTabListPanelOverlayMacOS();
+                HideTabListPanelOverlayMacOS();
+            }
 
             // NOTE: Wallet overlay is NOT closed here. It has the prevent-close
             // exemption (user may Cmd+Tab to copy a mnemonic phrase). This matches
