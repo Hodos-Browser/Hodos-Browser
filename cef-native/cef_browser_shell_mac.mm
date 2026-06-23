@@ -321,6 +321,7 @@ std::atomic<bool> g_walletServerRunning{false};
 std::atomic<bool> g_adblockServerRunning{false};
 bool g_app_shutting_down = false;
 bool g_header_browser_loaded = false;
+bool g_picker_mode = false;
 
 // Convenience macros for easier logging
 #define LOG_DEBUG(msg) Logger::Log(msg, 0, 0)
@@ -2538,14 +2539,16 @@ void CreateMainWindow() {
     [g_main_window setDelegate:[[MainWindowDelegate alloc] init]];
     [g_main_window setReleasedWhenClosed:NO];  // We manage window lifecycle
 
-    // Calculate heights
-    int headerHeight = 96;         // Header with tabs (42px) + toolbar (54px)
-    int webviewHeight = screenRect.size.height - headerHeight;  // Full height below header
+    // In picker mode the header fills the entire window (no tab/webview area).
+    int headerHeight = g_picker_mode
+        ? (int)screenRect.size.height
+        : 96;  // Header with tabs (42px) + toolbar (54px)
+    int webviewHeight = (int)screenRect.size.height - headerHeight;
 
-    LOG_INFO("📐 Header height: " + std::to_string(headerHeight) + "px");
-    LOG_INFO("📐 Webview height: " + std::to_string(webviewHeight) + "px (full)");
+    LOG_INFO("📐 Header height: " + std::to_string(headerHeight) + "px" +
+             (g_picker_mode ? " [picker — full window]" : ""));
 
-    // Create header view (at very top)
+    // Create header view (at very top, or full window in picker mode)
     NSRect headerRect = NSMakeRect(0, screenRect.size.height - headerHeight,
                                    screenRect.size.width, headerHeight);
     g_header_view = [[NSView alloc] initWithFrame:headerRect];
@@ -2555,22 +2558,25 @@ void CreateMainWindow() {
         return;
     }
 
-    [g_header_view setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
+    [g_header_view setAutoresizingMask:NSViewWidthSizable | (g_picker_mode
+        ? NSViewHeightSizable : NSViewMinYMargin)];
     [[g_main_window contentView] addSubview:g_header_view];
     LOG_INFO("✅ Header view created at Y=" + std::to_string((int)headerRect.origin.y));
 
-    // Create webview/content area (full height below header)
-    NSRect webviewRect = NSMakeRect(0, 0, screenRect.size.width, webviewHeight);
-    g_webview_view = [[NSView alloc] initWithFrame:webviewRect];
+    if (!g_picker_mode) {
+        // Create webview/content area (full height below header)
+        NSRect webviewRect = NSMakeRect(0, 0, screenRect.size.width, webviewHeight);
+        g_webview_view = [[NSView alloc] initWithFrame:webviewRect];
 
-    if (!g_webview_view) {
-        LOG_ERROR("❌ Failed to create webview");
-        return;
+        if (!g_webview_view) {
+            LOG_ERROR("❌ Failed to create webview");
+            return;
+        }
+
+        [g_webview_view setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+        [[g_main_window contentView] addSubview:g_webview_view];
+        LOG_INFO("✅ Webview created (full height)");
     }
-
-    [g_webview_view setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
-    [[g_main_window contentView] addSubview:g_webview_view];
-    LOG_INFO("✅ Webview created (full height)");
 
     // Note: Wallet panel now uses overlay window approach (CreateWalletOverlayWithSeparateProcess)
     // instead of embedded view to maintain parity with Windows implementation
@@ -5097,18 +5103,12 @@ int main(int argc, char* argv[]) {
         }
 
         // Parse --profile argument from command line
-        // macOS: extract --profile from NSProcessInfo, then resolve via the shared
-        // CHUNK 1 + R5 + R7 logic. Picker MODE is Windows-first (no _mac.mm picker
-        // path yet), so macOS ignores res.showPicker and simply opens the resolved
-        // profile (= last-used for a no-arg launch with >1 profile). See
-        // PROFILE_STARTUP_PICKER_DESIGN.md §4 / MACOS_PORT_0_4_0.md TODO.
         std::string argProfile = "";
         NSArray* arguments = [[NSProcessInfo processInfo] arguments];
         for (NSString* arg in arguments) {
             std::string argStr = [arg UTF8String];
             if (argStr.find("--profile=") == 0) {
                 argProfile = argStr.substr(10);
-                // Remove quotes if present
                 if (!argProfile.empty() && argProfile.front() == '"') argProfile = argProfile.substr(1);
                 if (!argProfile.empty() && argProfile.back() == '"') argProfile.pop_back();
                 break;
@@ -5119,79 +5119,75 @@ int main(int argc, char* argv[]) {
         for (const auto& p : pm.GetAllProfiles()) existingIds.push_back(p.id);
         ProfileManager::StartupResolution res = ProfileManager::ResolveStartup(
             argProfile, existingIds, pm.GetDefaultProfileId(),
-            /*pickerEnabled=*/false);  // picker is Windows-first
+            pm.ShouldShowPickerOnStartup());
         std::string profileId = res.profileId;
+        g_picker_mode = res.showPicker;
         pm.SetCurrentProfileId(profileId, /*persist=*/false);
-        LOG_INFO("Using profile: " + profileId);
+        LOG_INFO("Using profile: " + profileId +
+                 (g_picker_mode ? " [picker mode]" : ""));
 
-        // Get profile-specific data directory
-        std::string profile_cache = ProfileManager::GetInstance().GetCurrentProfileDataPath();
-        LOG_INFO("Profile data path: " + profile_cache);
+        // Data directory: picker uses a neutral cache that touches no real profile.
+        std::string profile_cache = g_picker_mode
+            ? (user_data_path + "/.picker-cache")
+            : ProfileManager::GetInstance().GetCurrentProfileDataPath();
+        LOG_INFO(std::string(g_picker_mode ? "Picker cache path: " : "Profile data path: ") + profile_cache);
 
-        // Acquire exclusive lock on profile directory (prevents SQLite corruption)
-        if (!AcquireProfileLock(profile_cache)) {
-            NSAlert* alert = [[NSAlert alloc] init];
-            [alert setMessageText:@"Profile Locked"];
-            NSString* infoText = [NSString stringWithFormat:
-                @"Profile \"%s\" is already in use by another instance.\n\nClose the other instance first, or launch with a different profile.",
-                profileId.c_str()];
-            [alert setInformativeText:infoText];
-            [alert setAlertStyle:NSAlertStyleCritical];
-            [alert runModal];
-            return 1;
-        }
-        LOG_INFO("Profile lock acquired");
-
-        // Initialize SettingsManager with profile-specific path
-        SettingsManager::GetInstance().Initialize(profile_cache);
-        LOG_INFO("Settings loaded for profile: " + profileId);
-
-        // Internal UI pages also live on 127.0.0.1. Chromium persists zoom by
-        // host, so a user zoom on an internal tab can otherwise scale the header
-        // and overlay chrome across restarts.
-        ClearPersistedInternalFrontendZoom(profile_cache);
-
-        // Initialize AdblockCache with profile path (loads per-site settings)
-        AdblockCache::GetInstance().Initialize(profile_cache);
-        AdblockCache::GetInstance().SetGlobalEnabled(
-            SettingsManager::GetInstance().GetPrivacySettings().adBlockEnabled);
-        LOG_INFO("AdblockCache initialized");
-
-        // Initialize fingerprint protection session token
-        FingerprintProtection::GetInstance().Initialize();
-        // Load per-site fingerprint overrides from fingerprint_settings.json
-        FingerprintProtection::GetInstance().LoadSiteSettings(profile_cache);
-        // Sync global toggle from persisted settings
-        FingerprintProtection::GetInstance().SetEnabled(
-            SettingsManager::GetInstance().GetPrivacySettings().fingerprintProtection);
-        LOG_INFO("Fingerprint protection initialized (enabled=" +
-            std::string(SettingsManager::GetInstance().GetPrivacySettings().fingerprintProtection ? "true" : "false") + ")");
-
-        // Initialize CookieBlockManager
-        if (CookieBlockManager::GetInstance().Initialize(profile_cache)) {
-            LOG_INFO("CookieBlockManager initialized");
-        } else {
-            LOG_WARNING("CookieBlockManager initialization failed");
+        // Picker mode: no profile lock, no DBs, no backends — just the chooser UI.
+        if (!g_picker_mode) {
+            if (!AcquireProfileLock(profile_cache)) {
+                NSAlert* alert = [[NSAlert alloc] init];
+                [alert setMessageText:@"Profile Locked"];
+                NSString* infoText = [NSString stringWithFormat:
+                    @"Profile \"%s\" is already in use by another instance.\n\nClose the other instance first, or launch with a different profile.",
+                    profileId.c_str()];
+                [alert setInformativeText:infoText];
+                [alert setAlertStyle:NSAlertStyleCritical];
+                [alert runModal];
+                return 1;
+            }
+            LOG_INFO("Profile lock acquired");
         }
 
-        // Initialize BookmarkManager
-        BookmarkManager::GetInstance().Initialize(profile_cache);
-        LOG_INFO("BookmarkManager initialized");
+        if (!g_picker_mode) {
+            // Initialize SettingsManager with profile-specific path
+            SettingsManager::GetInstance().Initialize(profile_cache);
+            LOG_INFO("Settings loaded for profile: " + profileId);
 
-        // Initialize SitePermissionStore (persists Allow/Block site permissions)
-        if (SitePermissionStore::GetInstance().Initialize(profile_cache)) {
-            LOG_INFO("SitePermissionStore initialized successfully");
-        } else {
-            LOG_ERROR("Failed to initialize SitePermissionStore");
-        }
+            ClearPersistedInternalFrontendZoom(profile_cache);
 
-        // Initialize PaidContentCache (BRC-121 paid response cache)
-        if (PaidContentCache::GetInstance().Initialize(profile_cache)) {
-            PaidContentCache::GetInstance().SetEnabled(
-                SettingsManager::GetInstance().GetPrivacySettings().paidContentCacheEnabled);
-            LOG_INFO("PaidContentCache initialized");
-        } else {
-            LOG_WARNING("PaidContentCache initialization failed");
+            AdblockCache::GetInstance().Initialize(profile_cache);
+            AdblockCache::GetInstance().SetGlobalEnabled(
+                SettingsManager::GetInstance().GetPrivacySettings().adBlockEnabled);
+            LOG_INFO("AdblockCache initialized");
+
+            FingerprintProtection::GetInstance().Initialize();
+            FingerprintProtection::GetInstance().LoadSiteSettings(profile_cache);
+            FingerprintProtection::GetInstance().SetEnabled(
+                SettingsManager::GetInstance().GetPrivacySettings().fingerprintProtection);
+            LOG_INFO("Fingerprint protection initialized");
+
+            if (CookieBlockManager::GetInstance().Initialize(profile_cache)) {
+                LOG_INFO("CookieBlockManager initialized");
+            } else {
+                LOG_WARNING("CookieBlockManager initialization failed");
+            }
+
+            BookmarkManager::GetInstance().Initialize(profile_cache);
+            LOG_INFO("BookmarkManager initialized");
+
+            if (SitePermissionStore::GetInstance().Initialize(profile_cache)) {
+                LOG_INFO("SitePermissionStore initialized successfully");
+            } else {
+                LOG_ERROR("Failed to initialize SitePermissionStore");
+            }
+
+            if (PaidContentCache::GetInstance().Initialize(profile_cache)) {
+                PaidContentCache::GetInstance().SetEnabled(
+                    SettingsManager::GetInstance().GetPrivacySettings().paidContentCacheEnabled);
+                LOG_INFO("PaidContentCache initialized");
+            } else {
+                LOG_WARNING("PaidContentCache initialization failed");
+            }
         }
 
         // Set root_cache_path AND cache_path to profile-specific directory.
@@ -5232,11 +5228,12 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // Start backend services (wallet + adblock)
-        NSLog(@"🔄 Starting backend services...");
-        StartWalletServer();
-        StartAdblockServer();
-        NSLog(@"✅ Backend services started");
+        if (!g_picker_mode) {
+            NSLog(@"🔄 Starting backend services...");
+            StartWalletServer();
+            StartAdblockServer();
+            NSLog(@"✅ Backend services started");
+        }
 
         // Create the primary BrowserWindow record (window 0) in WindowManager.
         // This MUST happen before any browser creation so SetBrowserForRole works.
@@ -5250,7 +5247,7 @@ int main(int argc, char* argv[]) {
         // Install shared overlay focus-loss handler (closes dropdown overlays on Cmd+Tab)
         InstallAppFocusLossHandler();
 
-        if (!g_main_window || !g_header_view || !g_webview_view) {
+        if (!g_main_window || !g_header_view || (!g_picker_mode && !g_webview_view)) {
             LOG_ERROR("❌ Window creation failed - exiting");
             CefShutdown();
             return 1;
@@ -5259,14 +5256,14 @@ int main(int argc, char* argv[]) {
         // Store window references for later use
         app->SetMacOSWindow((__bridge void*)g_main_window,
                            (__bridge void*)g_header_view,
-                           (__bridge void*)g_webview_view);
+                           g_webview_view ? (__bridge void*)g_webview_view : nullptr);
 
         // Populate window 0's BrowserWindow struct for multi-window support
         BrowserWindow* bw0 = WindowManager::GetInstance().GetWindow(0);
         if (bw0) {
             bw0->ns_window = (__bridge void*)g_main_window;
             bw0->header_view = (__bridge void*)g_header_view;
-            bw0->webview_view = (__bridge void*)g_webview_view;
+            bw0->webview_view = g_webview_view ? (__bridge void*)g_webview_view : nullptr;
             LOG_INFO("✅ BrowserWindow[0] populated with main window views");
         }
 
@@ -5290,10 +5287,13 @@ int main(int argc, char* argv[]) {
         CefBrowserSettings header_settings;
         header_settings.background_color = CefColorSetARGB(255, 255, 255, 255);
 
+        std::string header_url = g_picker_mode
+            ? "http://127.0.0.1:5137/profile-picker?mode=window"
+            : "http://127.0.0.1:5137";
         bool browser_created = CefBrowserHost::CreateBrowser(
             header_window_info,
             header_handler,
-            "http://127.0.0.1:5137",  // Load React frontend (localhost now allowed)
+            header_url,
             header_settings,
             nullptr,
             CefRequestContext::GetGlobalContext()
@@ -5314,37 +5314,35 @@ int main(int argc, char* argv[]) {
         // TabStripModel; see chrome/browser/ui/browser_tabstrip.cc).
         // ===================================================================
 
-        if (TabManager::GetInstance().GetAllTabs().empty()) {
-            NSView* webviewView = (__bridge NSView*)g_webview_view;
-            NSRect webviewBounds = [webviewView bounds];
+        if (!g_picker_mode) {
+            if (TabManager::GetInstance().GetAllTabs().empty()) {
+                NSView* webviewView = (__bridge NSView*)g_webview_view;
+                NSRect webviewBounds = [webviewView bounds];
 
-            LOG_INFO("🔧 Seeding first tab via TabManager::CreateTab (window 0)");
-            LOG_INFO("📐 Webview bounds: " + std::to_string((int)webviewBounds.size.width) +
-                     "x" + std::to_string((int)webviewBounds.size.height));
+                LOG_INFO("🔧 Seeding first tab via TabManager::CreateTab (window 0)");
+                LOG_INFO("📐 Webview bounds: " + std::to_string((int)webviewBounds.size.width) +
+                         "x" + std::to_string((int)webviewBounds.size.height));
 
-            int tabId = TabManager::GetInstance().CreateTab(
-                "http://127.0.0.1:5137/newtab",
-                g_webview_view,
-                0, 0,
-                (int)webviewBounds.size.width,
-                (int)webviewBounds.size.height,
-                /*window_id=*/0);
+                int tabId = TabManager::GetInstance().CreateTab(
+                    "http://127.0.0.1:5137/newtab",
+                    g_webview_view,
+                    0, 0,
+                    (int)webviewBounds.size.width,
+                    (int)webviewBounds.size.height,
+                    /*window_id=*/0);
 
-            LOG_INFO("✅ First tab seeded: tab id " + std::to_string(tabId));
-            SimpleHandler::NotifyWindowTabListChanged(0);
-        } else {
-            LOG_INFO("ℹ️ Skipping first-tab seed — TabManager already has tabs (session restore?)");
-        }
+                LOG_INFO("✅ First tab seeded: tab id " + std::to_string(tabId));
+                SimpleHandler::NotifyWindowTabListChanged(0);
+            } else {
+                LOG_INFO("ℹ️ Skipping first-tab seed — TabManager already has tabs (session restore?)");
+            }
 
-        // ===================================================================
-        // Initialize HistoryManager
-        // ===================================================================
-
-        LOG_INFO("🔄 Initializing HistoryManager...");
-        if (HistoryManager::GetInstance().Initialize(cache_path)) {
-            LOG_INFO("✅ HistoryManager initialized successfully");
-        } else {
-            LOG_ERROR("❌ Failed to initialize HistoryManager");
+            LOG_INFO("🔄 Initializing HistoryManager...");
+            if (HistoryManager::GetInstance().Initialize(cache_path)) {
+                LOG_INFO("✅ HistoryManager initialized successfully");
+            } else {
+                LOG_ERROR("❌ Failed to initialize HistoryManager");
+            }
         }
 
         // Debug: Check if CEF added a child view to our header view
@@ -5391,8 +5389,7 @@ int main(int argc, char* argv[]) {
         // HistoryManager is currently Windows-only (uses SQLite with Windows APIs)
         LOG_INFO("🔧 HistoryManager not implemented on macOS yet");
 
-        // Initialize auto-updater (Sparkle 2)
-        {
+        if (!g_picker_mode) {
             auto& settings = SettingsManager::GetInstance();
             auto browserSettings = settings.GetBrowserSettings();
             bool autoCheck = browserSettings.autoUpdateEnabled;
@@ -5410,10 +5407,11 @@ int main(int argc, char* argv[]) {
         // Run CEF message loop (blocks until quit)
         CefRunMessageLoop();
 
-        // Cleanup
         LOG_INFO("CEF message loop exited - shutting down...");
-        StopServers();
-        ReleaseProfileLock();
+        if (!g_picker_mode) {
+            StopServers();
+            ReleaseProfileLock();
+        }
         CefShutdown();
 
         LOG_INFO("✅ Application exited cleanly");

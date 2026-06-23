@@ -640,7 +640,7 @@ Files: `TabManager_mac.mm`, `WindowManager_mac.mm`, `simple_handler.h`, `simple_
 | Item | Status | Reason |
 |------|--------|--------|
 | **A4-OPEN** | Held | DB shutdown cascade — needs owner approval per invariant #8 |
-| **A11** | Held | Pre-window profile picker — needs owner approval |
+| **A11** | ✅ Implemented | Pre-window profile picker — see §11.10 |
 | **C12-M3** | Held | Non-blocking backend launch — measurements suggest not needed |
 
 ### 11.6 Known issues (deferred)
@@ -681,3 +681,48 @@ The browser acquires an `flock(LOCK_EX)` on `<profile>/profile.lock` at startup.
 The site-info overlay showed empty on first open because of a race between CEF's `OnLoadingStateChange(!isLoading)` (fires when HTML loads) and React's `useEffect` mount (registers `window.setSiteInfoContext`). With the Vite dev server, ~17 MUI icon ESM modules load asynchronously after the initial page load event, delaying React mount by ~400-500ms. The deferred JS injection at `OnLoadingStateChange` fires too early — `window.setSiteInfoContext` doesn't exist yet.
 
 **Fix:** Added two `CefPostDelayedTask` retries at 300ms and 600ms after the deferred injection, matching the `setShieldDomain` retry pattern used by the privacy shield overlay. The retries re-attempt the JS injection; the `if (window.setSiteInfoContext)` guard ensures no double-invocation once React has mounted. This is a **dev-mode-only issue** — production builds bundle all JS into a single file with no ESM waterfall.
+
+### 11.10 Pre-window profile picker (A11) — macOS implementation
+
+**What:** When the browser launches with >1 profile and no `--profile=` argument, it now shows a full-window profile chooser instead of silently opening the default profile. This matches the Windows picker behavior added in the previous sprint.
+
+**Architecture — picker mode (`g_picker_mode`):**
+
+The picker is a lightweight process that owns no profile. On startup, `ProfileManager::ResolveStartup()` sets `showPicker=true` when `>1 profiles && pickerEnabled`. The startup flow then skips all heavyweight initialization:
+
+| Component | Normal mode | Picker mode |
+|-----------|-------------|-------------|
+| Profile lock | `AcquireProfileLock()` | Skipped |
+| DB managers (Settings, Adblock, Fingerprint, CookieBlock, Bookmark, SitePermission, PaidContent) | All initialized | All skipped |
+| Backend servers (wallet, adblock) | `StartWalletServer()` + `StartAdblockServer()` | Skipped |
+| Auto-updater (Sparkle) | Initialized | Skipped |
+| Cache path | `<profile>/` | `.picker-cache/` |
+| Window layout | 96px header + webview | Full-window header (no tab bar/webview) |
+| Header URL | `http://127.0.0.1:5137/` | `http://127.0.0.1:5137/profile-picker?mode=window` |
+| Tab seeding | First tab via TabManager | Skipped |
+| History init | `HistoryManager::Initialize()` | Skipped |
+| Shutdown | `StopServers()` + `ReleaseProfileLock()` | `CefShutdown()` only |
+
+**Profile selection flow:**
+1. User clicks a profile in the React picker UI
+2. `profiles_switch` IPC fires → `ProfileManager::LaunchWithProfile(id)`
+3. macOS: `posix_spawn("/usr/bin/open", "-n", "-a", appPath, "--env", "HODOS_DEV=1", "--args", "--profile=<id>")`
+4. New process launches with `--profile=<id>` → `ResolveStartup` returns `showPicker=false` → normal startup
+5. Picker calls `CefQuitMessageLoop()` → clean exit (no servers/locks to release)
+
+**Fixes discovered during implementation:**
+
+| Issue | Fix |
+|-------|-----|
+| `LaunchWithProfile` falsely reported failure | CEF's SIGCHLD handler reaps the `open` child before `waitpid` can collect it → `ECHILD`. Fixed by treating `ECHILD` as success. |
+| `open -n -a` doesn't inherit env vars | Launch Services starts a fresh process. Fixed by forwarding `HODOS_DEV` and `HODOS_MAC_DEV_FLAGS` via `open --env` flags (macOS 12.3+). |
+| Traffic light overlap in picker | macOS close/minimize/maximize buttons overlapped picker header content. Fixed with 86px left padding in `ProfilePickerOverlayRoot.tsx` when `isPickerWindow && isMac`. |
+
+**Files changed:**
+
+| File | Changes |
+|------|---------|
+| `cef_browser_shell_mac.mm` | `g_picker_mode` global; conditional startup flow (lock, DBs, servers, layout, URL, tabs, history, auto-updater, shutdown) |
+| `simple_handler.cpp` | macOS `#elif` in `profiles_switch`: `CefQuitMessageLoop()` on successful launch |
+| `ProfileManager.cpp` | `open --env` for dev env forwarding; `ECHILD` handling in `waitpid` |
+| `ProfilePickerOverlayRoot.tsx` | macOS traffic light padding (86px left + 8px top); title "Choose a Profile" in window mode; close button hidden (traffic lights handle it) |

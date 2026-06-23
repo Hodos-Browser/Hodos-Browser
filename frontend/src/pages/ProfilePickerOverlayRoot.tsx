@@ -52,6 +52,10 @@ const ProfilePickerOverlayRoot: React.FC = () => {
         typeof window !== 'undefined' &&
         new URLSearchParams(window.location.search).get('mode') === 'window';
 
+    const isMac = (window as unknown as {
+        hodosBrowser?: { platform?: string };
+    }).hodosBrowser?.platform === 'macos';
+
     // Create form state
     const [showCreateForm, setShowCreateForm] = useState(false);
     const [newProfileName, setNewProfileName] = useState('');
@@ -228,20 +232,23 @@ const ProfilePickerOverlayRoot: React.FC = () => {
             display: 'flex',
             flexDirection: 'column',
         }}>
-            {/* Header */}
+            {/* Header — extra left padding in window mode on macOS to clear traffic lights */}
             <Box sx={{
                 p: 1.5,
+                ...(isPickerWindow && isMac && { pl: '86px', pt: '8px' }),
                 borderBottom: '1px solid #2a2d35',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'space-between',
             }}>
                 <Typography variant="subtitle2" sx={{ fontWeight: 600, color: '#f0f0f0' }}>
-                    Profiles
+                    {isPickerWindow ? 'Choose a Profile' : 'Profiles'}
                 </Typography>
-                <HodosButton variant="icon" size="small" onClick={handleClose} aria-label="Close">
-                    <CloseIcon sx={{ fontSize: 16 }} />
-                </HodosButton>
+                {!isPickerWindow && (
+                    <HodosButton variant="icon" size="small" onClick={handleClose} aria-label="Close">
+                        <CloseIcon sx={{ fontSize: 16 }} />
+                    </HodosButton>
+                )}
             </Box>
 
             {/* Profile List */}

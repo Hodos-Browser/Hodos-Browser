@@ -587,11 +587,29 @@ bool ProfileManager::LaunchWithProfile(const std::string& profileId) {
     // F5: launch via posix_spawn with an explicit argv array — NO shell, so the
     // (already-validated) profileId cannot be interpreted as a command even if a
     // future change weakened the validation. `open -n -a <app> --args <arg…>`.
+    // `open` uses Launch Services which does NOT inherit env vars, so forward
+    // HODOS_DEV and HODOS_MAC_DEV_FLAGS via --env (macOS 12.3+) for dev builds.
     std::string profileArg = "--profile=" + profileId;
-    const char* argv[] = {
-        "/usr/bin/open", "-n", "-a", appPath.c_str(),
-        "--args", profileArg.c_str(), nullptr
+    std::vector<const char*> argVec = {
+        "/usr/bin/open", "-n", "-a", appPath.c_str()
     };
+    const char* hodosDev = getenv("HODOS_DEV");
+    const char* hodosFlags = getenv("HODOS_MAC_DEV_FLAGS");
+    std::string envDev, envFlags;
+    if (hodosDev) {
+        envDev = std::string("HODOS_DEV=") + hodosDev;
+        argVec.push_back("--env");
+        argVec.push_back(envDev.c_str());
+    }
+    if (hodosFlags) {
+        envFlags = std::string("HODOS_MAC_DEV_FLAGS=") + hodosFlags;
+        argVec.push_back("--env");
+        argVec.push_back(envFlags.c_str());
+    }
+    argVec.push_back("--args");
+    argVec.push_back(profileArg.c_str());
+    argVec.push_back(nullptr);
+    const char** argv = argVec.data();
     pid_t pid;
     int spawn_rc = posix_spawn(&pid, "/usr/bin/open", nullptr, nullptr,
                                const_cast<char* const*>(argv), environ);
@@ -599,16 +617,23 @@ bool ProfileManager::LaunchWithProfile(const std::string& profileId) {
         std::cerr << "❌ Failed to spawn /usr/bin/open: " << strerror(spawn_rc) << std::endl;
         return false;
     }
+    // `open` delegates to Launch Services and returns quickly. CEF's SIGCHLD
+    // handler often reaps the child before we call waitpid, causing ECHILD.
+    // Treat both clean exit AND ECHILD as success — posix_spawn already
+    // confirmed the exec, and Launch Services handles the rest.
     int status = 0;
-    if (waitpid(pid, &status, 0) < 0) {
-        std::cerr << "❌ waitpid failed for open: " << strerror(errno) << std::endl;
-        return false;
+    pid_t rc = waitpid(pid, &status, 0);
+    if (rc < 0 && errno == ECHILD) {
+        std::cout << "🚀 Launched new instance with profile: " << profileId
+                  << " (reaped by SIGCHLD handler)" << std::endl;
+        return true;
     }
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+    if (rc > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
         std::cout << "🚀 Launched new instance with profile: " << profileId << std::endl;
         return true;
     }
-    std::cerr << "❌ open did not exit cleanly (status " << status << ")" << std::endl;
+    std::cerr << "❌ open failed (waitpid rc=" << rc << " status=" << status
+              << " errno=" << errno << ")" << std::endl;
     return false;
 #else
     std::cerr << "❌ LaunchWithProfile not implemented for this platform" << std::endl;

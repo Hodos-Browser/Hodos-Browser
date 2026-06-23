@@ -3244,8 +3244,15 @@ bool SimpleHandler::OnProcessMessageReceived(
                             "Hodos Browser", MB_OK | MB_ICONERROR);
                     }
                 }
-#else
-                (void)launched;
+#elif defined(__APPLE__)
+                extern bool g_picker_mode;
+                if (g_picker_mode) {
+                    if (launched) {
+                        CefQuitMessageLoop();
+                    } else {
+                        LOG_ERROR_BROWSER("👤 Picker: failed to launch profile '" + id + "'");
+                    }
+                }
 #endif
             }
         }
