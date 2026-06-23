@@ -726,3 +726,24 @@ The picker is a lightweight process that owns no profile. On startup, `ProfileMa
 | `simple_handler.cpp` | macOS `#elif` in `profiles_switch`: `CefQuitMessageLoop()` on successful launch |
 | `ProfileManager.cpp` | `open --env` for dev env forwarding; `ECHILD` handling in `waitpid` |
 | `ProfilePickerOverlayRoot.tsx` | macOS traffic light padding (86px left + 8px top); title "Choose a Profile" in window mode; close button hidden (traffic lights handle it) |
+
+### 11.11 Tab-list chevron moved to right side on macOS (A7 enhancement)
+
+**What:** The tab overflow chevron (recently-closed tab dropdown caret) is now on the **right** side of the tab strip on macOS, matching Chrome/Safari convention where the left side is reserved for traffic lights. Windows remains unchanged (caret on the left).
+
+**Tab strip layout by platform:**
+
+| Platform | Layout |
+|----------|--------|
+| Windows | `[⌄][tab][tab]...[+][spacer][min][max][close]` |
+| macOS | `[traffic lights 86px][tab][tab]...[+][⌄][spacer]` |
+
+**Implementation:**
+
+| File | Changes |
+|------|---------|
+| `TabBar.tsx` | Windows caret wrapped in `{!isMac && (...)}` (stays left, sends `rect.left` as left offset). macOS caret added after `[+]` button in `{isMac && (...)}` (sends `window.innerWidth - rect.right` as right offset). Keyboard shortcut tooltip updated to `Cmd+Shift+A` on macOS. |
+| `cef_browser_shell_mac.mm` | Added `CalculateRightAnchoredOverlayFrame()` — mirrors `CalculateLeftAnchoredOverlayFrame` but anchors the panel's right edge from the window's right edge. `ShowTabListPanelOverlayMacOS` and `CreateTabListPanelOverlayMacOS` switched from left-anchored to right-anchored positioning. Forward declarations updated. |
+| `simple_handler.cpp` | macOS `extern` declarations for tab-list functions updated to `int iconRightOffset`. Windows code path unchanged (still uses `iconLeftOffset`). Cmd+Shift+A keyboard shortcut handler updated similarly. |
+
+**Adversarial review confirmed:** Windows `#ifdef _WIN32` code paths are completely untouched — same variable names, same `ScalePx` call, same function signatures.

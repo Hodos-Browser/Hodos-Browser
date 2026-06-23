@@ -304,24 +304,26 @@ export const TabBar: React.FC<TabBarProps> = ({
         },
       }}
     >
-      {/* Tab-list caret — LEFT of the tab strip ([⌄][tab][tab][+]). Rides the
-          strip's existing paddingLeft (mac 86 / win 6), so it starts after the
-          macOS traffic-light reservation with no extra inset logic. Opens the
-          searchable tab-list overlay (also Ctrl/Cmd+Shift+A). */}
-      <Tooltip title="Search tabs (Ctrl+Shift+A)" placement="bottom">
-        <HodosButton
-          variant="icon"
-          size="small"
-          onClick={(e) => {
-            const left = Math.round(e.currentTarget.getBoundingClientRect().left);
-            window.cefMessage?.send('tablist_panel_show', [left.toString()]);
-          }}
-          aria-label="Search tabs"
-          style={{ flexShrink: 0, marginRight: '8px' }}
-        >
-          <KeyboardArrowDownIcon sx={{ fontSize: 18 }} />
-        </HodosButton>
-      </Tooltip>
+      {/* Tab-list caret — Windows: LEFT of the tab strip ([⌄][tab][tab][+]).
+          macOS: RIGHT, after the [+] button (Chrome convention — left side is
+          reserved for traffic lights). Opens the searchable tab-list overlay
+          (also Ctrl/Cmd+Shift+A). */}
+      {!isMac && (
+        <Tooltip title="Search tabs (Ctrl+Shift+A)" placement="bottom">
+          <HodosButton
+            variant="icon"
+            size="small"
+            onClick={(e) => {
+              const left = Math.round(e.currentTarget.getBoundingClientRect().left);
+              window.cefMessage?.send('tablist_panel_show', [left.toString()]);
+            }}
+            aria-label="Search tabs"
+            style={{ flexShrink: 0, marginRight: '8px' }}
+          >
+            <KeyboardArrowDownIcon sx={{ fontSize: 18 }} />
+          </HodosButton>
+        </Tooltip>
+      )}
 
       {/* Loading indicator or empty state */}
       {tabs.length === 0 && (
@@ -439,6 +441,25 @@ export const TabBar: React.FC<TabBarProps> = ({
           <AddIcon sx={{ fontSize: 18 }} />
         </HodosButton>
       </Tooltip>
+
+      {/* macOS: tab-list caret on the RIGHT (after [+]), matching Chrome convention */}
+      {isMac && (
+        <Tooltip title="Search tabs (Cmd+Shift+A)" placement="bottom">
+          <HodosButton
+            variant="icon"
+            size="small"
+            onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              const right = Math.round(window.innerWidth - rect.right);
+              window.cefMessage?.send('tablist_panel_show', [right.toString()]);
+            }}
+            aria-label="Search tabs"
+            style={{ flexShrink: 0, marginLeft: '4px' }}
+          >
+            <KeyboardArrowDownIcon sx={{ fontSize: 18 }} />
+          </HodosButton>
+        </Tooltip>
+      )}
 
       {/* Spacer pushes window controls to far right */}
       <Box sx={{ flex: 1, minWidth: 8 }} />

@@ -606,8 +606,8 @@ void ShowSiteInfoPanelOverlayMacOS(int iconLeftOffset);
 void HideSiteInfoPanelOverlayMacOS();
 bool IsSiteInfoPanelOverlayVisible();
 bool WasSiteInfoPanelJustHidden();
-void CreateTabListPanelOverlayMacOS(int iconLeftOffset);
-void ShowTabListPanelOverlayMacOS(int iconLeftOffset);
+void CreateTabListPanelOverlayMacOS(int iconRightOffset);
+void ShowTabListPanelOverlayMacOS(int iconRightOffset);
 void HideTabListPanelOverlayMacOS();
 bool IsTabListPanelOverlayVisible();
 bool WasTabListPanelJustHidden();
@@ -4181,6 +4181,21 @@ static NSRect CalculateLeftAnchoredOverlayFrame(NSWindow* mainWindow, CGFloat wi
     return NSMakeRect(x, y, width, height);
 }
 
+static NSRect CalculateRightAnchoredOverlayFrame(NSWindow* mainWindow, CGFloat width, CGFloat height, CGFloat toolbarHeight, int iconRightOffset) {
+    NSRect contentScreen = [mainWindow convertRectToScreen:[[mainWindow contentView] frame]];
+    CGFloat contentRight = contentScreen.origin.x + contentScreen.size.width;
+    CGFloat x = contentRight - (CGFloat)iconRightOffset - width;
+    CGFloat contentTop = contentScreen.origin.y + contentScreen.size.height;
+    CGFloat y = contentTop - toolbarHeight - height;
+
+    NSRect screenFrame = [[mainWindow screen] visibleFrame];
+    if (x + width > NSMaxX(screenFrame)) x = NSMaxX(screenFrame) - width;
+    if (x < NSMinX(screenFrame)) x = NSMinX(screenFrame);
+    if (y < NSMinY(screenFrame)) y = NSMinY(screenFrame);
+
+    return NSMakeRect(x, y, width, height);
+}
+
 // ============================================================================
 // Bookmarks Panel Overlay (macOS) — A5
 // ============================================================================
@@ -4493,9 +4508,9 @@ bool WasTabListPanelJustHidden() {
     return (now - g_tablist_panel_last_hide_time) < 0.3;
 }
 
-void ShowTabListPanelOverlayMacOS(int iconLeftOffset) {
+void ShowTabListPanelOverlayMacOS(int iconRightOffset) {
     if (g_tablist_panel_overlay_window) {
-        NSRect panelFrame = CalculateLeftAnchoredOverlayFrame(g_main_window, 340, 480, 96, iconLeftOffset);
+        NSRect panelFrame = CalculateRightAnchoredOverlayFrame(g_main_window, 340, 480, 96, iconRightOffset);
         [g_tablist_panel_overlay_window setFrame:panelFrame display:YES];
 
         [g_tablist_panel_overlay_window makeKeyAndOrderFront:nil];
@@ -4515,12 +4530,12 @@ void ShowTabListPanelOverlayMacOS(int iconLeftOffset) {
     }
 }
 
-void CreateTabListPanelOverlayMacOS(int iconLeftOffset) {
-    LOG_INFO("Creating tab-list panel overlay (macOS) iconLeftOffset=" + std::to_string(iconLeftOffset));
+void CreateTabListPanelOverlayMacOS(int iconRightOffset) {
+    LOG_INFO("Creating tab-list panel overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
 
     CGFloat panelWidth = 340;
     CGFloat panelHeight = 480;
-    NSRect panelFrame = CalculateLeftAnchoredOverlayFrame(g_main_window, panelWidth, panelHeight, 96, iconLeftOffset);
+    NSRect panelFrame = CalculateRightAnchoredOverlayFrame(g_main_window, panelWidth, panelHeight, 96, iconRightOffset);
 
     if (g_tablist_panel_overlay_window) {
         [g_tablist_panel_overlay_window close];

@@ -6803,8 +6803,8 @@ bool SimpleHandler::OnProcessMessageReceived(
         }
         LOG_DEBUG_BROWSER("🗂️ Tab-list panel toggle (iconLeftOffset=" + std::to_string(iconLeftOffset) + ")");
 #elif defined(__APPLE__)
-        extern void CreateTabListPanelOverlayMacOS(int iconLeftOffset);
-        extern void ShowTabListPanelOverlayMacOS(int iconLeftOffset);
+        extern void CreateTabListPanelOverlayMacOS(int iconRightOffset);
+        extern void ShowTabListPanelOverlayMacOS(int iconRightOffset);
         extern void HideTabListPanelOverlayMacOS();
         extern bool IsTabListPanelOverlayVisible();
         extern bool WasTabListPanelJustHidden();
@@ -8270,12 +8270,12 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
                     ShowTabListPanelOverlay(g_tablist_icon_left_offset, GetOwnerWindow());
                 }
 #elif defined(__APPLE__)
-                extern void CreateTabListPanelOverlayMacOS(int iconLeftOffset);
-                extern void ShowTabListPanelOverlayMacOS(int iconLeftOffset);
+                extern void CreateTabListPanelOverlayMacOS(int iconRightOffset);
+                extern void ShowTabListPanelOverlayMacOS(int iconRightOffset);
                 extern void HideTabListPanelOverlayMacOS();
                 extern bool IsTabListPanelOverlayVisible();
                 extern NSWindow* g_tablist_panel_overlay_window;
-                int tlDefOff = 60;  // approximate anchor near tab-list icon (points)
+                int tlDefOff = 60;  // right offset in points — approximate caret position from right edge
                 if (!g_tablist_panel_overlay_window) {
                     CreateTabListPanelOverlayMacOS(tlDefOff);
                 } else if (IsTabListPanelOverlayVisible()) {
