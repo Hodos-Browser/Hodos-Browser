@@ -803,3 +803,26 @@ Releasing profile lock...
 | File | Changes |
 |------|---------|
 | `cef_browser_shell_mac.mm` | Added `SaveSession()` (macOS version with NSWindow frame saving), `ClearBrowsingDataOnExit()` (identical to Windows logic). Updated `ShutdownApplication()` to call both before browser cleanup. Post-message-loop: added 5x DB `Shutdown()` between `StopServers()` and `ReleaseProfileLock()`. Fixed `_exit(0)` timeout from 1s to 5s. Moved `Logger::Shutdown()` before `CefShutdown()`. |
+
+---
+
+## 12. Windows-side review of §11 (2026-06-24, Windows agent, range `c19e31b..fa44f0b`)
+
+**Verdict: CLEAN for Windows — ship it.** The mac-only `*_mac.mm` files can't affect the Windows build, and the shared-file changes are correctly platform-gated. Solid, thorough work.
+
+**Windows-safety checks — all pass:**
+- ✅ `TabBar.tsx` chevron: Windows caret wrapped in `{!isMac}` with identical content + `left`-offset; macOS caret is a separate `{isMac}` block. Windows render path unchanged.
+- ✅ `DoClose()` override: new behavior is inside `#if defined(__APPLE__)`; on Windows it falls through to `return false` = CEF default = no behavior change.
+- ✅ All bookmarks/site-info/tab-list/picker overlay IPC is inside `#elif defined(__APPLE__)`; `#ifdef _WIN32` paths untouched.
+- ✅ `ProfilePickerOverlayRoot.tsx` traffic-light padding gated by `isPickerWindow && isMac`.
+
+**Two unguarded additions in `simple_handler.cpp` that DO run on Windows** (both look benign, neither Windows-tested):
+1. Site-info first-open **retry injection** at 300/600ms in `OnLoadingStateChange` — idempotent (`if (window.setSiteInfoContext)` guard); on Windows it's two extra harmless delayed injections.
+2. `NotifyWindowTabListChanged(window_id_)` after a successful `tab_switch` — at worst a redundant tab-list refresh on Windows.
+→ **Recommend a 2-minute Windows smoke** of the site-info panel first-open + tab switching to confirm no flicker / double-update. Not a blocker.
+
+**Two corrections for record accuracy:**
+- 📝 §11.2 (A9) lists `simple_app.cpp` as modified (removed `--enable-media-stream`), but `simple_app.cpp` is **not** in this commit range and `git grep` finds no `--enable-media-stream` in source — that change predates these 7 commits (or was misattributed). The other A9 sub-fixes are present and correct.
+- 🔑 **§11.6's "CI release.yml downloads wrong CEF asset" is a NON-bug.** Verified by SHA256: the release-repo `cef-binaries-macos.tar.bz2` is **byte-identical** to the codec build (`80c34bcc…`, the *non-minimal* codec tarball). The mac CI already pulls codec-enabled CEF. ⚠️ Do **not** "fix" it by switching to the `*_minimal` variant — minimal omits the wrapper sources and would break the "Build CEF wrapper" step. The correct framing is folded into `DevOps-CICD/AUTO_UPDATE_AND_SIGNING_0_4_0.md`.
+
+**Coordination note (auto-update sprint):** A9 edited `Info.plist` (+6 TCC strings) and `mac/entitlements.plist` (CRLF fix). The upcoming macOS auto-update work also edits `Info.plist` (Sparkle `SU*` keys). No conflict now, but sequence those edits — and any Windows-authored edit to mac plists must avoid CRLF (the A9 fix confirms that trap is live here).
