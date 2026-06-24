@@ -32,6 +32,8 @@
 | Signing identity | 🟠 macOS hardcoded "Developer ID Application: Matthew Archbold" (personal, not org) |
 
 ## 3. How silent update works (target — "Chrome model")
+
+> ⚠️ **Superseded for Windows by `AUTO_UPDATE_AND_SIGNING_0_4_0.md` (2026-06-22).** Adversarial review + WinSparkle-source verification proved **WinSparkle has NO silent install-on-quit / apply-on-next-launch API** — `win_sparkle_check_update_without_ui()` still shows a dialog when an update is found, and `installerArguments` only silences the installer, not WinSparkle's own window. The owner's UX is **config-only on macOS** but requires a **hybrid custom updater on Windows** (WinSparkle for detection only → own the download → apply staged Inno `/VERYSILENT` on next launch, with child-process shutdown + ProfileLock sequencing). The §3/§5.1 framing below is optimistic; see the 0.4.0 doc for the corrected design + work split.
 ```
 Browser running → every 24h, fetch appcast.xml (HTTPS) → compare version
   → if newer: verify EdDSA signature → download installer silently to staging
