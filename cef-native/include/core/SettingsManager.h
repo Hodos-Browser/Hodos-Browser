@@ -13,7 +13,7 @@ struct BrowserSettings {
     std::string downloadsPath;  // Empty = system default
     bool restoreSessionOnStart = false;
     bool askWhereToSave = true;
-    bool autoUpdateEnabled = true;  // Check for updates automatically on startup
+    std::string autoUpdateMode = "silent";  // "off", "notify", or "silent"
 };
 
 // Privacy settings (ad blocking, tracking, etc.)
@@ -36,10 +36,37 @@ struct WalletSettings {
     bool peerpayAutoAccept = true;           // Auto-accept incoming PeerPay payments
 };
 
-// JSON serialization
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(BrowserSettings,
-    homepage, searchEngine, zoomLevel, showBookmarkBar,
-    downloadsPath, restoreSessionOnStart, askWhereToSave, autoUpdateEnabled)
+// Custom JSON serialization for BrowserSettings (handles legacy bool migration)
+inline void to_json(nlohmann::json& j, const BrowserSettings& s) {
+    j = nlohmann::json{
+        {"homepage", s.homepage}, {"searchEngine", s.searchEngine},
+        {"zoomLevel", s.zoomLevel}, {"showBookmarkBar", s.showBookmarkBar},
+        {"downloadsPath", s.downloadsPath}, {"restoreSessionOnStart", s.restoreSessionOnStart},
+        {"askWhereToSave", s.askWhereToSave}, {"autoUpdateMode", s.autoUpdateMode}
+    };
+}
+
+inline void from_json(const nlohmann::json& j, BrowserSettings& s) {
+    BrowserSettings defaults;
+    s.homepage = j.value("homepage", defaults.homepage);
+    s.searchEngine = j.value("searchEngine", defaults.searchEngine);
+    s.zoomLevel = j.value("zoomLevel", defaults.zoomLevel);
+    s.showBookmarkBar = j.value("showBookmarkBar", defaults.showBookmarkBar);
+    s.downloadsPath = j.value("downloadsPath", defaults.downloadsPath);
+    s.restoreSessionOnStart = j.value("restoreSessionOnStart", defaults.restoreSessionOnStart);
+    s.askWhereToSave = j.value("askWhereToSave", defaults.askWhereToSave);
+    // Backward compat: migrate legacy bool autoUpdateEnabled → string autoUpdateMode
+    if (j.contains("autoUpdateMode")) {
+        s.autoUpdateMode = j.value("autoUpdateMode", defaults.autoUpdateMode);
+    } else if (j.contains("autoUpdateEnabled")) {
+        bool legacy = j.value("autoUpdateEnabled", true);
+        s.autoUpdateMode = legacy ? "silent" : "off";
+    }
+    // Validate
+    if (s.autoUpdateMode != "off" && s.autoUpdateMode != "notify" && s.autoUpdateMode != "silent") {
+        s.autoUpdateMode = defaults.autoUpdateMode;
+    }
+}
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(PrivacySettings,
     adBlockEnabled, thirdPartyCookieBlocking, doNotTrack, clearDataOnExit,
@@ -78,7 +105,7 @@ public:
     void SetDownloadsPath(const std::string& path);
     void SetRestoreSessionOnStart(bool restore);
     void SetAskWhereToSave(bool ask);
-    void SetAutoUpdateEnabled(bool enabled);
+    void SetAutoUpdateMode(const std::string& mode);
 
     // Privacy settings
     void SetAdBlockEnabled(bool enabled);

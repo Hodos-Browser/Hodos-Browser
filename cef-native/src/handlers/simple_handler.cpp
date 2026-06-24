@@ -2983,10 +2983,20 @@ bool SimpleHandler::OnProcessMessageReceived(
         } else if (key == "wallet.peerpayAutoAccept") {
             settings.SetPeerpayAutoAccept(value == "true");
         }
-        // Auto-update settings
+        // Auto-update settings (3-state: off / notify / silent)
+        else if (key == "browser.autoUpdateMode") {
+            settings.SetAutoUpdateMode(value);
+            UpdateMode mode = UpdateMode::Silent;
+            if (value == "off") mode = UpdateMode::Off;
+            else if (value == "notify") mode = UpdateMode::Notify;
+            AutoUpdater::GetInstance().SetUpdateMode(mode);
+        }
+        // Legacy key — frontend may still send this during transition
         else if (key == "browser.autoUpdateEnabled") {
-            settings.SetAutoUpdateEnabled(value == "true");
-            AutoUpdater::GetInstance().SetAutoCheckEnabled(value == "true");
+            std::string mapped = (value == "true") ? "silent" : "off";
+            settings.SetAutoUpdateMode(mapped);
+            AutoUpdater::GetInstance().SetUpdateMode(
+                (value == "true") ? UpdateMode::Silent : UpdateMode::Off);
         } else {
             LOG_WARNING_BROWSER("⚠️ Unknown settings key: " + key);
         }

@@ -5566,14 +5566,19 @@ int main(int argc, char* argv[]) {
         if (!g_picker_mode) {
             auto& settings = SettingsManager::GetInstance();
             auto browserSettings = settings.GetBrowserSettings();
-            bool autoCheck = browserSettings.autoUpdateEnabled;
             std::string appVersion = APP_VERSION;
             std::string appcastUrl = "https://hodosbrowser.com/appcast.xml";
 
             auto& updater = AutoUpdater::GetInstance();
-            updater.Initialize(appVersion, appcastUrl, autoCheck);
+            updater.Initialize(appVersion, appcastUrl, true);
+
+            UpdateMode mode = UpdateMode::Silent;
+            if (browserSettings.autoUpdateMode == "off") mode = UpdateMode::Off;
+            else if (browserSettings.autoUpdateMode == "notify") mode = UpdateMode::Notify;
+            updater.SetUpdateMode(mode);
+
             LOG_INFO("Auto-updater initialized (version=" + appVersion +
-                     ", autoCheck=" + std::string(autoCheck ? "true" : "false") + ")");
+                     ", mode=" + browserSettings.autoUpdateMode + ")");
         }
 
         LOG_INFO("🚀 Entering CEF message loop...");

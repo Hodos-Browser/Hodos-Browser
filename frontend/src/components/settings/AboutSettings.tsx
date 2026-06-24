@@ -1,5 +1,5 @@
 import React, { useState, useCallback } from 'react';
-import { Typography, Box, Switch } from '@mui/material';
+import { Typography, Box, Select, MenuItem } from '@mui/material';
 import { SettingsCard, SettingRow } from './SettingsCard';
 import { useSettings } from '../../hooks/useSettings';
 
@@ -48,17 +48,32 @@ const AboutSettings: React.FC = () => {
       <SettingsCard title="Updates">
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
           <SettingRow
-            label="Check for updates automatically"
-            description="Hodos Browser will periodically check for new versions"
+            label="Automatic updates"
+            description="How Hodos Browser handles new versions"
             control={
-              <Switch
-                checked={settings.browser.autoUpdateEnabled ?? true}
-                onChange={(e) => updateSetting('browser.autoUpdateEnabled', e.target.checked)}
+              <Select
+                value={settings.browser.autoUpdateMode ?? 'silent'}
+                onChange={(e) => updateSetting('browser.autoUpdateMode', e.target.value)}
+                size="small"
                 sx={{
-                  '& .MuiSwitch-switchBase.Mui-checked': { color: '#a67c00' },
-                  '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': { backgroundColor: '#a67c00' },
+                  minWidth: 220,
+                  color: '#e0e0e0',
+                  fontSize: '0.85rem',
+                  '.MuiOutlinedInput-notchedOutline': { borderColor: '#444' },
+                  '&:hover .MuiOutlinedInput-notchedOutline': { borderColor: '#666' },
+                  '&.Mui-focused .MuiOutlinedInput-notchedOutline': { borderColor: '#a67c00' },
+                  '.MuiSvgIcon-root': { color: '#888' },
                 }}
-              />
+                MenuProps={{
+                  PaperProps: {
+                    sx: { bgcolor: '#2a2a2a', color: '#e0e0e0' },
+                  },
+                }}
+              >
+                <MenuItem value="silent">Download &amp; install on quit</MenuItem>
+                <MenuItem value="notify">Notify me</MenuItem>
+                <MenuItem value="off">Off</MenuItem>
+              </Select>
             }
           />
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>

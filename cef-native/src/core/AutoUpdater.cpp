@@ -143,6 +143,19 @@ void AutoUpdater::SetAutoCheckEnabled(bool enabled) {
     LogInfo("Auto-check " + std::string(enabled ? "enabled" : "disabled"));
 }
 
+void AutoUpdater::SetUpdateMode(UpdateMode mode) {
+    if (!initialized_) return;
+    update_mode_ = mode;
+
+    std::string modeStr = mode == UpdateMode::Off ? "off" :
+                          mode == UpdateMode::Notify ? "notify" : "silent";
+    LogInfo("Update mode set to: " + modeStr);
+
+    // WinSparkle only supports auto-check on/off — no silent download mode.
+    // Map Off → disable checks; Notify/Silent → enable checks.
+    win_sparkle_set_automatic_check_for_updates(mode != UpdateMode::Off ? 1 : 0);
+}
+
 bool AutoUpdater::IsAutoCheckEnabled() const {
     if (!initialized_) return false;
     return win_sparkle_get_automatic_check_for_updates() != 0;

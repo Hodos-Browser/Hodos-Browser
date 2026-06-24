@@ -826,3 +826,65 @@ Releasing profile lock...
 - 🔑 **§11.6's "CI release.yml downloads wrong CEF asset" is a NON-bug.** Verified by SHA256: the release-repo `cef-binaries-macos.tar.bz2` is **byte-identical** to the codec build (`80c34bcc…`, the *non-minimal* codec tarball). The mac CI already pulls codec-enabled CEF. ⚠️ Do **not** "fix" it by switching to the `*_minimal` variant — minimal omits the wrapper sources and would break the "Build CEF wrapper" step. The correct framing is folded into `DevOps-CICD/AUTO_UPDATE_AND_SIGNING_0_4_0.md`.
 
 **Coordination note (auto-update sprint):** A9 edited `Info.plist` (+6 TCC strings) and `mac/entitlements.plist` (CRLF fix). The upcoming macOS auto-update work also edits `Info.plist` (Sparkle `SU*` keys). No conflict now, but sequence those edits — and any Windows-authored edit to mac plists must avoid CRLF (the A9 fix confirms that trap is live here).
+
+---
+
+## 13. macOS Sparkle 2 auto-update implementation (2026-06-24, Windows agent)
+
+> 9-step implementation of silent auto-update using Sparkle 2. All changes are macOS-only (Windows auto-update handled separately via WinSparkle). Deep research workflow + adversarial review completed before implementation.
+
+### 13.1 Design decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Default update mode | **Silent** (`"silent"`) | Download in background, install on quit — no popups. User ethos: "give users control and awareness but we don't want to annoy them." |
+| Legacy migration | `true` → `"silent"`, `false` → `"off"` | Preserves existing user intent; silent is the new default. |
+| UI label | "Download & install on quit" | Accurate description of what silent mode actually does. |
+| Update mode enum | `Off` / `Notify` / `Silent` | Three modes: no checking, check + native UI, check + background download + install-on-quit. |
+| Sparkle version | 2.9.0 → **2.9.3** | Security fixes (symlink guard, installer validation) + bundle-ID bug fix. No breaking API changes. |
+| Startup race fix | `initWithStartingUpdater:NO` + deferred `startUpdater:` | Configure `automaticallyDownloadsUpdates` BEFORE Sparkle's first check cycle. |
+
+### 13.2 Files changed (9 steps)
+
+| Step | File | Changes |
+|------|------|---------|
+| 1 | `.github/workflows/release.yml` | Sparkle download version `2.9.0` → `2.9.3` |
+| 2 | `cef-native/include/core/AutoUpdater.h` | Added `UpdateMode` enum (`Off`/`Notify`/`Silent`) at namespace scope; added `SetUpdateMode(UpdateMode)` method; added `update_mode_` member with `Silent` default |
+| 3 | `cef-native/src/core/AutoUpdater_mac.mm` | Removed dead channel filter (`allowedChannelsForUpdater:` returning "beta" — misleading, default channel always included). Removed dead `autoCheckEnabled` property. Added `willInstallUpdateOnQuit:` delegate (returns NO, logs version). Fixed startup race: `initWithStartingUpdater:NO` then `startUpdater:` inside `SetUpdateMode`. Implemented `SetUpdateMode` using `automaticallyDownloadsUpdates`. Fixed `IsAutoCheckEnabled` returning `true` when `SPARKLE_AVAILABLE=0`. |
+| 4 | `cef-native/src/core/AutoUpdater_mac.mm` | (Merged with step 3 — delegate + deferred start + mode switching all in one pass) |
+| 6 | `cef-native/include/core/SettingsManager.h` | Changed `bool autoUpdateEnabled = true` → `std::string autoUpdateMode = "silent"`. Replaced `NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT` macro with custom `to_json`/`from_json` for `BrowserSettings` to handle legacy bool→string migration + validation. |
+| 6 | `cef-native/src/core/SettingsManager.cpp` | `SetAutoUpdateEnabled(bool)` → `SetAutoUpdateMode(const std::string&)` with validation (rejects unknown values → defaults to `"silent"`). |
+| 7 | `cef-native/src/handlers/simple_handler.cpp` | IPC dispatch: new `browser.autoUpdateMode` key sends string to `SetAutoUpdateMode()` + `SetUpdateMode()`. Legacy `browser.autoUpdateEnabled` key preserved for backward compat (maps bool → mode string). |
+| 7 | `cef-native/cef_browser_shell_mac.mm` | Startup init: reads `autoUpdateMode` string from settings, converts to `UpdateMode` enum, calls `SetUpdateMode()` (triggers deferred `startUpdater:`). Removed old `autoUpdateEnabled` bool path. |
+| 8 | `frontend/src/hooks/useSettings.ts` | `BrowserSettings.autoUpdateEnabled: boolean` → `autoUpdateMode: 'off' \| 'notify' \| 'silent'`; default `'silent'`. |
+| 8 | `frontend/src/components/settings/AboutSettings.tsx` | Replaced MUI `Switch` (on/off) with MUI `Select` dropdown: "Download & install on quit" (silent), "Notify me" (notify), "Off" (off). Dark theme styling. |
+| 9 | `cef-native/Info.plist` | Added `SUEnableAutomaticChecks` → `true` (Sparkle reads this on first launch before any runtime configuration). |
+
+### 13.3 Key technical details
+
+**Sparkle `automaticallyDownloadsUpdates`:** Despite the name, this runtime property controls BOTH download AND install-on-quit behavior. Writable, persists to `NSUserDefaults`, takes effect dynamically.
+
+**Startup race prevention:** `SPUStandardUpdaterController` is initialized with `initWithStartingUpdater:NO` so properties can be configured before Sparkle's first check cycle. `startUpdater:` is called inside `SetUpdateMode()` — safe to call multiple times (returns NO if already started).
+
+**Settings migration (JSON deserialization):** Custom `from_json` handles three cases:
+1. New format: `"autoUpdateMode": "silent"` → use directly
+2. Legacy format: `"autoUpdateEnabled": true` → map to `"silent"`; `false` → `"off"`
+3. Invalid/missing: default to `"silent"`
+
+**Channel filter removal:** The `allowedChannelsForUpdater:` delegate returning `{"beta"}` was dead code — Sparkle 2 always includes the default (no-channel) items in the allowed set, so this method only added "beta" channel visibility without blocking anything. Removed to avoid confusion.
+
+### 13.4 What Sparkle does NOT do
+
+- **Does NOT terminate helper processes** — only sends quit Apple Event to main app. CEF helpers must be handled by our shutdown path (already implemented in §11.12).
+- **App Management TCC** — NOT an issue for same-team-signed updates (confirmed by research).
+
+### 13.5 Step 5 (Windows `AutoUpdater.cpp` `SetUpdateMode`) — SKIPPED
+
+Windows auto-update uses WinSparkle, handled by the Windows-side agent in a separate implementation. The `SetUpdateMode` stub for Windows will be added there.
+
+### 13.6 What's left for auto-update
+
+- **Windows `SetUpdateMode` implementation** — Windows Claude handles this
+- **Build + test on macOS** — verify Sparkle actually downloads/installs (requires a signed release build with valid appcast)
+- **Appcast XML** — must be published at `https://hodosbrowser.com/appcast.xml` with EdDSA signatures
+- **CI pipeline** — `release.yml` Sparkle version bump (step 1) needs the actual 2.9.3 release to be available

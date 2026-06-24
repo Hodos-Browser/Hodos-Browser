@@ -339,8 +339,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          echo "Downloading Sparkle 2.9.0..."
-          gh release download 2.9.0 --repo sparkle-project/Sparkle --pattern "Sparkle-*.tar.xz" --output Sparkle.tar.xz
+          echo "Downloading Sparkle 2.9.3..."
+          gh release download 2.9.3 --repo sparkle-project/Sparkle --pattern "Sparkle-*.tar.xz" --output Sparkle.tar.xz
           mkdir -p sparkle-extract
           tar -xf Sparkle.tar.xz -C sparkle-extract
           ls -la sparkle-extract/

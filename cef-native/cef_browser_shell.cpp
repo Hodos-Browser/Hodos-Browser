@@ -4381,7 +4381,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     if (!g_picker_mode) {
         auto& settings = SettingsManager::GetInstance();
         auto browserSettings = settings.GetBrowserSettings();
-        bool autoCheck = browserSettings.autoUpdateEnabled;
+        bool autoCheck = (browserSettings.autoUpdateMode != "off");
         std::string appVersion = APP_VERSION; // Injected by CMake via -DAPP_VERSION=
         std::string appcastUrl = "https://hodosbrowser.com/appcast.xml";
 
@@ -4396,7 +4396,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         });
         updater.Initialize(appVersion, appcastUrl, autoCheck);
         LOG_INFO("Auto-updater initialized (version=" + appVersion +
-                 ", autoCheck=" + std::string(autoCheck ? "true" : "false") + ")");
+                 ", mode=" + browserSettings.autoUpdateMode + ")");
     }
 
     LOG_INFO(elapsed() + "STARTUP: Entering CefRunMessageLoop");

@@ -2,8 +2,9 @@
 //
 // Sparkle 2 handles the entire update lifecycle on macOS:
 // - Periodic background check against appcast.xml
-// - Native macOS update dialog
-// - Download + EdDSA signature verification
+// - Native macOS update dialog (Notify mode)
+// - Silent download + install-on-quit (Silent mode)
+// - EdDSA signature verification
 // - Replace app bundle and relaunch
 //
 // Sparkle 2 reads SUFeedURL and SUPublicEDKey from Info.plist.
@@ -30,16 +31,20 @@ namespace {
 
 #if SPARKLE_AVAILABLE
 
-// Sparkle 2 delegate for updater configuration
 @interface HodosUpdaterDelegate : NSObject <SPUUpdaterDelegate>
-@property (nonatomic, assign) BOOL autoCheckEnabled;
 @end
 
 @implementation HodosUpdaterDelegate
-- (NSSet<NSString *> *)allowedChannelsForUpdater:(SPUUpdater *)updater {
-    // Allow pre-release channels (beta versions)
-    return [NSSet setWithObject:@"beta"];
+
+- (BOOL)updater:(nonnull SPUUpdater *)updater
+    willInstallUpdateOnQuit:(nonnull SUAppcastItem *)item
+    immediateInstallationBlock:(nonnull void (^)(void))immediateInstallHandler {
+    NSLog(@"[AutoUpdater] Update %@ staged for install on quit", item.displayVersionString);
+    // Return NO — lets Sparkle's scheduler continue running future cycles.
+    // The update still installs when the app quits regardless.
+    return NO;
 }
+
 @end
 
 // Static Sparkle objects (retained for app lifetime)
@@ -61,17 +66,15 @@ void AutoUpdater::Initialize(const std::string& version, const std::string& appc
 #if SPARKLE_AVAILABLE
     @autoreleasepool {
         s_delegate = [[HodosUpdaterDelegate alloc] init];
-        s_delegate.autoCheckEnabled = autoCheck;
 
-        // SPUStandardUpdaterController reads SUFeedURL and SUPublicEDKey from Info.plist
+        // Use deferred start so we can configure all properties before
+        // Sparkle begins its first update check cycle.
         s_updaterController = [[SPUStandardUpdaterController alloc]
-            initWithStartingUpdater:YES
+            initWithStartingUpdater:NO
             updaterDelegate:s_delegate
             userDriverDelegate:nil];
 
-        s_updaterController.updater.automaticallyChecksForUpdates = autoCheck;
-
-        LogInfo("Sparkle 2 initialized successfully");
+        LogInfo("Sparkle 2 controller created (deferred start)");
     }
 #else
     LogInfo("Sparkle framework not available — update checks disabled");
@@ -99,7 +102,6 @@ void AutoUpdater::CheckForUpdatesInBackground() {
 
 #if SPARKLE_AVAILABLE
     // Sparkle handles background checks automatically via automaticallyChecksForUpdates
-    // No explicit call needed — it runs on its own schedule
 #endif
 }
 
@@ -114,13 +116,53 @@ void AutoUpdater::SetAutoCheckEnabled(bool enabled) {
 #endif
 }
 
+void AutoUpdater::SetUpdateMode(UpdateMode mode) {
+    if (!initialized_) return;
+    update_mode_ = mode;
+
+    std::string modeStr = mode == UpdateMode::Off ? "off" :
+                          mode == UpdateMode::Notify ? "notify" : "silent";
+    LogInfo("Update mode set to: " + modeStr);
+
+#if SPARKLE_AVAILABLE
+    @autoreleasepool {
+        SPUUpdater *updater = s_updaterController.updater;
+        switch (mode) {
+            case UpdateMode::Off:
+                updater.automaticallyChecksForUpdates = NO;
+                updater.automaticallyDownloadsUpdates = NO;
+                break;
+            case UpdateMode::Notify:
+                updater.automaticallyChecksForUpdates = YES;
+                updater.automaticallyDownloadsUpdates = NO;
+                break;
+            case UpdateMode::Silent:
+                updater.automaticallyChecksForUpdates = YES;
+                updater.automaticallyDownloadsUpdates = YES;
+                break;
+        }
+
+        // Start the updater if this is the first SetUpdateMode call.
+        // Properties are now configured, so Sparkle's first check cycle
+        // will use the correct mode.
+        NSError *error = nil;
+        if (![updater startUpdater:&error]) {
+            if (error) {
+                NSLog(@"[AutoUpdater] Sparkle startUpdater error: %@", error.localizedDescription);
+            }
+            // startUpdater returns NO if already started — that's fine.
+        }
+    }
+#endif
+}
+
 bool AutoUpdater::IsAutoCheckEnabled() const {
     if (!initialized_) return false;
 
 #if SPARKLE_AVAILABLE
     return s_updaterController.updater.automaticallyChecksForUpdates;
 #else
-    return true;
+    return false;
 #endif
 }
 
@@ -139,7 +181,6 @@ void AutoUpdater::Cleanup() {
     LogInfo("Cleaning up Sparkle 2...");
 
 #if SPARKLE_AVAILABLE
-    // Sparkle 2 handles its own cleanup — just nil our references
     s_updaterController = nil;
     s_delegate = nil;
 #endif

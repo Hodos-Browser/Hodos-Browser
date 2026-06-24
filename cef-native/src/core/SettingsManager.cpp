@@ -255,10 +255,14 @@ void SettingsManager::SetAskWhereToSave(bool ask) {
     Save();
 }
 
-void SettingsManager::SetAutoUpdateEnabled(bool enabled) {
+void SettingsManager::SetAutoUpdateMode(const std::string& mode) {
+    std::string validated = mode;
+    if (validated != "off" && validated != "notify" && validated != "silent") {
+        validated = "silent";
+    }
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        browser_.autoUpdateEnabled = enabled;
+        browser_.autoUpdateMode = validated;
     }
     Save();
 }

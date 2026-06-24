@@ -13,6 +13,12 @@
 #include <string>
 #include <functional>
 
+enum class UpdateMode {
+    Off,    // No automatic checking
+    Notify, // Check automatically, show native UI when update found
+    Silent  // Check automatically, download in background, install on quit
+};
+
 class AutoUpdater {
 public:
     static AutoUpdater& GetInstance();
@@ -33,6 +39,11 @@ public:
 
     // Enable or disable automatic update checking.
     void SetAutoCheckEnabled(bool enabled);
+
+    // Set the update behavior mode (Off / Notify / Silent).
+    // Call once during init with the user's stored preference, and again
+    // when the user changes the setting via the UI.
+    void SetUpdateMode(UpdateMode mode);
 
     // Get current auto-check state.
     bool IsAutoCheckEnabled() const;
@@ -57,6 +68,7 @@ private:
     AutoUpdater& operator=(const AutoUpdater&) = delete;
 
     bool initialized_ = false;
+    UpdateMode update_mode_ = UpdateMode::Silent;
     ShutdownCallback shutdown_callback_;
 };
 
