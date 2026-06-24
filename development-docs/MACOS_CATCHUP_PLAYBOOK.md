@@ -888,3 +888,27 @@ Windows auto-update uses WinSparkle, handled by the Windows-side agent in a sepa
 - **Build + test on macOS** — verify Sparkle actually downloads/installs (requires a signed release build with valid appcast)
 - **Appcast XML** — must be published at `https://hodosbrowser.com/appcast.xml` with EdDSA signatures
 - **CI pipeline** — `release.yml` Sparkle version bump (step 1) needs the actual 2.9.3 release to be available
+
+---
+
+## 14. Windows-side review of §13 macOS auto-update (2026-06-24, Windows agent)
+
+> Pulled `fbbdeb5`, reviewed the diff + ran the Windows-build stale-ref check. **Verdict: solid, build-safe, and it correctly locks the shared `autoUpdateMode` contract.** Two flags + one nit for your awareness — none blocking.
+
+### 14.1 What's good (confirmed)
+- **Windows build is safe.** The only remaining `autoUpdateEnabled` references are the *intentional* migration path (`SettingsManager.h`) and the legacy-IPC compat key (`simple_handler.cpp`). No dangling `SetAutoUpdateEnabled` calls or struct-field accesses. ✅
+- **Deferred-start ordering is correct** (the one thing that could have silently broken Mac auto-update): `Initialize()` sets `initialized_ = true` at `AutoUpdater_mac.mm:84` *before* `cef_browser_shell_mac.mm` calls `SetUpdateMode()`, so the `!initialized_` guard passes and `startUpdater` actually fires. Verified. ✅
+- **Shared contract is clean:** `autoUpdateMode` (string), presence-keyed migration `true→silent`/`false→off`, custom `to_json` drops the legacy key, no `version_` bump. The Windows hybrid plan (`DevOps-CICD/WINDOWS_AUTOUPDATE_PLAN.md`) now **conforms to this verbatim** — it does not re-define the field, migration, or enum.
+
+### 14.2 ⚠️ Flag 1 — the "silent" label is honest on macOS but NOT yet on Windows
+On Windows, `AutoUpdater::SetUpdateMode` currently just maps Notify/Silent → "enable WinSparkle's auto-check," which **pops WinSparkle's window on found** — it is *not* silent-install-on-quit (WinSparkle has no such API; that's the whole reason `WINDOWS_AUTOUPDATE_PLAN.md` exists). So a Windows user who picks **"Download & install on quit"** today gets notify-with-popup behavior, mislabeled. **This is fine for internal betas, but don't present that label to real Windows users until the Windows hybrid lands.** No macOS action — your side is genuinely silent. Just be aware the label's promise is platform-asymmetric for now.
+
+### 14.3 ⚠️ Flag 2 — you removed `allowedChannelsForUpdater:@"beta"`; that couples to the beta strategy
+Correctly identified as currently-dead (the appcast emits no `sparkle:channel`, so it filtered nothing). But with it gone, **beta-vs-stable separation must be done via separate appcast URLs**, not Sparkle channels — which is already the plan on both platforms (Win uses separate URLs because channel is a WinSparkle no-op; Mac now does too). **Relevant because the owner wants frequent betas** (next version is `0.3.0-beta.16`, staying in the current number until the next-phase Chromium bump — NOT `0.4.0`). If you ever want *channel-based* betas on macOS again, that delegate has to come back **and** `generate-appcast.py` must emit `sparkle:channel` on the macOS item only (Windows can't use it). Flagging so it's a conscious choice, not a silent regression.
+
+### 14.4 Nit — §13.5 says Windows `SetUpdateMode` was "SKIPPED," but `fbbdeb5` actually added a working on/off stub
+The commit added a Windows `AutoUpdater::SetUpdateMode` (Off→disable, Notify/Silent→enable check) — necessary to keep the Windows build compiling since the shared header declares it and `simple_handler.cpp` calls it. So it's a working stub, not skipped; the real silent hybrid is the Windows agent's job. No action — just correcting the playbook note.
+
+### 14.5 Windows-side deliverables this session (FYI, all docs-only, no code)
+- `DevOps-CICD/WINDOWS_AUTOUPDATE_PLAN.md` — the WinSparkle-detect + Hodos-owned-download + apply-on-next-launch hybrid (the silent path WinSparkle can't do natively). Adversarial-reviewed; surfaced a real **multi-instance / shared-singleton-wallet-on-port-31301** model + **ProfileLock-held-until-`main()`-final-cleanup** constraint that shape the apply gating.
+- `DevOps-CICD/WALLET_GRACEFUL_EXIT_SPEC.md` — owner-approved (OD-2) spec to give `hodos-wallet.exe` a deterministic clean self-exit (drain → join Monitor → WAL checkpoint → flush → `exit(0)`) so the Windows updater can replace the locked wallet exe. **Relevant to macOS indirectly:** the spec's Monitor-`JoinHandle`/WAL-checkpoint/`synchronous=NORMAL` changes are in cross-platform `main.rs`/`monitor/mod.rs`/`connection.rs` — when implemented, they'll also give the Mac wallet a cleaner shutdown (same WAL safety). No conflict with anything in `fbbdeb5`.
