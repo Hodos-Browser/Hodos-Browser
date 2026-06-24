@@ -272,8 +272,9 @@ async fn main() -> std::io::Result<()> {
     enforce_dev_safeguard();
 
     // Initialize logging: console + rotating file in <data_root>/logs/.
-    // Held for the process lifetime (drop = logging stops).
-    let _logger = init_logging();
+    // Held for the process lifetime (drop = logging stops). Flushed explicitly in
+    // the OD-2 graceful-exit sequence before std::process::exit(0).
+    let logger = init_logging();
 
     log::info!("🦀 Bitcoin Browser Wallet (Rust)");
     log::info!("=================================");
@@ -721,6 +722,12 @@ async fn main() -> std::io::Result<()> {
         signal_token.cancel();
     });
 
+    // OD-2 graceful-exit: capture the Monitor's JoinHandle (so the shutdown sequence
+    // can quiesce it with a bounded join) and a DB handle (for the shutdown WAL
+    // checkpoint), BEFORE app_state is moved into the HttpServer factory closure below.
+    let mut monitor_handle: Option<tokio::task::JoinHandle<()>> = None;
+    let db_for_shutdown = app_state.database.clone();
+
     // Start Monitor — the sole background task scheduler (Phase 6 complete)
     // Replaces: arc_status_poller, cache_sync, utxo_sync background services
     // Only start if wallet exists — no background work to do without a wallet
@@ -858,7 +865,7 @@ async fn main() -> std::io::Result<()> {
         }
 
         log::info!("🔄 Starting Monitor (background task scheduler)...");
-        monitor::Monitor::start(app_state.clone());
+        monitor_handle = monitor::Monitor::start(app_state.clone());
         log::info!("   ✅ Monitor started with 7 tasks");
         log::info!("");
     } else {
@@ -1091,7 +1098,8 @@ async fn main() -> std::io::Result<()> {
     .bind(("127.0.0.1", 31301))?
     .run();
 
-    // Spawn shutdown watcher that stops the HTTP server when Ctrl+C fires (Phase 8D)
+    // Spawn shutdown watcher that stops the HTTP server when Ctrl+C / POST /shutdown
+    // cancels the token (Phase 8D). Keeps the watcher minimal: cancel → drain.
     let server_handle = server.handle();
     tokio::spawn(async move {
         shutdown_token.cancelled().await;
@@ -1099,5 +1107,55 @@ async fn main() -> std::io::Result<()> {
         server_handle.stop(true).await; // graceful: finish in-flight requests
     });
 
-    server.await
+    // Block here until the server has fully drained in-flight requests.
+    server.await?;
+
+    // ── OD-2 graceful-exit sequence ─────────────────────────────────────────────
+    // The server is stopped (in-flight HTTP drained). Quiesce the Monitor, checkpoint
+    // the WAL so the next open is clean (and the image-file lock releases cleanly for
+    // the Windows updater), flush logs, then exit deterministically — all well within
+    // the C++ StopWalletServer 5s WaitForSingleObject budget so the clean-exit branch
+    // fires instead of TerminateProcess.
+    // See development-docs/DevOps-CICD/WALLET_GRACEFUL_EXIT_SPEC.md.
+    log::info!("🛑 HTTP server stopped — beginning clean shutdown sequence");
+
+    // 1. Quiesce the Monitor: bounded 2s join. The run loop breaks on the cancelled
+    //    token between tasks; a task blocked mid-network-await can't be interrupted, so
+    //    it burns the full cap before being abandoned — WAL + startup recovery make that
+    //    safe (never worse than the old TerminateProcess hard-kill). Cap is 2s (not 3s)
+    //    to keep drain+join+checkpoint comfortably under the C++ 5s WaitForSingleObject
+    //    even when an in-flight HTTP request makes the drain itself multi-second
+    //    (smoke 2026-06-24: idle drain ~1.2s + 3s join ≈ 4.2s left too little headroom).
+    if let Some(handle) = monitor_handle {
+        match tokio::time::timeout(std::time::Duration::from_secs(2), handle).await {
+            Ok(_) => log::info!("   ✅ Monitor quiesced"),
+            Err(_) => log::warn!("   ⚠️  Monitor did not quiesce within 2s — abandoning (WAL-safe)"),
+        }
+    }
+
+    // 2. Best-effort WAL checkpoint(TRUNCATE). Never block exit: try_lock with a short
+    //    bounded retry, then proceed regardless (an un-checkpointed WAL replays cleanly
+    //    on the next open).
+    {
+        let mut done = false;
+        for _ in 0..10 {
+            if let Ok(db) = db_for_shutdown.try_lock() {
+                match db.checkpoint_truncate() {
+                    Ok(()) => log::info!("   ✅ WAL checkpoint(TRUNCATE) complete"),
+                    Err(e) => log::warn!("   ⚠️  WAL checkpoint failed (non-fatal): {}", e),
+                }
+                done = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        if !done {
+            log::warn!("   ⚠️  WAL checkpoint skipped — DB busy at shutdown (WAL replays clean on next open)");
+        }
+    }
+
+    // 3. Final log line + flush, then deterministic clean exit.
+    log::info!("✅ Wallet clean exit (OD-2 graceful-exit)");
+    logger.flush();
+    std::process::exit(0);
 }

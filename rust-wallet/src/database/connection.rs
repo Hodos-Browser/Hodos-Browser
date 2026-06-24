@@ -99,6 +99,17 @@ impl WalletDatabase {
         &self.conn
     }
 
+    /// Best-effort WAL checkpoint at shutdown (OD-2 graceful-exit).
+    /// Runs `PRAGMA wal_checkpoint(TRUNCATE)` so the `-wal`/`-shm` are flushed into
+    /// the main DB file and truncated, leaving a clean no-replay open on the next
+    /// launch (and a clean image-file state for the Windows updater to swap the exe).
+    /// Callers log-and-ignore any error — exit must never block on this.
+    pub fn checkpoint_truncate(&self) -> rusqlite::Result<()> {
+        // PRAGMA wal_checkpoint(TRUNCATE) returns one row (busy, log, checkpointed).
+        self.conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))?;
+        Ok(())
+    }
+
     // ── PIN / mnemonic cache methods ──
 
     /// Check if the wallet uses PIN protection (has an encrypted mnemonic)

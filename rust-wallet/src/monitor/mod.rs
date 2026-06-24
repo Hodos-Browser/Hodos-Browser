@@ -106,15 +106,18 @@ impl Monitor {
     ///
     /// Uses an AtomicBool to prevent duplicate Monitor loops.
     /// Safe to call multiple times — second call is a no-op.
-    pub fn start(state: web::Data<AppState>) {
+    /// Returns the spawned task's `JoinHandle` so the shutdown coordinator can
+    /// quiesce the Monitor (bounded join) before the process exits (OD-2). Returns
+    /// `None` on the duplicate-start no-op path (preserves the `MONITOR_STARTED` guard).
+    pub fn start(state: web::Data<AppState>) -> Option<tokio::task::JoinHandle<()>> {
         if MONITOR_STARTED.swap(true, Ordering::SeqCst) {
             warn!("Monitor::start() called but Monitor is already running — skipping");
-            return;
+            return None;
         }
         let monitor = Self::new(state);
-        tokio::spawn(async move {
+        Some(tokio::spawn(async move {
             monitor.run().await;
-        });
+        }))
     }
 
     /// Check if the database is currently available (not held by a user request).
@@ -242,6 +245,8 @@ impl Monitor {
                 }
             }
 
+            if self.state.shutdown.is_cancelled() { info!("🛑 Monitor: shutdown — breaking after in-flight task"); break; }
+
             // TaskFailAbandoned
             if now - last_fail_abandoned >= self.schedule.fail_abandoned {
                 last_fail_abandoned = now;
@@ -250,6 +255,8 @@ impl Monitor {
                     self.log_event("TaskFailAbandoned:error", Some(&e));
                 }
             }
+
+            if self.state.shutdown.is_cancelled() { info!("🛑 Monitor: shutdown — breaking after in-flight task"); break; }
 
             // TaskUnFail
             if now - last_unfail >= self.schedule.unfail {
@@ -260,6 +267,8 @@ impl Monitor {
                 }
             }
 
+            if self.state.shutdown.is_cancelled() { info!("🛑 Monitor: shutdown — breaking after in-flight task"); break; }
+
             // TaskReviewStatus
             if now - last_review_status >= self.schedule.review_status {
                 last_review_status = now;
@@ -268,6 +277,8 @@ impl Monitor {
                     self.log_event("TaskReviewStatus:error", Some(&e));
                 }
             }
+
+            if self.state.shutdown.is_cancelled() { info!("🛑 Monitor: shutdown — breaking after in-flight task"); break; }
 
             // TaskPurge
             if now - last_purge >= self.schedule.purge {
@@ -322,6 +333,8 @@ impl Monitor {
                     _ => {}
                 }
             }
+
+            if self.state.shutdown.is_cancelled() { info!("🛑 Monitor: shutdown — breaking after in-flight task"); break; }
 
             // TaskReplayOverlay — retry overlay notification for certs stuck in 'unpublished_pending_overlay'
             if now - last_replay_overlay >= self.schedule.replay_overlay {
