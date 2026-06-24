@@ -212,10 +212,15 @@ jobs:
           echo "DSA_SIGNATURE=$DSA_SIG" >> $GITHUB_OUTPUT
 
       # EdDSA sign installer for WinSparkle 0.9.x (dual-signed DSA->EdDSA transition).
-      # Reuses the EXISTING macOS Ed25519 key (SPARKLE_EDDSA_PRIVATE_KEY) — WinSparkle
-      # 0.9.x and Sparkle 2 share the Ed25519 scheme. A self-check derives the public key
-      # and asserts it matches the SUPublicEDKey embedded in the client, so a key-format
-      # mismatch fails the release loudly instead of shipping a bad signature.
+      # Reuses the EXISTING macOS Ed25519 key (SPARKLE_EDDSA_PRIVATE_KEY) — WinSparkle 0.9.x
+      # and Sparkle 2 share the Ed25519 scheme. A self-check derives the public key and
+      # asserts it equals the SUPublicEDKey embedded in the client.
+      # NON-BLOCKING during the 3a transition: the shipped client is still 0.8.1/DSA, so the
+      # EdDSA signature is NOT yet load-bearing — if it can't be produced (e.g. the mac key
+      # needs a format conversion) we log a warning and ship a DSA-only feed, which every
+      # current client verifies fine. The self-check result in the CI log tells us whether
+      # the key is reusable. This step becomes FAIL-CLOSED in commit 3b, when the client
+      # switches to EdDSA-only and the EdDSA signature becomes mandatory.
       - name: EdDSA sign installer for WinSparkle
         shell: bash
         env:
@@ -227,34 +232,28 @@ jobs:
           TOOL="external/winsparkle/WinSparkle-0.9.3/bin/winsparkle-tool.exe"
           EXPECTED_PUB="GVq3mpDl8eelsG0A5wqC5FBYZd3fy7U3we9iZ9+Tq3Q="
 
-          if [ -z "$EDDSA_PRIVATE_KEY" ]; then
-            echo "::error::SPARKLE_EDDSA_PRIVATE_KEY not set — refusing to publish an unsigned EdDSA Windows feed (Goal-2 fail-closed)"
-            exit 1
-          fi
-          if [ ! -f "$TOOL" ]; then
-            echo "::error::winsparkle-tool not found at $TOOL (0.9.3 download step failed?)"
-            exit 1
-          fi
+          # Soft-skip: warn, emit an empty signature, let the release proceed DSA-only.
+          # (Becomes a hard error in commit 3b once EdDSA is load-bearing.)
+          soft_skip() { echo "::warning::EdDSA Windows signing skipped: $1 — shipping a DSA-only feed (fine while the client is 0.8.1)"; echo "EDDSA_SIGNATURE=" >> "$GITHUB_OUTPUT"; exit 0; }
+
+          [ -n "$EDDSA_PRIVATE_KEY" ] || soft_skip "SPARKLE_EDDSA_PRIVATE_KEY not set"
+          [ -f "$TOOL" ] || soft_skip "winsparkle-tool not found at $TOOL (0.9.3 download failed?)"
 
           printf '%s' "$EDDSA_PRIVATE_KEY" > /tmp/ed25519_win.key
 
-          # Self-check: derived public key MUST equal the embedded SUPublicEDKey.
-          DERIVED_PUB=$("$TOOL" public-key -f /tmp/ed25519_win.key 2>&1 | grep -i 'Public key:' | head -1 | sed 's/.*Public key: *//' | tr -d '[:space:]')
+          # Self-check: the derived public key MUST equal the embedded SUPublicEDKey.
+          DERIVED_PUB=$("$TOOL" public-key -f /tmp/ed25519_win.key 2>&1 | grep -i 'Public key:' | head -1 | sed 's/.*Public key: *//' | tr -d '[:space:]' || true)
           if [ "$DERIVED_PUB" != "$EXPECTED_PUB" ]; then
             rm -f /tmp/ed25519_win.key
-            echo "::error::winsparkle-tool derived pubkey ($DERIVED_PUB) != embedded SUPublicEDKey ($EXPECTED_PUB). The macOS SPARKLE_EDDSA_PRIVATE_KEY likely needs a one-time format conversion before WinSparkle can reuse it."
-            exit 1
+            soft_skip "derived pubkey '$DERIVED_PUB' != embedded '$EXPECTED_PUB' — the macOS key needs a one-time 32-byte format conversion before WinSparkle can reuse it"
           fi
-          echo "EdDSA key self-check passed (derives the embedded SUPublicEDKey)"
+          echo "EdDSA key self-check PASSED — the macOS key derives the embedded SUPublicEDKey (reuse confirmed)"
 
-          EDDSA_SIG=$("$TOOL" sign "$INSTALLER" -f /tmp/ed25519_win.key)
+          EDDSA_SIG=$("$TOOL" sign "$INSTALLER" -f /tmp/ed25519_win.key 2>&1 || true)
           rm -f /tmp/ed25519_win.key
-          if [ -z "$EDDSA_SIG" ]; then
-            echo "::error::winsparkle-tool produced an empty EdDSA signature"
-            exit 1
-          fi
+          [ -n "$EDDSA_SIG" ] || soft_skip "winsparkle-tool produced an empty signature"
           echo "Windows EdDSA signature: ${EDDSA_SIG:0:20}..."
-          echo "EDDSA_SIGNATURE=$EDDSA_SIG" >> $GITHUB_OUTPUT
+          echo "EDDSA_SIGNATURE=$EDDSA_SIG" >> "$GITHUB_OUTPUT"
 
       # Upload for publish job
       - name: Upload Windows installer
