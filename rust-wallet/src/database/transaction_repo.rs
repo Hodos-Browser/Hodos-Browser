@@ -28,8 +28,15 @@ impl<'a> TransactionRepository<'a> {
             .unwrap()
             .as_secs() as i64;
 
+        // Atomicity (OD-2 commit 2): wrap the whole multi-statement insert
+        // (transactions + labels + inputs + outputs) in ONE SQLite transaction so an
+        // unclean process kill mid-sequence rolls back to nothing rather than leaving a
+        // partial transaction row that startup recovery then has to reconcile. Any early
+        // `return` below drops `tx` uncommitted → automatic rollback.
+        let tx = self.conn.unchecked_transaction()?;
+
         // Insert into transactions table with single status column
-        self.conn.execute(
+        tx.execute(
             "INSERT INTO transactions (
                 txid, reference_number, raw_tx, description, status, is_outgoing,
                 satoshis, block_height, confirmations, version, lock_time, price_usd_cents, created_at, updated_at
@@ -52,7 +59,7 @@ impl<'a> TransactionRepository<'a> {
             ],
         )?;
 
-        let transaction_id = self.conn.last_insert_rowid();
+        let transaction_id = tx.last_insert_rowid();
 
         // Insert transaction labels into tx_labels/tx_labels_map
         for label in &action.labels {
@@ -60,24 +67,24 @@ impl<'a> TransactionRepository<'a> {
             if normalized.is_empty() { continue; }
 
             // Find or insert the deduplicated label entity
-            let label_id: i64 = match self.conn.query_row(
+            let label_id: i64 = match tx.query_row(
                 "SELECT txLabelId FROM tx_labels WHERE label = ?1 AND user_id = ?2 AND is_deleted = 0",
                 rusqlite::params![&normalized, user_id],
                 |row| row.get(0),
             ) {
                 Ok(id) => id,
                 Err(rusqlite::Error::QueryReturnedNoRows) => {
-                    self.conn.execute(
+                    tx.execute(
                         "INSERT INTO tx_labels (user_id, label, is_deleted, created_at, updated_at) VALUES (?1, ?2, 0, ?3, ?4)",
                         rusqlite::params![user_id, &normalized, now, now],
                     )?;
-                    self.conn.last_insert_rowid()
+                    tx.last_insert_rowid()
                 }
                 Err(e) => return Err(e),
             };
 
             // Create the label→transaction mapping
-            self.conn.execute(
+            tx.execute(
                 "INSERT OR IGNORE INTO tx_labels_map (txLabelId, transaction_id, is_deleted, created_at, updated_at) VALUES (?1, ?2, 0, ?3, ?4)",
                 rusqlite::params![label_id, transaction_id, now, now],
             )?;
@@ -85,7 +92,7 @@ impl<'a> TransactionRepository<'a> {
 
         // Insert transaction inputs
         for input in &action.inputs {
-            self.conn.execute(
+            tx.execute(
                 "INSERT INTO transaction_inputs (
                     transaction_id, txid, vout, satoshis, script
                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -101,7 +108,7 @@ impl<'a> TransactionRepository<'a> {
 
         // Insert transaction outputs
         for output in &action.outputs {
-            self.conn.execute(
+            tx.execute(
                 "INSERT INTO transaction_outputs (
                     transaction_id, vout, satoshis, script, address
                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -114,6 +121,8 @@ impl<'a> TransactionRepository<'a> {
                 ],
             )?;
         }
+
+        tx.commit()?;
 
         info!("   ✅ Transaction {} saved to database (ID: {})", action.txid, transaction_id);
         Ok(transaction_id)

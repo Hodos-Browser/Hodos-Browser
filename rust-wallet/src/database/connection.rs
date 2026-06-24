@@ -72,6 +72,14 @@ impl WalletDatabase {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         info!("   Busy timeout set to 5 seconds");
 
+        // Make the WAL durability level explicit + auditable (OD-2 commit 2). NORMAL is
+        // the implicit WAL default already in effect; stating it removes ambiguity and
+        // is the correct level for our clean-exit path (the shutdown WAL checkpoint forces
+        // the fsync). FULL would only matter for OS-crash/power-loss and slows every commit.
+        conn.execute("PRAGMA synchronous=NORMAL", [])?;
+        let synchronous: i32 = conn.query_row("PRAGMA synchronous", [], |row| row.get(0))?;
+        info!("   Synchronous: {} (0=OFF 1=NORMAL 2=FULL)", synchronous);
+
         let db = WalletDatabase {
             conn,
             db_path: db_path.clone(),

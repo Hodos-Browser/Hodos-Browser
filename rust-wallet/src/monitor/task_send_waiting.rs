@@ -262,7 +262,17 @@ fn cleanup_failed_sending_impl(state: &web::Data<AppState>, txid: &str, tx_id: i
             .unwrap_or_default()
             .as_secs() as i64;
 
-        if let Err(e) = conn.execute(
+        // Per-tx atomicity (OD-2 commit 2): wrap mark-failed + output disable + input
+        // handling in ONE transaction so an unclean kill mid-sequence rolls back rather
+        // than leaving a half-cleaned tx. Existing best-effort sub-step error handling
+        // (warn-and-continue) is preserved — only the kill-torn case changes. Any early
+        // `return` drops `tx` uncommitted → automatic rollback.
+        let tx = match conn.unchecked_transaction() {
+            Ok(t) => t,
+            Err(e) => { warn!("   ⚠️ Failed to begin cleanup txn for {}: {}", short_txid, e); return; }
+        };
+
+        if let Err(e) = tx.execute(
             "UPDATE transactions SET status = 'failed', failed_at = ?1 WHERE id = ?2",
             rusqlite::params![now, tx_id],
         ) {
@@ -270,7 +280,7 @@ fn cleanup_failed_sending_impl(state: &web::Data<AppState>, txid: &str, tx_id: i
             return;
         }
 
-        let output_repo = OutputRepository::new(conn);
+        let output_repo = OutputRepository::new(&tx);
 
         // 2. Disable (not delete) change outputs — TaskUnFail can re-enable if tx was actually mined
         match output_repo.disable_by_txid(txid) {
@@ -287,7 +297,7 @@ fn cleanup_failed_sending_impl(state: &web::Data<AppState>, txid: &str, tx_id: i
         if is_double_spend {
             // Mark as suspected — TaskVerifyDoubleSpend will verify independently.
             let suspected_desc = format!("{}{}", crate::arc_status::SUSPECTED_DOUBLE_SPEND_PREFIX, txid);
-            let marked = conn.execute(
+            let marked = tx.execute(
                 "UPDATE outputs SET spending_description = ?1
                  WHERE spending_description = ?2 AND spendable = 0",
                 rusqlite::params![&suspected_desc, txid],
@@ -313,6 +323,10 @@ fn cleanup_failed_sending_impl(state: &web::Data<AppState>, txid: &str, tx_id: i
                     }
                 }
             }
+        }
+
+        if let Err(e) = tx.commit() {
+            warn!("   ⚠️ Failed to commit cleanup txn for {}: {}", short_txid, e);
         }
     }
 

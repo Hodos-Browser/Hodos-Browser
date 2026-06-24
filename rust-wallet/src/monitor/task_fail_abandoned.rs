@@ -13,7 +13,7 @@ use actix_web::web;
 use log::{info, warn};
 
 use crate::AppState;
-use crate::database::{TransactionRepository, OutputRepository};
+use crate::database::OutputRepository;
 
 /// Transactions older than this (in seconds) are considered abandoned
 const ABANDON_THRESHOLD_SECS: i64 = 300;
@@ -28,8 +28,8 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
     let results = {
         let db = state.database.lock().map_err(|e| format!("DB lock: {}", e))?;
         let conn = db.connection();
-        let _tx_repo = TransactionRepository::new(conn);
-        let output_repo = OutputRepository::new(conn);
+        // OD-2 commit 2: repos are created inside each loop iteration so each tx's cleanup
+        // runs in its own SQLite transaction (per-tx atomicity vs an unclean kill).
 
         // Find transactions stuck in unprocessed/unsigned for more than 5 minutes
         let mut stmt = conn.prepare(
@@ -63,7 +63,16 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
                 .unwrap_or_default()
                 .as_secs() as i64;
 
-            if let Err(e) = conn.execute(
+            // Per-tx atomicity (OD-2 commit 2): one transaction per abandoned tx so an
+            // unclean kill mid-cleanup rolls back rather than leaving it half-cleaned.
+            // `continue` drops `itx` uncommitted → rollback.
+            let itx = match conn.unchecked_transaction() {
+                Ok(t) => t,
+                Err(e) => { warn!("   ⚠️ Failed to begin cleanup txn for {}: {}", short_txid, e); continue; }
+            };
+            let output_repo = OutputRepository::new(&itx);
+
+            if let Err(e) = itx.execute(
                 "UPDATE transactions SET status = 'failed', failed_at = ?1 WHERE id = ?2",
                 rusqlite::params![now, tx_id],
             ) {
@@ -103,6 +112,9 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
                 }
             }
 
+            if let Err(e) = itx.commit() {
+                warn!("   ⚠️ Failed to commit cleanup txn for {}: {}", short_txid, e);
+            }
             info!("   ✅ Abandoned tx {} marked as failed", short_txid);
         }
 
@@ -130,7 +142,14 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
                 .unwrap_or_default()
                 .as_secs() as i64;
 
-            if let Err(e) = conn.execute(
+            // Per-tx atomicity (OD-2 commit 2): one transaction per stuck backup.
+            let itx = match conn.unchecked_transaction() {
+                Ok(t) => t,
+                Err(e) => { warn!("   ⚠️ Failed to begin cleanup txn for backup {}: {}", short_txid, e); continue; }
+            };
+            let output_repo = OutputRepository::new(&itx);
+
+            if let Err(e) = itx.execute(
                 "UPDATE transactions SET status = 'failed', failed_at = ?1 WHERE id = ?2",
                 rusqlite::params![now, tx_id],
             ) {
@@ -163,6 +182,9 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
                 }
             }
 
+            if let Err(e) = itx.commit() {
+                warn!("   ⚠️ Failed to commit cleanup txn for backup {}: {}", short_txid, e);
+            }
             info!("   ✅ Stuck backup {} marked as failed", short_txid);
         }
 

@@ -174,8 +174,17 @@ fn recover_transaction(state: &web::Data<AppState>, txid: &str, proven_tx_id: i6
         let conn = db.connection();
         let short_txid = &txid[..txid.len().min(16)];
 
+        // Per-tx atomicity (OD-2 commit 2): wrap the whole recovery (status update, proof
+        // link, input re-mark, output re-enable) in ONE transaction so an unclean kill
+        // mid-sequence rolls back rather than leaving a partially-recovered tx. Existing
+        // best-effort sub-step handling is preserved; any early `return` rolls back.
+        let tx = match conn.unchecked_transaction() {
+            Ok(t) => t,
+            Err(e) => { warn!("   ⚠️ Failed to begin recovery txn for {}: {}", short_txid, e); return; }
+        };
+
         // Update transaction status to completed
-        let tx_repo = TransactionRepository::new(conn);
+        let tx_repo = TransactionRepository::new(&tx);
         if let Err(e) = tx_repo.update_broadcast_status(txid, "confirmed") {
             warn!("   ⚠️ Failed to recover tx {}: {}", short_txid, e);
             return;
@@ -185,11 +194,11 @@ fn recover_transaction(state: &web::Data<AppState>, txid: &str, proven_tx_id: i6
         }
 
         // Link proven_tx
-        let proven_tx_repo = ProvenTxRepository::new(conn);
+        let proven_tx_repo = ProvenTxRepository::new(&tx);
         let _ = proven_tx_repo.link_transaction(txid, proven_tx_id);
 
         // Update proven_tx_reqs if exists
-        let req_repo = ProvenTxReqRepository::new(conn);
+        let req_repo = ProvenTxReqRepository::new(&tx);
         if let Ok(Some(req)) = req_repo.get_by_txid(txid) {
             let _ = req_repo.update_status(req.proven_tx_req_id, "completed");
             let _ = req_repo.link_proven_tx(req.proven_tx_req_id, proven_tx_id);
@@ -204,8 +213,8 @@ fn recover_transaction(state: &web::Data<AppState>, txid: &str, proven_tx_id: i6
         // When mark_failed ran, it restored inputs as "spendable" and NULLed
         // spending_description. Now that the tx is confirmed on-chain, those
         // inputs are actually spent. Parse raw_tx to find which inputs to re-mark.
-        let output_repo = OutputRepository::new(conn);
-        let tx_repo_inner = TransactionRepository::new(conn);
+        let output_repo = OutputRepository::new(&tx);
+        let tx_repo_inner = TransactionRepository::new(&tx);
         if let Ok(Some(stored_tx)) = tx_repo_inner.get_by_txid(txid) {
             match crate::transaction::extract_input_outpoints(&stored_tx.raw_tx) {
                 Ok(input_outpoints) => {
@@ -214,7 +223,7 @@ fn recover_transaction(state: &web::Data<AppState>, txid: &str, proven_tx_id: i6
                         // First: clear any 'dss:*' suspected marking (spendable=0, so mark_spent won't match).
                         // This handles the case where inputs were marked suspected by TaskSendWaiting
                         // but the tx was actually mined.
-                        let dss_cleared = conn.execute(
+                        let dss_cleared = tx.execute(
                             "UPDATE outputs SET spendable = 1, spending_description = NULL
                              WHERE txid = ?1 AND vout = ?2 AND spending_description LIKE 'dss:%'",
                             rusqlite::params![prev_txid, *prev_vout],
@@ -251,6 +260,10 @@ fn recover_transaction(state: &web::Data<AppState>, txid: &str, proven_tx_id: i6
                 warn!("   ⚠️ Failed to re-enable outputs for {}: {} — run /wallet/sync to reconcile", short_txid, e);
             }
             _ => {}
+        }
+
+        if let Err(e) = tx.commit() {
+            warn!("   ⚠️ Failed to commit recovery txn for {}: {}", short_txid, e);
         }
         info!("   ✅ Recovered tx {} → completed (proof at height {})", short_txid, height);
     }
