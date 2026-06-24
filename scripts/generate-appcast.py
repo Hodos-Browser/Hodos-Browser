@@ -62,6 +62,11 @@ def generate_appcast(args):
         if not args.windows_signature:
             sys.exit('ERROR: --windows-url given without --windows-signature — refusing to emit an unsigned Windows enclosure')
         enclosure_attrs[f'{{{SPARKLE_NS}}}dsaSignature'] = args.windows_signature
+        # Dual-signed DSA→EdDSA transition: also emit the EdDSA signature so WinSparkle
+        # 0.9.x clients verify via EdDSA, while already-installed 0.8.1 (DSA-only) clients
+        # keep verifying via dsaSignature. (Drop dsaSignature only after 0.8.1 drains.)
+        if args.windows_ed_signature:
+            enclosure_attrs[f'{{{SPARKLE_NS}}}edSignature'] = args.windows_ed_signature
         ET.SubElement(item, 'enclosure', enclosure_attrs)
 
     # macOS item
@@ -117,7 +122,8 @@ def main():
     parser.add_argument('--build-number', type=int, help='Monotonic integer build number (e.g. 14 for v0.3.0-beta.14). Emitted as macOS sparkle:version for comparison against CFBundleVersion. If omitted, falls back to --version.')
     parser.add_argument('--windows-url', help='Windows installer download URL')
     parser.add_argument('--windows-size', type=int, help='Windows installer file size in bytes')
-    parser.add_argument('--windows-signature', help='Windows DSA signature')
+    parser.add_argument('--windows-signature', help='Windows DSA signature (legacy; kept during the DSA→EdDSA transition)')
+    parser.add_argument('--windows-ed-signature', help='Windows EdDSA (Ed25519) signature from winsparkle-tool — dual-emitted alongside the DSA signature')
     parser.add_argument('--macos-url', help='macOS DMG download URL')
     parser.add_argument('--macos-size', type=int, help='macOS DMG file size in bytes')
     parser.add_argument('--macos-signature', help='macOS EdDSA signature')
