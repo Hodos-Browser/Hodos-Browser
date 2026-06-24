@@ -145,7 +145,18 @@ jobs:
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
-      
+
+      # Re-create the portable zip from the SIGNED staging dir. build-release.ps1 zips it
+      # BEFORE this signing step, so its binaries would otherwise ship unsigned (Goal-2).
+      - name: Re-create portable zip from signed binaries
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.VERSION }}"
+          $zip = "${{ github.workspace }}\dist\HodosBrowser-$version-portable.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path "${{ github.workspace }}\staging\HodosBrowser\*" -DestinationPath $zip -CompressionLevel Optimal
+          Write-Host "Re-zipped signed staging into $zip"
+
       # Re-run installer after signing (so installer contains signed exes)
       - name: Rebuild installer with signed executables
         shell: pwsh
@@ -181,9 +192,8 @@ jobs:
           INSTALLER="dist/HodosBrowser-${VERSION}-setup.exe"
 
           if [ -z "$DSA_PRIVATE_KEY" ]; then
-            echo "WARNING: WINSPARKLE_DSA_PRIVATE_KEY not set — skipping DSA signing"
-            echo "DSA_SIGNATURE=" >> $GITHUB_OUTPUT
-            exit 0
+            echo "::error::WINSPARKLE_DSA_PRIVATE_KEY not set — refusing to publish an unsigned auto-update feed (Goal-2 fail-closed)"
+            exit 1
           fi
 
           # Write DSA private key to temp file
@@ -903,5 +913,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git diff --cached --quiet || git commit -m "Update appcast.xml for ${GITHUB_REF_NAME}"
-          git push || echo "WARNING: Could not push appcast to website repo (check permissions)"
+          # Empty-commit guard keeps a byte-identical re-run from failing; but if there IS
+          # a new appcast to publish, a failed push must FAIL the release (Goal-2 fail-closed)
+          # — a silently-unpublished feed means clients never see the update.
+          git diff --cached --quiet || { git commit -m "Update appcast.xml for ${GITHUB_REF_NAME}" && git push; }

@@ -17,6 +17,7 @@ The generated XML follows the Sparkle appcast format used by both WinSparkle and
 """
 
 import argparse
+import sys
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
@@ -55,8 +56,12 @@ def generate_appcast(args):
             'length': str(args.windows_size or 0),
             'type': 'application/octet-stream',
         }
-        if args.windows_signature:
-            enclosure_attrs[f'{{{SPARKLE_NS}}}dsaSignature'] = args.windows_signature
+        # Fail closed (Goal-2 feed integrity): a Windows item with no signature is an
+        # UNSIGNED enclosure that WinSparkle would still try to install. Refuse to emit
+        # one rather than silently omitting the attribute.
+        if not args.windows_signature:
+            sys.exit('ERROR: --windows-url given without --windows-signature — refusing to emit an unsigned Windows enclosure')
+        enclosure_attrs[f'{{{SPARKLE_NS}}}dsaSignature'] = args.windows_signature
         ET.SubElement(item, 'enclosure', enclosure_attrs)
 
     # macOS item
@@ -86,8 +91,10 @@ def generate_appcast(args):
             'length': str(args.macos_size or 0),
             'type': 'application/octet-stream',
         }
-        if args.macos_signature:
-            enclosure_attrs[f'{{{SPARKLE_NS}}}edSignature'] = args.macos_signature
+        # Fail closed (Goal-2 feed integrity): never emit an unsigned macOS enclosure.
+        if not args.macos_signature:
+            sys.exit('ERROR: --macos-url given without --macos-signature — refusing to emit an unsigned macOS enclosure')
+        enclosure_attrs[f'{{{SPARKLE_NS}}}edSignature'] = args.macos_signature
         ET.SubElement(item, 'enclosure', enclosure_attrs)
 
     # Write XML

@@ -20,6 +20,10 @@ version = "0.3.0"
 edition = "2021"
 default-run = "hodos-wallet"
 
+# Goal-2 signing hygiene: embed Windows VERSIONINFO (publisher/version metadata) via build.rs.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 [dependencies]
 # HTTP server
 actix-web = "4.9"

@@ -3,6 +3,10 @@ name = "hodos-adblock"
 version = "0.1.0"
 edition = "2021"
 
+# Goal-2 signing hygiene: embed Windows VERSIONINFO (publisher/version metadata) via build.rs.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 [dependencies]
 # HTTP server (pinned to 4.11 — 4.13+ requires Rust 1.88)
 actix-web = "=4.11.0"
