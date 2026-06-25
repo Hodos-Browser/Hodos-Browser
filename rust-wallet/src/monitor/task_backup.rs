@@ -68,7 +68,7 @@ pub async fn run(state: &web::Data<AppState>) -> BackupOutcome {
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
-    match client.post("http://127.0.0.1:31301/wallet/backup/onchain")
+    match client.post(format!("http://127.0.0.1:{}/wallet/backup/onchain", crate::wallet_port()))
         .header("Content-Type", "application/json")
         .body("{}")
         .send()

@@ -15,7 +15,15 @@ mod handlers;
 use actix_web::{web, App, HttpServer};
 use std::path::PathBuf;
 
-const ADBLOCK_PORT: u16 = 31302;
+/// Adblock HTTP port. Dev builds (`HODOS_DEV=1`) bind 31402 so the dev browser
+/// and the INSTALLED browser (31302) can run simultaneously. Gated on the SAME
+/// `HODOS_DEV` condition as `app_dir_name()`; a release build always uses 31302.
+fn adblock_port() -> u16 {
+    match std::env::var("HODOS_DEV").as_deref() {
+        Ok("1") => 31402,
+        _ => 31302,
+    }
+}
 
 fn app_dir_name() -> &'static str {
     match std::env::var("HODOS_DEV").as_deref() {
@@ -69,7 +77,7 @@ async fn main() -> std::io::Result<()> {
     let engine_for_init = engine_data.clone();
 
     println!();
-    println!("Starting HTTP server on port {}...", ADBLOCK_PORT);
+    println!("Starting HTTP server on port {}...", adblock_port());
 
     // Start HTTP server (responds to /health with "loading" immediately)
     let server = HttpServer::new(move || {
@@ -84,7 +92,7 @@ async fn main() -> std::io::Result<()> {
             .route("/cosmetic-hidden-ids", web::post().to(handlers::cosmetic_hidden_ids))
     })
     .workers(2)
-    .bind(("127.0.0.1", ADBLOCK_PORT))?
+    .bind(("127.0.0.1", adblock_port()))?
     .run();
 
     // Clone for the background update task
@@ -147,7 +155,7 @@ async fn main() -> std::io::Result<()> {
         }
     });
 
-    println!("Server listening on http://127.0.0.1:{}", ADBLOCK_PORT);
+    println!("Server listening on http://127.0.0.1:{}", adblock_port());
     println!();
 
     server.await

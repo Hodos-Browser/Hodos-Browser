@@ -110,6 +110,19 @@ fn app_dir_name() -> &'static str {
     }
 }
 
+/// Wallet HTTP port. Dev builds (`HODOS_DEV=1`) bind 31401 so the dev browser
+/// and the INSTALLED browser (which uses 31301) can run simultaneously without
+/// fighting over the port. Gated on the SAME `HODOS_DEV` condition as
+/// `app_dir_name()` — a release build never sets the env var, so it always uses
+/// 31301. Used by the bind below AND by `monitor::task_backup`'s self-call
+/// (via `crate::wallet_port()`) so the dev monitor never POSTs the prod wallet.
+pub fn wallet_port() -> u16 {
+    match std::env::var("HODOS_DEV").as_deref() {
+        Ok("1") => 31401,
+        _ => 31301,
+    }
+}
+
 /// Cross-platform base data directory for this app instance.
 /// `<dirs::data_dir()>/<app_dir_name()>` — e.g.
 /// Windows dev: `%APPDATA%\HodosBrowserDev`, macOS: `~/Library/Application Support/HodosBrowser`.
@@ -667,8 +680,8 @@ async fn main() -> std::io::Result<()> {
 
     log::info!("");
     log::info!("🌐 Starting HTTP server...");
-    log::info!("   Port: 31301");
-    log::info!("   URL: http://localhost:31301");
+    log::info!("   Port: {}", wallet_port());
+    log::info!("   URL: http://localhost:{}", wallet_port());
     log::info!("");
     log::info!("📋 Available endpoints:");
     log::info!("   GET  /health");
@@ -1095,7 +1108,7 @@ async fn main() -> std::io::Result<()> {
             .route("/domain/permissions/reset-all", web::post().to(handlers::domain_permissions_reset_all))
 
     })
-    .bind(("127.0.0.1", 31301))?
+    .bind(("127.0.0.1", wallet_port()))?
     .run();
 
     // Spawn shutdown watcher that stops the HTTP server when Ctrl+C / POST /shutdown

@@ -16387,9 +16387,29 @@ pub struct WalletExportRequest {
 /// POST /wallet/export — encrypt all wallet entities into a .hodos-wallet file
 pub async fn wallet_export(
     state: web::Data<AppState>,
+    http_req: HttpRequest,
     body: web::Json<WalletExportRequest>,
 ) -> HttpResponse {
     log::info!("   /wallet/export called");
+
+    // Security (OQ-4 / bridge migration): export serializes the wallet (encrypted
+    // mnemonic + every row). It is a user/wallet-internal operation only — no
+    // external site, even an approved dApp, may trigger it (a caller-chosen
+    // password would let them decrypt the result and recover the seed). External
+    // origins carry `X-Requesting-Domain` (injected by the C++ layer); reject
+    // them. Internal callers (wallet UI) send no such header. Mirrors
+    // `wallet_backup` / `wallet_restore`.
+    if let Some(domain) = http_req
+        .headers()
+        .get("X-Requesting-Domain")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+    {
+        log::warn!("   🛡️  Rejected external export request from '{}'", domain);
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "error": "Export is a local-only operation and cannot be triggered by a website"
+        }));
+    }
 
     if body.password.len() < 8 {
         return HttpResponse::BadRequest().json(serde_json::json!({
@@ -16453,9 +16473,26 @@ pub struct WalletImportRequest {
 /// POST /wallet/import — restore wallet from encrypted backup file (mnemonic included in backup)
 pub async fn wallet_import(
     state: web::Data<AppState>,
+    http_req: HttpRequest,
     body: web::Json<WalletImportRequest>,
 ) -> HttpResponse {
     log::info!("   /wallet/import called");
+
+    // Security (OQ-4 / bridge migration): import OVERWRITES the live wallet from a
+    // caller-supplied backup blob — user/wallet-internal only, same as restore.
+    // External origins carry `X-Requesting-Domain` (injected by the C++ layer);
+    // reject them. Internal callers (wallet UI) send no such header.
+    if let Some(domain) = http_req
+        .headers()
+        .get("X-Requesting-Domain")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+    {
+        log::warn!("   🛡️  Rejected external import request from '{}'", domain);
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "error": "Import is a local-only operation and cannot be triggered by a website"
+        }));
+    }
 
     // 1. Validate PIN format if provided
     if let Some(ref pin) = body.pin {
