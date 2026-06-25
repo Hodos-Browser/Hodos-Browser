@@ -130,9 +130,10 @@ const App = () => {
     // (Removed) BRC-100 startup probe. brc100.isAvailable() invoked a SYNCHRONOUS
     // native WinHTTP call on the renderer main thread that blocked first paint by
     // ~2s at startup (cold wallet + WPAD proxy auto-detect). Its result was only
-    // logged. The legacy window.hodosBrowser.brc100.* bindings are unused — wallet
-    // actions go direct to the Rust API at 127.0.0.1:31301.
-    // See development-docs/0.4.0/STARTUP_OPTIMIZATION.md.
+    // logged. The legacy window.hodosBrowser.brc100.* bindings are unused. Wallet
+    // UI calls now route through the C++ wallet_call bridge (walletFetch ->
+    // window.__hodos_walletCall) so C++ owns the wallet port — see
+    // development-docs/0.4.0/WALLET_UI_BRIDGE_MIGRATION.md and STARTUP_OPTIMIZATION.md.
 
     // Cleanup function to remove event listeners
     return () => {
