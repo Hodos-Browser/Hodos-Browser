@@ -85,48 +85,50 @@ After build completes, find the signature in the CI logs:
 
 The signature looks like: `MD0CHQCvt9FfZ6Q9Co/s...`
 
-#### Step 5: Update appcast.xml on website
+#### Steps 5–7: appcast, download links, and publish — NOW AUTOMATED (2026-06-25)
+
+> The `publish` job in `release.yml` does all of this automatically when you push a `v*` tag. The old manual recipe is kept as a fallback at the end of this section.
+
+On a tag push, the `publish` job runs a **draft-first** flow so a failure leaves nothing public:
+
+1. Generates `appcast.xml` (DSA + EdDSA signatures) as a release artifact.
+2. Creates the GitHub Release as a **draft**, then **verifies it before anything goes public**: all 5 assets present + `state=uploaded` + non-trivial size, and the appcast advertises *this* version (exact `<sparkle:shortVersionString>`, both enclosure URLs, non-empty signatures).
+3. **Promotes** the release to live + marks it **Latest**. The deliberate `v*` tag push is the ship gate — there is no separate "click Publish."
+4. Verifies the public `.exe`/`.dmg` URLs actually resolve.
+5. Pushes to `Hodos-Browser/hodosbrowser.com` (Cloudflare Pages) using the **`WEBSITE_DEPLOY_TOKEN`** secret, updating all three version-bearing files:
+   - `public/appcast.xml` — the auto-update feed
+   - `public/_redirects` — the `/download/win` + `/download/mac` button targets (rewritten deterministically from the tag)
+   - `src/pages/index.astro` — the `const version` shown on the page/footer
+6. Verifies the **live** site (`https://hodosbrowser.com/appcast.xml` + `/download/win`) is serving the new version, with a cache-busted poll, before going green.
+
+A **green** `publish` job therefore means: release live + marked Latest, feed published, website serving the new version — all verified. A **red** job before the *Promote* step means nothing went public.
+
+**One-time prerequisite:** the `WEBSITE_DEPLOY_TOKEN` repo secret — a fine-grained PAT scoped to `Hodos-Browser/hodosbrowser.com` with **Contents: Read and write**. Without it the website push fails with HTTP 403. Rotate by regenerating the PAT and replacing the secret.
+
+> **Build-number note:** the macOS `CFBundleVersion` / appcast `sparkle:version` is now a globally-monotonic integer (`MAJOR*1e6 + MINOR*1e4 + PATCH*100 + (beta N, or 99 for a final)`), computed identically in the build job and the appcast step. This fixes the old bug where a final `vX.Y.0` scored `0` and never superseded an installed beta. See the comments in `release.yml` and `CEF_VERSION_UPDATE_TRACKER.md`.
+
+<details>
+<summary>Manual fallback (only if the automation is disabled)</summary>
 
 ```bash
+# 1. Generate appcast with signatures pulled from the CI logs
 python3 scripts/generate-appcast.py \
   --version "X.Y.Z-beta.N" \
-  --windows-url "https://github.com/Hodos-Browser/Hodos-Browser/releases/download/vX.Y.Z-beta.N/HodosBrowser-X.Y.Z-beta.N-setup.exe" \
-  --windows-size 0 \
-  --windows-signature "<PASTE DSA SIGNATURE FROM STEP 4>" \
-  --macos-url "https://github.com/Hodos-Browser/Hodos-Browser/releases/download/vX.Y.Z-beta.N/HodosBrowser-X.Y.Z-beta.N.dmg" \
-  --macos-size 0 \
+  --windows-url ".../vX.Y.Z-beta.N/HodosBrowser-X.Y.Z-beta.N-setup.exe" --windows-size 0 \
+  --windows-signature "<DSA SIG>" \
+  --macos-url ".../vX.Y.Z-beta.N/HodosBrowser-X.Y.Z-beta.N.dmg" --macos-size 0 \
   --output "C:\Users\archb\Marston Enterprises\Hodos\website\public\appcast.xml"
 
+# 2. In the website repo, also bump public/_redirects (/download/win + /download/mac)
+#    and src/pages/index.astro (const version = "X.Y.Z-beta.N"), then:
 cd "C:\Users\archb\Marston Enterprises\Hodos\website"
-git add public/appcast.xml
-git commit -m "Update appcast.xml for vX.Y.Z-beta.N with DSA signature"
-git push
+git add -A && git commit -m "Release vX.Y.Z-beta.N: appcast + download links + version" && git push
+# Cloudflare deploys in ~1–2 min. Verify https://hodosbrowser.com/appcast.xml
+
+# 3. Publish the draft at https://github.com/Hodos-Browser/Hodos-Browser/releases
 ```
 
-Wait 1–2 min for Cloudflare to deploy. Verify at: https://hodosbrowser.com/appcast.xml
-
-#### Step 6: Update website download links
-
-Edit the website repo at `C:\Users\archb\Marston Enterprises\Hodos\website`:
-
-| File | What to change |
-|------|----------------|
-| `public/_redirects` | Update `/download/win` and `/download/mac` URLs to point at `vX.Y.Z-beta.N` GitHub Release assets |
-| `src/pages/index.astro` | Update `const version = "X.Y.Z-beta.N"` (the version text shown to users) |
-
-```bash
-cd "C:\Users\archb\Marston Enterprises\Hodos\website"
-git add -A
-git commit -m "Update download links and version to vX.Y.Z-beta.N"
-git push
-```
-
-#### Step 7: Publish the GitHub Release
-
-Go to: https://github.com/Hodos-Browser/Hodos-Browser/releases
-- Find the draft release for `vX.Y.Z-beta.N`
-- Verify all 5 assets are present (installer .exe, portable .zip, macOS .dmg, appcast.xml, SHA256SUMS.txt)
-- Click **Publish release**
+</details>
 
 #### Step 8: Anti-virus / reputation seeding
 
@@ -174,17 +176,18 @@ If the chain shows `Microsoft ID Verified CS EOC CA 03`, you're on the post-Marc
 **What's automatic (CI handles):**
 - Windows + macOS builds
 - Azure code signing (Windows executables)
-- macOS code signing + notarization attempt
-- DSA signing of Windows installer for WinSparkle
-- Appcast.xml generation with DSA signature (as release artifact)
+- macOS code signing + notarization
+- DSA + EdDSA signing of Windows installer for WinSparkle
+- Appcast.xml generation (DSA + EdDSA) as a release artifact
 - Version injection into C++ binary via `-DAPP_VERSION=` CMake flag
+- Globally-monotonic macOS build number (finals supersede betas)
+- **Draft-first release: verify assets + appcast → promote live + mark Latest (Steps 5–7)**
+- **Website publish: appcast + `_redirects` + `index.astro` pushed to `hodosbrowser.com` via `WEBSITE_DEPLOY_TOKEN`, then live-verified**
 
 **What's still manual:**
-- Bumping `APP_VERSION` in frontend AboutSettings.tsx (Step 1)
-- Copying appcast.xml (with DSA sig) to website repo (Step 5)
-- Updating `_redirects` and `index.astro` in website (Step 6)
-- Publishing the draft release on GitHub (Step 7)
+- Bumping `APP_VERSION` in `frontend/src/components/settings/AboutSettings.tsx` and `installer/hodos-browser.iss` (Step 1)
 - AV submissions (Step 8)
+- Pushing the `v*` tag to the release remote — the deliberate "ship it" gate
 
 **Important notes:**
 - The release repo is `Hodos-Browser/Hodos-Browser` (public). Dev repo is `BSVArchie/Hodos-Browser` (private).

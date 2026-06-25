@@ -320,15 +320,22 @@ jobs:
         id: version
         run: |
           version="${GITHUB_REF_NAME#v}"
-          # Build number = the integer suffix after "-beta." in the tag.
-          # Used as CFBundleVersion (which Apple's spec requires to be a
-          # monotonic integer; Sparkle 2's comparator silently misbehaves
-          # on suffixed strings like "0.3.0-beta.13"). Falls back to 0
-          # for non-beta tags (e.g. release candidates / final).
-          build_number=$(echo "$version" | sed -nE 's/^.*-beta\.([0-9]+)$/\1/p')
-          if [ -z "$build_number" ]; then
-            build_number=0
-          fi
+          # Globally-monotonic macOS build number (-> CFBundleVersion). MUST strictly
+          # increase across ALL releases — betas AND finals, across versions — or
+          # Sparkle 2's integer comparator won't offer the update. The old logic
+          # (bare "-beta.N", else 0) broke finals: a "v0.4.0" tag scored 0 and would
+          # never supersede an installed beta.16 (16). New scheme:
+          #   MAJOR*1000000 + MINOR*10000 + PATCH*100 + (beta N, or 99 for a final)
+          #   0.3.0-beta.15 -> 30015 ; 0.3.0-beta.16 -> 30016 ; 0.4.0 -> 40099 ; 0.4.1-beta.1 -> 40101
+          # Constraints: MINOR<100, PATCH<100, beta N<99; a final outranks all its betas.
+          # KEEP BYTE-IDENTICAL to the publish job's appcast step (it bakes the same
+          # number into sparkle:version, which is compared against this CFBundleVersion).
+          core="${version%%-*}"
+          maj="${core%%.*}"; rest="${core#*.}"; min="${rest%%.*}"; pat="${rest#*.}"
+          beta=$(echo "$version" | sed -nE 's/^.*-beta\.([0-9]+)$/\1/p')
+          [ -z "$beta" ] && beta=99
+          case "$maj$min$pat$beta" in ''|*[!0-9]*) echo "ERROR: cannot parse version '$version' into a build number"; exit 1;; esac
+          build_number=$(( 10#$maj * 1000000 + 10#$min * 10000 + 10#$pat * 100 + 10#$beta ))
           echo "VERSION=$version" >> $GITHUB_OUTPUT
           echo "BUILD_NUMBER=$build_number" >> $GITHUB_OUTPUT
           echo "Building version: $version (build number: $build_number)"
@@ -920,13 +927,18 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           REPO_URL="https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}"
 
-          # Build number: integer suffix from "-beta.N" tag form. Used as
-          # macOS sparkle:version (matches CFBundleVersion in the .app)
-          # so Sparkle 2's comparator can do unambiguous integer compare.
-          BUILD_NUMBER=$(echo "$VERSION" | sed -nE 's/^.*-beta\.([0-9]+)$/\1/p')
-          if [ -z "$BUILD_NUMBER" ]; then
-            BUILD_NUMBER=0
-          fi
+          # Globally-monotonic macOS build number (-> sparkle:version). MUST be computed
+          # identically to the build-macos "Get version from tag" step, which bakes the
+          # same number into CFBundleVersion — Sparkle 2 compares this appcast integer
+          # against the installed CFBundleVersion. Scheme:
+          #   MAJOR*1000000 + MINOR*10000 + PATCH*100 + (beta N, or 99 for a final)
+          #   0.3.0-beta.16 -> 30016 ; 0.4.0 -> 40099 ; 0.4.1-beta.1 -> 40101
+          core="${VERSION%%-*}"
+          maj="${core%%.*}"; rest="${core#*.}"; min="${rest%%.*}"; pat="${rest#*.}"
+          beta=$(echo "$VERSION" | sed -nE 's/^.*-beta\.([0-9]+)$/\1/p')
+          [ -z "$beta" ] && beta=99
+          case "$maj$min$pat$beta" in ''|*[!0-9]*) echo "ERROR: cannot parse version '$VERSION' into a build number"; exit 1;; esac
+          BUILD_NUMBER=$(( 10#$maj * 1000000 + 10#$min * 10000 + 10#$pat * 100 + 10#$beta ))
           echo "Build number derived from tag: $BUILD_NUMBER"
 
           ls -la artifacts/ || true
@@ -974,12 +986,17 @@ jobs:
           python3 scripts/generate-appcast.py $APPCAST_ARGS
 
           cat appcast.xml
-          cp appcast.xml artifacts/appcast.xml || true
+          test -s appcast.xml || { echo "ERROR: appcast.xml was not generated"; exit 1; }
+          cp appcast.xml artifacts/appcast.xml
 
-      - name: Create GitHub Release
+      # Create the release as a DRAFT first. Nothing is public yet — we verify the
+      # assets + appcast below and only then promote it live. A verification failure
+      # therefore leaves NOTHING public (RED = not shipped), instead of a broken
+      # release already auto-updating to users.
+      - name: Create draft GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          draft: true  # Creates as draft - you review before publishing
+          draft: true
           generate_release_notes: true
           files: |
             artifacts/windows-installer/*
@@ -988,21 +1005,148 @@ jobs:
             artifacts/appcast.xml
             artifacts/SHA256SUMS.txt
 
-      # Push appcast.xml to website repo for auto-update discovery
-      - name: Push appcast to website
+      - name: Verify draft release is complete
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git clone https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository_owner }}/hodosbrowser.com.git website-repo
-          cp appcast.xml website-repo/public/appcast.xml 2>/dev/null || \
-          cp appcast.xml website-repo/static/appcast.xml 2>/dev/null || \
-          cp appcast.xml website-repo/src/pages/appcast.xml 2>/dev/null || \
-          cp appcast.xml website-repo/appcast.xml
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          REPO="${{ github.repository }}"
+          EXPECTED="HodosBrowser-${VERSION}-setup.exe HodosBrowser-${VERSION}-portable.zip HodosBrowser-${VERSION}.dmg appcast.xml SHA256SUMS.txt"
+          gh release view "${GITHUB_REF_NAME}" --repo "$REPO" --json assets > assets.json
+          echo "=== draft assets ==="; jq -r '.assets[] | "\(.name)\t\(.size)\t\(.state)"' assets.json
+          for name in $EXPECTED; do
+            size=$(jq -r --arg n "$name" '.assets[] | select(.name==$n) | .size' assets.json)
+            state=$(jq -r --arg n "$name" '.assets[] | select(.name==$n) | .state' assets.json)
+            { [ -n "$size" ] && [ "$size" != "null" ]; } || { echo "ERROR: release asset missing: $name"; exit 1; }
+            [ "$state" = "uploaded" ] || { echo "ERROR: asset $name not fully uploaded (state=$state)"; exit 1; }
+            [ "$size" -gt 1000 ] || { echo "ERROR: asset $name suspiciously small ($size bytes)"; exit 1; }
+          done
+          echo "All expected assets present, uploaded, and non-trivial."
+
+      - name: Verify appcast advertises this version (offline)
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          V_ESC="${VERSION//./\\.}"
+          test -s appcast.xml || { echo "ERROR: appcast.xml missing/empty"; exit 1; }
+          # macOS display version must equal THIS version exactly (not a substring)
+          grep -qE "<sparkle:shortVersionString>${V_ESC}</sparkle:shortVersionString>" appcast.xml \
+            || { echo "ERROR: appcast shortVersionString is not ${VERSION}"; exit 1; }
+          # both enclosures must point at THIS version's files
+          grep -qF -- "HodosBrowser-${VERSION}-setup.exe" appcast.xml || { echo "ERROR: appcast missing Windows enclosure for ${VERSION}"; exit 1; }
+          grep -qF -- "HodosBrowser-${VERSION}.dmg"       appcast.xml || { echo "ERROR: appcast missing macOS enclosure for ${VERSION}"; exit 1; }
+          # both enclosures must carry a non-empty signature (generate-appcast.py fails closed,
+          # but double-check the serialized XML so an empty attr can never ship silently)
+          grep -qE 'sparkle:dsaSignature="[^"]+"' appcast.xml || { echo "ERROR: Windows enclosure has no DSA signature"; exit 1; }
+          grep -qE 'sparkle:edSignature="[^"]+"'  appcast.xml || { echo "ERROR: macOS enclosure has no EdDSA signature"; exit 1; }
+          echo "Appcast verified for ${VERSION}: version + both enclosures + signatures present."
+
+      # Everything checked out — promote the release LIVE and mark it Latest.
+      # From here the GitHub assets are public. This is the point of no return;
+      # the deliberate tag push is the ship gate.
+      - name: Promote release to live (latest)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release edit "${GITHUB_REF_NAME}" --repo "${{ github.repository }}" \
+            --draft=false --prerelease=false --latest
+          echo "Release ${GITHUB_REF_NAME} is now LIVE and marked Latest."
+
+      - name: Verify public download URLs resolve
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          BASE="https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}"
+          for f in "HodosBrowser-${VERSION}-setup.exe" "HodosBrowser-${VERSION}.dmg"; do
+            ok=0
+            for i in $(seq 1 15); do
+              code=$(curl -sS -o /dev/null -L -w "%{http_code}" "${BASE}/${f}" || echo "000")
+              [ "$code" = "200" ] && { ok=1; echo "public OK: ${f}"; break; }
+              echo "waiting on public ${f} (HTTP $code) [$i/15]"; sleep 8
+            done
+            [ "$ok" = "1" ] || { echo "ERROR: ${f} not publicly downloadable after promote"; exit 1; }
+          done
+
+      # Update the website repo: the auto-update feed (public/appcast.xml), the
+      # download-button targets (public/_redirects), and the version shown on the
+      # page (src/pages/index.astro). Cloudflare Pages auto-deploys on push to main.
+      - name: Update website (appcast + downloads + version)
+        env:
+          WEBSITE_TOKEN: ${{ secrets.WEBSITE_DEPLOY_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          TAG="${GITHUB_REF_NAME}"
+          OWNER="${{ github.repository_owner }}"
+          [ -n "${WEBSITE_TOKEN:-}" ] || { echo "ERROR: WEBSITE_DEPLOY_TOKEN secret is not set"; exit 1; }
+          case "$VERSION" in *[!0-9A-Za-z.-]*) echo "ERROR: unexpected chars in version '$VERSION'"; exit 1;; esac
+
+          # Public repo — clone without credentials; auth is applied only on the push.
+          git clone --depth 1 "https://github.com/${OWNER}/hodosbrowser.com.git" website-repo
           cd website-repo
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A
-          # Empty-commit guard keeps a byte-identical re-run from failing; but if there IS
-          # a new appcast to publish, a failed push must FAIL the release (Goal-2 fail-closed)
-          # — a silently-unpublished feed means clients never see the update.
-          git diff --cached --quiet || { git commit -m "Update appcast.xml for ${GITHUB_REF_NAME}" && git push; }
+          { test -f public/_redirects && test -f src/pages/index.astro; } || { echo "ERROR: website layout not as expected"; exit 1; }
+
+          # 1) appcast.xml — copy the already-verified feed verbatim
+          test -s ../appcast.xml || { echo "ERROR: ../appcast.xml missing/empty"; exit 1; }
+          cp ../appcast.xml public/appcast.xml
+
+          # 2) _redirects — rewrite the two download lines deterministically from VERSION/TAG
+          #    (printf, not a find/replace, so there is no regex/substring hazard)
+          BASE="https://github.com/${OWNER}/Hodos-Browser/releases/download/${TAG}"
+          {
+            printf '/download/win  %s/HodosBrowser-%s-setup.exe  302\n' "$BASE" "$VERSION"
+            printf '/download/mac  %s/HodosBrowser-%s.dmg  302\n'       "$BASE" "$VERSION"
+          } > public/_redirects
+
+          # 3) index.astro — bump the displayed version (tolerant of spacing); assert exactly one decl
+          sed -i -E "s/(const +version *= *\")[^\"]*(\")/\1${VERSION}\2/" src/pages/index.astro
+          n=$(grep -cE "const +version *= *\"${VERSION//./\\.}\"" src/pages/index.astro || true)
+          [ "$n" = "1" ] || { echo "ERROR: expected exactly 1 version decl in index.astro, found $n"; exit 1; }
+
+          # Exact-match sanity (grep -F: version is a literal, never a regex/substring)
+          grep -qF -- "HodosBrowser-${VERSION}-setup.exe" public/_redirects || { echo "ERROR: _redirects win line not bumped"; exit 1; }
+          grep -qF -- "HodosBrowser-${VERSION}.dmg"       public/_redirects || { echo "ERROR: _redirects mac line not bumped"; exit 1; }
+          [ "$(grep -c '^/download/' public/_redirects)" = "2" ] || { echo "ERROR: _redirects route count drifted"; exit 1; }
+
+          git config user.name "hodos-release-bot"
+          git config user.email "release-bot@hodosbrowser.com"
+          git add public/appcast.xml public/_redirects src/pages/index.astro
+          if git diff --cached --quiet; then
+            echo "Website already at ${VERSION} (idempotent re-run) — nothing to push."
+          else
+            git commit -m "Release ${VERSION}: appcast + download links + version"
+            # Auth via per-command header (not in the clone URL or .git/config). Mask the
+            # base64 so it can never surface in logs even though it isn't the raw secret.
+            AUTH_B64=$(printf 'x-access-token:%s' "$WEBSITE_TOKEN" | base64 | tr -d '\n')
+            echo "::add-mask::${AUTH_B64}"
+            pushed=0
+            for i in 1 2 3; do
+              if git -c http.extraheader="AUTHORIZATION: basic ${AUTH_B64}" push origin HEAD:main; then pushed=1; break; fi
+              echo "push rejected (concurrent update on main?) — rebasing, attempt ${i}/3"
+              git fetch origin main && git rebase origin/main || { echo "ERROR: rebase conflict on website repo"; exit 1; }
+            done
+            [ "$pushed" = "1" ] || { echo "ERROR: website push failed after retries"; exit 1; }
+          fi
+
+      # Confirm the LIVE site actually serves the new version. The release is already
+      # live by now, so a failure here means "website/Cloudflare lagging", not "release
+      # didn't ship" — but we still fail the run so the gap is visible, not hidden.
+      - name: Verify website is live with new version
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          ok=0
+          for i in $(seq 1 30); do
+            # cache-bust so we read origin, not a stale Cloudflare edge copy
+            live=$(curl -sS -m 20 -H 'Cache-Control: no-cache' "https://hodosbrowser.com/appcast.xml?cb=${GITHUB_SHA}" \
+                   | grep -oE '<sparkle:shortVersionString>[^<]+' | sed 's/.*>//' || true)
+            echo "$live" | grep -qxF "$VERSION" && { ok=1; echo "live appcast serving ${VERSION}"; break; }
+            echo "live appcast not yet ${VERSION} (saw: ${live:-none}) [${i}/30]"; sleep 15
+          done
+          [ "$ok" = "1" ] || { echo "ERROR: hodosbrowser.com/appcast.xml not serving ${VERSION} after deploy window"; exit 1; }
+          loc=$(curl -sS -o /dev/null -w "%{redirect_url}" "https://hodosbrowser.com/download/win" || true)
+          echo "/download/win -> ${loc:-<none>}"
+          echo "$loc" | grep -qF -- "HodosBrowser-${VERSION}-setup.exe" || { echo "ERROR: /download/win not pointing at ${VERSION}"; exit 1; }
+          echo "Website verified live for ${VERSION}."
