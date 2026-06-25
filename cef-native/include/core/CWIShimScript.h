@@ -45,7 +45,12 @@
 //   - development-docs/Sigma-BRC121-Sprint/YOURS_CWI_MIGRATION.md (canonical 28-method list)
 //   - development-docs/Sigma-BRC121-Sprint/BRAVE_WALLET_REFERENCE.md (Proxy + descriptor patterns)
 
-static const char* CWI_SHIM_SCRIPT = R"JS(
+// Transport bridge ONLY (window.__hodos_walletCall / __hodos_walletResponse).
+// Split out of CWI_SHIM_SCRIPT (bridge migration) so it can be injected on the
+// first-party Hodos UI (internal pages + overlays) as well as external dApp
+// pages — the first-party wallet UI now routes through this bridge instead of
+// direct fetch. Idempotent IIFE (guards on window.__hodos_walletCall).
+static const char* WALLET_CALL_BRIDGE_SCRIPT = R"JS(
 // ============================================================================
 // Phase 2.5 — wallet IPC bridge
 // ============================================================================
@@ -147,7 +152,13 @@ static const char* CWI_SHIM_SCRIPT = R"JS(
         });
     };
 })();
+)JS";
 
+// The window.CWI / window.yours / window.panda PROVIDER object — injected ONLY on
+// external dApp pages (the first-party Hodos UI has no need for a dApp provider).
+// WALLET_CALL_BRIDGE_SCRIPT (above) MUST be injected before this on external
+// pages, since the provider methods call window.__hodos_walletCall.
+static const char* CWI_SHIM_SCRIPT = R"JS(
 // ============================================================================
 // CWI / yours / panda shim (Phase 2 Steps 1-4 + 3b + 3c)
 // ============================================================================

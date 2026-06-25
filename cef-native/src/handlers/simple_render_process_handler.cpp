@@ -883,12 +883,23 @@ void SimpleRenderProcessHandler::OnContextCreated(
     // Each shim method POSTs to http://127.0.0.1:31301/<methodName>, captured by
     // HttpRequestInterceptor::isWalletEndpoint() and routed through PermissionEngine —
     // identical gating to canonical BRC-100 calls. No bypass paths.
+    // Wallet IPC transport bridge (window.__hodos_walletCall / __hodos_walletResponse).
+    // Bridge migration: the first-party wallet UI (internal pages + overlays) now
+    // routes its wallet calls through this bridge instead of direct fetch to the
+    // Rust port, so C++ owns the port and gates by frame origin. Idempotent IIFE.
+    if (isInternalPage || isOverlayBrowser) {
+        frame->ExecuteJavaScript(WALLET_CALL_BRIDGE_SCRIPT, url, 0);
+    }
+
     if (isExternalPage) {
         if (!frame->IsMain()) {
             LOG_DEBUG_RENDER("⏭️ Phase 2 shim skipped (iframe, not main frame) for " + url);
         } else if (url.find("https://") != 0) {
             LOG_DEBUG_RENDER("⏭️ Phase 2 shim skipped (insecure context, not https://) for " + url);
         } else {
+            // dApp page: inject the transport bridge FIRST (the provider's methods
+            // call window.__hodos_walletCall), then the window.CWI/yours/panda provider.
+            frame->ExecuteJavaScript(WALLET_CALL_BRIDGE_SCRIPT, url, 0);
             LOG_INFO_RENDER("💉 Injecting window.CWI / window.yours / window.panda shim for " + url);
             frame->ExecuteJavaScript(CWI_SHIM_SCRIPT, url, 0);
         }

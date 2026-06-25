@@ -1866,7 +1866,17 @@ void runIpcCallDirect(const std::string& requestId,
     ) {
         std::map<std::string, std::string> headers;
         headers["Content-Type"] = "application/json";
-        if (!origin.empty()) headers["X-Requesting-Domain"] = origin;
+        // Bridge migration (WALLET_UI_BRIDGE_MIGRATION.md §2): runIpcCallDirect is
+        // the INTERNAL dispatch path — HandleIpcWalletCall routes only
+        // IsInternalOrigin() callers here. Internal == wallet-internal (the
+        // first-party UI served from 127.0.0.1:5137, or any loopback caller), and
+        // it MUST reach Rust header-free so the X-Requesting-Domain trust gate
+        // treats it as internal. Stamping the loopback origin here is exactly the
+        // "naive break" that 403s wallet_backup/wallet_export and prompts the user
+        // for their own identity key. Stamp ONLY a genuine external origin
+        // (defensive — should never occur on this path).
+        if (!origin.empty() && !IsInternalOrigin(origin))
+            headers["X-Requesting-Domain"] = origin;
 
         std::string url = hodos::WalletBaseUrl() + endpoint;
         HttpResponse resp = dispatchWalletHttpByMethod(httpMethod, url, bodyJson, headers);
