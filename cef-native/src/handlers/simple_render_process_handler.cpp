@@ -1096,6 +1096,38 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
             return true;
         }
 
+        // ========== WALLET IPC BRIDGE RESPONSE — CHUNKED (large payloads) ==========
+        // Pair to the browser-process chunking in sendWalletResponseIpc. Each chunk
+        // is forwarded to window.__hodos_walletResponseChunk with its framing
+        // {index, total, totalByteLength}; the JS reassembler resolves the pending
+        // promise only when the response is complete + length-verified, else rejects.
+        // Each chunk's escaped source stays bounded (~256 KB), so no single
+        // ExecuteJavaScript compiles the whole multi-MB body.
+        if (message_name == "wallet_response_chunk") {
+            CefRefPtr<CefListValue> args = message->GetArgumentList();
+            if (args->GetSize() < 6) {
+                LOG_WARNING_RENDER("wallet_response_chunk missing args (need 6)");
+                return true;
+            }
+            std::string requestId = args->GetString(0).ToString();
+            bool ok               = args->GetBool(1);
+            int chunkIndex        = args->GetInt(2);
+            int totalChunks       = args->GetInt(3);
+            std::string totalLen  = args->GetString(4).ToString();  // decimal byte count
+            std::string chunkData = args->GetString(5).ToString();
+
+            std::string escapedReqId = escapeJsonForJs(requestId);
+            std::string escapedChunk = escapeJsonForJs(chunkData);
+            // totalLen is a C++-generated decimal string — safe to embed as a number.
+            std::string js = std::string("if (window.__hodos_walletResponseChunk) { ") +
+                "window.__hodos_walletResponseChunk('" + escapedReqId + "', " +
+                (ok ? "true" : "false") + ", " + std::to_string(chunkIndex) + ", " +
+                std::to_string(totalChunks) + ", " + totalLen + ", '" + escapedChunk + "'); }";
+
+            frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+            return true;
+        }
+
         // ========== DOWNLOAD FOLDER PICKER RESULT ==========
         if (message_name == "download_folder_selected") {
             CefRefPtr<CefListValue> args = message->GetArgumentList();

@@ -34,6 +34,8 @@ class AsyncWalletResourceHandler;
 std::string g_pendingModalDomain = "";
 #include <sstream>
 #include <algorithm>
+#include <vector>
+#include <utility>
 #include <fstream>
 #include <mutex>
 #include <condition_variable>
@@ -1804,6 +1806,14 @@ static bool tryHandlePendingResponse(int statusCode,
 
 namespace {
 
+// Payloads at or under this take the original single-message path UNCHANGED.
+// Larger ones (e.g. /wallet/export of an active wallet) are chunked so neither
+// the CEF process-message size limit nor the render-thread ExecuteJavaScript
+// compile ever sees the whole multi-MB body at once. 256 KB keeps each chunk's
+// escaped JS source small while keeping the chunk count low.
+// See WALLET_UI_BRIDGE_MIGRATION.md §4 (Rule 3).
+constexpr size_t kWalletResponseChunkBytes = 256 * 1024;
+
 // Send wallet_response IPC back to the calling frame. UI thread only.
 // Drops silently if frame is no longer valid (frame navigated, tab closed).
 void sendWalletResponseIpc(CefRefPtr<CefFrame> frame,
@@ -1814,12 +1824,64 @@ void sendWalletResponseIpc(CefRefPtr<CefFrame> frame,
         LOG_DEBUG_HTTP("wallet_response dropped — frame invalid for " + requestId);
         return;
     }
-    CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("wallet_response");
-    auto args = response->GetArgumentList();
-    args->SetString(0, requestId);
-    args->SetBool(1, ok);
-    args->SetString(2, payload);
-    frame->SendProcessMessage(PID_RENDERER, response);
+
+    // Small-payload fast path — byte-identical to the original. The vast majority
+    // of wallet responses (balance, status, activity pages) are far under the cap.
+    if (payload.size() <= kWalletResponseChunkBytes) {
+        CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("wallet_response");
+        auto args = response->GetArgumentList();
+        args->SetString(0, requestId);
+        args->SetBool(1, ok);
+        args->SetString(2, payload);
+        frame->SendProcessMessage(PID_RENDERER, response);
+        return;
+    }
+
+    // Large-payload chunked path. Each chunk ends on a UTF-8 character boundary so
+    // per-chunk JS-string escaping + reassembly is lossless. The render side
+    // forwards each chunk to window.__hodos_walletResponseChunk, which reassembles
+    // by requestId and resolves the pending promise ONLY when all chunks have
+    // arrived AND the reassembled byte length matches — otherwise it rejects
+    // (never a silent truncation). frame validity was checked above; we are on the
+    // UI thread for the whole loop so it cannot be invalidated mid-send.
+    std::vector<std::pair<size_t, size_t>> spans;  // (offset, length) per chunk
+    {
+        const size_t n = payload.size();
+        size_t pos = 0;
+        while (pos < n) {
+            size_t end = (std::min)(pos + kWalletResponseChunkBytes, n);
+            if (end < n) {
+                // Back off any UTF-8 continuation byte (10xxxxxx) so a multibyte
+                // sequence is never split across two chunks.
+                while (end > pos && (static_cast<unsigned char>(payload[end]) & 0xC0) == 0x80) {
+                    --end;
+                }
+                // Degenerate guard (cannot happen for valid UTF-8): a full chunk of
+                // continuation bytes. Force progress so we never loop forever.
+                if (end == pos) {
+                    end = (std::min)(pos + kWalletResponseChunkBytes, n);
+                }
+            }
+            spans.emplace_back(pos, end - pos);
+            pos = end;
+        }
+    }
+
+    const int total = static_cast<int>(spans.size());
+    const std::string totalLen = std::to_string(payload.size());
+    LOG_DEBUG_HTTP("wallet_response chunked: " + requestId + " " + totalLen +
+                   " bytes in " + std::to_string(total) + " chunks");
+    for (int i = 0; i < total; ++i) {
+        CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("wallet_response_chunk");
+        auto args = msg->GetArgumentList();
+        args->SetString(0, requestId);
+        args->SetBool(1, ok);
+        args->SetInt(2, i);
+        args->SetInt(3, total);
+        args->SetString(4, totalLen);  // string to avoid 32-bit int overflow
+        args->SetString(5, payload.substr(spans[i].first, spans[i].second));
+        frame->SendProcessMessage(PID_RENDERER, msg);
+    }
 }
 
 // Dispatch wallet HTTP call by method string. Worker thread only.

@@ -102,6 +102,89 @@ static const char* WALLET_CALL_BRIDGE_SCRIPT = R"JS(
         }
     };
 
+    // Chunked-response reassembler. For large responses the browser process
+    // splits the body into N ordered chunks (sendWalletResponseIpc) and delivers
+    // each here. We buffer by requestId and, once every chunk has arrived AND the
+    // reassembled UTF-8 byte length matches what the browser reported, hand the
+    // full payload to __hodos_walletResponse exactly as if it had arrived as one
+    // message. Any gap / inconsistent framing / size mismatch / timeout REJECTS
+    // the pending promise — a partially-reassembled (truncated) response is never
+    // resolved. See WALLET_UI_BRIDGE_MIGRATION.md §4 (Rule 3).
+    var chunkBuf = Object.create(null);  // requestId -> { ok, total, totalLen, parts[], count, timer }
+
+    // Capture TextEncoder at injection time (this IIFE runs before any page script)
+    // so a page cannot later delete/shadow it and weaken the integrity check below.
+    var TextEncoderRef = (typeof TextEncoder !== 'undefined') ? TextEncoder : null;
+
+    function failChunked(requestId, message) {
+        var b = chunkBuf[requestId];
+        if (b && b.timer) { try { clearTimeout(b.timer); } catch (e) {} }
+        delete chunkBuf[requestId];
+        var p = pending[requestId];
+        if (p) { delete pending[requestId]; p.reject(new Error(message)); }
+    }
+
+    window.__hodos_walletResponseChunk = function(requestId, ok, idx, total, totalLen, chunk) {
+        var b = chunkBuf[requestId];
+        if (!b) {
+            if (!(total > 0) || idx < 0 || idx >= total) {
+                failChunked(requestId, '[Hodos] wallet_response_chunk: bad framing');
+                return;
+            }
+            b = chunkBuf[requestId] = {
+                ok: ok, total: total, totalLen: totalLen,
+                parts: new Array(total), count: 0, timer: null
+            };
+        }
+        // Framing must stay consistent across every chunk for the same id.
+        if (total !== b.total || idx < 0 || idx >= b.total) {
+            failChunked(requestId, '[Hodos] wallet_response_chunk: inconsistent framing');
+            return;
+        }
+        if (b.parts[idx] === undefined) {
+            b.parts[idx] = chunk;
+            b.count++;
+            // Sliding "no-progress" timeout: a steady-but-slow large export keeps
+            // arriving, so reset the 30s window on every NEW chunk. Only a genuine
+            // stall (no new chunk for 30s) rejects — this avoids false-rejecting a
+            // valid large /wallet/export just because the render thread was busy.
+            if (b.timer) { clearTimeout(b.timer); }
+            b.timer = setTimeout(function() {
+                failChunked(requestId, '[Hodos] wallet_response stalled — no chunk for 30s (incomplete reassembly)');
+            }, 30000);
+        }
+        // (a duplicate index is ignored — idempotent)
+        if (b.count !== b.total) return;
+
+        // Complete. Reassemble, then verify byte length before delivering.
+        if (b.timer) { try { clearTimeout(b.timer); } catch (e) {} }
+        delete chunkBuf[requestId];
+        var full = b.parts.join('');
+        b.parts = null;  // drop ~payload-size memory before the TextEncoder pass
+
+        // MANDATORY integrity gate (FAIL-CLOSED). The reassembled UTF-8 byte length
+        // must equal what the browser reported. If TextEncoder is unavailable or
+        // throws we CANNOT verify, so we REJECT rather than resolve an unverified
+        // (possibly truncated) payload — a money app must never hand back a
+        // maybe-broken backup. This is the large-response path (e.g. /wallet/export
+        // of the encrypted seed), so the check is non-negotiable.
+        var encLen = -1;
+        if (TextEncoderRef) {
+            try { encLen = new TextEncoderRef().encode(full).length; } catch (e) { encLen = -1; }
+        }
+        if (encLen < 0 || encLen !== b.totalLen) {
+            var p = pending[requestId];
+            if (p) {
+                delete pending[requestId];
+                p.reject(new Error('[Hodos] wallet_response integrity check failed: got ' +
+                    encLen + ', expected ' + b.totalLen));
+            }
+            return;
+        }
+        // Verified complete — hand off to the single-message path (same semantics).
+        window.__hodos_walletResponse(requestId, b.ok, full);
+    };
+
     // Public bridge entry. Returns a Promise that resolves with the parsed JSON
     // response (or null if response body was empty) or rejects with a structured
     // Error carrying .code / .status / .body when the wallet returned non-2xx.
