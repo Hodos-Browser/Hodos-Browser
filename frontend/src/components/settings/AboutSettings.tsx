@@ -3,7 +3,7 @@ import { Typography, Box, Select, MenuItem } from '@mui/material';
 import { SettingsCard, SettingRow } from './SettingsCard';
 import { useSettings } from '../../hooks/useSettings';
 
-const APP_VERSION = '0.3.0-beta.15';
+const APP_VERSION = '0.3.0-beta.16';
 
 const AboutSettings: React.FC = () => {
   const { settings, updateSetting } = useSettings();
