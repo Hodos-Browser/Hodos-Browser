@@ -3829,16 +3829,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
              (res.showPicker ? " [picker-pending]" : ""));
     g_picker_mode = res.showPicker;
 
-    // Set process AUMID early (before window creation) so Windows groups taskbar
-    // buttons by profile. The picker owns no profile -> keep the base AUMID.
-    if (!g_picker_mode && ProfileManager::GetInstance().GetAllProfiles().size() > 1) {
-        std::wstring aumid = L"HodosBrowser";
+    // Set process AUMID early (before window creation) so Windows gives dev vs
+    // prod (and multi-profile) DISTINCT taskbar buttons. A dev build ALWAYS gets a
+    // ".Dev" identity — even single-profile — so it never merges with the installed
+    // build's taskbar button; prod keeps its existing (set-only-when-multi-profile)
+    // behavior. The picker owns no profile -> keep the base AUMID.
+    if (!g_picker_mode && (hodos::IsDevEnv() || ProfileManager::GetInstance().GetAllProfiles().size() > 1)) {
+        std::wstring aumid = hodos::IsDevEnv() ? L"HodosBrowser.Dev" : L"HodosBrowser";
         if (profileId != "Default") {
             std::wstring pw(profileId.begin(), profileId.end());
             aumid += L"." + pw;
         }
         SetCurrentProcessExplicitAppUserModelID(aumid.c_str());
-        LOG_INFO("AUMID set: " + profileId);
+        LOG_INFO("AUMID set: " + std::string(hodos::IsDevEnv() ? "dev " : "") + profileId);
     }
 
     // Data directory. Picker mode uses a NEUTRAL cache derived from the resolved
@@ -3968,6 +3971,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
             try { portOffset = std::stoi(profileId.substr(underscorePos + 1)); } catch (...) {}
         }
         settings.remote_debugging_port = 9222 + portOffset;
+    }
+    // Dev build offsets the DevTools port (+100) so it never collides with the
+    // installed build's port — both otherwise use 9222 for the Default profile,
+    // and the 2nd instance to start would fail to bind it.
+    if (hodos::IsDevEnv() && settings.remote_debugging_port != 0) {
+        settings.remote_debugging_port += 100;
     }
     LOG_INFO("Remote debugging port: " + std::to_string(settings.remote_debugging_port));
 

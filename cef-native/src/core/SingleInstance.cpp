@@ -16,6 +16,7 @@
 
 // Logger macros — must match Logger::Log(string, int level, int process) signature
 #include "../../include/core/Logger.h"
+#include "../../include/core/PortConfig.h"  // hodos::IsDevEnv()
 #define LOG_INFO(msg)    Logger::Log(msg, 1, 0)
 #define LOG_WARNING(msg) Logger::Log(msg, 2, 0)
 #define LOG_ERROR(msg)   Logger::Log(msg, 3, 0)
@@ -41,7 +42,12 @@ std::string g_listener_profile_id;
 
 // Build the pipe name for a given profile.
 std::string GetPipeName(const std::string& profileId) {
-    return "\\\\.\\pipe\\hodos-browser-" + profileId;
+    // Separate dev (HODOS_DEV) from prod so the two builds don't share a pipe and
+    // cross-forward/activate when run together. '.' is not a valid profile-id char
+    // (the same guard the ".picker" pipe relies on), so the "dev." marker can never
+    // collide with a real profile id. Prod name is unchanged.
+    const char* dev = hodos::IsDevEnv() ? "dev." : "";
+    return "\\\\.\\pipe\\hodos-browser-" + std::string(dev) + profileId;
 }
 
 // Read a complete message from a pipe (synchronous, blocking).
