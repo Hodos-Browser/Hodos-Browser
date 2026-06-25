@@ -8,6 +8,26 @@ Track features, fixes, and investigations to research when updating the CEF buil
 
 ## Must Investigate on Next CEF Update
 
+### Toolchain (MSVC) & Dependency Alignment
+- **Priority:** HIGH — build-breaker. Nothing compiles or links if this is wrong, and the errors *look* like our code but aren't.
+- **Why:** The compiler toolset (currently **MSVC v143**, shipped by Visual Studio 2022) is a cross-cutting **ABI contract**. **Four things must all sit on the same toolset** or you get linker/ABI failures:
+  1. The **CEF binaries** — whether prebuilt download *or* our own full Chromium+CEF source build
+  2. The **vcpkg static deps** (`nlohmann-json`, `sqlite3`, …) — compiled per-toolset
+  3. Our **C++ shell** code
+  4. The **CI runner image** — the `windows-XXXX` / `macos-XX` GitHub label that *provides* the compiler
+- **The rule for FULL builds (Chromium/CEF bump), not just shell builds:** when moving to a new stable Chromium/CEF, treat the toolset as a deliberate choice:
+  1. Pull the **latest stable Chromium**; note which **MSVC/Clang toolset** its CEF is built with.
+  2. Re-validate **every dependency version** against that toolset — vcpkg baseline, CEF wrapper, Inno Setup, Sparkle/WinSparkle, etc. (see `DEPENDENCY_VERIFICATION.md`).
+  3. Rebuild the **vcpkg static deps** and the **CEF wrapper** on the chosen toolset.
+  4. **Pin the CI runner image** (`runs-on:` in `release.yml` / `ci.yml`) to one that ships that exact toolset — **never `windows-latest` / `macos-latest`**, which float and silently roll the compiler forward under you.
+  5. Bump `APP_VERSION` + installer + appcast versions; run the full smoke matrix (CLAUDE.md Testing Standards).
+- **Cautionary tale (2026-06-25):** GitHub rolled the `windows-latest` label from the windows-2022 image to **windows-2025**. The `"Visual Studio 17 2022"` CMake generator stopped resolving ("could not find any instance of Visual Studio") and the beta.16 Windows build died at *configure* — before compiling a single file. Pure infra drift, zero code changes. Fix: pin `runs-on: windows-2022`. **Generalize: pin runner images; don't let them float.**
+- **References:**
+  - `DEPENDENCY_VERIFICATION.md` — per-bump dependency checklist
+  - `CEF_BUILD_RUNBOOK.md` — full Chromium+CEF source build
+  - `.github/workflows/release.yml` — `runs-on:` pins + the explanatory comment on the windows job
+- **Added:** 2026-06-25
+
 ### FedCM (Federated Credential Management) Support
 - **Priority:** HIGH
 - **Why:** Google made FedCM mandatory for "Sign in with Google" as of August 2025. CEF 136 does not implement the browser-level UI (account chooser dialog) that FedCM requires. This breaks "Sign in with Google" on any site that migrated to FedCM-only (no popup/redirect fallback).
@@ -65,7 +85,8 @@ Track features, fixes, and investigations to research when updating the CEF buil
 
 1. Check this document for investigation items
 2. Build from source with `proprietary_codecs=true ffmpeg_branding=Chrome`
-3. Run full test suite (Minimal + Standard site verification from CLAUDE.md)
-4. Specifically test: Google Sign-In, OAuth flows, media playback, ad blocking, fingerprint protection
-5. Update this document with findings
-6. Update `CLAUDE.md` x.com media section if codec situation changes
+3. **Align the toolchain** — note the toolset the new CEF is built with; rebuild vcpkg static deps + the CEF wrapper on it; re-run `DEPENDENCY_VERIFICATION.md`; and **re-pin the CI runner images** (`runs-on:`) to one shipping that toolset (never `windows-latest`/`macos-latest`). See *"Toolchain (MSVC) & Dependency Alignment"* above.
+4. Run full test suite (Minimal + Standard site verification from CLAUDE.md)
+5. Specifically test: Google Sign-In, OAuth flows, media playback, ad blocking, fingerprint protection
+6. Update this document with findings
+7. Update `CLAUDE.md` x.com media section if codec situation changes

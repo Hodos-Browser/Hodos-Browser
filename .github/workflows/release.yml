@@ -42,7 +42,14 @@ jobs:
   # WINDOWS BUILD
   # ============================================================
   build-windows:
-    runs-on: windows-latest
+    # Pinned to windows-2022 (not windows-latest): the runner's "windows-latest"
+    # label rolled forward to the windows-2025 image, where the
+    # "Visual Studio 17 2022" CMake generator no longer resolves
+    # ("could not find any instance of Visual Studio"). windows-2022 ships the
+    # MSVC v143 toolset our prebuilt CEF + vcpkg static deps are built against.
+    # Do NOT bump to a newer image without re-validating the whole C++/CEF stack
+    # on the new toolset — see DevOps-CICD/CEF_VERSION_UPDATE_TRACKER.md.
+    runs-on: windows-2022
     
     steps:
       - name: Checkout code
@@ -686,12 +693,21 @@ jobs:
 
           # Submit for notarization — MUST succeed or build fails
           echo "Submitting for notarization (timeout: 2 hours)..."
+          # notarytool can exit NON-zero on auth/credential failure (e.g. an
+          # expired App Store Connect API key or a pending Program License
+          # Agreement). Under the step's default `set -e`, that would abort
+          # before we print Apple's error. Disable -e around the capture so the
+          # exact reason + exit code always surface in the log.
+          set +e
           NOTARIZE_OUTPUT=$(xcrun notarytool submit HodosBrowser-notarize.zip \
             --key ~/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8 \
             --key-id "$APPLE_API_KEY_ID" \
             --issuer "$APPLE_API_ISSUER" \
             --wait --timeout 7200 2>&1)
+          NOTARYTOOL_EXIT=$?
+          set -e
           echo "$NOTARIZE_OUTPUT"
+          echo "notarytool submit exit code: $NOTARYTOOL_EXIT"
 
           # Extract submission ID for log fetching
           SUBMISSION_ID=$(echo "$NOTARIZE_OUTPUT" | grep "id:" | head -1 | awk '{print $2}')
@@ -744,12 +760,18 @@ jobs:
           DMG="dist/HodosBrowser-${VERSION}.dmg"
 
           echo "Submitting DMG for notarization (timeout: 2 hours)..."
+          # See note in the app "Notarize" step: keep -e off around the capture
+          # so a non-zero notarytool exit still prints Apple's exact error.
+          set +e
           NOTARIZE_OUTPUT=$(xcrun notarytool submit "$DMG" \
             --key ~/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8 \
             --key-id "$APPLE_API_KEY_ID" \
             --issuer "$APPLE_API_ISSUER" \
             --wait --timeout 7200 2>&1)
+          NOTARYTOOL_EXIT=$?
+          set -e
           echo "$NOTARIZE_OUTPUT"
+          echo "notarytool submit exit code: $NOTARYTOOL_EXIT"
 
           SUBMISSION_ID=$(echo "$NOTARIZE_OUTPUT" | grep "id:" | head -1 | awk '{print $2}')
 
