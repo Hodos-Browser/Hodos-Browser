@@ -30,6 +30,7 @@
 #include "include/handlers/simple_app.h"
 #include "include/core/AppPaths.h"
 #include "include/core/WalletService.h"
+#include "include/core/PortConfig.h"
 #include "include/core/TabManager.h"
 #include "include/core/HistoryManager.h"
 #include "include/core/CookieBlockManager.h"
@@ -3298,7 +3299,7 @@ static bool QuickHealthCheck(DWORD timeoutMs = 500) {
     WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
     WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
 
-    HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 31301, 0);
+    HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", hodos::WalletPort(), 0);
     if (!hConnect) { WinHttpCloseHandle(hSession); return false; }
 
     HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", L"/health",
@@ -3402,7 +3403,7 @@ void LaunchWalletProcess() {
     // Fast check if wallet server is already running (dev workflow: cargo run separately)
     // Uses raw TCP probe (~1ms if listening, ~100ms max if not) instead of WinHTTP
     // which ignores short timeouts on localhost.
-    if (IsPortListening(31301)) {
+    if (IsPortListening(hodos::WalletPort())) {
         LOG_INFO("Wallet server already running (dev mode) - skipping launch");
         g_walletServerRunning = true;
         return;
@@ -3507,7 +3508,7 @@ void StopWalletServer() {
         // Step 1: Try graceful shutdown via HTTP (lets wallet flush SQLite WAL)
         LOG_INFO("Requesting graceful wallet server shutdown (PID: " +
                  std::to_string(g_walletServerProcess.dwProcessId) + ")...");
-        bool shutdownSent = SendShutdownRequest(31301);
+        bool shutdownSent = SendShutdownRequest(hodos::WalletPort());
 
         if (shutdownSent) {
             // Wait up to 5 seconds for graceful exit
@@ -3558,7 +3559,7 @@ static bool QuickAdblockHealthCheck(DWORD timeoutMs = 500) {
     WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
     WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
 
-    HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 31302, 0);
+    HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", hodos::AdblockPort(), 0);
     if (!hConnect) { WinHttpCloseHandle(hSession); return false; }
 
     HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", L"/health",
@@ -3593,7 +3594,7 @@ static bool QuickAdblockHealthCheck(DWORD timeoutMs = 500) {
 // so the Rust engine warms up during CefInitialize.
 void LaunchAdblockProcess() {
     // Fast check if adblock engine is already running (dev mode)
-    if (IsPortListening(31302)) {
+    if (IsPortListening(hodos::AdblockPort())) {
         LOG_INFO("Adblock engine already running (dev mode) - skipping launch");
         g_adblockServerRunning = true;
         return;
@@ -3698,7 +3699,7 @@ void StopAdblockServer() {
     if (g_adblockServerProcess.hProcess) {
         LOG_INFO("Requesting graceful adblock engine shutdown (PID: " +
                  std::to_string(g_adblockServerProcess.dwProcessId) + ")...");
-        bool shutdownSent = SendShutdownRequest(31302);
+        bool shutdownSent = SendShutdownRequest(hodos::AdblockPort());
 
         if (shutdownSent) {
             DWORD waitResult = WaitForSingleObject(g_adblockServerProcess.hProcess, 3000);

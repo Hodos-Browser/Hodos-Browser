@@ -3,6 +3,7 @@
 
 #include "../../include/core/WalletService.h"
 #include "../../include/core/Logger.h"
+#include "../../include/core/PortConfig.h"
 #include <curl/curl.h>
 #include <iostream>
 #include <sstream>
@@ -24,7 +25,7 @@ static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* use
 // ========== Constructor/Destructor ==========
 
 WalletService::WalletService()
-    : baseUrl_("http://localhost:31301")
+    : baseUrl_(hodos::WalletBaseUrl())
     , daemonPath_("")
     , connected_(false)
     , daemonRunning_(false) {

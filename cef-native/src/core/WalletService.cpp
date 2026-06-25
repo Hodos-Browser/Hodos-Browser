@@ -1,5 +1,6 @@
 #include "../../include/core/WalletService.h"
 #include "../../include/core/Logger.h"
+#include "../../include/core/PortConfig.h"
 #include <iostream>
 #include <sstream>
 #include <fstream>
@@ -16,7 +17,7 @@
 static WalletService* g_walletService = nullptr;
 
 WalletService::WalletService()
-    : baseUrl_("http://localhost:31301")
+    : baseUrl_(hodos::WalletBaseUrl())
     , daemonPath_("")
     , hSession_(nullptr)
     , hConnect_(nullptr)

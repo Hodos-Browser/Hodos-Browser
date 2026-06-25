@@ -26,6 +26,7 @@
 
 #include <nlohmann/json.hpp>
 #include "SyncHttpClient.h"
+#include "PortConfig.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -606,7 +607,7 @@ private:
         body += resourceType;
         body += "\"}";
 
-        auto resp = SyncHttpClient::Post("http://127.0.0.1:31302/check", body, "application/json", 2000);
+        auto resp = SyncHttpClient::Post(hodos::AdblockUrl("/check"), body, "application/json", 2000);
         if (!resp.success) return false;
 
         bool blocked = (resp.body.find("\"blocked\":true") != std::string::npos);
@@ -647,7 +648,7 @@ private:
         WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
         WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
 
-        HINTERNET hConnect = WinHttpConnect(hSession, L"127.0.0.1", 31302, 0);
+        HINTERNET hConnect = WinHttpConnect(hSession, L"127.0.0.1", hodos::AdblockPort(), 0);
         if (!hConnect) {
             WinHttpCloseHandle(hSession);
             return result;
@@ -785,7 +786,7 @@ private:
         WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
         WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
 
-        HINTERNET hConnect = WinHttpConnect(hSession, L"127.0.0.1", 31302, 0);
+        HINTERNET hConnect = WinHttpConnect(hSession, L"127.0.0.1", hodos::AdblockPort(), 0);
         if (!hConnect) {
             WinHttpCloseHandle(hSession);
             return "";

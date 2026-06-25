@@ -3,6 +3,7 @@
 #include "../../include/core/ManifestFetcher.h"
 #include "../../include/core/SensitiveCertFields.h"
 #include "../../include/core/SyncHttpClient.h"
+#include "../../include/core/PortConfig.h"
 #include "include/wrapper/cef_helpers.h"
 #include "include/cef_urlrequest.h"
 #include "include/cef_request.h"
@@ -176,7 +177,7 @@ private:
         HINTERNET hSession = getSession();
         if (!hSession) return result;
 
-        HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 31301, 0);
+        HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", hodos::WalletPort(), 0);
         if (!hConnect) return result;
 
         std::string endpoint = "/domain/permissions?domain=" + domain;
@@ -245,7 +246,7 @@ private:
         result.trustLevel = "unknown";
         fetchSucceeded = false;
 
-        std::string url = "http://localhost:31301/domain/permissions?domain=" + domain;
+        std::string url = hodos::WalletUrl("/domain/permissions?domain=") + domain;
         HttpResponse resp = SyncHttpClient::Get(url, 5000);
         if (!resp.success) return result;
 
@@ -349,7 +350,7 @@ private:
         HINTERNET hSession = getSession();
         if (!hSession) return Status::FetchFailed;
 
-        HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 31301, 0);
+        HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", hodos::WalletPort(), 0);
         if (!hConnect) return Status::FetchFailed;
 
         HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET",
@@ -395,7 +396,7 @@ private:
     }
 #else
     Status fetchWalletStatus() {
-        HttpResponse resp = SyncHttpClient::Get("http://localhost:31301/wallet/status",
+        HttpResponse resp = SyncHttpClient::Get(hodos::WalletUrl("/wallet/status"),
                                                 FETCH_TIMEOUT_MS);
         if (!resp.success) return Status::FetchFailed;
 
@@ -478,7 +479,7 @@ private:
         HINTERNET hSession = getSession();
         if (!hSession) return -1.0;
 
-        HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 31301, 0);
+        HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", hodos::WalletPort(), 0);
         if (!hConnect) return -1.0;
 
         HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET",
@@ -525,7 +526,7 @@ private:
     }
 #else
     double fetchFromBackend() {
-        HttpResponse resp = SyncHttpClient::Get("http://localhost:31301/wallet/bsv-price", 1000);
+        HttpResponse resp = SyncHttpClient::Get(hodos::WalletUrl("/wallet/bsv-price"), 1000);
         if (!resp.success) return -1.0;
 
         try {
@@ -566,7 +567,7 @@ static std::set<std::string> fetchCertFieldsFromBackend(const std::string& domai
                                      WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) return result;
 
-    HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 31301, 0);
+    HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", hodos::WalletPort(), 0);
     if (!hConnect) {
         WinHttpCloseHandle(hSession);
         return result;
@@ -633,7 +634,7 @@ static std::set<std::string> fetchCertFieldsFromBackend(const std::string& domai
 static std::set<std::string> fetchCertFieldsFromBackend(const std::string& domain, const std::string& certType) {
     std::set<std::string> result;
 
-    std::string url = "http://localhost:31301/domain/permissions/certificate?domain="
+    std::string url = hodos::WalletUrl("/domain/permissions/certificate?domain=")
                     + urlEncode(domain) + "&cert_type=" + urlEncode(certType);
     HttpResponse resp = SyncHttpClient::Get(url, 5000);
     if (!resp.success) return result;
@@ -861,7 +862,7 @@ void fireSessionApproveToRust(const std::string& domain, const char* kind) {
         std::map<std::string, std::string> headers;
         headers["Content-Type"] = "application/json";
         HttpResponse resp = SyncHttpClient::Post(
-            "http://127.0.0.1:31301/wallet/session-approve",
+            hodos::WalletUrl("/wallet/session-approve"),
             body, headers, /*timeoutMs=*/3000);
         if (!resp.success || resp.statusCode < 200 || resp.statusCode >= 300) {
             LOG_DEBUG_HTTP(std::string("🛡️ session-approve POST failed (statusCode=")
@@ -884,7 +885,7 @@ void fireSessionCloseToRust(int browserId) {
         std::map<std::string, std::string> headers;
         headers["Content-Type"] = "application/json";
         HttpResponse resp = SyncHttpClient::Post(
-            "http://127.0.0.1:31301/wallet/session/close",
+            hodos::WalletUrl("/wallet/session/close"),
             body, headers, /*timeoutMs=*/3000);
         if (!resp.success || resp.statusCode < 200 || resp.statusCode >= 300) {
             LOG_DEBUG_HTTP(std::string("🛡️ session/close POST failed (statusCode=")
@@ -909,7 +910,7 @@ void fireSessionRevokeToRust(const std::string& domain) {
         std::map<std::string, std::string> headers;
         headers["Content-Type"] = "application/json";
         HttpResponse resp = SyncHttpClient::Post(
-            "http://127.0.0.1:31301/wallet/session-revoke",
+            hodos::WalletUrl("/wallet/session-revoke"),
             body, headers, /*timeoutMs=*/3000);
         if (!resp.success || resp.statusCode < 200 || resp.statusCode >= 300) {
             LOG_DEBUG_HTTP(std::string("🛡️ session-revoke POST failed (statusCode=")
@@ -1867,7 +1868,7 @@ void runIpcCallDirect(const std::string& requestId,
         headers["Content-Type"] = "application/json";
         if (!origin.empty()) headers["X-Requesting-Domain"] = origin;
 
-        std::string url = "http://127.0.0.1:31301" + endpoint;
+        std::string url = hodos::WalletBaseUrl() + endpoint;
         HttpResponse resp = dispatchWalletHttpByMethod(httpMethod, url, bodyJson, headers);
         bool ok = resp.success && resp.statusCode >= 200 && resp.statusCode < 300;
         std::string payload = buildIpcResponsePayload(resp, ok);
@@ -2007,7 +2008,7 @@ void runIpcEngineCascade(const std::string& requestId,
                 headers["X-Payment-Cents"] = std::to_string(cents);
                 headers["X-Bsv-Price-Available"] = priceAvailable ? "1" : "0";
             }
-            std::string url = "http://127.0.0.1:31301" + endpoint;
+            std::string url = hodos::WalletBaseUrl() + endpoint;
             HttpResponse resp = dispatchWalletHttpByMethod(httpMethod, url, bodyJson, headers);
 
             if (resp.statusCode == 202) {
@@ -2371,7 +2372,7 @@ public:
 
         // Create request
         CefRefPtr<CefRequest> cefRequest = CefRequest::Create();
-        cefRequest->SetURL("http://localhost:31301/domain/permissions");
+        cefRequest->SetURL(hodos::WalletUrl("/domain/permissions"));
         cefRequest->SetMethod("POST");
         cefRequest->SetHeaderByName("Content-Type", "application/json", true);
 
@@ -2433,7 +2434,7 @@ public:
         LOG_DEBUG_HTTP("🔐 AdvancedDomainPermissionTask executing for domain: " + domain_);
 
         CefRefPtr<CefRequest> cefRequest = CefRequest::Create();
-        cefRequest->SetURL("http://localhost:31301/domain/permissions");
+        cefRequest->SetURL(hodos::WalletUrl("/domain/permissions"));
         cefRequest->SetMethod("POST");
         cefRequest->SetHeaderByName("Content-Type", "application/json", true);
 
@@ -2517,7 +2518,7 @@ void addDomainPermissionAdvanced(const std::string& domain, int64_t perTxLimitCe
     permBody["identityKeyDisclosureAllowed"] = identityKeyDisclosureAllowed;
     permBody["bundledScopeGrant"] = bundledScopeGrant;
     HttpResponse permResp = SyncHttpClient::Post(
-        "http://localhost:31301/domain/permissions", permBody.dump());
+        hodos::WalletUrl("/domain/permissions"), permBody.dump());
     LOG_DEBUG_HTTP("🔐 Advanced domain permission sync write for " + domain
         + " -> status " + std::to_string(permResp.statusCode));
 }
@@ -2565,7 +2566,7 @@ void addDomainPermission(const std::string& domain, bool identityKeyDisclosureAl
     permBody["identityKeyDisclosureAllowed"] = identityKeyDisclosureAllowed;
     permBody["bundledScopeGrant"] = bundledScopeGrant;
     HttpResponse permResp = SyncHttpClient::Post(
-        "http://localhost:31301/domain/permissions", permBody.dump());
+        hodos::WalletUrl("/domain/permissions"), permBody.dump());
     LOG_DEBUG_HTTP("🔐 Domain permission sync write for " + domain
         + " -> status " + std::to_string(permResp.statusCode));
 }
@@ -2952,7 +2953,7 @@ static void resumeInternalResponse(const PendingAuthRequest& req,
         if (!domain.empty()) headers["X-Requesting-Domain"] = domain;
         for (const auto& kv : headersOnApprove) headers[kv.first] = kv.second;
 
-        std::string url = "http://127.0.0.1:31301" + endpoint;
+        std::string url = hodos::WalletBaseUrl() + endpoint;
         HttpResponse resp = dispatchWalletHttpByMethod(httpMethod, url, body, headers);
         bool ok = resp.success && resp.statusCode >= 200 && resp.statusCode < 300;
         std::string payload = buildIpcResponsePayload(resp, ok);
@@ -3076,7 +3077,7 @@ static void resumeHttpCallbackResponse(const PendingAuthRequest& req,
         if (!domain.empty()) headers["X-Requesting-Domain"] = domain;
         for (const auto& kv : headersOnApprove) headers[kv.first] = kv.second;
 
-        std::string url = "http://127.0.0.1:31301" + endpoint;
+        std::string url = hodos::WalletBaseUrl() + endpoint;
         HttpResponse resp = dispatchWalletHttpByMethod(httpMethod, url, body, headers);
         bool ok = resp.success && resp.statusCode >= 200 && resp.statusCode < 300;
         std::string payload = buildIpcResponsePayload(resp, ok);
@@ -3191,7 +3192,7 @@ static void resumeIpcResponse(const PendingAuthRequest& req,
         if (!domain.empty()) headers["X-Requesting-Domain"] = domain;
         for (const auto& kv : headersOnApprove) headers[kv.first] = kv.second;
 
-        std::string url = "http://127.0.0.1:31301" + endpoint;
+        std::string url = hodos::WalletBaseUrl() + endpoint;
         HttpResponse resp = dispatchWalletHttpByMethod(httpMethod, url, body, headers);
         bool ok = resp.success && resp.statusCode >= 200 && resp.statusCode < 300;
         std::string payload = buildIpcResponsePayload(resp, ok);
@@ -3537,7 +3538,7 @@ void AsyncWalletResourceHandler::startAsyncHTTPRequest() {
 
     // Create CEF HTTP request
     CefRefPtr<CefRequest> httpRequest = CefRequest::Create();
-    std::string fullUrl = "http://localhost:31301" + endpoint_;
+    std::string fullUrl = hodos::WalletBaseUrl() + endpoint_;
     httpRequest->SetURL(fullUrl);
     httpRequest->SetMethod(method_);
 
@@ -3664,8 +3665,8 @@ CefRefPtr<CefResourceHandler> HttpRequestInterceptor::GetResourceHandler(
             request->SetURL(url);
         }
     };
-    redirectPort("localhost:", "localhost:31301");
-    redirectPort("127.0.0.1:", "127.0.0.1:31301");
+    redirectPort("localhost:", "localhost:" + hodos::WalletPortStr());
+    redirectPort("127.0.0.1:", "127.0.0.1:" + hodos::WalletPortStr());
 
     LOG_DEBUG_HTTP("🌐 About to check if wallet endpoint...");
 
@@ -3695,9 +3696,9 @@ CefRefPtr<CefResourceHandler> HttpRequestInterceptor::GetResourceHandler(
             if (schemeEnd != std::string::npos) {
                 size_t hostEnd = url.find('/', schemeEnd + 3);
                 if (hostEnd != std::string::npos) {
-                    url = "http://localhost:31301" + url.substr(hostEnd);
+                    url = hodos::WalletBaseUrl() + url.substr(hostEnd);
                 } else {
-                    url = "http://localhost:31301";
+                    url = hodos::WalletBaseUrl();
                 }
             }
 
@@ -4460,7 +4461,7 @@ private:
             nlohmann::json body;
             body["txid"] = txid_;
             HttpResponse r = SyncHttpClient::Post(
-                "http://localhost:31301/wallet/broadcast-nosend",
+                hodos::WalletUrl("/wallet/broadcast-nosend"),
                 body.dump(), "application/json", 30000);
             if (!r.success) {
                 LOG_WARNING_HTTP("💰 BRC-121: broadcast-nosend failed (status="
@@ -4682,7 +4683,7 @@ bool TryHandleBrc121_402(CefRefPtr<CefBrowser> browser,
     // Synchronous: localhost wallet, fast path. 10s ceiling — createAction may need
     // to fetch BEEF ancestry from external indexers in worst cases.
     HttpResponse rresp = SyncHttpClient::Post(
-        "http://localhost:31301/wallet/pay402",
+        hodos::WalletUrl("/wallet/pay402"),
         body,
         payHeaders,
         10000);
@@ -5020,7 +5021,7 @@ bool HttpRequestInterceptor::isWalletEndpoint(const std::string& url) {
 
 bool HttpRequestInterceptor::isSocketIOConnection(const std::string& url) {
     // Check if this is a Socket.IO connection to our daemon or Babbage messagebox
-    bool isLocalhost = url.find("localhost:31301") != std::string::npos;
+    bool isLocalhost = hodos::IsWalletHostPort(url);
     bool isBabbageMessagebox = url.find("messagebox.babbage.systems/socket.io/") != std::string::npos;
     bool isSocketIO = url.find("/socket.io/") != std::string::npos;
 

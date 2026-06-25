@@ -4969,13 +4969,13 @@ void ShutdownApplication() {
 
 // Returns true if wallet server at localhost:31301 responds with "ok"
 static bool QuickHealthCheck() {
-    HttpResponse resp = SyncHttpClient::Get("http://localhost:31301/health", 2000);
+    HttpResponse resp = SyncHttpClient::Get(hodos::WalletUrl("/health"), 2000);
     return resp.success && resp.body.find("\"ok\"") != std::string::npos;
 }
 
 // Returns true if adblock engine at localhost:31302 responds with "ready"
 static bool QuickAdblockHealthCheck() {
-    HttpResponse resp = SyncHttpClient::Get("http://localhost:31302/health", 2000);
+    HttpResponse resp = SyncHttpClient::Get(hodos::AdblockUrl("/health"), 2000);
     return resp.success && resp.body.find("\"ready\"") != std::string::npos;
 }
 
@@ -5110,10 +5110,10 @@ static void StartAdblockServer() {
 static void StopServers() {
     // Graceful shutdown via HTTP
     if (g_walletServerRunning) {
-        SendShutdownRequest(31301);
+        SendShutdownRequest(hodos::WalletPort());
     }
     if (g_adblockServerRunning) {
-        SendShutdownRequest(31302);
+        SendShutdownRequest(hodos::AdblockPort());
     }
 
     // R2/R3: adaptive wait for graceful exit instead of a blind 1s sleep. Poll for

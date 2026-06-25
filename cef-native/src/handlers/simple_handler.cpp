@@ -43,6 +43,7 @@
 #include "../../include/core/ProfileImporter.h"
 #include "../../include/core/QRScannerScript.h"
 #include "../../include/core/SyncHttpClient.h"
+#include "../../include/core/PortConfig.h"
 #ifdef _WIN32
 #include "../../include/core/QRScreenCapture.h"
 #endif
@@ -4003,7 +4004,7 @@ bool SimpleHandler::OnProcessMessageReceived(
             DWORD timeout = 5000;
             WinHttpSetOption(hSession, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
             WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
-            HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", 31301, 0);
+            HINTERNET hConnect = WinHttpConnect(hSession, L"localhost", hodos::WalletPort(), 0);
             if (hConnect) {
                 HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", L"/wallet/delete",
                     nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
@@ -4929,7 +4930,7 @@ bool SimpleHandler::OnProcessMessageReceived(
                 nlohmann::json reqBody;
                 reqBody["domain"] = domain;
                 if (kind == "protocol") {
-                    url = "http://localhost:31301/domain/permissions/protocol";
+                    url = hodos::WalletUrl("/domain/permissions/protocol");
                     reqBody["securityLevel"] = data.value("protocolLevel", 2);
                     reqBody["protocolName"] = data.value("protocolName", "");
                     // Always-allow writes use the wildcard keyId ("*") rather
@@ -4948,11 +4949,11 @@ bool SimpleHandler::OnProcessMessageReceived(
                         reqBody["counterparty"] = data["protocolCounterparty"];
                     }
                 } else if (kind == "basket") {
-                    url = "http://localhost:31301/domain/permissions/basket";
+                    url = hodos::WalletUrl("/domain/permissions/basket");
                     reqBody["basket"] = data.value("basket", "");
                     reqBody["access"] = data.value("basketAccess", "read");
                 } else if (kind == "counterparty") {
-                    url = "http://localhost:31301/domain/permissions/counterparty";
+                    url = hodos::WalletUrl("/domain/permissions/counterparty");
                     reqBody["counterparty"] = data.value("counterparty", "");
                 } else {
                     LOG_DEBUG_BROWSER("🛡️ grant_scoped_permission unknown kind: " + kind);
@@ -5009,7 +5010,7 @@ bool SimpleHandler::OnProcessMessageReceived(
                             std::string jsonBody = body.dump();
 
                             CefRefPtr<CefRequest> cefRequest = CefRequest::Create();
-                            cefRequest->SetURL("http://localhost:31301/domain/permissions/certificate");
+                            cefRequest->SetURL(hodos::WalletUrl("/domain/permissions/certificate"));
                             cefRequest->SetMethod("POST");
                             cefRequest->SetHeaderByName("Content-Type", "application/json", true);
 
@@ -5080,7 +5081,7 @@ bool SimpleHandler::OnProcessMessageReceived(
                     std::string body = std::string("{\"domain\":\"") + domain
                         + "\",\"trustLevel\":\"approved\",\"identityKeyDisclosureAllowed\":true}";
                     HttpResponse resp = SyncHttpClient::Post(
-                        "http://localhost:31301/domain/permissions",
+                        hodos::WalletUrl("/domain/permissions"),
                         body, "application/json", 3000);
                     if (resp.success && resp.statusCode == 200) {
                         LOG_DEBUG_BROWSER("🛡️ V17 set for " + domain + " (HTTP 200)");
@@ -7647,7 +7648,7 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
     // Trusted internal overlays (wallet, settings, backup) talking directly to the Rust wallet
     // bypass ALL resource handlers — let CEF's native network stack handle them.
     // This avoids CefURLRequest forwarding issues on macOS.
-    if (url.find("127.0.0.1:31301") != std::string::npos &&
+    if (hodos::IsWalletHostPort(url) &&
         (role_ == "wallet" || role_ == "wallet_panel" || role_ == "settings" || role_ == "backup")) {
         LOG_DEBUG_BROWSER("🔒 Trusted overlay direct wallet request — bypassing all handlers");
         return nullptr;
@@ -7748,7 +7749,7 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
     // Intercept HTTP requests for all browsers when they're making external requests
     // Check if the request is to localhost ports that BRC-100 sites commonly use
     // OR if it's a BRC-104 /.well-known/auth request (standard wallet authentication endpoint)
-    if (url.find("localhost:31301") != std::string::npos ||
+    if (hodos::IsWalletHostPort(url) ||
         url.find("localhost:3321") != std::string::npos ||
         url.find("localhost:2121") != std::string::npos ||
         url.find("localhost:8080") != std::string::npos ||
