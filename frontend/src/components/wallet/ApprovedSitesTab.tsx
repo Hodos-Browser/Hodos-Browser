@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { walletFetch } from '../../services/walletApi';
 import DomainPermissionsTab from '../DomainPermissionsTab';
 import { HodosButton } from '../HodosButton';
 
@@ -34,7 +35,7 @@ const ApprovedSitesTab: React.FC = () => {
   const fetchDefaults = useCallback(async () => {
     try {
       setLoading(true);
-      const res = await fetch('http://127.0.0.1:31301/wallet/settings');
+      const res = await walletFetch('/wallet/settings');
       if (!res.ok) throw new Error('Failed to fetch settings');
       const data = await res.json();
       const loaded: DefaultLimits = {
@@ -66,7 +67,7 @@ const ApprovedSitesTab: React.FC = () => {
       setSaving(true);
       setSaveResult(null);
       setSaveStatus(null);
-      const postRes = await fetch('http://127.0.0.1:31301/wallet/settings', {
+      const postRes = await walletFetch('/wallet/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -80,7 +81,7 @@ const ApprovedSitesTab: React.FC = () => {
       if (!postRes.ok) throw new Error('Failed to save defaults');
 
       // Re-fetch to confirm saved values
-      const getRes = await fetch('http://127.0.0.1:31301/wallet/settings');
+      const getRes = await walletFetch('/wallet/settings');
       if (getRes.ok) {
         const data = await getRes.json();
         const confirmed: DefaultLimits = {
@@ -110,7 +111,7 @@ const ApprovedSitesTab: React.FC = () => {
   const handleResetAll = async () => {
     try {
       setResetting(true);
-      const res = await fetch('http://127.0.0.1:31301/domain/permissions/reset-all', {
+      const res = await walletFetch('/domain/permissions/reset-all', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

@@ -1,4 +1,5 @@
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
+import { walletFetch } from '../services/walletApi';
 import { useTransaction } from '../hooks/useTransaction';
 import type { TransactionData, TransactionResponse } from '../types/transaction';
 import { HodosButton } from './HodosButton';
@@ -87,7 +88,7 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
     const timer = setTimeout(async () => {
       try {
         const address = formData.recipient.trim();
-        const resp = await fetch(`http://127.0.0.1:31301/wallet/paymail/resolve?address=${encodeURIComponent(address)}`);
+        const resp = await walletFetch(`/wallet/paymail/resolve?address=${encodeURIComponent(address)}`);
         const data = await resp.json();
         setPaymailInfo(data);
       } catch {
@@ -117,8 +118,8 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
       const controller = new AbortController();
       suggestAbortRef.current = controller;
       try {
-        const resp = await fetch(
-          `http://127.0.0.1:31301/wallet/recipient/suggest?q=${encodeURIComponent(q)}&limit=6`,
+        const resp = await walletFetch(
+          `/wallet/recipient/suggest?q=${encodeURIComponent(q)}&limit=6`,
           { signal: controller.signal }
         );
         const data = await resp.json();
@@ -177,7 +178,7 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
     if (suggestion.unverified && PAYMAIL_REGEX.test(suggestion.value)) {
       setIsResolvingPaymail(true);
       setPaymailInfo(null);
-      fetch(`http://127.0.0.1:31301/wallet/paymail/resolve?address=${encodeURIComponent(suggestion.value)}`)
+      walletFetch(`/wallet/paymail/resolve?address=${encodeURIComponent(suggestion.value)}`)
         .then(r => r.json())
         .then(data => setPaymailInfo(data))
         .catch(() => setPaymailInfo({ valid: false }))
@@ -272,14 +273,14 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
       const satoshiAmount = Math.round(parseFloat(formData.amount) * 100000000);
       let result: TransactionResponse;
       if (isPaymail) {
-        const resp = await fetch('http://127.0.0.1:31301/wallet/paymail/send', {
+        const resp = await walletFetch('/wallet/paymail/send', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ paymail: formData.recipient.trim(), amount_satoshis: satoshiAmount }),
         });
         result = await resp.json();
       } else if (isPeerPay) {
-        const resp = await fetch('http://127.0.0.1:31301/wallet/peerpay/send', {
+        const resp = await walletFetch('/wallet/peerpay/send', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ recipient_identity_key: formData.recipient.trim(), amount_satoshis: satoshiAmount }),

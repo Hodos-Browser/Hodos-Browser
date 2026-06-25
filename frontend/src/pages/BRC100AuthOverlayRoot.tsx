@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import DomainPermissionForm from '../components/DomainPermissionForm';
+import { walletFetch } from '../services/walletApi';
 import type { DomainPermissionSettings } from '../components/DomainPermissionForm';
 import { HodosButton } from '../components/HodosButton';
 import { prompt as promptTheme } from '../styles/hodosTheme';
@@ -31,7 +32,7 @@ const EditPermissionsForm: React.FC<{ domain: string; onClose: () => void }> = (
   useEffect(() => {
     const fetchSettings = async () => {
       try {
-        const res = await fetch(`http://127.0.0.1:31301/domain/permissions?domain=${encodeURIComponent(domain)}`);
+        const res = await walletFetch(`/domain/permissions?domain=${encodeURIComponent(domain)}`);
         if (res.ok) {
           const data = await res.json();
           // Rust GET returns camelCase (trustLevel, perTxLimitCents, etc.)
@@ -58,7 +59,7 @@ const EditPermissionsForm: React.FC<{ domain: string; onClose: () => void }> = (
   const handleSave = async (settings: DomainPermissionSettings) => {
     try {
       // POST directly to Rust wallet API (serde rename_all = camelCase)
-      await fetch('http://127.0.0.1:31301/domain/permissions', {
+      await walletFetch('/domain/permissions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -85,7 +86,7 @@ const EditPermissionsForm: React.FC<{ domain: string; onClose: () => void }> = (
 
   const handleRevoke = async () => {
     try {
-      await fetch(`http://127.0.0.1:31301/domain/permissions?domain=${encodeURIComponent(domain)}`, {
+      await walletFetch(`/domain/permissions?domain=${encodeURIComponent(domain)}`, {
         method: 'DELETE',
       });
     } catch { /* ignore */ }
@@ -496,7 +497,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     // checkbox. If they set it to OFF in Approved Sites, fresh-site prompts
     // should start the checkbox unticked. Default to true on any fetch failure
     // so we don't accidentally degrade UX on a wallet that doesn't have V19 yet.
-    fetch('http://127.0.0.1:31301/wallet/settings')
+    walletFetch('/wallet/settings')
       .then((res) => res.ok ? res.json() : null)
       .then((data) => {
         if (data && typeof data.default_identity_key_disclosure_allowed === 'boolean') {
@@ -965,8 +966,8 @@ const BRC100AuthOverlayRoot: React.FC = () => {
 
       // 2. Scoped sub-permissions via Step 3 endpoints. Fail-tolerant —
       // each row is independent, partial-write doesn't corrupt anything.
-      const walletBase = 'http://127.0.0.1:31301';
-      const post = (path: string, body: object) => fetch(walletBase + path, {
+      const walletBase = '';
+      const post = (path: string, body: object) => walletFetch(walletBase + path, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),

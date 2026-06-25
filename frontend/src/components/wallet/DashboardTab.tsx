@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { walletFetch } from '../../services/walletApi';
 import { QRCodeSVG } from 'qrcode.react';
 import { TransactionForm } from '../TransactionForm';
 import type { TransactionResponse } from '../../types/transaction';
@@ -63,7 +64,7 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
 
   useEffect(() => {
     if (identityKey) return;
-    fetch('http://127.0.0.1:31301/getPublicKey', {
+    walletFetch('/getPublicKey', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ identityKey: true }),
@@ -111,7 +112,7 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
   const fetchBalance = useCallback(async (showLoading = false) => {
     try {
       if (showLoading) setBalanceLoading(true);
-      const res = await fetch('http://127.0.0.1:31301/wallet/balance');
+      const res = await walletFetch('/wallet/balance');
       if (!res.ok) throw new Error('Failed to fetch balance');
       const data = await res.json();
       const newBalance = data.balance || 0;
@@ -141,7 +142,7 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
   const fetchAddress = useCallback(async () => {
     try {
       setAddressLoading(true);
-      const res = await fetch('http://127.0.0.1:31301/wallet/address/current');
+      const res = await walletFetch('/wallet/address/current');
       if (!res.ok) throw new Error('Failed to fetch address');
       const data = await res.json();
       setCurrentAddress(data.address || '');
@@ -155,7 +156,7 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
   const fetchRecentActivity = useCallback(async () => {
     try {
       setRecentLoading(true);
-      const res = await fetch('http://127.0.0.1:31301/wallet/activity?page=1&limit=5&filter=all');
+      const res = await walletFetch('/wallet/activity?page=1&limit=5&filter=all');
       if (!res.ok) throw new Error('Failed to fetch activity');
       const data = await res.json();
       setRecentActions(data.items || []);
@@ -185,7 +186,7 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
   // Notification polling (incoming payments + failures)
   useEffect(() => {
     const fetchNotification = () => {
-      fetch('http://127.0.0.1:31301/wallet/peerpay/status')
+      walletFetch('/wallet/peerpay/status')
         .then(r => r.json())
         .then((data: { unread_count?: number; unread_amount?: number;
                        receive_count?: number; receive_amount?: number;
@@ -228,7 +229,7 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
   const handleGenerateAddress = async () => {
     try {
       setGenerating(true);
-      const res = await fetch('http://127.0.0.1:31301/wallet/address/generate', { method: 'POST' });
+      const res = await walletFetch('/wallet/address/generate', { method: 'POST' });
       if (!res.ok) throw new Error('Failed to generate address');
       const data = await res.json();
       setCurrentAddress(data.address || '');
@@ -286,7 +287,7 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
     setNotification(null);
     setFailureNotification(null);
     prevNotificationCount.current = 0;
-    fetch('http://127.0.0.1:31301/wallet/peerpay/dismiss', { method: 'POST' }).catch(() => {});
+    walletFetch('/wallet/peerpay/dismiss', { method: 'POST' }).catch(() => {});
     if ((window as any).cefMessage?.send) {
       (window as any).cefMessage.send('wallet_payment_dismissed', []);
     }
@@ -298,7 +299,7 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
     setBackingUp(true);
     setBackupStatus('idle');
     try {
-      const resp = await fetch('http://127.0.0.1:31301/wallet/backup/onchain', {
+      const resp = await walletFetch('/wallet/backup/onchain', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: '{}',

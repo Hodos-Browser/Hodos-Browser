@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { HodosButton } from './HodosButton';
+import { walletFetch } from '../services/walletApi';
 
 const FONT_FAMILY = "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
 
@@ -98,13 +99,13 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
   // successful revoke so the list stays accurate.
   const refreshSubPermissions = useCallback(async () => {
     setSubPermsLoading(true);
-    const wallet = 'http://127.0.0.1:31301';
+    const wallet = '';
     const enc = encodeURIComponent(domain);
     try {
       const [protoRes, basketRes, cpRes] = await Promise.all([
-        fetch(`${wallet}/domain/permissions/protocol?domain=${enc}`),
-        fetch(`${wallet}/domain/permissions/basket?domain=${enc}`),
-        fetch(`${wallet}/domain/permissions/counterparty?domain=${enc}`),
+        walletFetch(`${wallet}/domain/permissions/protocol?domain=${enc}`),
+        walletFetch(`${wallet}/domain/permissions/basket?domain=${enc}`),
+        walletFetch(`${wallet}/domain/permissions/counterparty?domain=${enc}`),
       ]);
       const rows: SubPermissionRow[] = [];
       if (protoRes.ok) {
@@ -160,9 +161,9 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
   }, [refreshSubPermissions, hideDisclosureSection]);
 
   const handleRevokeSubPerm = async (row: SubPermissionRow) => {
-    const wallet = 'http://127.0.0.1:31301';
+    const wallet = '';
     try {
-      const res = await fetch(`${wallet}/domain/permissions/${row.kind}?id=${row.id}`, {
+      const res = await walletFetch(`${wallet}/domain/permissions/${row.kind}?id=${row.id}`, {
         method: 'DELETE',
       });
       if (res.ok) {

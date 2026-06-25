@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { walletFetch } from '../../services/walletApi';
 import { HodosButton } from '../HodosButton';
 
 const InfoTooltip: React.FC<{ text: string; align?: 'left' | 'right' }> = ({ text, align }) => {
@@ -65,8 +66,8 @@ const ActivityTab: React.FC = () => {
         setError(null);
       }
 
-      const res = await fetch(
-        `http://127.0.0.1:31301/wallet/activity?page=${p}&limit=${PAGE_SIZE}&filter=${f}`
+      const res = await walletFetch(
+        `/wallet/activity?page=${p}&limit=${PAGE_SIZE}&filter=${f}`
       );
 
       if (!res.ok) throw new Error(`Failed to fetch: ${res.statusText}`);
@@ -148,7 +149,7 @@ const ActivityTab: React.FC = () => {
   const handleRetryNotification = async (txid: string) => {
     setRetryingTxid(txid);
     try {
-      const res = await fetch('http://127.0.0.1:31301/wallet/peerpay/outbox-retry', {
+      const res = await walletFetch('/wallet/peerpay/outbox-retry', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ txid }),

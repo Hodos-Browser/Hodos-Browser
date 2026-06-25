@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { walletFetch } from '../../services/walletApi';
 import { HodosButton } from '../HodosButton';
 
 interface TokenOutput {
@@ -31,7 +32,7 @@ const TokensTab: React.FC = () => {
     try {
       setLoading(true);
       setError(null);
-      const res = await fetch('http://127.0.0.1:31301/wallet/tokens');
+      const res = await walletFetch('/wallet/tokens');
       if (!res.ok) throw new Error(`Failed to fetch tokens: ${res.statusText}`);
       const data = await res.json();
       setTokens(data.tokens || []);

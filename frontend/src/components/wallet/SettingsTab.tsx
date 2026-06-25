@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { walletFetch } from '../../services/walletApi';
 import { HodosButton } from '../HodosButton';
 
 const SettingsTab: React.FC = () => {
@@ -41,7 +42,7 @@ const SettingsTab: React.FC = () => {
   const fetchSettings = useCallback(async () => {
     try {
       setNameLoading(true);
-      const res = await fetch('http://127.0.0.1:31301/wallet/settings');
+      const res = await walletFetch('/wallet/settings');
       if (!res.ok) throw new Error('Failed to fetch settings');
       const data = await res.json();
       setDisplayName(data.sender_display_name || 'Anonymous');
@@ -57,7 +58,7 @@ const SettingsTab: React.FC = () => {
 
   const fetchIdentityKey = useCallback(async () => {
     try {
-      const res = await fetch('http://127.0.0.1:31301/getPublicKey', {
+      const res = await walletFetch('/getPublicKey', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ identityKey: true }),
@@ -72,7 +73,7 @@ const SettingsTab: React.FC = () => {
 
   const fetchBalance = useCallback(async () => {
     try {
-      const res = await fetch('http://127.0.0.1:31301/wallet/balance');
+      const res = await walletFetch('/wallet/balance');
       if (!res.ok) return;
       const data = await res.json();
       setBalance(data.satoshis || 0);
@@ -91,7 +92,7 @@ const SettingsTab: React.FC = () => {
     try {
       setNameSaving(true);
       setNameResult(null);
-      const res = await fetch('http://127.0.0.1:31301/wallet/settings', {
+      const res = await walletFetch('/wallet/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sender_display_name: displayName }),
@@ -122,7 +123,7 @@ const SettingsTab: React.FC = () => {
     try {
       setRevealingMnemonic(true);
       setMnemonicError(null);
-      const res = await fetch('http://127.0.0.1:31301/wallet/reveal-mnemonic', {
+      const res = await walletFetch('/wallet/reveal-mnemonic', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pin: mnemonicPin }),
@@ -153,7 +154,7 @@ const SettingsTab: React.FC = () => {
     try {
       setExporting(true);
       setExportError(null);
-      const res = await fetch('http://127.0.0.1:31301/wallet/export', {
+      const res = await walletFetch('/wallet/export', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password: exportPassword }),
@@ -194,7 +195,7 @@ const SettingsTab: React.FC = () => {
       setDeleteError(null);
 
       // Verify PIN — 409 "already unlocked" is fine (user already authenticated)
-      const unlockRes = await fetch('http://127.0.0.1:31301/wallet/unlock', {
+      const unlockRes = await walletFetch('/wallet/unlock', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pin: deletePin }),
@@ -206,7 +207,7 @@ const SettingsTab: React.FC = () => {
       }
 
       // Delete wallet (backend attempts on-chain backup before deleting)
-      const res = await fetch('http://127.0.0.1:31301/wallet/delete', {
+      const res = await walletFetch('/wallet/delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),

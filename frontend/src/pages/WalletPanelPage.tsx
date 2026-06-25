@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import WalletPanel from '../components/WalletPanel';
+import { walletFetch } from '../services/walletApi';
 import { HodosButton } from '../components/HodosButton';
 import { tokens } from '../theme/tokens';
 
@@ -121,7 +122,7 @@ export default function WalletPanelPage() {
   // Returns a promise so callers can await it before rendering components that read the key.
   const cacheIdentityKey = async () => {
     try {
-      const r = await fetch('http://127.0.0.1:31301/getPublicKey', {
+      const r = await walletFetch('/getPublicKey', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ identityKey: true }),
@@ -216,7 +217,7 @@ export default function WalletPanelPage() {
     if (cachedExists) return;
 
     console.log('[WalletPanel] Fetching wallet status from backend...');
-    fetch('http://127.0.0.1:31301/wallet/status')
+    walletFetch('/wallet/status')
       .then(r => r.json())
       .then(data => {
         console.log('[WalletPanel] Wallet status response:', JSON.stringify(data));
@@ -266,7 +267,7 @@ export default function WalletPanelPage() {
     const handleShown = (e: MessageEvent) => {
       if (e.data?.type === 'wallet_shown') {
         console.log('[WalletPanel] wallet_shown — refreshing status');
-        fetch('http://127.0.0.1:31301/wallet/status')
+        walletFetch('/wallet/status')
           .then(r => r.json())
           .then(data => {
             if (data.exists && data.locked) {
@@ -355,7 +356,7 @@ export default function WalletPanelPage() {
     setPinStep(null);
     setCreating(true);
     try {
-      const res = await fetch('http://127.0.0.1:31301/wallet/create', {
+      const res = await walletFetch('/wallet/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pin }),
@@ -462,7 +463,7 @@ export default function WalletPanelPage() {
     setRecoveryError(null);
 
     try {
-      const res = await fetch('http://127.0.0.1:31301/wallet/recover/onchain', {
+      const res = await walletFetch('/wallet/recover/onchain', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -493,7 +494,7 @@ export default function WalletPanelPage() {
       } else if (data.backup_found === false) {
         // No backup token — fall back to mnemonic-only recovery (gap-limit chain scan)
         try {
-          const fallbackRes = await fetch('http://127.0.0.1:31301/wallet/recover', {
+          const fallbackRes = await walletFetch('/wallet/recover', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ mnemonic: mnemonicPhrase, pin, confirm: true }),
@@ -595,7 +596,7 @@ export default function WalletPanelPage() {
     setImportError(null);
 
     try {
-      const res = await fetch('http://127.0.0.1:31301/wallet/import', {
+      const res = await walletFetch('/wallet/import', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -713,7 +714,7 @@ export default function WalletPanelPage() {
     setCentbeeProgress('Scanning Centbee addresses for funds...');
 
     try {
-      const res = await fetch('http://127.0.0.1:31301/wallet/recover-external', {
+      const res = await walletFetch('/wallet/recover-external', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1527,7 +1528,7 @@ export default function WalletPanelPage() {
     setUnlocking(true);
     setUnlockError(null);
     try {
-      const res = await fetch('http://127.0.0.1:31301/wallet/unlock', {
+      const res = await walletFetch('/wallet/unlock', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pin }),

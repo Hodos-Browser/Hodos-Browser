@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
+import { walletFetch } from '../services/walletApi';
 import {
     Avatar,
     Box,
@@ -81,13 +82,13 @@ const MainBrowserView: React.FC = () => {
     useEffect(() => {
         // Defer wallet status cache warm — not needed for initial render
         const id = setTimeout(() => {
-            fetch('http://127.0.0.1:31301/wallet/status')
+            walletFetch('/wallet/status')
                 .then(r => r.json())
                 .then(data => {
                     if (data.exists) {
                         localStorage.setItem('hodos_wallet_exists', 'true');
                         // Fetch and cache identity key for wallet panel
-                        fetch('http://127.0.0.1:31301/getPublicKey', {
+                        walletFetch('/getPublicKey', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ identityKey: true }),
@@ -206,7 +207,7 @@ const MainBrowserView: React.FC = () => {
         const deferredId = setTimeout(() => {
             const checkPeerpayStatus = async () => {
                 try {
-                    const resp = await fetch('http://127.0.0.1:31301/wallet/peerpay/status');
+                    const resp = await walletFetch('/wallet/peerpay/status');
                     if (resp.ok) {
                         const data = await resp.json();
                         setHasOutboxWarnings((data.outbox_warning_count || 0) > 0);

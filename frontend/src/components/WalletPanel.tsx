@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
+import { walletFetch } from '../services/walletApi';
 import { TransactionForm } from './TransactionForm';
 import { useBalance } from '../hooks/useBalance';
 import { useAddress } from '../hooks/useAddress';
@@ -69,7 +70,7 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
 
   useEffect(() => {
     if (identityKey) return;
-    fetch('http://127.0.0.1:31301/getPublicKey', {
+    walletFetch('/getPublicKey', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ identityKey: true }),
@@ -151,7 +152,7 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
   // Self-poll peerpay status every 10s while panel is visible (live updates)
   useEffect(() => {
     const pollStatus = () => {
-      fetch('http://127.0.0.1:31301/wallet/peerpay/status')
+      walletFetch('/wallet/peerpay/status')
         .then(r => r.json())
         .then((data: { receive_count?: number; receive_amount?: number;
                        failure_count?: number; failure_amount?: number }) => {
@@ -172,7 +173,7 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
   const handleDismissPeerpay = () => {
     setPeerpayNotification(null);
     setFailureNotification(null);
-    fetch('http://127.0.0.1:31301/wallet/peerpay/dismiss', { method: 'POST' }).catch(() => {});
+    walletFetch('/wallet/peerpay/dismiss', { method: 'POST' }).catch(() => {});
     // Notify header to clear the dot
     if (window.cefMessage?.send) {
       window.cefMessage.send('wallet_payment_dismissed', []);
@@ -203,7 +204,7 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
   // Fetch sync status on mount (deferred to let overlay become interactive first)
   useEffect(() => {
     const fetchStatus = () => {
-      fetch('http://127.0.0.1:31301/wallet/sync-status')
+      walletFetch('/wallet/sync-status')
         .then(r => r.json())
         .then((data: SyncStatusData) => {
           setSyncStatus(data);
@@ -229,7 +230,7 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
     if (syncStatus?.active) {
       if (!pollRef.current) {
         pollRef.current = setInterval(() => {
-          fetch('http://127.0.0.1:31301/wallet/sync-status')
+          walletFetch('/wallet/sync-status')
             .then(r => r.json())
             .then((data: SyncStatusData) => {
               setSyncStatus(data);
@@ -239,7 +240,7 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
                 refreshBalance();
                 if (!data.error) {
                   // Auto-dismiss successful sync (no "Continue to wallet" needed)
-                  fetch('http://127.0.0.1:31301/wallet/sync-status/seen', { method: 'POST' }).catch(() => {});
+                  walletFetch('/wallet/sync-status/seen', { method: 'POST' }).catch(() => {});
                 }
                 if (pollRef.current) {
                   clearInterval(pollRef.current);
@@ -259,7 +260,7 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
   }, [syncStatus?.active]);
 
   const handleDismissSyncSummary = () => {
-    fetch('http://127.0.0.1:31301/wallet/sync-status/seen', { method: 'POST' })
+    walletFetch('/wallet/sync-status/seen', { method: 'POST' })
       .then(() => setSyncStatus(prev => prev ? { ...prev, result_seen: true } : null))
       .catch(() => {});
   };

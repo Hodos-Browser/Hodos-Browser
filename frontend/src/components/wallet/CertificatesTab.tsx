@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { walletFetch } from '../../services/walletApi';
 
 interface Certificate {
   type: string;
@@ -31,7 +32,7 @@ const CertificatesTab: React.FC = () => {
     try {
       setLoading(true);
       setError(null);
-      const res = await fetch('http://127.0.0.1:31301/listCertificates', {
+      const res = await walletFetch('/listCertificates', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ limit: 100, offset: 0 }),
@@ -115,7 +116,7 @@ const CertificatesTab: React.FC = () => {
     try {
       const fieldNames = Object.keys(cert.decrypted_fields || {});
 
-      const res = await fetch('http://127.0.0.1:31301/wallet/certificate/publish', {
+      const res = await walletFetch('/wallet/certificate/publish', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -151,7 +152,7 @@ const CertificatesTab: React.FC = () => {
     setSuccess(null);
 
     try {
-      const res = await fetch('http://127.0.0.1:31301/wallet/certificate/unpublish', {
+      const res = await walletFetch('/wallet/certificate/unpublish', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -186,7 +187,7 @@ const CertificatesTab: React.FC = () => {
     setError(null);
 
     try {
-      const res = await fetch('http://127.0.0.1:31301/relinquishCertificate', {
+      const res = await walletFetch('/relinquishCertificate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

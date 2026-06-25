@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { walletFetch } from '../services/walletApi';
 import {
   Box,
   Typography,
@@ -108,7 +109,7 @@ const DomainPermissionsTab: React.FC = () => {
     try {
       setLoading(true);
       setError(null);
-      const res = await fetch('http://127.0.0.1:31301/domain/permissions/all');
+      const res = await walletFetch('/domain/permissions/all');
       if (!res.ok) throw new Error(`Failed to fetch: ${res.statusText}`);
       const data = await res.json();
       setPermissions(data.permissions || []);
@@ -160,7 +161,7 @@ const DomainPermissionsTab: React.FC = () => {
   const handleEditSave = async (settings: DomainPermissionSettings) => {
     if (!editingDomain) return;
     try {
-      const res = await fetch('http://127.0.0.1:31301/domain/permissions', {
+      const res = await walletFetch('/domain/permissions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -192,8 +193,8 @@ const DomainPermissionsTab: React.FC = () => {
     try {
       setRevoking(true);
       const domain = revokeTarget.domain;
-      const res = await fetch(
-        `http://127.0.0.1:31301/domain/permissions?domain=${encodeURIComponent(domain)}`,
+      const res = await walletFetch(
+        `/domain/permissions?domain=${encodeURIComponent(domain)}`,
         { method: 'DELETE' }
       );
       if (!res.ok) throw new Error(`Failed to revoke: ${res.statusText}`);
@@ -214,8 +215,8 @@ const DomainPermissionsTab: React.FC = () => {
 
   const handleRevokeCertType = async (domain: string, certType: string) => {
     try {
-      const res = await fetch(
-        `http://127.0.0.1:31301/domain/permissions/certificate?domain=${encodeURIComponent(domain)}&cert_type=${encodeURIComponent(certType)}`,
+      const res = await walletFetch(
+        `/domain/permissions/certificate?domain=${encodeURIComponent(domain)}&cert_type=${encodeURIComponent(certType)}`,
         { method: 'DELETE' }
       );
       if (!res.ok) throw new Error(`Failed to revoke cert fields: ${res.statusText}`);
