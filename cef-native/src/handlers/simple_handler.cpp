@@ -4057,7 +4057,8 @@ bool SimpleHandler::OnProcessMessageReceived(
         CefRefPtr<CefBrowser> target_browser = nullptr;
 
         if (role_ == "settings") {
-            target_hwnd = FindWindow(L"CEFSettingsOverlayWindow", L"Settings Overlay");
+            extern HWND g_settings_overlay_hwnd;
+            target_hwnd = g_settings_overlay_hwnd;  // in-process (not FindWindow — would match another instance)
             target_browser = GetSettingsBrowser();
             LOG_DEBUG_BROWSER("✅ Found settings overlay window: " + std::to_string(reinterpret_cast<uintptr_t>(target_hwnd)));
         } else if (role_ == "wallet") {
@@ -4069,7 +4070,8 @@ bool SimpleHandler::OnProcessMessageReceived(
                 ? walletOwnerWin->wallet_browser : GetWalletBrowser();
             LOG_DEBUG_BROWSER("✅ Found wallet overlay window (global): " + std::to_string(reinterpret_cast<uintptr_t>(target_hwnd)));
         } else if (role_ == "backup") {
-            target_hwnd = FindWindow(L"CEFBackupOverlayWindow", L"Backup Overlay");
+            extern HWND g_backup_overlay_hwnd;
+            target_hwnd = g_backup_overlay_hwnd;  // in-process (not FindWindow — would match another instance)
             target_browser = GetBackupBrowser();
             LOG_DEBUG_BROWSER("✅ Found backup overlay window: " + std::to_string(reinterpret_cast<uintptr_t>(target_hwnd)));
         } else if (role_ == "brc100auth") {
@@ -4422,14 +4424,18 @@ bool SimpleHandler::OnProcessMessageReceived(
         LOG_DEBUG_BROWSER("🪟 overlay_hide message received from role: " + role_);
 
 #ifdef _WIN32
-        // Close the BRC-100 auth overlay window
-        HWND auth_hwnd = FindWindow(L"CEFBRC100AuthOverlayWindow", L"BRC-100 Auth Overlay");
-        LOG_DEBUG_BROWSER("🪟 FindWindow result: " + std::to_string((uintptr_t)auth_hwnd));
-        if (auth_hwnd) {
+        // Close the BRC-100 auth overlay window. Use the in-process global, NOT
+        // FindWindow (system-wide → would match another running instance's overlay
+        // when dev+installed run together). Guard liveness + null the global so a
+        // stale handle can't outlive a DestroyWindow.
+        extern HWND g_brc100_auth_overlay_hwnd;
+        HWND auth_hwnd = g_brc100_auth_overlay_hwnd;
+        if (auth_hwnd && IsWindow(auth_hwnd)) {
             LOG_DEBUG_BROWSER("🪟 Closing BRC-100 auth overlay window");
             DestroyWindow(auth_hwnd);
+            g_brc100_auth_overlay_hwnd = nullptr;
         } else {
-            LOG_DEBUG_BROWSER("🪟 BRC-100 auth overlay window not found");
+            LOG_DEBUG_BROWSER("🪟 BRC-100 auth overlay window not live");
         }
 #elif defined(__APPLE__)
         extern NSWindow* g_brc100_auth_overlay_window;
@@ -5142,8 +5148,9 @@ bool SimpleHandler::OnProcessMessageReceived(
 
 #ifdef _WIN32
         // Close the settings overlay window
-        HWND settings_hwnd = FindWindow(L"CEFSettingsOverlayWindow", L"Settings Overlay");
-        if (settings_hwnd) {
+        extern HWND g_settings_overlay_hwnd;  // dead block — global, not FindWindow
+        HWND settings_hwnd = g_settings_overlay_hwnd;
+        if (settings_hwnd && IsWindow(settings_hwnd)) {
             LOG_DEBUG_BROWSER("🪟 Closing settings overlay window");
             DestroyWindow(settings_hwnd);
         }
@@ -5173,20 +5180,20 @@ bool SimpleHandler::OnProcessMessageReceived(
         // Handle input for the appropriate overlay based on role
         HWND target_hwnd = nullptr;
         if (role_ == "settings") {
-            // Find the settings overlay window
-            target_hwnd = FindWindow(L"CEFSettingsOverlayWindow", L"Settings Overlay");
-            LOG_DEBUG_BROWSER("🪟 Settings overlay HWND found: " + std::to_string(reinterpret_cast<uintptr_t>(target_hwnd)));
+            extern HWND g_settings_overlay_hwnd;
+            target_hwnd = g_settings_overlay_hwnd;  // in-process, not FindWindow (cross-instance safe)
+            LOG_DEBUG_BROWSER("🪟 Settings overlay HWND (global): " + std::to_string(reinterpret_cast<uintptr_t>(target_hwnd)));
         } else if (role_ == "wallet") {
-            // Find the wallet overlay window
-            target_hwnd = FindWindow(L"CEFWalletOverlayWindow", L"Wallet Overlay");
-            LOG_DEBUG_BROWSER("💰 Wallet overlay HWND found: " + std::to_string(reinterpret_cast<uintptr_t>(target_hwnd)));
+            extern HWND g_wallet_overlay_hwnd;
+            target_hwnd = g_wallet_overlay_hwnd;
+            LOG_DEBUG_BROWSER("💰 Wallet overlay HWND (global): " + std::to_string(reinterpret_cast<uintptr_t>(target_hwnd)));
         } else if (role_ == "backup") {
-            // Find the backup overlay window
-            target_hwnd = FindWindow(L"CEFBackupOverlayWindow", L"Backup Overlay");
-            LOG_DEBUG_BROWSER("💾 Backup overlay HWND found: " + std::to_string(reinterpret_cast<uintptr_t>(target_hwnd)));
+            extern HWND g_backup_overlay_hwnd;
+            target_hwnd = g_backup_overlay_hwnd;
+            LOG_DEBUG_BROWSER("💾 Backup overlay HWND (global): " + std::to_string(reinterpret_cast<uintptr_t>(target_hwnd)));
         }
 
-        if (target_hwnd) {
+        if (target_hwnd && IsWindow(target_hwnd)) {
             LONG exStyle = GetWindowLong(target_hwnd, GWL_EXSTYLE);
             if (enable) {
                 SetWindowLong(target_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
