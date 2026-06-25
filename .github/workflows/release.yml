@@ -1020,7 +1020,10 @@ jobs:
             state=$(jq -r --arg n "$name" '.assets[] | select(.name==$n) | .state' assets.json)
             { [ -n "$size" ] && [ "$size" != "null" ]; } || { echo "ERROR: release asset missing: $name"; exit 1; }
             [ "$state" = "uploaded" ] || { echo "ERROR: asset $name not fully uploaded (state=$state)"; exit 1; }
-            [ "$size" -gt 1000 ] || { echo "ERROR: asset $name suspiciously small ($size bytes)"; exit 1; }
+            # Size floor per file class: installers are 100+ MB; SHA256SUMS.txt /
+            # appcast.xml are legitimately a few hundred bytes — just non-empty.
+            case "$name" in *.exe|*.zip|*.dmg) min=1000000 ;; *) min=50 ;; esac
+            [ "$size" -gt "$min" ] || { echo "ERROR: asset $name suspiciously small ($size bytes, expected > $min)"; exit 1; }
           done
           echo "All expected assets present, uploaded, and non-trivial."
 
