@@ -22,13 +22,16 @@ const SettingsTab: React.FC = () => {
   const [revealingMnemonic, setRevealingMnemonic] = useState(false);
   const [showMnemonicForm, setShowMnemonicForm] = useState(false);
 
-  // Export backup (UI not yet wired)
+  // Export backup — ⚠️ TEMP-WIRED to test the bridge Commit 4 large-export path.
+  // Re-hide before the release pipeline: revert these three `useState` reads back
+  // to `[, setX]`, restore `void handleExportBackup;`, and re-collapse the JSX
+  // block below to the placeholder comment. See WALLET_UI_BRIDGE_MIGRATION.md.
   const [, setShowExportForm] = useState(false);
   const [exportPassword, setExportPassword] = useState('');
   const [exportConfirm, setExportConfirm] = useState('');
-  const [, setExportError] = useState<string | null>(null);
-  const [, setExporting] = useState(false);
-  const [, setExportSuccess] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [exportSuccess, setExportSuccess] = useState(false);
 
   // Delete wallet
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -187,7 +190,6 @@ const SettingsTab: React.FC = () => {
       setExporting(false);
     }
   };
-  void handleExportBackup; // suppress TS6133 until export UI is wired
 
   const handleDeleteWallet = async () => {
     try {
@@ -376,7 +378,38 @@ const SettingsTab: React.FC = () => {
         </div>
       </div>
 
-      {/* Export Backup — hidden for now, backend still supports /wallet/export */}
+      {/* Export Backup — ⚠️ TEMP UI wired to test bridge Commit 4 (large-export */}
+      {/* chunking). Re-collapse to this comment + re-hide the state reads before */}
+      {/* running the release pipeline. */}
+      <div className="wd-settings-section">
+        <div className="wd-section-title">Export Backup</div>
+        <div className="wd-section-desc">
+          Download an encrypted backup of your wallet. Remember this password — it is required to restore.
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxWidth: 360, marginTop: 8 }}>
+          <input
+            type="password"
+            placeholder="Backup password (8+ characters)"
+            value={exportPassword}
+            onChange={(e) => setExportPassword(e.target.value)}
+            style={{ padding: '8px', border: '1px solid #ccc', borderRadius: '4px' }}
+          />
+          <input
+            type="password"
+            placeholder="Confirm password"
+            value={exportConfirm}
+            onChange={(e) => setExportConfirm(e.target.value)}
+            style={{ padding: '8px', border: '1px solid #ccc', borderRadius: '4px' }}
+          />
+          {exportError && <div style={{ color: '#ef5350', fontSize: 13 }}>{exportError}</div>}
+          {exportSuccess && <div style={{ color: '#4caf50', fontSize: 13 }}>Backup downloaded.</div>}
+          <div>
+            <HodosButton variant="primary" onClick={handleExportBackup} disabled={exporting}>
+              {exporting ? 'Exporting…' : 'Download Backup'}
+            </HodosButton>
+          </div>
+        </div>
+      </div>
 
       {/* Delete Wallet */}
       <div className="wd-settings-section danger">
