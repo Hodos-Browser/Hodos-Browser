@@ -1,4 +1,5 @@
 import type { AddressData } from './address';
+import type { IdentityResult } from './identity';
 import type { TransactionResponse, BroadcastResponse } from './transaction';
 import type { HistoryEntry, HistorySearchParams, HistoryGetParams, ClearRangeParams, HistoryEntryWithFrecency } from './history';
 import type { CookieData, CookieDeleteResponse, CacheSizeResponse } from './cookies';
@@ -53,6 +54,10 @@ declare global {
           getTree: () => Promise<FolderData[]>;
         };
       };
+      identity: {
+        get: () => Promise<IdentityResult>;
+        markBackedUp: () => Promise<string>;
+      };
       wallet: {
         getStatus: () => Promise<{ exists: boolean; needsBackup: boolean }>;
         create: () => Promise<{ success: boolean; wallet?: { mnemonic: string; address?: string; version?: string; backedUp?: boolean }; error?: string }>;
@@ -62,8 +67,8 @@ declare global {
         getCurrentAddress: () => Promise<AddressData>;
         getAddresses: () => Promise<AddressData[]>;
         markBackedUp: () => Promise<{ success: boolean }>;
-        getBackupModalState: () => Promise<{ shown: boolean }>;
-        setBackupModalState: (shown: boolean) => Promise<{ success: boolean }>;
+        getBackupModalState: () => Promise<{ shown: boolean } | null>;
+        setBackupModalState: (shown: boolean) => Promise<{ success: boolean } | null>;
         getBalance: () => Promise<{ balance: number; bsvPrice?: number }>;
         sendTransaction: (data: { recipient: string; amount: number }) => Promise<TransactionResponse>;
         getTransactionHistory: () => Promise<any[]>;
@@ -95,7 +100,9 @@ declare global {
       };
     };
     cefMessage?: {
-      send: (channel: string, args: any[]) => void;
+      // Variadic: the C++ CefMessageSendHandler requires the message name and accepts
+      // any number of additional args of any type (string, number, array, object, or none).
+      send: (channel: string, ...args: any[]) => void;
     };
     triggerPanel?: (panelName: string) => void;
     onAddressGenerated?: (data: AddressData) => void;

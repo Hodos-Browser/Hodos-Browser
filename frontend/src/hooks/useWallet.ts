@@ -39,15 +39,16 @@ export const useWallet = () => {
 
       const walletData = await window.hodosBrowser.wallet.create();
 
+      // create() returns the nested shape { success, wallet: { mnemonic, address, version } }
       setWalletState({
-        address: walletData.address,
-        mnemonic: walletData.mnemonic,
+        address: walletData.wallet?.address ?? null,
+        mnemonic: walletData.wallet?.mnemonic ?? null,
         isInitialized: true,
         backedUp: false,
-        version: walletData.version
+        version: walletData.wallet?.version ?? null
       });
 
-      console.log('🔑 Wallet created with mnemonic:', walletData.mnemonic);
+      console.log('🔑 Wallet created with mnemonic:', walletData.wallet?.mnemonic);
       return walletData;
     } catch (error) {
       console.error('❌ Failed to create wallet:', error);
