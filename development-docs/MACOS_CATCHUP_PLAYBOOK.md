@@ -4,6 +4,11 @@
 
 ---
 
+> ## ⭐ PRIORITY UPDATE (2026-06-26) — read `MACOS_UPDATE_STABILITY_EXECUTION.md` FIRST
+> The owner has elevated **update stability** to top priority and now wants the **Mac side to execute the auto-update fix** (previously scoped here as "DevOps-owned, forward-look only" in §4-D). Before the parity work below, do `development-docs/0.4.0/MACOS_UPDATE_STABILITY_EXECUTION.md`: fix the macOS minimum-version regression (the live "requires macOS 26" auto-update break) and stand up the real-update verification gate. That brief is self-contained and ordered. Context: `development-docs/0.4.0/POST_BETA16_PLAN.md` (Track 0 + Threads 1/5) and the principle memory `feedback_update_stability_principle.md`. **This supersedes the §1.1 note that "the Windows side is doing research/docs only" and the §4-D "do not touch auto-update" scoping for the specific tasks in that brief** (Info.plist `SU*` keys and the no-silent-update posture are still preserved exactly — only `LSMinimumSystemVersion` + runner/deployment-target/guard change).
+
+---
+
 ## 0. Provenance & trust posture of this document
 
 Every macOS claim in this playbook was verified against **actual current source on branch `0.4.0` (HEAD `b9542aa`, 2026-06-22)** — not against project docs, which are systematically stale (examples flagged inline). However, **source shifts**. Line numbers cited here (e.g. `simple_handler.cpp:6620`) were correct at authoring time but **will drift** as you and others edit. They have *already* drifted ~40–60 lines in `simple_handler.cpp` between earlier drafts and this one. Treat every `file:line` as a *starting hint*, not gospel. **Do not Read a cited line with a tight `offset`/`limit` and trust you landed in the right place** — drift of 40–60 lines is normal; grep for the symbol/string first, then read around the real hit. The **Execution Protocol (§5)** mandates a kickoff re-verification pass before you touch anything — do not skip it.

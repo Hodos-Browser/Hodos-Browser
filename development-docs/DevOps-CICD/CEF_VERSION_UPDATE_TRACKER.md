@@ -3,6 +3,7 @@
 Track features, fixes, and investigations to research when updating the CEF build.
 
 **Current CEF version:** 136 (built from source with `proprietary_codecs=true ffmpeg_branding=Chrome`)
+**Current macOS floor:** **11.0 (Big Sur)** — CEF 136 dropped 10.15 "Catalina"; published minimum must match (see *"macOS Minimum Deployment Version"* below). Re-check on every Chromium bump.
 
 ---
 
@@ -27,6 +28,31 @@ Track features, fixes, and investigations to research when updating the CEF buil
   - `CEF_BUILD_RUNBOOK.md` — full Chromium+CEF source build
   - `.github/workflows/release.yml` — `runs-on:` pins + the explanatory comment on the windows job
 - **Added:** 2026-06-25
+
+### macOS Minimum Deployment Version (published min must match Chromium's floor)
+- **Priority:** HIGH — ships a **broken auto-update** if wrong. Sibling of the runner-pin lesson above; same root cause (a floating runner image silently overrode our intent).
+- **Why:** Two numbers must agree or mac auto-update breaks:
+  1. **The oldest macOS the Chromium/CEF build actually supports** (Chromium raises this every few majors as Apple drops old OSes — e.g. **CEF 136 dropped macOS 10.15 "Catalina"**, so the true floor is **macOS 11.0 "Big Sur"**, *not* the `10.15` our config historically claimed).
+  2. **Our published minimum** — `CMAKE_OSX_DEPLOYMENT_TARGET` (`cef-native/CMakeLists.txt`), `LSMinimumSystemVersion` (`cef-native/Info.plist`, `cef-native/mac/helper-Info.plist.in`), and the binary's actual Mach-O `LC_BUILD_VERSION minos`.
+- **The two failure modes (both real):**
+  - **Published min too HIGH** (the beta.16 bug): the build floated on `macos-latest` = macOS 26 "Tahoe"; the deployment-target intent was a silent CMake no-op, so the **linker stamped the binary's `minos` at the runner's SDK (26)**. Sparkle/the loader then refuses to relaunch on every user below that OS → "requires macOS 26.0 or later" → **dead auto-update**. (This is *why* pinning the runner — see the Toolchain item — and forcing the deployment target both matter.)
+  - **Published min too LOW** (claim 11.0 when the framework needs 12.0): the OS *accepts* the update, then dyld fails to load the higher-`minos` CEF framework → **launch crash after update**. Worse than gating honestly.
+- **The rule, every Chromium/CEF bump:**
+  1. **Look up the new Chromium's oldest supported macOS** (Chromium release notes / "Chrome to drop support for macOS X" announcements).
+  2. **Measure the prebuilt CEF framework's real floor** on a Mac: `vtool -show-build "<...>/Chromium Embedded Framework.framework/Chromium Embedded Framework" | awk '/minos/{print $2}'` (or `otool -l | grep -A4 LC_BUILD_VERSION`). Do **not** trust the announcement alone.
+  3. **Set our published minimum = `max(Chromium floor, measured framework minos)`** in **all three** places: `CMakeLists.txt` `CMAKE_OSX_DEPLOYMENT_TARGET`, `Info.plist` `LSMinimumSystemVersion`, `helper-Info.plist.in` `LSMinimumSystemVersion`. Keep them identical.
+  4. **Apply it for real** — pass `-DCMAKE_OSX_DEPLOYMENT_TARGET=<floor>` on the configure command line (a bare `set(... CACHE ...)` after `project()` is a silent no-op) and export `MACOSX_DEPLOYMENT_TARGET=<floor>` at job level so the CEF wrapper, cargo, and sub-cmakes all inherit one floor.
+  5. **Guard it in CI** (the standing per-build check — see `BUILD_AND_RELEASE.md` release checklist): after build, read `minos` of the main exe, all helper apps, and the Rust binaries and **FAIL the build unless each `minos` ≥ the CEF framework's `minos`** (an inequality, not `== <floor>`). CI runs on the newest macOS and *cannot* reproduce a sub-floor loader rejection, so also do a **manual relaunch-after-update on a real machine at/near the floor** before `promote --latest`.
+- **⚠️ Runner SDK vs. deployment target — do not conflate (this is what caused beta.16):** these are TWO independent things.
+  - **Build runner** (`runs-on:`) = the machine that *compiles* the app. It does **not** decide which users can run it. Best practice: **build on the *current stable, pinned* image** (newest GitHub-supported `macos-NN` you've validated), **never the floating `macos-latest`**. Re-validate and bump the pin on each Chromium bump (and whenever GitHub retires the image — old images *are* eventually removed, so "pin once forever" isn't an option).
+  - **Deployment target** (`CMAKE_OSX_DEPLOYMENT_TARGET` / `minos`) = the **minimum-requirements label** that decides backward compatibility. This — not the runner — is what makes one binary run on the floor OS *and everything newer*. Standard Apple practice (and Chrome/Firefox's): **build with the latest SDK, set the deployment target to the oldest OS you support.**
+  - **The trap:** if you forget to *explicitly* set + enforce the deployment target, the linker stamps `minos` from the **runner's SDK** — so a newer runner makes the app run on *fewer* machines, not more (the beta.16 "requires macOS 26" failure). Building on a newer runner never *widens* user compatibility; only lowering the deployment target does. So: newest pinned runner is fine and recommended, **provided the explicit target + the `minos` guard are in place.**
+- **Decision log:** for **CEF 136**, published floor = **macOS 11.0 (Big Sur)**, pending the §2 `vtool` measurement confirming the framework isn't higher. 10.15 is retired (Chromium dropped Catalina). Runner = **current stable pinned image (`macos-15`)**, not `macos-latest`. Owner approved "Big Sur or newer" + "current stable, pinned runner" 2026-06-26.
+- **References:**
+  - `cef-native/CMakeLists.txt` (`CMAKE_OSX_DEPLOYMENT_TARGET`), `cef-native/Info.plist` + `cef-native/mac/helper-Info.plist.in` (`LSMinimumSystemVersion`)
+  - `.github/workflows/release.yml` — mac build job runner pin + deployment-target flag + the post-build `minos` guard
+  - `development-docs/0.4.0/POST_BETA16_PLAN.md` — Thread 5 (full root-cause + fix)
+- **Added:** 2026-06-26
 
 ### FedCM (Federated Credential Management) Support
 - **Priority:** HIGH
@@ -86,7 +112,8 @@ Track features, fixes, and investigations to research when updating the CEF buil
 1. Check this document for investigation items
 2. Build from source with `proprietary_codecs=true ffmpeg_branding=Chrome`
 3. **Align the toolchain** — note the toolset the new CEF is built with; rebuild vcpkg static deps + the CEF wrapper on it; re-run `DEPENDENCY_VERIFICATION.md`; and **re-pin the CI runner images** (`runs-on:`) to one shipping that toolset (never `windows-latest`/`macos-latest`). See *"Toolchain (MSVC) & Dependency Alignment"* above.
-4. Run full test suite (Minimal + Standard site verification from CLAUDE.md)
-5. Specifically test: Google Sign-In, OAuth flows, media playback, ad blocking, fingerprint protection
-6. Update this document with findings
-7. Update `CLAUDE.md` x.com media section if codec situation changes
+4. **Re-check the macOS minimum version** — look up the new Chromium's oldest supported macOS, `vtool`-measure the prebuilt CEF framework's real `minos`, set our published minimum = `max(those)` in `CMakeLists.txt` + both plists, apply it via `-DCMAKE_OSX_DEPLOYMENT_TARGET=` on the configure line, and confirm the CI `minos` guard passes. See *"macOS Minimum Deployment Version"* above.
+5. Run full test suite (Minimal + Standard site verification from CLAUDE.md)
+6. Specifically test: Google Sign-In, OAuth flows, media playback, ad blocking, fingerprint protection
+7. Update this document with findings
+8. Update `CLAUDE.md` x.com media section if codec situation changes

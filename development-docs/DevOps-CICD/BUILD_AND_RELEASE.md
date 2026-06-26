@@ -30,6 +30,28 @@
 
 **Before you start:** Decide on the version number. Format: `X.Y.Z-beta.N` (e.g., `0.3.0-beta.8`).
 
+> **⚠️ Standing pre-flight check — macOS minimum version (EVERY build).** The build must verify the
+> shipped macOS binary's Mach-O `minos` matches our published minimum, because a floating runner image
+> can silently stamp a higher `minos` and **brick auto-update** (the beta.16 "requires macOS 26.0"
+> regression — the runner was `macos-latest` = Tahoe). The CI mac job must, after building:
+> 1. Read the **CEF framework's** floor: `vtool -show-build ".../Chromium Embedded Framework.framework/Chromium Embedded Framework" | awk '/minos/{print $2}'`.
+> 2. Read `minos` of the main exe, every helper app, and both Rust binaries.
+> 3. **FAIL the build unless each `minos` ≥ the framework's `minos`.**
+>
+> The *value* of the published minimum is set per-Chromium-bump, not per-release — see
+> `CEF_VERSION_UPDATE_TRACKER.md` → *"macOS Minimum Deployment Version."* **Current floor: macOS 11.0
+> (Big Sur)** for CEF 136 (10.15 "Catalina" was dropped by Chromium). Because CI runs on the newest
+> macOS and cannot reproduce a sub-floor loader rejection, also do a **manual relaunch-after-update on
+> a real machine at/near the floor before `promote --latest`** (see Step 9).
+>
+> **Runner selection (don't confuse with the floor above).** The build runner is just *where it
+> compiles* — it does NOT set user compatibility (the deployment target does). Use the **current
+> stable, *pinned* GitHub image** (`macos-15` today; `windows-2022` on Windows) — **never floating
+> `macos-latest`/`windows-latest`** (that's what stamped beta.16's `minos` at 26 and what broke the
+> Windows generator at `windows-latest`→2025). Re-validate and bump the pin on each Chromium bump and
+> whenever GitHub retires an image. Building on a newer runner never *widens* user reach — only the
+> deployment target does — so newest-pinned-runner + explicit target + `minos` guard is the rule.
+
 ---
 
 #### Step 1: Bump version
@@ -181,6 +203,7 @@ If the chain shows `Microsoft ID Verified CS EOC CA 03`, you're on the post-Marc
 - Appcast.xml generation (DSA + EdDSA) as a release artifact
 - Version injection into C++ binary via `-DAPP_VERSION=` CMake flag
 - Globally-monotonic macOS build number (finals supersede betas)
+- **macOS `minos` guard: every mac build verifies each binary's `minos` ≥ the CEF framework floor (fails closed) — see the "Standing pre-flight check" callout + `CEF_VERSION_UPDATE_TRACKER.md`**
 - **Draft-first release: verify assets + appcast → promote live + mark Latest (Steps 5–7)**
 - **Website publish: appcast + `_redirects` + `index.astro` pushed to `hodosbrowser.com` via `WEBSITE_DEPLOY_TOKEN`, then live-verified**
 
@@ -758,7 +781,8 @@ void OnBrowserExit() {
       <title>Version 1.1.0</title>
       <sparkle:version>1.1.0</sparkle:version>
       <sparkle:os>macos</sparkle:os>
-      <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+      <!-- Must match our published floor (CEF 136 = 11.0 Big Sur; 10.15 retired). See CEF_VERSION_UPDATE_TRACKER.md. -->
+      <sparkle:minimumSystemVersion>11.0</sparkle:minimumSystemVersion>
       <enclosure
         url="https://github.com/Hodos-Browser/Hodos-Browser/releases/download/v1.1.0/Hodos-1.1.0.dmg"
         sparkle:edSignature="SIGNATURE_HERE"
