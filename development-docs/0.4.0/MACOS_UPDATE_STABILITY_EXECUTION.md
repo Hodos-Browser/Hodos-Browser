@@ -147,16 +147,16 @@ done
 ```
 Expected: each prints `11.0` (anything ≤ 15 is fine for a 15.7.5 machine; **`26` is the failure** — report it). Then **open the wallet panel in beta.17 and confirm the balance loads** — that's functional proof `hodos-wallet` actually launched (a 26-stamped wallet backend would be dead on macOS 15).
 
-### Report back to the owner (paste this filled in)
+### Report back to the owner (filled in 2026-06-26)
 ```
 Real-update gate — beta.17 canary
-  Machine OS:            macOS __.__.__  (confirm < 26)
-  Part A (beta.15→17):   PASS / FAIL   — relaunched into: 0.3.0-beta.__  ; error (if any): ____
-  Part B (fresh beta.17 launch): PASS / FAIL
-  Part C minos:          HodosBrowser=__  hodos-wallet=__  hodos-adblock=__   (expect 11.0; 26=fail)
-  Part C wallet balance loaded: YES / NO
+  Machine OS:            macOS 15.7.5  (confirm < 26)
+  Part A (beta.15→17):   PASS   — relaunched into: 0.3.0-beta.17  ; error (if any): none
+  Part B (fresh beta.17 launch): PASS
+  Part C minos:          HodosBrowser=11.0  hodos-wallet=11.0  hodos-adblock=11.0   (expect 11.0; 26=fail)
+  Part C wallet balance loaded: YES
   notarytool/stapler (Task 5, from CI run 28253107086): PASS  (already confirmed green by Windows)
-  VERDICT: GREEN (safe to cut 0.4.0)  /  RED (hold)
+  VERDICT: GREEN (safe to cut 0.4.0)
 ```
 
 > This manual gate is mandatory until automated. Future work: a scripted N−1→N update check for Windows and, where possible, a VM-based mac check — but the sub-floor loader case needs a real old-OS machine.
