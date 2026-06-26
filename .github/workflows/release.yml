@@ -933,7 +933,9 @@ jobs:
   # ============================================================
   publish:
     needs: [build-windows, build-macos]
-    runs-on: ubuntu-latest
+    # Pinned (kill silent drift): the crypto-verify step needs openssl >= 3 (Ed25519
+    # -rawin); don't let a floating image move it under us. ubuntu-24.04 ships openssl 3.x.
+    runs-on: ubuntu-24.04
     permissions:
       contents: write  # Needed to create releases
 
@@ -1079,6 +1081,35 @@ jobs:
           grep -qE 'sparkle:dsaSignature="[^"]+"' appcast.xml || { echo "ERROR: Windows enclosure has no DSA signature"; exit 1; }
           grep -qE 'sparkle:edSignature="[^"]+"'  appcast.xml || { echo "ERROR: macOS enclosure has no EdDSA signature"; exit 1; }
           echo "Appcast verified for ${VERSION}: version + both enclosures + signatures present."
+
+      # T4(a) / Track-0 Pillar A: CRYPTOGRAPHICALLY verify the appcast signatures
+      # against the real artifacts, using the SAME public keys the shipped client
+      # embeds (DSA from AutoUpdater.cpp, Ed25519 from Info.plist's SUPublicEDKey).
+      # The grep above only proves a signature *string is present*; this proves it
+      # actually *verifies* — so a mis-signed feed can never be promoted. Includes a
+      # built-in mutation self-test (corrupted sig MUST fail) so the verifier can
+      # never silently degrade into a no-op. Fail-closed: runs BEFORE Promote, so a
+      # failure leaves nothing public. Validated offline against beta.16's real
+      # artifacts (genuine -> pass, corrupted/cross/wrong-payload -> reject).
+      - name: Cryptographically verify update signatures (fail-closed)
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          # -print -quit stops at the first match with no pipe (avoids head closing the
+          # pipe and SIGPIPE-killing find under pipefail).
+          WIN=$(find artifacts -name "HodosBrowser-${VERSION}-setup.exe" -print -quit)
+          DMG=$(find artifacts -name "HodosBrowser-${VERSION}.dmg" -print -quit)
+          [ -n "$WIN" ] || { echo "::error::installer artifact not found for ${VERSION}"; exit 1; }
+          [ -n "$DMG" ] || { echo "::error::dmg artifact not found for ${VERSION}"; exit 1; }
+          # Ed25519 -rawin requires openssl >= 3.x — assert, don't just print.
+          ver=$(openssl version | awk '{print $2}')
+          case "$ver" in 3.*|4.*|5.*) echo "openssl $ver OK" ;; *) echo "::error::openssl $ver too old (need >= 3.x for Ed25519 -rawin)"; exit 1 ;; esac
+          python3 scripts/verify_update_signatures.py \
+            --appcast appcast.xml \
+            --windows-installer "$WIN" \
+            --macos-dmg "$DMG" \
+            --autoupdater-src cef-native/src/core/AutoUpdater.cpp \
+            --info-plist cef-native/Info.plist
 
       # Everything checked out — promote the release LIVE and mark it Latest.
       # From here the GitHub assets are public. This is the point of no return;
