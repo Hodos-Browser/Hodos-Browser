@@ -561,8 +561,8 @@ jobs:
           TARGETS=(
             "$APP/Contents/MacOS/HodosBrowser"
             "$APP"/Contents/Frameworks/HodosBrowser\ Helper*.app/Contents/MacOS/*
-            "$APP/Contents/Resources/hodos-wallet"
-            "$APP/Contents/Resources/hodos-adblock"
+            "$APP/Contents/MacOS/hodos-wallet"
+            "$APP/Contents/MacOS/hodos-adblock"
           )
           fail=0
           for t in "${TARGETS[@]}"; do
