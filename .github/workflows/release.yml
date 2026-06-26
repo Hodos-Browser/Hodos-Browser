@@ -85,6 +85,10 @@ jobs:
         shell: pwsh
       
       # Set up build tools
+      # T3 Wave 3 (decision #8): msvc-dev-cmd@v1 runs on Node 20 and emits a
+      # deprecation warning. We ACCEPT it — there is no Node-24 release, and
+      # swapping risks the VS2022 v143 toolset on the pinned windows-2022 runner.
+      # TRIPWIRE: re-check for a maintained Node-24 successor on/after 2026-09-16.
       - name: Set up MSVC
         uses: ilammy/msvc-dev-cmd@v1
       

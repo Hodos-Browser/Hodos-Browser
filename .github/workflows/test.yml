@@ -43,13 +43,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # Pinned (T5(g) — kill silent drift): match release.yml's pinned images,
+        # never floating *-latest. Re-validate on each GitHub image retirement.
+        os: [ubuntu-24.04, windows-2022]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: rust-wallet
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install system deps (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config libsqlite3-dev
@@ -73,12 +75,12 @@ jobs:
 
   adblock:
     name: Rust — adblock-engine (test)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # pinned (T5(g)) — no floating *-latest
     defaults:
       run:
         working-directory: adblock-engine
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install system deps
         run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
@@ -91,9 +93,9 @@ jobs:
 
   security:
     name: Security — secret-log gate (F8) + audits
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # pinned (T5(g)) — no floating *-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # BLOCKING — F8: no private keys / seeds / mnemonics in any log/print sink.
       # Patterns validated to return 0 matches on a clean tree (post-Wave-0).
       # Catches: a logging sink that hex/base64-encodes a secret-named variable (Rust),
