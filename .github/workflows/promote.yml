@@ -1,0 +1,261 @@
+# ============================================================
+# PROMOTE RELEASE — manual "test-before-customers" gate
+# ============================================================
+# This workflow makes a verified DRAFT release public. It is the deliberate,
+# human-triggered ship gate: release.yml builds + signs + crypto-verifies a
+# DRAFT on a `v*` tag push and STOPS there. Nothing is public until the owner
+# has installed and tested that exact draft on real hardware, then runs THIS
+# workflow.
+#
+# It re-downloads the published draft bytes, optionally pins them to the digests
+# the owner actually tested, re-asserts version/enclosure correctness, re-runs
+# the SAME cryptographic signature verification — all BEFORE the irreversible
+# flip — then flips to Latest and updates the website auto-update feed.
+#
+# A tag push can never reach a customer on its own — only this manual run can.
+#
+# ⚠️ WHO can promote = whoever has write access to this repo. The manual dispatch
+# IS the gate; keep write access restricted to the release owner (this is the real
+# "only I can publish" control, set in repo Settings → Collaborators). NEVER
+# hand-publish a draft via the GitHub UI or `gh release edit` — that bypasses
+# every check below.
+name: Promote release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing verified DRAFT tag to promote (e.g. v0.4.0)'
+        required: true
+        type: string
+      expected_sha256sums:
+        description: 'OPTIONAL but recommended: paste the draft''s SHA256SUMS.txt content to pin the exact bytes you tested. Leave blank to skip pinning (a warning is logged).'
+        required: false
+        type: string
+
+# Never let two promotes (or a promote + re-run) race the irreversible flip or
+# the website push for the same tag.
+concurrency:
+  group: promote-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    # Pinned (kill silent drift): crypto-verify needs openssl >= 3 (Ed25519 -rawin).
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write   # needed to edit/promote the release
+
+    steps:
+      # Validate FIRST, via env-indirection — NEVER interpolate ${{ inputs.tag }}
+      # into a run body (that executes at substitution time, before validation).
+      - name: Validate tag input
+        env:
+          TAG_INPUT: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG="$TAG_INPUT"
+          # Accept only v<semver>[-beta.N] — no shell-metachar / path-traversal surface.
+          echo "$TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$' \
+            || { echo "::error::tag '$TAG' is not a valid release tag (expected vX.Y.Z or vX.Y.Z-beta.N)"; exit 1; }
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
+          # Betas are currently a legitimate public release (deliberate); just make the
+          # operator aware they're about to mark a beta as Latest on the public feed.
+          case "$TAG" in
+            *-beta.*) echo "::notice::Promoting a BETA tag ($TAG) to public Latest + feed." ;;
+          esac
+
+      # Pin the verifier + embedded public keys to the SOURCE that built this tag,
+      # not HEAD. env.TAG is the validated value. `ref:` is an action input (not a
+      # shell), so it cannot inject; a bad ref simply fails to check out.
+      - name: Checkout the tag's source (verify script + embedded public keys)
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Confirm the release exists (and detect draft vs already-public)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+          # Fail closed if the tag has no release. A draft is the normal case. An
+          # already-public release is allowed ONLY as a recovery re-run (resume at
+          # website-sync) — the flip step is skipped in that case.
+          isDraft=$(gh release view "$TAG" --repo "$REPO" --json isDraft --jq '.isDraft' 2>/dev/null || echo "MISSING")
+          case "$isDraft" in
+            true)  echo "ALREADY_PUBLIC=false" >> "$GITHUB_ENV"; echo "OK: $TAG is a draft — eligible for promotion." ;;
+            false) echo "ALREADY_PUBLIC=true"  >> "$GITHUB_ENV"; echo "::warning::$TAG is already public — running in RECOVERY mode (skip flip, re-sync website only)." ;;
+            *)     echo "::error::no release found for tag $TAG (build it first via a tag push)."; exit 1 ;;
+          esac
+
+      - name: Download the published release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+          mkdir -p artifacts
+          # Pull the EXACT bytes that are published — these are what customers will get.
+          gh release download "$TAG" --repo "$REPO" --dir artifacts --clobber
+          echo "=== downloaded assets ==="; find artifacts -type f -printf '%p\t%s bytes\n'
+          test -s "artifacts/appcast.xml" || { echo "::error::appcast.xml missing"; exit 1; }
+          test -s "artifacts/HodosBrowser-${VERSION}-setup.exe" || { echo "::error::Windows installer missing"; exit 1; }
+          test -s "artifacts/HodosBrowser-${VERSION}.dmg"       || { echo "::error::macOS dmg missing"; exit 1; }
+
+      # TOCTOU defense: assert the downloaded bytes hash-match the digests the owner
+      # actually tested. If no digests were pasted, log a loud warning (not fatal).
+      - name: Pin promoted bytes to the tested digests (if provided)
+        env:
+          EXPECTED_SUMS: ${{ inputs.expected_sha256sums }}
+        run: |
+          set -euo pipefail
+          if [ -z "${EXPECTED_SUMS//[[:space:]]/}" ]; then
+            echo "::warning::No expected_sha256sums provided — promoting whatever is currently on the draft WITHOUT pinning to the tested bytes. Paste SHA256SUMS.txt next time."
+            exit 0
+          fi
+          # SHA256SUMS.txt lines look like "<hash>  ./path/Name.ext". Compare by basename
+          # so the path prefix from build time doesn't matter. Strip CR so a Windows-pasted
+          # file (CRLF) doesn't corrupt the filename match.
+          printf '%s\n' "$EXPECTED_SUMS" | tr -d '\r' | while read -r want path; do
+            [ -n "$want" ] || continue
+            base=$(basename "$path")
+            file=$(find artifacts -type f -name "$base" -print -quit)
+            [ -n "$file" ] || { echo "::error::expected file '$base' not found among downloaded assets"; exit 1; }
+            got=$(sha256sum "$file" | awk '{print $1}')
+            [ "$got" = "$want" ] || { echo "::error::digest mismatch for $base: tested=$want published=$got — bytes changed since you tested. Refusing."; exit 1; }
+            echo "pinned OK: $base ($want)"
+          done
+
+      # Port release.yml's draft-time appcast assertions so promote's pre-flip gate
+      # is a SUPERSET, not a subset: version + both enclosures must match THIS tag.
+      - name: Verify appcast advertises this exact version + enclosures (pre-flip)
+        run: |
+          set -euo pipefail
+          AC="artifacts/appcast.xml"
+          V_ESC="${VERSION//./\\.}"
+          grep -qE "<sparkle:shortVersionString>${V_ESC}</sparkle:shortVersionString>" "$AC" \
+            || { echo "::error::appcast shortVersionString is not ${VERSION}"; exit 1; }
+          grep -qF -- "HodosBrowser-${VERSION}-setup.exe" "$AC" || { echo "::error::appcast missing Windows enclosure for ${VERSION}"; exit 1; }
+          grep -qF -- "HodosBrowser-${VERSION}.dmg"       "$AC" || { echo "::error::appcast missing macOS enclosure for ${VERSION}"; exit 1; }
+          grep -qE 'sparkle:dsaSignature="[^"]+"' "$AC" || { echo "::error::Windows enclosure has no DSA signature"; exit 1; }
+          grep -qE 'sparkle:edSignature="[^"]+"'  "$AC" || { echo "::error::macOS enclosure has no EdDSA signature"; exit 1; }
+          echo "Appcast pre-flip check OK for ${VERSION}."
+
+      # Same fail-closed verifier release.yml ran at draft time, re-run against the
+      # PUBLISHED bytes so a tampered/swapped asset can never be promoted. Includes
+      # the built-in mutation self-test (corrupted sig MUST fail).
+      - name: Cryptographically re-verify the published bytes (fail-closed)
+        run: |
+          set -euo pipefail
+          ver=$(openssl version | awk '{print $2}')
+          case "$ver" in 3.*|4.*|5.*) echo "openssl $ver OK" ;; *) echo "::error::openssl $ver too old (need >= 3.x for Ed25519 -rawin)"; exit 1 ;; esac
+          python3 scripts/verify_update_signatures.py \
+            --appcast "artifacts/appcast.xml" \
+            --windows-installer "artifacts/HodosBrowser-${VERSION}-setup.exe" \
+            --macos-dmg "artifacts/HodosBrowser-${VERSION}.dmg" \
+            --autoupdater-src cef-native/src/core/AutoUpdater.cpp \
+            --info-plist cef-native/Info.plist
+
+      # Point of no return — assets become public + Latest. Skipped in recovery mode
+      # (already public) so a re-run resumes at website-sync without re-flipping.
+      - name: Promote release to live (latest)
+        if: env.ALREADY_PUBLIC != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release edit "$TAG" --repo "${{ github.repository }}" \
+            --draft=false --prerelease=false --latest
+          echo "Release $TAG is now LIVE and marked Latest."
+
+      - name: Verify public download URLs resolve
+        run: |
+          set -euo pipefail
+          BASE="https://github.com/${{ github.repository }}/releases/download/${TAG}"
+          for f in "HodosBrowser-${VERSION}-setup.exe" "HodosBrowser-${VERSION}.dmg"; do
+            ok=0
+            for i in $(seq 1 15); do
+              code=$(curl -sS -o /dev/null -L -w "%{http_code}" "${BASE}/${f}" || echo "000")
+              [ "$code" = "200" ] && { ok=1; echo "public OK: ${f}"; break; }
+              echo "waiting on public ${f} (HTTP $code) [$i/15]"; sleep 8
+            done
+            [ "$ok" = "1" ] || { echo "ERROR: ${f} not publicly downloadable after promote"; exit 1; }
+          done
+
+      # Update the website repo: the auto-update feed (public/appcast.xml), the
+      # download-button targets (public/_redirects), and the version shown on the
+      # page (src/pages/index.astro). Cloudflare Pages auto-deploys on push to main.
+      # Idempotent (git diff --cached --quiet) so recovery re-runs are safe.
+      - name: Update website (appcast + downloads + version)
+        env:
+          WEBSITE_TOKEN: ${{ secrets.WEBSITE_DEPLOY_TOKEN }}
+        run: |
+          set -euo pipefail
+          OWNER="${{ github.repository_owner }}"
+          [ -n "${WEBSITE_TOKEN:-}" ] || { echo "ERROR: WEBSITE_DEPLOY_TOKEN secret is not set"; exit 1; }
+          case "$VERSION" in *[!0-9A-Za-z.-]*) echo "ERROR: unexpected chars in version '$VERSION'"; exit 1;; esac
+
+          # Public repo — clone without credentials; auth is applied only on the push.
+          git clone --depth 1 "https://github.com/${OWNER}/hodosbrowser.com.git" website-repo
+          cd website-repo
+          { test -f public/_redirects && test -f src/pages/index.astro; } || { echo "ERROR: website layout not as expected"; exit 1; }
+
+          # 1) appcast.xml — copy the already-verified published feed verbatim
+          test -s ../artifacts/appcast.xml || { echo "ERROR: artifacts/appcast.xml missing/empty"; exit 1; }
+          cp ../artifacts/appcast.xml public/appcast.xml
+
+          # 2) _redirects — rewrite the two download lines deterministically from VERSION/TAG
+          BASE="https://github.com/${OWNER}/Hodos-Browser/releases/download/${TAG}"
+          {
+            printf '/download/win  %s/HodosBrowser-%s-setup.exe  302\n' "$BASE" "$VERSION"
+            printf '/download/mac  %s/HodosBrowser-%s.dmg  302\n'       "$BASE" "$VERSION"
+          } > public/_redirects
+
+          # 3) index.astro — bump the displayed version (tolerant of spacing); assert exactly one decl
+          sed -i -E "s/(const +version *= *\")[^\"]*(\")/\1${VERSION}\2/" src/pages/index.astro
+          n=$(grep -cE "const +version *= *\"${VERSION//./\\.}\"" src/pages/index.astro || true)
+          [ "$n" = "1" ] || { echo "ERROR: expected exactly 1 version decl in index.astro, found $n"; exit 1; }
+
+          # Exact-match sanity (grep -F: version is a literal, never a regex/substring)
+          grep -qF -- "HodosBrowser-${VERSION}-setup.exe" public/_redirects || { echo "ERROR: _redirects win line not bumped"; exit 1; }
+          grep -qF -- "HodosBrowser-${VERSION}.dmg"       public/_redirects || { echo "ERROR: _redirects mac line not bumped"; exit 1; }
+          [ "$(grep -c '^/download/' public/_redirects)" = "2" ] || { echo "ERROR: _redirects route count drifted"; exit 1; }
+
+          git config user.name "hodos-release-bot"
+          git config user.email "release-bot@hodosbrowser.com"
+          git add public/appcast.xml public/_redirects src/pages/index.astro
+          if git diff --cached --quiet; then
+            echo "Website already at ${VERSION} (idempotent re-run) — nothing to push."
+          else
+            git commit -m "Release ${VERSION}: appcast + download links + version"
+            # Auth via per-command header (not in the clone URL or .git/config). Mask the
+            # base64 so it can never surface in logs even though it isn't the raw secret.
+            AUTH_B64=$(printf 'x-access-token:%s' "$WEBSITE_TOKEN" | base64 | tr -d '\n')
+            echo "::add-mask::${AUTH_B64}"
+            pushed=0
+            for i in 1 2 3; do
+              if git -c http.extraheader="AUTHORIZATION: basic ${AUTH_B64}" push origin HEAD:main; then pushed=1; break; fi
+              echo "push rejected (concurrent update on main?) — rebasing, attempt ${i}/3"
+              git fetch origin main && git rebase origin/main || { echo "ERROR: rebase conflict on website repo"; exit 1; }
+            done
+            [ "$pushed" = "1" ] || { echo "ERROR: website push failed after retries"; exit 1; }
+          fi
+
+      - name: Verify website is live with new version
+        run: |
+          set -euo pipefail
+          ok=0
+          for i in $(seq 1 30); do
+            # cache-bust so we read origin, not a stale Cloudflare edge copy
+            live=$(curl -sS -m 20 -H 'Cache-Control: no-cache' "https://hodosbrowser.com/appcast.xml?cb=${GITHUB_SHA}" \
+                   | grep -oE '<sparkle:shortVersionString>[^<]+' | sed 's/.*>//' || true)
+            echo "$live" | grep -qxF "$VERSION" && { ok=1; echo "live appcast serving ${VERSION}"; break; }
+            echo "live appcast not yet ${VERSION} (saw: ${live:-none}) [${i}/30]"; sleep 15
+          done
+          [ "$ok" = "1" ] || { echo "ERROR: hodosbrowser.com/appcast.xml not serving ${VERSION} after deploy window"; exit 1; }
+          loc=$(curl -sS -o /dev/null -w "%{redirect_url}" "https://hodosbrowser.com/download/win" || true)
+          echo "/download/win -> ${loc:-<none>}"
+          echo "$loc" | grep -qF -- "HodosBrowser-${VERSION}-setup.exe" || { echo "ERROR: /download/win not pointing at ${VERSION}"; exit 1; }
+          echo "Website verified live for ${VERSION}. Promotion complete."
