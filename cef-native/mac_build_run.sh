@@ -16,7 +16,7 @@ fi
 # Configure if needed
 if [ ! -f build/Makefile ] && [ ! -f build/build.ninja ]; then
     echo "Configuring CMake..."
-    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
 fi
 
 # Build

@@ -69,7 +69,7 @@ message(STATUS "App build number (CFBundleVersion): ${APP_BUILD_NUMBER}")
 
 # macOS-specific settings
 if(APPLE)
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15" CACHE STRING "Minimum macOS deployment version")
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS deployment version" FORCE)
     set(CMAKE_OSX_ARCHITECTURES "${CMAKE_SYSTEM_PROCESSOR}" CACHE STRING "macOS architecture")
     # -headerpad: ensure enough header space for code signing on arm64
     # -no_adhoc_codesign: prevent linker from embedding ad-hoc signatures on arm64

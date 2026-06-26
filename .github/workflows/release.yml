@@ -310,7 +310,9 @@ jobs:
   # MACOS BUILD
   # ============================================================
   build-macos:
-    runs-on: macos-latest
+    runs-on: macos-15
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
 
     steps:
       - name: Checkout code
@@ -438,7 +440,7 @@ jobs:
       - name: Configure and build CEF shell
         run: |
           cd cef-native
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DAPP_VERSION="${{ steps.version.outputs.VERSION }}" -DAPP_BUILD_NUMBER="${{ steps.version.outputs.BUILD_NUMBER }}"
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -DAPP_VERSION="${{ steps.version.outputs.VERSION }}" -DAPP_BUILD_NUMBER="${{ steps.version.outputs.BUILD_NUMBER }}"
           cmake --build build --config Release
 
           cd build/bin
@@ -543,6 +545,35 @@ jobs:
           # Verify helper location (must be Contents/Frameworks, not Contents/Contents/Frameworks)
           echo "App bundle structure:"
           find "cef-native/build/bin/HodosBrowser.app" -maxdepth 4 -type d | head -30
+
+      # Verify every shipped Mach-O's minos >= the CEF framework's minos.
+      # An under-stamped binary passes the loader but dyld fails to load
+      # the higher-minos framework → launch crash on older macOS.
+      - name: Minos deployment-target guard
+        run: |
+          set -euo pipefail
+          read_minos() { vtool -show-build "$1" | awk '/minos/{print $2; exit}'; }
+          APP="cef-native/build/bin/HodosBrowser.app"
+          FW="$APP/Contents/Frameworks/Chromium Embedded Framework.framework/Chromium Embedded Framework"
+          FW_MINOS=$(read_minos "$FW")
+          echo "CEF framework minos: $FW_MINOS"
+
+          TARGETS=(
+            "$APP/Contents/MacOS/HodosBrowser"
+            "$APP"/Contents/Frameworks/HodosBrowser\ Helper*.app/Contents/MacOS/*
+            "$APP/Contents/Resources/hodos-wallet"
+            "$APP/Contents/Resources/hodos-adblock"
+          )
+          fail=0
+          for t in "${TARGETS[@]}"; do
+            [ -f "$t" ] || continue
+            m=$(read_minos "$t") || { echo "::error::no minos for $t"; fail=1; continue; }
+            awk -v a="$m" -v b="$FW_MINOS" 'BEGIN{split(a,x,".");split(b,y,"."); if (x[1]<y[1]||(x[1]==y[1]&&x[2]<y[2])) exit 1}' \
+              || { echo "::error::$t minos=$m < framework $FW_MINOS"; fail=1; }
+            echo "  OK: $t minos=$m"
+          done
+          [ "$fail" = 0 ] || { echo "::error::minos guard FAILED — would brick auto-update on sub-$FW_MINOS macOS"; exit 1; }
+          echo "minos guard PASSED (all >= framework $FW_MINOS)"
 
       # Import signing certificate
       - name: Import code signing certificate
