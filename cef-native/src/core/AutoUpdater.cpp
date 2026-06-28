@@ -113,11 +113,21 @@ void AutoUpdater::Initialize(const std::string& version, const std::string& appc
         "OND9tLAqt6+ph7cMG0xx2hqryPrlk7g=\n"
         "-----END PUBLIC KEY-----";
 
-    if (win_sparkle_set_dsa_pub_pem(DSA_PUB_KEY)) {
-        LogInfo("DSA public key set successfully");
-    } else {
-        LogInfo("WARNING: Failed to set DSA public key — signature verification disabled");
+    // Signature-verification key is MANDATORY (fail-closed, WINDOWS_AUTOUPDATE_PLAN
+    // §B.2a). If it fails to load, WinSparkle would otherwise run with verification
+    // DISABLED — but a build that cannot load its own update key must run with the
+    // updater OFF, never with verification off (verification-off would let an
+    // unsigned / MITM'd update install). So abort init and leave the updater inert:
+    // initialized_ stays false, so every other AutoUpdater method no-ops, and the
+    // browser runs normally — just without auto-updates.
+    // (Commit 3b will add win_sparkle_set_eddsa_public_key to this same gate.)
+    if (!win_sparkle_set_dsa_pub_pem(DSA_PUB_KEY)) {
+        LogInfo("ERROR: failed to load update-signature public key — auto-updater "
+                "DISABLED (fail-closed). WinSparkle will NOT be started; the browser "
+                "runs normally without updates.");
+        return;  // do NOT win_sparkle_init(); do NOT set initialized_ = true.
     }
+    LogInfo("DSA public key set successfully");
 
     // Start WinSparkle (non-blocking)
     win_sparkle_init();
