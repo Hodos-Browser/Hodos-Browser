@@ -43,6 +43,30 @@ The owner answered the open decisions and the macOS auto-update work shipped fir
 
 ---
 
+## STATUS — kickoff verification (2026-06-28)
+
+Phase-kickoff re-verified every cited location against current code. **Foundation is ~90% done; several §H items below are STALE in the body (already shipped).** Owner decision: after §B.2a, **go straight at the silent mechanism** (commits 4→6, locally testable behind the flag); defer 3b EdDSA cutover + notify wizard (not blockers for local silent testing).
+
+| Item | Status |
+|------|--------|
+| Commit 1 — settings 3-state enum (`autoUpdateMode`, true→silent) | ✅ DONE (shipped w/ macOS) |
+| §B.2a — client fail-closed init | ✅ DONE this session (`5311eb6`) |
+| §H.1 — fail-closed feed (`generate-appcast.py` exits on missing Win sig) | ✅ DONE (body stale) |
+| §H.2 — sign the portable ZIP | ✅ DONE (`release.yml` re-zips from signed staging ~L170-179; body stale) |
+| §H.3 — Rust exe VERSIONINFO | ✅ DONE (`winresource` build.rs in wallet+adblock; body stale) |
+| Commit 3a — dual-sign DSA+EdDSA appcast | ✅ DONE (`9193ce6`) |
+| T4(a) — crypto-verify before promote | ✅ DONE (this sprint) |
+| §H.4 / §4c — Windows appcast uses version STRING, not integer build-number | ⚠️ PENDING (low impact until EdDSA; do with 3b) |
+| Commit 3b — WinSparkle 0.8.1→0.9.3 + client `set_eddsa_public_key` | ⏳ GATED (HIGH-risk one-way cutover; needs live dual-sign J10/J11; also handle the DSA `WIN_SPARKLE_DEPRECATED`/C4996 at the bump) |
+| Commit 3 — notify-mode present-user Inno wizard | ⏳ PENDING (deferred per owner; not a silent blocker) |
+| Commits 4-7 — the silent path | ⏳ NOT STARTED (next) |
+
+**Silent-path anchors all CONFIRMED present** (current lines): SingleInstance per-profile pipe `SingleInstance.cpp:44-51`; ProfileLock released late in `cef_browser_shell.cpp:4455` (main() cleanup, NOT at close); startup seq SingleInstance `:3910` → AcquireProfileLock `:3914` → LaunchWallet `:3927` / LaunchAdblock `:3928`; job objects KILL_ON_JOB_CLOSE wallet `:3466` / adblock `:3657`; wallet `/shutdown` still drain-only (`handlers.rs:193-197`, no `process::exit`); installer `[Run]` `skipifsilent` (`hodos-browser.iss:77`). The plan's structural premises hold.
+
+**NEXT: commit 4** — Hodos-owned download → stage → verify (EdDSA+Authenticode+anti-rollback) to `pending\`, inert under `HODOS_DEV`. Self-contained + locally testable; does its OWN EdDSA verify (reuses the Ed25519 key), so it does NOT depend on the 3b WinSparkle cutover.
+
+---
+
 ## A. Architecture decision
 
 **Chosen mechanism: (1) "shut children down → Inno apply on next launch → relaunch" — but ONLY for the SILENT mode, which 0.4.0 does NOT ship by default.** For the mode 0.4.0 actually ships (**notify**, default), the apply is the **present-user Inno wizard**, requiring none of the lock/rollback machinery below.
