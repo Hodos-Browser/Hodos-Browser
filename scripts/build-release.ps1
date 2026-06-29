@@ -101,6 +101,18 @@ Copy-Item (Join-Path $CefRelease "HodosBrowser.exe") $StagingDir
 Copy-Item (Join-Path $ProjectRoot "rust-wallet\target\release\hodos-wallet.exe") $StagingDir
 Copy-Item (Join-Path $ProjectRoot "adblock-engine\target\release\hodos-adblock.exe") $StagingDir
 
+# Copy the auto-update external rollback-supervisor (commit 6b). Built by the cmake
+# ALL_BUILD above; lands in $CefRelease. The *.dll wildcard below won't catch an
+# .exe, so copy it explicitly. The Azure-sign step (release.yml, filter exe,dll)
+# then signs it like the others.
+$UpdateHelper = Join-Path $CefRelease "hodos-update-helper.exe"
+if (Test-Path $UpdateHelper) {
+    Copy-Item $UpdateHelper $StagingDir
+    Write-Host "   Copied hodos-update-helper.exe" -ForegroundColor Green
+} else {
+    Write-Host "   WARNING: hodos-update-helper.exe not found at $UpdateHelper" -ForegroundColor Yellow
+}
+
 # Copy all CEF runtime DLLs (wildcard to prevent breakage on CEF updates)
 Copy-Item (Join-Path $CefRelease "*.dll") $StagingDir
 
@@ -156,6 +168,7 @@ $requiredFiles = @(
     "HodosBrowser.exe",
     "hodos-wallet.exe",
     "hodos-adblock.exe",
+    "hodos-update-helper.exe",
     "libcef.dll",
     "chrome_elf.dll",
     "resources.pak",

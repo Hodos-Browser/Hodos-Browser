@@ -86,6 +86,29 @@ bool WriteFileAtomic(const std::wstring& path, const std::string& content);
 // Read an entire file into `out` (binary). False if it can't be opened.
 bool ReadFileAll(const std::wstring& path, std::string& out);
 
+// Verify a detached Ed25519 signature (base64) over `data` using a raw-32-byte
+// base64 public key. Pure (OpenSSL). False on ANY failure. Encoding is byte-for-byte
+// identical to UpdateStager::VerifyEd25519 (raw-32 key, 64-byte sig, one-shot) so the
+// same CI-produced key/signature verifies here; duplicated (not shared) to keep the
+// helper free of UpdateStager's SyncHttpClient/Logger dependencies.
+bool VerifyEd25519(const std::string& data, const std::string& signatureBase64,
+                   const std::string& publicKeyBase64);
+
+// Domain-separation prefix for the expected-new-manifest signature (commit 6b.3,
+// V3-8). DISJOINT from the appcast ("hodos-appcast-v1\n") and installer signing
+// domains. scripts/generate-tree-manifest.py MUST prepend these EXACT bytes before
+// signing; the integrity gate verifies over (prefix || manifest-bytes).
+const char* ManifestSignaturePrefix();  // "hodos-manifest-v1\n"
+
+// The production Ed25519 public key (base64 raw-32) — the SAME key macOS Sparkle +
+// the Windows appcast use (one key signs everything).
+const char* PublicKeyBase64();
+
+// Verify the expected-new-manifest's detached signature: VerifyEd25519 over
+// (ManifestSignaturePrefix() || manifestBytes) with PublicKeyBase64(). Call this
+// BEFORE trusting/parsing the manifest (fail-closed).
+bool VerifyManifestSignature(const std::string& manifestBytes, const std::string& signatureBase64);
+
 }  // namespace updatefs
 }  // namespace hodos
 

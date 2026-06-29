@@ -59,6 +59,10 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "{#StagingDir}\HodosBrowser.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StagingDir}\hodos-wallet.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StagingDir}\hodos-adblock.exe"; DestDir: "{app}"; Flags: ignoreversion
+; Auto-update external rollback-supervisor (commit 6b). MUST be installed so 6c can
+; copy it OUT to pending\helper\ before the installer runs (it's the only process
+; that can overwrite a non-running HodosBrowser.exe). Azure-signed like the others.
+Source: "{#StagingDir}\hodos-update-helper.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 ; CEF DLLs and runtime files
 Source: "{#StagingDir}\*.dll"; DestDir: "{app}"; Flags: ignoreversion

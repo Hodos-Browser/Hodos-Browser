@@ -20,6 +20,32 @@
 
 namespace fs = std::filesystem;
 
+namespace {
+// base64 decode (standard alphabet, padding-tolerant) — mirrors UpdateStager's.
+bool Base64Decode(const std::string& in, std::vector<unsigned char>& out) {
+    auto val = [](unsigned char c) -> int {
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        if (c == '+') return 62;
+        if (c == '/') return 63;
+        return -1;
+    };
+    out.clear();
+    int accum = 0, nbits = 0;
+    for (unsigned char c : in) {
+        if (c == '\n' || c == '\r' || c == ' ' || c == '\t') continue;
+        if (c == '=') break;
+        int v = val(c);
+        if (v < 0) return false;
+        accum = (accum << 6) | v;
+        nbits += 6;
+        if (nbits >= 8) { nbits -= 8; out.push_back((unsigned char)((accum >> nbits) & 0xFF)); }
+    }
+    return true;
+}
+}  // namespace
+
 namespace hodos {
 namespace updatefs {
 
@@ -269,6 +295,40 @@ bool ReadFileAll(const std::wstring& path, std::string& out) {
     while (ReadFile(h, buf, sizeof(buf), &got, nullptr) && got > 0) out.append(buf, got);
     CloseHandle(h);
     return true;
+}
+
+bool VerifyEd25519(const std::string& data, const std::string& signatureBase64,
+                   const std::string& publicKeyBase64) {
+    std::vector<unsigned char> pub, sig;
+    if (!Base64Decode(publicKeyBase64, pub) || pub.size() != 32) return false;
+    if (!Base64Decode(signatureBase64, sig) || sig.size() != 64) return false;
+
+    EVP_PKEY* pkey = EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, nullptr, pub.data(), pub.size());
+    if (!pkey) return false;
+    bool ok = false;
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (ctx) {
+        if (EVP_DigestVerifyInit(ctx, nullptr, nullptr, nullptr, pkey) == 1) {
+            int rc = EVP_DigestVerify(ctx, sig.data(), sig.size(),
+                                      reinterpret_cast<const unsigned char*>(data.data()), data.size());
+            ok = (rc == 1);
+        }
+        EVP_MD_CTX_free(ctx);
+    }
+    EVP_PKEY_free(pkey);
+    return ok;
+}
+
+const char* ManifestSignaturePrefix() { return "hodos-manifest-v1\n"; }
+
+const char* PublicKeyBase64() {
+    // Same Ed25519 key as macOS Sparkle (SUPublicEDKey) + the Windows appcast.
+    return "GVq3mpDl8eelsG0A5wqC5FBYZd3fy7U3we9iZ9+Tq3Q=";
+}
+
+bool VerifyManifestSignature(const std::string& manifestBytes, const std::string& signatureBase64) {
+    return VerifyEd25519(std::string(ManifestSignaturePrefix()) + manifestBytes,
+                         signatureBase64, PublicKeyBase64());
 }
 
 unsigned long long DirSizeBytes(const std::wstring& dir) {

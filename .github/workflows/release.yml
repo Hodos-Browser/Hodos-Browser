@@ -1096,6 +1096,54 @@ jobs:
           cp appcast.xml.ed artifacts/appcast.xml.ed
           echo "appcast.xml.ed produced + self-verified"
 
+      # Commit 6b.3: generate + sign the expected-new-manifest from the SIGNED
+      # portable zip (== the signed staging tree == the installed bytes). At apply
+      # time the silent supervisor verifies this sidecar with the embedded key, then
+      # checks every installed {app} file's sha256 against it (catches a power-loss-
+      # truncated install / version-skew the verified installer alone wouldn't).
+      # SOFT during transition (consumed ONLY by the silent path, wired in 6c) + a
+      # key self-check; hardens to fail-closed at silent-enable. MUST be green on a
+      # real release before 6c wires the consumer (same 3a/4c discipline).
+      - name: Generate + sign expected-new-manifest (EdDSA sidecar)
+        shell: bash
+        env:
+          EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
+        run: |
+          EXPECTED_PUB="GVq3mpDl8eelsG0A5wqC5FBYZd3fy7U3we9iZ9+Tq3Q="
+          soft() { echo "::warning::expected-new-manifest skipped: $1 — shipping none (fine until silent is wired in 6c)"; exit 0; }
+          [ -n "$EDDSA_PRIVATE_KEY" ] || soft "SPARKLE_EDDSA_PRIVATE_KEY not set"
+
+          ZIP=$(ls artifacts/windows-portable/*portable*.zip 2>/dev/null | head -1)
+          [ -n "$ZIP" ] || soft "signed portable zip artifact not found"
+          rm -rf /tmp/mstage && mkdir -p /tmp/mstage
+          unzip -q "$ZIP" -d /tmp/mstage || soft "unzip failed"
+
+          # Same Sparkle-key -> PKCS#8 Ed25519 PEM as the appcast signer, with the
+          # same self-check (derived pubkey == embedded SUPublicEDKey).
+          SEED_HEX=$(printf '%s' "$EDDSA_PRIVATE_KEY" | base64 -d 2>/dev/null | head -c 32 | xxd -p -c 999 || true)
+          [ ${#SEED_HEX} -eq 64 ] || soft "could not extract a 32-byte seed from the Sparkle key"
+          { printf '302e020100300506032b657004220420%s' "$SEED_HEX" | xxd -r -p | openssl base64 > /tmp/mseed.b64; } || soft "PEM wrap failed"
+          { echo "-----BEGIN PRIVATE KEY-----"; cat /tmp/mseed.b64; echo "-----END PRIVATE KEY-----"; } > /tmp/manifest_ed.pem
+          DERIVED=$(openssl pkey -in /tmp/manifest_ed.pem -pubout -outform DER 2>/dev/null | tail -c 32 | openssl base64 | tr -d '\n' || true)
+          [ "$DERIVED" = "$EXPECTED_PUB" ] || { rm -f /tmp/manifest_ed.pem /tmp/mseed.b64; soft "derived pubkey '$DERIVED' != embedded '$EXPECTED_PUB'"; }
+          echo "expected-new-manifest key self-check PASSED"
+
+          python3 scripts/generate-tree-manifest.py --staging /tmp/mstage \
+            --out artifacts/expected-new-manifest.json --key /tmp/manifest_ed.pem || soft "manifest gen/sign failed"
+
+          # Local self-verify over (prefix||manifest-bytes) before publish.
+          openssl pkey -in /tmp/manifest_ed.pem -pubout -out /tmp/manifest_pub.pem 2>/dev/null || soft "pubkey extract failed"
+          { printf 'hodos-manifest-v1\n'; cat artifacts/expected-new-manifest.json; } > /tmp/manifest_msg.bin
+          openssl base64 -d -in artifacts/expected-new-manifest.json.ed -out /tmp/manifest_sig.bin || soft "sidecar base64 decode failed"
+          if ! openssl pkeyutl -verify -rawin -pubin -inkey /tmp/manifest_pub.pem \
+                 -in /tmp/manifest_msg.bin -sigfile /tmp/manifest_sig.bin >/dev/null 2>&1; then
+            rm -f /tmp/manifest_ed.pem /tmp/mseed.b64 /tmp/manifest_pub.pem /tmp/manifest_msg.bin /tmp/manifest_sig.bin
+            soft "local self-verify of the manifest sidecar failed"
+          fi
+          rm -f /tmp/manifest_ed.pem /tmp/mseed.b64 /tmp/manifest_pub.pem /tmp/manifest_msg.bin /tmp/manifest_sig.bin
+          rm -rf /tmp/mstage
+          echo "expected-new-manifest.json + .ed produced + self-verified"
+
       # Create the release as a DRAFT first. Nothing is public yet — we verify the
       # assets + appcast below and only then promote it live. A verification failure
       # therefore leaves NOTHING public (RED = not shipped), instead of a broken
@@ -1111,6 +1159,8 @@ jobs:
             artifacts/macos-dmg/*
             artifacts/appcast.xml
             artifacts/appcast.xml.ed
+            artifacts/expected-new-manifest.json
+            artifacts/expected-new-manifest.json.ed
             artifacts/SHA256SUMS.txt
 
       - name: Verify draft release is complete

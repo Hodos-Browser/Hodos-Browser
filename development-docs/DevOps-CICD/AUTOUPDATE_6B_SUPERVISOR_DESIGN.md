@@ -32,10 +32,23 @@ mutex `Local\HodosBrowser_AnyInstance`, `update.lock` honor-at-launch (dormant),
 >   the bootstrap's already-open inherited owner handle (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST` + `--bootstrap-handle`)
 >   and the helper must `Adopt()` it — else spawning the helper while the bootstrap still holds the `share=0`
 >   owner handle would `SHARING_VIOLATION`-bail. Wire Adopt() in 6c.
-> - **6b.3 ⏳ NEXT — packaging:** `.iss [Files]` line for the helper; `release.yml` build+Azure-sign the helper +
->   generate+EdDSA-sign `expected-new-manifest.json` from the POST-signed staging tree (V3-8/V3-9). The
->   IntegrityGate currently SKIPs an absent manifest — 6b.3 ships the signed manifest + makes it
->   mandatory+signature-verified (fail-closed).
+> - **6b.3 ✅ DONE — packaging:** (1) `.iss [Files]` line ships `hodos-update-helper.exe` to `{app}` (so 6c can
+>   copy it OUT); (2) `build-release.ps1` stages the helper + adds it to `$requiredFiles` (the existing Azure
+>   exe,dll sign step then signs it); (3) `scripts/generate-tree-manifest.py` walks the **post-signed** staging
+>   tree, emits `{normkey->sha256}` matching `NormalizeManifestKey` + the `[Files]` install-set filter, and
+>   signs it (`hodos-manifest-v1\n` domain-separated Ed25519 sidecar `.ed`); (4) `release.yml` publish-job step
+>   generates+signs the manifest from the signed portable zip (SOFT-during-transition + key self-check, same
+>   3a/4c discipline — MUST be green on a real release before 6c wires the consumer); (5) the C++ `IntegrityGate`
+>   now **verifies the manifest's Ed25519 sidecar with the embedded key BEFORE trusting it (fail-closed)** then
+>   sha256-checks the installed tree. `UpdateFs` gained `VerifyEd25519`/`VerifyManifestSignature`/`PublicKeyBase64`
+>   (self-contained, no UpdateStager dep). 8 new crypto tests; 53 update tests pass; all 4 configs clean.
+>
+> **✅ COMMIT 6b COMPLETE (the supervisor exe + its packaging).** Remaining apply-phase commits: **6c** (the
+> `MaybeApplyStagedUpdate` Phase-A bootstrap that stages the backup + snapshots the DB + spawns the helper with
+> the inherited owner handle/`Adopt()` + sets `expectedNewManifestPath`/`profileId`/`signerThumbprint`; swaps the
+> 6a honor-probe to `UpdateLockIsHeld`; commit-4 staging downloads the manifest+`.ed` into `pending\`) → **6d**
+> (the health-probe browser writes `apply.json`=healthy) → **6e** (watchdog + §H.7 kill-switch) → **7** (flip
+> `HODOS_SILENT_AUTOUPDATE` ON after soak).
 > - **6b.3 ⏳ — packaging:** `.iss [Files]` line for the helper; `release.yml` build+Azure-sign the helper +
 >   generate+EdDSA-sign `expected-new-manifest.json` from the POST-signed staging tree (V3-8/V3-9).
 

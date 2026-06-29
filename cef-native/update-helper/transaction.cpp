@@ -236,28 +236,38 @@ void ClearRunOnce() {
     }
 }
 
-// ---- the integrity gate (B4) -------------------------------------------------
+// ---- the integrity gate (B4 / V3-8) -----------------------------------------
 // Verify the freshly-installed {app} tree against the build-time expected-new
-// manifest. NOTE(6b.3): the manifest's OWN EdDSA signature (sidecar .ed, embedded
-// key) must be verified before trusting it — that lands with 6b.3, which generates
-// + signs the manifest from the post-Authenticode-signed staging tree. Until then
-// an absent manifest is logged + skipped (the whole silent path is compiled off /
-// unwired). A PRESENT manifest is enforced fail-closed.
+// manifest — but ONLY after verifying the manifest's OWN detached Ed25519 signature
+// (sidecar <manifest>.ed) with the embedded key, so a local attacker can't swap
+// both the new exe AND the manifest. An ABSENT manifest is skipped (a real 6b.3
+// release always ships+signs one; the silent path is compiled-off/unwired until
+// then). A PRESENT manifest is fail-closed: bad/missing signature => FAIL.
 bool IntegrityGate(const Paths& p, const ApplyRecord& rec) {
     if (rec.expectedNewManifestPath.empty()) {
-        L("IntegrityGate: no expected-new-manifest in apply.json — SKIPPED (6b.3 makes it mandatory+signed)");
+        L("IntegrityGate: no expected-new-manifest in apply.json — SKIPPED (6b.3 release ships+signs it)");
         return true;
     }
     std::string mjson;
     if (!updatefs::ReadFileAll(W(rec.expectedNewManifestPath), mjson)) {
-        L("IntegrityGate: expected-new-manifest unreadable — SKIPPED (6b.3 will fail-close)");
+        L("IntegrityGate: expected-new-manifest unreadable — SKIPPED");
         return true;
+    }
+    // Signature FIRST (V3-8): verify the sidecar before trusting any byte of it.
+    std::string msig;
+    if (!updatefs::ReadFileAll(W(rec.expectedNewManifestPath) + L".ed", msig)) {
+        L("IntegrityGate: manifest signature sidecar (.ed) missing -> FAIL (fail-closed)");
+        return false;
+    }
+    if (!updatefs::VerifyManifestSignature(mjson, msig)) {
+        L("IntegrityGate: manifest signature INVALID -> FAIL (tamper/replay)");
+        return false;
     }
     FileManifest m;
     if (!ParseManifest(mjson, m)) { L("IntegrityGate: manifest parse failed -> FAIL"); return false; }
     updatefs::VerifyResult r = updatefs::VerifyTreeAgainstManifest(p.appDir, m);
     if (!r.ok) { L("IntegrityGate: " + r.reason + " @ " + r.failedPath + " -> FAIL"); return false; }
-    L("IntegrityGate: new tree matches manifest (" + std::to_string(m.entries.size()) + " files)");
+    L("IntegrityGate: manifest signature OK + new tree matches (" + std::to_string(m.entries.size()) + " files)");
     return true;
 }
 

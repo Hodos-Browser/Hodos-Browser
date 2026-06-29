@@ -9,8 +9,10 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
+#include <openssl/evp.h>
 #include <windows.h>
 
 namespace fs = std::filesystem;
@@ -48,6 +50,14 @@ std::string Read(const fs::path& p) {
 }
 
 bool Exists(const fs::path& p) { std::error_code ec; return fs::exists(p, ec); }
+
+std::string B64(const unsigned char* d, size_t n) {
+    if (!n) return "";
+    std::string out(((n + 2) / 3) * 4 + 1, '\0');
+    int w = EVP_EncodeBlock(reinterpret_cast<unsigned char*>(&out[0]), d, static_cast<int>(n));
+    out.resize(w);
+    return out;
+}
 
 }  // namespace
 
@@ -243,4 +253,49 @@ TEST(EnsureDirExists, CreatesNestedAndIsIdempotent) {
     ASSERT_TRUE(EnsureDirExists(nested.wstring()));
     EXPECT_TRUE(Exists(nested));
     EXPECT_TRUE(EnsureDirExists(nested.wstring()));  // idempotent
+}
+
+// ---- VerifyEd25519 / VerifyManifestSignature (6b.3) -------------------------
+TEST(VerifyEd25519, RoundTripAndTamper) {
+    // Generate an Ed25519 keypair, sign a message, and round-trip through the
+    // same base64/raw-32 encoding the CI signer uses.
+    EVP_PKEY* pkey = nullptr;
+    EVP_PKEY_CTX* c = EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, nullptr);
+    ASSERT_TRUE(c);
+    ASSERT_EQ(EVP_PKEY_keygen_init(c), 1);
+    ASSERT_EQ(EVP_PKEY_keygen(c, &pkey), 1);
+    EVP_PKEY_CTX_free(c);
+
+    unsigned char pub[32]; size_t publen = sizeof(pub);
+    ASSERT_EQ(EVP_PKEY_get_raw_public_key(pkey, pub, &publen), 1);
+    ASSERT_EQ(publen, 32u);
+    const std::string pubB64 = B64(pub, 32);
+
+    const std::string msg = std::string(ManifestSignaturePrefix()) + "{\"files\":{\"a\":\"bb\"}}";
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    ASSERT_EQ(EVP_DigestSignInit(ctx, nullptr, nullptr, nullptr, pkey), 1);
+    size_t siglen = 0;
+    EVP_DigestSign(ctx, nullptr, &siglen, reinterpret_cast<const unsigned char*>(msg.data()), msg.size());
+    std::vector<unsigned char> sig(siglen);
+    ASSERT_EQ(EVP_DigestSign(ctx, sig.data(), &siglen,
+                             reinterpret_cast<const unsigned char*>(msg.data()), msg.size()), 1);
+    EVP_MD_CTX_free(ctx);
+    EVP_PKEY_free(pkey);
+    const std::string sigB64 = B64(sig.data(), siglen);
+
+    EXPECT_TRUE(VerifyEd25519(msg, sigB64, pubB64));
+    EXPECT_FALSE(VerifyEd25519(msg + "x", sigB64, pubB64));   // tampered data
+    EXPECT_FALSE(VerifyEd25519(msg, sigB64, "QUJD"));         // wrong/short key
+    EXPECT_FALSE(VerifyEd25519(msg, "QUJD", pubB64));         // bad signature
+}
+
+TEST(VerifyManifestSignature, FailsClosedWithoutProdKey) {
+    // We don't have the production private key, so any signature must fail —
+    // proving the gate is fail-closed (no accidental accept).
+    EXPECT_FALSE(VerifyManifestSignature("{\"files\":{}}", "QUJD"));
+}
+
+TEST(ManifestSignaturePrefix, IsStableAndDomainSeparated) {
+    EXPECT_STREQ(ManifestSignaturePrefix(), "hodos-manifest-v1\n");
+    EXPECT_STRNE(ManifestSignaturePrefix(), "hodos-appcast-v1\n");  // disjoint from appcast
 }
