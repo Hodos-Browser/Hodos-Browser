@@ -2,6 +2,9 @@
 #include <cstdlib>
 #include <string>
 #include <iostream>
+#ifdef _WIN32
+#include <filesystem>
+#endif
 
 namespace AppPaths {
 
@@ -14,6 +17,26 @@ inline std::string GetAppDirName() {
 }
 
 #ifdef _WIN32
+/// Read a Windows environment variable as UTF-8 (wide _wgetenv -> UTF-8). Using
+/// the narrow getenv would return CP_ACP, which the helper then mis-decodes as
+/// UTF-8 -> mojibake paths for non-ASCII usernames (F3). u8string() yields UTF-8
+/// that the helper's CP_UTF8 widen round-trips correctly. "" if unset.
+inline std::string EnvUtf8_(const wchar_t* name) {
+    const wchar_t* v = _wgetenv(name);
+    if (!v || !*v) return "";
+    const auto u8 = std::filesystem::path(v).u8string();  // C++17: std::string (UTF-8)
+    return std::string(u8.begin(), u8.end());
+}
+
+/// The Inno install root `{app}` = %LOCALAPPDATA%\<HodosBrowser|HodosBrowserDev>
+/// (Local; holds HodosBrowser.exe + the children + libcef.dll + paks). The update
+/// working area is its `update\` subdir. "" if LOCALAPPDATA is unavailable.
+inline std::string GetAppInstallDir() {
+    const std::string localAppData = EnvUtf8_(L"LOCALAPPDATA");
+    if (localAppData.empty()) return "";
+    return localAppData + "\\" + GetAppDirName();
+}
+
 /// Root of the auto-update working area. **All** update state lives under this
 /// ONE subtree — `update\` — which is deliberately OUTSIDE the `{app}` install
 /// root's backed-up file set (commit 6b / V3-10): the rollback backup copies the
@@ -24,9 +47,9 @@ inline std::string GetAppDirName() {
 /// Dev/prod-namespaced via GetAppDirName(). Returns "" if LOCALAPPDATA is
 /// unavailable — callers MUST skip (never fall back to a relative path).
 inline std::string GetUpdateDir() {
-    const char* localAppData = std::getenv("LOCALAPPDATA");
-    if (!localAppData || !*localAppData) return "";
-    return std::string(localAppData) + "\\" + GetAppDirName() + "\\update";
+    const std::string localAppData = EnvUtf8_(L"LOCALAPPDATA");
+    if (localAppData.empty()) return "";
+    return localAppData + "\\" + GetAppDirName() + "\\update";
 }
 
 /// Staging dir for the downloaded installer + markers (commit 4 download->stage;
@@ -75,9 +98,9 @@ inline std::string GetUpdateStatePath() {
 /// is unavailable. Returns the DIRECTORY; the DB file is `<dir>\wallet.db`
 /// (+`-wal`/`-shm`).
 inline std::string GetWalletDir() {
-    const char* appData = std::getenv("APPDATA");
-    if (!appData || !*appData) return "";
-    return std::string(appData) + "\\" + GetAppDirName() + "\\wallet";
+    const std::string appData = EnvUtf8_(L"APPDATA");
+    if (appData.empty()) return "";
+    return appData + "\\" + GetAppDirName() + "\\wallet";
 }
 
 /// Session-namespace mutex name marking ANY live HodosBrowser.exe (all profiles +

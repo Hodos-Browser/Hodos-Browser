@@ -229,6 +229,48 @@ unsigned long long FreeBytesOnVolume(const std::wstring& anyPathOnVolume) {
     return 0;
 }
 
+bool WriteFileAtomic(const std::wstring& path, const std::string& content) {
+    const fs::path target(path);
+    std::error_code ec;
+    fs::create_directories(target.parent_path(), ec);  // ec ignored: may already exist
+    const fs::path tmp = target.parent_path() / (target.filename().wstring() + L".tmp");
+
+    // Write + flush the temp file via Win32 so we can FlushFileBuffers before rename.
+    HANDLE h = CreateFileW(tmp.wstring().c_str(), GENERIC_WRITE, 0, nullptr,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    bool ok = true;
+    size_t off = 0;
+    while (off < content.size()) {
+        DWORD toWrite = static_cast<DWORD>((content.size() - off > 0x10000000)
+                                               ? 0x10000000 : (content.size() - off));
+        DWORD wrote = 0;
+        if (!WriteFile(h, content.data() + off, toWrite, &wrote, nullptr) || wrote == 0) {
+            ok = false; break;
+        }
+        off += wrote;
+    }
+    if (ok) FlushFileBuffers(h);
+    CloseHandle(h);
+    if (!ok) { fs::remove(tmp, ec); return false; }
+
+    if (!SwapFileReplace(tmp.wstring(), path)) { fs::remove(tmp, ec); return false; }
+    return true;
+}
+
+bool ReadFileAll(const std::wstring& path, std::string& out) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    out.clear();
+    char buf[64 * 1024];
+    DWORD got = 0;
+    while (ReadFile(h, buf, sizeof(buf), &got, nullptr) && got > 0) out.append(buf, got);
+    CloseHandle(h);
+    return true;
+}
+
 unsigned long long DirSizeBytes(const std::wstring& dir) {
     std::error_code ec;
     if (!fs::is_directory(dir, ec)) return 0;

@@ -668,6 +668,7 @@ endif()
 if(WIN32)
     add_executable(hodos-update-helper
         update-helper/main.cpp
+        update-helper/transaction.cpp     # 6b.2b — Phase B/C/E + --resume orchestration
         src/core/UpdateApply.cpp          # shared pure model (also in the shell + tests)
         src/core/UpdateFs.cpp             # 6b.2a — backup/verify/restore primitives
     )
@@ -678,9 +679,12 @@ if(WIN32)
     target_include_directories(hodos-update-helper PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/include/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/update-helper
     )
     target_link_libraries(hodos-update-helper PRIVATE
         user32                            # wsprintfA
+        advapi32                          # RunOnce registry
+        winhttp                           # child-shutdown POST
         nlohmann_json::nlohmann_json
         OpenSSL::SSL                      # UpdateFs::Sha256FileW
         OpenSSL::Crypto

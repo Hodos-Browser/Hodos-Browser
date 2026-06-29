@@ -60,6 +60,18 @@ public:
         return handle_ != INVALID_HANDLE_VALUE;
     }
 
+    // Bounded-retry Acquire (RISK-B). A probe's open-close window or a
+    // delete-pending remnant briefly yields SHARING_VIOLATION/ACCESS_DENIED on an
+    // otherwise-free lock; retry a few times before concluding "another owner live".
+    // A genuinely-held lock still fails after the budget (a few hundred ms).
+    bool AcquireWithRetry(const std::wstring& path, int attempts = 8, DWORD sleepMs = 100) {
+        for (int i = 0; i < attempts; ++i) {
+            if (Acquire(path)) return true;
+            if (i + 1 < attempts) Sleep(sleepMs);
+        }
+        return false;
+    }
+
     // Adopt an already-open handle the bootstrap inherited to us (the helper).
     void Adopt(HANDLE h) { Release(); handle_ = h; }
 

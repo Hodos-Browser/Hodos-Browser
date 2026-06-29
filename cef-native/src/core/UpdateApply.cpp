@@ -69,6 +69,8 @@ std::string SerializeApplyRecord(const ApplyRecord& r) {
     j["rollbackManifestPath"] = r.rollbackManifestPath;
     j["expectedNewManifestPath"] = r.expectedNewManifestPath;
     j["profileId"] = r.profileId;
+    j["toVersion"] = r.toVersion;
+    j["signerThumbprint"] = r.signerThumbprint;
     j["stagedAt"] = r.stagedAt;
     j["failureReason"] = r.failureReason;
     return j.dump(2);
@@ -86,6 +88,8 @@ bool ParseApplyRecord(const std::string& jsonStr, ApplyRecord& out) {
     out.rollbackManifestPath = getStr(j, "rollbackManifestPath");
     out.expectedNewManifestPath = getStr(j, "expectedNewManifestPath");
     out.profileId = getStr(j, "profileId");
+    out.toVersion = getStr(j, "toVersion");
+    out.signerThumbprint = getStr(j, "signerThumbprint");
     out.stagedAt = getStr(j, "stagedAt");
     out.failureReason = getStr(j, "failureReason");
     return true;

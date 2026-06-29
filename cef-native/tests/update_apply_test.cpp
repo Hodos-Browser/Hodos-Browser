@@ -44,6 +44,8 @@ TEST(ApplyRecord, RoundTripsAllFields) {
     in.rollbackManifestPath = "C:\\u\\pending\\rollback\\manifest.json";
     in.expectedNewManifestPath = "C:\\u\\pending\\expected-new-manifest.json";
     in.profileId = "Default";
+    in.toVersion = "0.4.1";
+    in.signerThumbprint = "AB12CD34";
     in.stagedAt = "2026-06-29T12:00:00Z";
     in.failureReason = "";
 
@@ -57,6 +59,8 @@ TEST(ApplyRecord, RoundTripsAllFields) {
     EXPECT_EQ(out.rollbackManifestPath, in.rollbackManifestPath);
     EXPECT_EQ(out.expectedNewManifestPath, in.expectedNewManifestPath);
     EXPECT_EQ(out.profileId, in.profileId);
+    EXPECT_EQ(out.toVersion, in.toVersion);
+    EXPECT_EQ(out.signerThumbprint, in.signerThumbprint);
     EXPECT_EQ(out.stagedAt, in.stagedAt);
 }
 

@@ -30,7 +30,9 @@
 
 #include "core/AppPaths.h"
 #include "core/UpdateApply.h"
+#include "core/UpdateFs.h"
 #include "core/UpdateLock.h"
+#include "transaction.h"
 
 namespace {
 
@@ -84,28 +86,6 @@ std::wstring Widen(const std::string& s) {
     return w;
 }
 
-// ---- transaction entry points (BODIES land in 6b.2) -------------------------
-// Phase B/C/E: wait for the bootstrap, unlock-poll {app}, child-shutdown, run the
-// installer, integrity-gate the new tree, launch the health-probe, then SUCCESS or
-// the DB-first crash-atomic ROLLBACK.
-int RunApplyTransaction(const std::map<std::string, std::string>& args,
-                        hodos::UpdateLockOwner& lock,
-                        const hodos::ApplyRecord& rec) {
-    (void)args; (void)lock;
-    Log("RunApplyTransaction: phase=" + std::string(hodos::ApplyPhaseToString(rec.phase)) +
-        " toBuild=" + std::to_string(rec.toBuild) + " — 6b.2 NOT YET IMPLEMENTED (scaffold no-op)");
-    return 0;
-}
-
-// --resume: the browser-independent watchdog. Re-arms RunOnce, then resumes/
-// restores/cleans per apply.json phase (idempotent). BODY in 6b.2.
-int RunResume(hodos::UpdateLockOwner& lock, const hodos::ApplyRecord& rec) {
-    (void)lock;
-    Log("RunResume: phase=" + std::string(hodos::ApplyPhaseToString(rec.phase)) +
-        " — 6b.2 NOT YET IMPLEMENTED (scaffold no-op)");
-    return 0;
-}
-
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -122,26 +102,28 @@ int wmain(int argc, wchar_t** argv) {
 
     const std::string helperDir = AppPaths::GetHelperStageDir();
     if (!helperDir.empty()) g_log_path = helperDir + "\\helper.log";
+    hodos::helper::SetLogger(&Log);
     Log(std::string("hodos-update-helper start (") + (isResume ? "--resume" : "apply") + ")");
 
     // The owner lock is the single-flight for EVERY entry point (V3-6). In the
-    // normal-apply path the bootstrap inherited an open owner handle to us (wired
-    // in 6c); as a --resume entry we open it fresh here. 6b.1 scaffold: open fresh.
+    // normal-apply path the bootstrap inherited an open owner handle to us; 6c will
+    // pass it via PROC_THREAD_ATTRIBUTE_HANDLE_LIST and we'd Adopt() it. Until 6c
+    // wires that, open it fresh here (bounded retry rides out a probe's open-close
+    // / delete-pending window — RISK-B).
     const std::string lockPath = AppPaths::GetUpdateLockPath();
     hodos::UpdateLockOwner lock;
-    if (lockPath.empty() || !lock.Acquire(Widen(lockPath))) {
+    if (lockPath.empty() || !lock.AcquireWithRetry(Widen(lockPath))) {
         Log("Could not acquire owner lock (another supervisor live, or no update dir) — exiting");
         return 0;  // benign: another owner is handling the transaction
     }
 
-    // Read the durable transaction state. Missing/corrupt => nothing to do.
+    // Read the durable transaction state (WIDE-safe, F4). Missing/corrupt => no-op.
     hodos::ApplyRecord rec;
     const std::string applyPath = AppPaths::GetPendingUpdateDir().empty()
         ? "" : AppPaths::GetPendingUpdateDir() + "\\apply.json";
     {
-        std::ifstream f(applyPath, std::ios::binary);
-        if (f) {
-            std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        std::string content;
+        if (!applyPath.empty() && hodos::updatefs::ReadFileAll(Widen(applyPath), content)) {
             if (!hodos::ParseApplyRecord(content, rec)) {
                 Log("apply.json present but unparseable — treating as no-op");
                 rec = hodos::ApplyRecord{};
@@ -151,7 +133,8 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
 
-    const int rc = isResume ? RunResume(lock, rec) : RunApplyTransaction(args, lock, rec);
+    const int rc = isResume ? hodos::helper::RunResume(args, lock, rec)
+                            : hodos::helper::RunApplyTransaction(args, lock, rec);
     Log("hodos-update-helper exit rc=" + std::to_string(rc));
     return rc;
 }

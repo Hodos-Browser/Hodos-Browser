@@ -77,6 +77,15 @@ unsigned long long FreeBytesOnVolume(const std::wstring& anyPathOnVolume);
 // Sum of regular-file sizes under dir (recursive). 0 on error/empty.
 unsigned long long DirSizeBytes(const std::wstring& dir);
 
+// Atomically write `content` to `path`: write a sibling temp file, flush, then
+// rename over `path` (SwapFileReplace). A reader cross-process never sees a
+// half-written file (the M7 requirement for apply.json/update-state.json). The
+// parent dir is created if missing. False on any failure.
+bool WriteFileAtomic(const std::wstring& path, const std::string& content);
+
+// Read an entire file into `out` (binary). False if it can't be opened.
+bool ReadFileAll(const std::wstring& path, std::string& out);
+
 }  // namespace updatefs
 }  // namespace hodos
 

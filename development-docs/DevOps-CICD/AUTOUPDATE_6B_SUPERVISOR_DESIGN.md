@@ -17,11 +17,25 @@ mutex `Local\HodosBrowser_AnyInstance`, `update.lock` honor-at-launch (dormant),
 >   target `-wal`/`-shm` first)**, `SwapFileReplace` (atomic `ReplaceFile`/`MoveFileEx`), `EnsureDirExists`
 >   (RISK-A), `FreeBytesOnVolume`/`DirSizeBytes` (M3 precheck). 18 temp-dir unit tests incl. both V3-3a cases
 >   (hard-kill leftover-wal + graceful no-wal). Helper links it (OpenSSL). Built clean; tests pass.
-> - **6b.2b ⏳ NEXT — the process orchestration:** the Phase B/C/E + `--resume` state machine wiring the 6b.2a
->   primitives (wait-for-bootstrap-handle, image-unlock poll, child-shutdown, installer spawn, integrity gate,
->   health-probe launch+wait, DB-first crash-atomic rollback, RunOnce arm/clear, success cleanup). The fragile
->   Win32 part — **gets its own adversarial review.** Honor: RISK-A (`EnsureDirExists(update\)` before the first
->   `Acquire`) + RISK-B (bounded `Acquire` retry on `SHARING_VIOLATION`/`ACCESS_DENIED`).
+> - **6b.2b ✅ DONE — the process orchestration:** `update-helper/transaction.{h,cpp}` — the Phase B/C/E +
+>   `--resume` state machine wiring the 6b.2a primitives (wait-for-bootstrap-HANDLE, image-unlock poll, sibling
+>   re-check, child-shutdown POST+taskkill `/F /T`, installer spawn+wait, integrity gate, health-probe
+>   launch+wait, **DB-first crash-atomic rollback**, RunOnce arm/clear, success cleanup via detached rmdir).
+>   `main.cpp` now dispatches to it (`AcquireWithRetry` = RISK-B; wide apply.json read = F4). Adversarial review
+>   (1 code-auditor) confirmed the structure + handle hygiene + I6/I9/lock-release ordering, and found 6 issues
+>   — **all fixed:** F1 (money-DB restore failure now aborts the binary swap, not swallowed → I9), F2 (exe+libcef
+>   commit-switch only flips after every other file restored), F3 (`AppPaths` uses `_wgetenv`+UTF-8 so non-ASCII
+>   usernames don't desync paths), F4 (wide apply.json read), F5 (rollback kills the probe first, then a sibling
+>   re-check gates the child-shutdown POST), F6 (terminate a wedged installer on timeout). Built clean (all 4
+>   configs); 45 unit tests pass.
+> - **⚠️ 6c carry-forward (review flag):** `main.cpp` currently opens the owner lock FRESH. 6c must instead pass
+>   the bootstrap's already-open inherited owner handle (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST` + `--bootstrap-handle`)
+>   and the helper must `Adopt()` it — else spawning the helper while the bootstrap still holds the `share=0`
+>   owner handle would `SHARING_VIOLATION`-bail. Wire Adopt() in 6c.
+> - **6b.3 ⏳ NEXT — packaging:** `.iss [Files]` line for the helper; `release.yml` build+Azure-sign the helper +
+>   generate+EdDSA-sign `expected-new-manifest.json` from the POST-signed staging tree (V3-8/V3-9). The
+>   IntegrityGate currently SKIPs an absent manifest — 6b.3 ships the signed manifest + makes it
+>   mandatory+signature-verified (fail-closed).
 > - **6b.3 ⏳ — packaging:** `.iss [Files]` line for the helper; `release.yml` build+Azure-sign the helper +
 >   generate+EdDSA-sign `expected-new-manifest.json` from the POST-signed staging tree (V3-8/V3-9).
 

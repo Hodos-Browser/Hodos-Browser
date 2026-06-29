@@ -56,6 +56,9 @@ struct ApplyRecord {
     std::string rollbackManifestPath;     // …\pending\rollback\manifest.json (old tree + DB)
     std::string expectedNewManifestPath;  // …\pending\expected-new-manifest.json (signed)
     std::string profileId;                // P0's resolved profile — for the health-probe relaunch (H1)
+    std::string toVersion;                // human-readable target version (diagnostics/state)
+    std::string signerThumbprint;         // the staged build's Authenticode signer (6c reads from the
+                                          // marker); the helper writes it to update-state on success (I5)
     std::string stagedAt;                 // ISO-8601 UTC
     std::string failureReason;            // set on Aborted/RolledBack (diagnostics)
 };
