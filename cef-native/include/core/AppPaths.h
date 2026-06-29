@@ -14,32 +14,70 @@ inline std::string GetAppDirName() {
 }
 
 #ifdef _WIN32
-/// Per-user staging dir for downloaded updates (auto-updater commit 4: download
-/// → stage; commit 6: apply-on-next-launch). Lives under %LOCALAPPDATA%
-/// (NON-roaming — we don't want a domain profile syncing a ~95 MB installer, and
-/// it stays same-volume with the Inno {app} target, required for commit 6's
-/// orphan-only rename). Namespaced by GetAppDirName() so dev (HodosBrowserDev)
-/// and prod never collide. Returns "" if LOCALAPPDATA is unavailable — the
-/// caller MUST skip staging in that case (never fall back to a relative path).
-/// Single source of truth shared by the staging (commit 4) and apply (commit 6)
-/// paths so they cannot diverge.
-inline std::string GetPendingUpdateDir() {
+/// Root of the auto-update working area. **All** update state lives under this
+/// ONE subtree — `update\` — which is deliberately OUTSIDE the `{app}` install
+/// root's backed-up file set (commit 6b / V3-10): the rollback backup copies the
+/// `[Files]` closure with root-level (non-recursive) globs, so a dedicated
+/// `update\` subdir is never captured, and the installer/uninstaller never touch
+/// it. Under %LOCALAPPDATA% (NON-roaming: no domain-profile syncing a ~95 MB
+/// installer; same-volume with `{app}` for the §D.5 orphan-only rename).
+/// Dev/prod-namespaced via GetAppDirName(). Returns "" if LOCALAPPDATA is
+/// unavailable — callers MUST skip (never fall back to a relative path).
+inline std::string GetUpdateDir() {
     const char* localAppData = std::getenv("LOCALAPPDATA");
     if (!localAppData || !*localAppData) return "";
-    return std::string(localAppData) + "\\" + GetAppDirName() + "\\pending";
+    return std::string(localAppData) + "\\" + GetAppDirName() + "\\update";
 }
 
-/// Fleet-wide silent-update lock (auto-updater commit 6a / OD-C). The apply
-/// supervisor (commit 6b) creates+holds this for the WHOLE install -> relaunch ->
-/// health window; every NORMAL launch (profile OR picker) defers while it exists
-/// so it can't run a half-written {app}. Lives at the HodosBrowser ROOT (the
-/// parent of pending\), NOT inside pending\, so a "clear the stage" sweep can't
-/// delete an in-flight lock. Dev/prod-namespaced via GetAppDirName(). Returns ""
-/// if LOCALAPPDATA is unavailable (caller treats that as "no lock", proceeds).
+/// Staging dir for the downloaded installer + markers (commit 4 download->stage;
+/// commit 6 apply-on-next-launch). Single source of truth shared by the staging
+/// and apply paths so they cannot diverge. "" if GetUpdateDir() is unavailable.
+inline std::string GetPendingUpdateDir() {
+    std::string root = GetUpdateDir();
+    return root.empty() ? "" : root + "\\pending";
+}
+
+/// Full pre-apply `{app}` + money-DB rollback backup (commit 6b). Under pending\.
+inline std::string GetRollbackDir() {
+    std::string p = GetPendingUpdateDir();
+    return p.empty() ? "" : p + "\\rollback";
+}
+
+/// Where the supervisor exe is copied OUT of `{app}` before the installer runs
+/// (commit 6b), so the installer can freely replace `{app}\hodos-update-helper.exe`.
+inline std::string GetHelperStageDir() {
+    std::string p = GetPendingUpdateDir();
+    return p.empty() ? "" : p + "\\helper";
+}
+
+/// Fleet-wide silent-update lock (commit 6a / OD-C). The apply supervisor
+/// (commit 6b) creates+holds this (exclusive handle) for the WHOLE install ->
+/// relaunch -> health window; every NORMAL launch (profile OR picker) defers
+/// while a live owner holds it. Lives in update\ (its own subtree), so a "clear
+/// the stage" sweep of pending\ can't delete an in-flight lock. "" if unavailable
+/// (caller treats that as "no lock", proceeds).
 inline std::string GetUpdateLockPath() {
-    const char* localAppData = std::getenv("LOCALAPPDATA");
-    if (!localAppData || !*localAppData) return "";
-    return std::string(localAppData) + "\\" + GetAppDirName() + "\\update.lock";
+    std::string root = GetUpdateDir();
+    return root.empty() ? "" : root + "\\update.lock";
+}
+
+/// GLOBAL cross-profile update state (commit 6b): schemaVer, silent, paused,
+/// highWaterBuild, signerThumbprint, lastFailure, rescanAfterRollback. Lives in
+/// update\ (outside the backed-up `{app}` set, V3-10/F8). "" if unavailable.
+inline std::string GetUpdateStatePath() {
+    std::string root = GetUpdateDir();
+    return root.empty() ? "" : root + "\\update-state.json";
+}
+
+/// The money DB (commit 6b / V3-1). It is in %APPDATA% (**ROAMING**, alongside
+/// the wallet), NOT under `{app}` (Local) — getting this wrong makes a rollback
+/// snapshot the wrong file and silently fail. Dev/prod-namespaced. "" if APPDATA
+/// is unavailable. Returns the DIRECTORY; the DB file is `<dir>\wallet.db`
+/// (+`-wal`/`-shm`).
+inline std::string GetWalletDir() {
+    const char* appData = std::getenv("APPDATA");
+    if (!appData || !*appData) return "";
+    return std::string(appData) + "\\" + GetAppDirName() + "\\wallet";
 }
 
 /// Session-namespace mutex name marking ANY live HodosBrowser.exe (all profiles +

@@ -36,6 +36,7 @@ add_executable(hodos_tests
     js_string_escape_test.cpp           # F6 — JsStringEscape.h is header-only, no production .cpp
     profile_id_test.cpp                 # F5 — IsValidProfileId is inline in ProfileManager.h, no .cpp
     update_stager_test.cpp              # commit 4b — auto-updater verify core
+    update_apply_test.cpp               # commit 6b.1 — apply-transaction pure model
 
     # Production sources under test (built into the test exe directly).
     # (Phase 2.6-H removed permission_engine_test / permission_gate_test along
@@ -49,6 +50,7 @@ add_executable(hodos_tests
     ../src/core/ManifestFetcher.cpp
     ../src/core/SyncHttpClient.cpp
     ../src/core/UpdateStager.cpp          # commit 4b — production source under test
+    ../src/core/UpdateApply.cpp           # commit 6b.1 — apply-transaction pure model
     ../src/core/Logger.cpp
 )
 

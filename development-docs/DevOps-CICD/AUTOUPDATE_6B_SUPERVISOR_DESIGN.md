@@ -1,9 +1,23 @@
 # 6b — External Rollback-Supervisor (`hodos-update-helper.exe`) — DESIGN (pre-code)
 
-**Status:** DESIGN for adversarial review — NO code yet. / **Created:** 2026-06-29 / Branch `0.4.0` local.
+**Status:** DESIGN code-ready (§9 v3) — IMPLEMENTATION IN PROGRESS. / **Created:** 2026-06-29 / Branch `0.4.0` local.
 **Parent:** `WINDOWS_AUTOUPDATE_PLAN.md` §"APPLY-PHASE DESIGN REVISION" (OD-A..E) + §D/§E. This doc is the
 detailed design the revision block defers to. **6a foundations already landed** (`9c516b2`): instance
 mutex `Local\HodosBrowser_AnyInstance`, `update.lock` honor-at-launch (dormant), Inno AppMutex/SetupMutex.
+
+> **IMPLEMENTATION STATUS (sub-commits, like 4a–4d):**
+> - **6b.1 ✅ DONE — foundations:** `AppPaths` repath (working area → `…\HodosBrowser\update\`; new
+>   `GetWalletDir`=Roaming, `GetUpdateStatePath`, `GetRollbackDir`, `GetHelperStageDir`); pure model
+>   `UpdateApply.{h,cpp}` (ApplyRecord/UpdateState/FileManifest + (de)serialize, 14 unit tests); two-MODE lock
+>   `UpdateLock.h` (owner share=0+DELETE_ON_CLOSE / permissive probe); `hodos-update-helper.exe` scaffold +
+>   CMake target. All 3 build configs clean; tests pass. Scaled review = SHIP. **Inert** (nothing spawns it).
+> - **6b.2 ⏳ NEXT — the transaction:** Phase B/C/E + the filesystem restore primitives. **Carry-forward from
+>   the 6b.1 review:** RISK-A — the apply path MUST create the `update\` subtree BEFORE the first owner
+>   `Acquire` (`CREATE_ALWAYS` doesn't make intermediate dirs → else silent no-op). RISK-B — give owner
+>   `Acquire` a bounded retry on `SHARING_VIOLATION`/`ACCESS_DENIED` to ride out a probe's open-close /
+>   delete-pending window (avoids a benign false-bail once the owner lock goes live).
+> - **6b.3 ⏳ — packaging:** `.iss [Files]` line for the helper; `release.yml` build+Azure-sign the helper +
+>   generate+EdDSA-sign `expected-new-manifest.json` from the POST-signed staging tree (V3-8/V3-9).
 
 > **Reviewers:** attack this to *brick a funded-wallet fleet*. The whole point of the external supervisor
 > is to make the worst case (OS-blocked or power-loss-truncated `HodosBrowser.exe`) RECOVERABLE. Find the

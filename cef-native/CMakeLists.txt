@@ -312,6 +312,9 @@ elseif(WIN32)
         src/core/AutoUpdater.cpp
         include/core/UpdateStager.h
         src/core/UpdateStager.cpp
+        include/core/UpdateApply.h
+        src/core/UpdateApply.cpp
+        include/core/UpdateLock.h
         include/core/QRScreenCapture.h
         src/core/QRScreenCapture.cpp
         hodos.rc
@@ -651,6 +654,34 @@ elseif(APPLE)
 endif()
 
 # add_subdirectory(src/core) # Removed - wallet library no longer needed
+
+# ============================================================================
+# Windows: hodos-update-helper.exe — external rollback-supervisor (commit 6b).
+# A tiny, low-churn, separately-signed Win32 exe (NOT linked against CEF) that
+# owns the silent-apply transaction + DB-first crash-atomic rollback. 6b.1 builds
+# the scaffold; the transaction body lands in 6b.2. It is not spawned by anything
+# until 6c wires Phase A, so building it has no effect on the shipped browser.
+# Console subsystem (wmain); spawned DETACHED/CREATE_NO_WINDOW so no console shows.
+# ============================================================================
+if(WIN32)
+    add_executable(hodos-update-helper
+        update-helper/main.cpp
+        src/core/UpdateApply.cpp          # shared pure model (also in the shell + tests)
+    )
+    set_target_properties(hodos-update-helper PROPERTIES
+        OUTPUT_NAME "hodos-update-helper"
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+    )
+    target_include_directories(hodos-update-helper PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/core
+    )
+    target_link_libraries(hodos-update-helper PRIVATE
+        user32                            # wsprintfA
+        nlohmann_json::nlohmann_json
+    )
+    target_compile_definitions(hodos-update-helper PRIVATE UNICODE _UNICODE)
+endif()
 
 # ============================================================================
 # Optional C++ unit tests (Phase 1.5 Step 3 — first one).
