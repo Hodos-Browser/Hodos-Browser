@@ -43,7 +43,30 @@ mutex `Local\HodosBrowser_AnyInstance`, `update.lock` honor-at-launch (dormant),
 >   sha256-checks the installed tree. `UpdateFs` gained `VerifyEd25519`/`VerifyManifestSignature`/`PublicKeyBase64`
 >   (self-contained, no UpdateStager dep). 8 new crypto tests; 53 update tests pass; all 4 configs clean.
 >
-> **✅ COMMIT 6b COMPLETE (the supervisor exe + its packaging).** Remaining apply-phase commits: **6c** (the
+> > - **6c.1 ✅ DONE (`03d7fb1`):** the 6a honor-probe swapped `GetFileAttributes` → `UpdateLockIsHeld` (exclusive-
+>   open liveness, remnant-safe) + the DOUBLE-GATED `--post-update-health-probe` bypass (arg AND armed apply.json).
+>   Behavior-neutral in the no-lock state; UTF-8→wide via CP_UTF8. Built clean. Still inert until 6c.2.
+> - **6c.2 ⏳ NEXT — `MaybeApplyStagedUpdate()` (the Phase-A bootstrap; the brick-critical core; OWN adversarial
+>   review):** inserts at `cef_browser_shell.cpp:3922` (top of `if(!g_picker_mode)`, before `TryAcquireInstance`
+>   `:3925`), behind `HODOS_SILENT_AUTOUPDATE`. Steps: eligibility (global `update-state.json` silent && !paused
+>   + verified `pending\update-info.json`+installer+manifest exist) → `EnsureDirExists(update\)` (RISK-A) →
+>   LOCK-FIRST `AcquireWithRetry` → D.0 (Toolhelp count HodosBrowser.exe by full module path under {app} == 1)
+>   → prove wallet dead (`!IsPortListening(31301)` + exclusive-open `hodos-wallet.exe`; graceful POST + defer if
+>   alive) → apply-time verify (reuse `UpdateStager`: `ParseMarker`, sha256==marker, **Authenticode re-verify
+>   (OD-B, self-contained)**, anti-rollback `buildNumber > max(live-exe VERSIONINFO, highWater)`, **signer-
+>   continuity (OD-E): live-exe thumbprint != marker.signerThumbprint → degrade-to-notify**) → backup full {app}
+>   (CopyTreeRecursive, exclude `update`) + `rollback\manifest.json` → **snapshot money DB (new
+>   `UpdateFs::SnapshotWalletDbSet`: raw db+wal, no checkpoint/shm)** → verify backup complete (free-space +
+>   re-hash) → copy helper out → `apply.json`=preparing → arm RunOnce → `apply.json`=armed → close instance
+>   mutex → **spawn helper with `STARTUPINFOEX`+`PROC_THREAD_ATTRIBUTE_HANDLE_LIST` inheriting {owner-lock handle,
+>   bootstrap SYNCHRONIZE handle} + `--bootstrap-handle` (CREATE_BREAKAWAY_FROM_JOB, retry-without on
+>   ACCESS_DENIED)** → `_exit(0)`. Decisions locked: manifest URL = sibling-of-installer (6c.3 staging downloads
+>   it); kill-list deferred to 6e. New helper: `UpdateFs::SnapshotWalletDbSet` (+ test). Reuse: `UpdateStager`
+>   (already in the shell), `UpdateFs`, `UpdateLock`, `UpdateApply`, `IsPortListening`.
+> - **6c.3 / 6d / rig ⏳** — staging downloads manifest+`.ed` into `pending\` (sibling-of-installer URL); the
+>   health-probe browser writes `apply.json`=healthy; the fault-injection rig = commit 7.
+
+**✅ COMMIT 6b COMPLETE (the supervisor exe + its packaging).** Remaining apply-phase commits: **6c** (the
 > `MaybeApplyStagedUpdate` Phase-A bootstrap that stages the backup + snapshots the DB + spawns the helper with
 > the inherited owner handle/`Adopt()` + sets `expectedNewManifestPath`/`profileId`/`signerThumbprint`; swaps the
 > 6a honor-probe to `UpdateLockIsHeld`; commit-4 staging downloads the manifest+`.ed` into `pending\`) → **6d**
