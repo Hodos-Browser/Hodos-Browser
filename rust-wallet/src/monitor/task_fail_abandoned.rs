@@ -112,10 +112,12 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
                 }
             }
 
-            if let Err(e) = itx.commit() {
-                warn!("   ⚠️ Failed to commit cleanup txn for {}: {}", short_txid, e);
+            // Only claim success if the cleanup txn committed — on failure it
+            // rolled back and startup recovery / a later sweep heals it.
+            match itx.commit() {
+                Ok(()) => info!("   ✅ Abandoned tx {} marked as failed", short_txid),
+                Err(e) => warn!("   ⚠️ Cleanup txn for {} failed to commit — rolled back, will retry: {}", short_txid, e),
             }
-            info!("   ✅ Abandoned tx {} marked as failed", short_txid);
         }
 
         // Second sweep: backup transactions stuck in 'sending' for >10 minutes.

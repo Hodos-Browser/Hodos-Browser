@@ -262,10 +262,12 @@ fn recover_transaction(state: &web::Data<AppState>, txid: &str, proven_tx_id: i6
             _ => {}
         }
 
-        if let Err(e) = tx.commit() {
-            warn!("   ⚠️ Failed to commit recovery txn for {}: {}", short_txid, e);
+        // Only log success if the txn actually committed — on commit failure the
+        // recovery rolled back (heals next cycle), so don't claim "recovered".
+        match tx.commit() {
+            Ok(()) => info!("   ✅ Recovered tx {} → completed (proof at height {})", short_txid, height),
+            Err(e) => warn!("   ⚠️ Recovery txn for {} failed to commit — rolled back, will retry next cycle: {}", short_txid, e),
         }
-        info!("   ✅ Recovered tx {} → completed (proof at height {})", short_txid, height);
     }
 
     // Invalidate balance cache since status changed

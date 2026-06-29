@@ -72,11 +72,17 @@ impl WalletDatabase {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         info!("   Busy timeout set to 5 seconds");
 
-        // Make the WAL durability level explicit + auditable (OD-2 commit 2). NORMAL is
-        // the implicit WAL default already in effect; stating it removes ambiguity and
-        // is the correct level for our clean-exit path (the shutdown WAL checkpoint forces
-        // the fsync). FULL would only matter for OS-crash/power-loss and slows every commit.
-        conn.execute("PRAGMA synchronous=NORMAL", [])?;
+        // Money-DB durability: synchronous=FULL (per-commit fsync). For a wallet
+        // holding real funds we want committed writes (completed sends, recovered
+        // txs) to survive OS crash / power loss, not just a clean process exit.
+        // FULL is the SQLite default for non-WAL and the safe choice here; the
+        // per-commit fsync cost is negligible at the wallet's low write volume.
+        // (Owner decision 2026-06-29: an earlier commit set NORMAL believing it was
+        // the implicit WAL default — but with bundled SQLite the prior effective
+        // level was FULL, so NORMAL had silently RELAXED durability. This restores
+        // FULL. NORMAL's power-loss window on committed-but-unchecked writes is not
+        // acceptable for the money DB.)
+        conn.execute("PRAGMA synchronous=FULL", [])?;
         let synchronous: i32 = conn.query_row("PRAGMA synchronous", [], |row| row.get(0))?;
         info!("   Synchronous: {} (0=OFF 1=NORMAL 2=FULL)", synchronous);
 
