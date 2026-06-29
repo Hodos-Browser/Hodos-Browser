@@ -1,0 +1,251 @@
+// UpdateFs.cpp — filesystem primitives for the apply transaction (commit 6b.2a).
+// See UpdateFs.h. std::filesystem (error_code, non-throwing) + OpenSSL + Win32.
+
+#include "../../include/core/UpdateFs.h"
+
+#ifdef _WIN32
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
+#include <filesystem>
+#include <vector>
+
+#include <openssl/evp.h>
+
+namespace fs = std::filesystem;
+
+namespace hodos {
+namespace updatefs {
+
+namespace {
+// Wide relpath -> UTF-8 narrow (for manifest keys; non-ASCII-safe).
+std::string WideToUtf8(const std::wstring& w) {
+    if (w.empty()) return "";
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    std::string s(n > 0 ? n - 1 : 0, '\0');
+    if (n > 0) WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, &s[0], n, nullptr, nullptr);
+    return s;
+}
+
+// First path component of a relative path (for the top-level exclude check).
+bool IsExcludedTopLevel(const fs::path& rel, const std::vector<std::wstring>& excl) {
+    if (rel.empty()) return false;
+    const std::wstring first = rel.begin()->wstring();
+    for (const auto& e : excl) if (first == e) return true;
+    return false;
+}
+}  // namespace
+
+std::string Sha256FileW(const std::wstring& path) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return "";
+
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (!ctx) { CloseHandle(h); return ""; }
+    if (EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) != 1) {
+        EVP_MD_CTX_free(ctx); CloseHandle(h); return "";
+    }
+
+    bool ok = true;
+    unsigned char buf[64 * 1024];
+    for (;;) {
+        DWORD got = 0;
+        if (!ReadFile(h, buf, sizeof(buf), &got, nullptr)) { ok = false; break; }
+        if (got == 0) break;  // EOF
+        if (EVP_DigestUpdate(ctx, buf, got) != 1) { ok = false; break; }
+    }
+    CloseHandle(h);
+
+    std::string hex;
+    if (ok) {
+        unsigned char md[EVP_MAX_MD_SIZE];
+        unsigned int mdLen = 0;
+        if (EVP_DigestFinal_ex(ctx, md, &mdLen) == 1) {
+            static const char* k = "0123456789abcdef";
+            hex.reserve(mdLen * 2);
+            for (unsigned int i = 0; i < mdLen; ++i) {
+                hex.push_back(k[md[i] >> 4]);
+                hex.push_back(k[md[i] & 0xF]);
+            }
+        }
+    }
+    EVP_MD_CTX_free(ctx);
+    return hex;
+}
+
+bool EnsureDirExists(const std::wstring& dir) {
+    std::error_code ec;
+    if (fs::exists(dir, ec)) return fs::is_directory(dir, ec);
+    fs::create_directories(dir, ec);
+    return !ec && fs::is_directory(dir, ec);
+}
+
+bool BuildManifestForTree(const std::wstring& rootDir, FileManifest& out,
+                          const std::vector<std::wstring>& excludeDirNames) {
+    out.entries.clear();
+    std::error_code ec;
+    if (!fs::is_directory(rootDir, ec)) return false;
+    const fs::path root(rootDir);
+
+    fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec);
+    if (ec) return false;
+    for (fs::recursive_directory_iterator end; it != end; it.increment(ec)) {
+        if (ec) return false;
+        const fs::path& p = it->path();
+        const fs::path rel = fs::relative(p, root, ec);
+        if (ec) continue;
+        if (it->is_directory(ec)) {
+            if (IsExcludedTopLevel(rel, excludeDirNames)) it.disable_recursion_pending();
+            continue;
+        }
+        if (!it->is_regular_file(ec)) continue;
+        if (IsExcludedTopLevel(rel, excludeDirNames)) continue;
+        const std::string sha = Sha256FileW(p.wstring());
+        if (sha.empty()) return false;  // unreadable file => fail (don't ship a partial manifest)
+        out.entries[NormalizeManifestKey(WideToUtf8(rel.wstring()))] = sha;
+    }
+    return true;
+}
+
+VerifyResult VerifyTreeAgainstManifest(const std::wstring& rootDir, const FileManifest& m) {
+    VerifyResult r;
+    const fs::path root(rootDir);
+    for (const auto& kv : m.entries) {
+        // kv.first is a normalized (forward-slash) relpath; rebuild a wide path.
+        std::wstring relW;
+        {
+            int n = MultiByteToWideChar(CP_UTF8, 0, kv.first.c_str(), -1, nullptr, 0);
+            relW.assign(n > 0 ? n - 1 : 0, L'\0');
+            if (n > 0) MultiByteToWideChar(CP_UTF8, 0, kv.first.c_str(), -1, &relW[0], n);
+        }
+        const fs::path full = root / fs::path(relW);
+        std::error_code ec;
+        if (!fs::exists(full, ec) || !fs::is_regular_file(full, ec)) {
+            r.ok = false; r.failedPath = kv.first; r.reason = "missing"; return r;
+        }
+        const std::string sha = Sha256FileW(full.wstring());
+        if (sha.empty()) { r.ok = false; r.failedPath = kv.first; r.reason = "read-error"; return r; }
+        if (sha != kv.second) { r.ok = false; r.failedPath = kv.first; r.reason = "sha-mismatch"; return r; }
+    }
+    r.ok = true;
+    return r;
+}
+
+bool CopyTreeRecursive(const std::wstring& srcDir, const std::wstring& dstDir,
+                       const std::vector<std::wstring>& excludeDirNames) {
+    std::error_code ec;
+    if (!fs::is_directory(srcDir, ec)) return false;
+    if (!EnsureDirExists(dstDir)) return false;
+    const fs::path src(srcDir), dst(dstDir);
+
+    fs::recursive_directory_iterator it(src, fs::directory_options::skip_permission_denied, ec);
+    if (ec) return false;
+    for (fs::recursive_directory_iterator end; it != end; it.increment(ec)) {
+        if (ec) return false;
+        const fs::path& p = it->path();
+        const fs::path rel = fs::relative(p, src, ec);
+        if (ec) return false;
+        if (it->is_directory(ec)) {
+            if (IsExcludedTopLevel(rel, excludeDirNames)) { it.disable_recursion_pending(); continue; }
+            fs::create_directories(dst / rel, ec);
+            if (ec) return false;
+            continue;
+        }
+        if (!it->is_regular_file(ec)) continue;
+        if (IsExcludedTopLevel(rel, excludeDirNames)) continue;
+        const fs::path target = dst / rel;
+        fs::create_directories(target.parent_path(), ec);
+        fs::copy_file(p, target, fs::copy_options::overwrite_existing, ec);
+        if (ec) return false;
+    }
+    return true;
+}
+
+bool RestoreWalletDbSet(const std::wstring& snapshotDir, const std::wstring& walletDir) {
+    std::error_code ec;
+    const fs::path snap(snapshotDir), wdir(walletDir);
+    const fs::path snapDb = snap / L"wallet.db";
+    const fs::path snapWal = snap / L"wallet.db-wal";
+    const fs::path tgtDb = wdir / L"wallet.db";
+    const fs::path tgtWal = wdir / L"wallet.db-wal";
+    const fs::path tgtShm = wdir / L"wallet.db-shm";
+
+    if (!fs::exists(snapDb, ec)) return false;  // nothing to restore from
+    if (!EnsureDirExists(walletDir)) return false;
+
+    // 1. DELETE the target -wal and -shm FIRST (V3-3a): a leftover NEW -wal would
+    //    be replayed onto the restored OLD db by checksum-only WAL recovery.
+    fs::remove(tgtWal, ec);  // ec ignored: absent is fine
+    fs::remove(tgtShm, ec);
+
+    // 2. Copy the snapshot db over the target.
+    fs::copy_file(snapDb, tgtDb, fs::copy_options::overwrite_existing, ec);
+    if (ec) return false;
+
+    // 3. Copy the snapshot -wal ONLY IF present (hard-kill snapshot). After a
+    //    graceful wallet exit the snapshot is just wallet.db -> target -wal stays
+    //    deleted from step 1. Never restore -shm.
+    if (fs::exists(snapWal, ec)) {
+        fs::copy_file(snapWal, tgtWal, fs::copy_options::overwrite_existing, ec);
+        if (ec) return false;
+    }
+    return true;
+}
+
+bool SwapFileReplace(const std::wstring& srcPath, const std::wstring& dstPath) {
+    std::error_code ec;
+    if (fs::exists(dstPath, ec)) {
+        // Atomic same-volume replace; ignore the backup slot (nullptr).
+        if (ReplaceFileW(dstPath.c_str(), srcPath.c_str(), nullptr,
+                         REPLACEFILE_IGNORE_MERGE_ERRORS, nullptr, nullptr)) {
+            return true;
+        }
+        // Fall through to MoveFileEx if ReplaceFile failed (e.g. dst on a path
+        // ReplaceFile dislikes); MoveFileEx with REPLACE_EXISTING is the fallback.
+    }
+    return MoveFileExW(srcPath.c_str(), dstPath.c_str(),
+                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+}
+
+unsigned long long FreeBytesOnVolume(const std::wstring& anyPathOnVolume) {
+    // GetDiskFreeSpaceExW wants a directory; use the parent if a file path slips in.
+    std::error_code ec;
+    std::wstring dir = anyPathOnVolume;
+    if (fs::exists(anyPathOnVolume, ec) && !fs::is_directory(anyPathOnVolume, ec)) {
+        dir = fs::path(anyPathOnVolume).parent_path().wstring();
+    }
+    ULARGE_INTEGER freeAvail{};
+    if (GetDiskFreeSpaceExW(dir.c_str(), &freeAvail, nullptr, nullptr)) {
+        return freeAvail.QuadPart;
+    }
+    return 0;
+}
+
+unsigned long long DirSizeBytes(const std::wstring& dir) {
+    std::error_code ec;
+    if (!fs::is_directory(dir, ec)) return 0;
+    unsigned long long total = 0;
+    fs::recursive_directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec);
+    if (ec) return 0;
+    for (fs::recursive_directory_iterator end; it != end; it.increment(ec)) {
+        if (ec) break;
+        if (it->is_regular_file(ec)) {
+            const auto sz = it->file_size(ec);
+            if (!ec) total += sz;
+        }
+    }
+    return total;
+}
+
+}  // namespace updatefs
+}  // namespace hodos
+
+#endif  // _WIN32

@@ -11,11 +11,17 @@ mutex `Local\HodosBrowser_AnyInstance`, `update.lock` honor-at-launch (dormant),
 >   `UpdateApply.{h,cpp}` (ApplyRecord/UpdateState/FileManifest + (de)serialize, 14 unit tests); two-MODE lock
 >   `UpdateLock.h` (owner share=0+DELETE_ON_CLOSE / permissive probe); `hodos-update-helper.exe` scaffold +
 >   CMake target. All 3 build configs clean; tests pass. Scaled review = SHIP. **Inert** (nothing spawns it).
-> - **6b.2 ⏳ NEXT — the transaction:** Phase B/C/E + the filesystem restore primitives. **Carry-forward from
->   the 6b.1 review:** RISK-A — the apply path MUST create the `update\` subtree BEFORE the first owner
->   `Acquire` (`CREATE_ALWAYS` doesn't make intermediate dirs → else silent no-op). RISK-B — give owner
->   `Acquire` a bounded retry on `SHARING_VIOLATION`/`ACCESS_DENIED` to ride out a probe's open-close /
->   delete-pending window (avoids a benign false-bail once the owner lock goes live).
+> - **6b.2a ✅ DONE — filesystem data-integrity primitives:** `UpdateFs.{h,cpp}` — `Sha256FileW` (wide-safe),
+>   `BuildManifestForTree`/`VerifyTreeAgainstManifest` (backup-complete + expected-new integrity, B4/M3),
+>   `CopyTreeRecursive` (backup), **`RestoreWalletDbSet` (the V3-3a money-DB FULL-SET restore — deletes a stale
+>   target `-wal`/`-shm` first)**, `SwapFileReplace` (atomic `ReplaceFile`/`MoveFileEx`), `EnsureDirExists`
+>   (RISK-A), `FreeBytesOnVolume`/`DirSizeBytes` (M3 precheck). 18 temp-dir unit tests incl. both V3-3a cases
+>   (hard-kill leftover-wal + graceful no-wal). Helper links it (OpenSSL). Built clean; tests pass.
+> - **6b.2b ⏳ NEXT — the process orchestration:** the Phase B/C/E + `--resume` state machine wiring the 6b.2a
+>   primitives (wait-for-bootstrap-handle, image-unlock poll, child-shutdown, installer spawn, integrity gate,
+>   health-probe launch+wait, DB-first crash-atomic rollback, RunOnce arm/clear, success cleanup). The fragile
+>   Win32 part — **gets its own adversarial review.** Honor: RISK-A (`EnsureDirExists(update\)` before the first
+>   `Acquire`) + RISK-B (bounded `Acquire` retry on `SHARING_VIOLATION`/`ACCESS_DENIED`).
 > - **6b.3 ⏳ — packaging:** `.iss [Files]` line for the helper; `release.yml` build+Azure-sign the helper +
 >   generate+EdDSA-sign `expected-new-manifest.json` from the POST-signed staging tree (V3-8/V3-9).
 

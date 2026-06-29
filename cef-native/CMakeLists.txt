@@ -315,6 +315,8 @@ elseif(WIN32)
         include/core/UpdateApply.h
         src/core/UpdateApply.cpp
         include/core/UpdateLock.h
+        include/core/UpdateFs.h
+        src/core/UpdateFs.cpp
         include/core/QRScreenCapture.h
         src/core/QRScreenCapture.cpp
         hodos.rc
@@ -667,6 +669,7 @@ if(WIN32)
     add_executable(hodos-update-helper
         update-helper/main.cpp
         src/core/UpdateApply.cpp          # shared pure model (also in the shell + tests)
+        src/core/UpdateFs.cpp             # 6b.2a — backup/verify/restore primitives
     )
     set_target_properties(hodos-update-helper PROPERTIES
         OUTPUT_NAME "hodos-update-helper"
@@ -679,6 +682,8 @@ if(WIN32)
     target_link_libraries(hodos-update-helper PRIVATE
         user32                            # wsprintfA
         nlohmann_json::nlohmann_json
+        OpenSSL::SSL                      # UpdateFs::Sha256FileW
+        OpenSSL::Crypto
     )
     target_compile_definitions(hodos-update-helper PRIVATE UNICODE _UNICODE)
 endif()
