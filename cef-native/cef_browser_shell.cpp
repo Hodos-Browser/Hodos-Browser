@@ -182,6 +182,13 @@ static bool g_adblockProcessLaunched = false;  // Set by LaunchAdblockProcess
 // that thread and threaded into StagePendingUpdate's abort check. (Commit 4d.)
 static std::atomic<bool> g_update_abort{false};
 
+// 6a (WINDOWS_AUTOUPDATE_PLAN §D.0 / OD-D): a session-namespace mutex marking THIS
+// HodosBrowser.exe as a live instance for the auto-update all-instances-gone gate.
+// Created at startup (profile AND picker modes), held for the process lifetime,
+// closed in main()'s final cleanup. INERT in 6a — checked by nothing yet; commit 6c
+// detects live siblings via OpenMutexW on this name before applying a staged update.
+static HANDLE g_instance_mutex = nullptr;
+
 // Forward declarations for adblock server management (two-phase startup)
 void LaunchAdblockProcess();   // Phase 1: CreateProcess only (non-blocking)
 void WaitForAdblockHealth();   // Phase 2: Poll /health with exponential backoff
@@ -3839,6 +3846,40 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
              (res.showPicker ? " [picker-pending]" : ""));
     g_picker_mode = res.showPicker;
 
+    // 6a (WINDOWS_AUTOUPDATE_PLAN §D.0 / OD-C): honor a fleet-wide update.lock at
+    // launch. The silent-apply supervisor (commit 6b) holds this lock for the entire
+    // install -> relaunch -> health window; while it exists, EVERY normal launch
+    // (profile OR picker) defers so it can never run a half-written {app}. Presence
+    // is the signal, so GetFileAttributes (not an exclusive open) is correct here.
+    // **INERT in 6a** — nothing creates the lock yet, so this never fires. The
+    // supervisor's own health-probe relaunch runs WHILE the lock is held and MUST
+    // bypass this; that bypass (recommended: detect via the staged marker, arg-free)
+    // plus a staleness-guarded lock format are 6b/6c work and MUST be wired BEFORE
+    // any code creates a lock. Until then the seam below is constant-false.
+    {
+        const std::string lockPath = AppPaths::GetUpdateLockPath();
+        const bool lockPresent = !lockPath.empty() &&
+            GetFileAttributesA(lockPath.c_str()) != INVALID_FILE_ATTRIBUTES;
+        const bool postUpdateHealthProbe = false;  // 6c: detect via staged marker
+        if (lockPresent && !postUpdateHealthProbe) {
+            LOG_INFO("Update in progress (update.lock present) — deferring this launch");
+            return 0;
+        }
+    }
+
+    // 6a (§D.0 / OD-D): register this live instance for the all-instances-gone gate.
+    // Done AFTER the update.lock defer (a deferring instance must NOT register as a
+    // sibling) and BEFORE the SingleInstance/picker early-exits (a forwarded/duplicate
+    // launch briefly holds it; the OS closes the handle on return, and the instance it
+    // forwarded to keeps the object alive — so coverage never gaps). Picker holds it
+    // too (OD-D: a user mid-pick is about to launch one). Best-effort: a creation
+    // failure is logged, never fatal — 6a depends on nothing here.
+    g_instance_mutex = CreateMutexW(nullptr, FALSE, AppPaths::GetInstanceMutexNameW().c_str());
+    if (!g_instance_mutex) {
+        LOG_WARNING("Could not create instance-presence mutex (err=" +
+                    std::to_string(GetLastError()) + ") — auto-update gate may be degraded");
+    }
+
     // Set process AUMID early (before window creation) so Windows gives dev vs
     // prod (and multi-profile) DISTINCT taskbar buttons. A dev build ALWAYS gets a
     // ".Dev" identity — even single-profile — so it never merges with the installed
@@ -4513,6 +4554,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     LOG_INFO("Releasing profile lock...");
     ReleaseProfileLock();
+
+    // 6a: drop the instance-presence mutex so the all-instances-gone gate (commit 6c)
+    // sees this instance disappear promptly. The OS would auto-close it at process
+    // exit anyway; explicit close is tidy + deterministic for the gate's timing.
+    if (g_instance_mutex) {
+        CloseHandle(g_instance_mutex);
+        g_instance_mutex = nullptr;
+    }
 
     Logger::Shutdown();
     CefShutdown();

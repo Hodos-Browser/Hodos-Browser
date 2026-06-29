@@ -36,6 +36,15 @@ ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 DisableProgramGroupPage=yes
+; Auto-update commit 6a (WINDOWS_AUTOUPDATE_PLAN §D.0): AppMutex must match the
+; UNPREFIXED form of the app's session mutex (AppPaths::GetInstanceMutexNameW =>
+; "Local\HodosBrowser_AnyInstance"; an unprefixed Inno name resolves to the same
+; session object). Lets Setup detect a still-running browser. For the SILENT path,
+; the apply supervisor (commit 6b) shuts every instance down AND closes this mutex
+; BEFORE spawning the installer, so AppMutex passes cleanly. SetupMutex blocks two
+; concurrent installers racing the same {app}.
+AppMutex=HodosBrowser_AnyInstance
+SetupMutex=HodosBrowserSetup
 SetupIconFile={#ProjectRoot}\cef-native\hodos.ico
 UninstallDisplayIcon={app}\HodosBrowser.exe
 

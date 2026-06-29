@@ -28,6 +28,34 @@ inline std::string GetPendingUpdateDir() {
     if (!localAppData || !*localAppData) return "";
     return std::string(localAppData) + "\\" + GetAppDirName() + "\\pending";
 }
+
+/// Fleet-wide silent-update lock (auto-updater commit 6a / OD-C). The apply
+/// supervisor (commit 6b) creates+holds this for the WHOLE install -> relaunch ->
+/// health window; every NORMAL launch (profile OR picker) defers while it exists
+/// so it can't run a half-written {app}. Lives at the HodosBrowser ROOT (the
+/// parent of pending\), NOT inside pending\, so a "clear the stage" sweep can't
+/// delete an in-flight lock. Dev/prod-namespaced via GetAppDirName(). Returns ""
+/// if LOCALAPPDATA is unavailable (caller treats that as "no lock", proceeds).
+inline std::string GetUpdateLockPath() {
+    const char* localAppData = std::getenv("LOCALAPPDATA");
+    if (!localAppData || !*localAppData) return "";
+    return std::string(localAppData) + "\\" + GetAppDirName() + "\\update.lock";
+}
+
+/// Session-namespace mutex name marking ANY live HodosBrowser.exe (all profiles +
+/// the picker) for the auto-update all-instances-gone gate (WINDOWS_AUTOUPDATE_PLAN
+/// §D.0, commit 6a). **Local\ (NOT Global\):** a PrivilegesRequired=lowest install
+/// runs as a standard user that cannot reliably create Global\ objects
+/// (SeCreateGlobalPrivilege), and every profile runs in the SAME session, so the
+/// session namespace already sees them all (cross-session is moot — each Windows
+/// user has its own per-user install + %LOCALAPPDATA%). Dev/prod-namespaced so a
+/// dev build never blocks a prod silent-apply (and vice-versa). Inno's [Setup]
+/// AppMutex uses the UNPREFIXED form ("HodosBrowser_AnyInstance") which resolves to
+/// this same session object. ASCII-only -> the narrow->wide widening below is safe.
+inline std::wstring GetInstanceMutexNameW() {
+    std::string n = "Local\\" + GetAppDirName() + "_AnyInstance";
+    return std::wstring(n.begin(), n.end());
+}
 #endif
 
 /// Safeguard: if running from a dev build directory, require HODOS_DEV=1.
