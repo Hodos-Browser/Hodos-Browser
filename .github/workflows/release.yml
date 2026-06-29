@@ -69,6 +69,19 @@ jobs:
           $version = "${{ github.ref_name }}" -replace '^v', ''
           echo "VERSION=$version" >> $env:GITHUB_OUTPUT
           echo "Building version: $version"
+          # Globally-monotonic build number — MUST stay byte-identical to the
+          # build-macos "Get version from tag" formula and the appcast step
+          # (sparkle:version), because the Windows auto-updater's integer
+          # anti-rollback gate (commit 4) compares the feed's build-number
+          # against the value baked into this build via -DAPP_BUILD_NUMBER:
+          #   MAJOR*1000000 + MINOR*10000 + PATCH*100 + (beta N, or 99 for a final)
+          $core = $version.Split('-')[0]
+          $p = $core.Split('.')
+          $maj = [int]$p[0]; $min = [int]$p[1]; $pat = [int]$p[2]
+          if ($version -match '-beta\.([0-9]+)$') { $beta = [int]$Matches[1] } else { $beta = 99 }
+          $buildNumber = $maj * 1000000 + $min * 10000 + $pat * 100 + $beta
+          echo "BUILD_NUMBER=$buildNumber" >> $env:GITHUB_OUTPUT
+          echo "Build number: $buildNumber"
       
       # Download CEF binaries from the cef-binaries release
       - name: Download CEF binaries
@@ -142,7 +155,7 @@ jobs:
         shell: pwsh
         run: |
           cd cef-native
-          cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DAPP_VERSION="${{ steps.version.outputs.VERSION }}"
+          cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DAPP_VERSION="${{ steps.version.outputs.VERSION }}" -DAPP_BUILD_NUMBER="${{ steps.version.outputs.BUILD_NUMBER }}"
       
       # Run the existing build script (created by your dev)
       - name: Build with release script

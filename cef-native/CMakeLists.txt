@@ -54,17 +54,38 @@ message(STATUS "App version: ${APP_VERSION}")
 # integer (build number), separate from the user-visible version string.
 # Sparkle 2's version comparator chokes on non-numeric CFBundleVersion
 # (it silently returns "you're up to date" when comparing versions like
-# "0.3.0-beta.12" vs "0.3.0-beta.13"). Pass APP_BUILD_NUMBER explicitly
-# from CI; otherwise extract from the beta suffix in APP_VERSION; fall
-# back to 0 for dev builds.
+# "0.3.0-beta.12" vs "0.3.0-beta.13"). It is ALSO the comparator the Windows
+# auto-updater's integer anti-rollback gate uses (the appcast bakes this same
+# number; commit 4). CI passes APP_BUILD_NUMBER explicitly (release.yml). The
+# fallback below computes the SAME globally-monotonic formula CI uses
+# (release.yml "Get version from tag"), so local dev builds sit on the same
+# scale as the feed:
+#   MAJOR*1000000 + MINOR*10000 + PATCH*100 + (beta N, or 99 for a final)
 if(NOT DEFINED APP_BUILD_NUMBER)
-    string(REGEX MATCH "-beta\\.([0-9]+)$" _beta_suffix "${APP_VERSION}")
-    if(CMAKE_MATCH_1)
-        set(APP_BUILD_NUMBER "${CMAKE_MATCH_1}")
+    if(APP_VERSION MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)")
+        set(_av_maj "${CMAKE_MATCH_1}")
+        set(_av_min "${CMAKE_MATCH_2}")
+        set(_av_pat "${CMAKE_MATCH_3}")
+        if(APP_VERSION MATCHES "-beta\\.([0-9]+)$")
+            set(_av_beta "${CMAKE_MATCH_1}")
+        else()
+            set(_av_beta "99")  # a final outranks all its betas
+        endif()
+        math(EXPR APP_BUILD_NUMBER
+             "${_av_maj} * 1000000 + ${_av_min} * 10000 + ${_av_pat} * 100 + ${_av_beta}")
     else()
         set(APP_BUILD_NUMBER "0")
     endif()
 endif()
+# Fail closed at configure time if CI passed an empty/garbage -DAPP_BUILD_NUMBER
+# (an empty-but-defined value would skip the fallback and emit an empty macro →
+# cryptic compile error). Must be a positive integer.
+if(NOT APP_BUILD_NUMBER MATCHES "^[0-9]+$")
+    message(FATAL_ERROR "APP_BUILD_NUMBER must be a positive integer, got: '${APP_BUILD_NUMBER}'")
+endif()
+# Expose to C++ as an integer literal (no quotes): the Windows updater reads it
+# as the "current" build number for its anti-rollback comparison.
+add_definitions(-DAPP_BUILD_NUMBER=${APP_BUILD_NUMBER})
 message(STATUS "App build number (CFBundleVersion): ${APP_BUILD_NUMBER}")
 
 # macOS-specific settings

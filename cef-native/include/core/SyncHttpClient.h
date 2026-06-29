@@ -5,7 +5,9 @@
 
 // Cross-platform synchronous HTTP client.
 // Windows: WinHTTP, macOS: libcurl.
-// Designed for internal localhost requests to wallet (31301) and adblock (31302) backends.
+// Originally for internal localhost requests to wallet (31301) and adblock
+// (31302) backends; also supports external https:// hosts (auto-updater appcast
+// + installer fetch) with redirect following.
 
 struct HttpResponse {
     int statusCode = 0;
@@ -39,6 +41,19 @@ public:
                              const std::string& body,
                              const std::map<std::string, std::string>& headers,
                              int timeoutMs = 5000);
+
+    // Stream a (potentially large, binary) GET response straight to a file on
+    // disk instead of buffering it in memory. The auto-updater uses this to
+    // fetch the installer (~95 MB) without holding it all in a std::string.
+    // Supports https:// + redirects. Writes to "<destPath>.partial" and renames
+    // it onto destPath ONLY after a COMPLETE 2xx transfer (Content-Length match
+    // when the server provides one). A non-2xx, truncated, or transport failure
+    // leaves destPath untouched (a previously-staged good file survives) and
+    // removes the partial. Returns statusCode + success; body stays empty.
+    // Default timeout is generous (120 s) for a large transfer.
+    static HttpResponse Download(const std::string& url,
+                                 const std::string& destPath,
+                                 int timeoutMs = 120000);
 
     // Generic method dispatch (GET / POST / DELETE / PUT / etc.) for callers
     // that need a verb the typed methods above don't cover. The wallet IPC
