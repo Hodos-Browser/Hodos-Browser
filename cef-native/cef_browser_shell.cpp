@@ -47,6 +47,9 @@
 #include "include/core/WindowManager.h"
 #include "include/core/AutoUpdater.h"
 #include "include/core/UpdateStager.h"
+#include "include/core/UpdateApply.h"
+#include "include/core/UpdateFs.h"
+#include "include/core/UpdateLock.h"
 #include "include/core/LayoutHelpers.h"
 #include "include/core/Logger.h"
 #include <shellapi.h>
@@ -3846,23 +3849,57 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
              (res.showPicker ? " [picker-pending]" : ""));
     g_picker_mode = res.showPicker;
 
-    // 6a (WINDOWS_AUTOUPDATE_PLAN §D.0 / OD-C): honor a fleet-wide update.lock at
-    // launch. The silent-apply supervisor (commit 6b) holds this lock for the entire
-    // install -> relaunch -> health window; while it exists, EVERY normal launch
-    // (profile OR picker) defers so it can never run a half-written {app}. Presence
-    // is the signal, so GetFileAttributes (not an exclusive open) is correct here.
-    // **INERT in 6a** — nothing creates the lock yet, so this never fires. The
-    // supervisor's own health-probe relaunch runs WHILE the lock is held and MUST
-    // bypass this; that bypass (recommended: detect via the staged marker, arg-free)
-    // plus a staleness-guarded lock format are 6b/6c work and MUST be wired BEFORE
-    // any code creates a lock. Until then the seam below is constant-false.
+    // 6a/6c.1 (WINDOWS_AUTOUPDATE_PLAN §D.0 / OD-C): honor a fleet-wide update.lock
+    // at launch. The silent-apply supervisor (commit 6b) holds this lock for the
+    // entire install -> relaunch -> health window; while a LIVE owner holds it, EVERY
+    // normal launch (profile OR picker) defers so it can never run a half-written
+    // {app}. **6c.1 makes the probe REAL:** liveness is an exclusive-open probe
+    // (UpdateLockIsHeld), not file presence — so a power-loss remnant (an ownerless
+    // file) opens fine and does NOT brick launches (V3-5/V3-6). Still INERT until 6c.2
+    // creates a lock. The supervisor's own health-probe relaunch runs WHILE the lock
+    // is held and MUST bypass this; the bypass is DOUBLE-GATED (V3-5/N1): the
+    // --post-update-health-probe arg AND a real armed apply.json (phase awaiting-
+    // health). A stray/forged arg with no matching apply is ignored (defers if locked).
     {
-        const std::string lockPath = AppPaths::GetUpdateLockPath();
-        const bool lockPresent = !lockPath.empty() &&
-            GetFileAttributesA(lockPath.c_str()) != INVALID_FILE_ATTRIBUTES;
-        const bool postUpdateHealthProbe = false;  // 6c: detect via staged marker
-        if (lockPresent && !postUpdateHealthProbe) {
-            LOG_INFO("Update in progress (update.lock present) — deferring this launch");
+        // UTF-8 (AppPaths) -> wide; a non-ASCII %LOCALAPPDATA% must not desync.
+        auto widenUtf8 = [](const std::string& s) -> std::wstring {
+            if (s.empty()) return L"";
+            int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+            std::wstring w(n > 0 ? n - 1 : 0, L'\0');
+            if (n > 0) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &w[0], n);
+            return w;
+        };
+
+        // Is this the supervisor's health-probe relaunch? DOUBLE-GATED (V3-5/N1):
+        // the --post-update-health-probe arg AND a real armed apply.json. A stray or
+        // forged arg with no matching armed apply is ignored (so it still defers if
+        // the lock is held).
+        bool healthProbe = false;
+        {
+            int pargc = 0;
+            LPWSTR* pargv = CommandLineToArgvW(GetCommandLineW(), &pargc);
+            if (pargv) {
+                for (int i = 1; i < pargc; ++i) {
+                    if (wcscmp(pargv[i], L"--post-update-health-probe") == 0) { healthProbe = true; break; }
+                }
+                LocalFree(pargv);
+            }
+            if (healthProbe) {
+                const std::string applyPath = AppPaths::GetPendingUpdateDir().empty()
+                    ? "" : AppPaths::GetPendingUpdateDir() + "\\apply.json";
+                std::string content;
+                hodos::ApplyRecord ar;
+                const bool armed = !applyPath.empty() &&
+                    hodos::updatefs::ReadFileAll(widenUtf8(applyPath), content) &&
+                    hodos::ParseApplyRecord(content, ar) &&
+                    ar.phase == hodos::ApplyPhase::AwaitingHealth;
+                if (!armed) healthProbe = false;
+            }
+        }
+
+        const std::wstring lockPathW = widenUtf8(AppPaths::GetUpdateLockPath());
+        if (!lockPathW.empty() && hodos::UpdateLockIsHeld(lockPathW) && !healthProbe) {
+            LOG_INFO("Update in progress (update.lock held by a live owner) — deferring this launch");
             return 0;
         }
     }
