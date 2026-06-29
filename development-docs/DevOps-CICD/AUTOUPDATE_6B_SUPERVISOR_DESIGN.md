@@ -85,9 +85,32 @@ defects, plus HIGH lock/eligibility gaps. v3 corrections (all mechanical / factu
 - **V3-16 (was N8, accepted) — RunOnce fires at next LOGON.** For the `installing`-crash Frankenstein case the in-browser tripwire can't run, so recovery waits for logon — but a user whose browser won't open will reboot/re-login (= a logon) → RunOnce fires. Adequate; a boot-triggered Scheduled Task is a possible future hardening, not now (owner chose RunOnce).
 - **DOC — mark §3 (pid+heartbeat JSON lock) and §4's `--bootstrap-pid`/"no inherited handles" as SUPERSEDED by §9** (was N5/N6 — coder-traps); fix the ~40-line-stale citations.
 
-**Disposition:** B3/M2/H3/H6 CLOSED. B1/B2/B4/B5/H2/M1/M3/M7/H7 → CLOSED once V3-1..V3-15 land. The money-DB
-joint (V3-1..V3-4) is the part to get exactly right; **a focused third micro-review on Phase A wallet-quiesce/
-snapshot + Phase C restore-ordering is warranted after the v3 rewrite, before code.** No new owner decisions.
+**Disposition:** B3/M2/H3/H6 CLOSED. B1/B2/B4/B5/H2/M1/M3/M7/H7 → CLOSED once V3-1..V3-15 land. No new owner
+decisions.
+
+### 🔬 THIRD-PASS (money-DB joint micro-review, 2026-06-29) — 1 HIGH found + fixed; joint now sound
+A surgical skeptic verified V3-1..V3-4 against the real `rust-wallet` code. Confirmed: wallet-dead proof is
+sound as an AND (`:31301` unbound AND `hodos-wallet.exe` exclusively openable); raw `db`+`-wal` snapshot (no
+checkpoint, no `-shm`) is correct; I9 DB-first holds. **Found one HIGH the first two rounds missed:**
+- **V3-3a (HIGH, FIXED) — stale `-wal`/`-shm` at the restore target corrupts the rolled-back funded DB.** The
+  unhealthy new wallet is `taskkill /F`'d (Phase C.1) leaving a DIRTY NEW `-wal`+`-shm` with uncheckpointed
+  NEW-schema frames. Restoring only `wallet.db` leaves that NEW `-wal`, which SQLite's checksum-only WAL
+  recovery (no db-identity binding) replays onto the OLD db → corruption on the PRIMARY rollback path. **Fix
+  (applied):** restore the WHOLE `{db,-wal,-shm}` set — DELETE target `-wal`+`-shm` first, copy `db`, copy
+  `-wal` only if present (Phase C.2 / Watchdog `--resume` / I9 updated).
+- **MED (FIXED) — `--resume` re-arms RunOnce at entry** (cleared only on success), so a 2nd power-loss during
+  recovery re-fires.
+- **MED ×2 (FIXED) — doc-trap strikes:** §2 step 6 (manifest "not known yet") and §4 arg-list
+  (`--bootstrap-pid`/"no inherited handles") struck inline → route to §9.
+- **LOW (grounded) — migration premise:** the old binary does NOT refuse a newer DB; shipped migrations are
+  additive, so the snapshot is conservative insurance vs a future destructive migration (kept; zero wallet
+  change). See the §8 premise note.
+- **MUST-TEST (added):** hard-kill (not graceful) the new wallet MID-migration → roll back → assert the
+  old-binary open is clean and the balance reconciles (exercises V3-3a). Plus "foreign wallet on 31301 from a
+  non-`{app}` path" (locks the wallet-dead AND-proof).
+
+**Verdict: the money-DB joint is now sound; the design is CODE-READY pending the owner's go.** (V3-1..V3-16 +
+V3-3a are all design-level; the remaining risk is implementation fidelity + the soak/MUST-TEST matrix.)
 
 ---
 
@@ -103,29 +126,24 @@ next launch" design can't recover the exact worst case (the new exe is the thing
 
 ## 1. Cast of processes & artifacts
 
+> ⚠️ **PATHS HERE ARE SUPERSEDED by §9 v3's "Paths & the working area" block** (this v1 diagram had the money
+> DB and the working area wrongly under `{app}`). Use §9. Kept for the process cast only.
+
 ```
 {app} = %LOCALAPPDATA%\HodosBrowser\               (Inno install dir, per-user, no UAC)
-  HodosBrowser.exe, hodos-wallet.exe, hodos-adblock.exe, libcef.dll, *.pak, ...
-
-%LOCALAPPDATA%\HodosBrowser\
-  update.lock                  (presence = "apply in progress"; carries supervisorPid+ts; staleness-guarded)
-  update-state.json            (GLOBAL, cross-profile: highWaterBuildNumber, signerThumbprint, paused, lastFailure)
-  pending\
-    HodosBrowser-<v>-setup.exe (commit-4 staged, verified installer)
-    update-info.json           (commit-4 StagedUpdateMarker: buildNumber, sha256, edSignature, signer, thumbprint)
-    apply.json                 (NEW 6b: the "armed, awaiting health" record the new browser + watchdog read)
-    rollback\                  (NEW 6b: full pre-apply {app} backup + manifest.json content-hashes)
-    helper\hodos-update-helper.exe  (NEW 6b: copy of the helper OUT of {app} so the installer can't lock/replace it)
+  HodosBrowser.exe, hodos-wallet.exe, hodos-adblock.exe, hodos-update-helper.exe, libcef.dll, *.pak, ...
+money DB = %APPDATA%\HodosBrowser\wallet\wallet.db (+ -wal)   ← ROAMING, NOT under {app} (V3-1)
+working area = %LOCALAPPDATA%\HodosBrowser\update\ {update.lock, update-state.json, pending\, pending\rollback\, pending\helper\}  (V3-10; see §9)
 
 Processes, in order:
-  (P0) bootstrap browser  = the cold-boot HodosBrowser.exe that runs MaybeApplyStagedUpdate (6c) at :3922
+  (P0) bootstrap browser  = the cold-boot HodosBrowser.exe that runs MaybeApplyStagedUpdate (6c) at :3925
   (P1) hodos-update-helper.exe = the supervisor (6b) — spawned by P0, OUTLIVES it
   (P2) HodosBrowser-<v>-setup.exe = Inno installer /VERYSILENT (spawned by P1)
   (P3) new browser        = {app}\HodosBrowser.exe after install, launched by P1 with the health-probe arg
 ```
 
-**Key timing fact (verified in code):** 6c runs at `cef_browser_shell.cpp:~3922`, BEFORE
-`LaunchWalletProcess`/`LaunchAdblockProcess` (~3937-3938) and BEFORE `AcquireProfileLock` (~3924). So **P0
+**Key timing fact (verified in code):** 6c runs at `cef_browser_shell.cpp:~3925`, BEFORE
+`LaunchWalletProcess`/`LaunchAdblockProcess` (~3978-3979) and BEFORE `AcquireProfileLock` (~3965). So **P0
 has no children and holds no `profile.lock`** — the only `{app}` files P0 image-locks are
 `HodosBrowser.exe` + `libcef.dll` + paks (itself). Job objects don't exist yet, so P1 is spawned into **no
 job** (the revision's "spawn helper not in any job" is satisfied for free; add `CREATE_BREAKAWAY_FROM_JOB`
@@ -156,11 +174,10 @@ paused (`update-state.json`), and a verified `pending\update-info.json` + matchi
    libcef are free (no orphaned children). `HodosBrowser.exe` self-lock is expected; the helper waits for
    P0's PID to release it. If a non-self exe stays locked past the cap with zero siblings → truly-orphaned
    child → D.5 orphan-only rename path (out of 6b core; documented).
-6. **Take FULL `{app}` rollback backup (D.3):** copy all three exes + libcef.dll + *.pak + locales + frontend
-   to `pending\rollback\`, write `rollback\manifest.json` = sha256 of every CURRENT `{app}` file (the
-   "known-good old tree"). Also stamp the EXPECTED-new manifest is NOT known yet (Inno decides) → the D.6
-   integrity check validates the new tree by Authenticode + the installer's own file list, not a pre-known
-   hash (see §5).
+6. **Take FULL `{app}` rollback backup (D.3):** ~~copy all three exes + libcef.dll + *.pak + locales + frontend~~
+   ~~Also stamp the EXPECTED-new manifest is NOT known yet (Inno decides)~~ **← BOTH CLAIMS REVERSED by §9 v3:
+   back up the COMPLETE `[Files]` closure incl. the helper exe (V3-9/B5), and the expected-new manifest IS
+   build-time-known + EdDSA-signed (V3-8/B4). Follow §9 Phase A.5–A.7, NOT this line.**
 7. **Copy the helper OUT:** `{app}\hodos-update-helper.exe` → `pending\helper\hodos-update-helper.exe` (so the
    installer can freely replace `{app}\hodos-update-helper.exe`).
 8. **Write `pending\apply.json`** = `{schema:1, fromBuild, toBuild, installer, rollbackDir, manifest, stagedAt,
@@ -259,11 +276,13 @@ markers); delete `update.lock`; `_exit(0)`. The healthy new browser (P3) is alre
 - **Why low-churn:** it must keep working across browser versions, so it stays minimal and its on-disk copy
   (`pending\helper\`) is the one that runs an apply (taken from the CURRENTLY-installed, known-good build —
   NOT the new one, so a broken new helper can't break recovery).
-- **Spawned NOT in any job** (CREATE_BREAKAWAY_FROM_JOB; at :3922 no jobs exist anyway), DETACHED, no
-  inherited handles. Uses `_exit(0)`.
-- **Args (one source of truth, passed by 6c):** `--app-dir`, `--pending-dir`, `--bootstrap-pid`,
-  `--installer`, `--from-build`, `--to-build`, `--health-timeout`. All paths are absolute, non-ASCII-safe
-  (wide). Everything else (marker, manifest, state) it reads from files.
+- **Spawned NOT in any job** (CREATE_BREAKAWAY_FROM_JOB; at :3925 no jobs exist anyway), DETACHED. ~~no
+  inherited handles~~ **← SUPERSEDED: it DOES inherit exactly `{update.lock handle, bootstrap process handle}`
+  via `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` (§9 step 13 / V3-11).** Uses `_exit(0)`.
+- **Args** ~~`--bootstrap-pid`~~ **← SUPERSEDED by §9 step 13: pass `--bootstrap-handle` (an inherited HANDLE,
+  not a PID — PID-reuse, V3-11).** Per §9: `--app-dir`, `--update-dir`, **`--bootstrap-handle`**, `--installer`,
+  `--from-build`, `--to-build`, `--health-timeout`. All paths absolute + wide (non-ASCII-safe). Everything else
+  (marker, manifest, state) it reads from files.
 - **Logging:** its own `pending\helper\helper.log` (the browser's Logger isn't available); never writes
   inside `{app}` (being replaced).
 
@@ -320,6 +339,14 @@ NEXT cold-boot browser must detect the half-done state and self-heal **without**
 - **I6.** The failed build's build-number never becomes the high-water floor (only a HEALTHY apply advances
   it), so a known-bad build can be superseded by a fixed one with the same/next number.
 - **I7.** Dev (`HODOS_DEV=1`) is fully inert: no helper, no installer, no lock.
+- **I8 (new, V3-2).** At most ONE live writer on the money DB at any instant — the DB is snapshotted/restored
+  only after the wallet is proven dead (`:31301` unbound + `hodos-wallet.exe` exclusively openable); never two
+  wallets on port 31301.
+- **I9 (new, V3-3 + V3-3a).** No intermediate apply/restore state ever pairs an OLDER `HodosBrowser.exe`/wallet
+  binary with a NEWER-schema money DB **or a NEWER `-wal`/`-shm`**. Restore is DB-first AND replaces the whole
+  `{wallet.db, -wal, -shm}` set (target `-wal`/`-shm` deleted first — a leftover new `-wal` is otherwise
+  replayed onto the old db by checksum-only WAL recovery → corruption); the binary+`libcef.dll` coherent pair
+  swaps last.
 
 ---
 
@@ -351,97 +378,190 @@ you flag one.)
 
 **Owner decisions (2026-06-29): D-B1 = (b) snapshot-and-restore the money DB. D-B2 = per-user RunOnce.**
 
+> **Premise note (3rd-pass, grounded against `rust-wallet/src/database/`):** `migrate()` runs forward-only on
+> every open and an OLD binary opening a NEWER-`user_version` DB does **NOT refuse** (it runs no steps, raises
+> no error); every migration shipped to date is **additive** (`ADD COLUMN … DEFAULT` / `CREATE TABLE IF NOT
+> EXISTS`), so an old binary on a new-schema DB would currently run fine. So the snapshot is **conservative
+> insurance against a future DESTRUCTIVE migration** (DROP/RENAME/NOT-NULL-without-default), not something
+> today's code forces. We keep it (owner choice) BECAUSE it needs **zero wallet-money-path change** (CLAUDE.md
+> #2). A cheaper future alternative — keep migrations additive + add an explicit "refuse + fail-to-notify if
+> `MAX(version)` > known" guard in the wallet — would remove the DB copy but IS a wallet change; not now.
+
 ---
 
-## 9. REVISED DESIGN v2 (AUTHORITATIVE — supersedes §2/§3/§5 above; folds in the verdict + owner decisions)
+## 9. REVISED DESIGN v3 (AUTHORITATIVE — supersedes §2/§3/§5 AND the v2 text formerly here; folds in BOTH review rounds + owner decisions)
 
-**Two-handle model (B3).** `update.lock` is an **exclusive (`share=0`, `FILE_FLAG_DELETE_ON_CLOSE`) handle** =
-the *liveness* token. `apply.json` (atomic temp+`MoveFileEx` writes) = the durable *transaction state*.
-Liveness is an OS guarantee (can you exclusively open `update.lock`?), never a pid/heartbeat guess. The 6a
-honor-at-launch becomes an **exclusive-open probe** (`SHARING_VIOLATION` ⇒ live apply ⇒ defer; opens or
-`NOT_FOUND` ⇒ no live apply ⇒ continue, and if `apply.json` shows an unfinished txn, run the watchdog).
+> v3 incorporates the 2nd-pass verdict (V3-1..V3-16). It supersedes §2/§3/§5 and the earlier v2 prose. The
+> §3/§4 prose above is SUPERSEDED where it conflicts (pid+heartbeat JSON lock; `--bootstrap-pid`; "no inherited
+> handles") — read §9 v3. **Pending the focused 3rd micro-review on V3-1..V3-4 before code.**
 
-**Global eligibility (H2).** Silent-on/paused/high-water/signerThumbprint live in cross-profile
-`update-state.json` at the `HodosBrowser` root (NOT per-profile settings, which aren't loaded at the seam).
-`signerThumbprint` + anti-rollback floor are **derived by Authenticode-verifying the live `{app}\HodosBrowser.exe`**
-(the signed binary is the trust root; the JSON is only a cache — H5).
+### Paths & the working area (V3-1, V3-10) — pin these exactly
+```
+{app}                = %LOCALAPPDATA%\HodosBrowser\           (Inno install dir; Local; non-roaming)
+money DB             = %APPDATA%\HodosBrowser\wallet\wallet.db (+ -wal)   ← ROAMING, NOT under {app} (V3-1)
+update working area  = %LOCALAPPDATA%\HodosBrowser\update\    ← its OWN subtree, OUTSIDE the {app} backup globs (V3-10)
+    update\update.lock        (zero-byte liveness token; see two-mode model)
+    update\update-state.json  (GLOBAL: schemaVer, silent, paused, highWaterBuild, signerThumbprint, lastFailure, rescanAfterRollback)
+    update\pending\           (staged installer + update-info.json + expected-new-manifest.json[.ed] + apply.json)
+    update\pending\rollback\  ({app} backup + manifest.json + wallet\ DB snapshot)
+    update\pending\helper\    (hodos-update-helper.exe copied out of {app} + helper.log)
+```
+`AppPaths::GetPendingUpdateDir()` (shipped flag-off in commit 4) **repaths to `…\HodosBrowser\update\pending`**;
+add `GetUpdateDir()`/`GetUpdateLockPath()`/`GetUpdateStatePath()` under `update\`. Safe to repath now (unshipped).
+Roaming may be redirected (enterprise) → the money-DB snapshot is a **cross-volume COPY** (fine; slower). The
+§D.5 orphan-RENAME stays Local-only (`{app}` exes) and is unaffected.
+
+**Two-MODE lock (B3 + V3-5/V3-6).** `update.lock` is a zero-byte file used two ways:
+- **OWNER open (bootstrap, supervisor, every `--resume`/watchdog entry):** `CreateFileW(CREATE_ALWAYS,
+  dwShare=0, FILE_FLAG_DELETE_ON_CLOSE, dwDesiredAccess includes DELETE, bInheritHandle=TRUE)`. Holding this
+  handle == "I am the live apply owner." `CREATE_ALWAYS` re-arms a power-loss remnant; a 2nd owner open gets
+  `SHARING_VIOLATION` ⇒ bail. **Every entry point's FIRST action is the owner-open-or-bail (V3-6)** — this is
+  the single-flight (after a crash the `DELETE_ON_CLOSE` lock is already gone, so the file's mere presence is
+  NOT the guard; the exclusive *open* is).
+- **PROBE open (the 6a honor-at-launch on a NORMAL launch):** `CreateFileW(OPEN_EXISTING, GENERIC_READ,
+  dwShare=READ|WRITE|DELETE, NO DELETE_ON_CLOSE)`, close immediately. `SHARING_VIOLATION` ⇒ a live owner holds
+  it ⇒ defer (show the "updating…" splash on persistent defer). Opens / `NOT_FOUND` ⇒ no live owner ⇒ proceed
+  (and if `apply.json` shows an unfinished txn, run the watchdog). Permissive share so two concurrent probes
+  don't false-defer on each other; never `DELETE_ON_CLOSE` on a probe (would delete the owner's lock). This
+  REPLACES the 6a `GetFileAttributes` presence check (co-lands with the first lock-creating code).
+
+`apply.json` (atomic temp+`MoveFileEx` writes — V3 / M7) = the durable *transaction state* the watchdog reads.
+
+**Global eligibility (H2 + V3-7).** `silent`/`paused`/`highWaterBuild`/`signerThumbprint` live in cross-profile
+`update\update-state.json` (NOT per-profile settings — unloaded at the seam). **Missing file ⇒ NOT eligible
+(fail-safe-off).** A normal post-`SettingsManager` startup MIRRORS `silent=(autoUpdateMode=="silent")` into the
+global file (the supervisor itself only writes highWater/thumbprint/paused/lastFailure). `signerThumbprint` +
+the anti-rollback floor are **derived by Authenticode-verifying the live `{app}\HodosBrowser.exe`** (the signed
+binary is the trust root; the JSON is a non-authoritative cache — H5), so a user editing the JSON can't forge
+continuity or the rollback floor.
 
 ### Phase A — bootstrap (`MaybeApplyStagedUpdate()`, inserted BEFORE `SingleInstance::TryAcquireInstance` `:3925`, inside `!g_picker_mode`)
-Eligible only if: `!g_picker_mode`, `HODOS_SILENT_AUTOUPDATE` compiled in, `update-state.json` silent && !paused,
-a verified `pending\update-info.json` + installer exist. (Note: this seam is before `SettingsManager::Initialize`
-— that's WHY eligibility reads the global file, H2.)
-1. **LOCK-FIRST (B3):** open `update.lock` exclusive + `DELETE_ON_CLOSE`, **inheritable**. If it
-   `SHARING_VIOLATION`s → another apply live → continue normal startup. Hold the handle.
-2. **D.0 all-instances-gone (re-ordered AFTER the lock):** Toolhelp enumerate, count==1 by **full module path
-   under prod `{app}`** excluding self (M6); picker `.picker` pipe counts as a sibling (OD-D). Any sibling →
-   close `update.lock` (auto-deletes) → continue normal startup (safe defer). *(The lock now precedes the
-   count, so a sibling either appears in this snapshot or hit the lock at its own honor probe — TOCTOU closed.)*
-3. **Apply-time verify (B-gates, all fail-closed):** re-hash installer == `marker.sha256`; **EdDSA over the full
-   raw installer bytes** (`Sha256File` from 0, M8) with the embedded key; **Authenticode** (`WinVerifyTrust` +
-   pin signer CN+thumbprint == live-exe thumbprint); **anti-rollback** `marker.buildNumber > max(live-exe
-   VERSIONINFO, update-state.highWater)` (H5); **kill-list (H4):** fetch signed kill-list, reject if
-   `buildNumber` listed (fail-OPEN on network-down); **signer-continuity (I5):** `marker.signerThumbprint !=
-   live-exe thumbprint` → degrade to notify (no silent apply). Any failure → close lock, keep old, retry/notify.
-4. **Backup the FULL `[Files]` closure + the money DB (B5+B1):** copy the exact `hodos-browser.iss [Files]`
-   set (`*.exe *.dll *.bin *.dat *.pak *.json` + `locales\` + `frontend\`) to `pending\rollback\`; WAL-
-   checkpoint(TRUNCATE) then copy `wallet.db`(+`-wal`/`-shm`) to `pending\rollback\wallet\`. Write
-   `rollback\manifest.json` (sha256 of every backed-up file). **Verify the backup complete (M3):** free-space
-   precheck ≥2× tree; re-hash `rollback\` vs manifest; any miss → close lock, abort (no arm).
-5. **Copy helper OUT:** `{app}\hodos-update-helper.exe` → `pending\helper\`.
-6. **Arm recovery (B2):** set HKCU `RunOnce\HodosUpdateResume = "pending\helper\hodos-update-helper.exe --resume"`.
-7. **`apply.json` (atomic) → `state="armed"`** with fromBuild/toBuild/paths/manifest.
-8. **Close the instance mutex** (so Inno AppMutex won't see P0).
-9. **Spawn helper** `pending\helper\hodos-update-helper.exe <args>` with an **inherited** `update.lock` handle
-   (B3) + an **inherited bootstrap process handle** (M1, not a PID) + `CREATE_NO_WINDOW|DETACHED_PROCESS`;
-   `CREATE_BREAKAWAY_FROM_JOB` **with ACCESS_DENIED→retry-without (M2)**. **Check the return**; on irrecoverable
-   spawn failure → clear RunOnce, close lock (auto-delete), continue normal startup (M2).
-10. `fflush`+Logger-flush the forensic lines (M9), then **`_exit(0)`** (launches/holds nothing).
+Eligible only if: `!g_picker_mode`, `HODOS_SILENT_AUTOUPDATE` compiled in, `update-state.json` exists &&
+`silent` && `!paused`, a verified `pending\update-info.json` + installer + signed `expected-new-manifest`
+exist. (This seam is before `SettingsManager::Initialize` `:3983` — that's WHY eligibility reads the global
+file, H2/V3-7.) Stale line cites updated: honor-probe `:3859`, mutex `:3877`, `TryAcquireInstance` `:3925`,
+`StartListenerThread` `:3961`, `AcquireProfileLock` `:3965`.
+1. **LOCK-FIRST, owner-open-or-bail (B3/V3-5/V3-6):** `CreateFileW(update.lock, CREATE_ALWAYS, share=0,
+   DELETE_ON_CLOSE, access incl. DELETE, inheritable)`. `SHARING_VIOLATION` → another apply live → continue
+   normal startup. Hold the handle.
+2. **D.0 all-instances-gone (AFTER the lock):** Toolhelp enumerate, count==1 by **full module path under prod
+   `{app}`** excluding self (M6/V3); the picker `.picker` pipe counts as a sibling (OD-D). Any sibling → close
+   `update.lock` → continue normal startup (safe defer). *(Lock precedes the count, so a sibling either appears
+   here or hit the lock at its own probe — TOCTOU closed.)*
+3. **Prove the WALLET is DEAD (V3-2, the F1 fix — BEFORE any snapshot):** the wallet is a separate job-bound
+   process; D.0 only counts `HodosBrowser.exe`. Confirm `:31301` is NOT bound AND exclusive-open
+   `{app}\hodos-wallet.exe` succeeds (process-dead proxy; a share-mode probe on `wallet.db` is useless — SQLite
+   uses byte-range locks). If a prior wallet lingers → graceful POST `:31301/shutdown` (hard ≤2s) + bounded
+   wait; still alive → close lock, DEFER (never snapshot a live-writer DB; never run two wallets on 31301).
+4. **Apply-time verify (B-gates, all fail-closed):** re-hash installer == `marker.sha256`; **EdDSA over the
+   full raw installer bytes** (`Sha256File` from 0, M8); **Authenticode** (`WinVerifyTrust`, pin signer CN +
+   thumbprint == live-`{app}\HodosBrowser.exe` thumbprint); **verify the `expected-new-manifest` EdDSA sig with
+   the embedded key (V3-8)**; **anti-rollback** `marker.buildNumber > max(live-exe VERSIONINFO, highWaterBuild)`
+   (H5); **kill-list (H4):** fetch signed kill-list, reject if `buildNumber` listed (fail-OPEN on network-down);
+   **signer-continuity (I5):** `marker.signerThumbprint != live-exe thumbprint` → degrade to notify. Any
+   failure → close lock, keep old, retry/notify.
+5. **Backup the FULL `[Files]` closure (B5/V3) → `pending\rollback\`:** copy the exact `hodos-browser.iss
+   [Files]` closure (the 3 named exes **+ the helper exe (V3-9)** + `*.dll *.bin *.dat *.pak *.json` +
+   `locales\` + `frontend\`), root-level globs only (do NOT recurse into `update\`). Write
+   `rollback\manifest.json` (sha256 of every backed-up file).
+6. **Snapshot the money DB (V3-2/V3-1) → `pending\rollback\wallet\`:** with the wallet proven dead (step 3),
+   **RAW copy `%APPDATA%\HodosBrowser\wallet\wallet.db` + `-wal` ONLY** — **NO `wal_checkpoint`** (no legitimate
+   opener; C++ opening the money DB violates CLAUDE.md #2 + risks a 2nd writer) and **NO `-shm`** (regenerable;
+   stale `-shm` misleads recovery). Restore replays the WAL. Hash both into `manifest.json`.
+7. **Verify the backup COMPLETE before arming (M3/V3-13):** free-space precheck ≈ `installer + 3× tree` on the
+   Local volume; re-hash everything in `rollback\` (+`rollback\wallet\`) vs `manifest.json`; any miss/short →
+   close lock, abort (NO arm). "Rollback verified complete" is a hard precondition.
+8. **Copy helper OUT:** `{app}\hodos-update-helper.exe` → `pending\helper\` (it IS now installed — V3-9).
+9. **`apply.json` (atomic) → `state="preparing"` (V3-14)** with fromBuild/toBuild/paths/manifest — **written
+   BEFORE arming RunOnce** so a power-loss in the next step never leaves a RunOnce with no `apply.json`.
+10. **Arm recovery (B2):** HKCU `RunOnce\HodosUpdateResume = "…\update\pending\helper\hodos-update-helper.exe --resume"`.
+11. **`apply.json` → `state="armed"`** (atomic).
+12. **Close the instance mutex** (so Inno AppMutex won't see P0).
+13. **Spawn helper** with `STARTUPINFOEX` + `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` inheriting EXACTLY
+    `{update.lock handle, an inheritable bootstrap process handle (V3-11, a HANDLE not a PID)}` +
+    `CREATE_NO_WINDOW|DETACHED_PROCESS`; `CREATE_BREAKAWAY_FROM_JOB` **with `ACCESS_DENIED`→retry-without (M2)**.
+    **Check the return**; on irrecoverable spawn failure → clear RunOnce, `apply.json`→`aborted`, close lock
+    (auto-delete), continue normal startup (M2).
+14. `fflush`+Logger-flush the forensic lines (M9), then **`_exit(0)`** (launches/holds nothing).
 
-### Phase B — supervisor (`hodos-update-helper.exe`); CWD set OUTSIDE `pending\`/`{app}` (M5)
-1. **Single-flight by the inherited exclusive `update.lock` handle** (B3) — no second supervisor can hold it.
-2. **Wait for the bootstrap via the inherited HANDLE** (M1, PID-reuse-immune), bounded ~15s; on timeout abort
-   (old install intact), close lock, exit.
-3. **Belt-and-suspenders child-shutdown (E.3) — only after re-confirming no sibling (F6/F9):** re-enumerate;
-   sibling present → abort+rollback, NEVER `taskkill` the shared wallet. Else POST `:31301//:31302/shutdown`
-   (hard ≤2s) + bounded exclusive-open poll; `taskkill /F` children only as last resort on a true orphan.
-4. **`apply.json` → `state="installing"` (M7) BEFORE** spawning the installer. Spawn `…-setup.exe /VERYSILENT
-   /SP- /SUPPRESSMSGBOXES /NORESTART`; **poll-wait** `WaitForSingleObject(P2, 10s)` in a loop so the supervisor
-   stays responsive (no 120s blind block — the old heartbeat conflict is moot under the exclusive-handle model
-   but keep the loop for abort/logging), ~120s cap. Non-zero exit / timeout → ROLLBACK.
-5. **Integrity-gate the new tree against the BUILD-TIME signed `expected-new-manifest.json` (B4):** every
-   installed file's sha256 == manifest AND every PE Authenticode-valid (Marston). Catches half-install skew +
-   truncated `icudtl.dat`/`*.bin`. Any miss → ROLLBACK.
-6. **`apply.json` → `state="awaiting-health"`** (atomic). Launch P3 `{app}\HodosBrowser.exe --post-update-health-probe
-   --profile <P0's resolved profileId>` (H1: explicit profile, forces `!g_picker_mode`).
-7. **Wait ~adaptive (H7, generous) for `apply.json.state=="healthy"`**, also watching P3 PID for crash-loop.
-   Healthy in time → SUCCESS (Phase E). Else → ROLLBACK.
+### Phase B — supervisor (`hodos-update-helper.exe`); CWD set OUTSIDE `update\`/`{app}` (M5/V3)
+1. **Owner-open-or-bail on `update.lock` (V3-6):** the inherited handle is already held from birth (Phase A); as
+   a `--resume` entry instead, do the `CREATE_ALWAYS share=0` owner-open and bail on `SHARING_VIOLATION`. This
+   is the single-flight against any second supervisor / concurrent `--resume`.
+2. **Wait for the bootstrap via the inherited HANDLE** (V3-11, PID-reuse-immune; a dead process object is
+   signaled), bounded ~15s; timeout → abort (old install intact), close lock, exit.
+3. **Wait for the `{app}` images to actually UNLOCK (V3-12):** death ≠ unlocked — exclusive-open-poll
+   `{app}\HodosBrowser.exe` + `libcef.dll` until free (bounded), so the installer doesn't fail on a still-mapped
+   image.
+4. **Belt-and-suspenders child-shutdown (E.3) — only after RE-confirming no sibling (F6/F9):** re-enumerate
+   `HodosBrowser.exe`; **sibling present → ABORT (do NOT install, do NOT taskkill the shared wallet)**, close
+   lock, exit (next boot retries). Else POST `:31301//:31302/shutdown` (hard ≤2s) + bounded exclusive-open poll;
+   `taskkill /F` children only as last resort on a true orphan.
+5. **`apply.json` → `state="installing"` (M7) BEFORE** spawning the installer (so power-loss mid-copy is
+   classified as "installing" → restore, never "armed" → clean+boot-Frankenstein). Spawn `…-setup.exe
+   /VERYSILENT /SP- /SUPPRESSMSGBOXES /NORESTART`; **poll-wait** `WaitForSingleObject(P2, 10s)` in a loop
+   (responsive for abort/logging), ~120s cap. Non-zero exit / timeout → ROLLBACK.
+6. **Integrity-gate the new tree against the verified `expected-new-manifest` (B4/V3-8):** every installed
+   file's sha256 == manifest AND every PE Authenticode-valid (Marston). Catches half-install version-skew +
+   truncated `icudtl.dat`/`*.bin` (data files aren't PE-signed, so the hash is the only check). Any miss → ROLLBACK.
+7. **`apply.json` → `state="awaiting-health"`** (atomic). Launch P3 `{app}\HodosBrowser.exe
+   --post-update-health-probe --profile <P0's resolved profileId>` (H1: explicit profile, forces `!g_picker_mode`).
+8. **Wait ~adaptive/generous (H7/V3-15) for `apply.json.state=="healthy"`**, crediting the wallet's
+   "alive-but-migrating" heartbeat so a slow large-funded-DB migration on a GOOD build doesn't false-timeout;
+   also watch P3 for crash-loop. Healthy → SUCCESS (Phase E). Else → ROLLBACK.
 
-### Phase C — ROLLBACK (crash-atomic; B2/H3/H6)
+### Phase C — ROLLBACK (crash-atomic, DB-FIRST; B2/H3/H6/V3-3)
 1. **Graceful-first kill of P3 (H6):** POST P3's `:31301//:31302/shutdown` (hard ≤2s) + bounded wait, THEN
-   `taskkill /F /T <P3>` (tree — H3, kills CEF render/GPU subprocs too). **Then exclusive-open-poll
-   `HodosBrowser.exe`+`libcef.dll`+3 exes for ACTUAL unlock** (death ≠ unlocked, H3).
-2. **Crash-atomic restore (B2):** stage `rollback\` into `{app}\.restore-tmp\`, swap per file via
-   `ReplaceFile`/`MoveFileEx`, **`HodosBrowser.exe`+`libcef.dll` coherent pair LAST**; restore the money DB
-   from `rollback\wallet\` (B1); restore `{app}\hodos-update-helper.exe`. Verify each vs `manifest.json`.
-3. `update-state.json`: `paused=true`, `lastFailure={toBuild,reason,ts}`; **do NOT advance highWater** (I6).
-4. Clear HKCU `RunOnce`. Relaunch the OLD `{app}\HodosBrowser.exe` (no probe arg). Notify flag for the banner.
+   `taskkill /F /T <P3>` (TREE — H3, kills CEF render/GPU subprocs that hold `libcef.dll`/`*.pak`). **Then
+   exclusive-open-poll `HodosBrowser.exe`+`libcef.dll`+the 3 exes for ACTUAL unlock** (death ≠ unlocked, H3).
+2. **Crash-atomic restore — MONEY DB FIRST, as a FULL SET (V3-3, the I9 fix + V3-3a, the 3rd-pass HIGH fix):**
+   restore the money DB to `%APPDATA%\HodosBrowser\wallet\` **BEFORE** the binaries (so no intermediate state
+   pairs an OLD binary with a NEWER-schema DB). **CRITICAL — restore the WHOLE `{wallet.db, -wal, -shm}` set,
+   not just `wallet.db`:** a hung/crash-looped new wallet (the build being rolled back) was `taskkill /F`'d
+   (Phase C.1) and left a DIRTY NEW `-wal`+`-shm` with uncheckpointed NEW-schema frames. SQLite's WAL recovery
+   validates the `-wal` by its OWN header salt/per-frame checksums — it has **no reference to the db file's
+   identity** — so a leftover NEW `-wal` would be **replayed on top of the restored OLD `wallet.db` → funded-DB
+   corruption** on the *primary* rollback path. So: **(i) DELETE the target `wallet.db-wal` AND `wallet.db-shm`
+   first; (ii) copy snapshot `wallet.db`; (iii) copy snapshot `-wal` ONLY IF present** (after a graceful death
+   the snapshot is just `wallet.db` with no `-wal`, per the checkpoint-TRUNCATE in `WALLET_GRACEFUL_EXIT_SPEC`;
+   the `-wal` matters only for the hard-kill snapshot case). THEN stage `rollback\` into `{app}\.restore-tmp\`
+   and swap binaries per file via `ReplaceFile`/`MoveFileEx`, **`HodosBrowser.exe`+`libcef.dll` coherent pair
+   LAST**; restore `{app}\hodos-update-helper.exe`. Verify every restored file vs `manifest.json`. Fully
+   idempotent (delete-`-wal`/`-shm` + re-copy) so a `--resume` re-run is safe.
+3. `update-state.json`: `paused=true`, `lastFailure={toBuild,reason,ts}`, **`rescanAfterRollback=true` (V3-4)**
+   (the old wallet rescans on-chain to recover any tx received during the discarded health window); **do NOT
+   advance highWater** (I6).
+4. Clear HKCU `RunOnce`; `apply.json`→`rolledback`. Relaunch the OLD `{app}\HodosBrowser.exe` (no probe arg).
+   Notify flag for the banner.
 5. **Close `update.lock`** (auto-deletes). `_exit(0)`. (Leave `pending\` for forensics; next healthy boot cleans.)
 
 ### Phase D — new browser first-run health (6d, in `HodosBrowser.exe`)
 Launched with `--post-update-health-probe` AND `apply.json.state=="awaiting-health"` for the just-installed
-build AND `!g_picker_mode` (double/triple-gate). Bypass the `update.lock` honor; run normal startup; AFTER
+build AND `!g_picker_mode` (triple-gate). Bypass the `update.lock` honor; run normal startup; AFTER
 `profile.lock` acquired + both children pass **fast local `/health` (port bound + DB openable — NOT full
-recovery/filter-list, H7)** + own version == `apply.json.toBuild`, **atomically** set `apply.json.state="healthy"`.
-Probe arg without a matching armed `apply.json` ⇒ ignore arg, behave normally (defends a stray/forged arg).
+recovery / adblock filter-list, H7)** + own version == `apply.json.toBuild`, **atomically** set
+`apply.json.state="healthy"`. The new wallet emits the "alive-but-migrating" heartbeat (V3-15) while migrating
+so the supervisor doesn't false-rollback a slow GOOD build. Probe arg without a matching armed `apply.json` ⇒
+ignore arg, behave normally (defends a stray/forged arg).
 
 ### Phase E — SUCCESS
-Supervisor: advance `update-state.json.highWater=toBuild`, `signerThumbprint`, `paused=false`; clear HKCU
-`RunOnce`; delete `pending\` **but not its own running image** — delegate `pending\` removal to the healthy P3
-(runs from `{app}`) or a detached `cmd /c` after exit (M5); close `update.lock`; `_exit(0)`.
+Supervisor: advance `update-state.json.highWaterBuild=toBuild`, `signerThumbprint`, `paused=false`,
+`apply.json`→`healthy`; clear HKCU `RunOnce`; delete `pending\` **but not its own running image** — set CWD
+outside `update\` (M5) and delegate `pending\` removal to the healthy P3 (runs from `{app}`) or a detached
+`cmd /c <wait> & rmdir /s /q` after exit; close `update.lock`; `_exit(0)`.
 
-### Watchdog / `--resume` (B2; the RunOnce target + the next-boot in-browser check)
-The **RunOnce** fires `helper --resume` at next logon **independent of the browser** (closes B2's circular
-brick). `--resume` reads `apply.json`: `installing` or `awaiting-health` (+ no `healthy`) ⇒ kill any stray P3
-(graceful-first), **crash-atomic restore from `rollback\`+`rollback\wallet\`**, pause, relaunch old; `armed`
-with integrity OK ⇒ clean; `healthy` ⇒ finish success cleanup. Single-flight via the exclusive `update.lock`.
-The in-browser check stays as a SECONDARY tripwire but is no longer the sole recovery path.
+### Watchdog / `--resume` (B2; the browser-independent RunOnce target + a secondary in-browser tripwire)
+**RunOnce** fires `helper --resume` at next logon **independent of the browser** (closes B2's circular brick;
+a user whose browser won't open reboots → logon → `--resume` fires — adequate per V3-16). `--resume`:
+**(1) owner-open `update.lock` or bail (V3-6); (2) RE-ARM RunOnce immediately (3rd-pass MED fix)** — RunOnce
+self-deletes when it fires, so a second power-loss DURING recovery (after DB restored, before binaries) would
+leave a non-booting funded install with no auto-recovery (the in-browser tripwire can't run on the broken
+image). Re-arming first, and clearing it only on confirmed `healthy`/clean success, makes an interrupted
+recovery re-fire at next logon. THEN read `apply.json`:
+- `preparing` / `aborted` / **absent or corrupt (V3-14)** ⇒ clear RunOnce, clean any partial `pending\`, no-op.
+- `installing` / `awaiting-health` (no `healthy`) ⇒ kill any stray P3 (graceful-first), **DB-first crash-atomic
+  restore of the WHOLE `{db,-wal,-shm}` set (delete target `-wal`/`-shm` first, V3-3a)** (Phase C), pause,
+  relaunch old, then clear RunOnce.
+- `armed` with `{app}` integrity OK (installer never ran) ⇒ clean `pending\`, clear RunOnce.
+- `healthy` ⇒ finish the Phase E success cleanup, clear RunOnce.
+All branches idempotent. The in-browser check stays a SECONDARY tripwire, no longer the sole recovery path.
