@@ -50,6 +50,13 @@ def generate_appcast(args):
         ET.SubElement(item, 'pubDate').text = pub_date
         ET.SubElement(item, f'{{{SPARKLE_NS}}}version').text = args.version
         ET.SubElement(item, f'{{{SPARKLE_NS}}}os').text = 'windows'
+        # Hodos-read monotonic integer build number. sparkle:version stays the
+        # full version STRING (WinSparkle 0.8.1 compares it directly), so the
+        # Hodos-driven silent updater reads this dedicated element for its
+        # integer anti-rollback gate. WinSparkle ignores unknown elements.
+        # Keep this number byte-identical to the macOS build-number formula.
+        if args.build_number:
+            ET.SubElement(item, 'hodosBuildNumber').text = str(args.build_number)
 
         enclosure_attrs = {
             'url': args.windows_url,

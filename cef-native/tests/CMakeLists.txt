@@ -35,6 +35,7 @@ add_executable(hodos_tests
     sensitive_cert_fields_test.cpp
     js_string_escape_test.cpp           # F6 — JsStringEscape.h is header-only, no production .cpp
     profile_id_test.cpp                 # F5 — IsValidProfileId is inline in ProfileManager.h, no .cpp
+    update_stager_test.cpp              # commit 4b — auto-updater verify core
 
     # Production sources under test (built into the test exe directly).
     # (Phase 2.6-H removed permission_engine_test / permission_gate_test along
@@ -47,20 +48,30 @@ add_executable(hodos_tests
     # SensitiveCertFields.h is header-only — no production .cpp needed.
     ../src/core/ManifestFetcher.cpp
     ../src/core/SyncHttpClient.cpp
+    ../src/core/UpdateStager.cpp          # commit 4b — production source under test
     ../src/core/Logger.cpp
 )
 
-# SyncHttpClient pulls platform HTTP libs:
+# SyncHttpClient pulls platform HTTP libs; UpdateStager pulls Windows trust libs.
 if(WIN32)
-    target_link_libraries(hodos_tests PRIVATE winhttp)
+    target_link_libraries(hodos_tests PRIVATE winhttp wintrust crypt32)
 elseif(APPLE)
     find_package(CURL REQUIRED)
     target_link_libraries(hodos_tests PRIVATE CURL::libcurl)
 endif()
 
-# nlohmann::json header is needed by ManifestFetcher.
+# nlohmann::json header is needed by ManifestFetcher + UpdateStager (marker).
 find_package(nlohmann_json CONFIG REQUIRED)
 target_link_libraries(hodos_tests PRIVATE nlohmann_json::nlohmann_json)
+
+# OpenSSL: UpdateStager's Ed25519 verify + SHA-256, and the test's keygen helper.
+find_package(OpenSSL REQUIRED)
+target_link_libraries(hodos_tests PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+
+# Enable UpdateStager's test seams (test-key override + Authenticode-advisory)
+# ONLY in the test binary. The shipped shell never defines this, so a production
+# install has no env-triggerable way to weaken EdDSA / Authenticode verification.
+target_compile_definitions(hodos_tests PRIVATE HODOS_UPDATE_TEST_SEAM)
 
 target_include_directories(hodos_tests PRIVATE
     ../include

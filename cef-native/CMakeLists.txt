@@ -299,6 +299,8 @@ elseif(WIN32)
         include/core/LocalFileResourceHandler.h
         include/core/AutoUpdater.h
         src/core/AutoUpdater.cpp
+        include/core/UpdateStager.h
+        src/core/UpdateStager.cpp
         include/core/QRScreenCapture.h
         src/core/QRScreenCapture.cpp
         hodos.rc
