@@ -59,7 +59,14 @@ Phase-kickoff re-verified every cited location against current code. **Foundatio
 | §H.4 / §4c — Windows appcast uses version STRING, not integer build-number | ⚠️ PENDING (low impact until EdDSA; do with 3b) |
 | Commit 3b — WinSparkle 0.8.1→0.9.3 + client `set_eddsa_public_key` | ⏳ GATED (HIGH-risk one-way cutover; needs live dual-sign J10/J11; also handle the DSA `WIN_SPARKLE_DEPRECATED`/C4996 at the bump) |
 | Commit 3 — notify-mode present-user Inno wizard | ⏳ PENDING (deferred per owner; not a silent blocker) |
-| Commits 4-7 — the silent path | ⏳ NOT STARTED (next) |
+| Commit 4a — SyncHttpClient HTTPS + streaming Download + Windows `APP_BUILD_NUMBER` | ✅ DONE (`e68edd5`, local) |
+| Commit 4b — UpdateStager verify core (EdDSA+Authenticode+integer anti-rollback+marker) + 20 unit tests + localhost rig (`scripts/test-update-feed.ps1`) | ✅ DONE (`4f28df4`, local) |
+| Commit 4c — whole-appcast-document signature (anti-replay) — closes the HIGH downgrade-via-unsigned-buildNumber vector; 4b must not ship without it | ⏳ NEXT |
+| Commit 4d — wire `StagePendingUpdate()` into startup (HODOS_DEV-inert, behind silent flag, idempotent) | ⏳ PENDING |
+| Commits 5-7 — global mutex / apply-on-next-launch / rollback / health-gate / CI test gate | ⏳ NOT STARTED |
+
+**Commit-4 build decisions (locked while building 4a/4b):** (1) `SyncHttpClient` was HTTP-localhost-only — extended for HTTPS + a streaming `Download` (to-temp+rename, Content-Length completeness check). (2) Windows `sparkle:version` stays the version STRING (WinSparkle 0.8.1 compatibility); the updater reads a dedicated `<hodosBuildNumber>` element for its integer gate. (3) Test seams (`HODOS_UPDATE_TEST_PUBKEY` key override + Authenticode-advisory) are **compile-time** (`#ifdef HODOS_UPDATE_TEST_SEAM`, hodos_tests only) — compiled OUT of the shipped browser so production verify is unconditional. (4) `APP_BUILD_NUMBER` now a C++ macro on Windows (CI + monotonic local fallback).
+**Deferred from 4b (documented, sequenced):** HIGH downgrade vector → commit 4c (next). `WTD_REVOKE_NONE` = deliberate reliability choice (EdDSA primary; cert-revocation via §H.6 signer-continuity). Full non-ASCII pending-path support (Download dest path) → commit 6 filesystem-apply hardening (verify-gate wide-path already fixed).
 
 **Silent-path anchors all CONFIRMED present** (current lines): SingleInstance per-profile pipe `SingleInstance.cpp:44-51`; ProfileLock released late in `cef_browser_shell.cpp:4455` (main() cleanup, NOT at close); startup seq SingleInstance `:3910` → AcquireProfileLock `:3914` → LaunchWallet `:3927` / LaunchAdblock `:3928`; job objects KILL_ON_JOB_CLOSE wallet `:3466` / adblock `:3657`; wallet `/shutdown` still drain-only (`handlers.rs:193-197`, no `process::exit`); installer `[Run]` `skipifsilent` (`hodos-browser.iss:77`). The plan's structural premises hold.
 
