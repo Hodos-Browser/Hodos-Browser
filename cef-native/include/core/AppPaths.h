@@ -13,6 +13,23 @@ inline std::string GetAppDirName() {
     return "HodosBrowser";
 }
 
+#ifdef _WIN32
+/// Per-user staging dir for downloaded updates (auto-updater commit 4: download
+/// → stage; commit 6: apply-on-next-launch). Lives under %LOCALAPPDATA%
+/// (NON-roaming — we don't want a domain profile syncing a ~95 MB installer, and
+/// it stays same-volume with the Inno {app} target, required for commit 6's
+/// orphan-only rename). Namespaced by GetAppDirName() so dev (HodosBrowserDev)
+/// and prod never collide. Returns "" if LOCALAPPDATA is unavailable — the
+/// caller MUST skip staging in that case (never fall back to a relative path).
+/// Single source of truth shared by the staging (commit 4) and apply (commit 6)
+/// paths so they cannot diverge.
+inline std::string GetPendingUpdateDir() {
+    const char* localAppData = std::getenv("LOCALAPPDATA");
+    if (!localAppData || !*localAppData) return "";
+    return std::string(localAppData) + "\\" + GetAppDirName() + "\\pending";
+}
+#endif
+
 /// Safeguard: if running from a dev build directory, require HODOS_DEV=1.
 /// The installed app runs from Program Files / app bundle, so this won't trigger for users.
 /// Returns true if safe to proceed, false if the process should exit.

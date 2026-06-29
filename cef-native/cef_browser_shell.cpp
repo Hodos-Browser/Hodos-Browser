@@ -46,6 +46,7 @@
 #include "include/core/AdblockCache.h"
 #include "include/core/WindowManager.h"
 #include "include/core/AutoUpdater.h"
+#include "include/core/UpdateStager.h"
 #include "include/core/LayoutHelpers.h"
 #include "include/core/Logger.h"
 #include <shellapi.h>
@@ -67,6 +68,7 @@
 #include <iomanip>
 #include <thread>
 #include <atomic>
+#include <chrono>
 #include <sstream>
 
 HWND g_hwnd = nullptr;
@@ -174,6 +176,11 @@ PROCESS_INFORMATION g_adblockServerProcess = {};
 std::atomic<bool> g_adblockServerRunning{false};
 HANDLE g_adblockJobObject = nullptr;
 static bool g_adblockProcessLaunched = false;  // Set by LaunchAdblockProcess
+
+// Set true at the top of ShutdownApplication() so the (detached) silent-update
+// staging thread stops downloading / logging before Logger teardown. Polled by
+// that thread and threaded into StagePendingUpdate's abort check. (Commit 4d.)
+static std::atomic<bool> g_update_abort{false};
 
 // Forward declarations for adblock server management (two-phase startup)
 void LaunchAdblockProcess();   // Phase 1: CreateProcess only (non-blocking)
@@ -493,6 +500,9 @@ void ShutdownApplication() {
     SingleInstance::SetShuttingDown();
 
     // Step 0: Clean up auto-updater (cancels any pending operations)
+    // Signal the detached silent-update staging thread to stop BEFORE Logger
+    // teardown, so a long download can't race Logger::Shutdown (commit 4d).
+    g_update_abort.store(true);
     AutoUpdater::GetInstance().Cleanup();
 
     // Step 0a: Save session tabs before anything is closed
@@ -4407,6 +4417,56 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         updater.Initialize(appVersion, appcastUrl, autoCheck);
         LOG_INFO("Auto-updater initialized (version=" + appVersion +
                  ", mode=" + browserSettings.autoUpdateMode + ")");
+
+#ifdef HODOS_SILENT_AUTOUPDATE
+        // Commit 4d — silent download-WHILE-running (NOT apply; apply is commit 6).
+        // COMPILE-TIME GATED: this is built only when -DHODOS_SILENT_AUTOUPDATE=ON
+        // (CMake option, default OFF) so the shipped browser never background-
+        // downloads until commit 7 flips it on after the apply path + soak. Even
+        // when compiled in, only runs for autoUpdateMode=="silent".
+        //
+        // Off-thread + detached (matches the startup init-thread idiom). Touches
+        // NO CEF objects — only SyncHttpClient/filesystem/OpenSSL/Logger — so it
+        // is safe to abandon at exit. Sleeps past first-paint, bails on shutdown
+        // via g_update_abort, and single-flights across profiles via a named mutex
+        // (multiple HodosBrowser.exe share the one %LOCALAPPDATA% pending dir).
+        if (browserSettings.autoUpdateMode == "silent") {
+            std::string silentAppcastUrl = appcastUrl;
+            std::thread([silentAppcastUrl]() {
+                // Stagger ~60s past startup; wake early if shutdown begins.
+                for (int i = 0; i < 60 && !g_update_abort.load(); ++i) {
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                }
+                if (g_update_abort.load()) return;
+
+                std::string pendingDir = AppPaths::GetPendingUpdateDir();
+                if (pendingDir.empty()) {
+                    LOG_WARNING("Silent update: LOCALAPPDATA unavailable — skipping staging");
+                    return;
+                }
+                // Single-flight: only one instance stages at a time (shared dir).
+                HANDLE mtx = CreateMutexW(nullptr, FALSE, L"Local\\HodosUpdateStaging");
+                if (!mtx || WaitForSingleObject(mtx, 0) != WAIT_OBJECT_0) {
+                    if (mtx) CloseHandle(mtx);
+                    LOG_INFO("Silent update: another instance is staging — skipping");
+                    return;
+                }
+                try {
+                    if (!g_update_abort.load()) {
+                        hodos::UpdateStager::StagePendingUpdate(
+                            silentAppcastUrl, pendingDir, APP_BUILD_NUMBER, &g_update_abort);
+                    }
+                } catch (...) {
+                    // A detached thread must never let an exception escape
+                    // (std::terminate). Staging is best-effort; swallow + retry next launch.
+                    LOG_WARNING("Silent update: staging threw — ignored (best-effort)");
+                }
+                ReleaseMutex(mtx);
+                CloseHandle(mtx);
+            }).detach();
+            LOG_INFO("Silent update: background staging thread scheduled");
+        }
+#endif  // HODOS_SILENT_AUTOUPDATE
     }
 
     LOG_INFO(elapsed() + "STARTUP: Entering CefRunMessageLoop");

@@ -418,8 +418,10 @@ UpdateStager::AuthenticodeResult UpdateStager::VerifyAuthenticode(
 // ---------------------------------------------------------------------------
 StageResult UpdateStager::StagePendingUpdate(const std::string& appcastUrl,
                                              const std::string& pendingDir,
-                                             long currentBuildNumber) {
+                                             long currentBuildNumber,
+                                             const std::atomic<bool>* abort) {
     namespace fs = std::filesystem;
+    auto aborted = [&]() { return abort && abort->load(); };
 
     // Inert under HODOS_DEV unless the test seam is set.
     const char* dev = std::getenv("HODOS_DEV");
@@ -502,6 +504,8 @@ StageResult UpdateStager::StagePendingUpdate(const std::string& appcastUrl,
         if (p.path().filename() != "rollback") fs::remove_all(p.path(), ec);
     }
 
+    if (aborted()) { LOG_INFO_UPD("aborted before download (shutdown)"); return StageResult::Skipped; }
+
     // 6) Download the installer.
     const std::string installerName =
         "HodosBrowser-" + (entry.version.empty() ? std::to_string(entry.buildNumber)
@@ -511,6 +515,11 @@ StageResult UpdateStager::StagePendingUpdate(const std::string& appcastUrl,
     if (!dl.success || !fs::exists(installerPath)) {
         LOG_WARN_UPD("installer download failed (status " + std::to_string(dl.statusCode) + ")");
         return StageResult::NetworkFailed;
+    }
+    if (aborted()) {
+        LOG_INFO_UPD("aborted after download (shutdown) — discarding stage");
+        std::error_code rec; fs::remove(installerPath, rec);
+        return StageResult::Skipped;
     }
 
     // 7) Verify gates (fail-closed). Read the file ONCE; hash + EdDSA over the

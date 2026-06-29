@@ -27,6 +27,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <string>
 
 namespace hodos {
@@ -75,10 +76,13 @@ public:
     // gates, and (on success) write the marker. Idempotent: clears a stale stage,
     // skips re-download if a same-or-newer verified marker already exists.
     // Inert (returns Skipped) under HODOS_DEV unless HODOS_UPDATE_TEST=1.
-    // Wired into startup in commit 4d; unused until then.
+    // `abort` (optional) is polled at each major step so a long download can be
+    // cut short on app shutdown (returns Skipped); pass nullptr for no
+    // cancellation. Wired into startup in commit 4d behind a build-time flag.
     static StageResult StagePendingUpdate(const std::string& appcastUrl,
                                           const std::string& pendingDir,
-                                          long currentBuildNumber);
+                                          long currentBuildNumber,
+                                          const std::atomic<bool>* abort = nullptr);
 
     // ---- Pure / unit-testable pieces ------------------------------------------
     // Parse the Windows <item> from a Sparkle appcast XML. Lenient — returns

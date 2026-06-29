@@ -77,6 +77,17 @@ if(NOT DEFINED APP_BUILD_NUMBER)
         set(APP_BUILD_NUMBER "0")
     endif()
 endif()
+# Silent download-while-running (auto-updater commit 4d). DEFAULT OFF: the
+# shipped browser must NOT background-download until the apply path (commit 6) +
+# soak land and commit 7 deliberately flips this on. ON compiles the staging
+# thread in (still requires autoUpdateMode=="silent" at runtime). Build the test
+# rig / a silent dev build with -DHODOS_SILENT_AUTOUPDATE=ON.
+option(HODOS_SILENT_AUTOUPDATE "Enable Windows silent download-while-running (commit 7 gate)" OFF)
+if(HODOS_SILENT_AUTOUPDATE)
+    add_compile_definitions(HODOS_SILENT_AUTOUPDATE)
+    message(STATUS "HODOS_SILENT_AUTOUPDATE: ON (silent staging compiled in)")
+endif()
+
 # Fail closed at configure time if CI passed an empty/garbage -DAPP_BUILD_NUMBER
 # (an empty-but-defined value would skip the fallback and emit an empty macro →
 # cryptic compile error). Must be a positive integer.
