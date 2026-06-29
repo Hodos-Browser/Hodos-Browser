@@ -24,6 +24,7 @@
 #endif
 #include <windows.h>
 
+#include <cstdlib>
 #include <fstream>
 #include <map>
 #include <string>
@@ -105,16 +106,29 @@ int wmain(int argc, wchar_t** argv) {
     hodos::helper::SetLogger(&Log);
     Log(std::string("hodos-update-helper start (") + (isResume ? "--resume" : "apply") + ")");
 
-    // The owner lock is the single-flight for EVERY entry point (V3-6). In the
-    // normal-apply path the bootstrap inherited an open owner handle to us; 6c will
-    // pass it via PROC_THREAD_ATTRIBUTE_HANDLE_LIST and we'd Adopt() it. Until 6c
-    // wires that, open it fresh here (bounded retry rides out a probe's open-close
-    // / delete-pending window — RISK-B).
-    const std::string lockPath = AppPaths::GetUpdateLockPath();
+    // The owner lock is the single-flight for EVERY entry point (V3-6).
     hodos::UpdateLockOwner lock;
-    if (lockPath.empty() || !lock.AcquireWithRetry(Widen(lockPath))) {
-        Log("Could not acquire owner lock (another supervisor live, or no update dir) — exiting");
-        return 0;  // benign: another owner is handling the transaction
+    auto lh = args.find("lock-handle");
+    if (lh != args.end()) {
+        // APPLY path (6c.2): the bootstrap inherited an OPEN owner handle to us via
+        // PROC_THREAD_ATTRIBUTE_HANDLE_LIST (same handle value in the child). ADOPT it —
+        // a fresh share=0 open here would SHARING_VIOLATION against our own inherited
+        // handle (the 6c carry-forward).
+        HANDLE inherited = reinterpret_cast<HANDLE>(
+            static_cast<uintptr_t>(strtoull(lh->second.c_str(), nullptr, 10)));
+        if (inherited == nullptr || inherited == INVALID_HANDLE_VALUE) {
+            Log("inherited --lock-handle is invalid — exiting");
+            return 0;
+        }
+        lock.Adopt(inherited);
+    } else {
+        // --resume / standalone: open it fresh (bounded retry rides out a probe's
+        // open-close / delete-pending window — RISK-B).
+        const std::string lockPath = AppPaths::GetUpdateLockPath();
+        if (lockPath.empty() || !lock.AcquireWithRetry(Widen(lockPath))) {
+            Log("Could not acquire owner lock (another supervisor live, or no update dir) — exiting");
+            return 0;  // benign: another owner is handling the transaction
+        }
     }
 
     // Read the durable transaction state (WIDE-safe, F4). Missing/corrupt => no-op.

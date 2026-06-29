@@ -226,6 +226,32 @@ bool RestoreWalletDbSet(const std::wstring& snapshotDir, const std::wstring& wal
     return true;
 }
 
+bool SnapshotWalletDbSet(const std::wstring& walletDir, const std::wstring& snapshotDir) {
+    std::error_code ec;
+    const fs::path wdir(walletDir), snap(snapshotDir);
+    const fs::path srcDb = wdir / L"wallet.db";
+    const fs::path srcWal = wdir / L"wallet.db-wal";
+    const fs::path dstDb = snap / L"wallet.db";
+    const fs::path dstWal = snap / L"wallet.db-wal";
+    const fs::path dstShm = snap / L"wallet.db-shm";
+
+    if (!fs::exists(srcDb, ec)) return false;  // nothing to snapshot
+    if (!EnsureDirExists(snapshotDir)) return false;
+
+    // Clear any stale snapshot -wal/-shm so a re-run can't leave a -wal that doesn't
+    // belong to the freshly-copied db (idempotent; symmetric with RestoreWalletDbSet).
+    fs::remove(dstWal, ec);
+    fs::remove(dstShm, ec);
+
+    fs::copy_file(srcDb, dstDb, fs::copy_options::overwrite_existing, ec);
+    if (ec) return false;
+    if (fs::exists(srcWal, ec)) {
+        fs::copy_file(srcWal, dstWal, fs::copy_options::overwrite_existing, ec);
+        if (ec) return false;
+    }
+    return true;
+}
+
 bool SwapFileReplace(const std::wstring& srcPath, const std::wstring& dstPath) {
     std::error_code ec;
     if (fs::exists(dstPath, ec)) {
@@ -295,6 +321,12 @@ bool ReadFileAll(const std::wstring& path, std::string& out) {
     while (ReadFile(h, buf, sizeof(buf), &got, nullptr) && got > 0) out.append(buf, got);
     CloseHandle(h);
     return true;
+}
+
+bool RemoveTree(const std::wstring& dir) {
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    return !fs::exists(dir, ec);
 }
 
 bool VerifyEd25519(const std::string& data, const std::string& signatureBase64,

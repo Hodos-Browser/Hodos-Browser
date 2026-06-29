@@ -138,6 +138,60 @@ TEST(RestoreWalletDbSet, IsIdempotent) {
     EXPECT_EQ(Read(tgt / L"wallet.db-wal"), "OLD_WAL");
 }
 
+// ---- SnapshotWalletDbSet (6c.2) — the backup inverse of RestoreWalletDbSet ----
+TEST(SnapshotWalletDbSet, CopiesDbAndWal_NeverShm) {
+    TempDir live, snap;
+    Write(live / L"wallet.db", "LIVE_DB");
+    Write(live / L"wallet.db-wal", "LIVE_WAL");
+    Write(live / L"wallet.db-shm", "LIVE_SHM");  // must NOT be snapshotted
+
+    ASSERT_TRUE(SnapshotWalletDbSet(live.dir.wstring(), snap.dir.wstring()));
+    EXPECT_EQ(Read(snap / L"wallet.db"), "LIVE_DB");
+    EXPECT_EQ(Read(snap / L"wallet.db-wal"), "LIVE_WAL");
+    EXPECT_FALSE(Exists(snap / L"wallet.db-shm"));
+}
+
+TEST(SnapshotWalletDbSet, GracefulNoWal_SnapshotIsJustDb) {
+    TempDir live, snap;
+    Write(live / L"wallet.db", "LIVE_DB");  // no -wal (graceful checkpoint+truncate)
+    ASSERT_TRUE(SnapshotWalletDbSet(live.dir.wstring(), snap.dir.wstring()));
+    EXPECT_EQ(Read(snap / L"wallet.db"), "LIVE_DB");
+    EXPECT_FALSE(Exists(snap / L"wallet.db-wal"));
+}
+
+TEST(SnapshotWalletDbSet, MissingSourceDbReturnsFalse) {
+    TempDir live, snap;
+    EXPECT_FALSE(SnapshotWalletDbSet(live.dir.wstring(), snap.dir.wstring()));
+}
+
+TEST(SnapshotWalletDbSet, StaleSnapshotWalClearedWhenSourceHasNone) {
+    TempDir live, snap;
+    Write(snap / L"wallet.db-wal", "STALE");   // a leftover from a prior snapshot
+    Write(snap / L"wallet.db-shm", "STALE");
+    Write(live / L"wallet.db", "NEW_DB");      // source has no -wal
+    ASSERT_TRUE(SnapshotWalletDbSet(live.dir.wstring(), snap.dir.wstring()));
+    EXPECT_EQ(Read(snap / L"wallet.db"), "NEW_DB");
+    EXPECT_FALSE(Exists(snap / L"wallet.db-wal"));  // stale cleared
+    EXPECT_FALSE(Exists(snap / L"wallet.db-shm"));
+}
+
+TEST(SnapshotWalletDbSet, RoundTripsThroughRestore) {
+    // Snapshot a live DB, then restore the snapshot into a "new build" target that
+    // has dirty new -wal/-shm — the full backup->restore cycle the apply path uses.
+    TempDir live, snap, target;
+    Write(live / L"wallet.db", "OLD_DB");
+    Write(live / L"wallet.db-wal", "OLD_WAL");
+    ASSERT_TRUE(SnapshotWalletDbSet(live.dir.wstring(), snap.dir.wstring()));
+
+    Write(target / L"wallet.db", "MIGRATED");
+    Write(target / L"wallet.db-wal", "DIRTY_NEW_WAL");
+    Write(target / L"wallet.db-shm", "DIRTY_NEW_SHM");
+    ASSERT_TRUE(RestoreWalletDbSet(snap.dir.wstring(), target.dir.wstring()));
+    EXPECT_EQ(Read(target / L"wallet.db"), "OLD_DB");
+    EXPECT_EQ(Read(target / L"wallet.db-wal"), "OLD_WAL");
+    EXPECT_FALSE(Exists(target / L"wallet.db-shm"));  // V3-3a: stale new shm gone
+}
+
 // ---- BuildManifestForTree + VerifyTreeAgainstManifest -----------------------
 TEST(Manifest, BuildThenVerifyRoundTrips) {
     TempDir t;
@@ -245,6 +299,16 @@ TEST(DirSizeBytes, SumsRegularFiles) {
     Write(t / L"a", "12345");          // 5
     Write(t / L"sub\\b", "678");       // 3
     EXPECT_EQ(DirSizeBytes(t.dir.wstring()), 8u);
+}
+
+TEST(RemoveTree, DeletesRecursivelyAndTolueratesAbsent) {
+    TempDir t;
+    Write(t / L"a\\b\\c.txt", "x");
+    Write(t / L"a\\d.txt", "y");
+    ASSERT_TRUE(Exists(t / L"a"));
+    EXPECT_TRUE(RemoveTree((t / L"a").wstring()));
+    EXPECT_FALSE(Exists(t / L"a"));
+    EXPECT_TRUE(RemoveTree((t / L"nonexistent").wstring()));  // absent -> true
 }
 
 TEST(EnsureDirExists, CreatesNestedAndIsIdempotent) {

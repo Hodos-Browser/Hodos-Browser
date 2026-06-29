@@ -46,8 +46,25 @@ mutex `Local\HodosBrowser_AnyInstance`, `update.lock` honor-at-launch (dormant),
 > > - **6c.1 ✅ DONE (`03d7fb1`):** the 6a honor-probe swapped `GetFileAttributes` → `UpdateLockIsHeld` (exclusive-
 >   open liveness, remnant-safe) + the DOUBLE-GATED `--post-update-health-probe` bypass (arg AND armed apply.json).
 >   Behavior-neutral in the no-lock state; UTF-8→wide via CP_UTF8. Built clean. Still inert until 6c.2.
-> - **6c.2 ⏳ NEXT — `MaybeApplyStagedUpdate()` (the Phase-A bootstrap; the brick-critical core; OWN adversarial
->   review):** inserts at `cef_browser_shell.cpp:3922` (top of `if(!g_picker_mode)`, before `TryAcquireInstance`
+> - **6c.2 ✅ DONE — `MaybeApplyStagedUpdate()` (the Phase-A bootstrap; brick-critical core):** built behind
+>   `HODOS_SILENT_AUTOUPDATE` at `cef_browser_shell.cpp:3922`; `+UpdateFs::SnapshotWalletDbSet`/`RemoveTree`;
+>   `main.cpp` Adopts the inherited owner handle (the carry-forward); spawns the helper via
+>   `STARTUPINFOEX`+`PROC_THREAD_ATTRIBUTE_HANDLE_LIST` inheriting {owner-lock, bootstrap-SYNCHRONIZE, pinned-
+>   installer}. **2-skeptic adversarial review** confirmed the seam/handle-lifecycle/handoff sound (and the
+>   feared CEF-subprocess D.0 inflation is NOT a bug — CefInitialize is far after the seam). Found + FIXED:
+>   **#6** mutex-close-on-abort (de-registered a live session) → removed the premature close; **#1 (HIGH, OD-B
+>   TOCTOU)** the helper ran the installer without re-verify → bootstrap now PINS the verified installer with a
+>   deny-write inheritable handle the helper holds across the install (no swap window, no Authenticode dup);
+>   **#4** a persistently-rejected build now records `lastFailureBuild` + skips early (no per-boot wallet churn);
+>   **#8** clean stale `rollback\` before backup; self-path truncation fix. Built clean (flag ON+OFF); 61 tests.
+>   **⚠️ #2 PRE-PROMOTE MUST (tracked, NOT yet done):** anti-rollback compares the PLAINTEXT `marker.buildNumber`
+>   — an attacker with a genuinely-signed OLD installer+manifest + a forged-high marker could downgrade + poison
+>   high-water. **Before silent is promoted:** bind the build number into the EdDSA-signed expected-new-manifest
+>   (`generate-tree-manifest.py --build-number` + `FileManifest.buildNumber`) and have the bootstrap verify the
+>   manifest signature + anti-rollback on THAT number (do in 6c.3, which already touches the manifest). The
+>   `max(APP_BUILD_NUMBER, highWater)` floor still blocks sub-current downgrades until then. Also deferred: the
+>   signer-continuity "degrade to notify" notify-PROMPT UI (6d).
+> - **(superseded) 6c.2 plan:** inserts at `cef_browser_shell.cpp:3922` (top of `if(!g_picker_mode)`, before `TryAcquireInstance`
 >   `:3925`), behind `HODOS_SILENT_AUTOUPDATE`. Steps: eligibility (global `update-state.json` silent && !paused
 >   + verified `pending\update-info.json`+installer+manifest exist) → `EnsureDirExists(update\)` (RISK-A) →
 >   LOCK-FIRST `AcquireWithRetry` → D.0 (Toolhelp count HodosBrowser.exe by full module path under {app} == 1)

@@ -51,6 +51,9 @@
 #include "include/core/UpdateFs.h"
 #include "include/core/UpdateLock.h"
 #include "include/core/LayoutHelpers.h"
+#ifdef HODOS_SILENT_AUTOUPDATE
+#include <tlhelp32.h>   // 6c.2: D.0 all-instances-gone sibling enumeration
+#endif
 #include "include/core/Logger.h"
 #include <shellapi.h>
 #include <objbase.h>   // CoInitializeEx for taskbar profile integration
@@ -3750,6 +3753,343 @@ void StopAdblockServer() {
     LOG_INFO("Adblock engine stopped");
 }
 
+#ifdef HODOS_SILENT_AUTOUPDATE
+// ============================================================================
+// 6c.2 — MaybeApplyStagedUpdate: the Phase-A apply bootstrap.
+// AUTOUPDATE_6B_SUPERVISOR_DESIGN.md §9 v3 Phase A. Runs at the :3922 startup seam
+// (sole instance, !picker, before profile lock / backends / CefInitialize). On a
+// verified staged update it: locks-first, proves the fleet idle + the wallet dead,
+// re-verifies the installer (Authenticode + anti-rollback + signer-continuity),
+// backs up {app} + snapshots the money DB, arms the RunOnce recovery hook, and
+// spawns the external supervisor (hodos-update-helper.exe) with an INHERITED owner-
+// lock handle + bootstrap process handle, then _exit(0)s. Compiled OUT by default
+// (HODOS_SILENT_AUTOUPDATE) + inert under HODOS_DEV (unless HODOS_UPDATE_TEST).
+// ============================================================================
+static std::wstring SU_Widen(const std::string& s) {
+    if (s.empty()) return L"";
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    std::wstring w(n > 0 ? n - 1 : 0, L'\0');
+    if (n > 0) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &w[0], n);
+    return w;
+}
+
+// Exclusively openable for write (== not image-locked). Absent file => free.
+static bool SU_ExclusiveOpenable(const std::wstring& p) {
+    if (GetFileAttributesW(p.c_str()) == INVALID_FILE_ATTRIBUTES) return true;
+    HANDLE h = CreateFileW(p.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    CloseHandle(h);
+    return true;
+}
+
+// Count live HodosBrowser.exe processes whose FULL module path == appDir\HodosBrowser.exe
+// (M6 — by path, so a dev build elsewhere isn't counted). -1 on snapshot failure.
+static int SU_CountSelfBrowsers(const std::wstring& appDir) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return -1;
+    std::wstring needle = appDir + L"\\HodosBrowser.exe";
+    for (auto& c : needle) c = (wchar_t)towlower(c);
+    int count = 0;
+    PROCESSENTRY32W pe{}; pe.dwSize = sizeof(pe);
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            if (_wcsicmp(pe.szExeFile, L"HodosBrowser.exe") != 0) continue;
+            HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+            if (!h) continue;
+            wchar_t path[MAX_PATH]; DWORD sz = MAX_PATH;
+            if (QueryFullProcessImageNameW(h, 0, path, &sz)) {
+                std::wstring lp(path); for (auto& c : lp) c = (wchar_t)towlower(c);
+                if (lp == needle) ++count;
+            }
+            CloseHandle(h);
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return count;
+}
+
+static void SU_ArmRunOnce(const std::wstring& helperPath) {
+    HKEY k;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce",
+                        0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr) == ERROR_SUCCESS) {
+        std::wstring cmd = L"\"" + helperPath + L"\" --resume";
+        RegSetValueExW(k, L"HodosUpdateResume", 0, REG_SZ,
+                       reinterpret_cast<const BYTE*>(cmd.c_str()),
+                       static_cast<DWORD>((cmd.size() + 1) * sizeof(wchar_t)));
+        RegCloseKey(k);
+    }
+}
+static void SU_ClearRunOnce() {
+    HKEY k;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce",
+                      0, KEY_SET_VALUE, &k) == ERROR_SUCCESS) {
+        RegDeleteValueW(k, L"HodosUpdateResume");
+        RegCloseKey(k);
+    }
+}
+
+// Spawn the helper inheriting EXACTLY {lockH, bootH, instH} (PROC_THREAD_ATTRIBUTE_HANDLE_LIST),
+// detached + no-window + breakaway (retry without breakaway on ACCESS_DENIED, M2).
+// instH (the pinned, deny-write installer handle) is inherited but unreferenced — it
+// just stays open in the helper, keeping the verified installer bytes un-swappable
+// across the install (review #1). Returns the process HANDLE (caller closes) or nullptr.
+static HANDLE SU_SpawnHelper(const std::wstring& cmdline, HANDLE lockH, HANDLE bootH, HANDLE instH) {
+    SIZE_T size = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &size);
+    std::vector<unsigned char> buf(size);
+    auto* al = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(buf.data());
+    if (!InitializeProcThreadAttributeList(al, 1, 0, &size)) return nullptr;
+    HANDLE handles[3]; DWORD nh = 0;
+    handles[nh++] = lockH;
+    if (bootH) handles[nh++] = bootH;
+    if (instH && instH != INVALID_HANDLE_VALUE) handles[nh++] = instH;
+    if (!UpdateProcThreadAttribute(al, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                   handles, nh * sizeof(HANDLE), nullptr, nullptr)) {
+        DeleteProcThreadAttributeList(al); return nullptr;
+    }
+    STARTUPINFOEXW si{}; si.StartupInfo.cb = sizeof(si); si.lpAttributeList = al;
+    PROCESS_INFORMATION pi{};
+    auto mk = [&](DWORD f) -> BOOL {
+        std::vector<wchar_t> cl(cmdline.begin(), cmdline.end()); cl.push_back(L'\0');
+        return CreateProcessW(nullptr, cl.data(), nullptr, nullptr, TRUE, f,
+                              nullptr, nullptr, &si.StartupInfo, &pi);
+    };
+    DWORD flags = CREATE_NO_WINDOW | DETACHED_PROCESS | EXTENDED_STARTUPINFO_PRESENT | CREATE_BREAKAWAY_FROM_JOB;
+    BOOL ok = mk(flags);
+    if (!ok && GetLastError() == ERROR_ACCESS_DENIED) ok = mk(flags & ~CREATE_BREAKAWAY_FROM_JOB);
+    DeleteProcThreadAttributeList(al);
+    if (!ok) return nullptr;
+    CloseHandle(pi.hThread);
+    return pi.hProcess;
+}
+
+// Returns false => not eligible / aborted => caller continues normal startup. On a
+// successful apply it _exit(0)s (never returns).
+static bool MaybeApplyStagedUpdate(const std::string& profileId) {
+    using namespace hodos;
+    if (IsDevEnv() && !std::getenv("HODOS_UPDATE_TEST")) return false;  // inert in dev
+
+    const std::string updateDir = AppPaths::GetUpdateDir();
+    const std::string pendingDir = AppPaths::GetPendingUpdateDir();
+    const std::string appDir = AppPaths::GetAppInstallDir();
+    const std::string walletDir = AppPaths::GetWalletDir();
+    const std::string statePath = AppPaths::GetUpdateStatePath();
+    const std::string lockPath = AppPaths::GetUpdateLockPath();
+    if (updateDir.empty() || pendingDir.empty() || appDir.empty() || lockPath.empty()) return false;
+
+    // Eligibility (global state — settings aren't loaded at this seam). Missing/
+    // corrupt update-state.json => NOT eligible (fail-safe-off, V3-7).
+    UpdateState state;
+    {
+        std::string c;
+        if (!updatefs::ReadFileAll(SU_Widen(statePath), c) || !ParseUpdateState(c, state)) return false;
+    }
+    if (!state.silent || state.paused) return false;
+
+    StagedUpdateMarker marker;
+    {
+        std::string c;
+        if (!updatefs::ReadFileAll(SU_Widen(pendingDir + "\\update-info.json"), c) ||
+            !UpdateStager::ParseMarker(c, marker)) return false;
+    }
+    const std::string installerPath = pendingDir + "\\" + marker.installerFileName;
+    const std::string manifestPath = pendingDir + "\\expected-new-manifest.json";
+    if (GetFileAttributesW(SU_Widen(installerPath).c_str()) == INVALID_FILE_ATTRIBUTES) return false;
+    if (GetFileAttributesW(SU_Widen(manifestPath).c_str()) == INVALID_FILE_ATTRIBUTES) return false;
+    if (GetFileAttributesW(SU_Widen(manifestPath + ".ed").c_str()) == INVALID_FILE_ATTRIBUTES) return false;
+
+    // A build already rejected for a PERSISTENT reason (signer/rollback/tamper — won't
+    // change for the same staged bytes) is skipped HERE, before the lock + wallet
+    // shutdown, so a bad stage doesn't churn the wallet on every cold boot (review #4).
+    if (marker.buildNumber != 0 && state.lastFailureBuild == marker.buildNumber) {
+        LOG_INFO("Silent apply: build " + std::to_string(marker.buildNumber) +
+                 " previously rejected (" + state.lastFailureReason + ") — skip");
+        return false;
+    }
+
+    LOG_INFO("Silent apply: eligible staged build " + std::to_string(marker.buildNumber) + " — Phase A");
+
+    updatefs::EnsureDirExists(SU_Widen(updateDir));  // RISK-A: dir before the first Acquire
+
+    UpdateLockOwner lock;  // LOCK-FIRST (V3-6): own the apply window or bail.
+    if (!lock.AcquireWithRetry(SU_Widen(lockPath))) {
+        LOG_INFO("Silent apply: another apply owner is live — normal startup");
+        return false;
+    }
+
+    // Record a PERSISTENT rejection so this exact staged build is skipped on future
+    // boots (review #4: avoid per-boot wallet churn). Use ONLY for reasons that won't
+    // change for the same bytes (tamper/signer/rollback) — NOT for transient defers.
+    auto rejectPersistent = [&](const std::string& reason) -> bool {
+        LOG_WARNING("Silent apply: reject build " + std::to_string(marker.buildNumber) + " — " + reason);
+        state.lastFailureBuild = marker.buildNumber;
+        state.lastFailureReason = reason;
+        updatefs::WriteFileAtomic(SU_Widen(statePath), SerializeUpdateState(state));
+        return false;
+    };
+
+    const std::wstring appDirW = SU_Widen(appDir);
+    const int selfCount = SU_CountSelfBrowsers(appDirW);  // D.0 (after the lock)
+    if (selfCount != 1) {
+        LOG_INFO("Silent apply: not sole instance (count=" + std::to_string(selfCount) + ") — defer");
+        return false;
+    }
+
+    // Prove the WALLET DEAD before any snapshot (V3-2): port unbound AND exe openable.
+    if (IsPortListening(WalletPort())) {
+        SendShutdownRequest(WalletPort());
+        for (int i = 0; i < 12 && IsPortListening(WalletPort()); ++i) Sleep(250);  // ~3s grace
+    }
+    if (IsPortListening(WalletPort()) || !SU_ExclusiveOpenable(appDirW + L"\\hodos-wallet.exe")) {
+        LOG_WARNING("Silent apply: wallet still alive — defer (never snapshot a live-writer DB)");
+        return false;
+    }
+
+    // PIN the installer against tamper (review #1 / OD-B TOCTOU): open it deny-write,
+    // deny-delete, INHERITABLE before verifying, and keep the handle open through to
+    // the spawn (the helper inherits it). The bytes we verify here cannot be swapped
+    // in the bootstrap-exit -> helper-spawn window — no apply-time re-verify needed.
+    SECURITY_ATTRIBUTES instSa{}; instSa.nLength = sizeof(instSa); instSa.bInheritHandle = TRUE;
+    HANDLE instH = CreateFileW(SU_Widen(installerPath).c_str(), GENERIC_READ,
+                               FILE_SHARE_READ, &instSa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (instH == INVALID_HANDLE_VALUE) { LOG_WARNING("Silent apply: cannot pin installer — abort"); return false; }
+    struct InstHGuard { HANDLE h; ~InstHGuard() { if (h != INVALID_HANDLE_VALUE) CloseHandle(h); } } instGuard{instH};
+
+    // Apply-time verify (fail-closed; reuse UpdateStager) of the PINNED bytes.
+    // Authenticode is the trustworthy gate (self-contained; a local attacker can't
+    // re-sign as Marston). sha256==marker is a cheap extra (the marker is plaintext).
+    if (UpdateStager::Sha256File(installerPath) != marker.sha256) return rejectPersistent("installer sha256 != marker");
+    auto instAuth = UpdateStager::VerifyAuthenticode(installerPath, UpdateStager::ExpectedSigner());
+    if (!instAuth.trusted) return rejectPersistent("installer Authenticode failed");
+
+    // Anti-rollback. NOTE(review #2, PRE-PROMOTE MUST): marker.buildNumber is plaintext
+    // (attacker-writable). max(APP_BUILD_NUMBER, highWater) stops a JSON edit from
+    // lowering the floor below the running build, but an attacker pairing a genuinely
+    // -Marston-signed OLD installer + its signed manifest with a forged-high marker
+    // could downgrade + poison high-water. Bind the build number into the SIGNED
+    // expected-new-manifest and compare THAT before silent is promoted (tracked in the
+    // design doc). Until then the floor still blocks sub-current-build downgrades.
+    const long currentBuild = APP_BUILD_NUMBER;
+    const long floor = (state.highWaterBuild > currentBuild) ? state.highWaterBuild : currentBuild;
+    if (!(marker.buildNumber > floor)) {
+        return rejectPersistent("anti-rollback (build " + std::to_string(marker.buildNumber) +
+                                " <= floor " + std::to_string(floor) + ")");
+    }
+
+    // Signer-continuity (OD-E/H5): derive BOTH thumbprints from the actual binaries;
+    // a signer change => degrade to notify (never silent-apply across reputation reset).
+    std::string selfPathA(MAX_PATH, '\0');
+    for (;;) {
+        DWORD n = GetModuleFileNameA(nullptr, &selfPathA[0], (DWORD)selfPathA.size());
+        if (n == 0) { selfPathA.clear(); break; }
+        if (n < selfPathA.size()) { selfPathA.resize(n); break; }
+        selfPathA.resize(selfPathA.size() * 2);  // truncated -> grow + retry (review #8L)
+    }
+    auto liveAuth = UpdateStager::VerifyAuthenticode(selfPathA, UpdateStager::ExpectedSigner());
+    if (liveAuth.trusted && instAuth.trusted && liveAuth.thumbprint != instAuth.thumbprint) {
+        return rejectPersistent("signer changed (" + liveAuth.thumbprint + " -> " + instAuth.thumbprint +
+                                ") — degrade to notify");
+    }
+
+    // Backup the full {app} tree (exclude the update\ working area) + its manifest.
+    // Clear any partial rollback\ from a prior aborted run first (review #8) so the
+    // backup describes exactly this run's tree.
+    const std::wstring rollbackW = SU_Widen(AppPaths::GetRollbackDir());
+    updatefs::RemoveTree(rollbackW);
+    FileManifest oldManifest;
+    if (!updatefs::BuildManifestForTree(appDirW, oldManifest, {L"update"})) {
+        LOG_WARNING("Silent apply: cannot manifest {app} — abort"); return false;
+    }
+    if (!updatefs::CopyTreeRecursive(appDirW, rollbackW, {L"update"})) {
+        LOG_WARNING("Silent apply: {app} backup failed — abort"); return false;
+    }
+    const std::string rbManifestPath = AppPaths::GetRollbackDir() + "\\manifest.json";
+    updatefs::WriteFileAtomic(SU_Widen(rbManifestPath), SerializeManifest(oldManifest));
+
+    // Snapshot the money DB (raw db+wal, no checkpoint/shm) — wallet proven dead above.
+    const std::wstring walletW = SU_Widen(walletDir);
+    if (!walletDir.empty() &&
+        GetFileAttributesW((walletW + L"\\wallet.db").c_str()) != INVALID_FILE_ATTRIBUTES) {
+        if (!updatefs::SnapshotWalletDbSet(walletW, rollbackW + L"\\wallet")) {
+            LOG_WARNING("Silent apply: money-DB snapshot failed — abort (no rollback safety)"); return false;
+        }
+    } else {
+        LOG_INFO("Silent apply: no wallet.db to snapshot (fresh install) — continuing");
+    }
+
+    // Verify the backup is COMPLETE before arming (M3).
+    {
+        auto vr = updatefs::VerifyTreeAgainstManifest(rollbackW, oldManifest);
+        if (!vr.ok) { LOG_WARNING("Silent apply: backup incomplete (" + vr.reason + ") — abort"); return false; }
+    }
+
+    // Copy the helper OUT of {app} so the installer can replace it.
+    const std::wstring helperStageW = SU_Widen(AppPaths::GetHelperStageDir());
+    updatefs::EnsureDirExists(helperStageW);
+    const std::wstring helperDst = helperStageW + L"\\hodos-update-helper.exe";
+    if (!CopyFileW((appDirW + L"\\hodos-update-helper.exe").c_str(), helperDst.c_str(), FALSE)) {
+        LOG_WARNING("Silent apply: failed to copy helper out — abort"); return false;
+    }
+
+    // apply.json = preparing (BEFORE arming RunOnce, V3-14) -> arm -> armed.
+    ApplyRecord rec;
+    rec.phase = ApplyPhase::Preparing;
+    rec.fromBuild = currentBuild;
+    rec.toBuild = marker.buildNumber;
+    rec.installerPath = installerPath;
+    rec.rollbackDir = AppPaths::GetRollbackDir();
+    rec.rollbackManifestPath = rbManifestPath;
+    rec.expectedNewManifestPath = manifestPath;
+    rec.profileId = profileId;
+    rec.toVersion = marker.version;
+    rec.signerThumbprint = instAuth.thumbprint;
+    rec.stagedAt = marker.stagedAt;
+    const std::wstring applyW = SU_Widen(pendingDir + "\\apply.json");
+    updatefs::WriteFileAtomic(applyW, SerializeApplyRecord(rec));
+    SU_ArmRunOnce(helperDst);
+    rec.phase = ApplyPhase::Armed;
+    updatefs::WriteFileAtomic(applyW, SerializeApplyRecord(rec));
+
+    // NOTE: we do NOT close g_instance_mutex here. On the SUCCESS path _exit(0) (OS
+    // teardown) closes it AFTER the helper inherited everything — and the helper waits
+    // for THIS process's death before it runs Inno, so Inno's AppMutex sees the mutex
+    // gone anyway. On a spawn-FAILURE abort below we MUST keep it (this browser keeps
+    // running and must stay registered for the all-instances-gone / AppMutex gate).
+    // Closing it pre-spawn would de-register a still-live session on abort (review #6).
+
+    // Inheritable SYNCHRONIZE handle to SELF — the helper's PID-reuse-immune wait target.
+    HANDLE bootH = nullptr;
+    DuplicateHandle(GetCurrentProcess(), GetCurrentProcess(), GetCurrentProcess(),
+                    &bootH, SYNCHRONIZE, TRUE, 0);
+
+    std::wstring cmd = L"\"" + helperDst + L"\""
+        + L" --app-dir \"" + appDirW + L"\""
+        + L" --update-dir \"" + SU_Widen(updateDir) + L"\""
+        + L" --installer \"" + SU_Widen(installerPath) + L"\""
+        + L" --from-build " + std::to_wstring(currentBuild)
+        + L" --to-build " + std::to_wstring(marker.buildNumber)
+        + L" --lock-handle " + std::to_wstring(reinterpret_cast<uintptr_t>(lock.raw()));
+    if (bootH) cmd += L" --bootstrap-handle " + std::to_wstring(reinterpret_cast<uintptr_t>(bootH));
+
+    HANDLE helper = SU_SpawnHelper(cmd, lock.raw(), bootH, instH);
+    if (!helper) {
+        LOG_ERROR("Silent apply: helper spawn FAILED — aborting, cleaning up");
+        SU_ClearRunOnce();
+        rec.phase = ApplyPhase::Aborted; rec.failureReason = "helper-spawn-failed";
+        updatefs::WriteFileAtomic(applyW, SerializeApplyRecord(rec));
+        if (bootH) CloseHandle(bootH);
+        return false;  // lock dtor releases (DELETE_ON_CLOSE removes update.lock); old build runs
+    }
+    CloseHandle(helper);
+    if (bootH) CloseHandle(bootH);  // the helper inherited its own copy
+
+    LOG_INFO("Silent apply: helper spawned for build " + std::to_string(marker.buildNumber) + " — bootstrap exiting");
+    fflush(nullptr);
+    _exit(0);   // hold nothing; the helper inherited the lock handle so the lock object survives
+    return true;  // unreachable
+}
+#endif  // HODOS_SILENT_AUTOUPDATE
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     // ── Startup performance timer ──
     auto t0 = std::chrono::steady_clock::now();
@@ -3956,6 +4296,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     // The single-instance forward / profile-lock / backend-launch path is profile-only.
     if (!g_picker_mode) {
+#ifdef HODOS_SILENT_AUTOUPDATE
+    // 6c.2 (§9 v3 Phase A / D.1): apply a verified staged update at this cold-boot
+    // seam — BEFORE SingleInstance/profile-lock/backends/CefInitialize, so the
+    // bootstrap holds nothing in {app} but its own image. On a successful apply it
+    // _exit(0)s (spawns the supervisor + never returns); otherwise it returns and
+    // normal startup continues on the current build. Compiled out by default.
+    MaybeApplyStagedUpdate(profileId);
+#endif
     // B-6: Single-instance check — forward to running instance instead of error dialog.
     // Must be AFTER CefExecuteProcess (line 2968) so CEF subprocesses aren't affected,
     // and AFTER profile ID parsing so we use the correct pipe name.

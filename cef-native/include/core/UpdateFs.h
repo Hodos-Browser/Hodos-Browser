@@ -65,6 +65,15 @@ bool CopyTreeRecursive(const std::wstring& srcDir, const std::wstring& dstDir,
 // False if the snapshot wallet.db is missing or a copy/delete fails.
 bool RestoreWalletDbSet(const std::wstring& snapshotDir, const std::wstring& walletDir);
 
+// Snapshot the money DB for the rollback backup (commit 6c.2, V3-1/V3-2). RAW copy
+// of <walletDir>\wallet.db (required) + wallet.db-wal (only if present), with NO
+// checkpoint (no legitimate opener — C++ opening the money DB violates CLAUDE.md #2)
+// and NO -shm (regenerable; a stale one misleads recovery). The CALLER MUST have
+// proven the wallet dead first (else a torn copy). Clears any stale snapshot
+// -wal/-shm first (idempotent). The exact inverse of RestoreWalletDbSet. False if
+// the source wallet.db is missing or a copy fails.
+bool SnapshotWalletDbSet(const std::wstring& walletDir, const std::wstring& snapshotDir);
+
 // Atomically replace dstPath with srcPath's content (rename-based; same-volume).
 // Uses ReplaceFile when dst exists (atomic swap that preserves nothing we need),
 // else MoveFileEx(REPLACE_EXISTING|WRITE_THROUGH). srcPath is consumed (moved).
@@ -85,6 +94,10 @@ bool WriteFileAtomic(const std::wstring& path, const std::string& content);
 
 // Read an entire file into `out` (binary). False if it can't be opened.
 bool ReadFileAll(const std::wstring& path, std::string& out);
+
+// Recursively delete a directory + its contents (best-effort, non-throwing). True
+// if the dir no longer exists afterward (incl. it never existing).
+bool RemoveTree(const std::wstring& dir);
 
 // Verify a detached Ed25519 signature (base64) over `data` using a raw-32-byte
 // base64 public key. Pure (OpenSSL). False on ANY failure. Encoding is byte-for-byte
