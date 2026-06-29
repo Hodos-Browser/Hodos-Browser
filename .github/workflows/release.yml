@@ -1045,6 +1045,57 @@ jobs:
           test -s appcast.xml || { echo "ERROR: appcast.xml was not generated"; exit 1; }
           cp appcast.xml artifacts/appcast.xml
 
+      # Commit 4c: sign the WHOLE appcast document (anti-replay / anti-tamper).
+      # Produces a detached Ed25519 sidecar appcast.xml.ed over
+      # (prefix||appcast-bytes); the silent updater (UpdateStager::
+      # VerifyAppcastDocument) verifies it BEFORE parsing any item.
+      # SOFT during transition: the sidecar is consumed ONLY by the silent path,
+      # which is inert until the 4d wiring lands — so a key-format miss here warns
+      # and ships no sidecar rather than blocking the (notify-only) release. The
+      # self-check below tells us, on each release, whether the Sparkle key
+      # converts for openssl. MUST be green before commit 4d wires the consumer;
+      # hardens to fail-closed at silent-enable.
+      - name: Sign appcast document (EdDSA sidecar)
+        shell: bash
+        env:
+          EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
+        run: |
+          EXPECTED_PUB="GVq3mpDl8eelsG0A5wqC5FBYZd3fy7U3we9iZ9+Tq3Q="
+          soft() { echo "::warning::appcast-doc signing skipped: $1 — shipping no sidecar (fine until the silent path is wired in 4d)"; exit 0; }
+          [ -n "$EDDSA_PRIVATE_KEY" ] || soft "SPARKLE_EDDSA_PRIVATE_KEY not set"
+
+          # Sparkle exports the Ed25519 key base64; the first 32 bytes are the seed.
+          # Wrap it as a PKCS#8 Ed25519 PEM openssl can sign with.
+          SEED_HEX=$(printf '%s' "$EDDSA_PRIVATE_KEY" | base64 -d 2>/dev/null | head -c 32 | xxd -p -c 999 || true)
+          [ ${#SEED_HEX} -eq 64 ] || soft "could not extract a 32-byte seed from the Sparkle key"
+          { printf '302e020100300506032b657004220420%s' "$SEED_HEX" | xxd -r -p | openssl base64 > /tmp/seed.b64; } || soft "PEM wrap failed"
+          { echo "-----BEGIN PRIVATE KEY-----"; cat /tmp/seed.b64; echo "-----END PRIVATE KEY-----"; } > /tmp/appcast_ed.pem
+
+          # Self-check: derived pubkey MUST equal the embedded SUPublicEDKey.
+          DERIVED=$(openssl pkey -in /tmp/appcast_ed.pem -pubout -outform DER 2>/dev/null | tail -c 32 | openssl base64 | tr -d '\n' || true)
+          if [ "$DERIVED" != "$EXPECTED_PUB" ]; then
+            rm -f /tmp/appcast_ed.pem /tmp/seed.b64
+            soft "derived pubkey '$DERIVED' != embedded '$EXPECTED_PUB' (Sparkle-key→PEM conversion needs work)"
+          fi
+          echo "appcast-doc key self-check PASSED (derives the embedded SUPublicEDKey)"
+
+          python3 scripts/sign-appcast.py --in appcast.xml --key /tmp/appcast_ed.pem --out appcast.xml.ed || soft "py-sign failed"
+
+          # Local self-verify before publish: the sidecar MUST verify against the
+          # exact appcast bytes (catches any byte-stability slip up to upload).
+          openssl pkey -in /tmp/appcast_ed.pem -pubout -out /tmp/appcast_ed_pub.pem 2>/dev/null || soft "pubkey extract failed"
+          { printf 'hodos-appcast-v1\n'; cat appcast.xml; } > /tmp/appcast_msg.bin
+          openssl base64 -d -in appcast.xml.ed -out /tmp/appcast_sig.bin || soft "sidecar base64 decode failed"
+          if ! openssl pkeyutl -verify -rawin -pubin -inkey /tmp/appcast_ed_pub.pem \
+                 -in /tmp/appcast_msg.bin -sigfile /tmp/appcast_sig.bin >/dev/null 2>&1; then
+            rm -f /tmp/appcast_ed.pem /tmp/appcast_ed_pub.pem /tmp/appcast_msg.bin /tmp/appcast_sig.bin /tmp/seed.b64
+            soft "local self-verify of the sidecar failed"
+          fi
+          rm -f /tmp/appcast_ed.pem /tmp/appcast_ed_pub.pem /tmp/appcast_msg.bin /tmp/appcast_sig.bin /tmp/seed.b64
+
+          cp appcast.xml.ed artifacts/appcast.xml.ed
+          echo "appcast.xml.ed produced + self-verified"
+
       # Create the release as a DRAFT first. Nothing is public yet — we verify the
       # assets + appcast below and only then promote it live. A verification failure
       # therefore leaves NOTHING public (RED = not shipped), instead of a broken
@@ -1059,6 +1110,7 @@ jobs:
             artifacts/windows-portable/*
             artifacts/macos-dmg/*
             artifacts/appcast.xml
+            artifacts/appcast.xml.ed
             artifacts/SHA256SUMS.txt
 
       - name: Verify draft release is complete

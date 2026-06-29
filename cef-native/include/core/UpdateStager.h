@@ -93,6 +93,21 @@ public:
                               const std::string& signatureBase64,
                               const std::string& publicKeyBase64);
 
+    // Domain-separation prefix for the WHOLE-appcast-document signature (commit
+    // 4c, anti-replay). The CI signer (scripts/sign-appcast.py) MUST prepend
+    // these EXACT bytes before signing; a mismatch fails closed. Tagging ONLY the
+    // appcast (the installer stays raw, for Sparkle/winsparkle-tool compat) keeps
+    // the two signing domains provably disjoint.
+    static const char* AppcastSignaturePrefix();   // "hodos-appcast-v1\n"
+
+    // Verify the detached Ed25519 signature over the whole appcast document,
+    // i.e. over (AppcastSignaturePrefix() || body). Pure; false on any failure.
+    // The orchestrator calls this BEFORE parsing any item, so a tampered/replayed
+    // feed never reaches the (deliberately minimal) XML extractors.
+    static bool VerifyAppcastDocument(const std::string& body,
+                                      const std::string& signatureBase64,
+                                      const std::string& publicKeyBase64);
+
     // Integer-monotonic anti-rollback: a candidate must be STRICTLY newer.
     // Refuses equal or lower, and refuses a candidate of 0 (absent build number).
     static bool IsNewerBuild(long candidateBuildNumber, long currentBuildNumber);

@@ -184,6 +184,40 @@ TEST(VerifyEd25519, RejectsMalformedInputs) {
 }
 
 // ---------------------------------------------------------------------------
+// VerifyAppcastDocument (whole-doc signature, domain-separated) — commit 4c
+// ---------------------------------------------------------------------------
+TEST(VerifyAppcastDocument, PrefixIsStableAndMatchesSigner) {
+    // Drift guard: must stay byte-identical to scripts/sign-appcast.py's
+    // APPCAST_SIGNATURE_PREFIX. A mismatch silently fails every appcast verify.
+    EXPECT_STREQ(UpdateStager::AppcastSignaturePrefix(), "hodos-appcast-v1\n");
+}
+
+TEST(VerifyAppcastDocument, AcceptsCorrectlySignedDocument) {
+    std::string body = "<rss><channel><item>...</item></channel></rss>";
+    std::string msg = std::string(UpdateStager::AppcastSignaturePrefix()) + body;
+    std::string pub, sig;
+    ASSERT_TRUE(MakeEd25519Sig(msg, pub, sig));
+    EXPECT_TRUE(UpdateStager::VerifyAppcastDocument(body, sig, pub));
+}
+
+TEST(VerifyAppcastDocument, RejectsTamperedBody) {
+    std::string body = "original appcast bytes";
+    std::string msg = std::string(UpdateStager::AppcastSignaturePrefix()) + body;
+    std::string pub, sig;
+    ASSERT_TRUE(MakeEd25519Sig(msg, pub, sig));
+    EXPECT_FALSE(UpdateStager::VerifyAppcastDocument("tampered appcast bytes", sig, pub));
+}
+
+TEST(VerifyAppcastDocument, RejectsSignatureMissingTheDomainPrefix) {
+    // A signature over body-ONLY (no domain prefix) must NOT pass doc-verify —
+    // proves the domain separation is actually enforced, not decorative.
+    std::string body = "the appcast body";
+    std::string pub, sig;
+    ASSERT_TRUE(MakeEd25519Sig(body, pub, sig));  // signs body WITHOUT the prefix
+    EXPECT_FALSE(UpdateStager::VerifyAppcastDocument(body, sig, pub));
+}
+
+// ---------------------------------------------------------------------------
 // IsNewerBuild
 // ---------------------------------------------------------------------------
 TEST(AntiRollback, StrictlyNewerOnly) {

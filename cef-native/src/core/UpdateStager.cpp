@@ -222,6 +222,22 @@ bool UpdateStager::VerifyEd25519(const std::string& data,
 }
 
 // ---------------------------------------------------------------------------
+// Pure: whole-appcast-document signature (anti-replay / anti-tamper)
+// ---------------------------------------------------------------------------
+const char* UpdateStager::AppcastSignaturePrefix() {
+    return "hodos-appcast-v1\n";
+}
+
+bool UpdateStager::VerifyAppcastDocument(const std::string& body,
+                                         const std::string& signatureBase64,
+                                         const std::string& publicKeyBase64) {
+    // Domain-separated: sign/verify over prefix||body so an appcast-doc signature
+    // can never be confused with an installer signature (and vice-versa).
+    return VerifyEd25519(std::string(AppcastSignaturePrefix()) + body,
+                         signatureBase64, publicKeyBase64);
+}
+
+// ---------------------------------------------------------------------------
 // Pure: integer anti-rollback
 // ---------------------------------------------------------------------------
 bool UpdateStager::IsNewerBuild(long candidateBuildNumber, long currentBuildNumber) {
@@ -415,19 +431,46 @@ StageResult UpdateStager::StagePendingUpdate(const std::string& appcastUrl,
         return StageResult::Skipped;
     }
 
-    // 1) Fetch + parse the appcast.
+    // The Ed25519 public key used for BOTH the appcast-document signature and the
+    // installer signature. Always the embedded production key; the test seam
+    // (compiled OUT of the shipped browser) lets the localhost rig substitute its
+    // throwaway key — there is no env-triggerable override in production.
+    std::string pubKey = PublicKeyBase64();
+#ifdef HODOS_UPDATE_TEST_SEAM
+    if (isTest) {
+        const char* testPub = std::getenv("HODOS_UPDATE_TEST_PUBKEY");
+        if (testPub) pubKey = testPub;
+    }
+#endif
+
+    // 1) Fetch the appcast + its detached signature sidecar.
     HttpResponse feed = SyncHttpClient::Get(appcastUrl, 10000);
     if (!feed.success || feed.body.empty()) {
         LOG_WARN_UPD("appcast fetch failed (status " + std::to_string(feed.statusCode) + ")");
         return StageResult::NetworkFailed;
     }
+    HttpResponse sig = SyncHttpClient::Get(appcastUrl + ".ed", 10000);
+    if (!sig.success || sig.body.empty()) {
+        LOG_WARN_UPD("appcast signature sidecar fetch failed (status "
+                     + std::to_string(sig.statusCode) + ") — refusing unsigned feed");
+        return StageResult::NetworkFailed;
+    }
+
+    // 2) VERIFY THE WHOLE DOCUMENT BEFORE PARSING (anti-tamper / anti-replay).
+    //    A tampered or forged feed never reaches the XML extractors below.
+    if (!VerifyAppcastDocument(feed.body, sig.body, pubKey)) {
+        LOG_ERR_UPD("appcast document signature INVALID — rejecting feed (fail-closed)");
+        return StageResult::VerifyFailed;
+    }
+
+    // 3) Parse the (now-authenticated) Windows item.
     AppcastEntry entry = ParseWindowsAppcastItem(feed.body);
     if (!entry.valid) {
         LOG_INFO_UPD("no usable Windows item in appcast");
         return StageResult::NoUpdate;
     }
 
-    // 2) Integer anti-rollback (current side baked via -DAPP_BUILD_NUMBER).
+    // 4) Integer anti-rollback (current side baked via -DAPP_BUILD_NUMBER).
     if (!IsNewerBuild(entry.buildNumber, currentBuildNumber)) {
         LOG_INFO_UPD("up to date (feed build " + std::to_string(entry.buildNumber)
                      + " <= current " + std::to_string(currentBuildNumber) + ")");
@@ -437,7 +480,7 @@ StageResult UpdateStager::StagePendingUpdate(const std::string& appcastUrl,
     std::error_code ec;
     fs::create_directories(pendingDir, ec);
 
-    // 3) Idempotency: if a verified marker for the same-or-newer build is already
+    // 5) Idempotency: if a verified marker for the same-or-newer build is already
     //    staged with its installer present, don't re-download.
     const fs::path markerPath = fs::path(pendingDir) / "update-info.json";
     if (fs::exists(markerPath)) {
@@ -459,7 +502,7 @@ StageResult UpdateStager::StagePendingUpdate(const std::string& appcastUrl,
         if (p.path().filename() != "rollback") fs::remove_all(p.path(), ec);
     }
 
-    // 4) Download the installer.
+    // 6) Download the installer.
     const std::string installerName =
         "HodosBrowser-" + (entry.version.empty() ? std::to_string(entry.buildNumber)
                                                   : entry.version) + "-setup.exe";
@@ -470,7 +513,7 @@ StageResult UpdateStager::StagePendingUpdate(const std::string& appcastUrl,
         return StageResult::NetworkFailed;
     }
 
-    // 5) Verify gates (fail-closed). Read the file ONCE; hash + EdDSA over the
+    // 7) Verify gates (fail-closed). Read the file ONCE; hash + EdDSA over the
     //    same in-memory bytes (no second read → no verify/hash TOCTOU). Pass the
     //    fs::path (not .string()) so non-ASCII pending dirs open losslessly.
     std::string bytes;
@@ -480,19 +523,8 @@ StageResult UpdateStager::StagePendingUpdate(const std::string& appcastUrl,
     }
     std::string sha = Sha256Buffer(bytes);
 
-    // EdDSA stays a HARD gate, always against the embedded production key.
-    std::string pubKey = PublicKeyBase64();
-#ifdef HODOS_UPDATE_TEST_SEAM
-    // TEST-BUILD ONLY (compiled OUT of the shipped browser — this block does not
-    // exist in production). Lets the localhost rig verify against a throwaway
-    // keypair, since the production private key is a CI secret. Because it is
-    // compile-time gated, no production install can be tricked into a key
-    // override via the environment.
-    if (isTest) {
-        const char* testPub = std::getenv("HODOS_UPDATE_TEST_PUBKEY");
-        if (testPub) pubKey = testPub;
-    }
-#endif
+    // EdDSA over the installer bytes — HARD gate, same key as the doc signature
+    // (pubKey computed once at the top; production = embedded key).
     bool edOk = VerifyEd25519(bytes, entry.edSignature, pubKey);
     std::string().swap(bytes);  // free the ~95MB buffer promptly (clear() keeps capacity)
     if (!edOk) {
@@ -541,7 +573,7 @@ StageResult UpdateStager::StagePendingUpdate(const std::string& appcastUrl,
     }
 #endif
 
-    // 6) Write the arm marker atomically (temp + rename) so a crash mid-write
+    // 8) Write the arm marker atomically (temp + rename) so a crash mid-write
     //    can't leave a torn marker that commit 6 might half-read.
     const fs::path markerTmp = markerPath.string() + ".tmp";
     {

@@ -68,6 +68,13 @@ try {
         --output $appcast
     if ($LASTEXITCODE -ne 0) { Write-Error 'generate-appcast.py failed' }
 
+    # 4b) Sign the WHOLE appcast document → sidecar appcast.xml.ed (commit 4c).
+    #     Same throwaway key as the installer; the client verifies this before
+    #     parsing. Exercises scripts/sign-appcast.py + the domain-separation prefix.
+    & python (Join-Path $repoRoot 'scripts\sign-appcast.py') `
+        --in $appcast --key $priv --out "$appcast.ed"
+    if ($LASTEXITCODE -ne 0) { Write-Error 'sign-appcast.py failed' }
+
     # 5) Serve the feed dir on localhost.
     $server = Start-Process python -ArgumentList @('-m','http.server',"$Port",'--bind','127.0.0.1') `
         -WorkingDirectory $feedDir -PassThru -WindowStyle Hidden
