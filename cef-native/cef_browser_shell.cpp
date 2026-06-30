@@ -3979,17 +3979,36 @@ static bool MaybeApplyStagedUpdate(const std::string& profileId) {
     auto instAuth = UpdateStager::VerifyAuthenticode(installerPath, UpdateStager::ExpectedSigner());
     if (!instAuth.trusted) return rejectPersistent("installer Authenticode failed");
 
-    // Anti-rollback. NOTE(review #2, PRE-PROMOTE MUST): marker.buildNumber is plaintext
-    // (attacker-writable). max(APP_BUILD_NUMBER, highWater) stops a JSON edit from
-    // lowering the floor below the running build, but an attacker pairing a genuinely
-    // -Marston-signed OLD installer + its signed manifest with a forged-high marker
-    // could downgrade + poison high-water. Bind the build number into the SIGNED
-    // expected-new-manifest and compare THAT before silent is promoted (tracked in the
-    // design doc). Until then the floor still blocks sub-current-build downgrades.
+    // Verify the SIGNED expected-new manifest + read its bound buildNumber, so
+    // anti-rollback trusts a SIGNED number, not the plaintext (attacker-writable)
+    // marker (review #2). The manifest's Ed25519 sidecar is verified with the embedded
+    // key; an attacker can't forge buildNumber without the private key.
+    long signedBuild = 0;
+    {
+        std::string mbytes, msig;
+        if (!updatefs::ReadFileAll(SU_Widen(manifestPath), mbytes) ||
+            !updatefs::ReadFileAll(SU_Widen(manifestPath + ".ed"), msig) ||
+            !updatefs::VerifyManifestSignature(mbytes, msig)) {
+            return rejectPersistent("expected-new-manifest signature invalid/missing");
+        }
+        FileManifest sm;
+        if (!ParseManifest(mbytes, sm) || sm.buildNumber <= 0) {
+            return rejectPersistent("expected-new-manifest unparseable / no buildNumber");
+        }
+        signedBuild = sm.buildNumber;
+        if (marker.buildNumber != signedBuild) {
+            return rejectPersistent("marker buildNumber " + std::to_string(marker.buildNumber) +
+                                    " != signed manifest " + std::to_string(signedBuild));
+        }
+    }
+
+    // Anti-rollback on the SIGNED build number. The floor max(APP_BUILD_NUMBER,
+    // highWater) also stops a JSON edit of update-state.json from going below the
+    // running build.
     const long currentBuild = APP_BUILD_NUMBER;
     const long floor = (state.highWaterBuild > currentBuild) ? state.highWaterBuild : currentBuild;
-    if (!(marker.buildNumber > floor)) {
-        return rejectPersistent("anti-rollback (build " + std::to_string(marker.buildNumber) +
+    if (!(signedBuild > floor)) {
+        return rejectPersistent("anti-rollback (build " + std::to_string(signedBuild) +
                                 " <= floor " + std::to_string(floor) + ")");
     }
 
@@ -4052,7 +4071,7 @@ static bool MaybeApplyStagedUpdate(const std::string& profileId) {
     ApplyRecord rec;
     rec.phase = ApplyPhase::Preparing;
     rec.fromBuild = currentBuild;
-    rec.toBuild = marker.buildNumber;
+    rec.toBuild = signedBuild;   // the SIGNED build number (review #2), not the plaintext marker
     rec.installerPath = installerPath;
     rec.rollbackDir = AppPaths::GetRollbackDir();
     rec.rollbackManifestPath = rbManifestPath;

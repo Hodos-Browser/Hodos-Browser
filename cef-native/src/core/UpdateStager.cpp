@@ -3,6 +3,7 @@
 
 #include "../../include/core/UpdateStager.h"
 #include "../../include/core/SyncHttpClient.h"
+#include "../../include/core/UpdateApply.h"   // 6c.3: FileManifest / ParseManifest (signed buildNumber)
 #include "../../include/core/Logger.h"
 
 #include <openssl/evp.h>
@@ -105,6 +106,17 @@ std::string IsoUtcNow() {
     std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tmv);
     return std::string(buf);
 }
+
+// Same-directory sibling URL: replace the last path segment of `url` with `name`
+// (6c.3: the expected-new-manifest is published next to the installer enclosure).
+std::string SiblingUrl(const std::string& url, const std::string& name) {
+    size_t slash = url.find_last_of('/');
+    return (slash == std::string::npos) ? name : url.substr(0, slash + 1) + name;
+}
+
+// MUST stay byte-identical to UpdateFs::ManifestSignaturePrefix() (the apply-time
+// verifier). Duplicated here so the stage-time check doesn't pull UpdateFs.
+const char* kManifestSigPrefix = "hodos-manifest-v1\n";
 
 // SHA-256 (hex) of an in-memory buffer — so the marker hash describes the SAME
 // bytes EdDSA verified (no second read of the file → no local write-race).
@@ -581,6 +593,45 @@ StageResult UpdateStager::StagePendingUpdate(const std::string& appcastUrl,
         return StageResult::VerifyFailed;
     }
 #endif
+
+    // 7c) Download + verify the SIGNED expected-new manifest (6c.3) into pending\.
+    //     The silent apply bootstrap REQUIRES it (the apply-time IntegrityGate verifies
+    //     the new {app} tree against it AND reads its bound buildNumber for anti-rollback,
+    //     review #2). Verify the sig here too (fail-closed early) + bind its buildNumber
+    //     to this feed's build. Sibling-of-installer URL (no appcast change).
+    {
+        const std::string manifestUrl = SiblingUrl(entry.enclosureUrl, "expected-new-manifest.json");
+        const fs::path manPath = fs::path(pendingDir) / "expected-new-manifest.json";
+        HttpResponse mdl = SyncHttpClient::Download(manifestUrl, manPath.string(), 60000);
+        HttpResponse msig = SyncHttpClient::Get(manifestUrl + ".ed", 10000);
+        if (!mdl.success || !fs::exists(manPath) || !msig.success || msig.body.empty()) {
+            LOG_WARN_UPD("expected-new-manifest download failed — refusing stage (silent path needs it)");
+            fs::remove(installerPath, ec); fs::remove(manPath, ec);
+            return StageResult::NetworkFailed;
+        }
+        std::string mbytes;
+        { std::ifstream in(manPath, std::ios::binary); mbytes.assign((std::istreambuf_iterator<char>(in)), {}); }
+        if (!VerifyEd25519(std::string(kManifestSigPrefix) + mbytes, msig.body, pubKey)) {
+            LOG_ERR_UPD("expected-new-manifest signature INVALID — rejecting stage (fail-closed)");
+            fs::remove(installerPath, ec); fs::remove(manPath, ec);
+            return StageResult::VerifyFailed;
+        }
+        FileManifest sm;
+        if (!ParseManifest(mbytes, sm) || sm.buildNumber != entry.buildNumber) {
+            LOG_ERR_UPD("expected-new-manifest buildNumber (" + std::to_string(sm.buildNumber)
+                        + ") != feed build (" + std::to_string(entry.buildNumber) + ") — rejecting stage");
+            fs::remove(installerPath, ec); fs::remove(manPath, ec);
+            return StageResult::VerifyFailed;
+        }
+        // Persist the verified sidecar next to the manifest (the apply-time gate reads it).
+        std::ofstream out((manPath.string() + ".ed"), std::ios::binary | std::ios::trunc);
+        out << msig.body;
+        if (!out) {
+            LOG_ERR_UPD("failed to write manifest sidecar — unstaging");
+            fs::remove(installerPath, ec); fs::remove(manPath, ec);
+            return StageResult::VerifyFailed;
+        }
+    }
 
     // 8) Write the arm marker atomically (temp + rename) so a crash mid-write
     //    can't leave a torn marker that commit 6 might half-read.

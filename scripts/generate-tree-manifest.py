@@ -73,7 +73,7 @@ def _is_installed(rel: str) -> bool:
     return top in _RECURSIVE_DIRS  # everything under locales\ / frontend\
 
 
-def build_manifest(staging: str) -> dict:
+def build_manifest(staging: str, build_number: int) -> dict:
     files = {}
     for root, _dirs, names in os.walk(staging):
         for name in names:
@@ -82,8 +82,11 @@ def build_manifest(staging: str) -> dict:
             if not _is_installed(rel):
                 continue  # not in [Files] -> not installed -> not in the manifest
             files[normkey(rel)] = sha256_file(full)
-    # Deterministic ordering so the signed bytes are reproducible.
-    return {"schema": 1, "files": dict(sorted(files.items()))}
+    # buildNumber is bound into the SIGNED bytes so apply-time anti-rollback can trust
+    # it instead of the plaintext marker (review #2). Key order matches the C++
+    # SerializeManifest output for human-diff parity (not required for verification —
+    # the client hashes the bytes we write). Deterministic file ordering.
+    return {"schema": 1, "buildNumber": build_number, "files": dict(sorted(files.items()))}
 
 
 def sign_detached(message: bytes, key_pem: str) -> bytes:
@@ -111,7 +114,11 @@ def main():
     ap.add_argument("--staging", required=True, help="post-signed staging tree (e.g. staging/HodosBrowser)")
     ap.add_argument("--out", required=True, help="manifest output path (written OUTSIDE staging)")
     ap.add_argument("--key", required=True, help="Ed25519 private key (PEM / PKCS#8) — same key as the appcast")
+    ap.add_argument("--build-number", type=int, required=True,
+                    help="monotonic integer build number (bound into the signed manifest for anti-rollback)")
     args = ap.parse_args()
+    if args.build_number <= 0:
+        sys.exit("ERROR: --build-number must be a positive integer")
 
     if not os.path.isdir(args.staging):
         sys.exit(f"ERROR: staging dir not found: {args.staging}")
@@ -120,7 +127,7 @@ def main():
     if out_abs.startswith(staging_abs + os.sep):
         sys.exit("ERROR: --out must be OUTSIDE --staging (else the manifest references itself)")
 
-    manifest = build_manifest(args.staging)
+    manifest = build_manifest(args.staging, args.build_number)
     # Compact, stable bytes — what we sign + what the client re-reads. Match the
     # C++ json.dump(2) only in *content*; the client hashes the BYTES we write, so
     # write once and sign the exact same bytes.

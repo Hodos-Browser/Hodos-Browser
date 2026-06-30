@@ -996,6 +996,8 @@ jobs:
           case "$maj$min$pat$beta" in ''|*[!0-9]*) echo "ERROR: cannot parse version '$VERSION' into a build number"; exit 1;; esac
           BUILD_NUMBER=$(( 10#$maj * 1000000 + 10#$min * 10000 + 10#$pat * 100 + 10#$beta ))
           echo "Build number derived from tag: $BUILD_NUMBER"
+          # Export for the later expected-new-manifest step (6c.3: bound into the signed manifest).
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
 
           ls -la artifacts/ || true
           ls -la artifacts/*/ || true
@@ -1128,8 +1130,10 @@ jobs:
           [ "$DERIVED" = "$EXPECTED_PUB" ] || { rm -f /tmp/manifest_ed.pem /tmp/mseed.b64; soft "derived pubkey '$DERIVED' != embedded '$EXPECTED_PUB'"; }
           echo "expected-new-manifest key self-check PASSED"
 
+          [ -n "$BUILD_NUMBER" ] || soft "BUILD_NUMBER not set (needed to bind into the signed manifest)"
           python3 scripts/generate-tree-manifest.py --staging /tmp/mstage \
-            --out artifacts/expected-new-manifest.json --key /tmp/manifest_ed.pem || soft "manifest gen/sign failed"
+            --out artifacts/expected-new-manifest.json --key /tmp/manifest_ed.pem \
+            --build-number "$BUILD_NUMBER" || soft "manifest gen/sign failed"
 
           # Local self-verify over (prefix||manifest-bytes) before publish.
           openssl pkey -in /tmp/manifest_ed.pem -pubout -out /tmp/manifest_pub.pem 2>/dev/null || soft "pubkey extract failed"

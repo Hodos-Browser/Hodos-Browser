@@ -90,9 +90,20 @@ mutex `Local\HodosBrowser_AnyInstance`, `update.lock` honor-at-launch (dormant),
 >   rolling back. Self-reviewed against the supervisor `WaitForHealthy(phase==Healthy)` contract (same
 >   `pending\apply.json`). Known item for the rig: a funded-wallet migration >110s would false-rollback —
 >   mitigation is the V3-15 wallet "alive-but-migrating" heartbeat (deferred wallet change) + the generous timeout.
-> - **6c.3 / 6e / rig ⏳** — staging downloads manifest+`.ed` into `pending\` (sibling-of-installer URL) + the
->   #2 build-number binding; 6e watchdog + §H.7 kill-switch/canary + kill-list + the signer-continuity notify
->   prompt; the funded-wallet fault-injection rig = commit 7.
+> - **6c.3 ✅ DONE — manifest download + the #2 anti-rollback fix (CLOSED).** `StagePendingUpdate` now also
+>   downloads `expected-new-manifest.json`+`.ed` (sibling-of-installer URL) into `pending\`, verifies the
+>   Ed25519 sig at stage time, and binds `manifest.buildNumber == feed buildNumber` (fail-closed: any failure
+>   removes the stage). `FileManifest` gained `buildNumber`; `generate-tree-manifest.py --build-number` +
+>   `release.yml` pass it; the bootstrap now **verifies the signed manifest + anti-rollbacks on the SIGNED
+>   buildNumber** (not the plaintext marker) + `rec.toBuild = signedBuild` (so high-water can't be poisoned).
+>   **Security review (security-ops): #2 CLOSED unconditionally** (forged-high-marker → marker≠signed reject;
+>   consistent-old-set → anti-rollback floor reject). Fixed its 2 LOW finds: **GAP-A** (IntegrityGate
+>   skip-if-*unreadable* now fail-closed, since the path is always populated) + a pubkey cross-verify test
+>   (`UpdateStager`==`UpdateFs` embedded key). 63 unit tests; built clean ON+OFF. **The silent path can now FIRE
+>   end-to-end** (manifest present for eligibility). RIG NOTE: `scripts/test-update-feed.ps1` must also
+>   generate+serve the manifest for the local e2e test — do with commit 7's funded-wallet rig.
+> - **6e / rig ⏳** — watchdog + §H.7 kill-switch/canary + kill-list (deferred from 6c) + the signer-continuity
+>   notify PROMPT UI; the funded-wallet fault-injection rig + flip `HODOS_SILENT_AUTOUPDATE` ON = commit 7.
 
 **✅ COMMIT 6b COMPLETE (the supervisor exe + its packaging).** Remaining apply-phase commits: **6c** (the
 > `MaybeApplyStagedUpdate` Phase-A bootstrap that stages the backup + snapshots the DB + spawns the helper with

@@ -128,11 +128,13 @@ TEST(UpdateState, DefaultsAreFailSafeOff) {
 // ---- FileManifest + key normalization ---------------------------------------
 TEST(FileManifest, RoundTrips) {
     FileManifest in;
+    in.buildNumber = 413;
     in.entries["hodosbrowser.exe"] = "aa";
     in.entries["locales/en-us.pak"] = "bb";
 
     FileManifest out;
     ASSERT_TRUE(ParseManifest(SerializeManifest(in), out));
+    EXPECT_EQ(out.buildNumber, 413);
     EXPECT_EQ(out.entries.size(), 2u);
     EXPECT_EQ(out.entries["hodosbrowser.exe"], "aa");
     EXPECT_EQ(out.entries["locales/en-us.pak"], "bb");

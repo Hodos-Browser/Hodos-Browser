@@ -4,6 +4,7 @@
 // new -wal/-shm at the target, or SQLite replays it onto the old db -> corruption.
 
 #include "core/UpdateFs.h"
+#include "core/UpdateStager.h"
 
 #include <atomic>
 #include <filesystem>
@@ -362,4 +363,12 @@ TEST(VerifyManifestSignature, FailsClosedWithoutProdKey) {
 TEST(ManifestSignaturePrefix, IsStableAndDomainSeparated) {
     EXPECT_STREQ(ManifestSignaturePrefix(), "hodos-manifest-v1\n");
     EXPECT_STRNE(ManifestSignaturePrefix(), "hodos-appcast-v1\n");  // disjoint from appcast
+}
+
+TEST(EmbeddedKey, StagerAndFsPublicKeysMatch) {
+    // The embedded Ed25519 pubkey is duplicated in UpdateStager (appcast/installer)
+    // and UpdateFs (manifest) to keep the helper free of UpdateStager. They MUST stay
+    // identical, or a CI-signed manifest verifies in one place and not the other
+    // (review 6c.3 LOW — catches a one-sided key rotation at test time).
+    EXPECT_STREQ(hodos::UpdateStager::PublicKeyBase64(), hodos::updatefs::PublicKeyBase64());
 }

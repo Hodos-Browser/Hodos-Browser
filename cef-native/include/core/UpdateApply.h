@@ -88,8 +88,13 @@ bool ParseUpdateState(const std::string& json, UpdateState& out);  // false on b
 // A content manifest: relative path (normalized to forward slashes, lower-cased on
 // Windows for case-insensitive match) -> sha256 hex. Backs BOTH the rollback
 // (old-tree) verify and the signed expected-new integrity check (B4/B5).
+// `buildNumber` (6c.3 / review #2): for the SIGNED expected-new manifest, the target
+// build number — bound into the EdDSA-signed bytes, so apply-time anti-rollback can
+// trust it instead of the plaintext (attacker-writable) marker. 0 when unused
+// (e.g. the local rollback manifest).
 struct FileManifest {
     std::map<std::string, std::string> entries;  // relpath -> sha256-hex
+    long buildNumber = 0;
 };
 
 std::string SerializeManifest(const FileManifest& m);

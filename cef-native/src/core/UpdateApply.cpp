@@ -139,6 +139,7 @@ std::string NormalizeManifestKey(const std::string& relPath) {
 std::string SerializeManifest(const FileManifest& m) {
     json j;
     j["schema"] = 1;
+    j["buildNumber"] = m.buildNumber;
     json files = json::object();
     for (const auto& kv : m.entries) files[kv.first] = kv.second;
     j["files"] = files;
@@ -149,6 +150,7 @@ bool ParseManifest(const std::string& jsonStr, FileManifest& out) {
     json j = json::parse(jsonStr, nullptr, /*allow_exceptions=*/false);
     if (j.is_discarded() || !j.is_object()) return false;
     out.entries.clear();
+    out.buildNumber = getLong(j, "buildNumber");
     auto it = j.find("files");
     if (it == j.end() || !it->is_object()) return false;
     for (auto& el : it->items()) {

@@ -250,8 +250,10 @@ bool IntegrityGate(const Paths& p, const ApplyRecord& rec) {
     }
     std::string mjson;
     if (!updatefs::ReadFileAll(W(rec.expectedNewManifestPath), mjson)) {
-        L("IntegrityGate: expected-new-manifest unreadable — SKIPPED");
-        return true;
+        // The path is SET (6c.3 always populates it) -> the manifest MUST be readable.
+        // Unreadable here means deleted/tampered in the window -> FAIL (review 6c.3 GAP-A).
+        L("IntegrityGate: expected-new-manifest path set but unreadable -> FAIL (deleted/tampered)");
+        return false;
     }
     // Signature FIRST (V3-8): verify the sidecar before trusting any byte of it.
     std::string msig;
