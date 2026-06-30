@@ -343,3 +343,39 @@ TEST(Authenticode, UnsignedFileIsNotTrusted) {
     std::remove(path.c_str());
 }
 #endif  // _WIN32
+
+// ---- Kill-list (commit 6e.2) — cross-platform pure parse --------------------
+TEST(KillList, ParsesGenerationAndRetractedBuilds) {
+    auto kl = UpdateStager::ParseKillList(
+        R"({"schema":1,"generation":5,"retractedBuilds":[40101,40102]})");
+    EXPECT_TRUE(kl.valid);
+    EXPECT_EQ(kl.generation, 5);
+    ASSERT_EQ(kl.retractedBuilds.size(), 2u);
+    EXPECT_EQ(kl.retractedBuilds[0], 40101);
+    EXPECT_EQ(kl.retractedBuilds[1], 40102);
+}
+
+TEST(KillList, GarbageOrNonObjectIsInvalid) {
+    EXPECT_FALSE(UpdateStager::ParseKillList("not json").valid);
+    EXPECT_FALSE(UpdateStager::ParseKillList("[1,2,3]").valid);   // array, not object
+    EXPECT_FALSE(UpdateStager::ParseKillList("").valid);
+}
+
+TEST(KillList, EmptyListIsValidEmpty) {
+    auto kl = UpdateStager::ParseKillList(R"({"schema":1,"generation":1,"retractedBuilds":[]})");
+    EXPECT_TRUE(kl.valid);
+    EXPECT_TRUE(kl.retractedBuilds.empty());
+}
+
+TEST(KillList, MissingFieldsDefaultSafely) {
+    auto kl = UpdateStager::ParseKillList(R"({"schema":1})");  // no generation / list
+    EXPECT_TRUE(kl.valid);
+    EXPECT_EQ(kl.generation, 0);
+    EXPECT_TRUE(kl.retractedBuilds.empty());
+}
+
+TEST(KillList, SignaturePrefixIsDomainSeparated) {
+    EXPECT_STREQ(UpdateStager::KillListSignaturePrefix(), "hodos-killlist-v1\n");
+    EXPECT_STRNE(UpdateStager::KillListSignaturePrefix(), "hodos-manifest-v1\n");
+    EXPECT_STRNE(UpdateStager::KillListSignaturePrefix(), "hodos-appcast-v1\n");
+}

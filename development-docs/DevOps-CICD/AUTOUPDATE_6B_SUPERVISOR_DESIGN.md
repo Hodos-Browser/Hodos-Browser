@@ -102,8 +102,24 @@ mutex `Local\HodosBrowser_AnyInstance`, `update.lock` honor-at-launch (dormant),
 >   (`UpdateStager`==`UpdateFs` embedded key). 63 unit tests; built clean ON+OFF. **The silent path can now FIRE
 >   end-to-end** (manifest present for eligibility). RIG NOTE: `scripts/test-update-feed.ps1` must also
 >   generate+serve the manifest for the local e2e test — do with commit 7's funded-wallet rig.
-> - **6e / rig ⏳** — watchdog + §H.7 kill-switch/canary + kill-list (deferred from 6c) + the signer-continuity
->   notify PROMPT UI; the funded-wallet fault-injection rig + flip `HODOS_SILENT_AUTOUPDATE` ON = commit 7.
+> - **6e ✅ DONE (mechanism) — watchdog tripwire + kill-list client.** **6e.1:** in-browser secondary watchdog
+>   (`MaybeResumeUnconfirmedApply`, before `MaybeApplyStagedUpdate`) — if apply.json is installing/awaiting-health
+>   AND no live supervisor holds the lock AND we're not the health-probe, the supervisor died mid-apply →
+>   re-spawn helper `--resume` (rolls back) + `_exit(0)` so it can overwrite our image. Covers the relaunch-
+>   before-next-logon window the OS-level RunOnce misses. **6e.2:** `UpdateStager::IsBuildRetracted` —
+>   the bootstrap fetches a signed kill-list (`hodos-killlist-v1\n` prefix, embedded key) before applying and
+>   defers a retracted build; **FAILS OPEN** on network-down/invalid-sig/unparseable (best-effort safety — the
+>   build is already Marston+EdDSA verified; this only stops OUR own retracted build). `ParseKillList` is pure
+>   + 5 unit tests. 79 update tests; built clean ON+OFF. Self-reviewed (compose already-reviewed primitives:
+>   the 6c.2 `_exit` seam, the 6c.1 lock probe, the 6b.2b helper `--resume`).
+> - **DEFERRED (not brick-safety gates):** the signer-continuity **notify PROMPT UI** (frontend/overlay — the
+>   mechanism already degrades correctly + leaves the build staged; the prompt is UX polish) + the **server-side
+>   kill-list publishing** (`kill-list.json` + `.ed` at hodosbrowser.com + the retraction tooling — the client
+>   fail-opens until it exists). Client-side anti-replay (persist the kill-list `generation`) is a future refinement.
+> - **commit 7 ⏳ — the gate + flip:** the funded-wallet fault-injection rig (the MUST-TEST: OS-blocked-stub +
+>   truncated-mid-copy → supervisor restores rollback, wallet DB + profile.lock intact) — also update
+>   `scripts/test-update-feed.ps1` to gen+serve the manifest; the CI test gate; flip `HODOS_SILENT_AUTOUPDATE`
+>   ON after soak.
 
 **✅ COMMIT 6b COMPLETE (the supervisor exe + its packaging).** Remaining apply-phase commits: **6c** (the
 > `MaybeApplyStagedUpdate` Phase-A bootstrap that stages the backup + snapshots the DB + spawns the helper with

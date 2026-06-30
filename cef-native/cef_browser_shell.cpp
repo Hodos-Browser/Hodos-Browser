@@ -3880,6 +3880,60 @@ static HANDLE SU_SpawnHelper(const std::wstring& cmdline, HANDLE lockH, HANDLE b
     return pi.hProcess;
 }
 
+// Simple detached spawn (no inherited handles) — for the helper --resume path.
+static HANDLE SU_SpawnDetached(const std::wstring& cmdline) {
+    STARTUPINFOW si{}; si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    auto mk = [&](DWORD f) -> BOOL {
+        std::vector<wchar_t> cl(cmdline.begin(), cmdline.end()); cl.push_back(L'\0');
+        return CreateProcessW(nullptr, cl.data(), nullptr, nullptr, FALSE, f, nullptr, nullptr, &si, &pi);
+    };
+    DWORD flags = CREATE_NO_WINDOW | DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB;
+    BOOL ok = mk(flags);
+    if (!ok && GetLastError() == ERROR_ACCESS_DENIED) ok = mk(flags & ~CREATE_BREAKAWAY_FROM_JOB);
+    if (!ok) return nullptr;
+    CloseHandle(pi.hThread);
+    return pi.hProcess;
+}
+
+// 6e.1 — in-browser watchdog tripwire (SECONDARY to the per-user RunOnce --resume).
+// At cold boot, if apply.json shows an unconfirmed apply (installing/awaiting-health)
+// AND no live supervisor holds the lock AND we're not the health-probe, the supervisor
+// died mid-apply: re-spawn the helper --resume (it rolls back DB-first + relaunches old)
+// and _exit(0) so it can overwrite our image. Covers the window where the user relaunches
+// before the next logon fires RunOnce. Returns false => nothing to do => continue startup.
+static bool MaybeResumeUnconfirmedApply() {
+    using namespace hodos;
+    if (IsDevEnv() && !std::getenv("HODOS_UPDATE_TEST")) return false;
+    if (g_post_update_probe.load()) return false;  // we ARE the probe — let 6d confirm health
+
+    const std::string pendingDir = AppPaths::GetPendingUpdateDir();
+    const std::string lockPath = AppPaths::GetUpdateLockPath();
+    if (pendingDir.empty() || lockPath.empty()) return false;
+
+    std::string content;
+    ApplyRecord rec;
+    if (!updatefs::ReadFileAll(SU_Widen(pendingDir + "\\apply.json"), content) ||
+        !ParseApplyRecord(content, rec)) return false;
+    if (rec.phase != ApplyPhase::Installing && rec.phase != ApplyPhase::AwaitingHealth) return false;
+
+    // A live supervisor (lock held) is already handling it — don't interfere.
+    if (UpdateLockIsHeld(SU_Widen(lockPath))) return false;
+
+    const std::string helperExe = AppPaths::GetHelperStageDir() + "\\hodos-update-helper.exe";
+    if (GetFileAttributesW(SU_Widen(helperExe).c_str()) == INVALID_FILE_ATTRIBUTES) {
+        LOG_WARNING("Resume: unconfirmed apply but helper copy missing — leaving for RunOnce --resume");
+        return false;
+    }
+    LOG_WARNING("Resume: unconfirmed apply (phase=" + std::string(ApplyPhaseToString(rec.phase)) +
+                ") with no live supervisor — re-spawning helper --resume");
+    HANDLE h = SU_SpawnDetached(L"\"" + SU_Widen(helperExe) + L"\" --resume");
+    if (h) CloseHandle(h);
+    fflush(nullptr);
+    _exit(0);   // let the helper restore rollback + relaunch the old build over our image
+    return true;  // unreachable
+}
+
 // Returns false => not eligible / aborted => caller continues normal startup. On a
 // successful apply it _exit(0)s (never returns).
 static bool MaybeApplyStagedUpdate(const std::string& profileId) {
@@ -4025,6 +4079,15 @@ static bool MaybeApplyStagedUpdate(const std::string& profileId) {
     if (liveAuth.trusted && instAuth.trusted && liveAuth.thumbprint != instAuth.thumbprint) {
         return rejectPersistent("signer changed (" + liveAuth.thumbprint + " -> " + instAuth.thumbprint +
                                 ") — degrade to notify");
+    }
+
+    // Kill-list (6e.2 / H4 / §H.7): a build WE retracted server-side must not apply
+    // even if already staged. Fail-open (best-effort safety; the build is already
+    // Marston+EdDSA verified — this only stops our own bad build). NOT recorded as a
+    // persistent rejection (a build could be UN-retracted), so use a plain return.
+    if (UpdateStager::IsBuildRetracted(signedBuild, "https://hodosbrowser.com/kill-list.json")) {
+        LOG_WARNING("Silent apply: build " + std::to_string(signedBuild) + " retracted by kill-list — defer");
+        return false;
     }
 
     // Backup the full {app} tree (exclude the update\ working area) + its manifest.
@@ -4329,11 +4392,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     // The single-instance forward / profile-lock / backend-launch path is profile-only.
     if (!g_picker_mode) {
 #ifdef HODOS_SILENT_AUTOUPDATE
-    // 6c.2 (§9 v3 Phase A / D.1): apply a verified staged update at this cold-boot
-    // seam — BEFORE SingleInstance/profile-lock/backends/CefInitialize, so the
-    // bootstrap holds nothing in {app} but its own image. On a successful apply it
-    // _exit(0)s (spawns the supervisor + never returns); otherwise it returns and
-    // normal startup continues on the current build. Compiled out by default.
+    // 6e.1: first recover an unconfirmed apply whose supervisor died (re-spawn
+    // helper --resume + _exit), THEN 6c.2: apply a verified staged update at this
+    // cold-boot seam — BEFORE SingleInstance/profile-lock/backends/CefInitialize, so
+    // the bootstrap holds nothing in {app} but its own image. Both _exit(0) on action;
+    // otherwise normal startup continues on the current build. Compiled out by default.
+    MaybeResumeUnconfirmedApply();
     MaybeApplyStagedUpdate(profileId);
 #endif
     // B-6: Single-instance check — forward to running instance instead of error dialog.

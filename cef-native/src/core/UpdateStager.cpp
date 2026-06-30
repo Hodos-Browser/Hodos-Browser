@@ -660,4 +660,43 @@ StageResult UpdateStager::StagePendingUpdate(const std::string& appcastUrl,
     return StageResult::Staged;
 }
 
+// ---- Kill-list (commit 6e.2 / §H.7 + H4) ------------------------------------
+UpdateStager::KillList UpdateStager::ParseKillList(const std::string& jsonStr) {
+    KillList out;
+    auto j = nlohmann::json::parse(jsonStr, nullptr, /*allow_exceptions=*/false);
+    if (j.is_discarded() || !j.is_object()) return out;  // valid stays false
+    if (auto it = j.find("generation"); it != j.end() && it->is_number_integer())
+        out.generation = it->get<long>();
+    if (auto it = j.find("retractedBuilds"); it != j.end() && it->is_array()) {
+        for (const auto& e : *it) if (e.is_number_integer()) out.retractedBuilds.push_back(e.get<long>());
+    }
+    out.valid = true;
+    return out;
+}
+
+const char* UpdateStager::KillListSignaturePrefix() { return "hodos-killlist-v1\n"; }
+
+bool UpdateStager::IsBuildRetracted(long buildNumber, const std::string& killListUrl) {
+    HttpResponse kl = SyncHttpClient::Get(killListUrl, 5000);
+    HttpResponse ks = SyncHttpClient::Get(killListUrl + ".ed", 5000);
+    if (!kl.success || kl.body.empty() || !ks.success || ks.body.empty()) {
+        LOG_INFO_UPD("kill-list unavailable (network) — fail-open (proceeding)");
+        return false;
+    }
+    if (!VerifyEd25519(std::string(KillListSignaturePrefix()) + kl.body, ks.body, PublicKeyBase64())) {
+        LOG_WARN_UPD("kill-list signature invalid — ignoring (fail-open)");
+        return false;
+    }
+    KillList list = ParseKillList(kl.body);
+    if (!list.valid) { LOG_WARN_UPD("kill-list unparseable — fail-open"); return false; }
+    for (long b : list.retractedBuilds) {
+        if (b == buildNumber) {
+            LOG_ERR_UPD("build " + std::to_string(buildNumber) + " is RETRACTED by kill-list gen "
+                        + std::to_string(list.generation) + " — refusing apply");
+            return true;
+        }
+    }
+    return false;
+}
+
 }  // namespace hodos

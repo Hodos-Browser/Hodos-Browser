@@ -29,6 +29,7 @@
 
 #include <atomic>
 #include <string>
+#include <vector>
 
 namespace hodos {
 
@@ -122,6 +123,25 @@ public:
     // Marker (update-info.json) (de)serialize. Pure JSON (nlohmann).
     static std::string SerializeMarker(const StagedUpdateMarker& marker);
     static bool ParseMarker(const std::string& json, StagedUpdateMarker& out);
+
+    // ---- Kill-list (commit 6e.2 / §H.7 + H4) ----------------------------------
+    // A signed retraction list so a build WE later found bad doesn't apply even if
+    // already staged on the fleet. NOT a security gate (the build is already
+    // Marston+EdDSA verified) — best-effort safety, so it FAILS OPEN.
+    struct KillList {
+        bool valid = false;          // false if the JSON was unparseable
+        long generation = 0;         // monotonic doc version (for future anti-replay)
+        std::vector<long> retractedBuilds;
+    };
+    // Pure parse of `{schema, generation, retractedBuilds:[...]}`. No network/throw.
+    static KillList ParseKillList(const std::string& json);
+    // Domain-separation prefix for the kill-list signature ("hodos-killlist-v1\n").
+    static const char* KillListSignaturePrefix();
+    // Fetch `killListUrl` + its `.ed` sidecar, verify with the embedded key, and
+    // return TRUE iff `buildNumber` is retracted. FAILS OPEN (returns false) on any
+    // network failure or unverifiable/unparseable list — a retraction we can't fetch
+    // or trust must not block a verified update (it only stops OUR own bad build).
+    static bool IsBuildRetracted(long buildNumber, const std::string& killListUrl);
 
 #ifdef _WIN32
     struct AuthenticodeResult {
