@@ -4031,7 +4031,14 @@ static bool MaybeApplyStagedUpdate(const std::string& profileId) {
     // re-sign as Marston). sha256==marker is a cheap extra (the marker is plaintext).
     if (UpdateStager::Sha256File(installerPath) != marker.sha256) return rejectPersistent("installer sha256 != marker");
     auto instAuth = UpdateStager::VerifyAuthenticode(installerPath, UpdateStager::ExpectedSigner());
-    if (!instAuth.trusted) return rejectPersistent("installer Authenticode failed");
+    bool authOk = instAuth.trusted;
+#ifdef HODOS_UPDATE_TEST_SEAM
+    // TEST-BUILD ONLY (compiled OUT of production): the rig installer is self-signed
+    // and won't chain to Marston — stage on the EdDSA/manifest gates alone, like
+    // UpdateStager::StagePendingUpdate's test seam. Production Authenticode is mandatory.
+    if (const char* t = std::getenv("HODOS_UPDATE_TEST"); t && std::string(t) == "1") authOk = true;
+#endif
+    if (!authOk) return rejectPersistent("installer Authenticode failed");
 
     // Verify the SIGNED expected-new manifest + read its bound buildNumber, so
     // anti-rollback trusts a SIGNED number, not the plaintext (attacker-writable)
@@ -4085,7 +4092,14 @@ static bool MaybeApplyStagedUpdate(const std::string& profileId) {
     // even if already staged. Fail-open (best-effort safety; the build is already
     // Marston+EdDSA verified — this only stops our own bad build). NOT recorded as a
     // persistent rejection (a build could be UN-retracted), so use a plain return.
-    if (UpdateStager::IsBuildRetracted(signedBuild, "https://hodosbrowser.com/kill-list.json")) {
+    bool checkKillList = true;
+#ifdef HODOS_UPDATE_TEST_SEAM
+    // Skip the prod-URL kill-list fetch in the rig (it would 404 -> fail-open anyway,
+    // but this avoids the ~10s network wait on the local apply path).
+    if (const char* t = std::getenv("HODOS_UPDATE_TEST"); t && std::string(t) == "1") checkKillList = false;
+#endif
+    if (checkKillList &&
+        UpdateStager::IsBuildRetracted(signedBuild, "https://hodosbrowser.com/kill-list.json")) {
         LOG_WARNING("Silent apply: build " + std::to_string(signedBuild) + " retracted by kill-list — defer");
         return false;
     }

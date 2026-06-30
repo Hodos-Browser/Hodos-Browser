@@ -13,6 +13,7 @@
 #endif
 #include <windows.h>
 
+#include <cstdlib>
 #include <filesystem>
 #include <vector>
 
@@ -359,8 +360,22 @@ const char* PublicKeyBase64() {
 }
 
 bool VerifyManifestSignature(const std::string& manifestBytes, const std::string& signatureBase64) {
-    return VerifyEd25519(std::string(ManifestSignaturePrefix()) + manifestBytes,
-                         signatureBase64, PublicKeyBase64());
+    std::string pub = PublicKeyBase64();
+#ifdef HODOS_UPDATE_TEST_SEAM
+    // TEST-BUILD ONLY (compiled OUT of production via the HODOS_UPDATE_TEST_SEAM
+    // CMake option): let the localhost rig verify a manifest it signed with its
+    // throwaway key. The signature check stays a REAL hard gate — just against the
+    // rig key instead of the embedded production key. No env override exists in a
+    // shipped build, so a production install can't be tricked into a weaker key.
+    {
+        const char* t = std::getenv("HODOS_UPDATE_TEST");
+        if (t && std::string(t) == "1") {
+            const char* tp = std::getenv("HODOS_UPDATE_TEST_PUBKEY");
+            if (tp && *tp) pub = tp;
+        }
+    }
+#endif
+    return VerifyEd25519(std::string(ManifestSignaturePrefix()) + manifestBytes, signatureBase64, pub);
 }
 
 unsigned long long DirSizeBytes(const std::wstring& dir) {

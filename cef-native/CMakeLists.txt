@@ -88,6 +88,17 @@ if(HODOS_SILENT_AUTOUPDATE)
     message(STATUS "HODOS_SILENT_AUTOUPDATE: ON (silent staging compiled in)")
 endif()
 
+# RIG-ONLY auto-update test seams (commit 7 fault-injection rig). Compiles the
+# throwaway-key + self-signed-installer relaxations into the SHELL + HELPER (the
+# hodos_tests target already defines this per-target). **NEVER set in a shipped
+# build** — production verify (EdDSA, manifest key, Authenticode) stays unconditional.
+# Build the local apply rig with -DHODOS_SILENT_AUTOUPDATE=ON -DHODOS_UPDATE_TEST_SEAM=ON.
+option(HODOS_UPDATE_TEST_SEAM "Compile the auto-update TEST seams into the shell/helper (rig only — NOT production)" OFF)
+if(HODOS_UPDATE_TEST_SEAM)
+    add_compile_definitions(HODOS_UPDATE_TEST_SEAM)
+    message(WARNING "HODOS_UPDATE_TEST_SEAM: ON — auto-update test seams compiled into the shell/helper. DO NOT SHIP THIS BUILD.")
+endif()
+
 # Fail closed at configure time if CI passed an empty/garbage -DAPP_BUILD_NUMBER
 # (an empty-but-defined value would skip the fallback and emit an empty macro →
 # cryptic compile error). Must be a positive integer.
