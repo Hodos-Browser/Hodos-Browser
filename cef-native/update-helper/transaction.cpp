@@ -70,11 +70,24 @@ Paths ResolvePaths(const std::map<std::string, std::string>& args) {
     Paths p;
     p.appDir = Arg(args, "app-dir");
     if (p.appDir.empty()) p.appDir = W(AppPaths::GetAppInstallDir());
-    p.walletDir = W(AppPaths::GetWalletDir());
-    p.pendingDir = W(AppPaths::GetPendingUpdateDir());
-    p.rollbackDir = W(AppPaths::GetRollbackDir());
+
+    // --wallet-dir / --update-dir are arg overrides used ONLY by the fault-injection
+    // rig to run in a fully isolated temp sandbox (production omits them -> the real
+    // %APPDATA%\…\wallet and %LOCALAPPDATA%\…\update paths). The bootstrap already
+    // passes --app-dir/--update-dir; --wallet-dir is rig-only.
+    p.walletDir = Arg(args, "wallet-dir");
+    if (p.walletDir.empty()) p.walletDir = W(AppPaths::GetWalletDir());
+
+    std::wstring updateDir = Arg(args, "update-dir");
+    if (updateDir.empty()) {
+        p.pendingDir = W(AppPaths::GetPendingUpdateDir());
+        p.statePath = W(AppPaths::GetUpdateStatePath());
+    } else {
+        p.pendingDir = updateDir + L"\\pending";
+        p.statePath = updateDir + L"\\update-state.json";
+    }
+    p.rollbackDir = p.pendingDir.empty() ? L"" : p.pendingDir + L"\\rollback";
     p.applyPath = p.pendingDir.empty() ? L"" : p.pendingDir + L"\\apply.json";
-    p.statePath = W(AppPaths::GetUpdateStatePath());
     p.browserExe = p.appDir + L"\\HodosBrowser.exe";
     p.libcef = p.appDir + L"\\libcef.dll";
     return p;

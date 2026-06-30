@@ -121,10 +121,19 @@ int wmain(int argc, wchar_t** argv) {
             return 0;
         }
         lock.Adopt(inherited);
-    } else {
+    }
+
+    // --update-dir overrides the working area (the rig's temp sandbox; production
+    // omits it -> the real %LOCALAPPDATA%\…\update). Resolve the lock + apply paths
+    // from it so main and the transaction (ResolvePaths) agree.
+    std::string updateDir;
+    if (auto ud = args.find("update-dir"); ud != args.end() && !ud->second.empty()) updateDir = ud->second;
+    const std::string lockPath = updateDir.empty() ? AppPaths::GetUpdateLockPath() : (updateDir + "\\update.lock");
+    const std::string pendingDir = updateDir.empty() ? AppPaths::GetPendingUpdateDir() : (updateDir + "\\pending");
+
+    if (lh == args.end()) {
         // --resume / standalone: open it fresh (bounded retry rides out a probe's
         // open-close / delete-pending window — RISK-B).
-        const std::string lockPath = AppPaths::GetUpdateLockPath();
         if (lockPath.empty() || !lock.AcquireWithRetry(Widen(lockPath))) {
             Log("Could not acquire owner lock (another supervisor live, or no update dir) — exiting");
             return 0;  // benign: another owner is handling the transaction
@@ -133,8 +142,7 @@ int wmain(int argc, wchar_t** argv) {
 
     // Read the durable transaction state (WIDE-safe, F4). Missing/corrupt => no-op.
     hodos::ApplyRecord rec;
-    const std::string applyPath = AppPaths::GetPendingUpdateDir().empty()
-        ? "" : AppPaths::GetPendingUpdateDir() + "\\apply.json";
+    const std::string applyPath = pendingDir.empty() ? "" : pendingDir + "\\apply.json";
     {
         std::string content;
         if (!applyPath.empty() && hodos::updatefs::ReadFileAll(Widen(applyPath), content)) {

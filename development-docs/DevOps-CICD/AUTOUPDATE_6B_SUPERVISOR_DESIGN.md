@@ -116,10 +116,21 @@ mutex `Local\HodosBrowser_AnyInstance`, `update.lock` honor-at-launch (dormant),
 >   mechanism already degrades correctly + leaves the build staged; the prompt is UX polish) + the **server-side
 >   kill-list publishing** (`kill-list.json` + `.ed` at hodosbrowser.com + the retraction tooling — the client
 >   fail-opens until it exists). Client-side anti-replay (persist the kill-list `generation`) is a future refinement.
-> - **commit 7 ⏳ — the gate + flip:** the funded-wallet fault-injection rig (the MUST-TEST: OS-blocked-stub +
->   truncated-mid-copy → supervisor restores rollback, wallet DB + profile.lock intact) — also update
->   `scripts/test-update-feed.ps1` to gen+serve the manifest; the CI test gate; flip `HODOS_SILENT_AUTOUPDATE`
->   ON after soak.
+> - **commit 7 IN PROGRESS — the gate + flip:**
+>   - **7a ✅ DONE (`850a50b`)** — compile-time test seams (`HODOS_UPDATE_TEST_SEAM` CMake option) so the rig can
+>     drive the real shell/helper with a throwaway key + self-signed installer (compiled OUT of production).
+>   - **7b ✅ DONE — ROLLBACK fault-injection rig (`scripts/test-apply-rollback.ps1`) PASSES.** Fully isolated
+>     (temp sandbox via new helper `--app-dir/--wallet-dir/--update-dir` overrides; aborts if a real wallet is on
+>     31301/31302). Drives `hodos-update-helper.exe --resume` on a post-failure state and ASSERTS the recovery:
+>     old binaries restored, old money-DB snapshot restored, **stale new `-wal`/`-shm` DELETED (V3-3a proven)**,
+>     `paused`+`rescanAfterRollback` set, high-water NOT advanced (I6), apply.json→rolledback. BOTH the graceful
+>     (no-`-wal`) and hard-kill (with-`-wal`) cases green. **This validates the brick-critical recovery on a real
+>     run.** (Known cosmetic wart: a production rollback leaves a stray harmless `{app}\manifest.json` from the
+>     backup copy — nothing reads it; minor follow-up.)
+>   - **REMAINING for 7:** a FORWARD-apply rig (run the real bootstrap → installer → health → commit, then
+>     inject the OS-block/truncation faults and observe the supervisor roll back — exercises Phase B too) +
+>     update `test-update-feed.ps1` for the manifest; the CI test gate; then YOUR own real-build test on a
+>     trivial-balance prod wallet; flip `HODOS_SILENT_AUTOUPDATE` ON after soak (owner decision).
 
 **✅ COMMIT 6b COMPLETE (the supervisor exe + its packaging).** Remaining apply-phase commits: **6c** (the
 > `MaybeApplyStagedUpdate` Phase-A bootstrap that stages the backup + snapshots the DB + spawns the helper with
