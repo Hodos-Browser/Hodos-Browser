@@ -188,6 +188,23 @@ static bool g_adblockProcessLaunched = false;  // Set by LaunchAdblockProcess
 // that thread and threaded into StagePendingUpdate's abort check. (Commit 4d.)
 static std::atomic<bool> g_update_abort{false};
 
+// 6d: set in the 6c.1 honor-probe block when THIS launch is the silent-update
+// supervisor's --post-update-health-probe relaunch (arg + armed apply.json). A
+// detached thread then waits for the children to be healthy and writes
+// apply.json=healthy so the supervisor confirms the apply instead of rolling back.
+static std::atomic<bool> g_post_update_probe{false};
+static long g_post_update_to_build = 0;  // expected build from the armed apply.json
+
+// UTF-8 (AppPaths) -> wide. Always compiled (used by the 6c.1 honor-probe + 6d
+// health marker, which are NOT behind HODOS_SILENT_AUTOUPDATE).
+static std::wstring HodosUtf8ToWide(const std::string& s) {
+    if (s.empty()) return L"";
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    std::wstring w(n > 0 ? n - 1 : 0, L'\0');
+    if (n > 0) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &w[0], n);
+    return w;
+}
+
 // 6a (WINDOWS_AUTOUPDATE_PLAN §D.0 / OD-D): a session-namespace mutex marking THIS
 // HodosBrowser.exe as a live instance for the auto-update all-instances-gone gate.
 // Created at startup (profile AND picker modes), held for the process lifetime,
@@ -4201,19 +4218,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     // --post-update-health-probe arg AND a real armed apply.json (phase awaiting-
     // health). A stray/forged arg with no matching apply is ignored (defers if locked).
     {
-        // UTF-8 (AppPaths) -> wide; a non-ASCII %LOCALAPPDATA% must not desync.
-        auto widenUtf8 = [](const std::string& s) -> std::wstring {
-            if (s.empty()) return L"";
-            int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
-            std::wstring w(n > 0 ? n - 1 : 0, L'\0');
-            if (n > 0) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &w[0], n);
-            return w;
-        };
-
         // Is this the supervisor's health-probe relaunch? DOUBLE-GATED (V3-5/N1):
         // the --post-update-health-probe arg AND a real armed apply.json. A stray or
         // forged arg with no matching armed apply is ignored (so it still defers if
-        // the lock is held).
+        // the lock is held). On a match, record it so 6d writes apply.json=healthy.
         bool healthProbe = false;
         {
             int pargc = 0;
@@ -4230,14 +4238,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
                 std::string content;
                 hodos::ApplyRecord ar;
                 const bool armed = !applyPath.empty() &&
-                    hodos::updatefs::ReadFileAll(widenUtf8(applyPath), content) &&
+                    hodos::updatefs::ReadFileAll(HodosUtf8ToWide(applyPath), content) &&
                     hodos::ParseApplyRecord(content, ar) &&
                     ar.phase == hodos::ApplyPhase::AwaitingHealth;
-                if (!armed) healthProbe = false;
+                if (armed) {
+                    g_post_update_probe.store(true);          // 6d: arm the healthy-marker writer
+                    g_post_update_to_build = ar.toBuild;
+                } else {
+                    healthProbe = false;
+                }
             }
         }
 
-        const std::wstring lockPathW = widenUtf8(AppPaths::GetUpdateLockPath());
+        const std::wstring lockPathW = HodosUtf8ToWide(AppPaths::GetUpdateLockPath());
         if (!lockPathW.empty() && hodos::UpdateLockIsHeld(lockPathW) && !healthProbe) {
             LOG_INFO("Update in progress (update.lock held by a live owner) — deferring this launch");
             return 0;
@@ -4775,6 +4788,53 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     // Detach server health threads — they set atomic flags when done
     walletThread.detach();
     adblockThread.detach();
+
+    // 6d: if this launch is the silent-update supervisor's --post-update-health-probe
+    // relaunch (armed in the 6c.1 honor-probe block), confirm the new build is healthy
+    // and write apply.json=healthy so the supervisor commits the apply instead of
+    // rolling back. We re-run a REAL /health (not the "launched-but-slow" flag): wallet
+    // /health responds (port bound + DB openable) AND adblock port bound, AND our build
+    // == the armed toBuild. Bounded < the supervisor's ~120s health wait. Detached +
+    // touches no CEF — only QuickHealthCheck/IsPortListening/filesystem.
+    if (g_post_update_probe.load()) {
+        const long expectedBuild = g_post_update_to_build;
+        std::thread([expectedBuild]() {
+            const DWORD start = GetTickCount();
+            bool walletOk = false, adblockOk = false;
+            while (GetTickCount() - start < 110000 && !g_update_abort.load()) {
+                if (!walletOk)  walletOk  = QuickHealthCheck();
+                if (!adblockOk) adblockOk = IsPortListening(hodos::AdblockPort());
+                if (walletOk && adblockOk) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            }
+            if (!(walletOk && adblockOk)) {
+                LOG_WARNING("Post-update health: children not healthy in time — supervisor will roll back");
+                return;
+            }
+            if (static_cast<long>(APP_BUILD_NUMBER) != expectedBuild) {
+                LOG_WARNING("Post-update health: running build " + std::to_string(APP_BUILD_NUMBER) +
+                            " != expected " + std::to_string(expectedBuild) + " — not marking healthy");
+                return;
+            }
+            // Atomically flip apply.json -> healthy (re-read to preserve all fields).
+            const std::string applyPath = AppPaths::GetPendingUpdateDir().empty()
+                ? "" : AppPaths::GetPendingUpdateDir() + "\\apply.json";
+            std::string content;
+            hodos::ApplyRecord ar;
+            if (applyPath.empty() ||
+                !hodos::updatefs::ReadFileAll(HodosUtf8ToWide(applyPath), content) ||
+                !hodos::ParseApplyRecord(content, ar)) {
+                LOG_WARNING("Post-update health: apply.json gone/unreadable — cannot mark healthy");
+                return;
+            }
+            ar.phase = hodos::ApplyPhase::Healthy;
+            if (hodos::updatefs::WriteFileAtomic(HodosUtf8ToWide(applyPath),
+                                                 hodos::SerializeApplyRecord(ar))) {
+                LOG_INFO("Post-update health: wrote apply.json=healthy (build " +
+                         std::to_string(expectedBuild) + ") — apply confirmed");
+            }
+        }).detach();
+    }
 
     auto initMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - initStart).count();

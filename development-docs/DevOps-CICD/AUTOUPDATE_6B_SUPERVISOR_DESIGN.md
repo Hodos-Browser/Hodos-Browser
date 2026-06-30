@@ -80,8 +80,19 @@ mutex `Local\HodosBrowser_AnyInstance`, `update.lock` honor-at-launch (dormant),
 >   ACCESS_DENIED)** → `_exit(0)`. Decisions locked: manifest URL = sibling-of-installer (6c.3 staging downloads
 >   it); kill-list deferred to 6e. New helper: `UpdateFs::SnapshotWalletDbSet` (+ test). Reuse: `UpdateStager`
 >   (already in the shell), `UpdateFs`, `UpdateLock`, `UpdateApply`, `IsPortListening`.
-> - **6c.3 / 6d / rig ⏳** — staging downloads manifest+`.ed` into `pending\` (sibling-of-installer URL); the
->   health-probe browser writes `apply.json`=healthy; the fault-injection rig = commit 7.
+> - **6d ✅ DONE — the health-probe browser writes `apply.json`=healthy.** When the 6c.1 honor-probe matches
+>   (`--post-update-health-probe` + armed apply.json), it arms `g_post_update_probe`+`g_post_update_to_build`; a
+>   detached thread (after the child health-poll threads) re-runs a REAL `/health` (wallet `QuickHealthCheck` +
+>   adblock port bound — fast, not full-recovery, H7), confirms `APP_BUILD_NUMBER == toBuild`, then atomically
+>   flips `apply.json`→healthy (re-reads to preserve fields). Bounded < the supervisor's ~120s wait; bails on
+>   `g_update_abort`; touches no CEF; INERT flag-off (no apply.json => `g_post_update_probe` never set). Built
+>   clean ON+OFF. **This closes the SUCCESS path** — the apply transaction can now complete instead of always
+>   rolling back. Self-reviewed against the supervisor `WaitForHealthy(phase==Healthy)` contract (same
+>   `pending\apply.json`). Known item for the rig: a funded-wallet migration >110s would false-rollback —
+>   mitigation is the V3-15 wallet "alive-but-migrating" heartbeat (deferred wallet change) + the generous timeout.
+> - **6c.3 / 6e / rig ⏳** — staging downloads manifest+`.ed` into `pending\` (sibling-of-installer URL) + the
+>   #2 build-number binding; 6e watchdog + §H.7 kill-switch/canary + kill-list + the signer-continuity notify
+>   prompt; the funded-wallet fault-injection rig = commit 7.
 
 **✅ COMMIT 6b COMPLETE (the supervisor exe + its packaging).** Remaining apply-phase commits: **6c** (the
 > `MaybeApplyStagedUpdate` Phase-A bootstrap that stages the backup + snapshots the DB + spawns the helper with
