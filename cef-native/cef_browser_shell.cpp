@@ -5015,9 +5015,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         // (multiple HodosBrowser.exe share the one %LOCALAPPDATA% pending dir).
         if (browserSettings.autoUpdateMode == "silent") {
             std::string silentAppcastUrl = appcastUrl;
-            std::thread([silentAppcastUrl]() {
+            int stageDelaySec = 60;
+#ifdef HODOS_UPDATE_TEST_SEAM
+            // RIG-ONLY (compiled OUT of production): point the real shell's staging at
+            // a localhost feed + skip the 60s stagger so a local real-build test can
+            // exercise the full bootstrap -> supervisor -> apply path without waiting.
+            if (const char* u = std::getenv("HODOS_UPDATE_RIG_URL"); u && *u) { silentAppcastUrl = u; stageDelaySec = 1; }
+#endif
+            std::thread([silentAppcastUrl, stageDelaySec]() {
                 // Stagger ~60s past startup; wake early if shutdown begins.
-                for (int i = 0; i < 60 && !g_update_abort.load(); ++i) {
+                for (int i = 0; i < stageDelaySec && !g_update_abort.load(); ++i) {
                     std::this_thread::sleep_for(std::chrono::seconds(1));
                 }
                 if (g_update_abort.load()) return;
