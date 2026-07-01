@@ -75,6 +75,19 @@ try {
         --in $appcast --key $priv --out "$appcast.ed"
     if ($LASTEXITCODE -ne 0) { Write-Error 'sign-appcast.py failed' }
 
+    # 4c) Generate + sign the expected-new-manifest (commit 6c.3 made staging REQUIRE
+    #     it: StagePendingUpdate fetches it from the sibling-of-installer URL, verifies
+    #     the sig with the same throwaway key, and binds buildNumber == the appcast
+    #     build). The tree content is irrelevant to STAGING (the tree check is an
+    #     apply-time gate) - one dummy file is enough.
+    $mstaging = Join-Path $work 'mstaging'
+    New-Item -ItemType Directory -Force -Path $mstaging | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $mstaging 'HodosBrowser.exe'), 'dummy')
+    & python (Join-Path $repoRoot 'scripts\generate-tree-manifest.py') `
+        --staging $mstaging --out (Join-Path $feedDir 'expected-new-manifest.json') `
+        --key $priv --build-number 99999999
+    if ($LASTEXITCODE -ne 0) { Write-Error 'generate-tree-manifest.py failed' }
+
     # 5) Serve the feed dir on localhost.
     $server = Start-Process python -ArgumentList @('-m','http.server',"$Port",'--bind','127.0.0.1') `
         -WorkingDirectory $feedDir -PassThru -WindowStyle Hidden
