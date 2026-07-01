@@ -127,10 +127,21 @@ mutex `Local\HodosBrowser_AnyInstance`, `update.lock` honor-at-launch (dormant),
 >     (no-`-wal`) and hard-kill (with-`-wal`) cases green. **This validates the brick-critical recovery on a real
 >     run.** (Known cosmetic wart: a production rollback leaves a stray harmless `{app}\manifest.json` from the
 >     backup copy — nothing reads it; minor follow-up.)
->   - **REMAINING for 7:** a FORWARD-apply rig (run the real bootstrap → installer → health → commit, then
->     inject the OS-block/truncation faults and observe the supervisor roll back — exercises Phase B too) +
->     update `test-update-feed.ps1` for the manifest; the CI test gate; then YOUR own real-build test on a
->     trivial-balance prod wallet; flip `HODOS_SILENT_AUTOUPDATE` ON after soak (owner decision).
+>   - **7c ✅ DONE — FORWARD-apply fault-injection rig (`scripts/test-apply-forward.ps1`) PASSES all 3 cases.**
+>     Runs the real helper's FORWARD transaction (Phase B) in an isolated sandbox with two tiny compiled fakes
+>     (a copy-installer + a "new browser" that writes the healthy marker): **HAPPY** (install matches the signed
+>     manifest + healthy → COMMIT, high-water→40101, new build installed) + **OS-BLOCK** (installed exe
+>     non-runnable → probe launch fails → ROLLBACK) + **INTEGRITY** (installed tree ≠ signed manifest → gate
+>     fails → ROLLBACK). Both rollback cases restore the old build + keep the wallet DB intact + don't advance
+>     high-water (I6). This exercises the installer-spawn, the **signed-manifest IntegrityGate (incl. the #2
+>     path)**, the 6d health-marker flow, the commit, and both rollback triggers on a real exe run.
+>   - **⚖️ Together 7b+7c validate the WHOLE transaction on real helper runs** — forward commit, both rollback
+>     triggers, and the DB-safe restore. What the rig does NOT cover (needs the owner's real-build test): the
+>     real bootstrap end-to-end (`MaybeApplyStagedUpdate`), a real Inno installer, a real CEF health-probe, the
+>     inherited-handle spawn, and a real funded wallet + migration.
+>   - **REMAINING for 7:** update `test-update-feed.ps1` for the manifest (the staging rig); wire these rigs into
+>     a CI gate; then the owner's own real-build test on a trivial-balance prod wallet; flip
+>     `HODOS_SILENT_AUTOUPDATE` ON after soak (owner decision).
 
 **✅ COMMIT 6b COMPLETE (the supervisor exe + its packaging).** Remaining apply-phase commits: **6c** (the
 > `MaybeApplyStagedUpdate` Phase-A bootstrap that stages the backup + snapshots the DB + spawns the helper with
