@@ -3,6 +3,24 @@
 **Created:** 2026-06-22 · **Owner:** DevOps/CI-CD · **Status:** Windows done; macOS in progress.
 **Why:** ship under the **company** name ("Marston Enterprises"), not the founder's personal name. Per root CLAUDE.md Invariant #12.
 
+> **⚠️ 2026-07-03 — Apple Support responded (case 102924392520, "Katiana"): they can START the
+> individual→org migration AT ANY TIME. To kick it off, REPLY to that email.** Review points from
+> Apple: (1) 2FA must be ON on the Apple Account; (2) a public org website on the matching domain
+> (`marstonenterprises.com` ✓); (3) the Certificates/Identifiers/Profiles portal is DOWN during
+> migration (App Store Connect stays up — don't schedule a release into that window); (4) the legal
+> entity name is applied to all distributed apps; (5) individual Sales/Trends reports go away after;
+> (6) pre-migration earnings route to the bank account active when the migration starts.
+>
+> **🚦 RELEASE GATE (auto-update stability) — do this BEFORE the first public signed 0.4.0 build:**
+> complete the macOS org conversion → issue the org Developer ID cert → update the 3 `release.yml`
+> identity strings, so **every** public release shares ONE signing identity. A mid-stream signing
+> -identity change is a known **reinstall-forcer** ([[feedback_update_stability_principle]]): if
+> users install an individual-signed build and later receive an org-signed update, macOS can treat
+> it as a different developer and force a reinstall. (Windows is already `CN=Marston Enterprises` —
+> no change there.) **Verify before shipping:** `codesign -dv --verbose=4 <app>` shows Authority =
+> the org cert AND the **Team ID is UNCHANGED** vs the individual account (conversion should preserve
+> it — confirm, don't assume; a changed Team ID would itself force a reinstall).
+
 > **Headline: there is NO reputation loss on either platform.**
 > - **Windows** is *already* signed as Marston Enterprises (Azure cert `CN=Marston Enterprises`) — nothing changes.
 > - **macOS** is a *conversion* (Team ID + certs + apps survive) and Apple's Gatekeeper trust is **binary** (signed + notarized = trusted) with **no per-developer reputation score** — so the new org cert is trusted identically from its first build. The earlier fear of "rebuilding reputation from scratch" does not apply.
