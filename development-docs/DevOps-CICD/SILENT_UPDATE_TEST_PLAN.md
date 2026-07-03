@@ -46,11 +46,19 @@ cmake --build build --config Release --target hodos-update-helper HodosBrowserSh
 ## Stage 2 — local REAL-BUILD test (dev wallet, no prod keys, no push)
 
 This is the important next step: it exercises everything the rigs stub out — the **real
-bootstrap** (`MaybeApplyStagedUpdate`), a **real Inno installer**, the **real CEF browser**
-+ health probe, the inherited-handle spawn, and a **real (dev) wallet + migration** — using
-the test seams to stand in for the production signing keys (which are CI secrets). It runs
-in the `HodosBrowserDev` namespace, so your real wallet is untouched. Use a throwaway dev
-wallet (empty or a few cents).
+bootstrap** (`MaybeApplyStagedUpdate`), the **real CEF browser** + health probe (build-number
++ live wallet/adblock `/health`), the inherited-handle spawn, and a **real (dev) wallet +
+migration** — using the test seams to stand in for the production signing keys (which are CI
+secrets). It runs in the `HodosBrowserDev` namespace, so your real wallet is untouched. Use a
+throwaway dev wallet (empty or a few cents). (Inno itself is deferred to Stage 3's signed
+build; here a tiny fake copy-installer stands in, so the real Inno step is the only thing not
+covered.)
+
+> **Automated by `scripts/setup-real-apply-test.ps1`** — it builds N (0.4.0) + N+1 (0.4.1),
+> installs N into the dev app dir, pre-stages a signed N+1, and writes you a launch + verify
+> script. Happy: `pwsh -File scripts/setup-real-apply-test.ps1`. Rollback:
+> `pwsh -File scripts/setup-real-apply-test.ps1 -Break`. The manual steps below are the
+> underlying mechanics (kept for reference / debugging).
 
 **Prep once:** a throwaway dev wallet, its recovery phrase written down. A rig build (above).
 A throwaway Ed25519 key (`openssl genpkey -algorithm ed25519 -out rig.pem`) + its raw-32
