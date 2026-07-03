@@ -4000,10 +4000,30 @@ static bool MaybeApplyStagedUpdate(const std::string& profileId) {
     };
 
     const std::wstring appDirW = SU_Widen(appDir);
-    const int selfCount = SU_CountSelfBrowsers(appDirW);  // D.0 (after the lock)
+    // D.0 sole-instance gate — with a bounded WAIT for the transient picker (bug #3).
+    // Other {app}\HodosBrowser.exe processes inflate the count: the profile PICKER + its
+    // CEF subprocess tree, or a real browser. The picker is TRANSIENT — it
+    // PostMessage(WM_CLOSE)s itself the instant it spawns us (simple_handler.cpp ~3247)
+    // and its whole tree dies within a few seconds — whereas a real browser (booting OR
+    // up) stays. So poll: if the count settles to 1 (everything else exited — the picker
+    // died) we are genuinely sole → apply; if it stays >1 (a real browser is live) → defer.
+    // This waits the picker out WITHOUT the process-classification/lock-probe an adversarial
+    // review REJECTED as unsafe (a lock/cmdline probe misses a concurrently-BOOTING real
+    // browser that hasn't taken its profile.lock yet, and V3-2 below would then kill its
+    // shared 31301/31401 wallet). Waiting is safe: only the transient picker's death drops
+    // the count; a real browser never dies mid-wait, so we can never over-approve. Exits
+    // early the moment count==1 (picker case ~2-4s); ~8s cap otherwise. See
+    // DevOps-CICD/AUTOUPDATE_PICKER_GATE_DESIGN.md.
+    int selfCount = SU_CountSelfBrowsers(appDirW);
+    for (int i = 0; selfCount > 1 && i < 16 && !g_update_abort.load(); ++i) {  // ~8s cap
+        Sleep(500);
+        selfCount = SU_CountSelfBrowsers(appDirW);
+    }
     if (selfCount != 1) {
-        LOG_INFO("Silent apply: not sole instance (count=" + std::to_string(selfCount) + ") — defer");
-        return false;
+        LOG_INFO("Silent apply: not sole instance (count=" + std::to_string(selfCount) +
+                 ") after wait — defer");
+        return false;  // Fix D: a persistent >1 (always-open browser / slow picker) is a
+                       // TRANSIENT defer — future chronic-deferral valve degrades to notify.
     }
 
     // Prove the WALLET DEAD before any snapshot (V3-2): port unbound AND exe openable.
