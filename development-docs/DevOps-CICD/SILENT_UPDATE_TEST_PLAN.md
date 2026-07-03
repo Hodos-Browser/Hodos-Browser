@@ -20,6 +20,37 @@ one unrecoverable case. So we de-risk in stages, each cheaper-to-catch than the 
 A green stage-1 rig proves the *logic*. It does NOT prove a real signed build works on a
 real machine — that's stages 2–3. **Do not skip to a funded wallet.**
 
+## Stage 2 RESULTS — DONE + GREEN (2026-07-03)
+
+Ran the local real-build test end-to-end on a 3-profile dev wallet (real bootstrap + real
+CEF health-probe + real dev wallet; fake copy-installer standing in for Inno; test-signed).
+**Both legs passed:** happy path COMMITs to 0.4.1 with the wallet intact; a health-failing
+build ROLLS BACK to 0.4.0 (updates paused, high-water preserved, wallet byte-intact), and
+the deferred-then-`--resume` recovery completed the rollback correctly.
+
+It also found **3 real production bugs the isolated rigs could not** — all now fixed +
+re-verified on real builds:
+1. **Health-probe used `--profile ` (space)**, but the browser only parses `--profile=`
+   (equals) → probe fell into the picker → never healthy → **false rollback of a GOOD update**
+   for multi-profile users. Fixed (`transaction.cpp` uses `--profile=`).
+2. **Browser wrote `debug_output.log` into `{app}`** (relative path + shortcut's working dir
+   is `{app}`); the open log made the `{app}` backup fail (`cannot manifest {app}`) → **the
+   update could NEVER apply for installed users**. Fixed (`AppPaths::GetLogDir()` → absolute
+   `%APPDATA%\<ns>\logs`, out of `{app}`).
+3. **Sole-instance gate counted the transient profile picker** (+ its CEF subprocess tree)
+   → every picker-shown launch deferred forever. Fixed with a bounded WAIT for the picker to
+   die (a lock-probe alternative was adversarially REJECTED as unsafe — it would kill the
+   shared wallet under a concurrently-booting browser). See
+   [`AUTOUPDATE_PICKER_GATE_DESIGN.md`](./AUTOUPDATE_PICKER_GATE_DESIGN.md).
+
+Deferred (non-blocking) follow-ups: **Fix D** (chronic-deferral → degrade-to-notify, for the
+always-open-browser / slow-picker tail — must ship WITH its notify-surface wiring, not a half
+counter); an **"Updating…" progress splash** (helper-owned native window during the apply, to
+remove the confusing several-second pause on an apply-boot — Windows-only, macOS Sparkle shows
+its own) + a post-update "updated to vX" toast; and CEF's own `debug.log` still lands in
+`{app}` (harmless — closed at backup time — but move it for the "install dir immutable"
+principle).
+
 ---
 
 ## Stage 1 — local rigs (DONE, green)
