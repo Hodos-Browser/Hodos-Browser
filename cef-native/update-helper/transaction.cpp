@@ -499,7 +499,11 @@ int RunApplyTransaction(const std::map<std::string, std::string>& args,
     // 7. AWAITING-HEALTH -> launch the health-probe (H1: explicit profile, !picker).
     WriteApply(p, rec, ApplyPhase::AwaitingHealth);
     std::wstring probe = L"\"" + p.browserExe + L"\" --post-update-health-probe";
-    if (!rec.profileId.empty()) probe += L" --profile " + W(rec.profileId);
+    // NOTE: the browser's ProfileManager::ParseProfileArgument only recognizes the
+    // "--profile=<id>" (equals) form; a space-separated "--profile <id>" is ignored,
+    // which would drop the probe into the profile PICKER on multi-profile installs and
+    // hang the health check -> false rollback. Use the equals form (H1: !picker).
+    if (!rec.profileId.empty()) probe += L" --profile=" + W(rec.profileId);
     HANDLE p3 = Spawn(probe, /*detached=*/false);
     if (!p3) { L("apply: health-probe launch failed -> rollback"); DoRollback(p, rec, lock, nullptr, "probe-launch-failed"); return 1; }
 
