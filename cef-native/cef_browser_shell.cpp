@@ -2680,8 +2680,13 @@ LRESULT CALLBACK BookmarksPanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam
                 if (g_file_dialog_active) return 0;
                 // Suppress immediate hide if just shown (<200ms) — SetForegroundWindow
                 // in ShowBookmarksPanelOverlay bounces focus and would otherwise self-close.
-                ULONGLONG elapsed = GetTickCount64() - g_bookmarks_last_show_tick;
-                if (elapsed < 200) {
+                // Consume the ONE focus-bounce WA_INACTIVE that SetForegroundWindow fires
+                // right after show — machine-INDEPENDENTLY. The old fixed <200ms window
+                // mis-fired on SLOW PCs (the bounce lands later than 200ms → the panel
+                // self-closed). The first WA_INACTIVE after a show IS the bounce; the next
+                // one is a real click-outside.
+                if (g_bookmarks_last_show_tick != 0) {
+                    g_bookmarks_last_show_tick = 0;  // consume the bounce; next one closes
                     return 0;
                 }
                 LOG_INFO("Hiding bookmarks panel — lost activation (click-outside)");
@@ -2849,8 +2854,10 @@ LRESULT CALLBACK TabListPanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
                 ImmAssociateContext(hwnd, nullptr);
             } else {
                 if (g_file_dialog_active) return 0;
-                ULONGLONG elapsed = GetTickCount64() - g_tablist_last_show_tick;
-                if (elapsed < 200) {
+                // Consume the ONE focus-bounce WA_INACTIVE after show (machine-independent;
+                // the old fixed 200ms window mis-fired on slow PCs). See bookmarks above.
+                if (g_tablist_last_show_tick != 0) {
+                    g_tablist_last_show_tick = 0;  // consume the bounce; next one closes
                     return 0;
                 }
                 LOG_INFO("Hiding tab-list panel — lost activation (click-outside)");
@@ -3210,13 +3217,12 @@ LRESULT CALLBACK ProfilePanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
                 ImmAssociateContext(hwnd, nullptr);
             } else {
                 if (g_file_dialog_active) return 0;
-                // Suppress immediate hide if overlay was just shown (<200ms ago).
-                // SetForegroundWindow in ShowProfilePanelOverlay triggers a
-                // WM_ACTIVATE(WA_INACTIVE) as focus bounces — don't hide.
+                // Consume the ONE focus-bounce WA_INACTIVE after show (machine-independent;
+                // the old fixed 200ms window mis-fired on slow PCs). See bookmarks above.
                 extern ULONGLONG g_profile_last_show_tick;
-                ULONGLONG elapsed = GetTickCount64() - g_profile_last_show_tick;
-                if (elapsed < 200) {
-                    LOG_INFO("Profile panel WM_ACTIVATE suppressed — shown " + std::to_string(elapsed) + "ms ago");
+                if (g_profile_last_show_tick != 0) {
+                    g_profile_last_show_tick = 0;  // consume the bounce; next one closes
+                    LOG_INFO("Profile panel WM_ACTIVATE suppressed — focus bounce consumed");
                     return 0;
                 }
                 LOG_INFO("Hiding profile panel — lost activation (click-outside)");
