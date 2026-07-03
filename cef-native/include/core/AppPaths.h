@@ -103,6 +103,22 @@ inline std::string GetWalletDir() {
     return appData + "\\" + GetAppDirName() + "\\wallet";
 }
 
+/// Shell debug-log directory. MUST live OUTSIDE `{app}` (the Local install root): the
+/// browser holds debug_output.log OPEN for write for its whole lifetime, and the
+/// silent-update backup hashes the ENTIRE `{app}` tree (BuildManifestForTree) — an
+/// open-for-write file anywhere under `{app}` makes the backup fail ("cannot manifest
+/// {app}") so the update can never apply. (Found by the Stage-2 real-build test: the
+/// installed shortcut's working dir is `{app}`, so a relative "debug_output.log"
+/// landed inside `{app}`.) Under %APPDATA% (ROAMING, alongside the wallet's own logs).
+/// Dev/prod-namespaced. "" if APPDATA is unavailable (caller falls back to the relative
+/// name). NOTE: consumed by the narrow-string Logger/freopen, so a non-ASCII username
+/// degrades the LOG only — never the update (which no longer depends on log placement).
+inline std::string GetLogDir() {
+    const std::string appData = EnvUtf8_(L"APPDATA");
+    if (appData.empty()) return "";
+    return appData + "\\" + GetAppDirName() + "\\logs";
+}
+
 /// Session-namespace mutex name marking ANY live HodosBrowser.exe (all profiles +
 /// the picker) for the auto-update all-instances-gone gate (WINDOWS_AUTOUPDATE_PLAN
 /// §D.0, commit 6a). **Local\ (NOT Global\):** a PrivilegesRequired=lowest install

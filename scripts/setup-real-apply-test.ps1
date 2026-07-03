@@ -63,6 +63,7 @@ $local     = $env:LOCALAPPDATA
 $roaming   = $env:APPDATA
 $devApp    = Join-Path $local  'HodosBrowserDev'            # {app} - where N is "installed"
 $devWallet = Join-Path $roaming 'HodosBrowserDev\wallet'    # money DB (ROAMING)
+$devLog    = Join-Path $roaming 'HodosBrowserDev\logs'      # debug_output.log (bug-#2 fix: out of {app})
 $devUpdate = Join-Path $devApp 'update'
 $devPending= Join-Path $devUpdate 'pending'
 $rig       = Join-Path $local  'Hodos-rig'                  # scratch: keys, fake installer, build trees
@@ -210,10 +211,13 @@ $launch = Join-Path $rig 'launch-real-apply-test.ps1'
 `$env:HODOS_UPDATE_TEST_PUBKEY = '$pubB64'
 `$env:RIG_STAGING = '$newTree'
 `$env:RIG_APP_DIR = '$devApp'
-Write-Host 'Launching... watch $devApp\debug_output.log for "Silent apply:" lines.' -ForegroundColor Cyan
-# --profile Default skips the profile picker: the picker + its CEF subprocesses would
-# otherwise count as extra instances and trip the apply's sole-instance safety gate.
-Start-Process -FilePath '$devApp\HodosBrowser.exe' -ArgumentList '--profile','Default' -WorkingDirectory '$devApp'
+Write-Host 'Launching... watch $devLog\debug_output.log for "Silent apply:" lines.' -ForegroundColor Cyan
+# --profile=Default skips the profile picker (else it trips the apply's sole-instance
+# gate). WorkingDirectory = {app} deliberately MIRRORS the production shortcut (whose
+# working dir is {app}) — the exact scenario that broke bug #2. With the fix, the shell
+# now writes debug_output.log to an absolute out-of-{app} path, so this no longer
+# poisons the {app} backup.
+Start-Process -FilePath '$devApp\HodosBrowser.exe' -ArgumentList '--profile=Default' -WorkingDirectory '$devApp'
 "@ | Set-Content -Path $launch -Encoding ascii
 
 $verify = Join-Path $rig 'verify-real-apply-test.ps1'
@@ -247,7 +251,7 @@ Say ""
 Say "STEP A - launch it:"
 Say "    powershell -ExecutionPolicy Bypass -File `"$launch`"" 'White'
 Say ""
-Say "STEP B - watch $devApp\debug_output.log. Expect the bootstrap to log"
+Say "STEP B - watch $devLog\debug_output.log. Expect the bootstrap to log"
 Say "         'Silent apply: eligible ...' then the supervisor to install + health-check."
 if ($Break) {
     Say "         (this is the -Break leg: the new build's number won't match -> ROLLBACK)"

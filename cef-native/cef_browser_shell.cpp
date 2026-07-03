@@ -4247,17 +4247,32 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     int exit_code = CefExecuteProcess(main_args, app, nullptr);
     if (exit_code >= 0) return exit_code;
 
-    // Initialize centralized logger FIRST
-    Logger::Initialize(ProcessType::MAIN, "debug_output.log");
+    // Initialize centralized logger FIRST. Log to an ABSOLUTE path OUTSIDE {app}: the
+    // installed shortcut's working dir is {app}, so a relative "debug_output.log" lands
+    // inside the install root — and the browser holds it open-for-write while the
+    // silent-update backup tries to hash the whole {app} tree, failing the backup so the
+    // update never applies (Stage-2 real-build test finding). GetLogDir() is %APPDATA%\
+    // <ns>\logs (roaming, next to the wallet's logs). Falls back to the relative name
+    // only if APPDATA is unavailable.
+    std::string logPath = "debug_output.log";
+    {
+        const std::string logDir = AppPaths::GetLogDir();
+        if (!logDir.empty()) {
+            std::error_code lec;
+            std::filesystem::create_directories(std::filesystem::u8path(logDir), lec);
+            if (!lec) logPath = logDir + "\\debug_output.log";
+        }
+    }
+    Logger::Initialize(ProcessType::MAIN, logPath);
     LOG_INFO(elapsed() + "STARTUP: Logger initialized");
 
     LOG_INFO("=== NEW SESSION STARTED ===");
     LOG_INFO("Shell starting...");
 
-    // Redirect stdout and stderr to debug_output.log as backup
+    // Redirect stdout and stderr to the SAME out-of-{app} log (see logPath above).
     FILE* dummy;
-    errno_t result1 = freopen_s(&dummy, "debug_output.log", "a", stdout);
-    errno_t result2 = freopen_s(&dummy, "debug_output.log", "a", stderr);
+    errno_t result1 = freopen_s(&dummy, logPath.c_str(), "a", stdout);
+    errno_t result2 = freopen_s(&dummy, logPath.c_str(), "a", stderr);
 
     if (result1 != 0 || result2 != 0) {
         LOG_WARNING("freopen failed - stdout: " + std::to_string(result1) + ", stderr: " + std::to_string(result2));
