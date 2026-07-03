@@ -693,7 +693,8 @@ if(WIN32)
         ${CMAKE_CURRENT_SOURCE_DIR}/update-helper
     )
     target_link_libraries(hodos-update-helper PRIVATE
-        user32                            # wsprintfA
+        user32                            # wsprintfA + splash window
+        gdi32                             # splash.h GDI marquee drawing
         advapi32                          # RunOnce registry
         winhttp                           # child-shutdown POST
         nlohmann_json::nlohmann_json

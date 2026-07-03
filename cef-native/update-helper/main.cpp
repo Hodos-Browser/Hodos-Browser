@@ -33,6 +33,7 @@
 #include "core/UpdateApply.h"
 #include "core/UpdateFs.h"
 #include "core/UpdateLock.h"
+#include "splash.h"
 #include "transaction.h"
 
 namespace {
@@ -96,6 +97,16 @@ int wmain(int argc, wchar_t** argv) {
         wchar_t tmp[MAX_PATH];
         DWORD n = GetTempPathW(MAX_PATH, tmp);
         if (n > 0 && n < MAX_PATH) SetCurrentDirectoryW(tmp);
+    }
+
+    // --splash-preview: show the "Hodos is updating…" indicator for ~6s then exit — a quick
+    // visual check of the apply splash without running a full apply cycle.
+    for (int i = 1; i < argc; ++i) {
+        if (std::wstring(argv[i]) == L"--splash-preview") {
+            UpdateSplash splash;
+            Sleep(6000);
+            return 0;
+        }
     }
 
     bool isResume = false;

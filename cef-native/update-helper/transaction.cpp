@@ -15,6 +15,8 @@
 #include <tlhelp32.h>
 #include <winhttp.h>
 
+#include "splash.h"  // native "Hodos is updating…" indicator during the visible apply
+
 #include <string>
 #include <vector>
 
@@ -471,6 +473,10 @@ int RunApplyTransaction(const std::map<std::string, std::string>& args,
     PollUnlocked({p.appDir + L"\\hodos-wallet.exe", p.appDir + L"\\hodos-adblock.exe"}, kChildShutdownMs);
 
     // 5. INSTALLING (before spawn, M7) -> run the installer /VERYSILENT.
+    // Show the "Hodos is updating…" indicator for the whole visible apply (install ->
+    // health -> commit/rollback). RAII: closes when this function returns, so SUCCESS
+    // reveals the new browser and ROLLBACK reveals the relaunched old one.
+    UpdateSplash splash;
     WriteApply(p, rec, ApplyPhase::Installing);
     if (rec.installerPath.empty()) { L("apply: no installer path — abort"); WriteApply(p, rec, ApplyPhase::Aborted, "no-installer"); return 0; }
     const std::wstring instCmd = L"\"" + W(rec.installerPath) + L"\" /VERYSILENT /SP- /SUPPRESSMSGBOXES /NORESTART";
