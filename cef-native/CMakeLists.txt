@@ -702,6 +702,11 @@ if(WIN32)
         OpenSSL::Crypto
     )
     target_compile_definitions(hodos-update-helper PRIVATE UNICODE _UNICODE)
+    # Read the helper source as UTF-8 so splash.h's typographic chars (…, —, ') land as the
+    # correct wide codepoints instead of ACP-mojibake in the "Hodos is updating…" splash.
+    if(MSVC)
+        target_compile_options(hodos-update-helper PRIVATE /utf-8)
+    endif()
 endif()
 
 # ============================================================================
