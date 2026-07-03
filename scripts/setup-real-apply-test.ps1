@@ -211,7 +211,9 @@ $launch = Join-Path $rig 'launch-real-apply-test.ps1'
 `$env:RIG_STAGING = '$newTree'
 `$env:RIG_APP_DIR = '$devApp'
 Write-Host 'Launching... watch $devApp\debug_output.log for "Silent apply:" lines.' -ForegroundColor Cyan
-Start-Process -FilePath '$devApp\HodosBrowser.exe'
+# --profile Default skips the profile picker: the picker + its CEF subprocesses would
+# otherwise count as extra instances and trip the apply's sole-instance safety gate.
+Start-Process -FilePath '$devApp\HodosBrowser.exe' -ArgumentList '--profile','Default' -WorkingDirectory '$devApp'
 "@ | Set-Content -Path $launch -Encoding ascii
 
 $verify = Join-Path $rig 'verify-real-apply-test.ps1'
@@ -222,7 +224,11 @@ $verify = Join-Path $rig 'verify-real-apply-test.ps1'
 Write-Host ("highWaterBuild = {0}  (expect {1} on commit, {2} on rollback)" -f `$state.highWaterBuild, $N1Num, $NNum)
 Write-Host ("paused         = {0}  (expect False on commit, True on rollback)" -f `$state.paused)
 Write-Host ("apply.json     = {0}" -f `$phase)
-`$dbNow = if (Test-Path '$walletDb') { (Get-FileHash '$walletDb' -Algorithm SHA256).Hash.ToLower() } else { '(no wallet)' }
+`$dbNow = '(no wallet)'
+if (Test-Path '$walletDb') {
+    try { `$dbNow = (Get-FileHash '$walletDb' -Algorithm SHA256).Hash.ToLower() }
+    catch { `$dbNow = '(in use - browser still running; close it, then re-run this verify)' }
+}
 `$dbWas = if (Test-Path '$rig\wallet-db-before.txt') { (Get-Content '$rig\wallet-db-before.txt' -Raw).Trim() } else { '(none)' }
 Write-Host ("wallet.db sha  = {0}" -f `$dbNow)
 Write-Host ("  before       = {0}" -f `$dbWas)
