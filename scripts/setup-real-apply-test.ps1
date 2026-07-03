@@ -104,8 +104,13 @@ function Assemble-Tree([string]$dest) {
 }
 function Build-Shell([string]$ver,[int]$num) {
     Say "  building CEF shell $ver (build $num) ..."
-    & cmake -S (Join-Path $repoRoot 'cef-native') -B (Join-Path $repoRoot 'cef-native\build') `
-        -DHODOS_SILENT_AUTOUPDATE=ON -DHODOS_UPDATE_TEST_SEAM=ON -DAPP_VERSION=$ver -DAPP_BUILD_NUMBER=$num | Out-Null
+    $cfgArgs = @(
+        '-S', (Join-Path $repoRoot 'cef-native'),
+        '-B', (Join-Path $repoRoot 'cef-native\build'),
+        '-DHODOS_SILENT_AUTOUPDATE=ON', '-DHODOS_UPDATE_TEST_SEAM=ON',
+        "-DAPP_VERSION=$ver", "-DAPP_BUILD_NUMBER=$num"
+    )
+    & cmake @cfgArgs | Out-Null
     if ($LASTEXITCODE -ne 0) { Write-Error "cmake configure failed for $ver" }
     & cmake --build (Join-Path $repoRoot 'cef-native\build') --config Release --target HodosBrowserShell hodos-update-helper | Out-Null
     if ($LASTEXITCODE -ne 0) { Write-Error "cmake build failed for $ver" }
