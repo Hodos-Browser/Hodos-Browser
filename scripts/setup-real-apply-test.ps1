@@ -30,6 +30,24 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 function Say([string]$m,[string]$c='Cyan') { Write-Host $m -ForegroundColor $c }
 
+# ---- 0a. Put openssl + python on PATH even if the shell doesn't have them --------
+# (Git ships openssl at usr\bin; the py launcher knows where python lives. The manifest
+#  signer shells out to openssl too, so it must be on PATH for the whole process.)
+function Add-ToPath([string]$dir) {
+    if ($dir -and (Test-Path $dir) -and (";$env:PATH;" -notlike "*;$dir;*")) { $env:PATH = "$dir;$env:PATH" }
+}
+if (-not (Get-Command openssl -ErrorAction SilentlyContinue)) {
+    foreach ($c in @("$env:ProgramFiles\Git\usr\bin", "$env:ProgramFiles\Git\mingw64\bin",
+                     "${env:ProgramFiles(x86)}\Git\usr\bin")) {
+        if (Test-Path (Join-Path $c 'openssl.exe')) { Add-ToPath $c; break }
+    }
+}
+if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+    $pyExe = $null
+    try { $pyExe = (& py -c "import sys; print(sys.executable)" 2>$null) } catch {}
+    if ($pyExe -and (Test-Path $pyExe)) { Add-ToPath (Split-Path -Parent $pyExe) }
+}
+
 # ---- 0. Preflight + safety -------------------------------------------------------
 foreach ($tool in @('cmake','cargo','npm','openssl','python')) {
     if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) { Write-Error "'$tool' not on PATH" }
@@ -216,7 +234,7 @@ if (-not $haveWallet) {
 }
 Say ""
 Say "STEP A - launch it:"
-Say "    pwsh -File `"$launch`"" 'White'
+Say "    powershell -ExecutionPolicy Bypass -File `"$launch`"" 'White'
 Say ""
 Say "STEP B - watch $devApp\debug_output.log. Expect the bootstrap to log"
 Say "         'Silent apply: eligible ...' then the supervisor to install + health-check."
@@ -225,7 +243,7 @@ if ($Break) {
 }
 Say ""
 Say "STEP C - after it settles (~30-90s), verify:"
-Say "    pwsh -File `"$verify`"" 'White'
+Say "    powershell -ExecutionPolicy Bypass -File `"$verify`"" 'White'
 if ($Break) {
     Say "    EXPECT: highWater=$NNum, paused=True, old build restored, wallet.db intact."
 } else {
