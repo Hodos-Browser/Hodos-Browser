@@ -125,6 +125,29 @@ TEST(UpdateState, DefaultsAreFailSafeOff) {
     EXPECT_EQ(out.highWaterBuild, 0);
 }
 
+// #2 — the post-rollback `paused` latch lets a strictly NEWER build break through.
+TEST(PausedBlocksStagedBuild, NotPausedNeverBlocks) {
+    EXPECT_FALSE(PausedBlocksStagedBuild(/*paused=*/false, 40199, 40199));
+    EXPECT_FALSE(PausedBlocksStagedBuild(false, 40099, 40199));  // even an older build
+    EXPECT_FALSE(PausedBlocksStagedBuild(false, 40200, 40199));
+}
+
+TEST(PausedBlocksStagedBuild, PausedBlocksSameOrOlderButNotNewer) {
+    const long failed = 40199;
+    EXPECT_TRUE(PausedBlocksStagedBuild(true, failed, failed));       // same failed build -> block
+    EXPECT_TRUE(PausedBlocksStagedBuild(true, 40100, failed));        // older -> block
+    EXPECT_FALSE(PausedBlocksStagedBuild(true, 40200, failed));       // a fix (newer) -> break through
+    EXPECT_FALSE(PausedBlocksStagedBuild(true, failed + 1, failed));  // boundary: strictly newer
+}
+
+TEST(PausedBlocksStagedBuild, PausedWithNoRecordedFailureNeverPermanentlyWedges) {
+    // Shouldn't happen (rollback sets paused + lastFailureBuild together), but if a stray
+    // paused=true has lastFailureBuild==0, any real build is "newer than 0" and proceeds —
+    // so a corrupt/edited flag can never brick the fleet to notify-only forever.
+    EXPECT_FALSE(PausedBlocksStagedBuild(true, 40099, 0));
+    EXPECT_FALSE(PausedBlocksStagedBuild(true, 1, 0));
+}
+
 // ---- FileManifest + key normalization ---------------------------------------
 TEST(FileManifest, RoundTrips) {
     FileManifest in;

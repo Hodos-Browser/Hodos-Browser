@@ -85,6 +85,14 @@ struct UpdateState {
 std::string SerializeUpdateState(const UpdateState& s);
 bool ParseUpdateState(const std::string& json, UpdateState& out);  // false on bad JSON
 
+// #2 — the post-rollback `paused` latch is NOT permanent. A rollback sets paused=true +
+// lastFailureBuild=<failed build>. This returns true (BLOCK the apply) while paused for a
+// staged build that is NOT strictly newer than the failed one (don't retry the bad build),
+// and false (ALLOW) for a strictly newer build (a fix) — which, on health-confirmed success,
+// clears paused and heals the fleet. Pure. Safe because every build is still fully verified +
+// health-gated + rollback-protected, so a newer (possibly-also-bad) build can't brick.
+bool PausedBlocksStagedBuild(bool paused, long stagedBuild, long lastFailureBuild);
+
 // A content manifest: relative path (normalized to forward slashes, lower-cased on
 // Windows for case-insensitive match) -> sha256 hex. Backs BOTH the rollback
 // (old-tree) verify and the signed expected-new integrity check (B4/B5).

@@ -123,6 +123,14 @@ bool ParseUpdateState(const std::string& jsonStr, UpdateState& out) {
     return true;
 }
 
+bool PausedBlocksStagedBuild(bool paused, long stagedBuild, long lastFailureBuild) {
+    // Not paused -> never blocks here. Paused -> block a same-or-older build (don't retry
+    // the failed one); a strictly newer build breaks through. If lastFailureBuild==0 (no
+    // recorded failure — shouldn't happen since rollback sets both together) any real build
+    // is "newer than 0" and proceeds, so a stray paused flag can never permanently wedge.
+    return paused && stagedBuild <= lastFailureBuild;
+}
+
 // ---- FileManifest -----------------------------------------------------------
 std::string NormalizeManifestKey(const std::string& relPath) {
     std::string s = relPath;

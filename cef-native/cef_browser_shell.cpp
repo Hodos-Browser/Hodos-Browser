@@ -3962,7 +3962,11 @@ static bool MaybeApplyStagedUpdate(const std::string& profileId) {
         std::string c;
         if (!updatefs::ReadFileAll(SU_Widen(statePath), c) || !ParseUpdateState(c, state)) return false;
     }
-    if (!state.silent || state.paused) return false;
+    // NOTE: `paused` is intentionally NOT checked here (#2). A prior rollback sets paused,
+    // but a strictly NEWER build (a fix) must break through it — see PausedBlocksStagedBuild
+    // after the marker parse below. Gating on paused here would permanently wedge the fleet
+    // to notify-only after a single rollback and block silently pushing the fix.
+    if (!state.silent) return false;
 
     StagedUpdateMarker marker;
     {
@@ -3982,6 +3986,18 @@ static bool MaybeApplyStagedUpdate(const std::string& profileId) {
     if (marker.buildNumber != 0 && state.lastFailureBuild == marker.buildNumber) {
         LOG_INFO("Silent apply: build " + std::to_string(marker.buildNumber) +
                  " previously rejected (" + state.lastFailureReason + ") — skip");
+        return false;
+    }
+
+    // #2: a prior ROLLBACK paused silent updates. Stay paused for the same-or-older build
+    // (never retry the bad one), but let a strictly NEWER build (a fix) break through — on
+    // health-confirmed success the helper clears paused, healing the fleet. Safe: every build
+    // is still EdDSA+Authenticode+manifest-verified, health-gated, and rollback-protected, so
+    // a newer (possibly-also-bad) build can't brick — it just rolls back + re-pauses.
+    if (PausedBlocksStagedBuild(state.paused, marker.buildNumber, state.lastFailureBuild)) {
+        LOG_INFO("Silent apply: paused after a prior rollback; staged build " +
+                 std::to_string(marker.buildNumber) + " not newer than failed build " +
+                 std::to_string(state.lastFailureBuild) + " — skip (a newer build will apply)");
         return false;
     }
 
