@@ -206,6 +206,14 @@ jobs:
           cd website-repo
           { test -f public/_redirects && test -f src/pages/index.astro; } || { echo "ERROR: website layout not as expected"; exit 1; }
 
+          # 0) Byte-stability: the detached appcast.xml.ed signature is over the EXACT appcast.xml
+          #    bytes. Stop git from normalizing line endings on these files — a CRLF flip would
+          #    break the signature and fail-close every Windows silent client. Idempotent; the
+          #    per-file `-text` rule overrides any repo-wide `* text=auto`.
+          touch .gitattributes
+          grep -qxF 'public/appcast.xml -text'    .gitattributes || echo 'public/appcast.xml -text'    >> .gitattributes
+          grep -qxF 'public/appcast.xml.ed -text' .gitattributes || echo 'public/appcast.xml.ed -text' >> .gitattributes
+
           # 1) appcast.xml + its Ed25519 document-signature sidecar (appcast.xml.ed) — copy the
           #    already-verified published feed verbatim. The Windows silent client fetches
           #    <feed>.ed from the website and fail-closes without it, so BOTH must be served.
@@ -233,7 +241,7 @@ jobs:
 
           git config user.name "hodos-release-bot"
           git config user.email "release-bot@hodosbrowser.com"
-          git add public/appcast.xml public/appcast.xml.ed public/_redirects src/pages/index.astro
+          git add .gitattributes public/appcast.xml public/appcast.xml.ed public/_redirects src/pages/index.astro
           if git diff --cached --quiet; then
             echo "Website already at ${VERSION} (idempotent re-run) — nothing to push."
           else
@@ -267,3 +275,34 @@ jobs:
           echo "/download/win -> ${loc:-<none>}"
           echo "$loc" | grep -qF -- "HodosBrowser-${VERSION}-setup.exe" || { echo "ERROR: /download/win not pointing at ${VERSION}"; exit 1; }
           echo "Website verified live for ${VERSION}. Promotion complete."
+
+      # The Windows silent client fail-closes on the appcast document signature. Verify the
+      # SERVED appcast.xml.ed against the SERVED appcast.xml bytes with the SAME embedded key
+      # the client uses — the only thing that catches a CRLF/normalization/edge-transform that
+      # slipped past the .gitattributes guard. Fail-closed: a broken feed signature bricks
+      # silent for the whole fleet, so refuse to consider the promotion complete.
+      - name: Verify served appcast.xml.ed signature (byte-stability guard)
+        run: |
+          set -euo pipefail
+          ver=$(openssl version | awk '{print $2}')
+          case "$ver" in 3.*|4.*|5.*) : ;; *) echo "::error::openssl $ver too old (need >= 3.x for Ed25519 -rawin)"; exit 1 ;; esac
+          # Embedded SUPublicEDKey (raw 32-byte Ed25519). Build a public-key PEM: SPKI DER
+          # prefix (302a300506032b6570032100) || the 32 raw bytes -> DER -> base64 -> PEM.
+          PUB="GVq3mpDl8eelsG0A5wqC5FBYZd3fy7U3we9iZ9+Tq3Q="
+          { printf '302a300506032b6570032100'; printf '%s' "$PUB" | base64 -d | xxd -p -c 999; } \
+            | xxd -r -p | openssl base64 > /tmp/pub.b64
+          { echo "-----BEGIN PUBLIC KEY-----"; cat /tmp/pub.b64; echo "-----END PUBLIC KEY-----"; } > /tmp/appcast_pub.pem
+          ok=0
+          for i in $(seq 1 20); do
+            curl -sS -m 20 -H 'Cache-Control: no-cache' "https://hodosbrowser.com/appcast.xml?cb=${GITHUB_SHA}"    -o /tmp/served.xml || true
+            curl -sS -m 20 -H 'Cache-Control: no-cache' "https://hodosbrowser.com/appcast.xml.ed?cb=${GITHUB_SHA}" -o /tmp/served.ed  || true
+            if [ -s /tmp/served.xml ] && [ -s /tmp/served.ed ]; then
+              { printf 'hodos-appcast-v1\n'; cat /tmp/served.xml; } > /tmp/msg.bin
+              if openssl base64 -d -in /tmp/served.ed -out /tmp/sig.bin 2>/dev/null \
+                 && openssl pkeyutl -verify -rawin -pubin -inkey /tmp/appcast_pub.pem -in /tmp/msg.bin -sigfile /tmp/sig.bin >/dev/null 2>&1; then
+                ok=1; echo "served appcast.xml.ed verifies against the served appcast.xml bytes ✓"; break
+              fi
+            fi
+            echo "served .ed not verifying yet [${i}/20] (edge cache warming, or a normalization slipped in?)"; sleep 15
+          done
+          [ "$ok" = "1" ] || { echo "::error::served appcast.xml.ed does NOT verify against the served appcast.xml — a CRLF/normalization/edge transform broke the feed signature; every Windows silent client would fail-closed. Investigate before this build reaches silent users."; exit 1; }

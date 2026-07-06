@@ -1069,7 +1069,12 @@ jobs:
           EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
         run: |
           EXPECTED_PUB="GVq3mpDl8eelsG0A5wqC5FBYZd3fy7U3we9iZ9+Tq3Q="
-          soft() { echo "::warning::appcast-doc signing skipped: $1 — shipping no sidecar (fine until the silent path is wired in 4d)"; exit 0; }
+          # FAIL-CLOSED (silent is enabled, #4/#6): the Windows silent client consumes this
+          # sidecar and fail-closes without it, so a signing failure MUST block the release
+          # rather than ship a feed no silent client can verify. (Was soft/warn during the
+          # pre-silent transition.) If this fails on "derived pubkey != embedded", the
+          # SPARKLE_EDDSA_PRIVATE_KEY secret needs its one-time 32-byte-seed conversion (#5).
+          soft() { echo "::error::appcast-doc signing FAILED: $1 — silent is enabled, the .ed sidecar is REQUIRED"; exit 1; }
           [ -n "$EDDSA_PRIVATE_KEY" ] || soft "SPARKLE_EDDSA_PRIVATE_KEY not set"
 
           # Sparkle exports the Ed25519 key base64; the first 32 bytes are the seed.
@@ -1118,7 +1123,11 @@ jobs:
           EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
         run: |
           EXPECTED_PUB="GVq3mpDl8eelsG0A5wqC5FBYZd3fy7U3we9iZ9+Tq3Q="
-          soft() { echo "::warning::expected-new-manifest skipped: $1 — shipping none (fine until silent is wired in 6c)"; exit 0; }
+          # FAIL-CLOSED (silent is enabled, #4/#6): the silent apply path verifies this signed
+          # manifest against the installed tree, so a signing failure MUST block the release.
+          # (Was soft/warn pre-silent.) A "derived pubkey != embedded" failure => the
+          # SPARKLE_EDDSA_PRIVATE_KEY secret needs its one-time 32-byte-seed conversion (#5).
+          soft() { echo "::error::expected-new-manifest signing FAILED: $1 — silent is enabled, the signed manifest is REQUIRED"; exit 1; }
           [ -n "$EDDSA_PRIVATE_KEY" ] || soft "SPARKLE_EDDSA_PRIVATE_KEY not set"
 
           ZIP=$(ls artifacts/windows-portable/*portable*.zip 2>/dev/null | head -1)
@@ -1180,7 +1189,11 @@ jobs:
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
           REPO="${{ github.repository }}"
-          EXPECTED="HodosBrowser-${VERSION}-setup.exe HodosBrowser-${VERSION}-portable.zip HodosBrowser-${VERSION}.dmg appcast.xml SHA256SUMS.txt"
+          # Includes the silent-path sidecars (#6): appcast.xml.ed (feed doc signature) +
+          # expected-new-manifest.json{,.ed} (signed installed-tree manifest). Their signing
+          # steps are now fail-closed, but assert presence here too so a missing sidecar can
+          # never reach a silent client.
+          EXPECTED="HodosBrowser-${VERSION}-setup.exe HodosBrowser-${VERSION}-portable.zip HodosBrowser-${VERSION}.dmg appcast.xml appcast.xml.ed expected-new-manifest.json expected-new-manifest.json.ed SHA256SUMS.txt"
           gh release view "${GITHUB_REF_NAME}" --repo "$REPO" --json assets > assets.json
           echo "=== draft assets ==="; jq -r '.assets[] | "\(.name)\t\(.size)\t\(.state)"' assets.json
           for name in $EXPECTED; do
