@@ -201,6 +201,25 @@ if ($LASTEXITCODE -ne 0) { Write-Error 'generate-tree-manifest.py failed' }
     signerThumbprint=''; stagedAt='2026-07-03T00:00:00Z' } | ConvertTo-Json) `
     | Set-Content -Path (Join-Path $devPending 'update-info.json') -Encoding ascii
 
+# Force the DEV environment into SILENT mode (this test proves the silent WRITER + apply
+# path; the conservative cross-profile collapse is unit-tested separately). We do NOT hand-
+# seed update-state.json silent=true — instead we set the user-facing GLOBAL update setting
+# to "silent", which is exactly the input the app's own writer must translate. Writing the
+# global updateMode also makes LoadInternal treat it as authoritative and SKIP the one-time
+# collapse (which would otherwise pick the most-conservative across any stray dev profiles).
+$devGlobalSettings = Join-Path $roaming 'HodosBrowserDev\settings.json'
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $devGlobalSettings) | Out-Null
+$gs = @{}
+if (Test-Path $devGlobalSettings) {
+    try {
+        $obj = Get-Content $devGlobalSettings -Raw | ConvertFrom-Json
+        if ($obj) { $obj.PSObject.Properties | ForEach-Object { $gs[$_.Name] = $_.Value } }
+    } catch {}
+}
+$gs['updateMode'] = 'silent'
+($gs | ConvertTo-Json -Depth 10) | Set-Content -Path $devGlobalSettings -Encoding ascii
+Say "  forced dev global updateMode = silent (the scenario under test)"
+
 # Global state: seed silent=FALSE (NOT eligible yet). This deliberately does NOT hand-seed
 # silent=true — the whole point of commit #1 is that the app's OWN silent-state writer must
 # flip this to true on a normal launch (from the global autoUpdateMode). If we seeded true
