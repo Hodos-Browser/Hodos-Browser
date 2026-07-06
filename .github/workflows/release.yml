@@ -163,7 +163,13 @@ jobs:
       - name: Install vcpkg dependencies
         shell: pwsh
         run: |
-          vcpkg install nlohmann-json:x64-windows-static sqlite3:x64-windows-static
+          # openssl:x64-windows-static gives find_package a STATIC-CRT (/MT) OpenSSL matching
+          # our /MT targets. Without it, CI falls back to the runner's system OpenSSL
+          # (libcrypto_static.lib, built for the /MD dynamic CRT). The main shell survives that
+          # mismatch because CEF's link drags in the dynamic CRT, but the minimal
+          # hodos-update-helper.exe (first built in CI as of the silent-update work) does not,
+          # so its OpenSSL link fails with __imp_ CRT unresolved externals (LNK1120).
+          vcpkg install nlohmann-json:x64-windows-static sqlite3:x64-windows-static openssl:x64-windows-static
 
       # Download WinSparkle for auto-update support
       - name: Download WinSparkle
@@ -188,7 +194,10 @@ jobs:
         shell: pwsh
         run: |
           cd cef-native
-          cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DHODOS_SILENT_AUTOUPDATE=ON -DAPP_VERSION="${{ steps.version.outputs.VERSION }}" -DAPP_BUILD_NUMBER="${{ steps.version.outputs.BUILD_NUMBER }}"
+          # Force find_package(OpenSSL) to the vcpkg STATIC-CRT (/MT) OpenSSL, overriding the
+          # OPENSSL_ROOT_DIR env var the windows-2022 image sets to the system (/MD) OpenSSL —
+          # otherwise the /MT hodos-update-helper fails to link (see the vcpkg-install comment).
+          cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DOPENSSL_ROOT_DIR="$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows-static" -DHODOS_SILENT_AUTOUPDATE=ON -DAPP_VERSION="${{ steps.version.outputs.VERSION }}" -DAPP_BUILD_NUMBER="${{ steps.version.outputs.BUILD_NUMBER }}"
       
       # Run the existing build script (created by your dev)
       - name: Build with release script
