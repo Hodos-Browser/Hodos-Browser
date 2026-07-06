@@ -158,7 +158,8 @@ $priv = Join-Path $rig 'rig_ed.pem'; $pubder = Join-Path $rig 'rig_ed_pub.der'
 $pb = [IO.File]::ReadAllBytes($pubder); $pubB64 = [Convert]::ToBase64String($pb[($pb.Length-32)..($pb.Length-1)])
 
 $fakeInstaller = Join-Path $rig 'hodos-rig-installer.exe'
-Add-Type -OutputAssembly $fakeInstaller -OutputType ConsoleApplication -TypeDefinition @'
+$fakeSrc = Join-Path $rig 'hodos-rig-installer.cs'
+@'
 using System; using System.IO;
 class P { static int Main(string[] a) {
     string src = Environment.GetEnvironmentVariable("RIG_STAGING");
@@ -172,7 +173,15 @@ class P { static int Main(string[] a) {
     }
     return 0;
 }}
-'@
+'@ | Set-Content -Path $fakeSrc -Encoding ascii
+# Compile with the .NET Framework C# compiler. Works under BOTH Windows PowerShell 5.1
+# AND PowerShell 7 — unlike `Add-Type -OutputAssembly -OutputType ConsoleApplication`,
+# which .NET Core (pwsh) does not support.
+$csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+if (-not (Test-Path $csc)) { Write-Error "csc.exe not found at $csc (need .NET Framework 4.x)" }
+if (Test-Path $fakeInstaller) { Remove-Item -Force $fakeInstaller }
+& $csc /nologo /target:exe "/out:$fakeInstaller" $fakeSrc | Out-Null
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path $fakeInstaller)) { Write-Error 'fake-installer compile (csc) failed' }
 
 # Fresh pending\ (clears any prior run's staged files + rollback backup).
 if (Test-Path $devPending) { Remove-Item -Recurse -Force $devPending }
