@@ -101,6 +101,10 @@ jobs:
           gh release download "$TAG" --repo "$REPO" --dir artifacts --clobber
           echo "=== downloaded assets ==="; find artifacts -type f -printf '%p\t%s bytes\n'
           test -s "artifacts/appcast.xml" || { echo "::error::appcast.xml missing"; exit 1; }
+          # The Windows silent client fetches <feed>.ed (the Ed25519 document-signature sidecar)
+          # from the website and FAIL-CLOSES if it 404s. Refuse to promote a silent release whose
+          # feed can't be signature-verified by the client.
+          test -s "artifacts/appcast.xml.ed" || { echo "::error::appcast.xml.ed (feed signature sidecar) missing — the Windows silent client fail-closes without it"; exit 1; }
           test -s "artifacts/HodosBrowser-${VERSION}-setup.exe" || { echo "::error::Windows installer missing"; exit 1; }
           test -s "artifacts/HodosBrowser-${VERSION}.dmg"       || { echo "::error::macOS dmg missing"; exit 1; }
 
@@ -202,9 +206,13 @@ jobs:
           cd website-repo
           { test -f public/_redirects && test -f src/pages/index.astro; } || { echo "ERROR: website layout not as expected"; exit 1; }
 
-          # 1) appcast.xml — copy the already-verified published feed verbatim
-          test -s ../artifacts/appcast.xml || { echo "ERROR: artifacts/appcast.xml missing/empty"; exit 1; }
-          cp ../artifacts/appcast.xml public/appcast.xml
+          # 1) appcast.xml + its Ed25519 document-signature sidecar (appcast.xml.ed) — copy the
+          #    already-verified published feed verbatim. The Windows silent client fetches
+          #    <feed>.ed from the website and fail-closes without it, so BOTH must be served.
+          test -s ../artifacts/appcast.xml    || { echo "ERROR: artifacts/appcast.xml missing/empty"; exit 1; }
+          test -s ../artifacts/appcast.xml.ed || { echo "ERROR: artifacts/appcast.xml.ed missing/empty"; exit 1; }
+          cp ../artifacts/appcast.xml    public/appcast.xml
+          cp ../artifacts/appcast.xml.ed public/appcast.xml.ed
 
           # 2) _redirects — rewrite the two download lines deterministically from VERSION/TAG
           BASE="https://github.com/${OWNER}/Hodos-Browser/releases/download/${TAG}"
@@ -225,7 +233,7 @@ jobs:
 
           git config user.name "hodos-release-bot"
           git config user.email "release-bot@hodosbrowser.com"
-          git add public/appcast.xml public/_redirects src/pages/index.astro
+          git add public/appcast.xml public/appcast.xml.ed public/_redirects src/pages/index.astro
           if git diff --cached --quiet; then
             echo "Website already at ${VERSION} (idempotent re-run) — nothing to push."
           else
