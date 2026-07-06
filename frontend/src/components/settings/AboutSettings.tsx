@@ -3,7 +3,11 @@ import { Typography, Box, Select, MenuItem } from '@mui/material';
 import { SettingsCard, SettingRow } from './SettingsCard';
 import { useSettings } from '../../hooks/useSettings';
 
-const APP_VERSION = '0.3.0-beta.18';
+// Driven by the real build version: release builds set VITE_APP_VERSION (Windows
+// build-release.ps1 + macOS release.yml) before `npm run build`, and Vite embeds it.
+// Falls back to "dev" for local `npm run dev`. NEVER hardcode a version here again — it
+// silently drifts (it was stuck at beta.18 while builds moved on).
+const APP_VERSION = (import.meta.env.VITE_APP_VERSION as string | undefined) || 'dev';
 
 const AboutSettings: React.FC = () => {
   const { settings, updateSetting } = useSettings();

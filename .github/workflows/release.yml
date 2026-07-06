@@ -481,6 +481,9 @@ jobs:
 
       # Build frontend
       - name: Build frontend
+        env:
+          # Embed the real build version so Settings -> About shows it (Vite reads VITE_*).
+          VITE_APP_VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
           cd frontend
           npm ci

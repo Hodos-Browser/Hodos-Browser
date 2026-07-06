@@ -63,6 +63,8 @@ if (-not $SkipBuild) {
         npm ci
         if ($LASTEXITCODE -ne 0) { Pop-Location; Write-Host "ERROR: npm ci failed" -ForegroundColor Red; exit 1 }
     }
+    # Embed the real build version so Settings -> About shows it (Vite reads VITE_* at build).
+    $env:VITE_APP_VERSION = $Version
     npm run build
     if ($LASTEXITCODE -ne 0) { Pop-Location; Write-Host "ERROR: Frontend build failed" -ForegroundColor Red; exit 1 }
     Pop-Location
