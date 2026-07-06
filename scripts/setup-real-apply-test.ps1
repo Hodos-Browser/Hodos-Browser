@@ -236,6 +236,23 @@ $haveWallet = Test-Path $walletDb
 if ($haveWallet) { (Get-FileHash $walletDb -Algorithm SHA256).Hash.ToLower() | Set-Content (Join-Path $rig 'wallet-db-before.txt') }
 
 # ---- 5. Write the launch + verify scripts ----------------------------------------
+# For the -Break (rollback) leg, the supervisor DEFERS the restore while a browser is live
+# (the safe guardrail), so completing the rollback needs a 3rd (--resume) launch. Append a
+# guided PHASE 3 that does it. (Happy leg: empty — the commit path needs no resume.)
+$phase3 = ''
+if ($Break) {
+$phase3 = @"
+
+Write-Host ''
+Write-Host 'PHASE 3 (rollback): wait ~2 min for the bad build to fail its health check and the' -ForegroundColor Cyan
+Write-Host '  supervisor to defer the restore, then CLOSE all Hodos windows (incl. the picker).' -ForegroundColor Cyan
+Read-Host '  Press Enter once no Hodos windows are open'
+Write-Host '  launching --resume (a window/picker may appear = the OLD build restored; close it),' -ForegroundColor DarkGray
+Write-Host '  then wait ~30-60s and run the verify script.' -ForegroundColor DarkGray
+Start-Process -FilePath '$devApp\HodosBrowser.exe' -ArgumentList '--profile=Default' -WorkingDirectory '$devApp'
+"@
+}
+
 $launch = Join-Path $rig 'launch-real-apply-test.ps1'
 @"
 # TWO-PHASE launch. Phase 1 lets the app's OWN silent-state writer (commit #1) create the
@@ -259,6 +276,7 @@ if (-not `$st.silent) { Write-Error 'WRITER FAILED: app did not flip silent=true
 Write-Host 'PHASE 2: relaunch — the real bootstrap now applies the staged N+1.' -ForegroundColor Cyan
 Write-Host '  watch $devLog\debug_output.log for "Silent apply:" lines.' -ForegroundColor DarkGray
 Start-Process -FilePath '$devApp\HodosBrowser.exe' -ArgumentList '--profile=Default' -WorkingDirectory '$devApp'
+$phase3
 "@ | Set-Content -Path $launch -Encoding ascii
 
 $verify = Join-Path $rig 'verify-real-apply-test.ps1'
