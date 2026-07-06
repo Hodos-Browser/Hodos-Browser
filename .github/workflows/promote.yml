@@ -265,7 +265,7 @@ jobs:
           ok=0
           for i in $(seq 1 30); do
             # cache-bust so we read origin, not a stale Cloudflare edge copy
-            live=$(curl -sS -m 20 -H 'Cache-Control: no-cache' "https://hodosbrowser.com/appcast.xml?cb=${GITHUB_SHA}" \
+            live=$(curl -sS -m 20 -H 'Cache-Control: no-cache' "https://hodosbrowser.com/appcast.xml?cb=${GITHUB_SHA}-${i}" \
                    | grep -oE '<sparkle:shortVersionString>[^<]+' | sed 's/.*>//' || true)
             echo "$live" | grep -qxF "$VERSION" && { ok=1; echo "live appcast serving ${VERSION}"; break; }
             echo "live appcast not yet ${VERSION} (saw: ${live:-none}) [${i}/30]"; sleep 15
@@ -294,8 +294,10 @@ jobs:
           { echo "-----BEGIN PUBLIC KEY-----"; cat /tmp/pub.b64; echo "-----END PUBLIC KEY-----"; } > /tmp/appcast_pub.pem
           ok=0
           for i in $(seq 1 20); do
-            curl -sS -m 20 -H 'Cache-Control: no-cache' "https://hodosbrowser.com/appcast.xml?cb=${GITHUB_SHA}"    -o /tmp/served.xml || true
-            curl -sS -m 20 -H 'Cache-Control: no-cache' "https://hodosbrowser.com/appcast.xml.ed?cb=${GITHUB_SHA}" -o /tmp/served.ed  || true
+            # Per-iteration cache-bust so a stale/partial edge copy can't get pinned under a
+            # constant key for the whole retry window.
+            curl -sS -m 20 -H 'Cache-Control: no-cache' "https://hodosbrowser.com/appcast.xml?cb=${GITHUB_SHA}-${i}"    -o /tmp/served.xml || true
+            curl -sS -m 20 -H 'Cache-Control: no-cache' "https://hodosbrowser.com/appcast.xml.ed?cb=${GITHUB_SHA}-${i}" -o /tmp/served.ed  || true
             if [ -s /tmp/served.xml ] && [ -s /tmp/served.ed ]; then
               { printf 'hodos-appcast-v1\n'; cat /tmp/served.xml; } > /tmp/msg.bin
               if openssl base64 -d -in /tmp/served.ed -out /tmp/sig.bin 2>/dev/null \

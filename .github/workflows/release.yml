@@ -45,9 +45,36 @@ env:
 
 jobs:
   # ============================================================
+  # PREFLIGHT — fail fast on a mis-formatted signing key BEFORE the ~1-2h builds
+  # ============================================================
+  preflight-signing-key:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Derive + assert the Ed25519 signing public key
+        env:
+          EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          # Silent auto-update's sidecar signing (publish job) is FAIL-CLOSED, so a
+          # mis-formatted SPARKLE_EDDSA_PRIVATE_KEY would otherwise burn both platform builds
+          # (~1-2h incl. mac notarize) before being rejected. Catch it here in seconds (#5).
+          # Same key -> PKCS#8 PEM -> derived-pubkey construction the signing steps use.
+          EXPECTED_PUB="GVq3mpDl8eelsG0A5wqC5FBYZd3fy7U3we9iZ9+Tq3Q="
+          [ -n "${EDDSA_PRIVATE_KEY:-}" ] || { echo "::error::SPARKLE_EDDSA_PRIVATE_KEY not set — silent releases require it (fail-closed sidecars)"; exit 1; }
+          SEED_HEX=$(printf '%s' "$EDDSA_PRIVATE_KEY" | base64 -d 2>/dev/null | head -c 32 | xxd -p -c 999 || true)
+          [ ${#SEED_HEX} -eq 64 ] || { echo "::error::could not extract a 32-byte seed — SPARKLE_EDDSA_PRIVATE_KEY must be the 44-char 32-byte-seed form, not the 88-char/64-byte format"; exit 1; }
+          { printf '302e020100300506032b657004220420%s' "$SEED_HEX" | xxd -r -p | openssl base64 > /tmp/seed.b64; }
+          { echo "-----BEGIN PRIVATE KEY-----"; cat /tmp/seed.b64; echo "-----END PRIVATE KEY-----"; } > /tmp/ed.pem
+          DERIVED=$(openssl pkey -in /tmp/ed.pem -pubout -outform DER 2>/dev/null | tail -c 32 | openssl base64 | tr -d '\n' || true)
+          rm -f /tmp/seed.b64 /tmp/ed.pem
+          [ "$DERIVED" = "$EXPECTED_PUB" ] || { echo "::error::derived pubkey '$DERIVED' != embedded '$EXPECTED_PUB' — the signing key needs its one-time 32-byte-seed conversion (#5)"; exit 1; }
+          echo "signing-key preflight PASSED — derives the embedded SUPublicEDKey"
+
+  # ============================================================
   # WINDOWS BUILD
   # ============================================================
   build-windows:
+    needs: [preflight-signing-key]
     # Pinned to windows-2022 (not windows-latest): the runner's "windows-latest"
     # label rolled forward to the windows-2025 image, where the
     # "Visual Studio 17 2022" CMake generator no longer resolves
@@ -339,6 +366,7 @@ jobs:
   # MACOS BUILD
   # ============================================================
   build-macos:
+    needs: [preflight-signing-key]
     runs-on: macos-15
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
