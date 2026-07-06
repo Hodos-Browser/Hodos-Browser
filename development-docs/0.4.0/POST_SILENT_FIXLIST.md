@@ -70,16 +70,31 @@ environment cause. **Investigate C1–C3 TOGETHER, and specifically on a real Wi
   cosmetic-polish task. A lighter modal may reduce the D1 handoff cost, which is the real reason
   to consider it. Don't over-invest in looks right now.
 
-## E. macOS silent update — VERIFICATION (pending this session's retest)
+## E. macOS silent update — Sparkle CONFIRMED linked; the issue is the update MODE (design question)
 
-- First attempt did NOT auto-update (owner quit before Sparkle finished the background download —
-  likely just timing). Retesting with a proper ~10–15 min wait. **If it still doesn't fire after
-  a proper wait:** verify `Sparkle.framework` is actually linked/bundled in the shipped build —
-  the one open unknown from the #7 mac verification. Check the runtime log for
-  `Sparkle 2 controller created (deferred start)` (linked) vs `Sparkle framework not available`
-  (`AutoUpdater_mac.mm`), and the Sparkle check-interval + install-on-quit flow. (macOS install
-  itself works: drag-to-Applications confirmed; About showed beta.18 = beta.19 installed.)
-  **→ Update this section with the retest result before the deep-dive.**
+- **RESOLVED unknown:** Sparkle IS linked + working on mac. On the retest, "Check for updates"
+  correctly detected beta.20 and knew the app was on beta.19. So the #7 "is Sparkle linked?"
+  unknown is answered — yes. macOS install also confirmed (drag-to-Applications; About beta.18 =
+  beta.19 installed).
+- **Why silent didn't fire:** the Mac is almost certainly in **"Notify me"** mode, not
+  "Automatic." Manual check finds the update but nothing auto-installs-on-quit. **Likely cause:**
+  the Mac had an old **beta.8** install; on beta.19's first launch the one-time
+  MOST-CONSERVATIVE cross-profile collapse (#1/#7 "never surprise-silent") found the legacy
+  profile's notify/legacy-bool setting and set the global mode to **notify**. The owner's Windows
+  machine had no such legacy setting, so it stayed silent and updated on its own. Setting the Mac
+  to "Automatic" should make it silently update (retest pending owner confirmation of the mode).
+- **⭐ DESIGN QUESTION for the deep-dive (this is the real item, not a bug):** the conservative
+  collapse means EVERY machine upgrading from an older/legacy install lands on **notify**, and the
+  user must manually opt into "Automatic" to get silent auto-update. That is the *safe* behavior
+  we deliberately chose, but it works against the owner's goal of "everyone's apps just update."
+  Decide: is legacy-upgraders→notify the right call, or too conservative? Options to weigh — keep
+  as-is (safe, users opt in); OR only collapse to notify when there's an EXPLICIT notify/off
+  choice (treat a legacy `autoUpdateEnabled=true` as silent-eligible rather than notify); OR a
+  one-time in-app nudge inviting existing users to turn on Automatic. Whatever is chosen must not
+  re-introduce a surprise-silent path ([[feedback_update_stability_principle]]). Confirm the mode
+  hypothesis first (owner: Settings → Software updates dropdown; or the mac
+  `~/Library/Application Support/HodosBrowser/logs/debug_output.log` line
+  `Auto-updater initialized (... mode=...)`).
 
 ---
 
