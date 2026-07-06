@@ -38,6 +38,7 @@ add_executable(hodos_tests
     update_stager_test.cpp              # commit 4b — auto-updater verify core
     update_apply_test.cpp               # commit 6b.1 — apply-transaction pure model
     update_fs_test.cpp                  # commit 6b.2a — backup/verify/restore primitives
+    silent_state_writer_test.cpp        # #1 — silent-eligibility mirror pure helpers
 
     # Production sources under test (built into the test exe directly).
     # (Phase 2.6-H removed permission_engine_test / permission_gate_test along
@@ -53,6 +54,7 @@ add_executable(hodos_tests
     ../src/core/UpdateStager.cpp          # commit 4b — production source under test
     ../src/core/UpdateApply.cpp           # commit 6b.1 — apply-transaction pure model
     ../src/core/UpdateFs.cpp              # commit 6b.2a — backup/verify/restore primitives
+    ../src/core/SilentStateWriter.cpp     # #1 — silent-eligibility mirror
     ../src/core/Logger.cpp
 )
 

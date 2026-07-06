@@ -2,6 +2,7 @@
 
 #include <string>
 #include <mutex>
+#include <functional>
 #include <nlohmann/json.hpp>
 
 // Browser settings (general browsing behavior)
@@ -55,12 +56,16 @@ inline void from_json(const nlohmann::json& j, BrowserSettings& s) {
     s.downloadsPath = j.value("downloadsPath", defaults.downloadsPath);
     s.restoreSessionOnStart = j.value("restoreSessionOnStart", defaults.restoreSessionOnStart);
     s.askWhereToSave = j.value("askWhereToSave", defaults.askWhereToSave);
-    // Backward compat: migrate legacy bool autoUpdateEnabled → string autoUpdateMode
+    // Backward compat: migrate legacy bool autoUpdateEnabled → string autoUpdateMode.
+    // NOTE: legacy `true` maps to "notify", NOT "silent": the old bool only ever meant
+    // notify-era updates (silent auto-apply did not exist), so promoting those users to
+    // silent would auto-apply updates they never consented to. Fresh installs still
+    // default to "silent" (the struct default); only this legacy-upgrade path is notify.
     if (j.contains("autoUpdateMode")) {
         s.autoUpdateMode = j.value("autoUpdateMode", defaults.autoUpdateMode);
     } else if (j.contains("autoUpdateEnabled")) {
         bool legacy = j.value("autoUpdateEnabled", true);
-        s.autoUpdateMode = legacy ? "silent" : "off";
+        s.autoUpdateMode = legacy ? "notify" : "off";
     }
     // Validate
     if (s.autoUpdateMode != "off" && s.autoUpdateMode != "notify" && s.autoUpdateMode != "silent") {
@@ -126,6 +131,30 @@ public:
     // Bulk update from JSON (for IPC from frontend)
     bool UpdateFromJson(const std::string& jsonStr);
 
+    // --- Global (cross-profile) update mode (auto-update setting) ---
+    // autoUpdateMode is machine/user-GLOBAL (Chrome's model), not per-profile: it is
+    // sourced from and persisted to the global settings.json, so a change in any profile
+    // applies to all. See AUTOUPDATE_SILENT_STATE_WRITER_DESIGN.md.
+
+    // Register a callback invoked (with the validated mode string) whenever the update
+    // mode CHANGES via SetAutoUpdateMode / UpdateFromJson. The shell wires this to the
+    // silent-eligibility mirror (Windows + HODOS_SILENT_AUTOUPDATE only). Not called on
+    // load. Thread note: invoked OUTSIDE mutex_.
+    void SetUpdateModeChangeCallback(std::function<void(const std::string&)> cb);
+
+    // True iff LoadInternal found NO global updateMode (first run under the global-mode
+    // scheme) — the shell then does a one-time MOST-CONSERVATIVE collapse across profiles.
+    bool GlobalUpdateModeWasAbsentAtLoad() const;
+
+    // Set the authoritative global mode (persist global + set in memory). Used by the
+    // shell's one-time conservative collapse. Does NOT invoke the change callback.
+    void SetGlobalUpdateModeAuthoritative(const std::string& mode);
+
+    // Read a specific profile's stored autoUpdateMode (applying legacy migration) from
+    // <profilePath>/settings.json. Returns "" if absent/unreadable. Static — used by the
+    // one-time collapse to find the most-conservative value across all profiles.
+    static std::string ReadModeFromProfileSettings(const std::string& profilePath);
+
 private:
     SettingsManager() = default;
     ~SettingsManager() = default;
@@ -135,6 +164,12 @@ private:
     void EnsureDirectoryExists(const std::string& path) const;
     void LoadInternal();  // Actual load logic (no mutex)
 
+    // Global update mode helpers (operate on the global settings.json root "updateMode"
+    // key). Read returns "" if absent/invalid. Persist is a read-modify-write of ONLY
+    // that key (never clobbers other global settings). Neither takes mutex_.
+    std::string LoadGlobalUpdateMode() const;
+    bool PersistGlobalUpdateMode(const std::string& mode);
+
     mutable std::mutex mutex_;
     BrowserSettings browser_;
     PrivacySettings privacy_;
@@ -143,6 +178,9 @@ private:
 
     std::string settings_file_path_;  // Per-profile path (set by Initialize)
     bool initialized_ = false;
+
+    std::function<void(const std::string&)> update_mode_change_cb_;  // -> silent mirror
+    bool global_update_mode_absent_at_load_ = false;                 // first-run collapse flag
 
     // Prevent copying
     SettingsManager(const SettingsManager&) = delete;

@@ -328,6 +328,8 @@ elseif(WIN32)
         include/core/UpdateLock.h
         include/core/UpdateFs.h
         src/core/UpdateFs.cpp
+        include/core/SilentStateWriter.h
+        src/core/SilentStateWriter.cpp
         include/core/QRScreenCapture.h
         src/core/QRScreenCapture.cpp
         hodos.rc

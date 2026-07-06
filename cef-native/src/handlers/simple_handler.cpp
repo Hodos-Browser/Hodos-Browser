@@ -2992,12 +2992,15 @@ bool SimpleHandler::OnProcessMessageReceived(
             else if (value == "notify") mode = UpdateMode::Notify;
             AutoUpdater::GetInstance().SetUpdateMode(mode);
         }
-        // Legacy key — frontend may still send this during transition
+        // Legacy key — frontend may still send this during transition.
+        // Legacy `true` -> "notify" (NOT "silent"): the old bool only meant notify-era
+        // updates; promoting to silent would auto-apply updates the user never consented
+        // to. Matches BrowserSettings::from_json's legacy migration.
         else if (key == "browser.autoUpdateEnabled") {
-            std::string mapped = (value == "true") ? "silent" : "off";
+            std::string mapped = (value == "true") ? "notify" : "off";
             settings.SetAutoUpdateMode(mapped);
             AutoUpdater::GetInstance().SetUpdateMode(
-                (value == "true") ? UpdateMode::Silent : UpdateMode::Off);
+                (value == "true") ? UpdateMode::Notify : UpdateMode::Off);
         } else {
             LOG_WARNING_BROWSER("⚠️ Unknown settings key: " + key);
         }

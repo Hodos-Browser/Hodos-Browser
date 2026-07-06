@@ -192,8 +192,13 @@ if ($LASTEXITCODE -ne 0) { Write-Error 'generate-tree-manifest.py failed' }
     signerThumbprint=''; stagedAt='2026-07-03T00:00:00Z' } | ConvertTo-Json) `
     | Set-Content -Path (Join-Path $devPending 'update-info.json') -Encoding ascii
 
-# Global state: eligible (silent, not paused), high-water below N1Num, no prior rejection.
-(@{ schema=1; silent=$true; paused=$false; highWaterBuild=$NNum; signerThumbprint='';
+# Global state: seed silent=FALSE (NOT eligible yet). This deliberately does NOT hand-seed
+# silent=true — the whole point of commit #1 is that the app's OWN silent-state writer must
+# flip this to true on a normal launch (from the global autoUpdateMode). If we seeded true
+# here we'd be masking a missing writer exactly like the pre-#1 rig did. The two-phase launch
+# script below runs the app once (the writer flips silent -> true), then relaunches to apply.
+# high-water below N1Num, not paused, no prior rejection.
+(@{ schema=1; silent=$false; paused=$false; highWaterBuild=$NNum; signerThumbprint='';
     lastFailureBuild=0; lastFailureReason=''; rescanAfterRollback=$false } | ConvertTo-Json) `
     | Set-Content -Path (Join-Path $devUpdate 'update-state.json') -Encoding ascii
 
@@ -205,18 +210,26 @@ if ($haveWallet) { (Get-FileHash $walletDb -Algorithm SHA256).Hash.ToLower() | S
 # ---- 5. Write the launch + verify scripts ----------------------------------------
 $launch = Join-Path $rig 'launch-real-apply-test.ps1'
 @"
-# Launches the installed N build so the REAL bootstrap applies the staged N+1.
+# TWO-PHASE launch. Phase 1 lets the app's OWN silent-state writer (commit #1) create the
+# eligibility (flip update-state.json silent false->true from the global autoUpdateMode) —
+# NOT hand-seeded. Phase 2 relaunches so the REAL bootstrap applies the staged N+1. This is
+# the proof the writer works: if the app never flips silent, phase 2 will not apply.
 `$env:HODOS_DEV = '1'
 `$env:HODOS_UPDATE_TEST = '1'
 `$env:HODOS_UPDATE_TEST_PUBKEY = '$pubB64'
 `$env:RIG_STAGING = '$newTree'
 `$env:RIG_APP_DIR = '$devApp'
-Write-Host 'Launching... watch $devLog\debug_output.log for "Silent apply:" lines.' -ForegroundColor Cyan
 # --profile=Default skips the profile picker (else it trips the apply's sole-instance
-# gate). WorkingDirectory = {app} deliberately MIRRORS the production shortcut (whose
-# working dir is {app}) — the exact scenario that broke bug #2. With the fix, the shell
-# now writes debug_output.log to an absolute out-of-{app} path, so this no longer
-# poisons the {app} backup.
+# gate). WorkingDirectory = {app} deliberately MIRRORS the production shortcut (bug #2).
+Write-Host 'PHASE 1: prime launch — the app writes update-state.json silent=true itself.' -ForegroundColor Cyan
+Write-Host '  (make sure Software updates = Automatic in Settings; it is the default.)' -ForegroundColor DarkGray
+Write-Host '  Wait for the window, then CLOSE it to continue.' -ForegroundColor Cyan
+Start-Process -FilePath '$devApp\HodosBrowser.exe' -ArgumentList '--profile=Default' -WorkingDirectory '$devApp' -Wait
+`$st = Get-Content '$devUpdate\update-state.json' -Raw | ConvertFrom-Json
+Write-Host ("  update-state.json silent = {0}  (expect True — written by the app, not the rig)" -f `$st.silent) -ForegroundColor Yellow
+if (-not `$st.silent) { Write-Error 'WRITER FAILED: app did not flip silent=true — commit #1 is not working'; exit 1 }
+Write-Host 'PHASE 2: relaunch — the real bootstrap now applies the staged N+1.' -ForegroundColor Cyan
+Write-Host '  watch $devLog\debug_output.log for "Silent apply:" lines.' -ForegroundColor DarkGray
 Start-Process -FilePath '$devApp\HodosBrowser.exe' -ArgumentList '--profile=Default' -WorkingDirectory '$devApp'
 "@ | Set-Content -Path $launch -Encoding ascii
 

@@ -48,8 +48,8 @@ const AboutSettings: React.FC = () => {
       <SettingsCard title="Updates">
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
           <SettingRow
-            label="Automatic updates"
-            description="How Hodos Browser handles new versions"
+            label="Software updates"
+            description="How Hodos Browser installs new versions"
             control={
               <Select
                 value={settings.browser.autoUpdateMode ?? 'silent'}
@@ -70,7 +70,7 @@ const AboutSettings: React.FC = () => {
                   },
                 }}
               >
-                <MenuItem value="silent">Download &amp; install on quit</MenuItem>
+                <MenuItem value="silent">Automatic (recommended)</MenuItem>
                 <MenuItem value="notify">Notify me</MenuItem>
                 <MenuItem value="off">Off</MenuItem>
               </Select>

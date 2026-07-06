@@ -50,6 +50,7 @@
 #include "include/core/UpdateApply.h"
 #include "include/core/UpdateFs.h"
 #include "include/core/UpdateLock.h"
+#include "include/core/SilentStateWriter.h"
 #include "include/core/LayoutHelpers.h"
 #ifdef HODOS_SILENT_AUTOUPDATE
 #include <tlhelp32.h>   // 6c.2: D.0 all-instances-gone sibling enumeration
@@ -4518,6 +4519,33 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     // Initialize SettingsManager with profile-specific path
     SettingsManager::GetInstance().Initialize(profile_cache);
     LOG_INFO(elapsed() + "STARTUP: Settings loaded for profile: " + profileId);
+
+#if defined(_WIN32) && defined(HODOS_SILENT_AUTOUPDATE)
+    // Mirror the (global) autoUpdateMode into the silent apply-eligibility gate for the
+    // NEXT cold boot, and — on the first run under the global-mode scheme — collapse the
+    // mode to ONE global value across profiles, taking the MOST CONSERVATIVE (so an
+    // explicit notify/off in any profile is never promoted to silent). Normal launches
+    // only: a launch with update.lock held already deferred at the honor-probe, and the
+    // health-probe / picker are excluded here — so this never races the helper's
+    // update-state writes (no lock needed). See AUTOUPDATE_SILENT_STATE_WRITER_DESIGN.md.
+    if (!g_picker_mode && !g_post_update_probe.load()) {
+        auto& sm = SettingsManager::GetInstance();
+        sm.SetUpdateModeChangeCallback([](const std::string& m) {
+            hodos::MirrorSilentEligibility(m);
+        });
+
+        std::string updMode = sm.GetBrowserSettings().autoUpdateMode;
+        if (sm.GlobalUpdateModeWasAbsentAtLoad()) {
+            for (const auto& p : ProfileManager::GetInstance().GetAllProfiles()) {
+                std::string pm = SettingsManager::ReadModeFromProfileSettings(p.path);
+                if (!pm.empty()) updMode = hodos::MoreConservativeMode(updMode, pm);
+            }
+            sm.SetGlobalUpdateModeAuthoritative(updMode);
+            LOG_INFO("Silent mirror: one-time global update-mode collapse -> " + updMode);
+        }
+        hodos::MirrorSilentEligibility(updMode);
+    }
+#endif
 
     // Initialize AdblockCache with profile path (loads per-site settings from JSON)
     AdblockCache::GetInstance().Initialize(profile_cache);
