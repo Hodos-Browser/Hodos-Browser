@@ -1,0 +1,38 @@
+# One-click check of the Sparkle EdDSA update-signing key (SPARKLE_EDDSA_PRIVATE_KEY).
+#
+# Run it from the Actions tab (Actions -> "Check signing key" -> Run workflow). It derives
+# the public key from the secret and asserts it equals the embedded SUPublicEDKey — the same
+# check the release pipeline's fail-closed sidecar signing does, but in seconds and without a
+# release. Use it to confirm #5 (whether the key is in a form the openssl path can read)
+# before tagging the first real silent beta. It never prints the private key.
+name: Check signing key
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Derive + assert the Ed25519 signing public key
+        env:
+          EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          EXPECTED_PUB="GVq3mpDl8eelsG0A5wqC5FBYZd3fy7U3we9iZ9+Tq3Q="
+          [ -n "${EDDSA_PRIVATE_KEY:-}" ] || { echo "::error::SPARKLE_EDDSA_PRIVATE_KEY is not set"; exit 1; }
+          SEED_HEX=$(printf '%s' "$EDDSA_PRIVATE_KEY" | base64 -d 2>/dev/null | head -c 32 | xxd -p -c 999 || true)
+          echo "seed length: ${#SEED_HEX} hex chars (want 64)"
+          [ ${#SEED_HEX} -eq 64 ] || { echo "::error::could not extract a 32-byte seed — the secret must be the 44-char 32-byte-seed form (not the 88-char/64-byte format). Re-export from Sparkle's generate_keys."; exit 1; }
+          { printf '302e020100300506032b657004220420%s' "$SEED_HEX" | xxd -r -p | openssl base64 > /tmp/seed.b64; }
+          { echo "-----BEGIN PRIVATE KEY-----"; cat /tmp/seed.b64; echo "-----END PRIVATE KEY-----"; } > /tmp/ed.pem
+          DERIVED=$(openssl pkey -in /tmp/ed.pem -pubout -outform DER 2>/dev/null | tail -c 32 | openssl base64 | tr -d '\n' || true)
+          rm -f /tmp/seed.b64 /tmp/ed.pem
+          echo "derived : $DERIVED"
+          echo "embedded: $EXPECTED_PUB"
+          if [ "$DERIVED" = "$EXPECTED_PUB" ]; then
+            echo "✅ KEY OK — the openssl path reads it; no conversion needed. Silent releases will sign the sidecars."
+          else
+            echo "::error::derived pubkey does not match the embedded SUPublicEDKey — the key needs its one-time 32-byte-seed conversion, OR the openssl seed extraction needs adjusting. Send this log."
+            exit 1
+          fi
