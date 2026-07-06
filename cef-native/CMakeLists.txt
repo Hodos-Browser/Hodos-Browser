@@ -253,6 +253,10 @@ if(APPLE)
         src/core/HttpRequestInterceptor.cpp
         src/core/ManifestFetcher.cpp
         src/core/AutoUpdater_mac.mm
+        # #1 — pure update-mode helpers (MoreConservativeMode) for the cross-profile
+        # collapse. MirrorSilentEligibility is #ifdef _WIN32 so it compiles to nothing here.
+        include/core/SilentStateWriter.h
+        src/core/SilentStateWriter.cpp
     )
     message(STATUS "Adding macOS-specific sources: cef_browser_shell_mac.mm, TabManager_mac.mm, WalletService_mac.cpp + cross-platform modules")
 

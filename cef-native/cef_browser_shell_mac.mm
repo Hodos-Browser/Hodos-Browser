@@ -125,6 +125,7 @@ namespace fs = std::filesystem;
 #include "include/core/ProfileLock.h"
 #include "include/core/SettingsManager.h"
 #include "include/core/AutoUpdater.h"
+#include "include/core/SilentStateWriter.h"  // hodos::MoreConservativeMode (pure)
 #include "include/core/SyncHttpClient.h"
 #include "include/core/AdblockCache.h"
 #include "include/core/FingerprintProtection.h"
@@ -5568,6 +5569,22 @@ int main(int argc, char* argv[]) {
             auto browserSettings = settings.GetBrowserSettings();
             std::string appVersion = APP_VERSION;
             std::string appcastUrl = "https://hodosbrowser.com/appcast.xml";
+
+            // #1 (macOS): autoUpdateMode is machine/user-GLOBAL. On the FIRST run under the
+            // global scheme, collapse to the MOST CONSERVATIVE mode across all profiles so an
+            // explicit notify/off in ANY profile is never promoted to silent (mirrors the
+            // Windows collapse in cef_browser_shell.cpp). mac needs no update-state mirror —
+            // Sparkle reads the (now global) autoUpdateMode directly below.
+            if (settings.GlobalUpdateModeWasAbsentAtLoad()) {
+                std::string updMode = browserSettings.autoUpdateMode;
+                for (const auto& p : ProfileManager::GetInstance().GetAllProfiles()) {
+                    std::string pm = SettingsManager::ReadModeFromProfileSettings(p.path);
+                    if (!pm.empty()) updMode = hodos::MoreConservativeMode(updMode, pm);
+                }
+                settings.SetGlobalUpdateModeAuthoritative(updMode);
+                browserSettings.autoUpdateMode = updMode;  // reflect for SetUpdateMode + log below
+                LOG_INFO("Update mode: one-time global collapse -> " + updMode);
+            }
 
             auto& updater = AutoUpdater::GetInstance();
             updater.Initialize(appVersion, appcastUrl, true);
