@@ -1135,7 +1135,9 @@ jobs:
           # exact appcast bytes (catches any byte-stability slip up to upload).
           openssl pkey -in /tmp/appcast_ed.pem -pubout -out /tmp/appcast_ed_pub.pem 2>/dev/null || soft "pubkey extract failed"
           { printf 'hodos-appcast-v1\n'; cat appcast.xml; } > /tmp/appcast_msg.bin
-          openssl base64 -d -in appcast.xml.ed -out /tmp/appcast_sig.bin || soft "sidecar base64 decode failed"
+          # -A: the sidecar is a single base64 line with no trailing newline; without -A,
+          # `openssl base64 -d` silently emits 0 bytes and the verify fails on an empty sig.
+          openssl base64 -d -A -in appcast.xml.ed -out /tmp/appcast_sig.bin || soft "sidecar base64 decode failed"
           if ! openssl pkeyutl -verify -rawin -pubin -inkey /tmp/appcast_ed_pub.pem \
                  -in /tmp/appcast_msg.bin -sigfile /tmp/appcast_sig.bin >/dev/null 2>&1; then
             rm -f /tmp/appcast_ed.pem /tmp/appcast_ed_pub.pem /tmp/appcast_msg.bin /tmp/appcast_sig.bin /tmp/seed.b64
@@ -1190,7 +1192,7 @@ jobs:
           # Local self-verify over (prefix||manifest-bytes) before publish.
           openssl pkey -in /tmp/manifest_ed.pem -pubout -out /tmp/manifest_pub.pem 2>/dev/null || soft "pubkey extract failed"
           { printf 'hodos-manifest-v1\n'; cat artifacts/expected-new-manifest.json; } > /tmp/manifest_msg.bin
-          openssl base64 -d -in artifacts/expected-new-manifest.json.ed -out /tmp/manifest_sig.bin || soft "sidecar base64 decode failed"
+          openssl base64 -d -A -in artifacts/expected-new-manifest.json.ed -out /tmp/manifest_sig.bin || soft "sidecar base64 decode failed"
           if ! openssl pkeyutl -verify -rawin -pubin -inkey /tmp/manifest_pub.pem \
                  -in /tmp/manifest_msg.bin -sigfile /tmp/manifest_sig.bin >/dev/null 2>&1; then
             rm -f /tmp/manifest_ed.pem /tmp/mseed.b64 /tmp/manifest_pub.pem /tmp/manifest_msg.bin /tmp/manifest_sig.bin

@@ -300,7 +300,7 @@ jobs:
             curl -sS -m 20 -H 'Cache-Control: no-cache' "https://hodosbrowser.com/appcast.xml.ed?cb=${GITHUB_SHA}-${i}" -o /tmp/served.ed  || true
             if [ -s /tmp/served.xml ] && [ -s /tmp/served.ed ]; then
               { printf 'hodos-appcast-v1\n'; cat /tmp/served.xml; } > /tmp/msg.bin
-              if openssl base64 -d -in /tmp/served.ed -out /tmp/sig.bin 2>/dev/null \
+              if openssl base64 -d -A -in /tmp/served.ed -out /tmp/sig.bin 2>/dev/null \
                  && openssl pkeyutl -verify -rawin -pubin -inkey /tmp/appcast_pub.pem -in /tmp/msg.bin -sigfile /tmp/sig.bin >/dev/null 2>&1; then
                 ok=1; echo "served appcast.xml.ed verifies against the served appcast.xml bytes ✓"; break
               fi
