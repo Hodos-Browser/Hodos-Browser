@@ -70,7 +70,31 @@ environment cause. **Investigate C1–C3 TOGETHER, and specifically on a real Wi
   cosmetic-polish task. A lighter modal may reduce the D1 handoff cost, which is the real reason
   to consider it. Don't over-invest in looks right now.
 
-## E. macOS silent update — Sparkle CONFIRMED linked; the issue is the update MODE (design question)
+## E. macOS auto-update — Sparkle works; the AUTOMATIC scheduled check doesn't fire promptly
+
+**Updated diagnosis (2026-07-06, after owner retest):** Sparkle is linked + working — manual
+"Check for updates" sees beta.20 on beta.19. But NEITHER Automatic (silent) NOR Notify fired on
+their own within a ~15-min window, even after switching to Automatic. Key realization: the
+"Automatic vs Notify" setting controls *what happens when an update is found* (download silently
+vs prompt), NOT *how often Sparkle checks*. The check FREQUENCY is `SUScheduledCheckInterval`,
+which our `Info.plist` does NOT set → Sparkle uses its default (~1 day). So the automatic check
+simply wasn't due yet in the test window — for either mode. **Likely not a regression and not
+broken** (mac auto-update was never verified before; we're discovering the default cadence).
+
+**Fixes / investigation:**
+1. **Set `SUScheduledCheckInterval` in `cef-native/Info.plist`** to something sane (Chrome-like,
+   e.g. a few hours = 3600–14400s), so updates land promptly in production AND are testable in
+   minutes. Verify the full automatic path E2E: launch → scheduled check fires → background
+   download → install-on-quit → relaunch is the new version.
+2. **Confirm the install PATH** independently: manual "Check for updates → install" should
+   download + install beta.20 (owner to try; if it works, the ONLY mac gap is the check cadence).
+3. Consider a **check-on-launch / shortened first-run interval** so a freshly-installed mac
+   picks up a waiting update quickly rather than after a full interval.
+4. Get the mac log if needed: `~/Library/Application Support/HodosBrowser/logs/debug_output.log`
+   → `Auto-updater initialized (... mode=...)` confirms the mode; Sparkle's own scheduling logs
+   go to Console.app / unified logging.
+
+## E2. macOS update MODE — the legacy-collapse design question (secondary)
 
 - **RESOLVED unknown:** Sparkle IS linked + working on mac. On the retest, "Check for updates"
   correctly detected beta.20 and knew the app was on beta.19. So the #7 "is Sparkle linked?"
