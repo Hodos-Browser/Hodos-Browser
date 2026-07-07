@@ -40,5 +40,15 @@
 	<string>GVq3mpDl8eelsG0A5wqC5FBYZd3fy7U3we9iZ9+Tq3Q=</string>
 	<key>SUEnableAutomaticChecks</key>
 	<true/>
+	<!-- Fixlist E: how often Sparkle runs its scheduled background update check.
+	     Without this key Sparkle uses a ~1-day default, so on retest neither Automatic
+	     (silent) nor Notify fired within the test window — the check simply wasn't due.
+	     3 hours = Chrome-like: prompt in production and testable in minutes. Sparkle also
+	     checks on launch when this interval has elapsed since the last check, so a running
+	     or relaunched Mac picks up a published update within a few hours instead of a day.
+	     (This controls the CHECK cadence; the Automatic-vs-Notify mode still governs what
+	     happens when an update is found — silent install-on-quit vs prompt.) -->
+	<key>SUScheduledCheckInterval</key>
+	<integer>10800</integer>
 </dict>
 </plist>
