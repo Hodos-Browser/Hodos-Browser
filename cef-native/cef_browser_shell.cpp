@@ -4697,6 +4697,22 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     SystemParametersInfo(SPI_GETWORKAREA, 0, &rect, 0);
     int width  = rect.right - rect.left;
     int height = rect.bottom - rect.top;
+
+    // Picker-UI redesign: the launch profile picker is a SMALL, CENTERED launcher window
+    // (not the full-work-area browser window) so it reads as a deliberate "pick a profile"
+    // launcher rather than a broken/empty browser window. Picker mode only — the normal
+    // window path below is untouched. Fraction-of-workarea + cap keeps it DPI-agnostic and
+    // sane on small screens; the picker page (a single full-window chooser) fills it.
+    if (g_picker_mode) {
+        int pw = width * 60 / 100;  if (pw > 980) pw = 980;  if (pw > width)  pw = width;
+        int ph = height * 78 / 100; if (ph > 660) ph = 660;  if (ph > height) ph = height;
+        rect.left += (width - pw) / 2;
+        rect.top  += (height - ph) / 2;
+        width = pw;
+        height = ph;
+        LOG_INFO("Picker launcher window: " + std::to_string(width) + "x" + std::to_string(height) + " centered");
+    }
+
     // Fixed header height, DPI-scaled (no HWND yet, use system DPI)
     int shellHeight = GetHeaderHeightPxSystem();
     int webviewHeight = height - shellHeight;

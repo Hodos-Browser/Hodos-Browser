@@ -12,8 +12,11 @@ import EditIcon from '@mui/icons-material/Edit';
 import StarIcon from '@mui/icons-material/Star';
 import StarBorderIcon from '@mui/icons-material/StarBorder';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
+import ChevronLeftIcon from '@mui/icons-material/ChevronLeft';
+import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import { useProfiles } from '../hooks/useProfiles';
 import { HodosButton } from '../components/HodosButton';
+import { tokens } from '../theme/tokens';
 
 // Predefined color palette for new profiles
 const PROFILE_COLORS = [
@@ -71,6 +74,11 @@ const ProfilePickerOverlayRoot: React.FC = () => {
     const [editAvatarImage, setEditAvatarImage] = useState<string | null>(null);
     const editNameInputRef = useRef<HTMLInputElement>(null);
     const editFileInputRef = useRef<HTMLInputElement>(null);
+
+    // Launch-window (isPickerWindow) tile strip: horizontal scroll paged by arrows.
+    const stripRef = useRef<HTMLDivElement>(null);
+    const scrollStrip = (dir: number) =>
+        stripRef.current?.scrollBy({ left: dir * 360, behavior: 'smooth' });
 
     // Reset edit/create state when overlay regains focus (re-shown after hide).
     // CEF calls SetFocus(true) on show and SetFocus(false) on hide,
@@ -222,6 +230,143 @@ const ProfilePickerOverlayRoot: React.FC = () => {
         setDefaultProfile(id);
     };
 
+    // ── Launch-window mode: a distinct, designed profile LAUNCHER (not the compact
+    // in-header dropdown). Small centered window (sized by C++), gold-glow backdrop like
+    // the new-tab page, logo top-left, "Choose Hodos Profile", Chrome-style tiles that
+    // page left/right with arrows. The dropdown branch below is unchanged.
+    if (isPickerWindow) {
+        const glow = `radial-gradient(ellipse 70% 34% at 50% 60%, rgba(166, 124, 0, 0.20) 0%, transparent 62%), radial-gradient(ellipse 90% 80% at 50% 42%, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0.02) 55%, transparent 82%), ${tokens.bgPrimary}`;
+        const tileBase: React.CSSProperties = {
+            position: 'relative', flex: '0 0 auto', width: 150,
+            padding: '26px 12px 18px', borderRadius: 16, cursor: 'pointer',
+            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14,
+            transition: 'transform 120ms ease, box-shadow 120ms ease',
+        };
+        const arrowBtn: React.CSSProperties = {
+            flex: '0 0 auto', width: 42, height: 42, borderRadius: '50%',
+            border: `1px solid ${tokens.borderDefault}`, background: tokens.bgElevated,
+            color: tokens.textSecondary, cursor: 'pointer', display: 'flex',
+            alignItems: 'center', justifyContent: 'center',
+        };
+        return (
+            <div style={{
+                position: 'fixed', inset: 0, width: '100vw', height: '100vh',
+                background: glow, fontFamily: tokens.fontUi, color: tokens.textPrimary,
+                overflow: 'hidden', display: 'flex', flexDirection: 'column', margin: 0,
+            }}>
+                {/* Hide the tile-strip scrollbar — paging is via the arrow buttons. */}
+                <style>{`.picker-strip{scrollbar-width:none;-ms-overflow-style:none;}.picker-strip::-webkit-scrollbar{display:none;}`}</style>
+                {/* Logo — top-left */}
+                <div style={{
+                    display: 'flex', alignItems: 'center', gap: 10,
+                    padding: '18px 24px', ...(isMac ? { paddingLeft: 86, paddingTop: 12 } : {}),
+                }}>
+                    <img src="/Hodos_Gold_Browser_Icon.svg" alt="Hodos Browser" style={{ height: 30, width: 'auto' }} />
+                    <span style={{ fontSize: 17, fontWeight: 700, color: tokens.gold, letterSpacing: 0.3 }}>Hodos Browser</span>
+                </div>
+
+                {/* Center content */}
+                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '0 20px 48px' }}>
+                    {showCreateForm ? (
+                        <div style={{ width: 360, maxWidth: '90%', background: tokens.bgSurface, border: `1px solid ${tokens.borderSubtle}`, borderRadius: 16, padding: 24, boxShadow: tokens.shadowLg }}>
+                            <Typography variant="h6" sx={{ color: tokens.textPrimary, fontWeight: 700, mb: 2 }}>New profile</Typography>
+                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 2 }}>
+                                <Avatar src={avatarImage || undefined} sx={{ width: 56, height: 56, fontSize: 22, bgcolor: selectedColor }}>
+                                    {!avatarImage && (newProfileName.trim() ? newProfileName[0].toUpperCase() : '?')}
+                                </Avatar>
+                                <div style={{ flex: 1, background: tokens.bgElevated, border: `1px solid ${avatarImage ? tokens.gold : tokens.borderDefault}`, borderRadius: 6, padding: '6px 8px' }}>
+                                    <input ref={fileInputRef} type="file" accept="image/*" onChange={handleImageSelect}
+                                        style={{ fontSize: 12, color: tokens.textSecondary, width: '100%', cursor: 'pointer' }} />
+                                </div>
+                            </Box>
+                            <input ref={nameInputRef} type="text" placeholder="Profile name" value={newProfileName}
+                                onChange={(e) => setNewProfileName(e.target.value)} onKeyDown={handleKeyDown}
+                                style={{ width: '100%', padding: '10px 12px', fontSize: 14, border: `1px solid ${tokens.borderDefault}`, borderRadius: 6, marginBottom: 14, boxSizing: 'border-box', outline: 'none', background: tokens.bgElevated, color: tokens.textPrimary }}
+                                onFocus={(e) => e.target.style.borderColor = tokens.gold}
+                                onBlur={(e) => e.target.style.borderColor = tokens.borderDefault} />
+                            <Box sx={{ display: 'flex', gap: 0.75, mb: 2, flexWrap: 'wrap' }}>
+                                {PROFILE_COLORS.map((color) => (
+                                    <Box key={color} onClick={() => setSelectedColor(color)} sx={{ width: 26, height: 26, borderRadius: '50%', bgcolor: color, cursor: 'pointer', border: selectedColor === color ? `2px solid ${tokens.textPrimary}` : '2px solid transparent', '&:hover': { transform: 'scale(1.1)' } }} />
+                                ))}
+                            </Box>
+                            <Box sx={{ display: 'flex', gap: 1, justifyContent: 'flex-end' }}>
+                                <HodosButton variant="secondary" onClick={handleCancelCreate}>Cancel</HodosButton>
+                                <HodosButton variant="primary" onClick={handleCreateProfile} disabled={!newProfileName.trim()}>Create</HodosButton>
+                            </Box>
+                        </div>
+                    ) : editingProfileId ? (
+                        <div style={{ width: 360, maxWidth: '90%', background: tokens.bgSurface, border: `1px solid ${tokens.borderSubtle}`, borderRadius: 16, padding: 24, boxShadow: tokens.shadowLg }}>
+                            <Typography variant="h6" sx={{ color: tokens.textPrimary, fontWeight: 700, mb: 2 }}>Edit profile</Typography>
+                            <input ref={editNameInputRef} type="text" placeholder="Profile name" value={editName}
+                                onChange={(e) => setEditName(e.target.value)} onKeyDown={handleEditKeyDown}
+                                style={{ width: '100%', padding: '10px 12px', fontSize: 14, border: `1px solid ${tokens.borderDefault}`, borderRadius: 6, marginBottom: 14, boxSizing: 'border-box', outline: 'none', background: tokens.bgElevated, color: tokens.textPrimary }}
+                                onFocus={(e) => e.target.style.borderColor = tokens.gold}
+                                onBlur={(e) => e.target.style.borderColor = tokens.borderDefault} />
+                            <Box sx={{ display: 'flex', gap: 0.75, mb: 2, flexWrap: 'wrap' }}>
+                                {PROFILE_COLORS.map((color) => (
+                                    <Box key={color} onClick={() => setEditColor(color)} sx={{ width: 26, height: 26, borderRadius: '50%', bgcolor: color, cursor: 'pointer', border: editColor === color ? `2px solid ${tokens.textPrimary}` : '2px solid transparent', '&:hover': { transform: 'scale(1.1)' } }} />
+                                ))}
+                            </Box>
+                            <Box onClick={() => handleToggleDefault(editingProfileId)} sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2, cursor: 'pointer' }}>
+                                {editingProfileId === defaultProfileId
+                                    ? <StarIcon sx={{ fontSize: 18, color: tokens.gold }} />
+                                    : <StarBorderIcon sx={{ fontSize: 18, color: tokens.textMuted }} />}
+                                <Typography variant="caption" sx={{ color: tokens.textSecondary }}>
+                                    {editingProfileId === defaultProfileId ? 'Default profile' : 'Set as default'}
+                                </Typography>
+                            </Box>
+                            <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                                <HodosButton variant="secondary" onClick={handleCancelEdit}>Cancel</HodosButton>
+                                <HodosButton variant="primary" onClick={handleSaveEdit} disabled={!editName.trim()}>Save</HodosButton>
+                                <Box sx={{ flex: 1 }} />
+                                <HodosButton variant="icon" size="small" onClick={() => handleDeleteProfile(editingProfileId)}
+                                    disabled={profiles.length <= 1 || editingProfileId === defaultProfileId} aria-label="Delete profile">
+                                    <DeleteOutlineIcon sx={{ fontSize: 18, color: (profiles.length <= 1 || editingProfileId === defaultProfileId) ? '#4b5563' : '#ef4444' }} />
+                                </HodosButton>
+                            </Box>
+                        </div>
+                    ) : (
+                        <>
+                            <h1 style={{ fontSize: 30, fontWeight: 700, margin: '0 0 40px', color: tokens.textPrimary }}>Choose Hodos Profile</h1>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 12, width: '100%', maxWidth: 860, justifyContent: 'center' }}>
+                                <button style={arrowBtn} onClick={() => scrollStrip(-1)} aria-label="Scroll left"><ChevronLeftIcon /></button>
+                                <div ref={stripRef} className="picker-strip"
+                                    style={{ display: 'flex', gap: 20, overflowX: 'auto', scrollBehavior: 'smooth', padding: '10px 6px', flex: 1, justifyContent: profiles.length <= 4 ? 'center' : 'flex-start' }}>
+                                    {profiles.map((profile) => (
+                                        <div key={profile.id} style={{ ...tileBase, background: `radial-gradient(ellipse 82% 60% at 50% 26%, rgba(166,124,0,0.13) 0%, transparent 72%), ${tokens.bgSurface}`, border: `1px solid ${tokens.borderSubtle}` }}
+                                            onClick={() => handleSwitchProfile(profile.id)}
+                                            onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-4px)'; e.currentTarget.style.boxShadow = '0 10px 30px rgba(0,0,0,0.5), 0 0 22px rgba(166,124,0,0.22)'; }}
+                                            onMouseLeave={(e) => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = 'none'; }}>
+                                            {profile.id === defaultProfileId && <StarIcon sx={{ fontSize: 15, color: tokens.gold, position: 'absolute', top: 10, left: 10 }} />}
+                                            <div onClick={(e) => { e.stopPropagation(); handleEditProfile(profile); }} title="Edit profile"
+                                                style={{ position: 'absolute', top: 6, right: 6, padding: 4, borderRadius: '50%', display: 'flex', opacity: 0.5 }}>
+                                                <EditIcon sx={{ fontSize: 15, color: tokens.textMuted }} />
+                                            </div>
+                                            <Avatar src={profile.avatarImage || undefined} sx={{ width: 64, height: 64, fontSize: 26, bgcolor: profile.color }}>
+                                                {!profile.avatarImage && profile.avatarInitial}
+                                            </Avatar>
+                                            <span style={{ fontSize: 15, fontWeight: 600, color: tokens.textPrimary, textAlign: 'center', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{profile.name}</span>
+                                        </div>
+                                    ))}
+                                    <div key="__add" style={{ ...tileBase, background: tokens.bgSurface, border: `1px dashed ${tokens.borderDefault}` }}
+                                        onClick={() => { setShowCreateForm(true); setEditingProfileId(null); }}
+                                        onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-4px)'; }}
+                                        onMouseLeave={(e) => { e.currentTarget.style.transform = 'none'; }}>
+                                        <div style={{ width: 64, height: 64, borderRadius: '50%', border: `2px dashed ${tokens.textMuted}`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                                            <AddIcon sx={{ color: tokens.textSecondary, fontSize: 30 }} />
+                                        </div>
+                                        <span style={{ fontSize: 15, fontWeight: 600, color: tokens.textSecondary }}>Add profile</span>
+                                    </div>
+                                </div>
+                                <button style={arrowBtn} onClick={() => scrollStrip(1)} aria-label="Scroll right"><ChevronRightIcon /></button>
+                            </div>
+                        </>
+                    )}
+                </div>
+            </div>
+        );
+    }
+
     return (
         <Box sx={{
             width: '100%',
@@ -235,7 +380,7 @@ const ProfilePickerOverlayRoot: React.FC = () => {
             {/* Header — extra left padding in window mode on macOS to clear traffic lights */}
             <Box sx={{
                 p: 1.5,
-                ...(isPickerWindow && isMac && { pl: '86px', pt: '8px' }),
+                ...(isPickerWindow && isMac ? { pl: '86px', pt: '8px' } : {}),
                 borderBottom: '1px solid #2a2d35',
                 display: 'flex',
                 alignItems: 'center',
