@@ -3214,6 +3214,13 @@ void CreateProfilePanelOverlay(HINSTANCE hInstance, bool showImmediately, int ic
             LONG exStyle = GetWindowLong(profile_panel_hwnd, GWL_EXSTYLE);
             SetWindowLong(profile_panel_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
             SetForegroundWindow(profile_panel_hwnd);
+            // B2: install the click-outside hook on the first (create-time) show too.
+            extern HHOOK g_profile_panel_mouse_hook;
+            extern LRESULT CALLBACK ProfilePanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+            if (g_profile_panel_mouse_hook) { UnhookWindowsHookEx(g_profile_panel_mouse_hook); g_profile_panel_mouse_hook = nullptr; }
+            g_profile_panel_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, ProfilePanelMouseHookProc, nullptr, 0);
+            if (!g_profile_panel_mouse_hook)
+                LOG_WARNING_APP("Failed to install profile panel mouse hook (create). Error: " + std::to_string(GetLastError()));
         }
     } else {
         LOG_ERROR_APP("Failed to create profile panel overlay browser");
@@ -3237,7 +3244,17 @@ void ShowProfilePanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
 
     LOG_INFO_APP("Showing profile panel overlay");
 
-    // No mouse hook — WM_ACTIVATE handles click-outside (MA_ACTIVATE overlay)
+    // B2: (re)install the click-outside mouse hook. This panel previously relied ONLY on
+    // WM_ACTIVATE, which doesn't reliably fire for an in-app click-outside (owner had to use
+    // the X). Same fix + rationale as bookmarks/tab-list: unhook-then-install every show to
+    // survive Win10's silent LowLevelHooksTimeout removal.
+    extern HHOOK g_profile_panel_mouse_hook;
+    extern LRESULT CALLBACK ProfilePanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+    if (g_profile_panel_mouse_hook) { UnhookWindowsHookEx(g_profile_panel_mouse_hook); g_profile_panel_mouse_hook = nullptr; }
+    g_profile_panel_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, ProfilePanelMouseHookProc, nullptr, 0);
+    if (mainWin) mainWin->profile_panel_mouse_hook = g_profile_panel_mouse_hook;
+    if (!g_profile_panel_mouse_hook)
+        LOG_WARNING_APP("Failed to install profile panel mouse hook. Error: " + std::to_string(GetLastError()));
 
     // Use target window's HWNDs for positioning (fall back to globals)
     extern HWND g_header_hwnd;
@@ -3312,7 +3329,12 @@ void HideProfilePanelOverlay() {
     extern ULONGLONG g_profile_last_hide_tick;
     g_profile_last_hide_tick = GetTickCount64();
 
-    // No mouse hook to remove — WM_ACTIVATE handles click-outside
+    // Remove the click-outside hook (B2).
+    extern HHOOK g_profile_panel_mouse_hook;
+    if (g_profile_panel_mouse_hook) {
+        UnhookWindowsHookEx(g_profile_panel_mouse_hook);
+        g_profile_panel_mouse_hook = nullptr;
+    }
 
     CefRefPtr<CefBrowser> profile_browser = SimpleHandler::GetProfilePanelBrowser();
     int profTargetWinId = 0;

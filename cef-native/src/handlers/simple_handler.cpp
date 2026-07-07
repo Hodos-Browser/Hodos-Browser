@@ -2621,13 +2621,18 @@ bool SimpleHandler::OnProcessMessageReceived(
 
         if (!g_profile_panel_overlay_hwnd || !IsWindow(g_profile_panel_overlay_hwnd)) {
             CreateProfilePanelOverlay(g_hInstance, true, iconRightOffset);
-        } else if (IsWindowVisible(g_profile_panel_overlay_hwnd)) {
+        } else if (IsOverlayEffectivelyVisible(g_profile_panel_overlay_hwnd)) {
             HideProfilePanelOverlay();
+        } else if (GetTickCount64() - g_profile_last_hide_tick < 250) {
+            // The click-outside mouse hook (B2) just hid the panel on this same profile-
+            // button click — this IPC is the toggle-off, not a re-open. Suppress the re-show.
         } else {
             ShowProfilePanelOverlay(iconRightOffset, GetOwnerWindow());
         }
 
-        LOG_DEBUG_BROWSER("Profile panel toggle handled");
+        LOG_DEBUG_BROWSER(std::string("Profile panel toggle: effVisible=") +
+            (IsOverlayEffectivelyVisible(g_profile_panel_overlay_hwnd) ? "1" : "0") +
+            " sinceHide=" + std::to_string(GetTickCount64() - g_profile_last_hide_tick) + "ms");
 #elif defined(__APPLE__)
         extern void CreateProfilePanelOverlayMacOS(int iconRightOffset);
         extern void ShowProfilePanelOverlayMacOS(int iconRightOffset);
