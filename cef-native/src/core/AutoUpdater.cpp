@@ -165,13 +165,17 @@ void AutoUpdater::SetUpdateMode(UpdateMode mode) {
     // Map Off → disable checks; Notify/Silent → enable checks.
     win_sparkle_set_automatic_check_for_updates(mode != UpdateMode::Off ? 1 : 0);
 
-    // Force a background check on every launch. WinSparkle's scheduled
-    // check only fires when the interval has elapsed since the last check,
-    // so a user who quits before the interval expires and relaunches would
-    // never see the update. This ensures we always check on startup.
-    if (mode != UpdateMode::Off) {
+    // Force a background check so users who quit before the scheduled interval
+    // elapses still get updates. NOTIFY ONLY on Windows: WinSparkle has no
+    // silent-download mode, so win_sparkle_check_update_without_ui() SHOWS the
+    // update prompt when an update is found. In SILENT mode the custom stager
+    // (StagePendingUpdate, runs at startup) owns updates and must stay invisible
+    // — a WinSparkle prompt would defeat "silent". (mac's Sparkle silent-downloads
+    // on the equivalent call, so the mac side correctly checks in both modes;
+    // WinSparkle differs — do NOT mirror the mac `mode != Off` gate here.)
+    if (mode == UpdateMode::Notify) {
         win_sparkle_check_update_without_ui();
-        LogInfo("Forced background update check on launch");
+        LogInfo("Forced background update check on launch (notify)");
     }
 }
 
