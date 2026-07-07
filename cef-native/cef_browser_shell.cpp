@@ -54,6 +54,7 @@
 #include "include/core/LayoutHelpers.h"
 #ifdef HODOS_SILENT_AUTOUPDATE
 #include <tlhelp32.h>   // 6c.2: D.0 all-instances-gone sibling enumeration
+#include "update-helper/splash.h"   // A1: shell-side "Hodos is updating…" splash before backup
 #endif
 #include "include/core/Logger.h"
 #include <shellapi.h>
@@ -4146,6 +4147,16 @@ static bool MaybeApplyStagedUpdate(const std::string& profileId) {
         LOG_WARNING("Silent apply: build " + std::to_string(signedBuild) + " retracted by kill-list — defer");
         return false;
     }
+
+    // A1: we are now COMMITTED to applying — every eligibility/verify/defer gate above
+    // (sole-instance wait, wallet-dead, Authenticode, anti-rollback, signer-continuity,
+    // kill-list) has passed. Put the "Hodos is updating…" splash up BEFORE the heavy {app}
+    // backup + wallet snapshot below — that local copy is the multi-second gap the owner
+    // saw on the apply-boot. RAII: any early `return false` below closes it and normal
+    // startup resumes; on the success path we _exit(0) after spawning the helper (the
+    // dtor won't run, but the process dies and the helper's own splash — up from the top
+    // of RunApplyTransaction — has already taken over with no visible seam).
+    UpdateSplash applySplash;
 
     // Backup the full {app} tree (exclude the update\ working area) + its manifest.
     // Clear any partial rollback\ from a prior aborted run first (review #8) so the

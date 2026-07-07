@@ -712,6 +712,11 @@ if(WIN32)
     # correct wide codepoints instead of ACP-mojibake in the "Hodos is updating…" splash.
     if(MSVC)
         target_compile_options(hodos-update-helper PRIVATE /utf-8)
+        # A2: GUI subsystem so the helper NEVER shows a console window on ANY launch path
+        # — including the RunOnce `--resume` recovery, which Windows launches WITHOUT our
+        # CREATE_NO_WINDOW/DETACHED flags (a console-subsystem helper would flash a console
+        # there). Keep `wmain` as the entry point via the wide console CRT startup shim.
+        target_link_options(hodos-update-helper PRIVATE /SUBSYSTEM:WINDOWS /ENTRY:wmainCRTStartup)
     endif()
 endif()
 

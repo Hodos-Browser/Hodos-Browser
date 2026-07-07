@@ -23,7 +23,14 @@ public:
         if (const char* q = std::getenv("HODOS_UPDATE_NO_SPLASH"); q && *q && std::string(q) != "0") {
             return;
         }
-        thread_ = std::thread([this] { Run(); });
+        // The splash is cosmetic but is constructed at a brick-sensitive moment (the apply
+        // bootstrap, before/after the {app} backup + install). A pathological thread-create
+        // failure must NEVER propagate out into the apply path — degrade to "no splash".
+        try {
+            thread_ = std::thread([this] { Run(); });
+        } catch (...) {
+            // no splash this cycle; the update proceeds normally (dtor sees no joinable thread)
+        }
     }
     ~UpdateSplash() {
         stop_.store(true);  // the ~30fps timer keeps GetMessage responsive, so the loop

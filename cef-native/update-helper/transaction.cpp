@@ -191,14 +191,22 @@ void HttpPostShutdown(INTERNET_PORT port) {
 }
 
 // Spawn a process. `cmdline` is mutable per CreateProcessW contract. Returns the
-// process HANDLE (caller closes) or nullptr. `detached` => no window, own group.
+// process HANDLE (caller closes) or nullptr. `detached` => survives our exit (own job
+// group), still window-less.
+//
+// A2: CREATE_NO_WINDOW (always) gives a console child (e.g. the `cmd /c ping … & rmdir`
+// pending cleanup) a HIDDEN console. We deliberately DO NOT set DETACHED_PROCESS: a
+// detached console app has NO console, so `ping`'s console I/O makes it ALLOCATE a fresh,
+// VISIBLE console — the "console flashes a few lines at the end of the update" bug. With
+// CREATE_NO_WINDOW alone the child runs fully hidden and still outlives us (children are
+// not killed by a parent's exit; CREATE_BREAKAWAY_FROM_JOB covers the job-object case).
 HANDLE Spawn(const std::wstring& cmdline, bool detached, bool waitInherit = false) {
     std::vector<wchar_t> buf(cmdline.begin(), cmdline.end());
     buf.push_back(L'\0');
     STARTUPINFOW si{}; si.cb = sizeof(si);
     PROCESS_INFORMATION pi{};
     DWORD flags = CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT;
-    if (detached) flags |= DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB;
+    if (detached) flags |= CREATE_BREAKAWAY_FROM_JOB;
     if (!CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, flags,
                         nullptr, nullptr, &si, &pi)) {
         // CREATE_BREAKAWAY_FROM_JOB fails with ACCESS_DENIED if the parent's job
@@ -442,6 +450,15 @@ int RunApplyTransaction(const std::map<std::string, std::string>& args,
     const Paths p = ResolvePaths(args);
     if (p.appDir.empty() || p.applyPath.empty()) { L("apply: no appDir/pending — abort"); return 0; }
 
+    // A1: put the "Hodos is updating…" splash up IMMEDIATELY — before the bootstrap-exit
+    // wait / image-unlock poll / child-shutdown below (up to ~40s worst case). Previously
+    // the splash was created only just before the installer spawn, so the apply-boot showed
+    // a multi-second blank gap (owner nearly clicked again). RAII: it closes when this
+    // function returns, so SUCCESS reveals the new browser and ROLLBACK the relaunched old
+    // one. The bootstrap shell put up an identical centered splash before its {app} backup
+    // and _exit(0)'d, so this one takes over with no visible seam.
+    UpdateSplash splash;
+
     // 1. Wait for the bootstrap (P0) to exit via its inherited HANDLE (PID-reuse-
     //    immune, V3-11), so {app}\HodosBrowser.exe + libcef.dll unlock.
     {
@@ -472,11 +489,9 @@ int RunApplyTransaction(const std::map<std::string, std::string>& args,
     HttpPostShutdown(31302);
     PollUnlocked({p.appDir + L"\\hodos-wallet.exe", p.appDir + L"\\hodos-adblock.exe"}, kChildShutdownMs);
 
-    // 5. INSTALLING (before spawn, M7) -> run the installer /VERYSILENT.
-    // Show the "Hodos is updating…" indicator for the whole visible apply (install ->
-    // health -> commit/rollback). RAII: closes when this function returns, so SUCCESS
-    // reveals the new browser and ROLLBACK reveals the relaunched old one.
-    UpdateSplash splash;
+    // 5. INSTALLING (before spawn, M7) -> run the installer /VERYSILENT. The splash is
+    // already up from the top of this function (A1) and stays up through install -> health
+    // -> commit/rollback; its RAII teardown on return reveals the resulting browser.
     WriteApply(p, rec, ApplyPhase::Installing);
     if (rec.installerPath.empty()) { L("apply: no installer path — abort"); WriteApply(p, rec, ApplyPhase::Aborted, "no-installer"); return 0; }
     const std::wstring instCmd = L"\"" + W(rec.installerPath) + L"\" /VERYSILENT /SP- /SUPPRESSMSGBOXES /NORESTART";
