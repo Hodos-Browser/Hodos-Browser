@@ -86,8 +86,10 @@ broken** (mac auto-update was never verified before; we're discovering the defau
    e.g. a few hours = 3600–14400s), so updates land promptly in production AND are testable in
    minutes. Verify the full automatic path E2E: launch → scheduled check fires → background
    download → install-on-quit → relaunch is the new version.
-2. **Confirm the install PATH** independently: manual "Check for updates → install" should
-   download + install beta.20 (owner to try; if it works, the ONLY mac gap is the check cadence).
+2. ✅ **Install PATH CONFIRMED (2026-07-06):** owner ran manual "Check for updates → install" and
+   it downloaded, installed, and relaunched as **beta.20**. So the ENTIRE mac update path
+   (feed → download → Ed25519 verify → install-on-quit → relaunch) works. The ONLY remaining mac
+   gap is the automatic check CADENCE (fix #1 below). This item is now small + well-scoped.
 3. Consider a **check-on-launch / shortened first-run interval** so a freshly-installed mac
    picks up a waiting update quickly rather than after a full interval.
 4. Get the mac log if needed: `~/Library/Application Support/HodosBrowser/logs/debug_output.log`
