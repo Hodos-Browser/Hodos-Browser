@@ -237,8 +237,8 @@ const ProfilePickerOverlayRoot: React.FC = () => {
     if (isPickerWindow) {
         const glow = `radial-gradient(ellipse 70% 34% at 50% 60%, rgba(166, 124, 0, 0.20) 0%, transparent 62%), radial-gradient(ellipse 90% 80% at 50% 42%, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0.02) 55%, transparent 82%), ${tokens.bgPrimary}`;
         const tileBase: React.CSSProperties = {
-            position: 'relative', flex: '0 0 auto', width: 150,
-            padding: '26px 12px 18px', borderRadius: 16, cursor: 'pointer',
+            position: 'relative', flex: '0 0 auto', width: 132,
+            padding: '22px 10px 16px', borderRadius: 16, cursor: 'pointer',
             display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14,
             transition: 'transform 120ms ease, box-shadow 120ms ease',
         };
@@ -261,11 +261,11 @@ const ProfilePickerOverlayRoot: React.FC = () => {
                     display: 'flex', alignItems: 'center', gap: 10,
                     padding: '18px 24px', ...(isMac ? { paddingLeft: 86, paddingTop: 12 } : {}),
                 }}>
-                    <img src="/Hodos_Gold_Browser_Icon.svg" alt="Hodos Browser" style={{ height: 52, width: 'auto' }} />
+                    <img src="/Hodos_Gold_Browser_Icon.svg" alt="Hodos Browser" style={{ height: 41, width: 'auto' }} />
                 </div>
 
                 {/* Center content */}
-                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '0 20px 48px' }}>
+                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '0 20px 110px' }}>
                     {showCreateForm ? (
                         <div style={{ width: 360, maxWidth: '90%', background: tokens.bgSurface, border: `1px solid ${tokens.borderSubtle}`, borderRadius: 16, padding: 24, boxShadow: tokens.shadowLg }}>
                             <Typography variant="h6" sx={{ color: tokens.textPrimary, fontWeight: 700, mb: 2 }}>New profile</Typography>
@@ -330,7 +330,7 @@ const ProfilePickerOverlayRoot: React.FC = () => {
                             <div style={{ display: 'flex', alignItems: 'center', gap: 12, width: '100%', maxWidth: 860, justifyContent: 'center' }}>
                                 <button style={arrowBtn} onClick={() => scrollStrip(-1)} aria-label="Scroll left"><ChevronLeftIcon /></button>
                                 <div ref={stripRef} className="picker-strip"
-                                    style={{ display: 'flex', gap: 20, overflowX: 'auto', scrollBehavior: 'smooth', padding: '10px 6px', flex: 1, justifyContent: profiles.length <= 4 ? 'center' : 'flex-start' }}>
+                                    style={{ display: 'flex', gap: 16, overflowX: 'auto', scrollBehavior: 'smooth', padding: '18px 8px', flex: 1, justifyContent: profiles.length <= 4 ? 'center' : 'flex-start' }}>
                                     {profiles.map((profile) => (
                                         <div key={profile.id} style={{ ...tileBase, background: `radial-gradient(ellipse 82% 60% at 50% 26%, rgba(166,124,0,0.13) 0%, transparent 72%), ${tokens.bgSurface}`, border: `1px solid rgba(166,124,0,0.45)` }}
                                             onClick={() => handleSwitchProfile(profile.id)}
@@ -341,7 +341,7 @@ const ProfilePickerOverlayRoot: React.FC = () => {
                                                 style={{ position: 'absolute', top: 6, right: 6, padding: 4, borderRadius: '50%', display: 'flex', opacity: 0.5 }}>
                                                 <EditIcon sx={{ fontSize: 15, color: tokens.textMuted }} />
                                             </div>
-                                            <Avatar src={profile.avatarImage || undefined} sx={{ width: 64, height: 64, fontSize: 26, bgcolor: profile.color }}>
+                                            <Avatar src={profile.avatarImage || undefined} sx={{ width: 56, height: 56, fontSize: 22, bgcolor: profile.color }}>
                                                 {!profile.avatarImage && profile.avatarInitial}
                                             </Avatar>
                                             <span style={{ fontSize: 15, fontWeight: 600, color: tokens.textPrimary, textAlign: 'center', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{profile.name}</span>
@@ -351,8 +351,8 @@ const ProfilePickerOverlayRoot: React.FC = () => {
                                         onClick={() => { setShowCreateForm(true); setEditingProfileId(null); }}
                                         onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-4px)'; }}
                                         onMouseLeave={(e) => { e.currentTarget.style.transform = 'none'; }}>
-                                        <div style={{ width: 64, height: 64, borderRadius: '50%', border: `2px dashed ${tokens.textMuted}`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                                            <AddIcon sx={{ color: tokens.textSecondary, fontSize: 30 }} />
+                                        <div style={{ width: 56, height: 56, borderRadius: '50%', border: `2px dashed ${tokens.textMuted}`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                                            <AddIcon sx={{ color: tokens.textSecondary, fontSize: 26 }} />
                                         </div>
                                         <span style={{ fontSize: 15, fontWeight: 600, color: tokens.textSecondary }}>Add profile</span>
                                     </div>
