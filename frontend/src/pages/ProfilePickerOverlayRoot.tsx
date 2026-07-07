@@ -261,8 +261,7 @@ const ProfilePickerOverlayRoot: React.FC = () => {
                     display: 'flex', alignItems: 'center', gap: 10,
                     padding: '18px 24px', ...(isMac ? { paddingLeft: 86, paddingTop: 12 } : {}),
                 }}>
-                    <img src="/Hodos_Gold_Browser_Icon.svg" alt="Hodos Browser" style={{ height: 30, width: 'auto' }} />
-                    <span style={{ fontSize: 17, fontWeight: 700, color: tokens.gold, letterSpacing: 0.3 }}>Hodos Browser</span>
+                    <img src="/Hodos_Gold_Browser_Icon.svg" alt="Hodos Browser" style={{ height: 52, width: 'auto' }} />
                 </div>
 
                 {/* Center content */}
@@ -333,10 +332,10 @@ const ProfilePickerOverlayRoot: React.FC = () => {
                                 <div ref={stripRef} className="picker-strip"
                                     style={{ display: 'flex', gap: 20, overflowX: 'auto', scrollBehavior: 'smooth', padding: '10px 6px', flex: 1, justifyContent: profiles.length <= 4 ? 'center' : 'flex-start' }}>
                                     {profiles.map((profile) => (
-                                        <div key={profile.id} style={{ ...tileBase, background: `radial-gradient(ellipse 82% 60% at 50% 26%, rgba(166,124,0,0.13) 0%, transparent 72%), ${tokens.bgSurface}`, border: `1px solid ${tokens.borderSubtle}` }}
+                                        <div key={profile.id} style={{ ...tileBase, background: `radial-gradient(ellipse 82% 60% at 50% 26%, rgba(166,124,0,0.13) 0%, transparent 72%), ${tokens.bgSurface}`, border: `1px solid rgba(166,124,0,0.45)` }}
                                             onClick={() => handleSwitchProfile(profile.id)}
-                                            onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-4px)'; e.currentTarget.style.boxShadow = '0 10px 30px rgba(0,0,0,0.5), 0 0 22px rgba(166,124,0,0.22)'; }}
-                                            onMouseLeave={(e) => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = 'none'; }}>
+                                            onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-4px)'; e.currentTarget.style.boxShadow = '0 10px 30px rgba(0,0,0,0.5), 0 0 22px rgba(166,124,0,0.22)'; e.currentTarget.style.borderColor = 'rgba(166,124,0,0.85)'; }}
+                                            onMouseLeave={(e) => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = 'none'; e.currentTarget.style.borderColor = 'rgba(166,124,0,0.45)'; }}>
                                             {profile.id === defaultProfileId && <StarIcon sx={{ fontSize: 15, color: tokens.gold, position: 'absolute', top: 10, left: 10 }} />}
                                             <div onClick={(e) => { e.stopPropagation(); handleEditProfile(profile); }} title="Edit profile"
                                                 style={{ position: 'absolute', top: 6, right: 6, padding: 4, borderRadius: '50%', display: 'flex', opacity: 0.5 }}>
@@ -348,7 +347,7 @@ const ProfilePickerOverlayRoot: React.FC = () => {
                                             <span style={{ fontSize: 15, fontWeight: 600, color: tokens.textPrimary, textAlign: 'center', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{profile.name}</span>
                                         </div>
                                     ))}
-                                    <div key="__add" style={{ ...tileBase, background: tokens.bgSurface, border: `1px dashed ${tokens.borderDefault}` }}
+                                    <div key="__add" style={{ ...tileBase, background: tokens.bgSurface, border: `1px dashed rgba(166,124,0,0.40)` }}
                                         onClick={() => { setShowCreateForm(true); setEditingProfileId(null); }}
                                         onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-4px)'; }}
                                         onMouseLeave={(e) => { e.currentTarget.style.transform = 'none'; }}>
