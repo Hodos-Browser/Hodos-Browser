@@ -1123,9 +1123,13 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
         }
     }
 
-    // Deferred bookmark-context injection: when the bookmarks panel finishes
-    // loading, inject the current page url/title via window.setBookmarkContext.
-    // Mirrors the cookie-panel deferred injection (fixes the first-open race).
+    // Deferred bookmark-context injection: when the bookmarks panel finishes loading,
+    // inject the current page url/title via window.setBookmarkContext.
+    // B1 fix: on FIRST open, OnLoadingStateChange fires BEFORE React's useEffect registers
+    // window.setBookmarkContext (Vite loads its ESM module waterfall after the page 'load'),
+    // so a single inject here no-ops and the panel opens blank — you had to close+reopen to
+    // populate. Mirror the site-info panel: inject now AND retry at 300ms + 600ms to cover
+    // the React-mount delay. (Do NOT clear pending until after the retries are scheduled.)
     if (!isLoading && role_ == "bookmarkspanel" &&
         (!pending_bookmark_url_.empty() || !pending_bookmark_title_.empty())) {
         CefRefPtr<CefFrame> frame = browser->GetMainFrame();
@@ -1138,6 +1142,19 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
                 EscapeForSingleQuotedJs(url) + "', '" + EscapeForSingleQuotedJs(title) + "'); }";
             frame->ExecuteJavaScript(js, frame->GetURL(), 0);
             LOG_INFO_BROWSER("Deferred bookmark context injected after page load: " + url);
+
+            CefRefPtr<CefBrowser> retry_browser = browser;
+            std::string retry_url = url;
+            std::string retry_title = title;
+            for (int delay : {300, 600}) {
+                CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b, std::string u, std::string t) {
+                    if (b && b->GetMainFrame()) {
+                        std::string retryJs = "if (window.setBookmarkContext) { window.setBookmarkContext('" +
+                            EscapeForSingleQuotedJs(u) + "', '" + EscapeForSingleQuotedJs(t) + "'); }";
+                        b->GetMainFrame()->ExecuteJavaScript(retryJs, b->GetMainFrame()->GetURL(), 0);
+                    }
+                }, retry_browser, retry_url, retry_title), delay);
+            }
         }
     }
 
@@ -6745,6 +6762,7 @@ bool SimpleHandler::OnProcessMessageReceived(
         extern void HideBookmarksPanelOverlay();
         extern HWND g_bookmarks_panel_overlay_hwnd;
         extern HINSTANCE g_hInstance;
+        extern ULONGLONG g_bookmarks_last_hide_tick;
 
         bool willShow = true;
         if (!g_bookmarks_panel_overlay_hwnd || !IsWindow(g_bookmarks_panel_overlay_hwnd)) {
@@ -6755,9 +6773,18 @@ bool SimpleHandler::OnProcessMessageReceived(
             // Toggle-off: drop the stashed context so it can't replay on a later reload.
             pending_bookmark_url_.clear();
             pending_bookmark_title_.clear();
+        } else if (GetTickCount64() - g_bookmarks_last_hide_tick < 250) {
+            // The click-outside mouse hook (B2) just hid the panel on THIS same bookmark-
+            // button click — this IPC is the toggle-off, not a re-open. Suppress the re-show.
+            willShow = false;
+            pending_bookmark_url_.clear();
+            pending_bookmark_title_.clear();
         } else {
             ShowBookmarksPanelOverlay(iconLeftOffset, GetOwnerWindow());
         }
+        LOG_DEBUG_BROWSER(std::string("🔖 Bookmark toggle: willShow=") + (willShow ? "1" : "0") +
+            " effVisible=" + (IsOverlayEffectivelyVisible(g_bookmarks_panel_overlay_hwnd) ? "1" : "0") +
+            " sinceHide=" + std::to_string(GetTickCount64() - g_bookmarks_last_hide_tick) + "ms");
 
         // Immediate injection for the re-open case (browser already loaded). On the
         // first open the browser isn't ready yet — the deferred OnLoadingStateChange
@@ -6837,14 +6864,20 @@ bool SimpleHandler::OnProcessMessageReceived(
         extern void HideTabListPanelOverlay();
         extern HWND g_tablist_panel_overlay_hwnd;
         extern HINSTANCE g_hInstance;
+        extern ULONGLONG g_tablist_last_hide_tick;
         if (!g_tablist_panel_overlay_hwnd || !IsWindow(g_tablist_panel_overlay_hwnd)) {
             CreateTabListPanelOverlay(g_hInstance, true, iconLeftOffset);
         } else if (IsOverlayEffectivelyVisible(g_tablist_panel_overlay_hwnd)) {
             HideTabListPanelOverlay();
+        } else if (GetTickCount64() - g_tablist_last_hide_tick < 250) {
+            // The click-outside mouse hook (B2) just hid the panel on this same caret click
+            // — this IPC is the toggle-off, not a re-open. Suppress the re-show.
         } else {
             ShowTabListPanelOverlay(iconLeftOffset, GetOwnerWindow());
         }
-        LOG_DEBUG_BROWSER("🗂️ Tab-list panel toggle (iconLeftOffset=" + std::to_string(iconLeftOffset) + ")");
+        LOG_DEBUG_BROWSER("🗂️ Tab-list panel toggle (iconLeftOffset=" + std::to_string(iconLeftOffset) +
+            ", effVisible=" + (IsOverlayEffectivelyVisible(g_tablist_panel_overlay_hwnd) ? "1" : "0") +
+            ", sinceHide=" + std::to_string(GetTickCount64() - g_tablist_last_hide_tick) + "ms)");
 #elif defined(__APPLE__)
         extern void CreateTabListPanelOverlayMacOS(int iconRightOffset);
         extern void ShowTabListPanelOverlayMacOS(int iconRightOffset);

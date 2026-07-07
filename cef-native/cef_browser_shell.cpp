@@ -125,6 +125,11 @@ ULONGLONG g_tablist_last_show_tick = 0;    // Same guard for the tab-list overla
 // siteinfo_panel_show IPC arrives. Without this, the toggle-off re-opens instead of
 // closing. The IPC's "not visible" branch suppresses re-show within the guard window.
 ULONGLONG g_siteinfo_last_hide_tick = 0;
+// Same same-click-toggle-off guard for bookmarks + tab-list now that they also install a
+// click-outside mouse hook (B2). The mouse hook hides on the button click microseconds
+// before the *_panel_show IPC lands; the toggle's hide-tick branch suppresses the re-show.
+ULONGLONG g_bookmarks_last_hide_tick = 0;
+ULONGLONG g_tablist_last_hide_tick = 0;
 
 // Global mouse hooks for overlay click-outside detection
 HHOOK g_omnibox_mouse_hook = nullptr;
@@ -2539,6 +2544,30 @@ LRESULT CALLBACK BookmarksPanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lP
     return CallNextHookEx(g_bookmarks_panel_mouse_hook, nCode, wParam, lParam);
 }
 
+// Tab-list overlay click-outside dismiss — mirrors the bookmarks hook (B2). The tab-list
+// panel is a clone of the bookmarks panel (MA_ACTIVATE dropdown with a search box) and,
+// like it, previously had NO installed mouse hook, so it only closed on the WM_ACTIVATE
+// path — which is exactly the fragile close the owner hit. Give it the same reliable
+// click-outside close.
+LRESULT CALLBACK TabListPanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode == HC_ACTION) {
+        if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN) {
+            if (g_tablist_panel_overlay_hwnd && IsWindow(g_tablist_panel_overlay_hwnd) && IsWindowVisible(g_tablist_panel_overlay_hwnd)) {
+                MSLLHOOKSTRUCT* mouseInfo = (MSLLHOOKSTRUCT*)lParam;
+                POINT clickPoint = mouseInfo->pt;
+                RECT overlayRect;
+                GetWindowRect(g_tablist_panel_overlay_hwnd, &overlayRect);
+                if (!PtInRect(&overlayRect, clickPoint)) {
+                    LOG_DEBUG("🖱️ Click detected outside tab-list panel overlay bounds - dismissing");
+                    extern void HideTabListPanelOverlay();
+                    HideTabListPanelOverlay();
+                }
+            }
+        }
+    }
+    return CallNextHookEx(g_tablist_panel_mouse_hook, nCode, wParam, lParam);
+}
+
 // Mirrors ProfilePanelOverlayWndProc: a dropdown WITH a text input (search box),
 // so it takes activation (MA_ACTIVATE) + forwards keyboard, and closes on
 // WM_ACTIVATE(WA_INACTIVE) (click-outside) with a show-tick race guard.
@@ -4366,9 +4395,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     std::string profileId = res.profileId;
     // In-memory only — startup never rewrites the registry (R5: no boot churn).
     pm.SetCurrentProfileId(profileId, /*persist=*/false);
+    // C3 diagnostic: the code says the picker keeps showing whenever there are >1 profiles
+    // and the setting is on, yet the owner's Win10 box shows it only on the first launch.
+    // Log the exact decision inputs so debug_output.log pinpoints WHICH input flipped
+    // (profile count dropped to 1? picker setting off? a stray --profile arg?).
     LOG_INFO(elapsed() + "STARTUP: Profile resolved: " + profileId +
-             (argProfile.empty() ? " (no-arg)" : " (--profile)") +
-             (res.showPicker ? " [picker-pending]" : ""));
+             (argProfile.empty() ? " (no-arg)" : " (--profile='" + argProfile + "')") +
+             (res.showPicker ? " [picker-pending]" : "") +
+             " | pickerDecision: profileCount=" + std::to_string(existingIds.size()) +
+             " pickerSettingOn=" + (pm.ShouldShowPickerOnStartup() ? "1" : "0") +
+             " defaultId=" + pm.GetDefaultProfileId() +
+             " -> showPicker=" + (res.showPicker ? "1" : "0"));
     g_picker_mode = res.showPicker;
 
     // 6a/6c.1 (WINDOWS_AUTOUPDATE_PLAN §D.0 / OD-C): honor a fleet-wide update.lock

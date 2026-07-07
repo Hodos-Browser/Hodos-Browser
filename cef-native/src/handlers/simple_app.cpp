@@ -2471,6 +2471,14 @@ void CreateTabListPanelOverlay(HINSTANCE hInstance, bool showImmediately, int ic
             SetForegroundWindow(tablist_panel_hwnd);
             extern ULONGLONG g_tablist_last_show_tick;
             g_tablist_last_show_tick = GetTickCount64();
+            // B2: install the click-outside hook on the first (create-time) show too (same
+            // rationale as bookmarks — not pre-created at startup).
+            extern HHOOK g_tablist_panel_mouse_hook;
+            extern LRESULT CALLBACK TabListPanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+            if (g_tablist_panel_mouse_hook) { UnhookWindowsHookEx(g_tablist_panel_mouse_hook); g_tablist_panel_mouse_hook = nullptr; }
+            g_tablist_panel_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, TabListPanelMouseHookProc, nullptr, 0);
+            if (!g_tablist_panel_mouse_hook)
+                LOG_WARNING_APP("Failed to install tab-list panel mouse hook (create). Error: " + std::to_string(GetLastError()));
         }
     } else {
         LOG_ERROR_APP("Failed to create tab-list panel overlay browser");
@@ -2493,6 +2501,16 @@ void ShowTabListPanelOverlay(int iconLeftOffset, BrowserWindow* targetWin) {
     if (mainWin) mainWin->tablist_icon_left_offset = g_tablist_icon_left_offset;
 
     LOG_INFO_APP("Showing tab-list panel overlay");
+
+    // B2: (re)install the click-outside mouse hook (same rationale as bookmarks — a fresh
+    // hook each show survives Win10's silent LowLevelHooksTimeout removal).
+    extern HHOOK g_tablist_panel_mouse_hook;
+    extern LRESULT CALLBACK TabListPanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+    if (g_tablist_panel_mouse_hook) { UnhookWindowsHookEx(g_tablist_panel_mouse_hook); g_tablist_panel_mouse_hook = nullptr; }
+    g_tablist_panel_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, TabListPanelMouseHookProc, nullptr, 0);
+    if (mainWin) mainWin->tablist_panel_mouse_hook = g_tablist_panel_mouse_hook;
+    if (!g_tablist_panel_mouse_hook)
+        LOG_WARNING_APP("Failed to install tab-list panel mouse hook. Error: " + std::to_string(GetLastError()));
 
     extern HWND g_header_hwnd;
     extern HWND g_hwnd;
@@ -2565,6 +2583,15 @@ void HideTabListPanelOverlay() {
     }
 
     LOG_INFO_APP("Hiding tab-list panel overlay");
+
+    // Same-click toggle-off stamp + remove the click-outside hook (B2).
+    extern ULONGLONG g_tablist_last_hide_tick;
+    g_tablist_last_hide_tick = GetTickCount64();
+    extern HHOOK g_tablist_panel_mouse_hook;
+    if (g_tablist_panel_mouse_hook) {
+        UnhookWindowsHookEx(g_tablist_panel_mouse_hook);
+        g_tablist_panel_mouse_hook = nullptr;
+    }
 
     CefRefPtr<CefBrowser> tl_browser = SimpleHandler::GetTabListPanelBrowser();
     int tlTargetWinId = 0;
@@ -2693,6 +2720,16 @@ void CreateBookmarksPanelOverlay(HINSTANCE hInstance, bool showImmediately, int 
             SetForegroundWindow(bookmarks_panel_hwnd);
             extern ULONGLONG g_bookmarks_last_show_tick;
             g_bookmarks_last_show_tick = GetTickCount64();
+            // B2: install the click-outside hook on this FIRST (create-time) show too. These
+            // panels are NOT pre-created at startup, so the first open of the session comes
+            // through here — not ShowBookmarksPanelOverlay — and without this the first open
+            // would fall back to the fragile WM_ACTIVATE close (the exact bug B2 fixes).
+            extern HHOOK g_bookmarks_panel_mouse_hook;
+            extern LRESULT CALLBACK BookmarksPanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+            if (g_bookmarks_panel_mouse_hook) { UnhookWindowsHookEx(g_bookmarks_panel_mouse_hook); g_bookmarks_panel_mouse_hook = nullptr; }
+            g_bookmarks_panel_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, BookmarksPanelMouseHookProc, nullptr, 0);
+            if (!g_bookmarks_panel_mouse_hook)
+                LOG_WARNING_APP("Failed to install bookmarks panel mouse hook (create). Error: " + std::to_string(GetLastError()));
         }
     } else {
         LOG_ERROR_APP("Failed to create bookmarks panel overlay browser");
@@ -2715,6 +2752,20 @@ void ShowBookmarksPanelOverlay(int iconLeftOffset, BrowserWindow* targetWin) {
     if (mainWin) mainWin->bookmarks_icon_left_offset = g_bookmarks_icon_left_offset;
 
     LOG_INFO_APP("Showing bookmarks panel overlay");
+
+    // B2: (re)install the click-outside mouse hook so the panel closes on an outside click
+    // like every other dropdown (it previously had none → only the X / the fragile
+    // WM_ACTIVATE path closed it). Unhook-then-install every show: on Win10 a WH_MOUSE_LL
+    // hook is SILENTLY removed if a callback ever exceeds LowLevelHooksTimeout (~1s) while
+    // our handle stays non-null, so a plain "install if null" could leave it permanently
+    // dead. A fresh hook each show is cheap and guarantees a live one.
+    extern HHOOK g_bookmarks_panel_mouse_hook;
+    extern LRESULT CALLBACK BookmarksPanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+    if (g_bookmarks_panel_mouse_hook) { UnhookWindowsHookEx(g_bookmarks_panel_mouse_hook); g_bookmarks_panel_mouse_hook = nullptr; }
+    g_bookmarks_panel_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, BookmarksPanelMouseHookProc, nullptr, 0);
+    if (mainWin) mainWin->bookmarks_panel_mouse_hook = g_bookmarks_panel_mouse_hook;
+    if (!g_bookmarks_panel_mouse_hook)
+        LOG_WARNING_APP("Failed to install bookmarks panel mouse hook. Error: " + std::to_string(GetLastError()));
 
     extern HWND g_header_hwnd;
     extern HWND g_hwnd;
@@ -2781,6 +2832,17 @@ void HideBookmarksPanelOverlay() {
     }
 
     LOG_INFO_APP("Hiding bookmarks panel overlay");
+
+    // Stamp the hide time so the toggle IPC can tell a same-click toggle-off (the mouse
+    // hook fired microseconds ago on the bookmark-button click) from a deliberate re-open,
+    // and remove the click-outside hook (B2).
+    extern ULONGLONG g_bookmarks_last_hide_tick;
+    g_bookmarks_last_hide_tick = GetTickCount64();
+    extern HHOOK g_bookmarks_panel_mouse_hook;
+    if (g_bookmarks_panel_mouse_hook) {
+        UnhookWindowsHookEx(g_bookmarks_panel_mouse_hook);
+        g_bookmarks_panel_mouse_hook = nullptr;
+    }
 
     CefRefPtr<CefBrowser> bm_browser = SimpleHandler::GetBookmarksPanelBrowser();
     int bmTargetWinId = 0;
