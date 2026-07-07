@@ -12,6 +12,7 @@
     #include <windows.h>
     #include <shobjidl.h>
     #include <shlobj.h>
+    #include <dwmapi.h>   // DWMWA_CLOAKED — cloaked-aware overlay visibility (Win10 fix)
     #include <thread>
 #endif
 
@@ -87,6 +88,27 @@
 #include "../../include/core/CachedContentResourceHandler.h"
 extern std::string g_pendingModalDomain;
 #define LOG_ERROR_BROWSER(msg) Logger::Log(msg, 3, 2)
+
+#ifdef _WIN32
+// Win10/11 hardening for the dropdown-overlay show/hide toggles. IsWindowVisible() alone
+// returns TRUE for a DWM-CLOAKED window — an owned/layered popup can be cloaked (invisible
+// to the user) while still WS_VISIBLE — which desyncs a toggle into its "already visible ->
+// hide" branch on every click, so the toolbar button goes DEAD after first use (owner-
+// reported on Windows 10; not reproducible on 11, whose compositor rarely cloaks these).
+// Treat a cloaked window as NOT visible so the toggle correctly re-shows it. The newer
+// left-anchored panels (bookmarks, site-info, tab-list) toggle on this check; the older
+// right-anchored panels (download/menu) never toggle-off on the button, which is why only
+// the new ones broke. See research: MSDN DWMWA_CLOAKED, Raymond Chen 2020-03-02.
+static bool IsOverlayEffectivelyVisible(HWND hwnd) {
+    if (!hwnd || !IsWindow(hwnd) || !IsWindowVisible(hwnd)) return false;
+    DWORD cloaked = 0;
+    if (SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) &&
+        cloaked != 0) {
+        return false;  // WS_VISIBLE but DWM-cloaked => not actually on screen
+    }
+    return true;
+}
+#endif
 
 // Platform-specific overlay function declarations (already in simple_app.h, but repeated for clarity)
 #ifdef _WIN32
@@ -6727,7 +6749,7 @@ bool SimpleHandler::OnProcessMessageReceived(
         bool willShow = true;
         if (!g_bookmarks_panel_overlay_hwnd || !IsWindow(g_bookmarks_panel_overlay_hwnd)) {
             CreateBookmarksPanelOverlay(g_hInstance, true, iconLeftOffset);
-        } else if (IsWindowVisible(g_bookmarks_panel_overlay_hwnd)) {
+        } else if (IsOverlayEffectivelyVisible(g_bookmarks_panel_overlay_hwnd)) {
             HideBookmarksPanelOverlay();
             willShow = false;
             // Toggle-off: drop the stashed context so it can't replay on a later reload.
@@ -6817,7 +6839,7 @@ bool SimpleHandler::OnProcessMessageReceived(
         extern HINSTANCE g_hInstance;
         if (!g_tablist_panel_overlay_hwnd || !IsWindow(g_tablist_panel_overlay_hwnd)) {
             CreateTabListPanelOverlay(g_hInstance, true, iconLeftOffset);
-        } else if (IsWindowVisible(g_tablist_panel_overlay_hwnd)) {
+        } else if (IsOverlayEffectivelyVisible(g_tablist_panel_overlay_hwnd)) {
             HideTabListPanelOverlay();
         } else {
             ShowTabListPanelOverlay(iconLeftOffset, GetOwnerWindow());
@@ -6913,7 +6935,7 @@ bool SimpleHandler::OnProcessMessageReceived(
         bool willShow = true;
         if (!g_siteinfo_panel_overlay_hwnd || !IsWindow(g_siteinfo_panel_overlay_hwnd)) {
             CreateSiteInfoPanelOverlay(g_hInstance, true, iconLeftOffset);
-        } else if (IsWindowVisible(g_siteinfo_panel_overlay_hwnd)) {
+        } else if (IsOverlayEffectivelyVisible(g_siteinfo_panel_overlay_hwnd)) {
             HideSiteInfoPanelOverlay();
             willShow = false;
             pending_siteinfo_host_.clear();

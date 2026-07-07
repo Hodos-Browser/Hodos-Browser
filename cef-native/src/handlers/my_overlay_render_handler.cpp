@@ -230,6 +230,15 @@ void MyOverlayRenderHandler::OnPaint(CefRefPtr<CefBrowser> browser,
         LONG exStyle = GetWindowLong(hwnd_, GWL_EXSTYLE);
         if (exStyle & WS_EX_TRANSPARENT) {
             SetWindowLong(hwnd_, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+            // Win10 hardening: a GWL_EXSTYLE change is CACHED until a SetWindowPos with
+            // SWP_FRAMECHANGED flushes it (MSDN SetWindowLong). Without the flush, Win10's
+            // DWM can keep the window click-through (WS_EX_TRANSPARENT stale) on a re-show,
+            // so the panel looks open but eats no clicks and the toolbar button appears
+            // "dead". Win11's compositor tolerates the omission — which is why the newer
+            // left-anchored panels broke only on the owner's Win10 machine. Harmless flush
+            // on every platform/overlay (no move/size/z-order change).
+            SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         }
     }
 
