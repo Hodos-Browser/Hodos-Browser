@@ -10,6 +10,28 @@ cluster) are the highest priority; B and D are UX polish; E is verification.
 
 ---
 
+## SESSION STATUS (2026-07-07) — what landed (all LOCAL on 0.4.0, unpushed)
+
+| Item | Status | Commit |
+|------|--------|--------|
+| **A1** instant update splash (shell-side before backup + helper hoist) | ✅ done | `6112d78` |
+| **A2** kill the console flash (helper GUI-subsystem + drop DETACHED on cmd cleanup) | ✅ done | `6112d78` |
+| **C1/C2** Win10 "works once then dead" hardening (cloaked-aware visibility + WS_EX_TRANSPARENT SWP_FRAMECHANGED flush) | ✅ done | `17f7e89` |
+| **B2** bookmark/tab-list click-outside close (install the scaffolded mouse hooks, Create + Show) | ✅ done | `aa5188a` |
+| **B1** bookmark first-open URL/star (300/600ms deferred-inject retry, mirrors site-info) | ✅ done | `aa5188a` |
+| **C3** picker "shows once" — **diagnostic only** (enriched startup `pickerDecision` log) | 🔎 diag | `aa5188a` |
+| **E** mac `SUScheduledCheckInterval` (3h) so the auto-check fires | ✅ done | `9bdae21` |
+| **E2** legacy-collapse → notify design question | ✅ keep-as-is (owner) | — |
+| **D1/D2** picker perf → same-process (Chrome model) | ⏸️ DEFERRED to a dedicated session | see `PROFILE_PICKER_SAME_PROCESS_PLAN.md` |
+
+Each shipped item was built clean + adversarially reviewed (code-auditor, SHIP). C1/C2/C3
+could NOT be reproduced on the available Win11 hardware — they are research-backed defenses
++ diagnostics; if C3 (or any residual C1/C2) persists, the owner's `debug_output.log` from
+the Win10 machine will pinpoint the cause via the new logging. **Nothing pushed** — the
+owner tests real builds before any customer.
+
+---
+
 ## A. Silent-update presentation (Windows) — mechanism works, the *look* is rough
 
 The update WORKS; users just shouldn't see the seams. Two issues on the apply-boot:
