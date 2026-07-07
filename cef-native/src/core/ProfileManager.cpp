@@ -619,22 +619,20 @@ bool ProfileManager::LaunchWithProfile(const std::string& profileId) {
     }
     // `open` delegates to Launch Services and returns quickly. CEF's SIGCHLD
     // handler often reaps the child before we call waitpid, causing ECHILD.
-    // Treat both clean exit AND ECHILD as success — posix_spawn already
-    // confirmed the exec, and Launch Services handles the rest.
+    // posix_spawn already confirmed the exec succeeded, so treat any
+    // waitpid outcome as success — Launch Services handles the rest.
     int status = 0;
     pid_t rc = waitpid(pid, &status, 0);
     if (rc < 0 && errno == ECHILD) {
         std::cout << "🚀 Launched new instance with profile: " << profileId
                   << " (reaped by SIGCHLD handler)" << std::endl;
-        return true;
-    }
-    if (rc > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+    } else if (rc > 0 && WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+        std::cerr << "⚠️ open returned exit code " << WEXITSTATUS(status)
+                  << " for profile '" << profileId << "' — proceeding (Launch Services may still succeed)" << std::endl;
+    } else {
         std::cout << "🚀 Launched new instance with profile: " << profileId << std::endl;
-        return true;
     }
-    std::cerr << "❌ open failed (waitpid rc=" << rc << " status=" << status
-              << " errno=" << errno << ")" << std::endl;
-    return false;
+    return true;
 #else
     std::cerr << "❌ LaunchWithProfile not implemented for this platform" << std::endl;
     return false;

@@ -152,6 +152,17 @@ void AutoUpdater::SetUpdateMode(UpdateMode mode) {
             }
             // startUpdater returns NO if already started — that's fine.
         }
+
+        // Force a background check on every launch. Sparkle's scheduled
+        // check only fires when SUScheduledCheckInterval has elapsed since
+        // the last check, so a user who quits before the interval expires
+        // and relaunches would never see the update. This ensures we
+        // always check on startup; the interval still governs subsequent
+        // checks while the app is running.
+        if (mode != UpdateMode::Off) {
+            [updater checkForUpdatesInBackground];
+            LogInfo("Forced background update check on launch");
+        }
     }
 #endif
 }

@@ -164,6 +164,15 @@ void AutoUpdater::SetUpdateMode(UpdateMode mode) {
     // WinSparkle only supports auto-check on/off — no silent download mode.
     // Map Off → disable checks; Notify/Silent → enable checks.
     win_sparkle_set_automatic_check_for_updates(mode != UpdateMode::Off ? 1 : 0);
+
+    // Force a background check on every launch. WinSparkle's scheduled
+    // check only fires when the interval has elapsed since the last check,
+    // so a user who quits before the interval expires and relaunches would
+    // never see the update. This ensures we always check on startup.
+    if (mode != UpdateMode::Off) {
+        win_sparkle_check_update_without_ui();
+        LogInfo("Forced background update check on launch");
+    }
 }
 
 bool AutoUpdater::IsAutoCheckEnabled() const {

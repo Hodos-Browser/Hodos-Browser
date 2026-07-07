@@ -2515,6 +2515,24 @@ void CreateMainWindow() {
     NSRect screenRect = [[NSScreen mainScreen] visibleFrame];
     LOG_INFO("📐 Screen dimensions: " + std::to_string((int)screenRect.size.width) + " x " + std::to_string((int)screenRect.size.height));
 
+    // Picker mode: small centered launcher window (mirrors Windows sizing).
+    NSRect windowRect = screenRect;
+    NSWindowStyleMask styleMask = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
+                                  NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable |
+                                  NSWindowStyleMaskFullSizeContentView;
+    if (g_picker_mode) {
+        int sw = (int)screenRect.size.width;
+        int sh = (int)screenRect.size.height;
+        int pw = sw * 60 / 100;  if (pw > 980) pw = 980;  if (pw > sw) pw = sw;
+        int ph = sh * 78 / 100;  if (ph > 660) ph = 660;  if (ph > sh) ph = sh;
+        int ox = (int)screenRect.origin.x + (sw - pw) / 2;
+        int oy = (int)screenRect.origin.y + (sh - ph) / 2;
+        windowRect = NSMakeRect(ox, oy, pw, ph);
+        styleMask = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
+                    NSWindowStyleMaskFullSizeContentView;
+        LOG_INFO("Picker launcher window: " + std::to_string(pw) + "x" + std::to_string(ph) + " centered");
+    }
+
     // Create main window. NSWindowStyleMaskFullSizeContentView lets our
     // React header render underneath the titlebar — combined with
     // titlebarAppearsTransparent + titleVisibility hidden, the grey titlebar
@@ -2522,10 +2540,8 @@ void CreateMainWindow() {
     // continue to render on top at their default macOS position. Our React
     // TabBar reserves 86px of left padding for them (see TabBar.tsx isMac).
     g_main_window = [[NSWindow alloc]
-        initWithContentRect:screenRect
-        styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
-                  NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable |
-                  NSWindowStyleMaskFullSizeContentView
+        initWithContentRect:windowRect
+        styleMask:styleMask
         backing:NSBackingStoreBuffered
         defer:NO];
 
@@ -2539,19 +2555,21 @@ void CreateMainWindow() {
     [g_main_window setTitleVisibility:NSWindowTitleHidden];
     [g_main_window setDelegate:[[MainWindowDelegate alloc] init]];
     [g_main_window setReleasedWhenClosed:NO];  // We manage window lifecycle
+    [g_main_window setBackgroundColor:[NSColor colorWithSRGBRed:0.102 green:0.114 blue:0.137 alpha:1.0]];  // #1a1d23
 
     // In picker mode the header fills the entire window (no tab/webview area).
+    int winW = (int)windowRect.size.width;
+    int winH = (int)windowRect.size.height;
     int headerHeight = g_picker_mode
-        ? (int)screenRect.size.height
+        ? winH
         : 96;  // Header with tabs (42px) + toolbar (54px)
-    int webviewHeight = (int)screenRect.size.height - headerHeight;
+    int webviewHeight = winH - headerHeight;
 
     LOG_INFO("📐 Header height: " + std::to_string(headerHeight) + "px" +
              (g_picker_mode ? " [picker — full window]" : ""));
 
     // Create header view (at very top, or full window in picker mode)
-    NSRect headerRect = NSMakeRect(0, screenRect.size.height - headerHeight,
-                                   screenRect.size.width, headerHeight);
+    NSRect headerRect = NSMakeRect(0, winH - headerHeight, winW, headerHeight);
     g_header_view = [[NSView alloc] initWithFrame:headerRect];
 
     if (!g_header_view) {
@@ -2566,7 +2584,7 @@ void CreateMainWindow() {
 
     if (!g_picker_mode) {
         // Create webview/content area (full height below header)
-        NSRect webviewRect = NSMakeRect(0, 0, screenRect.size.width, webviewHeight);
+        NSRect webviewRect = NSMakeRect(0, 0, winW, webviewHeight);
         g_webview_view = [[NSView alloc] initWithFrame:webviewRect];
 
         if (!g_webview_view) {
@@ -4997,15 +5015,18 @@ static bool SendShutdownRequest(int port) {
 
 extern char **environ;
 
-static void StartWalletServer() {
-    // Check if already running (dev mode: cargo run separately)
+// Spawn wallet/adblock processes without blocking the main thread.
+// Blocking the main thread after CefInitialize prevents CEF's network
+// service from completing setup, causing initial navigations to load
+// empty pages.
+
+static void SpawnWalletServer() {
     if (QuickHealthCheck()) {
         LOG_INFO("Wallet server already running (dev mode) - skipping launch");
         g_walletServerRunning = true;
         return;
     }
 
-    // Resolve exe path relative to browser executable
     char exec_path[1024];
     uint32_t exec_path_size = sizeof(exec_path);
     if (_NSGetExecutablePath(exec_path, &exec_path_size) != 0) {
@@ -5019,11 +5040,9 @@ static void StartWalletServer() {
         exeDir = exeDir.substr(0, lastSlash);
     }
 
-    // Production: binary alongside main exe in Contents/MacOS/
     std::string walletExe = exeDir + "/hodos-wallet";
 
     if (access(walletExe.c_str(), X_OK) != 0) {
-        // Dev fallback: relative path from build dir
         walletExe = exeDir + "/../../../../../../rust-wallet/target/release/hodos-wallet";
         if (access(walletExe.c_str(), X_OK) != 0) {
             walletExe = exeDir + "/../../../../../rust-wallet/target/release/hodos-wallet";
@@ -5045,20 +5064,9 @@ static void StartWalletServer() {
     }
 
     LOG_INFO("Wallet server launched with PID: " + std::to_string(g_wallet_server_pid));
-
-    // Wait for it to become healthy (up to 10 seconds)
-    for (int i = 0; i < 20; i++) {
-        usleep(500000); // 500ms
-        if (QuickHealthCheck()) {
-            g_walletServerRunning = true;
-            LOG_INFO("Wallet server is healthy");
-            return;
-        }
-    }
-    LOG_WARNING("Wallet server launched but health check timed out");
 }
 
-static void StartAdblockServer() {
+static void SpawnAdblockServer() {
     if (QuickAdblockHealthCheck()) {
         LOG_INFO("Adblock engine already running (dev mode) - skipping launch");
         g_adblockServerRunning = true;
@@ -5073,10 +5081,8 @@ static void StartAdblockServer() {
     size_t lastSlash = exeDir.find_last_of('/');
     if (lastSlash != std::string::npos) exeDir = exeDir.substr(0, lastSlash);
 
-    // Production: binary alongside main exe in Contents/MacOS/
     std::string adblockExe = exeDir + "/hodos-adblock";
     if (access(adblockExe.c_str(), X_OK) != 0) {
-        // Dev fallback: relative path from build dir
         adblockExe = exeDir + "/../../../../../../adblock-engine/target/release/hodos-adblock";
         if (access(adblockExe.c_str(), X_OK) != 0) {
             adblockExe = exeDir + "/../../../../../adblock-engine/target/release/hodos-adblock";
@@ -5096,16 +5102,39 @@ static void StartAdblockServer() {
     }
 
     LOG_INFO("Adblock engine launched with PID: " + std::to_string(g_adblock_server_pid));
+}
 
-    for (int i = 0; i < 20; i++) {
-        usleep(500000);
-        if (QuickAdblockHealthCheck()) {
-            g_adblockServerRunning = true;
-            LOG_INFO("Adblock engine is healthy");
-            return;
+static void StartBackendServices() {
+    SpawnWalletServer();
+    SpawnAdblockServer();
+
+    // Health-check the spawned servers on a background thread so the main
+    // thread can pump the CEF message loop while they start up.
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        for (int i = 0; i < 20 && !g_walletServerRunning; i++) {
+            usleep(500000);
+            if (QuickHealthCheck()) {
+                g_walletServerRunning = true;
+                LOG_INFO("Wallet server is healthy");
+                break;
+            }
         }
-    }
-    LOG_WARNING("Adblock engine launched but health check timed out");
+        if (!g_walletServerRunning) {
+            LOG_WARNING("Wallet server launched but health check timed out");
+        }
+
+        for (int i = 0; i < 20 && !g_adblockServerRunning; i++) {
+            usleep(500000);
+            if (QuickAdblockHealthCheck()) {
+                g_adblockServerRunning = true;
+                LOG_INFO("Adblock engine is healthy");
+                break;
+            }
+        }
+        if (!g_adblockServerRunning) {
+            LOG_WARNING("Adblock engine launched but health check timed out");
+        }
+    });
 }
 
 static void StopServers() {
@@ -5405,9 +5434,8 @@ int main(int argc, char* argv[]) {
 
         if (!g_picker_mode) {
             NSLog(@"🔄 Starting backend services...");
-            StartWalletServer();
-            StartAdblockServer();
-            NSLog(@"✅ Backend services started");
+            StartBackendServices();
+            NSLog(@"✅ Backend services spawned (health checks async)");
         }
 
         // Create the primary BrowserWindow record (window 0) in WindowManager.
