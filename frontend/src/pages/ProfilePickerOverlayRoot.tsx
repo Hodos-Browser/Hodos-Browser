@@ -256,12 +256,22 @@ const ProfilePickerOverlayRoot: React.FC = () => {
             }}>
                 {/* Hide the tile-strip scrollbar — paging is via the arrow buttons. */}
                 <style>{`.picker-strip{scrollbar-width:none;-ms-overflow-style:none;}.picker-strip::-webkit-scrollbar{display:none;}`}</style>
-                {/* Logo — top-left */}
+                {/* Logo — top-left; close (X) — top-right */}
                 <div style={{
-                    display: 'flex', alignItems: 'center', gap: 10,
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                     padding: '18px 24px', ...(isMac ? { paddingLeft: 86, paddingTop: 12 } : {}),
                 }}>
                     <img src="/Hodos_Gold_Browser_Icon.svg" alt="Hodos Browser" style={{ height: 41, width: 'auto' }} />
+                    {/* No wallet/DB/adblock are started in picker mode, so this is a clean
+                        exit — reuse the app's existing graceful 'exit' path (WM_CLOSE ->
+                        ShutdownApplication). */}
+                    <button aria-label="Close" title="Close"
+                        onClick={() => window.cefMessage?.send('exit')}
+                        style={{ width: 34, height: 34, borderRadius: '50%', border: 'none', background: 'transparent', color: tokens.textMuted, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'background 120ms, color 120ms' }}
+                        onMouseEnter={(e) => { e.currentTarget.style.background = tokens.bgSurfaceHover; e.currentTarget.style.color = tokens.textPrimary; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = tokens.textMuted; }}>
+                        <CloseIcon sx={{ fontSize: 20 }} />
+                    </button>
                 </div>
 
                 {/* Center content */}
