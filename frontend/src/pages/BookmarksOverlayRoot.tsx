@@ -13,6 +13,35 @@ function hostOf(url: string): string {
     try { return new URL(url).hostname; } catch { return url; }
 }
 
+// Derive a favicon URL from the host, mirroring the New Tab Page (google s2 service).
+// The backend never stores a favicon for bookmarks (bookmark_add saves only url/title),
+// so bm.favicon_url is effectively always empty — derive client-side instead. Falls back
+// to the globe icon via the <img> onError handler if the fetch fails.
+function faviconFor(url: string): string {
+    const host = hostOf(url);
+    return host ? `https://www.google.com/s2/favicons?domain=${host}&sz=32` : '';
+}
+
+// Favicon with graceful fallback to a globe glyph if the image fails to load
+// (offline / blocked). Prefers a backend-provided favicon_url, else derives one.
+const BookmarkFavicon: React.FC<{ url: string; src?: string }> = ({ url, src }) => {
+    const [failed, setFailed] = useState(false);
+    const resolved = src || faviconFor(url);
+    if (failed || !resolved) {
+        return <PublicIcon sx={{ fontSize: 16, color: '#6b7280', flexShrink: 0 }} />;
+    }
+    return (
+        <img
+            src={resolved}
+            alt=""
+            width={16}
+            height={16}
+            style={{ flexShrink: 0, borderRadius: 2 }}
+            onError={() => setFailed(true)}
+        />
+    );
+};
+
 const BookmarksOverlayRoot: React.FC = () => {
     const { bookmarks, refresh, search, isBookmarked, add, removeByUrl, remove } = useBookmarks();
 
@@ -22,12 +51,23 @@ const BookmarksOverlayRoot: React.FC = () => {
     const [query, setQuery] = useState('');
     const searchRef = useRef<HTMLInputElement>(null);
 
-    // Register the C++ injection hook (mirrors PrivacyShield's window.setShieldDomain).
+    // Latest reload fn (respects the active search filter). Kept in a ref so the window
+    // hook below can be registered once yet always call the current closure.
+    const reloadRef = useRef<() => void>(() => {});
+    reloadRef.current = () => { query.trim() ? search(query) : refresh(); };
+
+    // Register the C++ injection hooks (mirrors PrivacyShield's window.setShieldDomain).
+    // refreshBookmarkList (F3) lets C++ re-fetch the list on panel SHOW — needed now that
+    // the panel is pre-created (F2), so its mount-time list can be stale on later opens.
     useEffect(() => {
         (window as any).setBookmarkContext = (url: string, title: string) => {
             setCtx({ url: url || '', title: title || '' });
         };
-        return () => { delete (window as any).setBookmarkContext; };
+        (window as any).refreshBookmarkList = () => reloadRef.current();
+        return () => {
+            delete (window as any).setBookmarkContext;
+            delete (window as any).refreshBookmarkList;
+        };
     }, []);
 
     // Initial load + focus the search box (delayed per CEF input rules).
@@ -180,9 +220,7 @@ const BookmarksOverlayRoot: React.FC = () => {
                         }}
                         onClick={() => openBookmark(bm.url)}
                     >
-                        {bm.favicon_url
-                            ? <img src={bm.favicon_url} alt="" width={16} height={16} style={{ flexShrink: 0, borderRadius: 2 }} onError={(e) => { (e.currentTarget.style.display = 'none'); }} />
-                            : <PublicIcon sx={{ fontSize: 16, color: '#6b7280', flexShrink: 0 }} />}
+                        <BookmarkFavicon url={bm.url} src={bm.favicon_url} />
                         <Box sx={{ flex: 1, minWidth: 0 }}>
                             <Typography variant="body2" sx={{
                                 color: '#f0f0f0',
@@ -204,7 +242,7 @@ const BookmarksOverlayRoot: React.FC = () => {
                             onClick={(e) => { e.stopPropagation(); remove(bm.id); }}
                             aria-label="Remove bookmark"
                             title="Remove bookmark"
-                            style={{ opacity: 0, color: '#9ca3af', flexShrink: 0 }}
+                            style={{ opacity: 0.55, color: '#9ca3af', flexShrink: 0 }}
                         >
                             <DeleteOutlineIcon sx={{ fontSize: 16 }} />
                         </HodosButton>

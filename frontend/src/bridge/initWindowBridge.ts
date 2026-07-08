@@ -972,10 +972,13 @@ if (!(window.hodosBrowser as any).bookmarks) {
 
     getAll: (folderId?: number, limit?: number, offset?: number) => {
       return new Promise((resolve, reject) => {
+        // 15s (was 5s): on slow Win10 the synchronous SQLite read + IPC round-trip can run
+        // long under a saturated UI thread; a too-short timeout dropped the response and
+        // left the list empty. useBookmarks.refresh() also retries on top of this.
         const timeout = setTimeout(() => {
           reject(new Error('Bookmark getAll timeout'));
           delete window.onBookmarkGetAllResponse;
-        }, 5000);
+        }, 15000);
 
         window.onBookmarkGetAllResponse = (data: any) => {
           clearTimeout(timeout);
