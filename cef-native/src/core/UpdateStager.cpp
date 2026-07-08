@@ -353,8 +353,10 @@ UpdateStager::AuthenticodeResult UpdateStager::VerifyAuthenticode(
     // Deliberate: no online revocation. EdDSA is the PRIMARY integrity gate;
     // Authenticode is the secondary OS-trust gate. An online CRL/OCSP fetch could
     // hang or fail offline and fail-close the update (violates update-stability).
-    // Cert-compromise revocation is covered by the signer-continuity / thumbprint
-    // auto-degrade gate (WINDOWS_AUTOUPDATE_PLAN §H.6), not here.
+    // Malicious-build defenses are EdDSA (primary integrity), the Marston Subject-CN
+    // signer gate, and the server-side kill-list (WINDOWS_AUTOUPDATE_PLAN §H.6) — the
+    // signer-continuity gate is Subject-CN based (Azure TS rotates leaf certs, so leaf
+    // thumbprints cannot be pinned), not online revocation here.
     wd.fdwRevocationChecks = WTD_REVOKE_NONE;
     wd.dwUnionChoice = WTD_CHOICE_FILE;
     wd.pFile = &fileInfo;

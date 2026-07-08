@@ -6769,15 +6769,15 @@ bool SimpleHandler::OnProcessMessageReceived(
         extern HINSTANCE g_hInstance;
         extern ULONGLONG g_bookmarks_last_hide_tick;
 
+        // F1 (Win10 dead-button fix): the button only OPENS the panel; it closes via the
+        // click-outside mouse hook — which also closes it when the button is clicked while
+        // open (the <250ms guard below suppresses the immediate re-open). The old "already
+        // visible -> Hide" branch is REMOVED: on slow Win10 the visibility check desynced
+        // (DWM-cloak / off-screen placement), so the button took Hide and looked dead. A
+        // desynced panel now re-Shows (recovers) instead. Matches the proven download/menu panels.
         bool willShow = true;
         if (!g_bookmarks_panel_overlay_hwnd || !IsWindow(g_bookmarks_panel_overlay_hwnd)) {
             CreateBookmarksPanelOverlay(g_hInstance, true, iconLeftOffset);
-        } else if (IsOverlayEffectivelyVisible(g_bookmarks_panel_overlay_hwnd)) {
-            HideBookmarksPanelOverlay();
-            willShow = false;
-            // Toggle-off: drop the stashed context so it can't replay on a later reload.
-            pending_bookmark_url_.clear();
-            pending_bookmark_title_.clear();
         } else if (GetTickCount64() - g_bookmarks_last_hide_tick < 250) {
             // The click-outside mouse hook (B2) just hid the panel on THIS same bookmark-
             // button click — this IPC is the toggle-off, not a re-open. Suppress the re-show.
@@ -6797,8 +6797,12 @@ bool SimpleHandler::OnProcessMessageReceived(
         if (willShow) {
             CefRefPtr<CefBrowser> bm_browser = GetBookmarksPanelBrowser();
             if (bm_browser && bm_browser->GetMainFrame()) {
+                // F3: also re-fetch the list on SHOW (not only on React mount). Required now
+                // that the panel is pre-created (F2) — its mount-time list would otherwise be
+                // stale (missing bookmarks added since startup).
                 std::string js = "if (window.setBookmarkContext) { window.setBookmarkContext('" +
-                    EscapeForSingleQuotedJs(bmUrl) + "', '" + EscapeForSingleQuotedJs(bmTitle) + "'); }";
+                    EscapeForSingleQuotedJs(bmUrl) + "', '" + EscapeForSingleQuotedJs(bmTitle) + "'); } " +
+                    "if (window.refreshBookmarkList) { window.refreshBookmarkList(); }";
                 bm_browser->GetMainFrame()->ExecuteJavaScript(js, bm_browser->GetMainFrame()->GetURL(), 0);
             }
         }
@@ -6870,10 +6874,11 @@ bool SimpleHandler::OnProcessMessageReceived(
         extern HWND g_tablist_panel_overlay_hwnd;
         extern HINSTANCE g_hInstance;
         extern ULONGLONG g_tablist_last_hide_tick;
+        // F1 (Win10 dead-button fix): button only OPENS; closed by the click-outside hook
+        // (+ <250ms guard for the click-while-open case). Removed the fragile "already
+        // visible -> Hide" branch that made the caret look dead on slow Win10.
         if (!g_tablist_panel_overlay_hwnd || !IsWindow(g_tablist_panel_overlay_hwnd)) {
             CreateTabListPanelOverlay(g_hInstance, true, iconLeftOffset);
-        } else if (IsOverlayEffectivelyVisible(g_tablist_panel_overlay_hwnd)) {
-            HideTabListPanelOverlay();
         } else if (GetTickCount64() - g_tablist_last_hide_tick < 250) {
             // The click-outside mouse hook (B2) just hid the panel on this same caret click
             // — this IPC is the toggle-off, not a re-open. Suppress the re-show.
@@ -6970,14 +6975,11 @@ bool SimpleHandler::OnProcessMessageReceived(
         extern HINSTANCE g_hInstance;
 
         extern ULONGLONG g_siteinfo_last_hide_tick;
+        // F1 (Win10 dead-button fix): button only OPENS; closed by the click-outside hook
+        // (+ <250ms guard). Removed the fragile "already visible -> Hide" branch.
         bool willShow = true;
         if (!g_siteinfo_panel_overlay_hwnd || !IsWindow(g_siteinfo_panel_overlay_hwnd)) {
             CreateSiteInfoPanelOverlay(g_hInstance, true, iconLeftOffset);
-        } else if (IsOverlayEffectivelyVisible(g_siteinfo_panel_overlay_hwnd)) {
-            HideSiteInfoPanelOverlay();
-            willShow = false;
-            pending_siteinfo_host_.clear();
-            pending_siteinfo_security_.clear();
         } else if (GetTickCount64() - g_siteinfo_last_hide_tick < 250) {
             // The mouse hook just hid the panel on THIS same TuneIcon click — this
             // IPC is the toggle-off, not a re-open. Suppress the re-show.

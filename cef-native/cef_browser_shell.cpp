@@ -776,8 +776,11 @@ void ShutdownApplication() {
         g_menu_overlay_hwnd = nullptr;
     }
 
-    // B-6: Stop the single-instance pipe listener thread now, inside ShutdownApplication.
-    SingleInstance::StopListenerThread();
+    // F5 gap-b: the single-instance pipe listener is deliberately NOT stopped here anymore.
+    // It keeps serving "shutting_down" through the whole teardown (g_shutting_down is set),
+    // holding the pipe name until StopListenerThread() runs in main() cleanup right AFTER
+    // ReleaseProfileLock(). That way the pipe gate frees strictly after the profile lock, so a
+    // concurrent reopen keeps retrying and never slips between them into a "Profile Locked" error.
 
     // Safety net: force-close any browsers that ShutdownApplication didn't reach.
     // This catches leaked notification overlays from torn-off/B-6 windows whose
@@ -1480,6 +1483,12 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 // Last window — full graceful shutdown
                 LOG_INFO("🛑 Last window received WM_CLOSE - starting graceful shutdown...");
                 g_app_shutting_down = true;
+                // F5 gap-a: advertise "shutting_down" to the single-instance listener at the
+                // VERY FIRST instant of teardown (before ShowWindow/ShutdownApplication) so a
+                // concurrent reopen gets "shutting_down" (→ retry + take-over) instead of an
+                // "ok" whose PostMessage the now-busy UI thread would drop. (ShutdownApplication
+                // also calls this at its top — belt-and-suspenders for any other caller.)
+                SingleInstance::SetShuttingDown();
                 ShowWindow(hwnd, SW_HIDE);
                 ShutdownApplication();
             } else if (wid == primaryId) {
@@ -4146,8 +4155,10 @@ static bool MaybeApplyStagedUpdate(const std::string& profileId) {
                                 " <= floor " + std::to_string(floor) + ")");
     }
 
-    // Signer-continuity (OD-E/H5): derive BOTH thumbprints from the actual binaries;
-    // a signer change => degrade to notify (never silent-apply across reputation reset).
+    // Signer-continuity (OD-E/H5): compare the signing IDENTITY (Subject CN) of the
+    // running binary vs the staged installer; a signer-IDENTITY change => degrade to
+    // notify (never silent-apply across a reputation reset). NOT the leaf thumbprint —
+    // Azure Trusted Signing rotates leaf certs ~every 3 days (see the gate below).
     std::string selfPathA(MAX_PATH, '\0');
     for (;;) {
         DWORD n = GetModuleFileNameA(nullptr, &selfPathA[0], (DWORD)selfPathA.size());
@@ -4156,9 +4167,26 @@ static bool MaybeApplyStagedUpdate(const std::string& profileId) {
         selfPathA.resize(selfPathA.size() * 2);  // truncated -> grow + retry (review #8L)
     }
     auto liveAuth = UpdateStager::VerifyAuthenticode(selfPathA, UpdateStager::ExpectedSigner());
-    if (liveAuth.trusted && instAuth.trusted && liveAuth.thumbprint != instAuth.thumbprint) {
-        return rejectPersistent("signer changed (" + liveAuth.thumbprint + " -> " + instAuth.thumbprint +
-                                ") — degrade to notify");
+    if (!liveAuth.trusted) {
+        // Observability: a production signed build should always self-verify. If it can't
+        // (unreadable self-image, missing/mistrusted signature), the signer-continuity gate
+        // below is SKIPPED (fail-open on continuity ONLY) — log it so a real fleet regression
+        // is visible. Not a hard fail: the installer is independently EdDSA + Authenticode-CN +
+        // anti-rollback + kill-list verified above before we ever reach here.
+        LOG_WARNING("Silent apply: running binary self-Authenticode NOT trusted (signer=\"" +
+                    liveAuth.signer + "\") — signer-continuity check skipped this cycle");
+    }
+    // Compare the signer IDENTITY (Subject CN), NOT the leaf thumbprint. Windows signing is
+    // Azure Trusted Signing, whose leaf certificate ROTATES ~every 3 days — two legitimately
+    // signed builds days apart carry DIFFERENT thumbprints under the SAME "Marston Enterprises"
+    // identity, so gating on the thumbprint degraded every real silent update to notify (the
+    // beta.22 regression). VerifyAuthenticode already folds `CN contains ExpectedSigner()` into
+    // `.trusted`, so trusted+trusted already proves both are Marston; the explicit CN compare
+    // additionally rejects a same-substring near-miss. Leaf thumbprints are still logged.
+    if (liveAuth.trusted && instAuth.trusted && liveAuth.signer != instAuth.signer) {
+        return rejectPersistent("signer identity changed (\"" + liveAuth.signer + "\" -> \"" +
+                                instAuth.signer + "\"; leaf thumbprints " + liveAuth.thumbprint +
+                                " -> " + instAuth.thumbprint + ") — degrade to notify");
     }
 
     // Kill-list (6e.2 / H4 / §H.7): a build WE retracted server-side must not apply
@@ -4569,6 +4597,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
              "Close the other instance first, or launch with a different profile.").c_str(),
             "Hodos Browser - Profile Locked",
             MB_OK | MB_ICONERROR);
+        // S1 (review follow-up): the listener thread was already started above, so we must
+        // stop+join it before returning — otherwise the joinable std::thread global hits
+        // std::terminate() at static destruction (an ugly crash right after this dialog).
+        // Pre-existing on this error path; no DB risk (lock never acquired). Safe: no-op if
+        // the listener wasn't started.
+        SingleInstance::StopListenerThread();
         return 1;
     }
     LOG_INFO(elapsed() + "STARTUP: Profile lock acquired");
@@ -5114,6 +5148,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         extern void CreateMenuOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
         extern void CreateWalletOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
         extern void CreateSiteInfoPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconLeftOffset);
+        extern void CreateBookmarksPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconLeftOffset);
+        extern void CreateTabListPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconLeftOffset);
 
         HINSTANCE hInst = g_hInstance;
         CefPostDelayedTask(TID_UI, base::BindOnce([](HINSTANCE h) { CreateMenuOverlay(h, false, 30); }, hInst), 1000);
@@ -5124,6 +5160,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         // Site-info hub: pre-warm hidden so the first TuneIcon click just shows it
         // (avoids the subprocess-creation hitch that repainted the header on first open).
         CefPostDelayedTask(TID_UI, base::BindOnce([](HINSTANCE h) { CreateSiteInfoPanelOverlay(h, false, 100); }, hInst), 3500);
+        // F2 (Win10 blank-first-open fix): bookmark + tab-list were the ONLY dropdowns not
+        // pre-warmed, so on slow Win10 their first open showed a blank/unpainted layered window
+        // (the WS_POPUP is shown synchronously before the OSR browser's first paint). Pre-create
+        // them hidden like the others so React + the first frame are ready before the first open.
+        CefPostDelayedTask(TID_UI, base::BindOnce([](HINSTANCE h) { CreateBookmarksPanelOverlay(h, false, 100); }, hInst), 4000);
+        CefPostDelayedTask(TID_UI, base::BindOnce([](HINSTANCE h) { CreateTabListPanelOverlay(h, false, 100); }, hInst), 4500);
         LOG_INFO(elapsed() + "STARTUP: Overlay creation deferred");
     }
 
@@ -5252,6 +5294,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     LOG_INFO("Releasing profile lock...");
     ReleaseProfileLock();
+
+    // F5 gap-b: stop the single-instance listener + free the pipe name ONLY NOW — strictly
+    // AFTER the profile lock is released. The listener served "shutting_down" throughout
+    // teardown (holding the pipe), so a concurrent reopen kept retrying; its next
+    // TryAcquireInstance now succeeds AND finds the profile lock already free → clean take-over,
+    // no dropped reopen, no spurious "Profile Locked" dialog. (No-op in picker mode: the
+    // per-profile listener was never started; this just closes the ".picker" gate handle.)
+    LOG_INFO("Stopping single-instance listener (after profile lock release)...");
+    SingleInstance::StopListenerThread();
 
     // 6a: drop the instance-presence mutex so the all-instances-gone gate (commit 6c)
     // sees this instance disappear promptly. The OS would auto-close it at process

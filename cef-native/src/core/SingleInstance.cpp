@@ -34,8 +34,17 @@ HANDLE g_pipe_handle = INVALID_HANDLE_VALUE;
 // Background listener thread.
 std::thread g_listener_thread;
 
-// Shutdown flag — when true, listener responds "shutting_down" instead of creating windows.
+// Advertise flag — when true, the listener KEEPS SERVING but replies "shutting_down" to new
+// clients (so a reopen retries and takes over cleanly) instead of creating windows.
 std::atomic<bool> g_shutting_down{false};
+
+// Loop-termination flag (F5 gap-b — DECOUPLED from g_shutting_down). The listener loop runs
+// until THIS is set (only by StopListenerThread). Keeping the loop alive through the shutdown
+// window — while g_shutting_down advertises "shutting_down" — holds the single-instance pipe
+// name until StopListenerThread runs, which is now AFTER ReleaseProfileLock(). So the pipe gate
+// frees strictly AFTER the profile lock, and a reopen can never slip between them into a
+// spurious "Profile Locked" error. The :167 "shutting_down" reply stays keyed on g_shutting_down.
+std::atomic<bool> g_listener_stop{false};
 
 // Profile ID for the listener (needed by StopListenerThread for self-connect).
 std::string g_listener_profile_id;
@@ -94,7 +103,7 @@ void ListenerThreadFunc(std::string profileId) {
         g_pipe_handle = INVALID_HANDLE_VALUE;
     }
 
-    while (!g_shutting_down.load()) {
+    while (!g_listener_stop.load()) {
         // Create a new SYNCHRONOUS pipe instance for each client connection.
         HANDLE pipe = CreateNamedPipeA(
             pipeName.c_str(),
@@ -129,17 +138,19 @@ void ListenerThreadFunc(std::string profileId) {
             }
         }
 
-        // Check if we were unblocked by the shutdown self-connect.
-        if (g_shutting_down.load()) {
+        // Check if we were unblocked by the StopListenerThread self-connect (actual stop).
+        if (g_listener_stop.load()) {
             DisconnectNamedPipe(pipe);
             CloseHandle(pipe);
             break;
         }
 
         // Wait for data to arrive (up to 5s) using PeekNamedPipe.
-        // Prevents blocking forever if a client connects but never sends.
+        // Prevents blocking forever if a client connects but never sends. Keep waiting even
+        // while g_shutting_down (we still want to read + reply "shutting_down"); only bail on
+        // an actual loop-stop.
         bool dataReady = false;
-        for (int i = 0; i < 50 && !g_shutting_down.load(); i++) {
+        for (int i = 0; i < 50 && !g_listener_stop.load(); i++) {
             DWORD bytesAvail = 0;
             if (PeekNamedPipe(pipe, nullptr, 0, nullptr, &bytesAvail, nullptr) && bytesAvail > 0) {
                 dataReady = true;
@@ -148,7 +159,7 @@ void ListenerThreadFunc(std::string profileId) {
             Sleep(100);
         }
 
-        if (g_shutting_down.load()) {
+        if (g_listener_stop.load()) {
             DisconnectNamedPipe(pipe);
             CloseHandle(pipe);
             break;
@@ -250,9 +261,9 @@ bool SendToRunningInstance(const std::string& profileId, const std::string& url)
     // Allow the server process to call SetForegroundWindow on our behalf.
     AllowSetForegroundWindow(ASFW_ANY);
 
-    for (int attempt = 0; attempt < 10; attempt++) {
+    for (int attempt = 0; attempt < 20; attempt++) {
         if (attempt > 0) {
-            LOG_INFO("SingleInstance: Retry attempt " + std::to_string(attempt) + "/10...");
+            LOG_INFO("SingleInstance: Retry attempt " + std::to_string(attempt) + "/20...");
             Sleep(1000);
 
             // Check if we can become the new first instance (old process exited).
@@ -328,11 +339,13 @@ bool SendToRunningInstance(const std::string& profileId, const std::string& url)
 void StartListenerThread(const std::string& profileId) {
     g_listener_profile_id = profileId;
     g_shutting_down.store(false);
+    g_listener_stop.store(false);
     g_listener_thread = std::thread(ListenerThreadFunc, profileId);
 }
 
 void StopListenerThread() {
     g_shutting_down.store(true);
+    g_listener_stop.store(true);  // F5: actually terminate the loop (decoupled from the advertise flag)
 
     // Self-connect to the pipe to unblock the listener's synchronous ConnectNamedPipe.
     if (!g_listener_profile_id.empty()) {
