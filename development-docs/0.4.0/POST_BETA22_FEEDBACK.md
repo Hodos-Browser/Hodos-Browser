@@ -80,6 +80,43 @@ new clue:
 
 ---
 
+## 🔬 mom's debug_output.log analysis (2026-07-08) — what it actually shows
+Log had 4 launches (Jul 6 + Jul 8). VERIFIED facts (some helper-agent root-causes were
+inferred, not proven — corrected here):
+- **C3 CONFIRMED mechanism:** a `(no-arg)` launch DOES show the picker — `pickerDecision:
+  profileCount=2 pickerSettingOn=1 defaultId=Default -> showPicker=1` (Jul 8 10:15:58). ~8s
+  later a launch with `(--profile='Default')` → `showPicker=0` (bypassed — CORRECT: an
+  explicit --profile means "skip picker"). So the picker shows on no-arg but mom's later
+  reopens are launching **WITH `--profile=`**, which correctly bypasses it. This is inherent
+  to the **two-process picker** (picker spawns `--profile=X`; the running/relaunched instance
+  carries it — taskbar pin / relaunch). **The same-process picker refactor
+  (`PROFILE_PICKER_SAME_PROCESS_PLAN.md`, deferred) is the real fix.** Investigate HOW her
+  reopen carries --profile (taskbar/jumplist/TaskbarProfile.cpp).
+- **Session restore is NOT the cause** — the log says `📋 Session restore disabled — skipping
+  session save` on every shutdown, **even though owner says mom has "Restore last session"
+  turned ON.** → **that setting is NOT applying on her machine** = a real settings-not-sticking
+  bug, and direct support for the "apply settings globally for now" idea.
+- **Bookmark ADD actually WORKED** — `Added bookmark: https://www.accuweather.com/ (id: 12)`
+  then `(id: 13)`, with `bookmark_get_all` right after. So the URL WAS saved to SQLite. The
+  owner's "gold star but not added / not shown after reopen" is therefore a **bookmark-panel
+  DISPLAY/refresh problem, not a save failure** — the panel isn't rendering the saved list on
+  her Win10. Part of the broader overlay-render issue below.
+- **The real Win10 theme = overlay PANEL rendering/interaction, not the backend.** Backend
+  (profile resolve, bookmark save, BookmarkManager init) all succeed. The OSR **layered-window
+  overlays** (bookmark/site-info/profile) are what misbehave — dead buttons, list not shown.
+  The `effVisible=1 sinceHide=11007156ms` toggle lines are NOT conclusive proof of the dead
+  button (effVisible=1 right after create is expected; sinceHide is huge only because
+  `g_*_last_hide_tick` starts 0) — so the current diagnostics DON'T nail the dead-button;
+  need to look at `my_overlay_render_handler.cpp` (WS_EX_LAYERED + UpdateLayeredWindow) +
+  OnPaint on her slow Win10. My SWP_FRAMECHANGED/cloaked/hook hardening "helped" (owner:
+  bookmark "worked better") but didn't fully fix it.
+- Minor: recurring `Cannot hide wallet overlay - HWND does not exist` (premature hide, likely
+  harmless) + `1 browser could not be force-closed` on shutdown (pre-existing wart).
+
+**Net:** backend is fine; the OSR overlay-rendering layer is flaky on slow Win10, and the
+picker "shows once" is the two-process --profile relaunch (→ same-process refactor). The
+settings-not-applying finding supports going global-settings for now.
+
 ## Suggested fresh-session plan
 1. **Windows silent regression (P0):** re-run the apply rigs on current code → isolate to
    A1/A2 (helper subsystem / splash / Spawn) vs elsewhere → fix → re-prove via rig + a real
