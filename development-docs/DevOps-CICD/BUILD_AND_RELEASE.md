@@ -1,17 +1,29 @@
 # Hodos Browser — Build & Release Guide
 
 **Created:** 2026-03-20
-**Last Updated:** 2026-04-27
+**Last Updated:** 2026-07-08
 **Purpose:** How to build installers, sign code, ship updates, and manage releases
 
 > **Single source of truth.** This file in `development-docs/` is the canonical build & release guide. Any out-of-tree copies (e.g. older `Marston Enterprises/Hodos/Hodos_CI_CD/` snapshots) are deprecated — edit only this one.
 
 ---
 
-## Current Status (2026-05-07)
+## Current Status (2026-07-08)
 
-**Next release: TBD**
-**Last shipped: `v0.3.0-beta.15`**
+**Next release: `v0.3.0-beta.23`** — draft building; awaiting on-hardware gate-test → manual `promote.yml`.
+**Last shipped (promoted): `v0.3.0-beta.22`**
+
+> **What changed since this doc's older sections were written (read this first):**
+> - **Version is now 100% TAG-DERIVED** — no manual `APP_VERSION` edit per release (Step 1 rewritten below).
+> - **Auto-promote was REMOVED (2026-06-26).** A tag build now stops at a **verified DRAFT**; a
+>   **separate, manually-triggered `promote.yml`** flips it live — the *test-before-customers* gate,
+>   with a SHA256SUMS pin of the exact bytes you tested. Steps 5–7 updated accordingly.
+> - **Branch flow:** dev work lands on `origin/<feature>` (e.g. `0.4.0`) → fast-forward `origin/staging`
+>   + `origin/main` → fast-forward `release/staging` + `release/main` → tag on `release` (Steps 2–3).
+> - **Windows silent auto-update** (custom stager, not WinSparkle) shipped in the 0.4.0 line; the
+>   Authenticode signer gate compares the **Subject CN** ("Marston Enterprises"), not the leaf
+>   thumbprint (Azure Trusted Signing rotates leaves ~every 3 days). Existing clients on a build with
+>   the OLD thumbprint gate take one **notify** update to a CN-gate build before silent resumes.
 
 | Component | Status |
 |-----------|--------|
@@ -54,36 +66,38 @@
 
 ---
 
-#### Step 1: Bump version
+#### Step 1: Version — TAG-DERIVED, no manual bump (updated 2026-07-08)
 
-For beta increments, only one file needs to change. For major/minor bumps, also update CMakeLists.txt.
+**The version is 100% derived from the git tag.** For a beta increment there is **nothing to edit** —
+just tag `vX.Y.Z-beta.N` (Step 3) and CI injects it everywhere:
+- `frontend/src/components/settings/AboutSettings.tsx` reads `import.meta.env.VITE_APP_VERSION`, which
+  CI sets from the tag at build time (the old hardcoded `APP_VERSION` const is gone).
+- `installer/hodos-browser.iss` `AppVersion` is overridden by CI `/DAppVersion` from the tag.
+- `cef-native/cef_browser_shell.cpp` uses the `-DAPP_VERSION` / `-DAPP_BUILD_NUMBER` CMake defines from
+  the tag; `package.json` stays `0.0.0`.
 
-| File | What to change | Example | When |
-|------|---------------|---------|------|
-| `frontend/src/components/settings/AboutSettings.tsx` | `APP_VERSION` constant | `const APP_VERSION = '0.3.0-beta.8';` | Every release |
-| `installer/hodos-browser.iss` (default fallback) | `#define AppVersion` | `"0.3.0-beta.8"` | Every release (cosmetic — CI overrides via `/DAppVersion`, but keep in sync for clarity) |
-| `cef-native/CMakeLists.txt` | `MACOSX_BUNDLE_*_VERSION` (macOS only) | `"0.3.1"` | Major/minor bumps only |
-| `rust-wallet/Cargo.toml` | `version` | `"0.3.1"` | Major/minor bumps only |
+For **major/minor** bumps only, still update these (they feed the monotonic macOS build-number math):
+| File | What to change | When |
+|------|---------------|------|
+| `cef-native/CMakeLists.txt` | `MACOSX_BUNDLE_*_VERSION` (macOS) | Major/minor bumps only |
+| `rust-wallet/Cargo.toml` | `version` | Major/minor bumps only |
 
-**Automatic — no manual change needed:**
-- `cef-native/cef_browser_shell.cpp` — uses `APP_VERSION` define injected by CMake from the CI tag
-- The signed installer's `OutputBaseFilename` — derived from `/DAppVersion` in CI
+#### Step 2: Propagate branches (no version-bump commit — Step 1 is tag-derived)
 
-#### Step 2: Commit and push
+Land your work on the feature branch, then fast-forward staging + main on BOTH remotes. Example from a
+`0.4.0` feature branch already pushed to `origin` (this is exactly the beta.23 flow):
 
 ```bash
-git add -A
-git commit -m "Bump version to X.Y.Z-beta.N"
+# From the feature-branch tip (e.g. origin/0.4.0), fast-forward origin staging + main:
+git push origin HEAD:staging HEAD:main
 
-# Merge to main (if working on a feature branch)
-git checkout main
-git merge <your-branch>
+# Then the release repo (public). If rejected: git pull release main  (merge divergence) first.
+git push release HEAD:staging HEAD:main
+```
 
-# Push to dev repo (private)
-git push origin main
-
-# Push to release repo (public — may need: git pull release main first if diverged)
-git push release main
+Verify all four are aligned to the same commit before tagging:
+```bash
+for b in origin/0.4.0 origin/staging origin/main release/staging release/main; do echo "$b: $(git rev-parse --short $b)"; done
 ```
 
 #### Step 3: Tag and trigger CI build
@@ -107,23 +121,32 @@ After build completes, find the signature in the CI logs:
 
 The signature looks like: `MD0CHQCvt9FfZ6Q9Co/s...`
 
-#### Steps 5–7: appcast, download links, and publish — NOW AUTOMATED (2026-06-25)
+#### Steps 5–7: appcast, publish, promote — DRAFT-then-MANUAL-PROMOTE (updated 2026-07-08)
 
-> The `publish` job in `release.yml` does all of this automatically when you push a `v*` tag. The old manual recipe is kept as a fallback at the end of this section.
+> ⚠️ **Auto-promote was removed 2026-06-26.** A `v*` tag build **no longer goes live by itself.** It
+> stops at a **verified DRAFT** so a human can test the exact signed bytes before any customer sees them.
 
-On a tag push, the `publish` job runs a **draft-first** flow so a failure leaves nothing public:
+**Phase A — `release.yml` (automatic on the `v*` tag):** builds + signs Win+Mac, generates `appcast.xml`
+(DSA + EdDSA), creates the GitHub Release as a **DRAFT**, and **crypto-verifies** it (all assets present +
+`state=uploaded` + non-trivial size; the appcast advertises *this* exact version with both enclosure URLs
+and non-empty signatures; a mis-signed feed can never reach promote). Then it **STOPS** — "the verified
+DRAFT is the finish line." Nothing is customer-visible.
 
-1. Generates `appcast.xml` (DSA + EdDSA signatures) as a release artifact.
-2. Creates the GitHub Release as a **draft**, then **verifies it before anything goes public**: all 5 assets present + `state=uploaded` + non-trivial size, and the appcast advertises *this* version (exact `<sparkle:shortVersionString>`, both enclosure URLs, non-empty signatures).
-3. **Promotes** the release to live + marks it **Latest**. The deliberate `v*` tag push is the ship gate — there is no separate "click Publish."
-4. Verifies the public `.exe`/`.dmg` URLs actually resolve.
-5. Pushes to `Hodos-Browser/hodosbrowser.com` (Cloudflare Pages) using the **`WEBSITE_DEPLOY_TOKEN`** secret, updating all three version-bearing files:
-   - `public/appcast.xml` — the auto-update feed
-   - `public/_redirects` — the `/download/win` + `/download/mac` button targets (rewritten deterministically from the tag)
-   - `src/pages/index.astro` — the `const version` shown on the page/footer
-6. Verifies the **live** site (`https://hodosbrowser.com/appcast.xml` + `/download/win`) is serving the new version, with a cache-busted poll, before going green.
+**Phase B — GATE (manual, on real hardware):** download the draft's signed installer/DMG, install, and
+smoke it (launch + core flows; per the update-stability rule, verify the real N−1→N update behavior where
+possible). Grab the draft's `SHA256SUMS.txt` to pin the exact bytes.
 
-A **green** `publish` job therefore means: release live + marked Latest, feed published, website serving the new version — all verified. A **red** job before the *Promote* step means nothing went public.
+**Phase C — `promote.yml` (manual `workflow_dispatch`):** run **Actions → "Promote release"** with the
+draft **tag** and (recommended) paste the **`SHA256SUMS.txt`** you tested to pin the bytes. It re-downloads
+the published draft bytes, flips the release **live + Latest**, and pushes the website
+(`Hodos-Browser/hodosbrowser.com` — a **Cloudflare Worker** named `hodosbrowser-com`, built via
+`npm run build` + a committed `wrangler.jsonc`, deployed with `npx wrangler deploy`; NOT Pages) via the
+`WEBSITE_DEPLOY_TOKEN` secret — updating `public/appcast.xml` + `public/_redirects` +
+`src/pages/index.astro` — then live-verifies the feed + `/download/win`+`/download/mac` before going green.
+
+A green **`release.yml`** = a verified draft ready to test (nothing public). A green **`promote.yml`** =
+live + Latest + feed + website, all verified. **Do NOT skip Phase B** — it is the deliberate
+test-before-customers gate.
 
 **One-time prerequisite:** the `WEBSITE_DEPLOY_TOKEN` repo secret — a fine-grained PAT scoped to `Hodos-Browser/hodosbrowser.com` with **Contents: Read and write**. Without it the website push fails with HTTP 403. Rotate by regenerating the PAT and replacing the secret.
 
