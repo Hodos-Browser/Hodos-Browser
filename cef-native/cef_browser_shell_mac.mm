@@ -277,6 +277,8 @@ static NSView*   g_qr_selection_view = nullptr;
 // OverlayBrowserRef instances for overlays using GenericOverlayView
 static OverlayBrowserRef* g_menu_overlay_browser_ref = nullptr;
 static CefRefPtr<MyOverlayRenderHandler> g_menu_overlay_render_handler = nullptr;
+static CFAbsoluteTime g_menu_overlay_last_hide_time = 0;
+static id g_menu_click_monitor = nil;
 
 // Overlay state flags (mirrors Windows globals from cef_browser_shell.cpp)
 bool g_file_dialog_active = false;
@@ -467,6 +469,10 @@ static void DestroyMenuOverlayWindow(bool closeBrowser) {
     if (overlayWindow) {
         RemoveClickOutsideMonitor(overlayWindow);
     }
+    if (g_menu_click_monitor) {
+        [NSEvent removeMonitor:g_menu_click_monitor];
+        g_menu_click_monitor = nil;
+    }
 
     if (renderHandler) {
         renderHandler->DetachView();
@@ -491,7 +497,7 @@ static void DestroyMenuOverlayWindow(bool closeBrowser) {
     }
 
     delete browserRef;
-    LOG_INFO("Menu overlay hidden/closed");
+    LOG_INFO("Menu overlay destroyed");
 }
 
 static void ClearPersistedInternalFrontendZoom(const std::string& profileCachePath) {
@@ -5677,6 +5683,63 @@ void SetMenuOverlayBrowser(CefRefPtr<CefBrowser> browser) {
     }
 }
 
+static void RemoveMenuClickOutsideMonitor() {
+    if (g_menu_click_monitor) {
+        [NSEvent removeMonitor:g_menu_click_monitor];
+        g_menu_click_monitor = nil;
+    }
+}
+
+static void InstallMenuClickOutsideMonitor() {
+    if (g_menu_click_monitor) return;
+
+    g_menu_click_monitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown
+        handler:^NSEvent*(NSEvent* event) {
+            if (!g_menu_overlay_window || ![g_menu_overlay_window isVisible]) {
+                return event;
+            }
+            NSPoint screenLocation = [NSEvent mouseLocation];
+            NSRect overlayFrame = [g_menu_overlay_window frame];
+            if (!NSPointInRect(screenLocation, overlayFrame)) {
+                [g_menu_overlay_window orderOut:nil];
+                RemoveMenuClickOutsideMonitor();
+                g_menu_overlay_last_hide_time = CFAbsoluteTimeGetCurrent();
+            }
+            return event;
+        }];
+}
+
+void HideMenuOverlayMacOS() {
+    if (g_menu_overlay_window) {
+        [g_menu_overlay_window orderOut:nil];
+        RemoveMenuClickOutsideMonitor();
+        g_menu_overlay_last_hide_time = CFAbsoluteTimeGetCurrent();
+        LOG_INFO("Menu overlay hidden (macOS)");
+    }
+}
+
+bool IsMenuOverlayVisible() {
+    return g_menu_overlay_window && [g_menu_overlay_window isVisible];
+}
+
+bool WasMenuOverlayJustHidden() {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    return (now - g_menu_overlay_last_hide_time) < 0.3;
+}
+
+void ShowMenuOverlayMacOS(int iconRightOffset) {
+    if (g_menu_overlay_window) {
+        NSRect menuFrame = CalculateToolbarOverlayFrame(g_main_window, 280, 450, 96);
+        [g_menu_overlay_window setFrame:menuFrame display:YES];
+
+        [g_menu_overlay_window makeKeyAndOrderFront:nil];
+        NSView* cv = [g_menu_overlay_window contentView];
+        [g_menu_overlay_window makeFirstResponder:cv];
+        InstallMenuClickOutsideMonitor();
+        LOG_INFO("Menu overlay shown (macOS)");
+    }
+}
+
 void CreateMenuOverlayMac(int iconRightOffset) {
     LOG_INFO("Creating menu overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
 
@@ -5771,10 +5834,9 @@ void CreateMenuOverlayMac(int iconRightOffset) {
     // Attach browser ref to the GenericOverlayView (will be populated async)
     [contentView attachBrowser:g_menu_overlay_browser_ref];
 
-    // Show and install click-outside monitor
     [g_menu_overlay_window makeKeyAndOrderFront:nil];
     [g_menu_overlay_window makeFirstResponder:contentView];
-    InstallClickOutsideMonitor(g_menu_overlay_window);
+    InstallMenuClickOutsideMonitor();
 
     LOG_INFO("Menu overlay created successfully (using GenericOverlayView)");
 }
@@ -5786,9 +5848,9 @@ void CreateMenuOverlay(void* hInstance, bool showImmediately, int iconRightOffse
 }
 
 void ShowMenuOverlay(int iconRightOffset) {
-    CreateMenuOverlayMac(iconRightOffset);
+    ShowMenuOverlayMacOS(iconRightOffset);
 }
 
 void HideMenuOverlay() {
-    DestroyMenuOverlayWindow(true);
+    HideMenuOverlayMacOS();
 }

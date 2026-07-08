@@ -38,4 +38,43 @@ Both the Windows Claude session and the Mac Claude session coordinate through TH
 ---
 
 ## MAC → WINDOWS REPORT-BACK (Mac Claude fills this in + pushes)
-_(empty — Mac session to populate: date, commits, files changed, compile result, smoke result, blockers)_
+
+**Date:** 2026-07-08
+
+### Commits
+1. Previous session (already pushed): M1 build verify, M2 Sparkle force-check-on-launch, M3 picker
+   full flow, async server startup fix, port deconfliction — see `MACOS_EXECUTION_RESULTS_2026_07_07.md`
+2. This session: dropdown button consistency (menu, profile, download → 4-way reference pattern)
+
+### Files changed (this commit)
+- `cef-native/cef_browser_shell_mac.mm` — menu overlay keep-alive helpers: dedicated click-outside
+  monitor with 0.3s debounce (`InstallMenuClickOutsideMonitor`, `RemoveMenuClickOutsideMonitor`),
+  `HideMenuOverlayMacOS`, `IsMenuOverlayVisible`, `WasMenuOverlayJustHidden`, `ShowMenuOverlayMacOS`.
+  Updated `CreateMenuOverlayMac` to use dedicated monitor. Updated `ShowMenuOverlay`/`HideMenuOverlay`
+  stubs to use keep-alive (orderOut) instead of destroy.
+- `cef-native/src/handlers/simple_handler.cpp` — converted macOS IPC branches for `profile_panel_show`,
+  `menu_show`, and `download_panel_show` to the 4-way reference pattern:
+  `if (!window) Create; else if (IsVisible) Hide; else if (WasJustHidden) suppress; else Show`.
+  All three now match the bookmark/cookie/site-info/tab-list pattern.
+- `development-docs/0.4.0/MAC_WINDOWS_RELAY.md` — this report-back.
+
+### Compile result
+Clean build on macOS (cmake --build build --config Release) — zero warnings, zero errors.
+
+### Smoke result
+All three updated dropdowns (menu, profile, download) tested:
+- Open → content appears
+- Click button while open → closes cleanly (no flicker/reopen)
+- Click outside → closes
+- Reopen → content present (keep-alive reuse, no rebuild)
+Bookmark/site-info/tab-list (reference — untouched) still work correctly.
+
+### Blockers
+None. Ready for beta.23 cut.
+
+### Notes
+- Dev builds now require ad-hoc signing after rebuild (`codesign --force --deep --sign -`) for macOS
+  to allow launch via `open`. Direct exec from terminal still works without signing.
+- The `AutoUpdater_mac.mm` force-check-on-launch was added for all non-Off modes (previous session).
+  Windows narrowed this to Notify-only because WinSparkle shows prompts even in silent mode — the
+  platforms intentionally differ here (Sparkle 2 handles silent mode correctly).

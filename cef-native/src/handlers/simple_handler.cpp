@@ -2639,13 +2639,18 @@ bool SimpleHandler::OnProcessMessageReceived(
         extern void HideProfilePanelOverlayMacOS();
         extern bool IsProfilePanelOverlayVisible();
         extern bool WasProfilePanelJustHidden();
+        extern NSWindow* g_profile_panel_overlay_window;
 
-        if (IsProfilePanelOverlayVisible()) {
+        if (!g_profile_panel_overlay_window) {
+            CreateProfilePanelOverlayMacOS(iconRightOffset);
+        } else if (IsProfilePanelOverlayVisible()) {
             HideProfilePanelOverlayMacOS();
-            return true;
+        } else if (WasProfilePanelJustHidden()) {
+            // suppress — click-outside monitor just hid it
+        } else {
+            ShowProfilePanelOverlayMacOS(iconRightOffset);
         }
-        CreateProfilePanelOverlayMacOS(iconRightOffset);
-        LOG_DEBUG_BROWSER("Profile panel overlay shown (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
+        LOG_DEBUG_BROWSER("Profile panel toggle (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
 #endif
         return true;
     }
@@ -2692,8 +2697,22 @@ bool SimpleHandler::OnProcessMessageReceived(
         LOG_DEBUG_BROWSER("Menu overlay shown with iconRightOffset=" + std::to_string(iconRightOffset));
 #elif defined(__APPLE__)
         extern void CreateMenuOverlayMac(int iconRightOffset);
-        CreateMenuOverlayMac(iconRightOffset);
-        LOG_DEBUG_BROWSER("Menu overlay shown (macOS) with iconRightOffset=" + std::to_string(iconRightOffset));
+        extern void ShowMenuOverlayMacOS(int iconRightOffset);
+        extern void HideMenuOverlayMacOS();
+        extern bool IsMenuOverlayVisible();
+        extern bool WasMenuOverlayJustHidden();
+        extern NSWindow* g_menu_overlay_window;
+
+        if (!g_menu_overlay_window) {
+            CreateMenuOverlayMac(iconRightOffset);
+        } else if (IsMenuOverlayVisible()) {
+            HideMenuOverlayMacOS();
+        } else if (WasMenuOverlayJustHidden()) {
+            // suppress — click-outside monitor just hid it
+        } else {
+            ShowMenuOverlayMacOS(iconRightOffset);
+        }
+        LOG_DEBUG_BROWSER("Menu overlay toggle (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
 #endif
         return true;
     }
@@ -6730,16 +6749,19 @@ bool SimpleHandler::OnProcessMessageReceived(
         extern void HideDownloadPanelOverlayMacOS();
         extern bool IsDownloadPanelOverlayVisible();
         extern bool WasDownloadPanelJustHidden();
+        extern NSWindow* g_download_panel_overlay_window;
 
-        if (IsDownloadPanelOverlayVisible() || WasDownloadPanelJustHidden()) {
-            if (IsDownloadPanelOverlayVisible()) {
-                HideDownloadPanelOverlayMacOS();
-            }
-            return true;
+        if (!g_download_panel_overlay_window) {
+            CreateDownloadPanelOverlayMacOS(iconRightOffset);
+        } else if (IsDownloadPanelOverlayVisible()) {
+            HideDownloadPanelOverlayMacOS();
+        } else if (WasDownloadPanelJustHidden()) {
+            // suppress — click-outside monitor just hid it
+        } else {
+            ShowDownloadPanelOverlayMacOS(iconRightOffset);
         }
-        CreateDownloadPanelOverlayMacOS(iconRightOffset);
         NotifyDownloadStateChanged();
-        LOG_DEBUG_BROWSER("Download panel overlay shown (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
+        LOG_DEBUG_BROWSER("Download panel toggle (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
 #endif
         return true;
     }
