@@ -5,32 +5,35 @@ Both the Windows Claude session and the Mac Claude session coordinate through TH
 
 ---
 
-## PLAN DECISION (2026-07-08): BATCH the Mac work — do NOT start Mac yet
-Owner decision: the macOS **dropdown-button consistency** fix is DEFERRED and will be done TOGETHER with
-the macOS parity pass of the **Option 2 same-process picker refactor**, in ONE Mac session, AFTER the
-Windows session finishes the Option 2 design + adversarial review + Windows implementation. Rationale:
-Option 2 is cross-platform (needs a dedicated Mac parity pass anyway), it's adjacent to the profile/overlay
-code the buttons touch (batching avoids rework), and the buttons are cosmetic/no-urgency. **So there is
-nothing for Mac Claude to start right now on these two items.**
+## PLAN (2026-07-08): profile picker SHELVED; Mac does the buttons now; cutting beta.23
+- **Profile-picker architecture (Option 1/2) is SHELVED** — revisit way down the road with real
+  market feedback. Today's behavior is accepted: the picker works on a plain launch; if a taskbar
+  entry carries `--profile=` it goes straight to that profile, and users can open another profile
+  from inside the browser. No picker work now. (Wallet stays SHARED across profiles too.)
+- **Mac buttons are UN-BATCHED and ready to do now** (they were only batched with the picker, which
+  is shelved).
 
-## → FOR THE MAC CLAUDE SESSION (when the Windows Option 2 design lands here)
-1. `git pull origin 0.4.0`.
-2. Do BOTH together: (a) `MACOS_DROPDOWN_BUTTON_CONSISTENCY_BRIEF.md` (bring `menu`/`profile`/`download`
-   to the keep-alive+toggle+0.3s-debounce pattern the other four use; don't touch the already-correct
-   bookmark/site-info/tab-list mac branches or any Windows blocks), and (b) the **macOS parity** of the
-   Option 2 picker refactor per the Windows design that will be posted here / in the plan doc.
-   You IMPLEMENT + compile + smoke on macOS (this is `.mm`/`#elif __APPLE__` code that doesn't build on Windows).
-3. Any OTHER independent, still-open mac briefs you CAN do now if you want (verify state first):
-   `MACOS_0_4_0_EXECUTION_BRIEF_2026_07_07.md`, `MACOS_PORT_0_4_0.md`, `MACOS_UPDATE_STABILITY_EXECUTION.md`
-   — but the buttons + picker parity are the batched item and wait for the Option 2 design.
-4. When done: commit + `git push origin 0.4.0`, and **fill in "MAC → WINDOWS REPORT-BACK" below**.
+## → FOR THE MAC CLAUDE SESSION (do this now)
+1. `git pull origin 0.4.0` (Windows is at `f8edb20`+ — all the Windows 0.4.0 fixes + these docs).
+2. **Implement:** `development-docs/0.4.0/MACOS_DROPDOWN_BUTTON_CONSISTENCY_BRIEF.md` — make all macOS
+   toolbar dropdown buttons consistent with each other: bring `menu`, `profile`, and optionally
+   `download` up to the keep-alive + toggle + 0.3s-debounce pattern that cookie/bookmark/site-info/
+   tab-list already use. **You IMPLEMENT + compile + smoke on macOS** (`.mm`/`#elif __APPLE__` code that
+   doesn't build on the Windows machine). Do NOT touch the Windows blocks or the already-correct
+   bookmark/site-info/tab-list mac branches.
+3. Also do any still-open independent mac items if not already done (verify state first):
+   `MACOS_0_4_0_EXECUTION_BRIEF_2026_07_07.md`, `MACOS_PORT_0_4_0.md`, `MACOS_UPDATE_STABILITY_EXECUTION.md`.
+4. Verify the earlier Windows fixes are macOS-safe by build (they're mostly `#ifdef _WIN32`; the
+   signer-gate + SettingsManager-global + bookmark-favicon changes are cross-platform — just confirm
+   the mac build is clean). Do NOT re-implement the Win10 overlay F1/F2/F3/F5 on mac (Windows-only bug).
+5. When done: commit + `git push origin 0.4.0`, and **fill in "MAC → WINDOWS REPORT-BACK" below**
+   (commits, files, compile + smoke results, any blockers). This is how the Windows/release side learns
+   your status — needed before beta.23 is cut with the mac changes in it.
 
-## → FOR THE WINDOWS CLAUDE SESSION (heads-up)
-- Mac work (dropdown buttons + Option 2 mac parity) is **batched and deferred** until you finish the
-  Option 2 design + review + Windows implementation, then handed to Mac via this doc.
-- **Before assuming any macOS state, `git pull origin 0.4.0` and read "MAC → WINDOWS REPORT-BACK".** Don't
-  re-implement mac `.mm` code from Windows — Mac owns it (you can't compile it). When your Option 2 design
-  is ready, post/point to it here so Mac can do the parity pass.
+## → FOR THE WINDOWS / RELEASE SIDE (heads-up)
+- Mac Claude is doing the dropdown-button consistency now (standalone; picker is shelved).
+- **Before cutting beta.23 with the mac changes, `git pull origin 0.4.0` and read "MAC → WINDOWS
+  REPORT-BACK" to confirm Mac's work landed + compiles.** Don't re-implement mac `.mm` from Windows.
 
 ---
 
