@@ -92,10 +92,18 @@ inferred, not proven — corrected here):
   carries it — taskbar pin / relaunch). **The same-process picker refactor
   (`PROFILE_PICKER_SAME_PROCESS_PLAN.md`, deferred) is the real fix.** Investigate HOW her
   reopen carries --profile (taskbar/jumplist/TaskbarProfile.cpp).
-- **Session restore is NOT the cause** — the log says `📋 Session restore disabled — skipping
-  session save` on every shutdown, **even though owner says mom has "Restore last session"
-  turned ON.** → **that setting is NOT applying on her machine** = a real settings-not-sticking
-  bug, and direct support for the "apply settings globally for now" idea.
+- **Session restore is NOT the cause** — the log's `📋 Session restore disabled` is CORRECT:
+  restore-last-session is OFF (default). (Owner initially said "restore last session ON" but
+  CORRECTED it 2026-07-08: **it's "Clear data on exit" that's ON, not restore-last-session.**
+  So the earlier "settings not applying" conclusion was based on a misread — disregard it.)
+- **⭐ NEW LEAD — "Clear data on exit" is ON on mom's machine.** The bookmark ADD provably
+  SAVED (id 12/13) but the owner says it's gone after reopen → **prime suspect: clear-on-exit
+  is wiping the bookmark DB (and possibly other state) on shutdown.** Fresh session: check
+  EXACTLY what "clear data on exit" clears (Ctrl+Shift+Del sweep / the clear-on-exit handler)
+  — if bookmarks/history/overlay-state are included, that's a big chunk of her "everything's
+  buggy." Also a DESIGN gap: clear-on-exit vs restore-last-session are contradictory (can't
+  restore wiped data) — code should define precedence / gray one out. This may ALSO interact
+  with the two-process picker (data cleared between picker + profile launch?).
 - **Bookmark ADD actually WORKED** — `Added bookmark: https://www.accuweather.com/ (id: 12)`
   then `(id: 13)`, with `bookmark_get_all` right after. So the URL WAS saved to SQLite. The
   owner's "gold star but not added / not shown after reopen" is therefore a **bookmark-panel
