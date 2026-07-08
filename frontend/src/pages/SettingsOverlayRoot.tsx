@@ -234,9 +234,19 @@ const SettingsOverlayRoot: React.FC = () => {
           </Box>
 
           <Box sx={settingRowStyle}>
-            <Typography variant="body2">Restore session on start</Typography>
+            <Box>
+              <Typography variant="body2" sx={{ opacity: settings.privacy.clearDataOnExit ? 0.5 : 1 }}>
+                Restore session on start
+              </Typography>
+              {settings.privacy.clearDataOnExit && (
+                <Typography variant="caption" sx={{ color: '#888' }}>
+                  Disabled while “Clear data on exit” is on
+                </Typography>
+              )}
+            </Box>
             <Switch
-              checked={settings.browser.restoreSessionOnStart}
+              checked={settings.browser.restoreSessionOnStart && !settings.privacy.clearDataOnExit}
+              disabled={settings.privacy.clearDataOnExit}
               onChange={(e) => updateSetting('browser.restoreSessionOnStart', e.target.checked)}
               size="small"
             />

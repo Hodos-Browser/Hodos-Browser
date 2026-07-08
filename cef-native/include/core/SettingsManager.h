@@ -176,7 +176,7 @@ private:
     WalletSettings wallet_;
     int version_ = 1;
 
-    std::string settings_file_path_;  // Per-profile path (set by Initialize)
+    std::string settings_file_path_;  // Active settings path — GLOBAL app-data store (set by Initialize)
     bool initialized_ = false;
 
     std::function<void(const std::string&)> update_mode_change_cb_;  // -> silent mirror

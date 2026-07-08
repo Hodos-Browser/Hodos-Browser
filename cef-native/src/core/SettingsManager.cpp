@@ -61,29 +61,39 @@ std::string SettingsManager::GetActiveSettingsFilePath() const {
 void SettingsManager::Initialize(const std::string& profile_path) {
     std::lock_guard<std::mutex> lock(mutex_);
 
+    // GLOBAL SETTINGS (2026-07-08, owner decision): all profiles share ONE settings.json
+    // at the app-data root, NOT <profile>/settings.json. The per-profile settings machinery
+    // added init surface implicated in the slow-Win10 overlay/init bugs; a single global
+    // store is simpler and more robust. profile_path is now used ONLY for the one-time
+    // promotion migration below.
+    const std::string globalPath = GetGlobalSettingsFilePath();
+
 #ifdef _WIN32
-    settings_file_path_ = profile_path + "\\settings.json";
+    const std::string profileSettings = profile_path + "\\settings.json";
 #else
-    settings_file_path_ = profile_path + "/settings.json";
+    const std::string profileSettings = profile_path + "/settings.json";
 #endif
 
-    LOG_INFO_SM("Initializing SettingsManager with profile path: " + settings_file_path_);
-
-    // Migration: if profile settings.json doesn't exist but global one does, copy it
-    if (!fs::exists(settings_file_path_)) {
-        std::string globalPath = GetGlobalSettingsFilePath();
-        if (fs::exists(globalPath)) {
-            try {
-                EnsureDirectoryExists(settings_file_path_);
-                fs::copy_file(globalPath, settings_file_path_);
-                LOG_INFO_SM("Migrated global settings.json to profile: " + settings_file_path_);
-            } catch (const std::exception& e) {
-                LOG_WARNING_SM("Failed to migrate global settings: " + std::string(e.what()));
-            }
+    // One-time migration (per-profile -> global): if the launching profile has settings and
+    // global is missing OR older, promote the profile's file to global so the user keeps the
+    // config they last edited under the old per-profile scheme. Once global is written (every
+    // Save targets it), the frozen profile files stay older, so this never re-fires.
+    try {
+        const bool promote = fs::exists(profileSettings) &&
+            (!fs::exists(globalPath) ||
+             fs::last_write_time(profileSettings) > fs::last_write_time(globalPath));
+        if (promote) {
+            EnsureDirectoryExists(globalPath);
+            fs::copy_file(profileSettings, globalPath, fs::copy_options::overwrite_existing);
+            LOG_INFO_SM("Promoted profile settings to global (global-scheme migration): " + profileSettings);
         }
+    } catch (const std::exception& e) {
+        LOG_WARNING_SM("Global-settings migration skipped: " + std::string(e.what()));
     }
 
+    settings_file_path_ = globalPath;
     initialized_ = true;
+    LOG_INFO_SM("Initializing SettingsManager (GLOBAL store): " + settings_file_path_);
     LoadInternal();
 }
 

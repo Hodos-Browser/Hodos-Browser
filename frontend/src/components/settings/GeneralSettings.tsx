@@ -15,10 +15,15 @@ const GeneralSettings: React.FC = () => {
       <SettingsCard title="Startup">
         <SettingRow
           label="Restore previous session"
-          description="Reopen tabs from your last browsing session on startup"
+          description={
+            settings.privacy.clearDataOnExit
+              ? 'Disabled while "Clear data on exit" is on — cleared sessions can’t be restored'
+              : 'Reopen tabs from your last browsing session on startup'
+          }
           control={
             <Switch
-              checked={settings.browser.restoreSessionOnStart}
+              checked={settings.browser.restoreSessionOnStart && !settings.privacy.clearDataOnExit}
+              disabled={settings.privacy.clearDataOnExit}
               onChange={(e) => updateSetting('browser.restoreSessionOnStart', e.target.checked)}
               size="small"
             />
