@@ -35,9 +35,22 @@ foreach ($port in @(31301,31302,31401,31402)) {
 $work = Join-Path ([IO.Path]::GetTempPath()) ("hodos-fwd-" + [Guid]::NewGuid().ToString('N').Substring(0,8))
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 
+# Compile a tiny C# console exe from a source string via the .NET Framework C#
+# compiler (always present on Windows). Works on BOTH Windows PowerShell 5.1 AND
+# PowerShell 7+ — unlike `Add-Type -OutputType ConsoleApplication`, which throws
+# on pwsh 7 (.NET Core) with "assembly types ... are not currently supported".
+function Compile-Exe([string]$outPath, [string]$src) {
+    $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+    if (-not (Test-Path $csc)) { Write-Error "csc.exe not found: $csc" }
+    $cs = [IO.Path]::ChangeExtension($outPath, '.cs')
+    [IO.File]::WriteAllText($cs, $src)
+    & $csc /nologo /optimize+ /target:exe "/out:$outPath" $cs | Out-Null
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $outPath)) { Write-Error "csc failed to build $outPath (exit $LASTEXITCODE)" }
+}
+
 # ---- compile the two tiny fake exes (ignore /VERYSILENT args; no CEF/Inno) --------
 $fakeInstaller = Join-Path $work 'fake-installer.exe'
-Add-Type -OutputAssembly $fakeInstaller -OutputType ConsoleApplication -TypeDefinition @'
+Compile-Exe $fakeInstaller @'
 using System; using System.IO;
 class P { static int Main(string[] a) {
     string src = Environment.GetEnvironmentVariable("RIG_STAGING");
@@ -56,7 +69,7 @@ class P { static int Main(string[] a) {
 # The "new build" HodosBrowser.exe: on --post-update-health-probe it flips
 # apply.json awaiting-health -> healthy (simulating a healthy new build).
 $fakeBrowser = Join-Path $work 'fake-browser.exe'
-Add-Type -OutputAssembly $fakeBrowser -OutputType ConsoleApplication -TypeDefinition @'
+Compile-Exe $fakeBrowser @'
 using System; using System.IO;
 class P { static int Main(string[] a) {
     bool probe = false;
