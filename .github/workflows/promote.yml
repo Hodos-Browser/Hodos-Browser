@@ -262,18 +262,31 @@ jobs:
       - name: Verify website is live with new version
         run: |
           set -euo pipefail
-          ok=0
+          WIN_EXE="HodosBrowser-${VERSION}-setup.exe"
+          MAC_DMG="HodosBrowser-${VERSION}.dmg"
+          # Verify the appcast AND BOTH download redirects in ONE retry loop. Cloudflare
+          # propagates appcast.xml and _redirects with a few seconds' skew, so checking the
+          # redirects only once (right after the appcast catches up) false-failed even though
+          # the deploy was fine (the beta.23 promote). Retry all three together; only declare
+          # success when the whole website state is consistent.
+          ok=0; winloc=""; macloc=""
           for i in $(seq 1 30); do
             # cache-bust so we read origin, not a stale Cloudflare edge copy
             live=$(curl -sS -m 20 -H 'Cache-Control: no-cache' "https://hodosbrowser.com/appcast.xml?cb=${GITHUB_SHA}-${i}" \
                    | grep -oE '<sparkle:shortVersionString>[^<]+' | sed 's/.*>//' || true)
-            echo "$live" | grep -qxF "$VERSION" && { ok=1; echo "live appcast serving ${VERSION}"; break; }
-            echo "live appcast not yet ${VERSION} (saw: ${live:-none}) [${i}/30]"; sleep 15
+            winloc=$(curl -sS -m 20 -o /dev/null -w "%{redirect_url}" -H 'Cache-Control: no-cache' "https://hodosbrowser.com/download/win?cb=${GITHUB_SHA}-${i}" || true)
+            macloc=$(curl -sS -m 20 -o /dev/null -w "%{redirect_url}" -H 'Cache-Control: no-cache' "https://hodosbrowser.com/download/mac?cb=${GITHUB_SHA}-${i}" || true)
+            appcast_ok=0; echo "$live"   | grep -qxF "$VERSION" && appcast_ok=1
+            win_ok=0;     echo "$winloc" | grep -qF -- "$WIN_EXE" && win_ok=1
+            mac_ok=0;     echo "$macloc" | grep -qF -- "$MAC_DMG" && mac_ok=1
+            if [ "$appcast_ok" = 1 ] && [ "$win_ok" = 1 ] && [ "$mac_ok" = 1 ]; then
+              ok=1; echo "live: appcast + /download/win + /download/mac all serving ${VERSION}"; break
+            fi
+            echo "not fully live yet [${i}/30] — appcast=${appcast_ok}(saw ${live:-none}) win=${win_ok} mac=${mac_ok}; retrying"; sleep 15
           done
-          [ "$ok" = "1" ] || { echo "ERROR: hodosbrowser.com/appcast.xml not serving ${VERSION} after deploy window"; exit 1; }
-          loc=$(curl -sS -o /dev/null -w "%{redirect_url}" "https://hodosbrowser.com/download/win" || true)
-          echo "/download/win -> ${loc:-<none>}"
-          echo "$loc" | grep -qF -- "HodosBrowser-${VERSION}-setup.exe" || { echo "ERROR: /download/win not pointing at ${VERSION}"; exit 1; }
+          [ "$ok" = "1" ] || { echo "ERROR: website not fully serving ${VERSION} (appcast + both download redirects) after deploy window"; exit 1; }
+          echo "/download/win -> ${winloc}"
+          echo "/download/mac -> ${macloc}"
           echo "Website verified live for ${VERSION}. Promotion complete."
 
       # The Windows silent client fail-closes on the appcast document signature. Verify the
