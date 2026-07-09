@@ -78,6 +78,7 @@
 #include <atomic>
 #include <chrono>
 #include <sstream>
+#include <memory>
 
 HWND g_hwnd = nullptr;
 HWND g_header_hwnd = nullptr;
@@ -3871,6 +3872,28 @@ static int SU_CountSelfBrowsers(const std::wstring& appDir) {
     return count;
 }
 
+// Picker-gate v2: parse the inheritable process handle the transient picker passed us
+// (--picker-handle <uintptr>). Returns nullptr when absent/zero (a non-picker --profile=
+// launch: taskbar pin, win_run.ps1, the health probe). The value is only a live handle in a
+// child that actually INHERITED it; a forged value from an unrelated launch is caught at the
+// use site by GetProcessId()==0 (see the wait below), so this parse stays permissive.
+static HANDLE SU_ParsePickerHandle() {
+    HANDLE h = nullptr;
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (argv) {
+        for (int i = 1; i + 1 < argc; ++i) {  // need a value after the flag
+            if (wcscmp(argv[i], L"--picker-handle") == 0) {
+                uintptr_t v = _wcstoui64(argv[i + 1], nullptr, 10);  // handles can exceed INT_MAX
+                if (v) h = reinterpret_cast<HANDLE>(v);
+                break;
+            }
+        }
+        LocalFree(argv);
+    }
+    return h;
+}
+
 static void SU_ArmRunOnce(const std::wstring& helperPath) {
     HKEY k;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce",
@@ -4062,22 +4085,60 @@ static bool MaybeApplyStagedUpdate(const std::string& profileId) {
     };
 
     const std::wstring appDirW = SU_Widen(appDir);
-    // D.0 sole-instance gate — with a bounded WAIT for the transient picker (bug #3).
-    // Other {app}\HodosBrowser.exe processes inflate the count: the profile PICKER + its
-    // CEF subprocess tree, or a real browser. The picker is TRANSIENT — it
-    // PostMessage(WM_CLOSE)s itself the instant it spawns us (simple_handler.cpp ~3247)
-    // and its whole tree dies within a few seconds — whereas a real browser (booting OR
-    // up) stays. So poll: if the count settles to 1 (everything else exited — the picker
-    // died) we are genuinely sole → apply; if it stays >1 (a real browser is live) → defer.
-    // This waits the picker out WITHOUT the process-classification/lock-probe an adversarial
-    // review REJECTED as unsafe (a lock/cmdline probe misses a concurrently-BOOTING real
-    // browser that hasn't taken its profile.lock yet, and V3-2 below would then kill its
-    // shared 31301/31401 wallet). Waiting is safe: only the transient picker's death drops
-    // the count; a real browser never dies mid-wait, so we can never over-approve. Exits
-    // early the moment count==1 (picker case ~2-4s); ~8s cap otherwise. See
-    // DevOps-CICD/AUTOUPDATE_PICKER_GATE_DESIGN.md.
+
+    // Blank-screen fix (v2 review): from here through the verify gates we may WAIT several
+    // seconds while the picker dies + the count settles — but the picker window is already
+    // hidden and this child has no window yet, so the user stares at NOTHING (the committed
+    // "updating…" splash only comes up after all gates pass). A user who thinks it hung
+    // re-clicks the taskbar pin → a 2nd launch grabs the profile pipe → we defer, apply lost.
+    // Raise a NEUTRAL pre-commit splash to show it's alive. NOT "updating" — we may still
+    // DEFER below and fall through to normal startup (the unique_ptr dtor / reset() closes it).
+    // unique_ptr (not a scoped block) so it auto-closes on every early `return false` WITHOUT
+    // enclosing the instH guard that must survive to the helper spawn.
+    auto startingSplash = std::make_unique<UpdateSplash>(
+        L"Hodos is starting\u2026", L"Getting things ready\u2026");
+
+    // D.0 sole-instance gate — v2: an EXACT wait for the transient picker, then the count settle.
+    // Other {app}\HodosBrowser.exe processes inflate SU_CountSelfBrowsers: the profile PICKER +
+    // its CEF subprocess tree, or a real browser. The picker is TRANSIENT — it
+    // PostMessage(WM_CLOSE)s itself the instant it spawns us (simple_handler.cpp ~3313) and its
+    // whole ~8-proc tree dies within seconds — whereas a real browser (booting OR up) stays.
+    // v1 blind-polled an 8s cap that expired mid-teardown on a slow box (the beta.24 defer). v2:
+    // if the picker spawned us it handed us an inheritable handle to ITS OWN (browser/main)
+    // process. In CEF shutdown the browser process runs CefShutdown — which tears down + waits
+    // for its renderer/GPU/utility children — then exits LAST, so waiting on that handle blocks
+    // through the bulk of the teardown; by the time it signals the subprocesses are already
+    // reaped and the count settle below only mops a ~0-2s tail. Self-identification (the picker
+    // told us it's the picker) — NO process-classification/lock-probe (an adversarial review
+    // REJECTED those: they miss a concurrently-BOOTING real browser that hasn't taken its
+    // profile.lock yet, and V3-2 below would then kill its shared 31301/31401 wallet). This is a
+    // refinement of the WAIT, NOT the gate: the count==1 requirement below is UNCHANGED, so a
+    // real browser (which never dies mid-wait) still forces a defer → we can never over-approve.
+    // See DevOps-CICD/AUTOUPDATE_PICKER_GATE_DESIGN.md (v2).
+    if (HANDLE pickerH = SU_ParsePickerHandle()) {
+        // Ignore a forged/garbage value that isn't a real process handle (GetProcessId==0) —
+        // never wait on / close it (guards the signaled-event collision the review flagged).
+        if (GetProcessId(pickerH) != 0) {
+            LOG_INFO("Silent apply: spawned by picker — waiting for it to exit before sole-instance check");
+            DWORD wr = WAIT_TIMEOUT;
+            for (int i = 0; i < 60 && !g_update_abort.load(); ++i) {  // ~30s cap; early-exits on death
+                wr = WaitForSingleObject(pickerH, 500);
+                if (wr == WAIT_OBJECT_0 || wr == WAIT_FAILED) break;
+            }
+            // Close ONLY on the proven-real death path. On timeout/failure LEAK it: a forged
+            // value could alias one of OUR OWN live handles (update.lock owner / g_instance_mutex),
+            // and closing that would be a real bug; one SYNCHRONIZE handle for process lifetime is
+            // harmless (_exit(0) on apply, OS reclaims on defer).
+            if (wr == WAIT_OBJECT_0) { LOG_INFO("Silent apply: picker exited"); CloseHandle(pickerH); }
+            else LOG_WARNING("Silent apply: picker exit wait did not complete (wr=" +
+                             std::to_string(wr) + ") — proceeding to count settle");
+        } else {
+            LOG_WARNING("Silent apply: --picker-handle is not a live process handle — ignoring");
+        }
+    }
+
     int selfCount = SU_CountSelfBrowsers(appDirW);
-    for (int i = 0; selfCount > 1 && i < 16 && !g_update_abort.load(); ++i) {  // ~8s cap
+    for (int i = 0; selfCount > 1 && i < 30 && !g_update_abort.load(); ++i) {  // ~15s residual tail
         Sleep(500);
         selfCount = SU_CountSelfBrowsers(appDirW);
     }
@@ -4213,6 +4274,8 @@ static bool MaybeApplyStagedUpdate(const std::string& profileId) {
     // startup resumes; on the success path we _exit(0) after spawning the helper (the
     // dtor won't run, but the process dies and the helper's own splash — up from the top
     // of RunApplyTransaction — has already taken over with no visible seam).
+    startingSplash.reset();      // close the neutral pre-commit splash first (no overlap /
+                                 // window-class collision) before the committed one takes over.
     UpdateSplash applySplash;
 
     // Backup the full {app} tree (exclude the update\ working area) + its manifest.

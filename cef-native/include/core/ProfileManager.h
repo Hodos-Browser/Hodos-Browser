@@ -53,8 +53,16 @@ public:
     bool ShouldShowPickerOnStartup() const;
     void SetShowPickerOnStartup(bool show);
 
-    // Launch new instance with profile
-    bool LaunchWithProfile(const std::string& profileId);
+    // Launch new instance with profile.
+    // linkParentExitHandle (Windows only): when true, hand the spawned child an inheritable,
+    // SYNCHRONIZE|QUERY handle to THIS process so the child's silent-update sole-instance gate
+    // can wait for THIS (transient picker) process to fully exit before counting. Set ONLY by
+    // the pre-window profile picker (g_picker_mode) — NOT by the in-browser profile switch,
+    // whose parent stays alive. Best-effort: any handle-plumbing failure falls back to a plain
+    // spawn. No-op on macOS (Launch Services can't inherit Win32 handles; the picker-defer bug
+    // is Windows-only — mac silent update is Sparkle install-on-quit). See
+    // DevOps-CICD/AUTOUPDATE_PICKER_GATE_DESIGN.md (v2).
+    bool LaunchWithProfile(const std::string& profileId, bool linkParentExitHandle = false);
 
     // F5 (audit): syntactic validation of a profile id. The id is generated
     // internally ("Default", "Profile_N", legacy "Profile N") and is used BOTH

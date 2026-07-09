@@ -3299,7 +3299,13 @@ bool SimpleHandler::OnProcessMessageReceived(
                 LOG_WARNING_BROWSER("👤 Rejected profiles_switch: invalid profile id");
             } else {
                 LOG_INFO_BROWSER("👤 Launching new instance with profile: " + id);
-                bool launched = ProfileManager::GetInstance().LaunchWithProfile(id);
+                // Picker-gate v2: only the transient pre-window PICKER hands the child an
+                // exit-wait handle (g_picker_mode true). The in-browser profile switch
+                // (g_picker_mode false) stays alive, so it must NOT — the child would just
+                // wait the full cap for a process that never exits, then defer anyway.
+                extern bool g_picker_mode;
+                bool launched = ProfileManager::GetInstance().LaunchWithProfile(
+                    id, /*linkParentExitHandle=*/g_picker_mode);
 #ifdef _WIN32
                 // Pre-window picker (CHUNK 2): this process owns no profile. Once
                 // the chosen profile is launching in its own process, close the

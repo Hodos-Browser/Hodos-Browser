@@ -1,10 +1,10 @@
-// splash.h — minimal native "Hodos is updating…" window for the update helper (Windows).
+// splash.h - minimal native "Hodos is updating..." window for the update helper (Windows).
 //
 // The silent-apply supervisor (hodos-update-helper.exe) is the only process alive for the
 // whole apply (the bootstrap browser has _exit(0)'d; the new browser hasn't shown yet), so
 // it owns the "we're installing, one moment" indicator that removes the otherwise-confusing
 // several-second pause on an apply-boot. RAII: construct at the start of the visible install
-// work, destruct (auto-close) when RunApplyTransaction returns — so SUCCESS reveals the new
+// work, destruct (auto-close) when RunApplyTransaction returns - so SUCCESS reveals the new
 // browser and ROLLBACK reveals the relaunched old one.
 //
 // Deliberately dependency-light: a self-drawn GDI marquee (no comctl32 / InitCommonControls),
@@ -14,18 +14,29 @@
 #include <windows.h>
 #include <atomic>
 #include <cstdlib>
+#include <string>
 #include <thread>
 
 class UpdateSplash {
 public:
-    UpdateSplash() {
+    // title/subtitle default to the committed-apply wording ("Hodos is updating..."). The
+    // silent-apply bootstrap passes NEUTRAL pre-commit wording ("Hodos is starting...") for the
+    // splash it raises across the picker-exit wait + verify gates, where it may still DEFER and
+    // fall through to normal startup (so "updating" would be a lie). Charset-independent \u
+    // escapes so the WIDE literals render correctly in BOTH targets - the shell target compiles
+    // this header WITHOUT /utf-8 (only hodos-update-helper has it), which would otherwise mojibake
+    // a raw-UTF-8 L"..." literal by decoding the source bytes under the system code page.
+    explicit UpdateSplash(const wchar_t* title = L"Hodos is updating\u2026",
+                          const wchar_t* subtitle =
+                              L"This only takes a moment \u2014 please don\u2019t power off.")
+        : title_(title ? title : L""), subtitle_(subtitle ? subtitle : L"") {
         // Suppress in rigs / headless CI (they set this); production apply leaves it unset.
         if (const char* q = std::getenv("HODOS_UPDATE_NO_SPLASH"); q && *q && std::string(q) != "0") {
             return;
         }
         // The splash is cosmetic but is constructed at a brick-sensitive moment (the apply
         // bootstrap, before/after the {app} backup + install). A pathological thread-create
-        // failure must NEVER propagate out into the apply path — degrade to "no splash".
+        // failure must NEVER propagate out into the apply path - degrade to "no splash".
         try {
             thread_ = std::thread([this] { Run(); });
         } catch (...) {
@@ -43,6 +54,8 @@ public:
     UpdateSplash& operator=(const UpdateSplash&) = delete;
 
 private:
+    std::wstring title_;
+    std::wstring subtitle_;
     std::thread thread_;
     std::atomic<bool> stop_{false};
     std::atomic<HWND> hwnd_{nullptr};
@@ -66,7 +79,8 @@ private:
                 HGDIOBJ of = SelectObject(dc, ft);
                 SetTextColor(dc, RGB(236, 236, 238));
                 RECT t1 = rc; t1.top += 30;
-                DrawTextW(dc, L"Hodos is updating…", -1, &t1, DT_CENTER | DT_TOP | DT_SINGLELINE);
+                const wchar_t* line1 = self ? self->title_.c_str() : L"Hodos is updating\u2026";
+                DrawTextW(dc, line1, -1, &t1, DT_CENTER | DT_TOP | DT_SINGLELINE);
                 SelectObject(dc, of); DeleteObject(ft);
 
                 HFONT ft2 = CreateFontW(-12, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
@@ -74,8 +88,9 @@ private:
                 of = SelectObject(dc, ft2);
                 SetTextColor(dc, RGB(158, 158, 164));
                 RECT t2 = rc; t2.top += 60;
-                DrawTextW(dc, L"This only takes a moment — please don’t power off.",
-                          -1, &t2, DT_CENTER | DT_TOP | DT_SINGLELINE);
+                const wchar_t* line2 = self ? self->subtitle_.c_str()
+                    : L"This only takes a moment \u2014 please don\u2019t power off.";
+                DrawTextW(dc, line2, -1, &t2, DT_CENTER | DT_TOP | DT_SINGLELINE);
                 SelectObject(dc, of); DeleteObject(ft2);
 
                 // Indeterminate marquee: a gold block sliding along a dark track.

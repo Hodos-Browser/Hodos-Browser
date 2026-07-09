@@ -5,6 +5,7 @@
 #include <iomanip>
 #include <filesystem>
 #include <iostream>
+#include <vector>
 #include <nlohmann/json.hpp>
 
 #ifdef _WIN32
@@ -522,7 +523,7 @@ void ProfileManager::SetShowPickerOnStartup(bool show) {
     Save();
 }
 
-bool ProfileManager::LaunchWithProfile(const std::string& profileId) {
+bool ProfileManager::LaunchWithProfile(const std::string& profileId, bool linkParentExitHandle) {
     // F5 (audit): reject any id that isn't a well-formed profile id BEFORE it
     // reaches a process-launch boundary (or, on macOS, the shell). Cross-platform
     // primary gate; the macOS branch below additionally avoids the shell entirely.
@@ -530,6 +531,7 @@ bool ProfileManager::LaunchWithProfile(const std::string& profileId) {
         std::cerr << "❌ Refusing to launch: invalid profile id" << std::endl;
         return false;
     }
+    (void)linkParentExitHandle;  // consumed on Windows below; no-op on macOS/other
 #ifdef _WIN32
     // Get current executable path
     wchar_t exePath[MAX_PATH];
@@ -542,17 +544,67 @@ bool ProfileManager::LaunchWithProfile(const std::string& profileId) {
     cmdLine += std::wstring(profileId.begin(), profileId.end());
     cmdLine += L"\"";
 
-    // Launch new instance
-    STARTUPINFOW si = { sizeof(si) };
-    PROCESS_INFORMATION pi;
+    // ── Picker-gate v2 (AUTOUPDATE_PICKER_GATE_DESIGN.md): if asked, hand the child an
+    // inheritable handle to OUR OWN process so its silent-update sole-instance gate can wait
+    // for this transient picker to EXIT before counting (instead of blind-polling an 8s cap
+    // that expired mid-teardown on slow boxes). Mirrors the bootstrap→helper bootstrap-handle
+    // pattern (SU_SpawnHelper): dup the GetCurrentProcess() pseudo-handle into a real
+    // inheritable SYNCHRONIZE|QUERY handle, then restrict inheritance to EXACTLY that one
+    // handle via PROC_THREAD_ATTRIBUTE_HANDLE_LIST (so bInheritHandles=TRUE can't leak the
+    // ~8-proc picker's other inheritable handles). BEST-EFFORT: any failure here falls
+    // through to the plain spawn below — a profile must ALWAYS launch (G-1).
+    HANDLE pickerSelf = nullptr;                 // our own process handle, inheritable copy
+    STARTUPINFOEXW six{}; six.StartupInfo.cb = sizeof(six);
+    std::vector<unsigned char> attrBuf;
+    LPPROC_THREAD_ATTRIBUTE_LIST attrList = nullptr;  // set ONLY on full success (used, then deleted)
+    if (linkParentExitHandle) {
+        SIZE_T attrSize = 0;
+        InitializeProcThreadAttributeList(nullptr, 1, 0, &attrSize);  // size query
+        attrBuf.resize(attrSize);
+        LPPROC_THREAD_ATTRIBUTE_LIST tmp =
+            reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attrBuf.data());
+        HANDLE dup = nullptr;
+        // Short-circuit each step; DeleteProcThreadAttributeList is only valid after a
+        // SUCCESSFUL Initialize (mirrors SU_SpawnHelper), so track attrInit separately.
+        bool ok = DuplicateHandle(GetCurrentProcess(), GetCurrentProcess(), GetCurrentProcess(),
+                                  &dup, SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                                  /*bInheritHandle=*/TRUE, 0) != 0;
+        bool attrInit = ok && InitializeProcThreadAttributeList(tmp, 1, 0, &attrSize) != 0;
+        bool attrSet  = attrInit &&
+            UpdateProcThreadAttribute(tmp, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                      &dup, sizeof(HANDLE), nullptr, nullptr) != 0;
+        if (attrSet) {
+            pickerSelf = dup;
+            attrList = tmp;
+            six.lpAttributeList = attrList;
+            cmdLine += L" --picker-handle " +
+                       std::to_wstring(reinterpret_cast<uintptr_t>(dup));
+        } else {
+            // Plumbing failed — tear down partial state and spawn plainly (no handle, no arg).
+            if (attrInit) DeleteProcThreadAttributeList(tmp);
+            if (dup) CloseHandle(dup);
+        }
+    }
 
-    if (CreateProcessW(
+    // Launch new instance. With a picker handle: inherit EXACTLY it (extended startupinfo).
+    // Without: the original plain spawn (bInheritHandles=FALSE), byte-for-byte prior behavior.
+    STARTUPINFOW siPlain = { sizeof(siPlain) };
+    PROCESS_INFORMATION pi{};
+    const BOOL   inheritHandles = pickerSelf ? TRUE : FALSE;
+    const DWORD  createFlags    = pickerSelf ? EXTENDED_STARTUPINFO_PRESENT : 0;
+    LPSTARTUPINFOW siPtr = pickerSelf ? &six.StartupInfo : &siPlain;
+
+    BOOL launched = CreateProcessW(
         NULL,
         const_cast<LPWSTR>(cmdLine.c_str()),
-        NULL, NULL, FALSE,
-        0, NULL, NULL,
-        &si, &pi
-    )) {
+        NULL, NULL, inheritHandles,
+        createFlags, NULL, NULL,
+        siPtr, &pi);
+
+    if (attrList) DeleteProcThreadAttributeList(attrList);
+    if (pickerSelf) CloseHandle(pickerSelf);   // child inherited its own independent reference
+
+    if (launched) {
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
         std::cout << "🚀 Launched new instance with profile: " << profileId << std::endl;
