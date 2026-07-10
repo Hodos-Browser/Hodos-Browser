@@ -405,6 +405,82 @@ pub fn recover_change_index(
     )
 }
 
+// ---------------------------------------------------------------------------
+// c3 — reconcile_spent_inputs building blocks (pure, lib-testable).
+//
+// The async orchestration `reconcile_spent_inputs(state: &AppState, ...)` lives in
+// `handlers.rs` (it needs `AppState` + `cache_helpers::verify_tsc_proof_against_block`,
+// both main-only). These pure helpers keep the parse + txid-verify + report logic
+// unit-testable here; the orchestration's full exercise is integration/smoke (§7).
+// ---------------------------------------------------------------------------
+
+/// Outcome of a `reconcile_spent_inputs` pass. `changed()` gates the single
+/// `balance_cache.invalidate()`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ReconcileReport {
+    /// Phantom outpoints marked spent with their real successor txid.
+    pub marked_spent: u32,
+    /// Wallet-owned change outputs of successors inserted as spendable.
+    pub change_recovered: u32,
+}
+
+impl ReconcileReport {
+    pub fn changed(&self) -> bool {
+        self.marked_spent > 0 || self.change_recovered > 0
+    }
+}
+
+/// Parse every output of a raw BSV tx into `(satoshis, locking_script_bytes)`.
+/// Pure + bounds-checked (a malformed/truncated tx → `Err`, never a panic), so the
+/// caller fails closed. Skips the input section; ignores witness (BSV has none).
+pub fn parse_tx_outputs(raw_tx: &[u8]) -> Result<Vec<(i64, Vec<u8>)>, String> {
+    use crate::transaction::decode_varint;
+
+    let slice = |from: usize, len: usize| -> Result<&[u8], String> {
+        raw_tx
+            .get(from..from + len)
+            .ok_or_else(|| "truncated tx".to_string())
+    };
+
+    let mut pos = 4usize; // skip version
+    let (input_count, c) =
+        decode_varint(raw_tx.get(pos..).ok_or("truncated")?).map_err(|e| format!("input count: {:?}", e))?;
+    pos += c;
+    for _ in 0..input_count {
+        pos += 36; // prev txid (32) + vout (4)
+        let (script_len, c) = decode_varint(raw_tx.get(pos..).ok_or("truncated")?)
+            .map_err(|e| format!("input script len: {:?}", e))?;
+        pos += c + script_len as usize + 4; // script + sequence
+    }
+
+    let (output_count, c) =
+        decode_varint(raw_tx.get(pos..).ok_or("truncated")?).map_err(|e| format!("output count: {:?}", e))?;
+    pos += c;
+
+    let mut outputs = Vec::with_capacity(output_count as usize);
+    for _ in 0..output_count {
+        let value = u64::from_le_bytes(slice(pos, 8)?.try_into().unwrap());
+        pos += 8;
+        let (script_len, c) = decode_varint(raw_tx.get(pos..).ok_or("truncated")?)
+            .map_err(|e| format!("output script len: {:?}", e))?;
+        pos += c;
+        let script = slice(pos, script_len as usize)?.to_vec();
+        pos += script_len as usize;
+        outputs.push((value as i64, script));
+    }
+    Ok(outputs)
+}
+
+/// True iff `SHA256d(raw)` (little-endian hex, i.e. the on-chain txid) equals
+/// `expected_txid`. Closes fallback-provider poisoning: verify a fetched successor
+/// before parsing it (design §1 step 2 / review D-K2).
+pub fn verify_raw_txid(raw: &[u8], expected_txid: &str) -> bool {
+    let h1 = Sha256::digest(raw);
+    let h2 = Sha256::digest(h1);
+    let computed: String = h2.iter().rev().map(|b| format!("{:02x}", b)).collect();
+    computed.eq_ignore_ascii_case(expected_txid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::ProviderSignal::*;
@@ -692,5 +768,62 @@ mod tests {
             recover_change_index_pure(&pk, &pub_, &[-3, 5], 100, &target),
             Some(5)
         );
+    }
+
+    // --- c3: parse_tx_outputs / verify_raw_txid / ReconcileReport ---
+
+    /// A hand-built raw tx: 1 input, 2 P2PKH-ish outputs (1000 & 2000 sats).
+    fn sample_raw_tx() -> Vec<u8> {
+        let mut tx = Vec::new();
+        tx.extend_from_slice(&[0x01, 0x00, 0x00, 0x00]); // version
+        tx.push(0x01); // 1 input
+        tx.extend_from_slice(&[0xAB; 32]); // prev txid
+        tx.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // vout 0
+        tx.push(0x00); // empty scriptSig
+        tx.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]); // sequence
+        tx.push(0x02); // 2 outputs
+        tx.extend_from_slice(&1000u64.to_le_bytes()); // value
+        tx.push(0x03); // scriptlen
+        tx.extend_from_slice(&[0xAA, 0xBB, 0xCC]); // script
+        tx.extend_from_slice(&2000u64.to_le_bytes()); // value
+        tx.push(0x02); // scriptlen
+        tx.extend_from_slice(&[0xDD, 0xEE]); // script
+        tx.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // locktime
+        tx
+    }
+
+    #[test]
+    fn parse_tx_outputs_reads_all_outputs() {
+        let outs = parse_tx_outputs(&sample_raw_tx()).expect("parse");
+        assert_eq!(outs.len(), 2);
+        assert_eq!(outs[0], (1000, vec![0xAA, 0xBB, 0xCC]));
+        assert_eq!(outs[1], (2000, vec![0xDD, 0xEE]));
+    }
+
+    #[test]
+    fn parse_tx_outputs_fails_closed_on_truncation() {
+        let full = sample_raw_tx();
+        // Cut mid-tx — must Err, never panic (fail closed).
+        assert!(parse_tx_outputs(&full[..full.len() - 5]).is_err());
+        assert!(parse_tx_outputs(&[0x01, 0x00]).is_err());
+    }
+
+    #[test]
+    fn verify_raw_txid_matches_sha256d() {
+        use sha2::{Digest, Sha256};
+        let raw = sample_raw_tx();
+        let h2 = Sha256::digest(Sha256::digest(&raw));
+        let expected: String = h2.iter().rev().map(|b| format!("{:02x}", b)).collect();
+        assert!(verify_raw_txid(&raw, &expected));
+        assert!(verify_raw_txid(&raw, &expected.to_uppercase())); // case-insensitive
+        assert!(!verify_raw_txid(&raw, &"0".repeat(64))); // wrong txid
+        assert!(!verify_raw_txid(&raw, "deadbeef")); // malformed
+    }
+
+    #[test]
+    fn reconcile_report_changed_predicate() {
+        assert!(!ReconcileReport::default().changed());
+        assert!(ReconcileReport { marked_spent: 1, change_recovered: 0 }.changed());
+        assert!(ReconcileReport { marked_spent: 0, change_recovered: 1 }.changed());
     }
 }

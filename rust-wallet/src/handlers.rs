@@ -13684,6 +13684,163 @@ fn extract_output_value_and_script(raw_tx: &[u8], target_vout: usize) -> Result<
 /// The backup payload captures pre-backup state, so the funding UTXO is still
 /// marked spendable. This function marks the backup tx's inputs as spent and
 /// inserts the change output (vout 2) so the balance is correct immediately.
+/// WS1 c3 — shared spent-input reconcile primitive (UNWIRED; c4 wires create_action,
+/// c5 wires cert + do_onchain_backup). Composes the c1/c2 primitives in `reconcile.rs`.
+///
+/// For each candidate outpoint that is authoritatively spent by a confirmed successor
+/// `Y`, mark it spent with the real `Y` txid and recover `Y`'s wallet-owned,
+/// self-derived change as spendable. Fail-closed at every step; the only mutations are
+/// a guarded `mark_spent` (its `WHERE spendable=1` re-asserts the state at write time)
+/// plus verified-change inserts, done in one final write burst with a single
+/// `balance_cache.invalidate()`. No synthetic `transactions` row is created for `Y`
+/// (review D-R2/D-I5) — `Y` as `spending_description` is a real successor txid.
+///
+/// Lock contract (design §3): pure network reads + short DB bursts only; never holds
+/// `state.database` across an `.await`, and does NOT take `create_action_lock` —
+/// callers own serialization (2a holds `create_action_lock`; 2c holds
+/// `utxo_selection_lock`).
+#[allow(dead_code)] // unwired until c4/c5
+async fn reconcile_spent_inputs(
+    state: &AppState,
+    candidate_outpoints: &[(String, u32)],
+) -> crate::reconcile::ReconcileReport {
+    use crate::reconcile::{
+        check_outpoint_spent, parse_tx_outputs, recover_change_index, verify_raw_txid, SpentStatus,
+    };
+
+    let mut report = crate::reconcile::ReconcileReport::default();
+    let http = &state.services.client;
+
+    // wallet_id + master keypair — one short DB read (wallet must be unlocked).
+    let (wallet_id, master_priv, master_pub) = {
+        let db = state.database.lock().unwrap();
+        let wallet_id = match crate::database::WalletRepository::new(db.connection()).get_primary_wallet() {
+            Ok(Some(w)) => match w.id {
+                Some(id) => id,
+                None => return report,
+            },
+            _ => return report,
+        };
+        match (
+            crate::database::get_master_private_key_from_db(&db),
+            crate::database::get_master_public_key_from_db(&db),
+        ) {
+            (Ok(p), Ok(q)) => (wallet_id, p, q),
+            _ => {
+                log::warn!("   reconcile: wallet locked / no master key — skipping");
+                return report;
+            }
+        }
+    }; // DB lock dropped before any await
+
+    for (txid, vout) in candidate_outpoints {
+        let short = |s: &str| s[..16.min(s.len())].to_string();
+
+        // Step 1 — authoritative spent check. Unspent/Unknown → do nothing (fail closed).
+        let successor = match check_outpoint_spent(http, txid, *vout).await {
+            SpentStatus::Spent { spending_txid } => spending_txid,
+            _ => continue,
+        };
+
+        // Step 2 — fetch successor Y; verify SHA256d(raw)==Y BEFORE parsing (D-K2).
+        let raw_y = match state.services.get_raw_tx(&successor).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                log::warn!("   reconcile: fetch {} failed: {:?}", short(&successor), e);
+                continue;
+            }
+        };
+        if !verify_raw_txid(&raw_y, &successor) {
+            log::warn!("   reconcile: fetched tx txid mismatch for {} — fail closed", short(&successor));
+            continue;
+        }
+
+        // Step 3 — confirmation gate = merkle proof EXISTS and verifies canonically
+        // (a valid TSC proof ⇒ mined ⇒ ≥1 conf). No proof yet → read-only.
+        let tsc = match state.services.get_merkle_proof_tsc(&successor).await {
+            Ok(v) => v,
+            Err(_) => {
+                log::info!("   reconcile: successor {} not yet confirmed — read-only", short(&successor));
+                continue;
+            }
+        };
+        match crate::cache_helpers::verify_tsc_proof_against_block(http, &successor, &tsc).await {
+            Ok(true) => {}
+            _ => {
+                log::warn!("   reconcile: successor {} merkle proof did not verify — fail closed", short(&successor));
+                continue;
+            }
+        }
+
+        // Step 4 — recover ALL wallet-owned self-derived outputs of Y.
+        let outputs = match parse_tx_outputs(&raw_y) {
+            Ok(o) => o,
+            Err(e) => {
+                log::warn!("   reconcile: parse outputs failed for {}: {}", short(&successor), e);
+                continue;
+            }
+        };
+
+        let mut recovered: Vec<(u32, i64, String, i32)> = Vec::new();
+        for (out_vout, (sats, script)) in outputs.iter().enumerate() {
+            if *sats <= 0 {
+                continue;
+            }
+            // 4a–c: cache candidate + gap-scan + derivation re-verify (short DB read).
+            let index = {
+                let db = state.database.lock().unwrap();
+                recover_change_index(db.connection(), &master_priv, &master_pub, wallet_id, script)
+            };
+            let index = match index {
+                Some(n) => n,
+                None => continue, // not ours / unverifiable (foreign, BIP32, backup)
+            };
+
+            // 4d: positive-unspent required to insert — never insert on absence (D-P2).
+            match check_outpoint_spent(http, &successor, out_vout as u32).await {
+                SpentStatus::Unspent => {
+                    recovered.push((out_vout as u32, *sats, hex::encode(script), index));
+                }
+                _ => continue, // Spent or Unknown → skip
+            }
+        }
+
+        // Steps 5+6 — atomic final write burst (no .await inside; no synthetic tx row).
+        {
+            let db = state.database.lock().unwrap();
+            let output_repo = crate::database::OutputRepository::new(db.connection());
+            for (out_vout, sats, script_hex, index) in &recovered {
+                match output_repo.upsert_received_utxo_with_confirmed(
+                    state.current_user_id,
+                    &successor,
+                    *out_vout,
+                    *sats,
+                    script_hex,
+                    *index,
+                    true,
+                ) {
+                    Ok(_) => report.change_recovered += 1,
+                    Err(e) => log::warn!("   reconcile: insert recovered change failed: {}", e),
+                }
+            }
+            // Mark the phantom spent with the REAL successor txid (guarded WHERE spendable=1).
+            match output_repo.mark_spent(txid, *vout, &successor) {
+                Ok(n) if n > 0 => {
+                    report.marked_spent += 1;
+                    log::info!("   ✅ reconcile: marked {}:{} spent by {}", short(txid), vout, short(&successor));
+                }
+                Ok(_) => log::warn!("   ⚠️  reconcile: phantom {}:{} not spendable=1 at write — no-op", short(txid), vout),
+                Err(e) => log::error!("   ❌ reconcile: mark_spent failed: {}", e),
+            }
+        } // DB lock dropped
+    }
+
+    if report.changed() {
+        state.balance_cache.invalidate();
+    }
+    report
+}
+
 fn reconcile_backup_tx(
     state: &AppState,
     backup_txid: &str,
