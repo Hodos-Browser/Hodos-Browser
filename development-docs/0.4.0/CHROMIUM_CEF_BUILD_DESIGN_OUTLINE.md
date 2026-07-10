@@ -379,31 +379,31 @@ patches, owns the OS-specific build/arch/minos/plist wiring + Mac GPU strings** 
   C1–C7; owns the OS-specific build (framework not DLL), the **arm64/x64/universal2 arch decision**,
   minos/plist wiring, per-profile-seed platform conditionals in `cef_browser_shell_mac.mm`, and macOS farbling
   acceptance. **The "common real GPU strings" set (§3c C4) needs Mac entries — both Apple Silicon and Intel
-  ANGLE strings.** → `Q1-mac-farbling.md`.
+  ANGLE strings.** → `chromium-rebuild/Q1_mac_farbling.md`.
 - **Q2 — Farbling × adblock.** *Stub:* adblock is a **separate Rust process (31302) + C++ `AdblockCache` +
   cosmetic CSS/scriptlet injection**; farbling moving into the CEF binary (Blink, below JS) is a *different
   layer* and should not collide. **`hodos-unbreak.txt` is an adblock file and is untouched by this sprint
   (I1).** Verify: (1) **ordering** — cosmetic scriptlet injection in `simple_render_process_handler.cpp` and
   Blink farbling both touch the renderer; confirm no shared V8-timing assumption breaks; (2) the removed JS
   farbling site (`:586-632`) is deleted cleanly without disturbing adjacent scriptlet/cosmetic IPC handlers
-  (per the M1 teardown checklist). → `Q2-farbling-x-adblock.md`.
+  (per the M1 teardown checklist). → `chromium-rebuild/Q2_farbling_adblock.md`.
 - **Q3 — Farbling × OAuth pre-approved sites.** *Stub:* today JS-farbling **skips auth domains via the
   hardcoded C++ `FingerprintProtection::IsAuthDomain` list** (NOT `hodos-unbreak.txt`). C7 re-implements *that
   list* at source: pass an eTLD+1 auth allowlist to the renderer alongside the seed channel; when the current
   **top-frame** origin ∈ allowlist, `HodosSessionCache` returns pass-through (un-farbled) values. Persistent
   per-profile seed already reduces login breakage; the exemption is belt-and-suspenders for the most sensitive
-  OAuth flows. → `Q3-farbling-x-oauth.md`.
+  OAuth flows. → `chromium-rebuild/Q3_farbling_oauth.md`.
 - **Q4 — Amazon DRM.** *Stub:* prime suspect = missing/insufficient **Widevine CDM**. On the target build the
   CDM likely auto-downloads via component updater → **test whether Amazon plays at L3 first**, but expect it
   may be **SD-capped or refused** (I6) and **verify whether a VMP `.sig` is required for L3 on Windows before
   concluding "free."** If Amazon demands L1/higher robustness → **VMP signing** (Google MLA or commercial 3PL;
   castLabs' free path is Electron-only) — **default OUT of beta.1.** Document the exact error, Brave-parity,
-  cost, and which sites break. → `Q4-amazon-drm.md`.
+  cost, and which sites break. → `chromium-rebuild/Q4_widevine_amazon_drm.md`.
 - **Q5 — Full reconciled edit list.** *Stub:* = §3 of this outline, hardened into a final table once the §3c
   WebGL/navigator conflict is settled (value tables: deviceMemory/concurrency valid sets; common-GPU-string
   map incl. Mac entries, or the decision to drop vendor/renderer) **and the M2 extra vectors (UA-CH, screen/DPR,
   getClientRects, fonts, enumerateDevices) are each added or logged as accepted gaps.** Every edit →
-  what/why/platform/size/dep + final value decisions. → `Q5-full-edit-list.md`.
+  what/why/platform/size/dep + final value decisions. → `chromium-rebuild/Q5_full_edit_list.md`.
 
 ---
 
