@@ -9,9 +9,19 @@
 > [`ONCHAIN_BACKUP_REVIEW.md`](./ONCHAIN_BACKUP_REVIEW.md),
 > [`FIX_B_CRASH_SAFETY_SHUTDOWN_PLAN.md`](./FIX_B_CRASH_SAFETY_SHUTDOWN_PLAN.md).
 
-**Status:** design started (this session); RESEARCH-FIRST — no code until Phase 1 lands.
+**Status:** Phase 1 research DONE + owner decisions locked (2026-07-10). Phase 2
+design drafted → [`RECONCILE_PHASE2_DESIGN.md`](./RECONCILE_PHASE2_DESIGN.md)
+(adversarial review pending; no code until it lands + owner approves).
 **Branch:** commit on `0.4.0` (solo dev; easier to track).
 **Adversarial review is mandatory at every phase** (design AND implementation).
+
+> **Backup-anchor clarification (verified 2026-07-10, `connection.rs:389-420`):**
+> the `-3 → backup` mapping is **correct and load-bearing** — the backup address is
+> BRC-42-self-derived from invoice `"1-wallet-backup-1"` and stored in `addresses`
+> at index `-3` (the deterministic anchor mnemonic-only recovery uses). The backup
+> *outputs* carry `derivation_prefix="1-wallet-backup"`/`suffix="1"|"marker"`, which
+> reconstructs the same invoice → one identical key, two table views. The reconcile
+> must **skip** the −3 anchor / `"1-wallet-backup"` outputs when recovering *change*.
 
 ---
 
