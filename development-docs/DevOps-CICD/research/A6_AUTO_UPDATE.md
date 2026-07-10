@@ -10,6 +10,35 @@ Updater docs, OBS Studio release notes). Verification reversed the earlier "Velo
 
 ---
 
+> ## ✅ SHIPPED — silent auto-update is now LIVE + proven on both platforms (2026-07-09)
+>
+> This was a research pass; the feature has since **shipped and been proven live on real hardware**.
+> Latest release: **v0.3.0-beta.26** (LATEST/live). Silent update proven: **macOS beta.21→22**,
+> **Windows beta.25→26** (silent apply through the two-process profile picker on real hardware).
+>
+> **What actually shipped (vs. what this doc leaned toward):**
+> - **macOS = Sparkle silent-on-quit** — landed as the config-flip this doc predicted. ✅
+> - **Windows = a HYBRID CUSTOM updater — NOT `win_sparkle_check_update_without_ui()`.** This doc's
+>   WinSparkle-functionally-silent lean did **not** hold: WinSparkle has no true silent-install-on-quit,
+>   so Windows ships a **hybrid custom updater** (bg download → stage → verify → apply-on-cold-boot →
+>   relaunch) with an **external rollback-supervisor**, a **signer-continuity CN gate** (compares
+>   signing-cert Subject CN, not rotating Azure Trusted Signing leaf thumbprints), and a
+>   **picker-exit-wait** in the picker-spawned `--profile` child so the sole-instance check succeeds
+>   (commit `ae5beb6`, beta.26). Feed = draft-first → verify → manual promote-to-Latest → verify-live,
+>   with a redirect-verify retry loop in `promote.yml`.
+>
+> **As-built docs (authoritative — read these, not this research pass, for current behavior):**
+> - `development-docs/DevOps-CICD/WINDOWS_AUTOUPDATE_PLAN.md` — Windows hybrid updater as built
+> - `development-docs/DevOps-CICD/BUILD_AND_RELEASE.md` — tag-derived version, draft→manual-promote gate
+> - `development-docs/DevOps-CICD/AUTO_UPDATE.md` — cross-platform auto-update behavior
+>
+> **Still valid below:** the Velopack rejection rationale and the **security requirements** (EdDSA
+> appcast signing, HTTPS-only feed, monotonic version / anti-rollback, Sparkle/WinSparkle CVE pins)
+> remain the standing security bar and should be preserved. The Windows *mechanism* discussion below is
+> superseded by the hybrid-updater as-built docs.
+
+---
+
 ## TL;DR (verified) — keep the Sparkle + WinSparkle split; it's the secure, proven choice
 
 - **Do NOT unify on Velopack.** A single proven cross-platform C++ silent updater **does not exist**

@@ -1,7 +1,18 @@
 # Windows Auto-Update — Hybrid Updater Implementation Plan
 
-**Created:** 2026-06-24 / **Status:** Research/design — DOCS-ONLY, NO code / **Owner:** DevOps/CI-CD
+**Created:** 2026-06-24 / **Status:** ✅ SHIPPED + PROVEN LIVE — design-of-record / **Owner:** DevOps/CI-CD
 **Canonical home:** `development-docs/DevOps-CICD/` / Per root CLAUDE.md Invariant #12.
+
+> ## ✅ WHAT SHIPPED (2026-07-09 — this is now history, not a forward plan)
+> **Windows SILENT auto-update is DONE and PROVEN LIVE on real hardware.** `beta.25 → beta.26` applied silently through the two-process profile picker; macOS silent proven `beta.21 → beta.22`. Latest shipped = **v0.3.0-beta.26** (LATEST/live). `HODOS_SILENT_AUTOUPDATE` is flipped **ON**, soaked, and default `autoUpdateMode="silent"`.
+>
+> The whole saga closed: the full Hodos-owned download → stage → verify pipeline (commit 4), wallet graceful-exit (commit 5 / OD-2), the external rollback-supervisor `hodos-update-helper.exe` (commit 6b), `MaybeApplyStagedUpdate` bootstrap + consumer wiring (commit 6c), health-marker / watchdog / kill-switch (6d–6e), and the CI test gate + flip (commit 7). Plus the release-side hardening: **signer-continuity CN gate** (compares Subject CN, not rotating Azure-Trusted-Signing leaf thumbprints — beta.23), **promote.yml redirect-verify retry**, and **BUILD_AND_RELEASE tag-derived version + draft→manual-promote gate**.
+>
+> **The last blocker — the two-process profile picker.** After the CN signer gate landed, the picker-spawned `--profile` child was still deferring the apply because the picker's ~8-process CEF tree was still tearing down when the child ran `MaybeApplyStagedUpdate` (sole-instance count > 1 → defer forever). **Fixed in commit `ae5beb6` (beta.26): the picker-spawned child now waits for the exact picker-process exit before the sole-instance / all-instances-gone check**, so the apply fires on multi-profile machines. Proven live on real hardware.
+>
+> The **profile-picker + per-profile-wallet architecture is SHELVED** (wallet stays SHARED); the same-process picker refactor that would fix the two-process seam permanently is deferred (revisit with real market feedback).
+>
+> Everything below is the **design-of-record** for how the mechanism works. Anchors (file:line) predate several bumps and are **drift-risk / unverified this pass** — trust the mechanics, re-grep before relying on any line number.
 
 > **Scope.** Deep-research + concrete implementation plan + adversarial review for **Goal 1 on Windows** — the hybrid auto-updater that delivers the owner UX (background download while running -> apply on next launch -> no mid-session restart -> no popup by default -> ON by default -> opt-in notify/approve). This drills into the hard §3.3 of `AUTO_UPDATE_AND_SIGNING_0_4_0.md`, which this doc **supersedes on the Windows hybrid mechanics**. macOS config-only track and Goal 2 signing strategy stay in that parent doc.
 >
@@ -43,7 +54,9 @@ The owner answered the open decisions and the macOS auto-update work shipped fir
 
 ---
 
-## STATUS — kickoff verification (2026-06-28)
+## STATUS — kickoff verification (2026-06-28) — ✅ ALL ITEMS BELOW NOW SHIPPED
+
+> **Superseded by the SAGA CLOSED note (2026-07-09) at the bottom of this section.** The table and prose below are the mid-build snapshot; every ⏳/GATED/PENDING row has since landed and the silent path is LIVE + PROVEN (beta.25→26). Kept for the build record.
 
 Phase-kickoff re-verified every cited location against current code. **Foundation is ~90% done; several §H items below are STALE in the body (already shipped).** Owner decision: after §B.2a, **go straight at the silent mechanism** (commits 4→6, locally testable behind the flag); defer 3b EdDSA cutover + notify wizard (not blockers for local silent testing).
 
@@ -104,19 +117,24 @@ A pre-code adversarial DESIGN review (`bopen-tools:code-auditor`, against curren
 
 **MUST-TEST (the one that can't be hand-waved):** fault-inject on a FUNDED-WALLET profile — (1) replace new exe with a non-runnable stub before relaunch (simulates SAC block), (2) kill mid-`ignoreversion` copy (power-loss truncation) → assert the supervisor restores `rollback\`, relaunches the OLD build, sets paused, notifies, and the wallet DB + `profile.lock` survive intact.
 
-**⏳ NEXT = the APPLY phase (former commits 5+6 merged) — the brick-risk core:** ALL-INSTANCES-GONE global mutex gate (§D.0) + `!g_picker_mode` + the global mutex creation + Inno AppMutex/SetupMutex/un-skipifsilent/bounded-shutdown-helper; four-exe + `profile.lock` zero-retry poll (§D.2); full `{app}` rollback backup + manifest (§D.3); `/VERYSILENT /NORESTART` apply; widened post-update ProfileLock retry + no-browser-avoidance (§D.4); **post-apply health gate + integrity check + watchdog auto-revert (§D.6)**; orphan-only rename + abort-retry (§D.5); **high-water anti-replay**; **re-verify the staged installer at apply time** (EdDSA or marker sha — staged bytes sit on disk until cold boot); non-ASCII pending-path support; updater-side wait-for-PID. **Needs its own kickoff + adversarial DESIGN review BEFORE code** — this is the path that can brick the fleet. Then commit 7 (CI test gate + flip `HODOS_SILENT_AUTOUPDATE` on after soak + resolve the WinSparkle-vs-stager double-check). The 3 deferred-to-commit-7 items + the website byte-stability follow-up are listed in the 4c notes above.
+**✅ APPLY phase SHIPPED (former commits 5+6 merged) — the brick-risk core, now LIVE:** ALL-INSTANCES-GONE global mutex gate (§D.0) + `!g_picker_mode` + the global mutex creation + Inno AppMutex/SetupMutex/bounded-shutdown-helper; four-exe + `profile.lock` zero-retry poll (§D.2); full `{app}` rollback backup + manifest (§D.3); `/VERYSILENT /NORESTART` apply; widened post-update ProfileLock retry + no-browser-avoidance (§D.4); **post-apply health gate + integrity check + watchdog auto-revert (§D.6)**; orphan-only rename + abort-retry (§D.5); **high-water anti-replay**; **re-verify the staged installer at apply time** (EdDSA or marker sha); updater-side wait-for-PID — all landed and soaked. Commit 7 (CI test gate + flip `HODOS_SILENT_AUTOUPDATE` ON) is done; `autoUpdateMode` defaults to `silent`. The final multi-profile seam (picker-spawned child waiting for the exact picker exit before the sole-instance check) landed in `ae5beb6` (beta.26) and is PROVEN LIVE. The 3 former deferred-to-commit-7 items + the website byte-stability follow-up (see 4c notes above) were resolved during soak.
 
 **4c notes / follow-ups (don't lose before silent ships):** (1) The CI appcast-doc-signing self-check ("appcast-doc key self-check PASSED") MUST be confirmed green on a real release before the silent path is *enabled* (it answers the open Sparkle-key→openssl-PEM format question; same 3a/3b discipline — soft until proven). (2) **Website byte-stability:** when the sidecar goes load-bearing, the WEBSITE-served `appcast.xml` (promote.yml sync to hodosbrowser.com) must stay **LF + un-minified** (`.gitattributes -text` in the website repo) and `promote.yml` should re-fetch-and-verify the served sidecar (our known CRLF-autocrlf trap would otherwise fail every signature → silent update outage). (3) **High-water anti-replay** (reject a stale-but-newer-than-current signed doc) → commit 6, next to the silent apply path it guards + the §H.7 kill-switch. (4) `WTD_REVOKE_NONE` is deliberate (EdDSA primary).
 | Commit 6a — apply-phase foundations (instance mutex + `update.lock` honor-at-launch + Inno AppMutex/SetupMutex) | ✅ DONE (local on 0.4.0) — live/un-gated but INERT; `Local\` ns + kept `skipifsilent` (owner-approved); 5 forward-flags pinned for 6b above |
-| Commit 6b — external rollback-supervisor (`hodos-update-helper.exe`) | ✅ DESIGN CODE-READY — see [`AUTOUPDATE_6B_SUPERVISOR_DESIGN.md`](./AUTOUPDATE_6B_SUPERVISOR_DESIGN.md) §9 v3. v1 → **4-skeptic review** (fleet-brick bugs) → owner decisions (money-DB=snapshot+restore, recovery=RunOnce) → v2 → **2nd-skeptic review** (shape validated) → **v3 rewrite** (16 fixes) → **3rd money-DB micro-review** (found+fixed 1 HIGH: stale `-wal`/`-shm` replay-corruption on rollback; V3-3a). 3 review rounds, money-DB joint sound. NO supervisor code yet — awaiting owner go to implement. |
-| Commits 6c-7 — apply core / health-gate / watchdog / CI test gate | ⏳ NOT STARTED (after 6b lands) |
+| Commit 6b — external rollback-supervisor (`hodos-update-helper.exe`) | ✅ DONE (local on 0.4.0) — design §9 v3 (3 review rounds) then 4 sub-commits: **6b.1** `bc03359` foundations, **6b.2a** `a31ef18` fs primitives (V3-3a money-DB restore), **6b.2b** `f682440` Phase B/C/E + `--resume` (review → 6 fixes), **6b.3** `026a347` packaging (ship+sign helper + signed expected-new manifest + IntegrityGate). 53 update unit tests; all 4 configs clean. INERT until 6c spawns it. |
+| Commit 6c — `MaybeApplyStagedUpdate` Phase-A bootstrap + consumer wiring | ✅ DONE — landed + wired |
+| Commits 6d-7 — health-marker / watchdog+kill-switch / CI test gate + flip | ✅ DONE — `HODOS_SILENT_AUTOUPDATE` flipped ON, soaked, LIVE |
+| Picker-gate fix — picker-spawned `--profile` child waits for EXACT picker-process exit before the sole-instance / all-instances-gone check (unblocks silent apply on multi-profile machines) | ✅ DONE + PROVEN LIVE (`ae5beb6`, beta.26; beta.25→26 applied silently on real hardware) |
+
+> #### ✅ SAGA CLOSED (2026-07-09) — silent update DONE + PROVEN LIVE
+> Commits 6c–7 all landed; `HODOS_SILENT_AUTOUPDATE` is ON by default (`autoUpdateMode="silent"`), soaked, and proven on real hardware (`beta.25 → beta.26` silent through the picker; macOS `beta.21 → beta.22`). The **last** blocker was the two-process profile picker: its ~8-process CEF tree was still tearing down when the picker-spawned `--profile` child ran `MaybeApplyStagedUpdate`, so the all-instances-gone / sole-instance count stayed > 1 and the apply deferred forever. Root cause was PROVEN by bypassing the picker (launch the installed exe directly with `--profile="Default"` → count=1 → applied silently). **Fix (`ae5beb6`, beta.26): the picker-spawned child waits for the exact picker-process exit (handle/PID handoff, à la the supervisor bootstrap-wait) BEFORE the sole-instance check.** Release-side hardening that shipped alongside: signer-continuity **CN** gate (beta.23; compares Subject CN, not rotating Azure leaf thumbprints), external rollback-supervisor, promote.yml redirect-verify retry, BUILD_AND_RELEASE tag-derived version + draft→manual-promote gate. Profile-picker + per-profile-wallet architecture SHELVED (wallet stays SHARED); same-process picker refactor deferred (would fix the two-process seam permanently). The MUST-TEST fault-injection cases (non-runnable stub / truncated-copy → supervisor restores rollback, relaunches OLD, sets paused, notifies, wallet DB + `profile.lock` intact) were exercised on funded-wallet profiles.
 
 **Commit-4 build decisions (locked while building 4a/4b):** (1) `SyncHttpClient` was HTTP-localhost-only — extended for HTTPS + a streaming `Download` (to-temp+rename, Content-Length completeness check). (2) Windows `sparkle:version` stays the version STRING (WinSparkle 0.8.1 compatibility); the updater reads a dedicated `<hodosBuildNumber>` element for its integer gate. (3) Test seams (`HODOS_UPDATE_TEST_PUBKEY` key override + Authenticode-advisory) are **compile-time** (`#ifdef HODOS_UPDATE_TEST_SEAM`, hodos_tests only) — compiled OUT of the shipped browser so production verify is unconditional. (4) `APP_BUILD_NUMBER` now a C++ macro on Windows (CI + monotonic local fallback).
 **Deferred from 4b (documented, sequenced):** HIGH downgrade vector → commit 4c (next). `WTD_REVOKE_NONE` = deliberate reliability choice (EdDSA primary; cert-revocation via §H.6 signer-continuity). Full non-ASCII pending-path support (Download dest path) → commit 6 filesystem-apply hardening (verify-gate wide-path already fixed).
 
 **Silent-path anchors all CONFIRMED present** (current lines): SingleInstance per-profile pipe `SingleInstance.cpp:44-51`; ProfileLock released late in `cef_browser_shell.cpp:4455` (main() cleanup, NOT at close); startup seq SingleInstance `:3910` → AcquireProfileLock `:3914` → LaunchWallet `:3927` / LaunchAdblock `:3928`; job objects KILL_ON_JOB_CLOSE wallet `:3466` / adblock `:3657`; wallet `/shutdown` still drain-only (`handlers.rs:193-197`, no `process::exit`); installer `[Run]` `skipifsilent` (`hodos-browser.iss:77`). The plan's structural premises hold.
 
-**NEXT: commit 4** — Hodos-owned download → stage → verify (EdDSA+Authenticode+anti-rollback) to `pending\`, inert under `HODOS_DEV`. Self-contained + locally testable; does its OWN EdDSA verify (reuses the Ed25519 key), so it does NOT depend on the 3b WinSparkle cutover.
+**(Historical NEXT, now shipped) commit 4** — Hodos-owned download → stage → verify (EdDSA+Authenticode+anti-rollback) to `pending\`, inert under `HODOS_DEV`. Self-contained + locally testable; does its OWN EdDSA verify (reuses the Ed25519 key), so it does NOT depend on the 3b WinSparkle cutover. **✅ Landed and live.**
 
 ---
 
@@ -319,9 +337,11 @@ This split is the central correction folded in from the pragmatism review (Attac
 
 ---
 
-## I. Phased commit sequence (gate-before-automate, descoped for 0.4.0)
+## I. Phased commit sequence (gate-before-automate) — ✅ ALL RESOLVED / SHIPPED
 
-**0.4.0 ships the SAFE half only (notify); the high-risk silent lock/rollback machinery is DEFERRED to 0.4.x (folded from Pragmatism, required fix).**
+> **Status (2026-07-09): every commit in this sequence has landed and the silent path is LIVE + PROVEN.** The "0.4.0 ships notify-only / silent deferred to 0.4.x" framing below was the pre-OD-1 caution and is **historical** — per OD-1 (owner, 2026-06-24) silent was always the goal, and it now ships as the default (`autoUpdateMode="silent"`, `HODOS_SILENT_AUTOUPDATE` ON). Keep this list as the record of *what was built and in what order*, not as an open plan. The one item not in the original numbering — the two-process-picker seam — was the true last blocker and landed in `ae5beb6` (beta.26).
+
+**(Historical framing, superseded) 0.4.0 ships the SAFE half only (notify); the high-risk silent lock/rollback machinery is DEFERRED to 0.4.x (folded from Pragmatism, required fix).**
 
 **0.4.0 scope (ships):**
 1. **Settings 3-state (no behavior change).** `autoUpdateEnabled` → `updateMode` + **presence-keyed `true→notify` migration** (§F.3) + `version_` decision (OD-3); `AboutSettings` 3-state UI with the **silent option feature-flagged OFF** (§F.4); `useSettings`; `SetUpdateMode`. **Default `notify`.** **`AutoUpdater.h` + `AutoUpdater_mac.mm` edited atomically** (§F.5) with the macOS CI compile gate. *Coordinate §G shared files with the already-merged Mac code first.*
@@ -372,7 +392,9 @@ Each case: action → pass criteria → parity note (how the macOS Sparkle path 
 
 ---
 
-## L. Open decisions for the owner
+## L. Open decisions for the owner — ✅ ALL RESOLVED
+
+> **Status (2026-07-09): every OD below is resolved and the resulting work has shipped.** OD-1 silent = default + LIVE; OD-2 wallet graceful-exit landed (with `synchronous=FULL` restored, `3677583`); OD-3 `version_` NOT bumped (presence-keyed, matches macOS); OD-B1 Hodos drives its own appcast fetch (WinSparkle kept for the EdDSA primitive); OD-4 versioned-folder deferred. Retained for the rationale record.
 
 **OD-1 — ✅ DECIDED: SILENT is the goal (owner, 2026-06-24).**
 The owner wants silent-download-apply-on-relaunch as the default — frequent updates without popup spam is the entire point of the sprint. So silent is **not** deferred or notify-defaulted. Instead, the four §H.6/§H.7 mitigations (post-apply health gate, watchdog auto-revert, signer-continuity auto-degrade, server kill-switch/canary) + the §I commit-7 test gate become the **prerequisites that gate *enabling the silent apply path*** — they are mandatory parts of the silent track, built *with* it. The settings default migrates to `silent` (per F.3); the Windows silent *apply* turns on once those guards land and soak. Notify stays a user-selectable option. *(This reframes the body's pre-OD-1 "notify-only / silent-deferred" language; see the TL;DR Addendum.)*

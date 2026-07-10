@@ -2,6 +2,21 @@
 
 **Created:** 2026-06-01
 **Status:** 🚧 live — refine as research lands
+**Last refreshed:** 2026-07-09
+
+> **What shipped since (2026-07-09):** Latest live = **v0.3.0-beta.26** (LATEST). **A6 (silent
+> auto-update) is DONE + PROVEN LIVE** — Windows silent update lands through the two-process profile
+> picker (beta.25→beta.26 on real hardware); macOS silent proven beta.21→beta.22. The saga is
+> complete: signer-continuity CN gate (beta.23), external rollback-supervisor, picker-gate
+> exact-picker-exit-wait fix (`ae5beb6`, beta.26), `promote.yml` redirect-verify retry hardening,
+> `BUILD_AND_RELEASE` tag-derived version + draft→manual-promote gate. **B3 (bookmarks) DONE**
+> (favicon + delete shipped in beta.23). **B2 (header) DONE** — landed as the React-optimization /
+> header-UX pass, **not** a C++ port. Win10 overlay cluster (F1/F2/F3/F5) fixed in beta.23; global
+> settings across profiles landed beta.23. Profile-picker + per-profile-wallet architecture is
+> **SHELVED** (wallet stays SHARED); same-process picker refactor deferred.
+>
+> **A1/A2/A3/B1 now feed the queued Chromium/CEF rebuild sprint** — see
+> `../0.4.0/CHROMIUM_CEF_SPRINT_KICKOFF.md` for the consolidated plan.
 
 Captured from the planning session. **Part A** = every-build process work (lives in this DevOps
 home). **Part B** = 0.4.0 build-specific features/changes (live in `../0.4.0/`).
@@ -30,15 +45,15 @@ Keystone: **A4 Brave-fork feasibility** gates/colors A1, B1, B2, B4 → it goes 
 | ID | Item | Category | Size | 0.4.0? | Depends on | Research |
 |----|------|----------|------|--------|-----------|----------|
 | **A4** | Brave-fork feasibility (build from Brave's tree?) | research/decision | spike | gating | — | **DEEP (keystone)** |
-| A1 | Self-build CEF binaries (Win/Mac, Linux placeholder) | process | large | process | A4 | deep |
-| A2 | Track latest-stable Chromium/CEF + compat checks | process | med | process | A1 | med |
-| A3 | Post-CEF dependency-bump process | process | med | process | A2 | med |
+| A1 | Self-build CEF binaries (Win/Mac, Linux placeholder) | process | large | ➡️ rebuild sprint | A4 | deep |
+| A2 | Track latest-stable Chromium/CEF + compat checks | process | med | ➡️ rebuild sprint | A1 | med |
+| A3 | Post-CEF dependency-bump process | process | med | ➡️ rebuild sprint | A2 | med |
 | A5 | Two-tier release flow (binary build vs fast bugfix) | process | med | process | A1 | low-med |
-| A6 | True auto-update / Omaha 4 vs Sparkle | process/research | med-lg | maybe later | — | med |
+| A6 | True auto-update / Omaha 4 vs Sparkle | process/research | med-lg | ✅ SHIPPED (silent, live) | — | med |
 | A7 | Test review + strategy (where/platform/naming/trust) | process | large | process | — | semi-deep |
-| B1 | Farbling into Chromium source (Brave-style) | feature/refactor | large | candidate | A4 | deep |
-| B2 | Header → C++ (keep exact CSS) | refactor | large | candidate | assess + research | deep (own session) |
-| B3 | Bookmarks functional | feature | med | likely | — | light (UX) |
+| B1 | Farbling into Chromium source (Brave-style) | feature/refactor | large | ➡️ rebuild sprint | A4 | deep |
+| B2 | Header → C++ (keep exact CSS) | refactor | large | ✅ DONE (React-opt/UX pass, no C++ port) | assess + research | deep (own session) |
+| B3 | Bookmarks functional | feature | med | ✅ DONE (favicon + delete, beta.23) | — | light (UX) |
 | B4 | Extensions + wallet deconfliction | feature | large | candidate | research (untrusted doc) | deep (security) |
 
 ---
@@ -53,9 +68,9 @@ by someone else; user now has a Mac). **Real A1 work:** make the build not take 
 (sccache), remote/cloud execution (GitHub-hosted runners can't do full Chromium builds), reproducible
 runbook. See `CEF_BUILD_RUNBOOK.md`. Widevine premium = separate VMP track (§6 of runbook).
 
-### A2. Track latest-stable Chromium/CEF + compat
+### A2. Track latest-stable Chromium/CEF + compat — ➡️ queued for the Chromium/CEF rebuild sprint
 Currently ~6 months behind. Need: source latest stable, compatibility checks, what breaks, how we'd
-know.
+know. **Now the core of the queued rebuild sprint** — see `../0.4.0/CHROMIUM_CEF_SPRINT_KICKOFF.md`.
 
 ### A3. Post-CEF dependency-bump process
 Other deps pinned to current CEF, not bumped in isolation; after a CEF bump we update the rest.
@@ -66,10 +81,17 @@ Tier 1 = build CEF/Brave binaries (rare, expensive) → `cef-binaries` release. 
 release consuming prebuilt binaries (today's ~35 min CI already does this). Document both; keep the
 fast path fast. `BUILD_AND_RELEASE.md` documents Tier 2 only today.
 
-### A6. True auto-update (vs Sparkle notify-only)
-Sparkle/WinSparkle only *notify*; user must manually trigger. Want silent background updates.
-Research **Omaha 4** (Chromium-native cross-platform updater behind Chrome's silent updates).
-Also informs release **cadence**.
+### A6. True auto-update (vs Sparkle notify-only) — ✅ SHIPPED + PROVEN LIVE (2026-07-09)
+Original ask: Sparkle/WinSparkle only *notify*; user must manually trigger. **Delivered:** full
+**silent** background update on both platforms. macOS silent proven beta.21→beta.22; **Windows
+silent proven beta.25→beta.26 on real hardware, including through the two-process profile picker.**
+The Windows path went custom (WinSparkle has no silent-install-on-quit) with these pieces now live:
+signer-continuity **CN gate** (beta.23), an **external rollback-supervisor**, and the **picker-gate
+exact-picker-exit-wait fix** (`ae5beb6`, beta.26) that unblocked apply on multi-profile installs.
+Release plumbing hardened alongside: `promote.yml` redirect-verify retry loop and
+`BUILD_AND_RELEASE` tag-derived version + draft→manual-promote gate. (Omaha 4 not needed.)
+Full history: `WINDOWS_AUTOUPDATE_PLAN.md`, `AUTO_UPDATE_AND_SIGNING_0_4_0.md`, and the boot-note
+project memory. *Anchors/commit refs unverified this pass — drift-risk.*
 
 ### A7. Comprehensive test review + strategy
 Inventory + gaps + trust/audit problem (growing volume). Today: ~55 Rust (`rust-wallet/tests/`),
@@ -83,20 +105,23 @@ auditability. Research Brave + other BSV BRC-100 devs + industry best practice.
 
 ## Part B — 0.4.0 build-specific (see `../0.4.0/`)
 
-### B1. Farbling into Chromium source (Brave-style)
+### B1. Farbling into Chromium source (Brave-style) — ➡️ queued for the Chromium/CEF rebuild sprint
 Current JS-injection farbling (`cef-native/include/core/FingerprintScript.h` +
 `FingerprintProtection.h`) is **detectable by some sites (breaks logins)** and suspected slow. Prior
 decision: push farbling into Chromium source like Brave. **Tightly coupled to A4** — if we build
-from Brave, this may come largely for free.
+from Brave, this may come largely for free. **This item now rolls into the queued Chromium/CEF
+rebuild sprint** (Blink-patch farbling, owner committed) — see
+`../0.4.0/CHROMIUM_CEF_SPRINT_KICKOFF.md`.
 
-### B2. Header → C++ (keep exact CSS)
-Header loads slowly. Keep exact branding/look. Leaning header-only; overlays stay React. **Own
-dedicated multi-agent planning session** to find the *correct* architecture (do it once). Must also
-measure *why* the header is slow (React render vs CEF subprocess spawn vs IPC warmup) before
-assuming C++ is the fix.
+### B2. Header → C++ (keep exact CSS) — ✅ DONE (as React-opt/header-UX pass, no C++ port)
+Original ask: header loads slowly; leaning header-only C++ rewrite. **Outcome:** measurement showed
+the fix was **not** a C++ port. Delivered as the startup-optimization + header/omnibox UX pass
+(React optimization, ~2s first-paint fix, dead brc100 bindings removed). Header stays React. See
+`../0.4.0/STARTUP_OPTIMIZATION.md` and `../0.4.0/HEADER_UX_PHASE.md`.
 
-### B3. Bookmarks — make functional
-Buttons exist, non-functional today (verify). Research other browsers' bookmark UX.
+### B3. Bookmarks — make functional — ✅ DONE (favicon + delete, beta.23)
+Shipped: functional bookmarks with favicons, delete, first-open behavior, click-outside close.
+(Landed across the header-UX pass and beta.23.)
 
 ### B4. Extensions/plugins (security-focused)
 Untrusted research moved to `../Future-Features/browser-extensions/` (verify every claim against source).

@@ -1,116 +1,81 @@
-# DevOps / CI-CD — Process Home
+# DevOps / CI-CD — Canonical Process Home
 
-**Created:** 2026-06-01
-**Status:** 🚧 Phase 0 — being stood up (docs + research only, no source code)
-**Charter:** the planning session that created this folder is captured in
-`C:\Users\archb\.claude\plans\we-are-working-on-cuddly-pillow.md`
+This folder is the **permanent, canonical home** for Hodos Browser's Process & Procedures (P&P): build, release, signing, auto-update, CEF source-build, dependency verification, and testing strategy. Per `CLAUDE.md` invariant #12, whenever a build/dependency/codec/signing/release/auto-update step surprises us or teaches us something, the lesson is written down **here** and the relevant runbook updated. Treat P&P as code: keep it current or it rots. Sprint docs (e.g. `../0.4.0/`) only point here.
 
-This is the **permanent home** for how Hodos is built, tested, versioned, and shipped — the
-full dev lifecycle: branching/coordination, bug triage, feature intake, refactor planning,
-version bumping, CI gates, release, and post-release. Layer-specific details stay in each layer's
-`CLAUDE.md`; **cross-layer build/release/process concerns live here.**
-
-> This folder is being assembled from machinery that already exists but was scattered at the top
-> level of `development-docs/`. Existing docs are **linked, not yet moved** — physical
-> consolidation is a later dedicated step so no references break.
+**Status (2026-07-09):** Latest shipped = **`v0.3.0-beta.26` (LATEST/promoted, live).** **Silent auto-update is DONE and PROVEN LIVE on both platforms** (Windows beta.25 → beta.26 through the two-process profile picker on real hardware; macOS beta.21 → beta.22). Release is fully automated: a `v*` tag push produces a draft build; a manual promote gate flips it to Latest and publishes the website (appcast/redirects). Version is **tag-derived**.
 
 ---
 
-## Document index (everything in this folder)
+## Document index
 
-> This folder is the **canonical, permanent home** for build/release/update/process docs (per root
-> CLAUDE.md Invariant #12). Layer-specific details stay in each layer's `CLAUDE.md`; cross-layer
-> build/release/process concerns live here. Re-org consolidated here 2026-06-16.
+### Build & Release
+| Doc | Purpose | Status |
+|-----|---------|--------|
+| `BUILD_AND_RELEASE.md` | Canonical build + release guide (tag-derived version, draft → manual-promote gate, branch flow) | Living |
+| `CEF_BUILD_RUNBOOK.md` | Tier-1 custom Chromium/CEF source-build runbook | **Current** — linchpin for the next CEF rebuild sprint |
+| `CEF_VERSION_UPDATE_TRACKER.md` | Institutional-memory log for CEF bumps (toolchain, minos floor, FedCM) | **Current** — CEF 136 baseline; rebuild-target version TBD in the sprint |
+| `DEPENDENCY_VERIFICATION.md` | Timeless per-CEF-bump dependency-verification procedure | **Current** |
+| `ORG_IDENTITY_SIGNING_MIGRATION.md` | Signing-identity migration gate (Win done CN=Marston; macOS individual→org still pending BEFORE first public signed 0.4.0) | **Active gate** |
 
-| Doc | Purpose | State |
-|-----|---------|-------|
-| `README.md` (this file) | Process home + index + terminology + two-tier model + open questions | living |
-| `TRIAGE.md` | Master backlog: every item → category/size/0.4.0/deps/research-depth | 🚧 live |
-| `CEF_BUILD_RUNBOOK.md` | **Tier-1** full CEF/Chromium build (A1/A2/A3/A5): env → depot_tools → automate-git → GN flags → deps → verify. Now includes the merged-in from-source steps + LTS cadence | ✅ WORKING |
-| `CEF_VERSION_UPDATE_TRACKER.md` | CEF version cadence / per-bump changelog | reference (living log) |
-| `BUILD_AND_RELEASE.md` | **Tier-2** app build & release: installers, signing, AV/SmartScreen, release checklist | WORKING (some PLANNED/stale claims now flagged inline — reconciled 2026-06-16) |
-| `AUTO_UPDATE.md` | Auto-update CANONICAL (consolidates old impl-plan + `research/A6_*`) | built; notify-only — silent + Windows EdDSA pending |
-| `DEPENDENCY_VERIFICATION.md` | Procedure: verify Hodos-owned deps on **every CEF bump** | 🆕 procedure |
-| `TESTING.md` | CANONICAL cross-stack testing strategy (the audit↔CI overlap, done once): census, pyramid, CI gating, coverage, anti-gaming, secret-log gate, capped live-e2e harness | 🆕 strategy |
-| `TEST_PLAN.md` | Detailed test plan/catalog + manual QA checklists: ts-sdk vectors to port, Vitest blueprint, e2e/adblock/C++ test inventory, reconciled census. The PLAN that TESTING.md (strategy) points to | ⚠️ inherited (was `UNIT_TESTING.md`), reconciled 2026-06-16, mostly unverified/proposed |
-| `WSL_HYBRID_WORKSPACE.md` | Dev-environment strategy: repo location + WSL/Windows split + GitHub-mediated sync | 📋 planned |
-| `scripts/` | `build_hodos_cef.bat`, `build_hodos_cef_mac.sh` (Tier-1 build scripts) | reference |
-| `research/BRAVE_FORK_FEASIBILITY.md` | Keystone spike — build-from-Brave vs upstream CEF; Widevine path | ✅ done (2026-06-01) — verdict: STAY ON CEF |
-| `research/A1_BUILD_STRATEGY.md` | A1 self-build pain-reduction research (caching / remote build) | research |
-| `research/A6_AUTO_UPDATE.md` | Auto-update research input (folded into `AUTO_UPDATE.md`) | research (retained) |
-| `research/A6_SILENT_UPDATE_TEST_PLAN.md` | Silent-update test plan research input (folded into `AUTO_UPDATE.md`) | research (retained) |
+### Auto-update (silent — SHIPPED + PROVEN LIVE)
+| Doc | Purpose | Status |
+|-----|---------|--------|
+| `AUTO_UPDATE.md` | Canonical cross-platform auto-update P&P | Living — silent DONE + live (Win+Mac) |
+| `WINDOWS_AUTOUPDATE_PLAN.md` | Design-of-record for the Windows silent hybrid updater | **SHIPPED + LIVE** (incl. picker-gate resolution) |
+| `SILENT_UPDATE_TEST_PLAN.md` | Staged de-risking ladder + reusable apply/stage test rigs | Ladder climbed; rigs kept as living regression procedure |
+| `WALLET_GRACEFUL_EXIT_SPEC.md` | Wallet clean-self-exit subsystem (OD-2) underpinning the updater's image-lock release | Implemented/shipped (synchronous=FULL) |
 
-**Related, out of this folder (cross-referenced):**
+### Testing
+| Doc | Purpose | Status |
+|-----|---------|--------|
+| `TESTING.md` | Canonical cross-stack testing strategy (living DevOps-home doc, invariant #12) | **Current** |
+| `TEST_PLAN.md` | Detailed test catalog / manual-QA checklists (companion to TESTING.md) | **Current** |
+| `TRIAGE.md` | Master triage/roadmap for DevOps + 0.4.0 process items (A1–A7, B1–B4) | Living |
 
-| Doc | Purpose |
-|-----|---------|
-| `../../.github/workflows/release.yml` | Tag-triggered release CI (Windows + macOS build/sign/notarize/publish) |
-| `../../scripts/build-release.ps1`, `../../scripts/generate-appcast.py` | Release orchestrator + appcast generator |
-| `../../build-instructions/` | Platform-specific first-time build setup |
-| `../0.4.0/SPRINT_0_4_0_MASTER_PLAN.md` | 0.4.0 master plan (PIPE-* pipeline items, §3 / §7.3 build research) |
+### Research (feeds the queued Chromium/CEF rebuild sprint)
+| Doc | Purpose | Status |
+|-----|---------|--------|
+| `research/BRAVE_FORK_FEASIBILITY.md` | Keystone A4 decision — stay on CEF, farbling via Blink patches in our self-build | **Current** — load-bearing for the rebuild |
+| `research/A1_BUILD_STRATEGY.md` | Build strategy (local + sccache, M1 mac) feeding A1/A2 | **Current** (revisit figures at CEF-branch selection) |
+| `research/A6_AUTO_UPDATE.md` | Auto-update research (EdDSA appcast, security requirements, Velopack rejection) | Reference — Windows went hybrid custom, not WinSparkle-silent |
+| `WSL_HYBRID_WORKSPACE.md` | Future runbook for the Edwin recall workspace | **Planned** (execute post-sprint) |
 
-## Source-of-truth code pointers
-
-- Version sources (5, manual): `frontend/src/components/settings/AboutSettings.tsx` (`APP_VERSION`),
-  `rust-wallet/Cargo.toml`, `cef-native/CMakeLists.txt` (`-DAPP_VERSION`),
-  `installer/hodos-browser.iss`, git tag.
-- Tests (verified 2026-06, see `TESTING.md` §2 / `TEST_PLAN.md`): `rust-wallet/` ~491 (inline + `tests/`),
-  `adblock-engine/` 23, `cef-native/tests/` 39 (GoogleTest, opt-in `-DHODOS_BUILD_TESTS=ON`),
-  `frontend/e2e/` 54 (Playwright), Vitest **0**. ⚠️ Pass-status NOT verified (no recent run on record).
-- Dev launchers: root `dev-wallet.{ps1,sh}`, `dev-adblock.{ps1,sh}`, `cef-native/win_build_run.ps1`,
-  `cef-native/mac_build_run.sh` (all gate on `HODOS_DEV=1`).
+> **Archived (moved to `../0.4.0/archive/`):** the pre-code design + build journals whose subjects have since shipped and stabilized — `AUTOUPDATE_6B_SUPERVISOR_DESIGN.md` (rollback supervisor, live), `AUTOUPDATE_PICKER_GATE_DESIGN.md` (picker-exit-wait fix, shipped `ae5beb6` / proven beta.26), `AUTOUPDATE_SILENT_STATE_WRITER_DESIGN.md` (silent-eligibility writer, flipped ON), `AUTO_UPDATE_AND_SIGNING_0_4_0.md` (2026-06-22 research snapshot, superseded), and `research/A6_SILENT_UPDATE_TEST_PLAN.md` (pre-impl test plan, WinSparkle path dropped). Living behavior for all of these now lives in `AUTO_UPDATE.md` + `WINDOWS_AUTOUPDATE_PLAN.md`.
 
 ---
 
-## Terminology (settle this once)
+## Branch & Remote Workflow
 
-We are a **CEF-based browser that does custom Chromium builds** — not "CEF vs our own Chromium."
-CEF's `automate-git.py` pulls the full Chromium source, applies the CEF embedding layer, and compiles
-`libcef`, which our `cef-native/` shell drives. We self-build for **proprietary codecs**
-(`proprietary_codecs=true ffmpeg_branding=Chrome`) — confirmed in `scripts/build_hodos_cef*.{bat,sh}`.
-Farbling (B1) is a renderer-layer patch that rides on this same build. Extensions (B4) are
-chrome-layer and are NOT unlocked by self-building. See `research/BRAVE_FORK_FEASIBILITY.md`.
+- **`origin` = development** (BSVArchie fork). **ALL code changes land here first.** Flow: feature branch → `origin/staging` → `origin/main`. `staging` = integration + where internal test builds are fetched from; `main` = blessed release-candidate.
+- **`release` = the signed-build remote** (Hodos-Browser org; holds the GitHub signing keys). For a **public** build, push `main` → `release` and run the release workflow there. `release` may be **ahead of** `origin` (release-specific auto-update commits) — tolerated, but **code originates in `origin` first**; `release` only consumes + adds release-specific bits.
+- **Rule:** never author feature code directly on `release`. Internal/beta builds are `0.3.x-beta` and stay private; only the deliberate public release is tagged `0.4.0` and pushed to `release`.
+- *Open question:* whether `staging` stays a separate branch once `main` has CI-gated PRs — for now KEEP it as the integration / internal-beta branch.
 
-## Branch & Remote Workflow (canonical)
+## Two-tier release model
 
-> Mirrored concisely in root `CLAUDE.md → "Branch & Remote Workflow"`.
+1. **Draft build** — a `v*` tag push runs the release workflow and produces a **draft** GitHub release (verified: appcast + BOTH download redirects in a retry loop).
+2. **Manual promote gate** — a deliberate promote flips the draft to **Latest**, publishes the website (appcast / `_redirects` / `index.astro` to hodosbrowser.com via the Cloudflare deploy token), and re-verifies live. Version is **tag-derived** — no hand-edited version strings.
 
-**Remotes:**
-- **`origin`** (`github.com/BSVArchie/Hodos-Browser`, = `personal`) — **development.** ALL code changes land here first.
-- **`release`** (`github.com/Hodos-Browser/Hodos-Browser`) — **the signed-build repo**; GitHub holds the code-signing keys here. The actual public `BUILD_AND_RELEASE` runs here.
+> There is also the deeper **Tier-1 / Tier-2** split: Tier-1 = the (infrequent, hours-long) custom Chromium/CEF **binary** build (`CEF_BUILD_RUNBOOK.md`); Tier-2 = the fast app build that consumes those binaries and produces signed installers (the ~35-min tag-triggered CI). The next sprint exercises Tier-1.
 
-**Flow:**
-1. Author on a **feature branch** in `origin` → merge to **`origin/staging`** (integration; internal test builds are fetched from here) → merge to **`origin/main`** (blessed release-candidate; what `release` pulls from).
-2. **Internal / beta test builds** run the full (eventually new) pipeline but are versioned **`0.3.x-beta`** and stay **private** (fetched locally for testing; NOT the newest GitHub release).
-3. When ready for a **public** release: push `main` → **`release`**, tag it the real version (e.g. `0.4.0`), and run the signed `BUILD_AND_RELEASE` there.
+---
 
-**Rules / notes:**
-- **Code originates in `origin` first**, always. Never author feature code directly on `release`.
-- **`release` may be AHEAD of `origin`** — currently mostly release-specific auto-update commits. That's tolerated. ⚠️ **TODO before executing the new `AUTO_UPDATE.md` plan:** diff `release` vs `origin` for the auto-update code, learn what differs, then re-implement in `origin` (don't fork logic onto `release`).
-- *Open question:* keep `staging` as a separate branch once `main` has CI-gated PRs? For now **keep it** as the integration / internal-beta branch.
+## Open process questions
 
-## The two-tier model (A5 — to be fully documented)
+| Question | Status |
+|----------|--------|
+| **A6 — Silent auto-update** | **SOLVED.** Silent-apply-on-quit shipped + PROVEN LIVE on Windows (through the two-process picker) and macOS. Windows uses a hybrid custom updater (rollback supervisor + CN signer-continuity gate + picker-exit-wait); macOS uses Sparkle. |
+| **Signing-identity migration** | macOS individual → org conversion still pending; a mid-stream identity change forces reinstall, so complete it **BEFORE** the first public signed 0.4.0. Windows already CN=Marston Enterprises. See `ORG_IDENTITY_SIGNING_MIGRATION.md`. |
+| **A1/A2 — CEF self-build** | The 2-week-build pain + latest-stable sourcing + drift detection is the core of the queued Chromium/CEF rebuild sprint. See `../0.4.0/CHROMIUM_CEF_SPRINT_KICKOFF.md`. |
+| `staging` branch longevity | Keep as integration / internal-beta branch for now (revisit once `main` has CI-gated PRs). |
+| Binary-delta updates | Deferred — full-package auto-update is proven live; deltas are a later optimization. |
 
-- **Tier 1 — binary build:** build CEF/Brave Chromium **binaries** (infrequent, expensive, hours).
-  Publish to the `cef-binaries` GitHub release.
-- **Tier 2 — app release:** consume prebuilt binaries; build shell + Rust + frontend; sign; ship.
-  This is what today's ~35 min tag-triggered CI already does — it's the **fast bug-fix path**.
+---
 
-## Open process questions (resolved as research lands)
+## Guiding principle (never regress)
 
-- A1: self-build is mandatory (codecs — settled). Real question: how to make it not take ~2 weeks —
-  caching (sccache), remote/cloud build execution (GitHub-hosted runners can't), reproducible runbook.
-- A2: how to source latest-stable Chromium/CEF + detect what a new version breaks (we are **~12 mo behind**; M136 predates the M138 LTS program — see `CEF_BUILD_RUNBOOK.md` §1)?
-- A3: post-CEF dependency-bump process (deps are pinned to current CEF).
-- A6: Omaha 4 (silent background updates) vs Sparkle (notify-only) — feasible for a small team?
-- A7: where tests run (GitHub pre-build gate / cloud / local), on which platforms, naming conventions.
-
-## Maintenance policy
-
-When a change alters the build, test, version, or release process, update the relevant doc here in
-the **same commit**. Don't let this folder drift from `BUILD_AND_RELEASE.md` or the CI workflow.
+**Auto-update must NEVER force a reinstall.** Verify the REAL N-1 → N update + relaunch before every promote (not proxies). Kill silent drift: pin CI runners/SDKs, guard deploy-target + minos. Known reinstall-forcers = signing-identity migration (hence the gate above). We have restated this repeatedly and regressed it; the silent-update test rigs in `SILENT_UPDATE_TEST_PLAN.md` are the system that makes it repeatable.
 
 ## Linux
 
-Linux is **not a current target**. Placeholders only — keep a Linux column in process tables so the
-eventual port has a home, but no Linux work is scheduled.
+Linux is **not a current target**. Placeholders only — keep a Linux column in process tables so the eventual port has a home, but no Linux work is scheduled.

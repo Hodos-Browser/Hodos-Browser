@@ -112,7 +112,7 @@ Diff CEF's release notes between branches and run the **dependency-verification*
 2. **Farbling patches (B1)** — NEW step once B1 lands. Apply our Blink farbling patches via CEF's
    `cef/patch/patch.cfg` mechanism (add our `.patch` files + register them) so they're applied to the
    Chromium source before compile. The B1 Blink farbling work **rides on this build** — see
-   `../0.4.0/B1-farbling-in-source.md`. Log "same as last build, or with these changes: ___" per build.
+   `../0.4.0/B1-farbling-design.md`. Log "same as last build, or with these changes: ___" per build.
 3. **Extensions** — **N/A on CEF.** Extensions are chrome-layer; self-build does NOT unlock them. Do
    not add extension patches here. (Strategic future item; see `../Future-Features/B4-extensions.md`.)
 4. **Any other custom patches** — list and version them.
@@ -318,9 +318,9 @@ attribution to the About page; consult legal if Hodos grows significantly.
 - [ ] Execute the **M150 LTS** branch move (Step 1) — this is the priority; M136 is past the drift red-line.
 - [ ] A1: stand up the **self-hosted runner / beefy VM + shared sccache** path; evaluate **Siso + a
       third-party REAPI backend** (EngFlow / BuildBuddy / NativeLink) for distributed builds.
-- [ ] B1: farbling patch set + `patch.cfg` integration (own design session — `../0.4.0/B1-farbling-in-source.md`).
+- [ ] B1: farbling patch set + `patch.cfg` integration (own design session — `../0.4.0/B1-farbling-design.md`).
 - [ ] Decide whether premium DRM (VMP) is a product goal (own mini-spike).
 - [ ] Automate the **Step 5.5 build-config / file-manifest drift audit**: a CEF-version-pin–triggered
       `cef-bump-audit` script that diffs the new CEF dist manifest vs our cmake/mac copy-lists +
       `args.gn`, re-applies `cef/patch/` and reports fuzz, emitting a human-review diff. Build it
-      alongside the A1 patch toolchain (`../0.4.0/B1-farbling-in-source.md` / CEF track).
+      alongside the A1 patch toolchain (`../0.4.0/B1-farbling-design.md` / CEF track).

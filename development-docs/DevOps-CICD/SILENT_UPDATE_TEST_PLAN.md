@@ -1,20 +1,45 @@
 # Windows Silent Auto-Update — Test Plan (path to the flag flip)
 
-**Status:** the MECHANISM is complete + flag-gated (`HODOS_SILENT_AUTOUPDATE` OFF). This
-doc is the staged de-risking plan from "code done" to "on for real users." Design +
+> ## ✅ COMPLETE — silent update SHIPPED + LIVE (2026-07-09)
+>
+> All four stages are DONE. The flag is **ON** and silent auto-update is proven live on real
+> hardware: **Windows beta.25 → beta.26** applied silently through the two-process profile
+> picker; **macOS beta.21 → beta.22** applied silently via Sparkle. Latest public release =
+> **v0.3.0-beta.26 (LATEST)**.
+>
+> **The final blocker was the profile picker.** Stage 2 fixed the sole-instance gate to WAIT
+> for the picker to die, but a second root cause surfaced on real hardware: the picker-spawned
+> `--profile=` child still tore down the ~8-process CEF tree while `MaybeApplyStagedUpdate`
+> ran, so the sole-instance count never reached 1 and the apply deferred forever. Fixed by the
+> **exact picker-exit wait** (commit `ae5beb6`, shipped in beta.26): the picker-spawned child
+> waits for the picker process to fully exit before the sole-instance check, so the apply sees
+> count = 1 and proceeds. Proven by real hardware beta.25 → beta.26.
+>
+> The rest of the silent saga also landed: signer-continuity CN gate (beta.23), external
+> rollback-supervisor, promote.yml redirect-verify retry hardening, and BUILD_AND_RELEASE
+> tag-derived version + draft → manual-promote gate.
+>
+> **What's still living below:** the reusable rig table (Stage 1) and the rollback/safety
+> checklist are the **standing regression procedure** — run them before every future
+> update-touching change (e.g. the Chromium/CEF rebuild sprint). The Stage 2–4 narrative is
+> kept as the historical de-risking record.
+
+**Status:** ✅ COMPLETE — mechanism shipped, flag ON, silent live on Windows + macOS. This
+doc is retained as the staged de-risking record + living regression procedure. Design +
 supervisor detail: [`AUTOUPDATE_6B_SUPERVISOR_DESIGN.md`](./AUTOUPDATE_6B_SUPERVISOR_DESIGN.md).
 
 ## The principle (why staged, not "test locally then flip")
 
 Every prior "this should just work" in update-land has bitten this project
 ([[feedback_update_stability_principle]]). A funded user bricked by a bad update is the
-one unrecoverable case. So we de-risk in stages, each cheaper-to-catch than the next:
+one unrecoverable case. So we de-risked in stages, each cheaper-to-catch than the next
+(**all four DONE — see the COMPLETE banner above; silent is live**):
 
 ```
-  1. Local unit + fault-injection rigs   (done, green)   — logic + rollback correctness
-  2. Local REAL-BUILD test  (dev wallet)                 — real bootstrap/Inno/CEF/wallet, test-signed
-  3. Production-signed test (trivial prod wallet)        — real Marston Authenticode + prod EdDSA
-  4. Soak, then flip the default for users               — OWNER decision
+  1. Local unit + fault-injection rigs   (DONE, green)   — logic + rollback correctness
+  2. Local REAL-BUILD test  (dev wallet)  (DONE, green)  — real bootstrap/Inno/CEF/wallet, test-signed
+  3. Production-signed test (trivial prod wallet) (DONE) — real Marston Authenticode + prod EdDSA
+  4. Soak, then flip the default for users (DONE — ON)   — flipped; live beta.25→26 (Win) / beta.21→22 (mac)
 ```
 
 A green stage-1 rig proves the *logic*. It does NOT prove a real signed build works on a
@@ -157,13 +182,15 @@ SmartScreen/Smart App Control reputation, and the prod `%APPDATA%\HodosBrowser\w
 
 ---
 
-## Stage 4 — soak, then flip
+## Stage 4 — soak, then flip — DONE (silent is ON + live)
 
-- Soak stage-3 across several real updates over time; no surprises.
-- Only then set the **default** to silent for users. `HODOS_UPDATE_TEST_SEAM` must be OFF in
-  every shipped build (the CMake config warns loudly if on). This is the OWNER's call, per
-  the update-stability principle — never flip an un-soaked build.
-- Note the four fleet-safety mitigations that gate enabling silent are all in place: post-
+- Soaked across real updates; the **default is now silent** for users. Proven live: Windows
+  beta.25 → beta.26 (silent through the picker), macOS beta.21 → beta.22 (Sparkle). The
+  picker-gate exact-exit-wait (`ae5beb6`) was the last fix required to make the Windows apply
+  fire on multi-profile machines.
+- `HODOS_UPDATE_TEST_SEAM` must remain OFF in every shipped build (the CMake config warns
+  loudly if on).
+- The four fleet-safety mitigations that gate enabling silent are all in place: post-
   apply health gate (6d), watchdog auto-revert (6b RunOnce + 6e in-browser), signer-
   continuity degrade (6c.2), and the kill-switch client (6e.2) — the latter needs its
   server-side `kill-list.json` publishing deployed before it's load-bearing.

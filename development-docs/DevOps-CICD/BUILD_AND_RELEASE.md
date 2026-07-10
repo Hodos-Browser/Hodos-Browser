@@ -1,17 +1,23 @@
 # Hodos Browser — Build & Release Guide
 
 **Created:** 2026-03-20
-**Last Updated:** 2026-07-08
+**Last Updated:** 2026-07-09
 **Purpose:** How to build installers, sign code, ship updates, and manage releases
 
 > **Single source of truth.** This file in `development-docs/` is the canonical build & release guide. Any out-of-tree copies (e.g. older `Marston Enterprises/Hodos/Hodos_CI_CD/` snapshots) are deprecated — edit only this one.
 
 ---
 
-## Current Status (2026-07-08)
+## Current Status (2026-07-09)
 
-**Next release: `v0.3.0-beta.23`** — draft building; awaiting on-hardware gate-test → manual `promote.yml`.
-**Last shipped (promoted): `v0.3.0-beta.22`**
+**Last shipped (promoted): `v0.3.0-beta.26`** — live + marked **Latest**.
+
+> **Silent-update saga is COMPLETE.** Windows SILENT auto-update — including through the two-process
+> profile picker — is DONE and **PROVEN LIVE** (beta.25 → beta.26 silently applied on real hardware;
+> macOS silent proven beta.21 → beta.22). The full arc that got here: signer-continuity **CN gate**
+> (beta.23), external rollback-supervisor, **picker-gate exact-picker-exit-wait** fix (commit
+> `ae5beb6`, beta.26), `promote.yml` redirect-verify retry hardening, and BUILD_AND_RELEASE's
+> tag-derived version + draft→manual-promote gate.
 
 > **What changed since this doc's older sections were written (read this first):**
 > - **Version is now 100% TAG-DERIVED** — no manual `APP_VERSION` edit per release (Step 1 rewritten below).
@@ -20,10 +26,12 @@
 >   with a SHA256SUMS pin of the exact bytes you tested. Steps 5–7 updated accordingly.
 > - **Branch flow:** dev work lands on `origin/<feature>` (e.g. `0.4.0`) → fast-forward `origin/staging`
 >   + `origin/main` → fast-forward `release/staging` + `release/main` → tag on `release` (Steps 2–3).
-> - **Windows silent auto-update** (custom stager, not WinSparkle) shipped in the 0.4.0 line; the
->   Authenticode signer gate compares the **Subject CN** ("Marston Enterprises"), not the leaf
->   thumbprint (Azure Trusted Signing rotates leaves ~every 3 days). Existing clients on a build with
->   the OLD thumbprint gate take one **notify** update to a CN-gate build before silent resumes.
+> - **Windows silent auto-update** (custom stager, not WinSparkle) is DONE + PROVEN LIVE across the 0.4.0
+>   line; the Authenticode signer gate compares the **Subject CN** ("Marston Enterprises"), not the leaf
+>   thumbprint (Azure Trusted Signing rotates leaves ~every 3 days). The two-process profile picker no
+>   longer blocks the silent apply — the picker-spawned child waits for exact picker exit before the
+>   sole-instance check (beta.26). Profile-picker + per-profile-wallet architecture is SHELVED (wallet
+>   stays SHARED); the same-process picker refactor is deferred.
 
 | Component | Status |
 |-----------|--------|
@@ -31,9 +39,9 @@
 | Windows portable zip | WORKING |
 | macOS DMG | WORKING — signed + notarized + stapled in CI; DMG itself notarized + stapled as of beta.10 |
 | GitHub Actions CI/CD | WORKING — tag-triggered, builds both platforms |
-| Website (hodosbrowser.com) | LIVE — download links active for beta.15 |
-| Auto-update (Windows/WinSparkle) | WORKING — verified end-to-end on beta.4 → beta.5 |
-| Auto-update (macOS/Sparkle 2) | **WORKING** — verified end-to-end beta.12 → beta.14 → beta.15. Required: (1) DMG-level notarize+staple (beta.10), (2) deletion of Sparkle's nested XPC services from the framework before signing (beta.12), (3) integer `CFBundleVersion` + dual-field appcast (`sparkle:version` integer for comparison, `sparkle:shortVersionString` for display) (beta.14). On first auto-update, macOS shows a one-time **Privacy & Security → App Management** prompt; users approve once, all subsequent updates silent. |
+| Website (hodosbrowser.com) | LIVE — download links active for beta.26 (Latest) |
+| Auto-update (Windows) | **SILENT — DONE + PROVEN LIVE** (beta.25 → beta.26 applied silently through the two-process profile picker on real hardware). Custom stager (not WinSparkle) with CN signer gate + external rollback-supervisor + picker-exit-wait. Earlier notify path verified beta.4 → beta.5. |
+| Auto-update (macOS/Sparkle 2) | **SILENT — WORKING + PROVEN LIVE** (silent apply verified beta.21 → beta.22). Earlier end-to-end verified beta.12 → beta.14 → beta.15. Required: (1) DMG-level notarize+staple (beta.10), (2) deletion of Sparkle's nested XPC services from the framework before signing (beta.12), (3) integer `CFBundleVersion` + dual-field appcast (`sparkle:version` integer for comparison, `sparkle:shortVersionString` for display) (beta.14). On first auto-update, macOS shows a one-time **Privacy & Security → App Management** prompt; users approve once, all subsequent updates silent. |
 | Appcast generation | INTEGRATED — CI generates appcast.xml as release artifact. macOS items use integer `sparkle:version` + `sparkle:shortVersionString`; Windows items use full version string in `sparkle:version`. |
 | Install directory | `{localappdata}\HodosBrowser` (per-user, no UAC for updates) |
 | AV reputation (SmartScreen) | Microsoft rotated us through multiple intermediate CAs (beta.7=`EOC CA 03`, beta.8=`EOC CA 04`, beta.9-11=`AOC CA 03`, beta.12=`EOC CA 04`, beta.15=`AOC CA 03`). Multiple releases now landing on `AOC CA 03` — reputation should be accumulating against that thumbprint. See §2.5.1. |

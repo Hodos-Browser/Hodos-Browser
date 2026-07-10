@@ -1,11 +1,25 @@
 # Profile Picker — UI Redesign Phase (owner-requested, 2026-07-07)
 
-**Priority:** must land **this session before publish** — the current launch picker "looks
-lazy" and can't be shown to users. Functionality first, but this is a visible-quality gate.
+> **✅ SHIPPED (as of 2026-07-09).** The launcher-window + tile-grid redesign described
+> below landed and is live in the shipped releases (beta.23 → beta.26 LIVE). Relevant
+> commits: `49c7693` (docs), `0a3f4ce` (launcher window + tiles), `5177d61` (bigger logo
+> + gold-bordered tiles), `b1f35af` (final launcher polish), `6d358b8` (close button).
+> This doc is retained as design rationale + record. There is no remaining "before
+> publish" gate — publish already happened. Any further tweaks are cosmetic-only.
+>
+> **Note on the same-process refactor:** the `PROFILE_PICKER_SAME_PROCESS_PLAN.md` work
+> this redesign defers to is now **SHELVED** (owner decision — revisit way down the road
+> with real market feedback; wallet stays SHARED), not merely deferred. As predicted
+> below, making the picker read as a distinct designed launcher window took the pressure
+> off that risky work.
+
+**Original priority (2026-07-07, now satisfied):** land **this session before publish** —
+the current launch picker "looks lazy" and can't be shown to users. Functionality first,
+but this is a visible-quality gate.
 
 **Scope boundary:** this is the **visual redesign of the launch picker window** — it is NOT
-the same-process refactor (that's D1/D2 in `PROFILE_PICKER_SAME_PROCESS_PLAN.md`, still
-deferred). Crucially, these interact: the owner's point is that if the picker looks like a
+the same-process refactor (that's D1/D2 in `PROFILE_PICKER_SAME_PROCESS_PLAN.md`, now
+**SHELVED**). Crucially, these interact: the owner's point is that if the picker looks like a
 **distinct, designed launcher window** (not a full browser window with an empty content
 area), then the current two-process "close → reopen" handoff **feels intentional** rather
 than broken. So this redesign *substantially reduces the pressure* on the risky same-process
@@ -102,6 +116,6 @@ Add a dedicated window-mode render branch (the dropdown branch stays as-is):
 - Regression: normal (non-picker) launch window is unchanged.
 
 ## Non-goals
-- No same-process refactor (still `PROFILE_PICKER_SAME_PROCESS_PLAN.md`).
+- No same-process refactor (`PROFILE_PICKER_SAME_PROCESS_PLAN.md` — now **SHELVED**).
 - No change to profile persistence / `profiles.json`.
 - Don't touch the `!g_picker_mode` window path.

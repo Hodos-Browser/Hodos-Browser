@@ -51,7 +51,7 @@ Track features, fixes, and investigations to research when updating the CEF buil
 - **References:**
   - `cef-native/CMakeLists.txt` (`CMAKE_OSX_DEPLOYMENT_TARGET`), `cef-native/Info.plist` + `cef-native/mac/helper-Info.plist.in` (`LSMinimumSystemVersion`)
   - `.github/workflows/release.yml` — mac build job runner pin + deployment-target flag + the post-build `minos` guard
-  - `development-docs/0.4.0/POST_BETA16_PLAN.md` — Thread 5 (full root-cause + fix)
+  - `development-docs/0.4.0/archive/POST_BETA16_PLAN.md` — Thread 5 (full root-cause + fix)
 - **Added:** 2026-06-26
 
 ### FedCM (Federated Credential Management) Support

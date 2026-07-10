@@ -1,7 +1,25 @@
 # Audit Fix Tracker (0.4.0)
 
-**Created:** 2026-06-09 · **Status:** ✅ Adjudicated — backlog populated (implementation pending)
+**Created:** 2026-06-09 · **Status:** 🚧 Mostly shipped — live security backlog (as of v0.3.0-beta.26, 2026-07-09)
 **Scope:** HelicOps findings we **AGREE** with and intend to fix. Part of the 0.4.0 backlog.
+
+> ### What shipped (reconciliation — 2026-07-09, latest = v0.3.0-beta.26 LATEST/live)
+> - **DONE (7 of 9):** **F1 / F2 / F3** (Wave 0 secret-log deletions, 2026-06-17) + **F5 / F6 / F7 / F9**
+>   (Wave 1 Track A, 2026-06-18) are all landed on `0.4.0` and rode the beta.x release train. **F8** is
+>   **(a)+(b) done** (debug binary + sibling sweep, 2026-06-17); only **F8(c) — the CI grep-gate** against
+>   `log::*`/`std::cout` of crypto material — is **deferred** (to the CI/PIPE-CI track).
+> - **STILL OPEN:** **F4** (systemic `std::sync::Mutex`→`parking_lot` migration to kill the poison-cascade
+>   DoS class, ~253 sites, own kickoff) is **not yet started (☐)**. Follow-ups **FU1** (C++↔Rust
+>   per-launch shared-secret + CORS lockdown, cross-cutting) and **FU2** (route remaining backend-sourced
+>   raw-interpolation sites through `escapeJsonForJs`, low/defense-in-depth) are **open**.
+> - **Blocks public 0.4.0?** The two seed/key-on-disk criticals (F1/F2) and all Highs except F4 shipped, so
+>   **no open item is a release blocker for the beta line.** F4 is a real durable-DoS hardening item but is
+>   defense-in-depth (needs a panic-while-holding-the-guard to trigger) — recommend it lands in the 0.4.0
+>   window but it need not gate the public cut. FU1 pairs with the Q4 CORS lockdown and should ride the same
+>   chunk. Re-triage F4/FU1/FU2 against the upcoming Chromium/CEF rebuild sprint
+>   (`development-docs/0.4.0/CHROMIUM_CEF_SPRINT_KICKOFF.md`).
+> - Section anchors/file:line citations below were current at Wave 0/1 close and have **not** been
+>   re-verified this pass (code drift-risk — trust the closure notes' "corrected" citations over the table).
 
 > Only findings VERIFIED against current source land here (see `README.md` methodology). Each is a
 > real issue we accept. Disputed/false ones go to `HELICOPS_FEEDBACK.md`. Adjudication was run as a

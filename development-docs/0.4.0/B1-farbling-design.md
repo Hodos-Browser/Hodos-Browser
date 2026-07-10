@@ -1,7 +1,7 @@
 # B1 — Farbling Design (Blink patches in our self-built CEF)
 
 **Created:** 2026-06-01 · **Status:** ✅ Design research complete; ready for a build-time spike
-**Depends on:** A1 self-build pipeline (we already have it). **Stub:** `B1-farbling-in-source.md`.
+**Depends on:** A1 self-build pipeline (we already have it). **Stub (archived):** `archive/B1-farbling-in-source.md`.
 **Method:** primary-sourced (CEF patch.cfg/patcher.py, brave-core source, helium/fingerprint-chromium,
 CreepJS, Mozilla MPL docs).
 
