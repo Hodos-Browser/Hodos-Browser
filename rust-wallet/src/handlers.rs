@@ -12964,35 +12964,33 @@ pub async fn do_onchain_backup(
                 //
                 // Verify the specific DB outputs are still unspent before trusting them.
                 let mut db_outputs_valid = true;
-                if let Some(ref pd) = previous_pushdrop {
-                    let spent_url = format!(
-                        "https://api.whatsonchain.com/v1/bsv/main/tx/{}/{}/spent",
-                        pd.0, pd.1
-                    );
-                    match client.get(&spent_url).send().await {
-                        Ok(resp) if resp.status().as_u16() == 200 => {
-                            // Output IS spent on-chain — DB is stale
-                            let spent_body: serde_json::Value = resp.json().await.unwrap_or_default();
-                            let spending_txid = spent_body["txid"].as_str().unwrap_or("unknown");
+                // WS1 c1: authoritative cross-validated spent check (WoC + GorillaPool,
+                // fail-closed) replaces the inline single-WoC 200→spent/404→unspent logic.
+                // Behavior preserved — adopt the successor only on a positive Spent; trust
+                // DB on Unspent/Unknown — plus a GorillaPool contradiction guard.
+                let pushdrop_outpoint = previous_pushdrop.as_ref().map(|pd| (pd.0.clone(), pd.1));
+                if let Some((pd_txid, pd_vout)) = pushdrop_outpoint {
+                    match crate::reconcile::check_outpoint_spent(&client, &pd_txid, pd_vout).await {
+                        crate::reconcile::SpentStatus::Spent { spending_txid } => {
+                            // Output IS spent on-chain — DB is stale.
                             log::warn!("   ⚠️  DB backup PushDrop {}:{} is SPENT on-chain by {} — DB is stale",
-                                &pd.0[..16.min(pd.0.len())], pd.1, &spending_txid[..16.min(spending_txid.len())]);
+                                &pd_txid[..16.min(pd_txid.len())], pd_vout, &spending_txid[..16.min(spending_txid.len())]);
                             db_outputs_valid = false;
 
                             // Try to adopt the spending tx as the current backup
-                            // (it likely has the new PushDrop at vout 0 and marker at vout 1)
+                            // (it likely has the new PushDrop at vout 0 and marker at vout 1).
                             log::info!("   🔍 Attempting to adopt spending tx {} as current backup", &spending_txid[..16.min(spending_txid.len())]);
-                            adopt_onchain_backup(&client, spending_txid, &mut previous_pushdrop, &mut previous_marker).await;
+                            adopt_onchain_backup(&client, &spending_txid, &mut previous_pushdrop, &mut previous_marker).await;
                         }
-                        Ok(resp) if resp.status().as_u16() == 404 => {
-                            // Output is unspent — DB is correct, WoC address query was likely a network blip
+                        crate::reconcile::SpentStatus::Unspent => {
+                            // Output is unspent — DB is correct.
                             log::info!("   ✅ DB backup PushDrop {}:{} confirmed unspent — trusting DB",
-                                &pd.0[..16.min(pd.0.len())], pd.1);
+                                &pd_txid[..16.min(pd_txid.len())], pd_vout);
                         }
-                        Ok(resp) => {
-                            log::warn!("   ⚠️  Unexpected WoC spent-check status {} — trusting DB", resp.status());
-                        }
-                        Err(e) => {
-                            log::warn!("   ⚠️  WoC spent-check failed: {} — trusting DB", e);
+                        crate::reconcile::SpentStatus::Unknown => {
+                            // Inconclusive (no explicit signal or a flat contradiction) — fail closed.
+                            log::warn!("   ⚠️  DB backup PushDrop {}:{} spent-check inconclusive — trusting DB",
+                                &pd_txid[..16.min(pd_txid.len())], pd_vout);
                         }
                     }
                 }

@@ -331,5 +331,18 @@ for any completed tx) → separate ticket [`FOLLOWUP_REORG_HANDLING.md`](./FOLLO
 + `replace_proof`/`mark_failed`; no crypto/schema change). Out of this sprint. **(Owner-aligned.)**
 **C. Frontend one-retry hook on `ERR_RECONCILED_RETRY`** + inline "Updating your balance…" status
 + short success toast, non-blocking. The sprint's only non-Rust change. **(Owner: yes.)**
+**D. Spent-check is explicit-only; absence never acts (owner, 2026-07-10, during c1 build).**
+Refines D5/§5#2 and softens the review's D-P1: to conclude `Spent`, **one** provider's
+*explicit* positive is enough (a lagging node yields a false *unspent*, never a false *spent*;
+downstream fetch+txid-verify+1-conf+merkle+derivation gates catch any fabricated spend). The
+second provider only ever *vetoes* — a flat contradiction (one explicit spent, one explicit
+unspent) → `Unknown` (hold/retry). Crucially a **`404` / down endpoint / timeout / unparseable
+reply is `NoSignal`** — it can neither block a mark nor be read as unspent (this overrides D5's
+`WoC /spent 404 → Unspent`). **Consequence:** WoC's `/spent` reports unspent as `404` → `NoSignal`,
+so WoC can never emit `ExplicitUnspent`; only GorillaPool's explicit `200`-unspent body can, and
+`SpentStatus::Unspent` is GorillaPool-driven — **c3's "positive-unspent required to insert" gate
+(step 4d) must account for this asymmetry.** Implemented in `reconcile::check_outpoint_spent`
+(c1) with an exhaustive decision-table unit-test suite.
+
 Minor: gap-scan `back`/`gap_limit` defaults (propose back=`gap_limit`=20, cap 50) — widening
 `back` mitigates D-K3.
