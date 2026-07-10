@@ -50,10 +50,22 @@
 //! > endpoint degrades safely to WoC-only — which the owner accepts. Confirm the
 //! > exact shape against the diverged dev wallet before c4 ships.
 
+use ripemd::Ripemd160;
+use rusqlite::Connection;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+
+use crate::crypto::brc42::derive_child_public_key;
+use crate::database::AddressRepository;
+use crate::recovery;
 
 const WOC_BASE: &str = "https://api.whatsonchain.com/v1/bsv/main";
 const GORILLAPOOL_BASE: &str = "https://ordinals.gorillapool.io/api";
+
+/// Gap-scan window around `MAX(addresses.index)` for the uncached path (design §1
+/// step 4b / §9 minor). Symmetric `back`/`gap_limit`, capped by guardrail #9 (≤50).
+const GAP_BACK: i32 = 20;
+const GAP_LIMIT: i32 = 20;
 
 /// Authoritative result of a single-outpoint spent check. `Unknown` is the
 /// fail-closed value: the caller must treat it as "do nothing".
@@ -246,6 +258,153 @@ pub async fn check_outpoint_spent(
     status
 }
 
+// ---------------------------------------------------------------------------
+// c2 — recover_change_index
+//
+// Given the locking script of one output of a spending tx `Y`, find the wallet
+// self-derivation index `N` such that BRC-42 `"2-receive address-{N}"` reproduces
+// that exact script — i.e. an index we hold the signable key for. Returns `None`
+// for anything that isn't a verifiable BRC-42 self output (foreign, BIP32, master,
+// backup), so a caller can only ever insert change it can actually spend.
+//
+// Two candidate sources, ONE authoritative verify:
+//   - Cache-first: the change address is normally already in `addresses`
+//     (`handlers.rs:5529`), so an exact P2PKH match proposes candidate `N` fast —
+//     even when `N` is far from `MAX(index)`. But the `addresses` table has NO
+//     derivation-method column, so a matched `index>=0` row could be BIP32, not
+//     BRC-42 (review D-K1). The match is therefore only a *candidate*.
+//   - Gap-scan: bounded window around `MAX(index)` for uncached indices.
+//
+// Every candidate is verified by re-deriving `"2-receive address-{N}"` and
+// byte-comparing to the target (guardrail #4). `index<0` (master −1 / external −2 /
+// backup −3) is skipped structurally; the `"1-wallet-backup"` invoice can never be
+// produced by this scan, so backup outputs never match.
+// ---------------------------------------------------------------------------
+
+/// P2PKH locking script for a pubkey: `OP_DUP OP_HASH160 <hash160> OP_EQUALVERIFY
+/// OP_CHECKSIG`. `hash160 = RIPEMD160(SHA256(pubkey))` — the canonical derivation,
+/// byte-identical to `recovery::address_to_p2pkh_script(pubkey_to_address(pubkey))`
+/// and to a real on-chain P2PKH output.
+fn pubkey_to_p2pkh_script(pubkey: &[u8]) -> Vec<u8> {
+    let sha = Sha256::digest(pubkey);
+    let hash160 = Ripemd160::digest(sha);
+    let mut script = Vec::with_capacity(25);
+    script.extend_from_slice(&[0x76, 0xa9, 0x14]); // OP_DUP OP_HASH160 PUSH(20)
+    script.extend_from_slice(&hash160);
+    script.extend_from_slice(&[0x88, 0xac]); // OP_EQUALVERIFY OP_CHECKSIG
+    script
+}
+
+/// Derive the P2PKH script for self-derivation index `N` (`"2-receive address-{N}"`).
+/// `None` on any derivation error (index is then simply skipped).
+fn derive_receive_p2pkh_script(
+    master_privkey: &[u8],
+    master_pubkey: &[u8],
+    index: i32,
+) -> Option<Vec<u8>> {
+    if index < 0 {
+        return None; // never derive a receive script for special indices
+    }
+    let invoice = format!("2-receive address-{}", index);
+    let pubkey = derive_child_public_key(master_privkey, master_pubkey, &invoice).ok()?;
+    Some(pubkey_to_p2pkh_script(&pubkey))
+}
+
+/// True iff BRC-42 `"2-receive address-{index}"` reproduces `target_script` exactly.
+/// The authoritative ownership+method check (guardrail #4).
+fn verify_receive_index(
+    master_privkey: &[u8],
+    master_pubkey: &[u8],
+    index: i32,
+    target_script: &[u8],
+) -> bool {
+    derive_receive_p2pkh_script(master_privkey, master_pubkey, index)
+        .map(|s| s == target_script)
+        .unwrap_or(false)
+}
+
+/// Bounded gap-scan around `max_index` (design §1 step 4b). Returns the first index
+/// in `[max−back, max+gap_limit]` (clamped at 0) whose BRC-42 derivation verifies.
+fn gap_scan_receive_index(
+    master_privkey: &[u8],
+    master_pubkey: &[u8],
+    max_index: i32,
+    target_script: &[u8],
+    back: i32,
+    gap_limit: i32,
+) -> Option<i32> {
+    let lo = (max_index - back).max(0);
+    let hi = max_index + gap_limit;
+    (lo..=hi).find(|&i| verify_receive_index(master_privkey, master_pubkey, i, target_script))
+}
+
+/// Pure decision core: verify cache candidates first, else bounded gap-scan.
+/// Separated from the DB reads so the whole rule (incl. the D-K1 wrong-key guard)
+/// is unit-testable without a database.
+fn recover_change_index_pure(
+    master_privkey: &[u8],
+    master_pubkey: &[u8],
+    cache_candidates: &[i32],
+    max_index: i32,
+    target_script: &[u8],
+) -> Option<i32> {
+    // 1) Verify each cache-proposed candidate (skip special indices defensively).
+    for &n in cache_candidates {
+        if n >= 0 && verify_receive_index(master_privkey, master_pubkey, n, target_script) {
+            return Some(n);
+        }
+    }
+    // 2) Uncached — bounded gap-scan.
+    gap_scan_receive_index(
+        master_privkey,
+        master_pubkey,
+        max_index,
+        target_script,
+        GAP_BACK,
+        GAP_LIMIT,
+    )
+}
+
+/// Find the verified BRC-42 self index that owns `target_script`, or `None`.
+///
+/// Behavior-neutral (c2): unwired — c3 calls this to recover the spending tx's
+/// wallet-owned change. Caller supplies the master keypair (fetched once via
+/// `get_master_{private,public}_key_from_db`) and holds the DB lock for `conn`.
+pub fn recover_change_index(
+    conn: &Connection,
+    master_privkey: &[u8],
+    master_pubkey: &[u8],
+    wallet_id: i64,
+    target_script: &[u8],
+) -> Option<i32> {
+    let addr_repo = AddressRepository::new(conn);
+
+    // Cache-first: index>=0 rows whose stored-address P2PKH byte-equals the target.
+    // (A match is only a candidate — it might be a BIP32 row; the pure core re-verifies.)
+    let cache_candidates: Vec<i32> = addr_repo
+        .get_all_by_wallet(wallet_id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| a.index >= 0)
+        .filter(|a| {
+            recovery::address_to_p2pkh_script(&a.address)
+                .map(|s| s == target_script)
+                .unwrap_or(false)
+        })
+        .map(|a| a.index)
+        .collect();
+
+    let max_index = addr_repo.get_max_index(wallet_id).ok().flatten().unwrap_or(-1);
+
+    recover_change_index_pure(
+        master_privkey,
+        master_pubkey,
+        &cache_candidates,
+        max_index,
+        target_script,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::ProviderSignal::*;
@@ -426,5 +585,112 @@ mod tests {
     fn gp_unrecognized_shape_is_no_signal() {
         assert_eq!(parse_gorillapool_spend_body(200, &json!({ "foo": "bar" })), NoSignal);
         assert_eq!(parse_gorillapool_spend_body(200, &json!([1, 2, 3])), NoSignal);
+    }
+
+    // --- c2: recover_change_index (derivation-verify + gap-scan) ---
+
+    /// Deterministic master keypair from a fixed 32-byte scalar.
+    fn master_keys(seed: u8) -> (Vec<u8>, Vec<u8>) {
+        use secp256k1::{PublicKey, Secp256k1, SecretKey};
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_slice(&[seed; 32]).expect("valid scalar");
+        let pk = PublicKey::from_secret_key(&secp, &sk);
+        (sk.secret_bytes().to_vec(), pk.serialize().to_vec())
+    }
+
+    /// The real change-output script for BRC-42 self index `n` under these keys.
+    fn receive_script(priv_: &[u8], pub_: &[u8], n: i32) -> Vec<u8> {
+        derive_receive_p2pkh_script(priv_, pub_, n).expect("derivable")
+    }
+
+    #[test]
+    fn derive_skips_negative_indices() {
+        let (pk, pub_) = master_keys(0x11);
+        assert!(derive_receive_p2pkh_script(&pk, &pub_, -1).is_none());
+        assert!(derive_receive_p2pkh_script(&pk, &pub_, -3).is_none());
+        assert!(derive_receive_p2pkh_script(&pk, &pub_, 0).is_some());
+    }
+
+    #[test]
+    fn verify_true_for_matching_index_only() {
+        let (pk, pub_) = master_keys(0x11);
+        let target = receive_script(&pk, &pub_, 7);
+        assert!(verify_receive_index(&pk, &pub_, 7, &target));
+        assert!(!verify_receive_index(&pk, &pub_, 6, &target)); // wrong index
+        assert!(!verify_receive_index(&pk, &pub_, 8, &target));
+    }
+
+    #[test]
+    fn verify_false_for_wrong_master_key() {
+        // The D-K1 crux at the crypto level: a script derived under a DIFFERENT key
+        // (e.g. a BIP32 row / foreign key) never re-derives under our BRC-42 key.
+        let (pk_a, pub_a) = master_keys(0x11);
+        let (pk_b, pub_b) = master_keys(0x22);
+        let target = receive_script(&pk_a, &pub_a, 5);
+        assert!(!verify_receive_index(&pk_b, &pub_b, 5, &target));
+    }
+
+    #[test]
+    fn recover_returns_verified_cache_candidate() {
+        let (pk, pub_) = master_keys(0x11);
+        let target = receive_script(&pk, &pub_, 5);
+        assert_eq!(
+            recover_change_index_pure(&pk, &pub_, &[5], 100, &target),
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn recover_rejects_bip32_cache_poison() {
+        // Cache proposes index 3, but the target is NOT the BRC-42 derivation of 3
+        // (it's a foreign key's script — models a BIP32 index>=0 row). Verify fails,
+        // gap-scan finds nothing → None. Never inserts an unsignable output.
+        let (pk, pub_) = master_keys(0x11);
+        let (pk_foreign, pub_foreign) = master_keys(0x22);
+        let foreign_target = receive_script(&pk_foreign, &pub_foreign, 3);
+        assert_eq!(
+            recover_change_index_pure(&pk, &pub_, &[3], 10, &foreign_target),
+            None
+        );
+    }
+
+    #[test]
+    fn recover_gap_scans_when_uncached() {
+        let (pk, pub_) = master_keys(0x11);
+        let target = receive_script(&pk, &pub_, 8);
+        // No cache, index 8 within [10-20, 10+20].
+        assert_eq!(recover_change_index_pure(&pk, &pub_, &[], 10, &target), Some(8));
+    }
+
+    #[test]
+    fn recover_misses_far_uncached_index() {
+        let (pk, pub_) = master_keys(0x11);
+        let target = receive_script(&pk, &pub_, 100);
+        // No cache, index 100 far outside the window around max=10 → miss.
+        assert_eq!(recover_change_index_pure(&pk, &pub_, &[], 10, &target), None);
+        // ...but the cache rescues a far index.
+        assert_eq!(
+            recover_change_index_pure(&pk, &pub_, &[100], 10, &target),
+            Some(100)
+        );
+    }
+
+    #[test]
+    fn recover_none_for_foreign_script() {
+        let (pk, pub_) = master_keys(0x11);
+        let (pk_foreign, pub_foreign) = master_keys(0x33);
+        let foreign = receive_script(&pk_foreign, &pub_foreign, 2);
+        assert_eq!(recover_change_index_pure(&pk, &pub_, &[], 10, &foreign), None);
+    }
+
+    #[test]
+    fn recover_skips_negative_cache_candidates() {
+        let (pk, pub_) = master_keys(0x11);
+        let target = receive_script(&pk, &pub_, 5);
+        // −3 (backup) proposed alongside 5 — must be skipped, 5 wins.
+        assert_eq!(
+            recover_change_index_pure(&pk, &pub_, &[-3, 5], 100, &target),
+            Some(5)
+        );
     }
 }
