@@ -33,6 +33,16 @@ question is: **why did adopt_onchain_backup / c5b NOT heal it today?**
 
 ## FULL ANALYSIS — READ-ONLY. Do NOT run another backup. Do NOT mutate the wallet. It may be funded.
 
+**Operational pre-steps (owner shuts the app down first):**
+- The owner will **cleanly quit** the Mac app (Cmd+Q / normal quit, NOT force-kill) so the WAL checkpoints
+  into `wallet.db` and the logs flush. **Do NOT relaunch the app** — a relaunch restarts the monitor,
+  which can mutate the very state we're photographing, and may rotate the log.
+- **Copy the forensic files aside and analyze the COPIES** — never touch the live files:
+  - `cp ~/Library/Application Support/HodosBrowser/wallet/wallet.db* <scratch>/` (grab `-wal`/`-shm` too if
+    present; after a clean quit there should just be `wallet.db`).
+  - `cp ~/Library/Application Support/HodosBrowser/logs/wallet_rCURRENT.log <scratch>/`.
+  - Open the DB copy with `sqlite3` in read-only mode. Zero writes to anything under HodosBrowser/.
+
 1. **Pull `origin/0.4.0`** (this note + current code).
 2. **Today's failed attempt** — in `wallet_rCURRENT.log`, find the manual "Backup Now" run(s). Capture
    verbatim: the exact **outpoint/txid it tried to spend**, the error string, and any `adopt` / `Step 1.5`
