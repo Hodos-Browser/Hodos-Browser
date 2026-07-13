@@ -365,7 +365,7 @@ fn derive_brc42_address(
 }
 
 /// Convert public key to Bitcoin address
-fn pubkey_to_address(pubkey_bytes: &[u8]) -> Result<String, rusqlite::Error> {
+pub fn pubkey_to_address(pubkey_bytes: &[u8]) -> Result<String, rusqlite::Error> {
     // Hash public key: SHA256 then RIPEMD160
     let sha256_hash = Sha256::digest(pubkey_bytes);
     let ripemd160_hash = Ripemd160::digest(&sha256_hash);

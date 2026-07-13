@@ -168,9 +168,11 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
     Ok(())
 }
 
-/// Recover a failed transaction that was actually mined
-fn recover_transaction(state: &web::Data<AppState>, txid: &str, proven_tx_id: i64, height: u32) {
-    if let Ok(db) = state.database.lock() {
+/// Recover a failed transaction that was actually mined. Returns `true` iff the
+/// recovery transaction committed (callers that must know — e.g. reconcile's promotion
+/// path — rely on this; the Monitor callers ignore it).
+fn recover_transaction(state: &AppState, txid: &str, proven_tx_id: i64, height: u32) -> bool {
+    let committed = if let Ok(db) = state.database.lock() {
         let conn = db.connection();
         let short_txid = &txid[..txid.len().min(16)];
 
@@ -180,14 +182,14 @@ fn recover_transaction(state: &web::Data<AppState>, txid: &str, proven_tx_id: i6
         // best-effort sub-step handling is preserved; any early `return` rolls back.
         let tx = match conn.unchecked_transaction() {
             Ok(t) => t,
-            Err(e) => { warn!("   ⚠️ Failed to begin recovery txn for {}: {}", short_txid, e); return; }
+            Err(e) => { warn!("   ⚠️ Failed to begin recovery txn for {}: {}", short_txid, e); return false; }
         };
 
         // Update transaction status to completed
         let tx_repo = TransactionRepository::new(&tx);
         if let Err(e) = tx_repo.update_broadcast_status(txid, "confirmed") {
             warn!("   ⚠️ Failed to recover tx {}: {}", short_txid, e);
-            return;
+            return false;
         }
         if let Err(e) = tx_repo.update_confirmations(txid, 1, Some(height)) {
             warn!("   ⚠️ Failed to update confirmations for {}: {}", short_txid, e);
@@ -265,13 +267,16 @@ fn recover_transaction(state: &web::Data<AppState>, txid: &str, proven_tx_id: i6
         // Only log success if the txn actually committed — on commit failure the
         // recovery rolled back (heals next cycle), so don't claim "recovered".
         match tx.commit() {
-            Ok(()) => info!("   ✅ Recovered tx {} → completed (proof at height {})", short_txid, height),
-            Err(e) => warn!("   ⚠️ Recovery txn for {} failed to commit — rolled back, will retry next cycle: {}", short_txid, e),
+            Ok(()) => { info!("   ✅ Recovered tx {} → completed (proof at height {})", short_txid, height); true }
+            Err(e) => { warn!("   ⚠️ Recovery txn for {} failed to commit — rolled back, will retry next cycle: {}", short_txid, e); false }
         }
-    }
+    } else {
+        false
+    };
 
-    // Invalidate balance cache since status changed
+    // Invalidate balance cache since status may have changed.
     state.balance_cache.invalidate();
+    committed
 }
 
 /// Create proven_txs record from ARC merkle path and recover the transaction
@@ -311,4 +316,87 @@ fn create_proven_tx_and_recover(
 
     recover_transaction(state, txid, proven_tx_id, height);
     Ok(())
+}
+
+/// Promote a mined-but-not-`completed` LOCAL transaction to completed, reusing the
+/// UnFail recovery path.
+///
+/// Used by spent-input reconcile (WS1). When a phantom's successor `Y` is one of our
+/// OWN transactions still marked `failed` (a broadcast false-negative aged past the
+/// UnFail window — the exact origin of the phantom), marking the phantom
+/// `spent_by = Y.id` would be reverted within ~60s by `TaskReviewStatus` step 3, which
+/// restores the inputs of `failed` txs. Promoting `Y` first — using the merkle proof
+/// reconcile already fetched and validated — re-marks Y's inputs spent (including the
+/// phantom) AND fixes Y's status at the root, so the mark sticks.
+///
+/// Returns `true` iff it promoted a local tx. `false` means `txid` is foreign (not in
+/// our `transactions` table) or already `completed`; the caller then marks explicitly.
+///
+/// `tsc` is the TSC merkle proof (as from `services.get_merkle_proof_tsc`), already
+/// validated by `verify_tsc_proof_against_block`; `raw` is the txid-verified raw tx.
+/// How the reconcile caller should treat the mark of the input a successor spent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PromoteOutcome {
+    /// Local tx promoted + committed → `recover_transaction` already marked its inputs
+    /// spent (including the phantom) and set it `completed`; the caller credits the mark.
+    Promoted,
+    /// Foreign tx, or already `completed` → the caller marks the input explicitly
+    /// (`spent_by` stays NULL for a foreign txid, or the tx is already completed — both
+    /// step-3-revert-safe).
+    NotApplicable,
+    /// Local tx that could NOT be committed (serialize/insert/commit rolled back) → the
+    /// caller must NOT mark the input: explicit-marking a still-non-`completed` local tx
+    /// could be reverted by `TaskReviewStatus` step 3. Leave the phantom for the next pass.
+    TransientFailed,
+}
+
+pub(crate) fn promote_proven_local_tx(
+    state: &AppState,
+    txid: &str,
+    tsc: &serde_json::Value,
+    raw: &[u8],
+) -> PromoteOutcome {
+    let short = &txid[..txid.len().min(16)];
+
+    // Act only on a LOCAL, non-completed tx (foreign / already-completed → caller marks explicitly).
+    let promotable = match state.database.lock() {
+        Ok(db) => {
+            let tx_repo = TransactionRepository::new(db.connection());
+            matches!(
+                tx_repo.get_transaction_status(txid),
+                Ok(Some(status)) if status != crate::action_storage::TransactionStatus::Completed
+            )
+        }
+        Err(_) => false,
+    };
+    if !promotable {
+        return PromoteOutcome::NotApplicable;
+    }
+
+    let height = tsc.get("height").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let tx_index = tsc.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+    let merkle_path_bytes = match serde_json::to_vec(tsc) {
+        Ok(b) => b,
+        Err(e) => { warn!("   ⚠️ reconcile-promote: serialize TSC for {} failed: {}", short, e); return PromoteOutcome::TransientFailed; }
+    };
+
+    let proven_tx_id = {
+        let db = match state.database.lock() {
+            Ok(d) => d,
+            Err(_) => return PromoteOutcome::TransientFailed,
+        };
+        let proven_tx_repo = ProvenTxRepository::new(db.connection());
+        match proven_tx_repo.insert_or_get(txid, height, tx_index, &merkle_path_bytes, raw, "", "") {
+            Ok(id) => id,
+            Err(e) => { warn!("   ⚠️ reconcile-promote: insert proven_tx for {} failed: {}", short, e); return PromoteOutcome::TransientFailed; }
+        }
+    }; // lock dropped before recover_transaction re-locks
+
+    if recover_transaction(state, txid, proven_tx_id, height) {
+        info!("   ⤴️  reconcile-promote: {} was mined but not completed → recovered to completed", short);
+        PromoteOutcome::Promoted
+    } else {
+        // Rolled back — leave it non-completed for a later reconcile pass.
+        PromoteOutcome::TransientFailed
+    }
 }

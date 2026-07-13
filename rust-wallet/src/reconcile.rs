@@ -259,6 +259,62 @@ pub async fn check_outpoint_spent(
 }
 
 // ---------------------------------------------------------------------------
+// Positive-unspent probe (WhatsOnChain-primary) + address derivation.
+//
+// The spent-check above answers "is this SPENT (and by whom)?" — WoC's `/spent`
+// endpoint does that cleanly (200 = spent + successor). It cannot cleanly answer
+// the reverse "is this definitely UNSPENT?" (a 404 there is ambiguous). For the
+// insert direction we need an AFFIRMATIVE unspent signal, so we ask WoC for the
+// address's live UTXO list and confirm the outpoint appears in it. That is a
+// positive listing, not an inference from absence — it keeps the "never infer
+// unspent from a 404" guardrail intact while making WhatsOnChain (primary) the
+// authority for the unspent direction. Reuses the proven `utxo_fetcher` path
+// (correct `/address/{addr}/unspent/all` endpoint + retry/backoff).
+// ---------------------------------------------------------------------------
+
+/// Result of a positive-unspent probe. Only `Present` (the outpoint is an
+/// affirmatively-listed live UTXO) authorizes an insert; `Absent`/`Error` do not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnspentProbe {
+    /// The outpoint appears in WhatsOnChain's unspent-UTXO list → safe to insert.
+    Present,
+    /// Not listed (spent, or indexer lag). Never treated as unspent.
+    Absent,
+    /// Network / parse error — inconclusive.
+    Error,
+}
+
+/// Affirmatively confirm `(txid, vout)` at `address` is unspent via WhatsOnChain's
+/// address UTXO list. Pure network read; no DB, no locks.
+pub async fn check_outpoint_unspent(address: &str, txid: &str, vout: u32) -> UnspentProbe {
+    // `address_index` is only a tag on the returned UTXOs; irrelevant to presence.
+    match crate::utxo_fetcher::fetch_utxos_for_address(address, 0).await {
+        Ok(utxos) => {
+            if utxos
+                .iter()
+                .any(|u| u.txid.eq_ignore_ascii_case(txid) && u.vout == vout)
+            {
+                UnspentProbe::Present
+            } else {
+                UnspentProbe::Absent
+            }
+        }
+        Err(_) => UnspentProbe::Error,
+    }
+}
+
+/// Derive the receive **address** string for self index `N` (`"2-receive address-{N}"`),
+/// the key the unspent probe queries. `None` for `index<0` or any derivation error.
+pub fn derive_receive_address(master_privkey: &[u8], master_pubkey: &[u8], index: i32) -> Option<String> {
+    if index < 0 {
+        return None;
+    }
+    let invoice = format!("2-receive address-{}", index);
+    let pubkey = derive_child_public_key(master_privkey, master_pubkey, &invoice).ok()?;
+    recovery::pubkey_to_address(&pubkey).ok()
+}
+
+// ---------------------------------------------------------------------------
 // c2 — recover_change_index
 //
 // Given the locking script of one output of a spending tx `Y`, find the wallet
