@@ -48,6 +48,7 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
   });
   const [errors, setErrors] = useState<Partial<TransactionData>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [reconcileNotice, setReconcileNotice] = useState(false);
   const [usdInput, setUsdInput] = useState('');
 
   // Autocomplete state
@@ -271,23 +272,51 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
     try { (window as any).cefMessage?.send('wallet_prevent_close', []); } catch {}
     try {
       const satoshiAmount = Math.round(parseFloat(formData.amount) * 100000000);
-      let result: TransactionResponse;
-      if (isPaymail) {
-        const resp = await walletFetch('/wallet/paymail/send', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ paymail: formData.recipient.trim(), amount_satoshis: satoshiAmount }),
-        });
-        result = await resp.json();
-      } else if (isPeerPay) {
-        const resp = await walletFetch('/wallet/peerpay/send', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ recipient_identity_key: formData.recipient.trim(), amount_satoshis: satoshiAmount }),
-        });
-        result = await resp.json();
-      } else {
-        result = await sendTransaction({ ...formData, amount: (satoshiAmount / 100000000).toFixed(8) });
+
+      // A single send attempt (paymail / PeerPay / standard route).
+      const doSend = async (): Promise<TransactionResponse> => {
+        if (isPaymail) {
+          const resp = await walletFetch('/wallet/paymail/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ paymail: formData.recipient.trim(), amount_satoshis: satoshiAmount }),
+          });
+          return await resp.json();
+        } else if (isPeerPay) {
+          const resp = await walletFetch('/wallet/peerpay/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ recipient_identity_key: formData.recipient.trim(), amount_satoshis: satoshiAmount }),
+          });
+          return await resp.json();
+        }
+        return await sendTransaction({ ...formData, amount: (satoshiAmount / 100000000).toFixed(8) });
+      };
+
+      let result: TransactionResponse = await doSend();
+
+      // WS1: the wallet backend detected a stale/spent input still in the DB, reconciled
+      // it (marked the phantom spent + recovered any change), and asked us to retry ONCE.
+      // Re-run the same send — the phantom is now excluded and recovered change is spendable.
+      if ((result as any)?.code === 'ERR_RECONCILED_RETRY') {
+        setReconcileNotice(true);
+        try {
+          result = await doSend();
+        } finally {
+          setReconcileNotice(false);
+        }
+      }
+
+      // Retried at most once: if it STILL comes back with the retry code, present a clear
+      // terminal message instead of the internal "retrying…" text.
+      if ((result as any)?.code === 'ERR_RECONCILED_RETRY') {
+        result = {
+          ...result,
+          success: false,
+          status: 'failed',
+          error: 'Could not complete the send — please try again.',
+          message: 'Could not complete the send — please try again.',
+        } as TransactionResponse;
       }
       if (result.success === false || result.status === 'failed') {
         try { onTransactionCreated(result); } catch {}
@@ -533,6 +562,23 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
             disabled={isSubmitting || isLoading}
           />
         </div>
+
+        {reconcileNotice && (
+          <div
+            className="reconcile-notice"
+            style={{
+              margin: '8px 0',
+              padding: '8px 12px',
+              borderRadius: '6px',
+              background: 'rgba(166,124,0,0.12)',
+              color: '#a67c00',
+              fontSize: '13px',
+              textAlign: 'center',
+            }}
+          >
+            Updating your balance and retrying…
+          </div>
+        )}
 
         <HodosButton
           type="submit"
