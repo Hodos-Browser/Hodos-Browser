@@ -1,65 +1,63 @@
-# ⚠️ MAC BACKUP FAILURE — INVESTIGATION HANDOFF (for Mac Claude)
+# ⚠️ MAC BACKUP FAILURE — FULL ANALYSIS HANDOFF (for Mac Claude)
 
-**Created 2026-07-13 by Windows Claude. Priority: HIGH. This gates the 0.4.0 clean build.**
+**Created 2026-07-13 by Windows Claude. REVISED after owner found the real timeline. Priority: HIGH.
+Gates whether reconcile ships in the 0.4.0 clean build.**
 
-## What happened (owner report)
+## Corrected framing — this is very likely NOT our July regression
 
-- Owner installed the **beta.27 draft** on his **Mac** (installed app → production data dir
-  `~/Library/Application Support/HodosBrowser/`, NOT the Dev dir).
-- The Mac wallet's on-chain backup was **healthy / working before** beta.27 — nothing wrong with it.
-- Owner clicked **manual "Backup Now"** (wallet dashboard) **after** the reconcile/c5b hardening was
-  installed → the backup **FAILED and is now broken**.
-- Owner ran it **again** → it did **NOT** recover. The backup is stuck broken.
-- Owner's framing (correct): a broken backup = a broken wallet. This is a regression, most likely
-  introduced by our reconcile work.
+Owner installed beta.27 on the **Mac** (installed app → `~/Library/Application Support/HodosBrowser/`),
+clicked manual **"Backup Now"** → it FAILED; re-run did NOT recover. Initially suspected our reconcile/
+c5b hardening. **But the owner then found the last good on-chain backup is from ~April 15, 2026** — i.e.
+the backup has been broken for ~3 MONTHS, since well before any July reconcile work (and before the
+May-7 shutdown-backup removal). **Our July changes cannot have started an April break.**
 
-## Prime suspect: our reconcile/c5b changes to the backup path (on branch `0.4.0`, head ~`b42edb0`)
+This lines up with a known event: the **Backup double-spend cascade incident of 2026-04-11**. Read it:
+- `development-docs/Final-MVP-Sprint/backup-double-spend-incident-2026-04-11.md`
+- Related commits: `8dd3d2c` (incident report), `3a6fd2e` (three backup pipeline bugs from the incident),
+  `9ba106b` (disabled TaskValidateUtxos + reconcile — false external-spend bug), `1fa686f` (chain-truth
+  hardening: backup adoption / double-spend verification).
+- Backup system reference: `development-docs/ONCHAIN_BACKUP_SYSTEM.md`,
+  `development-docs/Wallet-Hardening/ONCHAIN_BACKUP_REVIEW.md`.
 
-These are the changes we made to the backup path — grep/verify current locations, they may have moved:
-- **c5b Part 1 — backup-token phantom SWEEP** in `adopt_onchain_backup` (`rust-wallet/src/handlers.rs`,
-  new "Step 1.5" ~line 12813, BEFORE the hash-check). Gathers all spendable `1-wallet-backup` outpoints
-  via `get_spendable_by_derivation("1"/"marker")`; **gate: if len > 2** → `utxo_selection_lock` +
-  `reconcile_spent_inputs(state, backup_outpoints)`. Intended to no-op on a healthy wallet (len==2).
-- **c5b Part 2 — funding reconcile at the backup broadcast-failure arm** (~`handlers.rs:13476`, after
-  `rollback_backup` restores inputs) → `reconcile_missing_inputs(state, &e, funding_outpoints)`.
-- **c1 — `do_onchain_backup` adopt-branch repointed to `reconcile::check_outpoint_spent`**
-  (`rust-wallet/src/reconcile.rs`) — WoC-primary spent probe; GorillaPool route is known-dead.
-- `do_onchain_backup` at `handlers.rs:12688/12789`; endpoint `POST /wallet/backup/onchain`.
+## The likely diagnosis (owner's insight — confirm it)
 
-**Leading hypotheses to confirm/refute (do NOT assume):**
-1. The sweep fired (len > 2 on this wallet unexpectedly) and `reconcile_spent_inputs` **wrongly marked
-   the CURRENT good backup token spent** → wallet now has no valid backup → every backup fails. (The
-   prior adversarial review claimed the sweep "can't harm the current valid backup" — that guarantee may
-   be FALSE; the owner's real result trumps the review.)
-2. `check_outpoint_spent` returned a **false Spent** on the current backup token/marker → adopt logic broke.
-3. The reconcile probe threw / errored and **aborted the backup** (network probe failure propagating).
-4. `utxo_selection_lock` held/contended.
+**Backup-token DIVERGENCE.** The owner observes: the **pre-incident on-chain backup token is still
+UNSPENT**, but the wallet's manual backup is **trying to spend something ELSE** (and failing). So the
+DB's notion of "the current backup token" (the tip each new backup spends from) drifted away from the
+chain during the April incident. The DB tries to spend a token that is spent/nonexistent → backup fails
+every time. **This is the exact divergence class the reconcile sprint was meant to HEAL** — so the sharp
+question is: **why did adopt_onchain_backup / c5b NOT heal it today?**
 
-## What Mac Claude must do (READ-ONLY — do NOT run another backup or mutate the wallet)
+**Logs note:** April logs are long gone (rotation). But TODAY's manual-backup attempt IS still in
+`~/Library/Application Support/HodosBrowser/logs/wallet_rCURRENT.log` — capture it.
 
-1. **Pull `origin/0.4.0`** to get this note + the current code.
-2. **Grab the wallet log** and paste the relevant lines verbatim into the findings file (below):
-   `~/Library/Application Support/HodosBrowser/logs/wallet_rCURRENT.log`
-   Look around the two backup attempts — grep for: `backup`, `ERROR`, `reconcile`, `sweep`, `Step 1.5`,
-   `check_outpoint`, `adopt`, `mark_spent`, `utxo_selection_lock`, `Insufficient`, `Missing inputs`,
-   `ARC`, `broadcast`. Include the exact failure/error string(s).
-3. **Read-only inspect the wallet DB** (`~/Library/Application Support/HodosBrowser/wallet/wallet.db`,
-   use `sqlite3` read-only — do NOT write):
-   - List all `1-wallet-backup` outputs (token + `-3` marker): their `spendable` flag, txid:vout,
-     `spending_description`, `spent_by`, satoshis.
-   - Cross-check each against chain: WoC `/tx/{txid}` (exists?) and the spent probe — is the CURRENT
-     backup token actually spent on-chain, or is it unspent but wrongly `spendable=0` in the DB?
-   - Determine: **did our sweep mark a GOOD (chain-unspent) backup token/marker as spent?** That would
-     be the smoking gun.
-   - How many spendable `1-wallet-backup` outpoints exist (was the `> 2` gate tripped)?
-4. Note the wallet's balance + whether it's unlocked (rule out the mundane insufficient-funds / locked
-   / hash-unchanged causes).
+## FULL ANALYSIS — READ-ONLY. Do NOT run another backup. Do NOT mutate the wallet. It may be funded.
+
+1. **Pull `origin/0.4.0`** (this note + current code).
+2. **Today's failed attempt** — in `wallet_rCURRENT.log`, find the manual "Backup Now" run(s). Capture
+   verbatim: the exact **outpoint/txid it tried to spend**, the error string, and any `adopt` / `Step 1.5`
+   / `sweep` / `reconcile` / `check_outpoint` / `mark_spent` / `Missing inputs` / `Insufficient` lines.
+3. **DB backup-token state** (`~/Library/Application Support/HodosBrowser/wallet/wallet.db`, `sqlite3`
+   READ-ONLY): list ALL `1-wallet-backup` outputs ever recorded (token + `-3` marker) — txid:vout,
+   `spendable`, `spent_by`, `spending_description`, satoshis, created order. Identify which one the DB
+   currently treats as the live tip.
+4. **Chain truth:** for each backup token in the DB history, WoC `/tx/{txid}` (exists?) + spent status.
+   Identify the backup token that is actually **UNSPENT on chain** (owner believes it's the ~April
+   pre-incident one). Confirm.
+5. **Divergence map:** DB "current" backup tip vs chain "last unspent" backup token. Where did they fork?
+   **What is the DB trying to spend, and why is it invalid** (spent / never existed)? — this answers the
+   owner's "what is it trying to spend then?"
+6. **Why didn't adopt heal it?** Trace `adopt_onchain_backup` / `do_onchain_backup` (`rust-wallet/src/
+   handlers.rs` ~12688/12789/12813) for THIS wallet's state: does it DETECT the divergence and try to
+   adopt the on-chain unspent token? If yes → why did the subsequent build/broadcast still fail? If no →
+   what condition gated adopt OFF for this state? **This is the key shipping question** for whether
+   reconcile/adopt actually fixes real divergence.
 
 ## Report back
 
 Write findings to `development-docs/Wallet-Hardening/MAC_BACKUP_FAILURE_FINDINGS.md` and **push to
-`origin/0.4.0`**. Include: the verbatim log lines, the DB backup-token state vs chain, which hypothesis
-the evidence supports, and whether our c5b sweep/reconcile is confirmed as the cause. Windows Claude will
-read it and design the fix.
+`origin/0.4.0`**. Include: today's attempted-spend outpoint + exact error, the full DB backup-token
+history, which token is chain-unspent, the divergence fork point, and the answer to "why adopt didn't
+heal." Windows Claude will read it and design the fix.
 
-**Do not attempt a fix on the Mac. Diagnose only. Do not run more backups (may further perturb state).**
+**Diagnose only. No fixes, no backups, no writes — a real/funded wallet in a fragile diverged state.**
