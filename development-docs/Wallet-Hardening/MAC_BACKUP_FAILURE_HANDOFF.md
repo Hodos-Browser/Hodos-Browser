@@ -31,6 +31,39 @@ question is: **why did adopt_onchain_backup / c5b NOT heal it today?**
 **Logs note:** April logs are long gone (rotation). But TODAY's manual-backup attempt IS still in
 `~/Library/Application Support/HodosBrowser/logs/wallet_rCURRENT.log` — capture it.
 
+## ⚠️ UPDATE — our c5b sweep may have made it WORSE today (decisive checks below)
+
+A 5-agent code hunt (`wf_7fc42299-61c`) found a REAL, code-grounded path where the **c5b Step 1.5 sweep**
+(`rust-wallet/src/handlers.rs:12827-12850`, gate `backup_outpoints.len() > 2` at :12841) can PERMANENTLY
+mark a *good* backup token `spendable=0` **before broadcast**, with **no self-heal** to undo it (the
+broadcast-failure reconcile only heals *funding* outpoints, never the token/marker — `:13535-13547`).
+That cleanly explains "ran it again → did not recover." So **two things may BOTH be true**: the root
+divergence is pre-existing (April), AND running "Backup Now" under c5b today added a *new* permanent
+corruption. Test it decisively:
+
+**1. Did the sweep even run?** grep `wallet_rCURRENT.log` for: `🧹 c5b backup-sweep: N spendable backup outputs`
+- **Absent** → sweep never fired (gate ≤ 2) → our new pre-broadcast code is exonerated; cause is mundane
+  (insufficient funds / wallet locked / hash-unchanged / network). Report the actual final error string.
+- **Present** → the sweep ran. Then grep for `check_outpoint_spent <curr-token-txid>:0 → Spent { ... }
+  (woc=ExplicitSpent, gp=NoSignal)` and `✅ reconcile: marked <curr-token>:0 spent by <Y>`.
+
+**2. DB smoking gun (decisive):**
+```sql
+SELECT txid, vout, spendable, spent_by, spending_description, satoshis
+FROM outputs WHERE derivation_prefix='1-wallet-backup';
+```
+- A row `spendable=0, spent_by=NULL, spending_description=<Y>` **while WoC `/tx/{txid}/{vout}/spent` shows
+  that outpoint UNSPENT** = the sweep **killed a good token** (H1/H3 confirmed — our regression).
+- A row `spendable=1` that WoC reports **SPENT** = the sweep left a spent phantom selectable (H2).
+- Cross-check EVERY `1-wallet-backup` txid:vout against WoC → classify each as good-but-killed vs
+  spent-but-trusted.
+
+**3. Final error string:** `Insufficient funds` → H3; `Missing inputs`/`double spend` → H1/H2 (build picked
+a spent input); generic `Broadcast failed` → check which input was selected.
+
+Report which arm fired + the full DB-vs-chain classification. This decides whether it's our c5b sweep or a
+mundane cause, and validates the fix.
+
 ## FULL ANALYSIS — READ-ONLY. Do NOT run another backup. Do NOT mutate the wallet. It may be funded.
 
 **Operational pre-steps (owner shuts the app down first):**
