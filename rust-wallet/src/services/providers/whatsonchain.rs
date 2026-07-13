@@ -147,17 +147,17 @@ impl IndexerProvider for WhatsOnChainProvider {
     }
 
     async fn outspend(&self, txid: &str, vout: u32) -> Result<OutspendStatus, IndexerError> {
-        // WoC: 404 = spent (or doesn't exist), 200 with {"spent": bool} → status.
-        // Per the existing certificate_handlers.rs:2982 pattern, treat 404 as Spent.
+        // WoC `/tx/{txid}/outspend/{vout}`: 200 `{"spent":bool}` → status. A 404 is AMBIGUOUS
+        // (spent OR the tx/output doesn't exist), so treat it as Unspent (FAIL-CLOSED) — never
+        // claim Spent without proof. The old `404 → Spent` was fail-open and could mark good
+        // UTXOs spent. For an authoritative spent-check use `reconcile::check_outpoint_spent`,
+        // which cross-validates the correct `/tx/{txid}/{vout}/spent` endpoint across providers.
         match self
             .get_json(&format!("/tx/{}/outspend/{}", txid, vout))
             .await
         {
             Ok(json) => Ok(parse_outspend(json)),
-            Err(IndexerError::NotFound) => Ok(OutspendStatus::Spent {
-                spending_txid: String::new(), // WoC 404 doesn't tell us who spent it.
-                spending_vin: None,
-            }),
+            Err(IndexerError::NotFound) => Ok(OutspendStatus::Unspent),
             Err(e) => Err(e),
         }
     }
