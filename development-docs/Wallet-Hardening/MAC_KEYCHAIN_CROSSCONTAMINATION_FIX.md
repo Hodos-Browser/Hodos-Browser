@@ -119,9 +119,9 @@ These funds were recovered on 2026-07-14 via a cross-key sweep (see "Fund Recove
 
 ### On-Chain Backup
 
-The existing on-chain backup token (tx8, `7855796d`, April 15) is **valid** — created before the June 25 contamination. However, it is **stale** and does not reflect activity since April. A new backup should be created after recovery.
+The existing on-chain backup token (tx8, `7855796d`, April 15) was **valid** — created before the June 25 contamination, but stale. A fresh backup was created successfully on 2026-07-14 after recovery.
 
-The failed July backup attempts were never broadcast. The failed tx9 from April is a separate BEEF/broadcast issue unrelated to this bug.
+The failed tx9 (`76c47e92`, April 15) was verified to have **correct production-key signatures** — not a wrong-key issue. It was a broadcast failure, likely due to pre-resilience broadcast infrastructure (fixed in commit `63cda01` on April 17). Dead record in DB, no impact.
 
 ### Affected Date Range
 
@@ -168,7 +168,7 @@ The DPAPI architecture stores secrets **per-database** (the blob is in the DB co
 | Sweep dev-keyed funds | Done | 12,496,323 sats swept to prod index 0 (tx `9b3bef7a`) |
 | Remove sweep endpoint | Done | One-time handler + route removed after use |
 | Create fresh backup | Done | Backup successful after sweep — wallet fully operational |
-| tx9 BEEF issue | Not a bug | April timing issue: backup attempted 2 min after prior tx, before confirmation. Unrelated to Keychain |
+| tx9 (`76c47e92`) | Not a Keychain issue | April 15 failed backup — signatures verified correct (production keys). Broadcast failure, likely pre-resilience infrastructure issue (fixed in `63cda01` on April 17). Dead record in DB, no impact |
 | Keep `test_self_derivation_consistency` | Recommended | Useful regression test in `brc42.rs` |
 
 ---

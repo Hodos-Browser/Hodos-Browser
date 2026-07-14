@@ -6,12 +6,12 @@
 
 ## TWO DISTINCT FAILURE MODES IDENTIFIED
 
-The investigation found **two separate bugs**, not one:
+The investigation found **one root cause** (Keychain cross-contamination) and one historical broadcast failure:
 
 | Failure | Tx | Date | Root Cause | Status |
 |---------|-----|------|-----------|--------|
-| **July 6+ backups** | `1b26b63b`, `64d9366e` | July 2026 | **KEY DERIVATION BUG** — wallet signs funding UTXO with the wrong key | **ROOT CAUSE FOUND** |
-| **Original tx9** | `76c47e92` | April 2026 | BEEF/broadcast layer issue — raw tx is cryptographically valid | Separate issue, unresolved |
+| **July 6+ backups** | `1b26b63b`, `64d9366e` | July 2026 | **KEYCHAIN CROSS-CONTAMINATION** — dev mnemonic overwrote production in Keychain, wallet signed with wrong key | **RESOLVED** — see `MAC_KEYCHAIN_CROSSCONTAMINATION_FIX.md` |
+| **tx9** | `76c47e92` | April 2026 | Broadcast infrastructure failure — signatures verified correct (production keys). Likely fixed by `63cda01` (broadcast resilience, April 17) | **Not a bug** — dead DB record, no impact |
 
 ---
 
