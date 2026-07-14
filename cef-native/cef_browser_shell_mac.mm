@@ -23,6 +23,7 @@
 #include "include/handlers/simple_render_process_handler.h"
 #include "include/handlers/simple_app.h"
 #include "include/core/AppPaths.h"
+#include "include/core/PortConfig.h"
 #include "include/handlers/my_overlay_render_handler.h"
 #include "include/wrapper/cef_library_loader.h"
 #include "OverlayHelpers_mac.h"
@@ -5410,6 +5411,8 @@ int main(int argc, char* argv[]) {
         // Remote debugging port: 9222 for Default profile, disabled for others
         // (avoids port conflict when multiple instances run simultaneously)
         settings.remote_debugging_port = (profileId == "Default") ? 9222 : 0;
+        if (hodos::IsDevEnv() && settings.remote_debugging_port != 0)
+            settings.remote_debugging_port += 100;
 
         LOG_INFO("Cache path: " + cache_path);
         LOG_INFO("Root cache path: " + cache_path);
@@ -5598,7 +5601,7 @@ int main(int argc, char* argv[]) {
         // HistoryManager is currently Windows-only (uses SQLite with Windows APIs)
         LOG_INFO("🔧 HistoryManager not implemented on macOS yet");
 
-        if (!g_picker_mode) {
+        if (!g_picker_mode && !hodos::IsDevEnv()) {
             auto& settings = SettingsManager::GetInstance();
             auto browserSettings = settings.GetBrowserSettings();
             std::string appVersion = APP_VERSION;
@@ -5630,6 +5633,8 @@ int main(int argc, char* argv[]) {
 
             LOG_INFO("Auto-updater initialized (version=" + appVersion +
                      ", mode=" + browserSettings.autoUpdateMode + ")");
+        } else if (hodos::IsDevEnv()) {
+            LOG_INFO("Auto-updater skipped (dev build)");
         }
 
         LOG_INFO("🚀 Entering CEF message loop...");

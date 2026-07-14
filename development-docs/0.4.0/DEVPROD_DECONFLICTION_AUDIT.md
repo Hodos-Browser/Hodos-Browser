@@ -81,10 +81,10 @@ Windows counterpart: `AutoUpdater::Initialize` (`cef_browser_shell.cpp:5238-5254
 
 | # | Gap | Blast | Status | Owner |
 |---|---|---|---|---|
-| C1 | Leaked `HODOS_DEV` flips prod → Dev namespace | Critical | ✅ **Mode-B env safeguard IMPLEMENTED** (force-prod scrub, Rust `main.rs` + C++ `AppPaths.h`, Rust compiles); pubkey-*check* SHELVED by owner. ⏳ Mac verify (mac shell scrub) | Win done; Mac verifies |
-| C2 | Launcher kills prod by image name | Critical | ✅ Win fixed + validated; ⏳ Mac verify | Win done; Mac verifies |
-| H1 | macOS Sparkle ungated in dev | High | Open | Mac |
-| M1 | macOS debug port 9222 not dev-gated | Medium | Open | Mac |
+| C1 | Leaked `HODOS_DEV` flips prod → Dev namespace | Critical | ✅ **Mode-B env safeguard IMPLEMENTED** (force-prod scrub, Rust `main.rs` + C++ `AppPaths.h`); pubkey-*check* SHELVED by owner. ✅ Mac code-review verified (fork): `EnforceDevSafeguard` at `:5213` → `unsetenv` → `posix_spawn` inherits scrubbed env. Runtime deferred to next installed build (current `/Applications` binary predates safeguard) | Win done; Mac verified (code) |
+| C2 | Launcher kills prod by image name | Critical | ✅ Win fixed + validated; ✅ Mac runtime-verified: `pgrep -f "$DEV_BUNDLE"` matched 0 processes while installed app running | Win done; Mac verified |
+| H1 | macOS Sparkle ungated in dev | High | ✅ Implemented: `!hodos::IsDevEnv()` gate at `cef_browser_shell_mac.mm:5601`, compiled. Dev builds skip Sparkle init entirely | Mac done |
+| M1 | macOS debug port 9222 not dev-gated | Medium | ✅ Implemented: `+100` offset at `cef_browser_shell_mac.mm:5414` mirroring Windows pattern, compiled. Dev Default=9322, prod=9222 | Mac done |
 | L1 | Staging mutex not namespaced | Low | ✅ Fixed — namespaced via `AppPaths::GetUpdateStagingMutexNameW()` (kept, not removed; still compiled-off — future-safe to enable) | Win |
 | L2 | Update-helper hardcodes ports | Low | Open (benign — helper only runs for a prod install; left per owner) | Win |
 | L3 | Comment/doc drift | Low | ✅ Fixed — interceptor comments + kickoff-doc corrected | Win |
