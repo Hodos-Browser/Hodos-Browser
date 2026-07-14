@@ -135,8 +135,17 @@ inline std::wstring GetInstanceMutexNameW() {
 }
 #endif
 
-/// Safeguard: if running from a dev build directory, require HODOS_DEV=1.
-/// The installed app runs from Program Files / app bundle, so this won't trigger for users.
+/// Dev/prod deconfliction guard. Call FIRST in main(), before any GetAppDirName()/
+/// hodos::IsDevEnv() read (the latter caches on first call). Two rules:
+///  1. A dev BUILD (running from build/bin/...) MUST have HODOS_DEV=1, or it would
+///     silently hit the PRODUCTION data directory — return false (caller exits).
+///  2. HODOS_DEV=1 is ONLY legitimate from a dev-build path. If an installed or
+///     portable (non-dev-build) binary is launched with a stray HODOS_DEV=1 — e.g. a
+///     developer left it set in their user environment — scrub it so GetAppDirName()/
+///     IsDevEnv() AND every child process that inherits this environment (the wallet
+///     + adblock daemons, CEF subprocesses) resolve to the PRODUCTION namespace,
+///     never dev data. Closes the installed-app AND portable-anywhere flip in one
+///     rule without needing to know where prod is installed (dev/prod audit, C1/Mode-B).
 /// Returns true if safe to proceed, false if the process should exit.
 inline bool EnforceDevSafeguard(const std::string& exe_path) {
     bool is_dev_build = (exe_path.find("build\\bin\\Release") != std::string::npos)
@@ -144,10 +153,30 @@ inline bool EnforceDevSafeguard(const std::string& exe_path) {
                      || (exe_path.find("build\\bin\\Debug") != std::string::npos)
                      || (exe_path.find("build/bin/Debug") != std::string::npos)
                      || (exe_path.find("build/bin/HodosBrowser") != std::string::npos);
-    if (!is_dev_build) return true;
-
     const char* dev = std::getenv("HODOS_DEV");
-    if (dev && std::string(dev) == "1") return true;
+    const bool dev_flag = (dev && std::string(dev) == "1");
+
+    if (!is_dev_build) {
+        // Rule 2 (Mode-B): a stray HODOS_DEV=1 on an installed/portable binary must
+        // NOT flip it into the dev namespace. Scrub it (updates getenv AND, on UCRT,
+        // the environment block that child processes inherit) and continue in prod.
+        if (dev_flag) {
+            std::cerr << "========================================================" << std::endl;
+            std::cerr << "  DEV/PROD GUARD: HODOS_DEV=1 is set but this is NOT a dev" << std::endl;
+            std::cerr << "  build. Ignoring the stray flag and using the PRODUCTION" << std::endl;
+            std::cerr << "  namespace so the installed app never opens dev data." << std::endl;
+            std::cerr << "========================================================" << std::endl;
+#ifdef _WIN32
+            _putenv_s("HODOS_DEV", "");
+#else
+            unsetenv("HODOS_DEV");
+#endif
+        }
+        return true;
+    }
+
+    // Rule 1: dev build — require the flag, else refuse (would corrupt prod data).
+    if (dev_flag) return true;
 
     std::cerr << "========================================================" << std::endl;
     std::cerr << "  DEV SAFEGUARD: HODOS_DEV=1 is not set!" << std::endl;

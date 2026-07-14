@@ -172,8 +172,20 @@ fn init_logging() -> flexi_logger::LoggerHandle {
         .expect("flexi_logger: failed to start")
 }
 
-/// Safeguard: if running from a cargo build directory (dev build), require HODOS_DEV=1.
-/// Installed app runs from a different path, so this check won't trigger for real users.
+/// Dev/prod deconfliction guard — runs FIRST in main(), before any HODOS_DEV read,
+/// so any correction takes effect everywhere downstream (`app_dir_name`,
+/// `wallet_port`, `keychain_service` all re-read the env var each call). Two rules:
+///
+///  1. A dev BUILD (running from `target/{release,debug}`) MUST have HODOS_DEV=1,
+///     or it would silently hit the PRODUCTION data directory — refuse.
+///  2. HODOS_DEV=1 is ONLY legitimate from a dev-build path. If an installed or
+///     portable (non-dev-build) binary is launched with a stray HODOS_DEV=1 — e.g.
+///     a developer left it set in their shell/user environment — scrub it so this
+///     process (and any child that inherits its env) uses the PRODUCTION namespace
+///     instead of silently opening the DEV wallet. This is the "namespace-flip"
+///     defense from the dev/prod deconfliction audit (gap C1/Mode-B); it closes the
+///     installed-app AND portable-anywhere case in one rule without needing to know
+///     where prod is installed.
 fn enforce_dev_safeguard() {
     let exe = std::env::current_exe().unwrap_or_default();
     let exe_str = exe.to_string_lossy();
@@ -181,7 +193,10 @@ fn enforce_dev_safeguard() {
         || exe_str.contains("target\\debug")
         || exe_str.contains("target/release")
         || exe_str.contains("target/debug");
-    if is_dev_build && std::env::var("HODOS_DEV").as_deref() != Ok("1") {
+    let dev_flag = std::env::var("HODOS_DEV").as_deref() == Ok("1");
+
+    // Rule 1: dev build without the flag → refuse (would corrupt prod data).
+    if is_dev_build && !dev_flag {
         eprintln!("========================================================");
         eprintln!("  DEV SAFEGUARD: HODOS_DEV=1 is not set!");
         eprintln!("  Running a dev build without it would use the");
@@ -192,6 +207,17 @@ fn enforce_dev_safeguard() {
         eprintln!("    Mac/Linux:  ./dev-wallet.sh");
         eprintln!("========================================================");
         std::process::exit(1);
+    }
+
+    // Rule 2 (Mode-B): stray HODOS_DEV on a non-dev-build binary → force prod.
+    if !is_dev_build && dev_flag {
+        eprintln!("========================================================");
+        eprintln!("  DEV/PROD GUARD: HODOS_DEV=1 is set but this is NOT a dev");
+        eprintln!("  build ({}).", exe_str);
+        eprintln!("  Ignoring the stray flag and using the PRODUCTION namespace");
+        eprintln!("  so the installed wallet never opens dev data.");
+        eprintln!("========================================================");
+        std::env::remove_var("HODOS_DEV");
     }
 }
 

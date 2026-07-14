@@ -1,6 +1,10 @@
-# C1 — Startup master-pubkey check (design v2, owner-gated)
+# C1 — Startup master-pubkey check (design v2)
 
-**Status:** DESIGN ONLY. No code. Touches the signing/startup path → owner sign-off + adversarial review required before any implementation (CLAUDE.md inv #8, #2, #3).
+**Status (2026-07-14): SHELVED — NOT to be built.** Owner decided against the key-*check*: it's insurance, not a fix; the source bug (shared macOS Keychain slot) is fixed at the source (`a85985f`) and benefit to non-dev users is ~nil, not worth a high-risk money/signing-path change. We *prevent* the wrong storage spot (the **Mode-B env safeguard**, §5 — implemented) rather than *detect* a wrong key. This doc is retained for the record and in case we ever want a low-risk log-only tripwire. Everything below is the (unbuilt) design.
+
+---
+
+**Original status:** DESIGN ONLY. No code. Touches the signing/startup path → owner sign-off + adversarial review required before any implementation (CLAUDE.md inv #8, #2, #3).
 
 **v2 (2026-07-14):** revised after a 5-lens adversarial review (`wf_01d524e9-807`). Review verdict: core mechanism **sound and non-circular** (validated against real code); five design-changing corrections folded in below — the largest being **gate at the DB chokepoint, not the HTTP handlers** (Option A as originally written *leaked* through the Monitor's autonomous signing).
 

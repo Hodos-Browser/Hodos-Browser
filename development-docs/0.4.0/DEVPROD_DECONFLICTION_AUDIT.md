@@ -1,6 +1,11 @@
 # Dev / Prod Deconfliction — Full Audit (2026-07-14)
 
-**Status:** C2 (launcher-kill) FIXED on Windows launchers; mac launcher fix written, needs Mac runtime-verify. C1 (startup pubkey-check) in design + adversarial review, owner-gated. H1/M1/L1–L3 tracked below.
+**Status:** C2 (launcher-kill) FIXED all 3 launchers (mac needs runtime-verify). C1: owner **dropped the startup pubkey-check** (see decision below) and approved the **Mode-B env safeguard**, now IMPLEMENTED (force-prod scrub in both layers). H1/M1/L1–L3 tracked below.
+
+## Owner decisions (2026-07-14)
+- **Storage model confirmed:** the machine's DPAPI (Windows) / Keychain (macOS) is *at-rest convenience encryption of the mnemonic, bound to the OS login* (same pattern as Chrome/Brave "Safe Storage") — NOT identity, NOT a machine lock. The wallet is fully portable: the **mnemonic** recovers it on any machine; the **encrypted export** (`wallet_export`, AES-256-GCM under a password, includes the seed) imports anywhere; even a raw `wallet.db` carries the PIN-encrypted seed (usable elsewhere with the PIN; the DPAPI/Keychain auto-unlock is machine-bound by design and simply falls back to the PIN). The July bug was ONE shared macOS Keychain slot (un-namespaced service name), already fixed @ `a85985f`; files were always separate; Windows was never affected.
+- **DROP the startup pubkey-check (C1 durable half).** Rationale: it's insurance, not a fix — the source bug (shared Keychain slot) is fixed at the source, and the benefit to non-dev users is ~nil; not worth a high-risk money/signing-path change. We *prevent* the wrong storage spot rather than *detect* a wrong key. `DEVPROD_C1_STARTUP_PUBKEY_CHECK_DESIGN.md` is retained for the record only (NOT to be built).
+- **DO the Mode-B env safeguard (force-prod + warn).** IMPLEMENTED as a bidirectional dev-safeguard in both layers.
 
 ## Why this audit exists
 
@@ -76,13 +81,15 @@ Windows counterpart: `AutoUpdater::Initialize` (`cef_browser_shell.cpp:5238-5254
 
 | # | Gap | Blast | Status | Owner |
 |---|---|---|---|---|
-| C1 | Leaked `HODOS_DEV` flips prod → Dev namespace | Critical | Design + adversarial review (owner-gated) | Win designs; Mac verifies |
+| C1 | Leaked `HODOS_DEV` flips prod → Dev namespace | Critical | ✅ **Mode-B env safeguard IMPLEMENTED** (force-prod scrub, Rust `main.rs` + C++ `AppPaths.h`, Rust compiles); pubkey-*check* SHELVED by owner. ⏳ Mac verify (mac shell scrub) | Win done; Mac verifies |
 | C2 | Launcher kills prod by image name | Critical | ✅ Win fixed + validated; ⏳ Mac verify | Win done; Mac verifies |
 | H1 | macOS Sparkle ungated in dev | High | Open | Mac |
 | M1 | macOS debug port 9222 not dev-gated | Medium | Open | Mac |
 | L1 | Staging mutex not namespaced | Low | Open (compiled out today) | Win |
 | L2 | Update-helper hardcodes ports | Low | Open | Win |
 | L3 | Comment/doc drift | Low | Open | Win |
+
+**Mode-B implementation note:** the guard is bidirectional in the existing dev-safeguards. `enforce_dev_safeguard()` (`rust-wallet/src/main.rs`) and `AppPaths::EnforceDevSafeguard()` (`cef-native/include/core/AppPaths.h`) now, when a **non-dev-build** binary sees a stray `HODOS_DEV=1`, scrub it (Rust `env::remove_var`; C++ `_putenv_s`/`unsetenv`) + warn, then proceed in the prod namespace. Runs first in each `main()` before any namespace read, so every downstream read (`app_dir_name`/`wallet_port`/`keychain_service`/`GetAppDirName`/`IsDevEnv`) resolves to prod, and every spawned child (wallet, adblock, CEF subprocs) inherits the scrubbed env — so the shell's scrub alone covers the adblock daemon too (adblock's own `main` not touched). Chosen behavior: **force-prod + warn** (least disruptive; flip to hard-refuse trivially by returning false / exiting instead of scrubbing).
 
 ---
 
@@ -92,7 +99,7 @@ This Windows session audited the cross-platform **code** but cannot verify macOS
 
 1. **C2 mac launcher (verify the written fix).** `mac_build_run.sh` now does `pkill -9 -f "$SCRIPT_DIR/build/bin/HodosBrowser.app"` and launches via the absolute bundle path. **Confirm at runtime** that with the installed `/Applications/HodosBrowser.app` running, `./mac_build_run.sh` kills ONLY the dev bundle's processes (main + helpers) and leaves the installed app alive. `pkill -f` matches against full argv — verify argv[0] of the dev processes actually contains `build/bin/HodosBrowser.app` (that's why the launch was switched to the absolute path). Adjust the pattern if CEF helpers spawn with a path that doesn't contain the build dir.
 
-2. **C1 mac Keychain env-flip repro (confirm the critical path).** With `HODOS_DEV=1` exported in the shell environment, launch the **installed** prod app directly (not via a dev script) and confirm it resolves to the `HodosBrowserDev` namespace (opens the dev `wallet.db`, reads Keychain service `HodosBrowserDev`). This proves C1's blast radius on macOS. Do NOT do this on a funded prod wallet without a backup.
+2. **C1 Mode-B mac guard (runtime-verify — code already wired).** The Mode-B scrub lives in the shared header `AppPaths::EnforceDevSafeguard()` (`#else unsetenv` branch) and Rust `enforce_dev_safeguard()`. The mac shell ALREADY calls `EnforceDevSafeguard` at `cef_browser_shell_mac.mm:5213`, before the first `GetAppDirName()` at `:5262` — so the fix auto-applies; no new call needed. **Just runtime-verify:** with `HODOS_DEV=1` exported, launch the **installed** prod `.app` directly → confirm it now warns + uses the **prod** (`HodosBrowser`) namespace + Keychain service `HodosBrowser`, NOT `HodosBrowserDev`, and that the spawned wallet child also lands on prod. (Before this fix it would have opened dev data / the dev Keychain.) The Rust wallet's own scrub covers the standalone `dev-wallet.sh` case. Confirm `unsetenv` on mac clears it for the spawned wallet/adblock children too.
 
 3. **H1 mac Sparkle gate (implement + verify).** Gate `cef_browser_shell_mac.mm:5601-5629` Sparkle init behind `!hodos::IsDevEnv()` (or a dev feed/bundle-id + separate `NSUserDefaults` domain). Verify a dev `.app` no longer checks/stages the public release and no longer rewrites the installed app's `SULastCheckTime`/`SUSkippedVersion`. Adversarial review before landing (auto-update path).
 
