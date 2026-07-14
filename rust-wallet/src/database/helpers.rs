@@ -115,11 +115,14 @@ pub fn derive_key_for_output(
 
                 let master_privkey = get_master_private_key_from_db(db)?;
                 let master_pubkey = get_master_public_key_from_db(db)?;
-                derive_child_private_key(&master_privkey, &master_pubkey, &invoice_number)
+
+                let child_privkey = derive_child_private_key(&master_privkey, &master_pubkey, &invoice_number)
                     .map_err(|e| rusqlite::Error::SqliteFailure(
                         rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
                         Some(format!("BRC-42 self-derivation failed: {}", e))
-                    ))
+                    ))?;
+
+                Ok(child_privkey)
             }
         }
 

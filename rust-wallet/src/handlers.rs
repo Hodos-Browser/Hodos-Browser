@@ -13297,6 +13297,7 @@ pub async fn do_onchain_backup(
                 .unwrap_or(0);
 
             let invoice = format!("2-receive address-{}", current_index);
+
             let derived_pubkey = crate::crypto::brc42::derive_child_public_key(
                 &master_privkey, &master_pubkey, &invoice,
             ).unwrap();
@@ -13306,6 +13307,7 @@ pub async fn do_onchain_backup(
                 let sha_hash = Sha256::digest(&derived_pubkey);
                 ripemd::Ripemd160::digest(&sha_hash)
             };
+
             let script = Script::p2pkh_locking_script(&pubkey_hash).unwrap();
             (script, current_index)
         };
@@ -13390,13 +13392,16 @@ pub async fn do_onchain_backup(
             let db = state.database.lock().unwrap();
             let output_repo = OutputRepository::new(db.connection());
             match output_repo.get_by_txid_vout(&utxo.txid, utxo.vout) {
-                Ok(Some(output)) => crate::database::derive_key_for_output(
-                    &db, output.derivation_prefix.as_deref(),
-                    output.derivation_suffix.as_deref(), output.sender_identity_key.as_deref(),
-                ).map_err(|e| format!("Key derivation: {}", e)),
-                _ => Err(format!("Output not found: {}:{}", utxo.txid, utxo.vout)),
+                Ok(Some(output)) => {
+                    crate::database::derive_key_for_output(
+                        &db, output.derivation_prefix.as_deref(),
+                        output.derivation_suffix.as_deref(), output.sender_identity_key.as_deref(),
+                    ).map_err(|e| format!("Key derivation: {}", e))
+                },
+                Ok(None) => Err(format!("Output not found: {}:{}", utxo.txid, utxo.vout)),
+                Err(e) => Err(format!("DB error looking up {}:{}: {}", utxo.txid, utxo.vout, e)),
             }
-        }; // DB lock dropped here
+        };
         let private_key_bytes = match key_result {
             Ok(k) => k,
             Err(e) => {
@@ -13405,6 +13410,7 @@ pub async fn do_onchain_backup(
             }
         };
         let funding_prev_script = hex::decode(&utxo.script).unwrap_or_default();
+
         let sighash = match calculate_sighash(&tx, input_idx, &funding_prev_script, utxo.satoshis, SIGHASH_ALL_FORKID) {
             Ok(h) => h,
             Err(e) => {
@@ -13418,6 +13424,7 @@ pub async fn do_onchain_backup(
         let mut sig_der = sig.serialize_der().to_vec();
         sig_der.push(SIGHASH_ALL_FORKID as u8);
         let pubkey = secp256k1::PublicKey::from_secret_key(&secp, &secret).serialize();
+
         let unlocking_script = Script::p2pkh_unlocking_script(&sig_der, &pubkey);
         tx.inputs[input_idx].set_script(unlocking_script.bytes);
         input_idx += 1;
@@ -19226,3 +19233,5 @@ pub async fn debug_broadcast_nosend(
         }
     }
 }
+
+

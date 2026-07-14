@@ -11,7 +11,9 @@
 //! - **macOS**: Keychain Services (SecKeychainAddGenericPassword/FindGenericPassword)
 //!   Same mechanism Chrome ("Chrome Safe Storage") and Brave use.
 //!   Storage: `wallets.mnemonic_dpapi` = sentinel value b"KEYCHAIN" (actual secret
-//!   lives in the OS Keychain under service "HodosBrowser", account "wallet-mnemonic")
+//!   lives in the OS Keychain under service returned by `keychain_service()`,
+//!   account "wallet-mnemonic"). Dev and production use different service names
+//!   to prevent cross-contamination.
 
 // =============================================================================
 // Windows DPAPI implementation
@@ -130,8 +132,17 @@ pub fn dpapi_decrypt(encrypted: &[u8]) -> Result<Vec<u8>, String> {
 #[cfg(target_os = "macos")]
 const KEYCHAIN_SENTINEL: &[u8] = b"KEYCHAIN";
 
+/// Keychain service name — MUST differ between dev and production to prevent
+/// cross-contamination (dev wallet overwriting production mnemonic in Keychain).
 #[cfg(target_os = "macos")]
-const KEYCHAIN_SERVICE: &str = "HodosBrowser";
+fn keychain_service() -> &'static str {
+    if std::env::var("HODOS_DEV").unwrap_or_default() == "1" {
+        "HodosBrowserDev"
+    } else {
+        "HodosBrowser"
+    }
+}
+
 #[cfg(target_os = "macos")]
 const KEYCHAIN_ACCOUNT: &str = "wallet-mnemonic";
 
@@ -141,14 +152,16 @@ const KEYCHAIN_ACCOUNT: &str = "wallet-mnemonic";
 pub fn dpapi_encrypt(plaintext: &[u8]) -> Result<Vec<u8>, String> {
     use security_framework::passwords::{set_generic_password, delete_generic_password};
 
-    // Delete any existing entry first (set_generic_password fails if entry exists)
-    let _ = delete_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
+    let service = keychain_service();
 
-    set_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, plaintext)
+    // Delete any existing entry first (set_generic_password fails if entry exists)
+    let _ = delete_generic_password(service, KEYCHAIN_ACCOUNT);
+
+    set_generic_password(service, KEYCHAIN_ACCOUNT, plaintext)
         .map_err(|e| format!("Keychain store failed: {}", e))?;
 
     log::info!("   Mnemonic stored in macOS Keychain (service={}, account={})",
-        KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
+        service, KEYCHAIN_ACCOUNT);
 
     // Return sentinel — the DB column stores this, not the actual secret
     Ok(KEYCHAIN_SENTINEL.to_vec())
@@ -160,8 +173,9 @@ pub fn dpapi_encrypt(plaintext: &[u8]) -> Result<Vec<u8>, String> {
 pub fn dpapi_decrypt(_encrypted: &[u8]) -> Result<Vec<u8>, String> {
     use security_framework::passwords::get_generic_password;
 
-    let password = get_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
-        .map_err(|e| format!("Keychain retrieve failed: {}", e))?;
+    let service = keychain_service();
+    let password = get_generic_password(service, KEYCHAIN_ACCOUNT)
+        .map_err(|e| format!("Keychain retrieve failed (service={}): {}", service, e))?;
 
     Ok(password)
 }

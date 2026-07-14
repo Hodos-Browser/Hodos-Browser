@@ -991,7 +991,6 @@ async fn main() -> std::io::Result<()> {
             .route("/wallet/debug/validate-beef", web::post().to(handlers::debug_validate_beef))  // Debug: BEEF ancestry validation
             .route("/wallet/debug/repair-nosend", web::post().to(handlers::debug_repair_nosend))  // Debug: repair DB after nosend broadcast
             .route("/wallet/debug/broadcast-nosend", web::post().to(handlers::debug_broadcast_nosend))  // Debug: broadcast nosend tx to ARC
-
             // Authentication endpoints
             .route("/.well-known/auth", web::post().to(handlers::well_known_auth))
 

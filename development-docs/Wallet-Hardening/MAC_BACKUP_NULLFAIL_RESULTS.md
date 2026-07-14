@@ -87,51 +87,49 @@ At backup time on July 6, `get_max_index` likely returned **6** (only addresses 
 The change invoice would be `"2-receive address-6"` — the **same** invoice as the funding UTXO.
 Both should derive the same key, but the key doesn't match what's in the addresses table for index 6.
 
-### What Remains Unknown
+### ROOT CAUSE IDENTIFIED: Keychain Mnemonic Cross-Contamination
 
-Despite exhaustive code analysis, the exact mechanism is not yet identified:
-1. The `derive_key_for_output` code paths are identical between backup and `sign_action`
-2. The derivation fields in the output record are correct (`"2-receive address"`, `"6"`, NULL)
-3. Both code paths call the same `get_master_private_key_from_db` → `derive_child_private_key`
-4. No variable shadowing, no stale cache, no hidden characters in the DB
+**Status: SOLVED** (2026-07-14)
 
-Possible remaining theories:
-- The **compiled binary** running on the Mac has different code than what's in git (build mismatch)
-- A **race condition** between the async backup function and another task modifying wallet state
-- A subtle **secp256k1 state corruption** from the change address derivation affecting the subsequent signing derivation
-- The `derive_child_public_key` (used for change address) and `derive_child_private_key` (used by `derive_key_for_output`) produce **inconsistent** key pairs under some edge condition
+The macOS Keychain entry for wallet mnemonic auto-unlock used a **hardcoded service name**
+`"HodosBrowser"` for BOTH dev and production wallets (`rust-wallet/src/crypto/dpapi.rs:134`).
+When the dev wallet started, it overwrote the production wallet's Keychain mnemonic with its own.
 
-### Recommended Diagnostic: Live Key Derivation Test
+**Evidence chain:**
+1. `KEYCHAIN_SERVICE` was `"HodosBrowser"` for both `HODOS_DEV=1` and production builds
+2. Dev wallet created on **2026-06-25** → `dpapi_encrypt()` stored dev mnemonic in Keychain
+3. Keychain entry `cdat` (creation date) = `2026-06-25 15:20:29 UTC` — matches dev wallet creation
+4. Production wallet auto-unlock reads same Keychain entry → gets **dev wallet's mnemonic**
+5. Dev master pubkey: `0302cabd...` ≠ Production master pubkey: `037b557e...`
+6. BRC-42 derivation with wrong master key → wrong child key → HASH160 mismatch → NULLFAIL
 
-Add temporary logging to `derive_key_for_output` in `database/helpers.rs` to capture the ACTUAL derived key for `80e034c8:0`:
+**Why the "Register as @26" tx succeeded (July 7) but backup failed (July 6):**
+The wallet alternated between correct and wrong mnemonics depending on whether it was
+auto-unlocked from Keychain (wrong — dev mnemonic) or manually unlocked via PIN (correct —
+production mnemonic from encrypted DB). Address 6 was created during a PIN-unlocked session;
+the backup ran after a Keychain auto-unlock.
 
+**BRC-42 self-derivation verified correct** — test `test_self_derivation_consistency` passes.
+The code is correct; the inputs (master key) were wrong.
+
+### Fix Applied
+
+`dpapi.rs`: `KEYCHAIN_SERVICE` changed from a constant to a function that reads `HODOS_DEV`:
 ```rust
-// TEMPORARY DIAGNOSTIC — remove after investigation
-if suffix == "6" && prefix == "2-receive address" {
-    let pubkey = crate::crypto::keys::derive_public_key(&result)?;
-    let h160 = {
-        use sha2::{Sha256, Digest};
-        let sha = Sha256::digest(&pubkey);
-        ripemd::Ripemd160::digest(&sha)
-    };
-    log::warn!("🔬 DIAG derive_key_for_output invoice='2-receive address-6': pubkey={}, h160={}",
-        hex::encode(&pubkey), hex::encode(&h160));
+fn keychain_service() -> &'static str {
+    if std::env::var("HODOS_DEV").unwrap_or_default() == "1" {
+        "HodosBrowserDev"
+    } else {
+        "HodosBrowser"
+    }
 }
 ```
 
-And in the backup change address derivation at `handlers.rs:13300`:
-
-```rust
-// TEMPORARY DIAGNOSTIC — remove after investigation
-log::warn!("🔬 DIAG backup change: index={}, invoice={}, pubkey={}, h160={}",
-    current_index, invoice, hex::encode(&derived_pubkey),
-    hex::encode(&pubkey_hash));
-```
-
-This will capture the actual keys at runtime and reveal whether:
-1. `derive_key_for_output` produces the wrong key (derivation bug)
-2. The change address derivation produces the wrong key (different invoice number)
-3. Both produce the same wrong key (master key mismatch)
+**Recovery needed:** The production wallet's Keychain entry must be restored. Next time the
+production wallet starts and unlocks via PIN, the DPAPI backfill path should store the
+correct mnemonic under `"HodosBrowser"`. If the backfill doesn't trigger (because the DB
+already has a KEYCHAIN sentinel), manually clear `mnemonic_dpapi` in the production wallet
+DB and restart — the backfill will re-store the correct mnemonic from PIN decryption.
 
 ---
 

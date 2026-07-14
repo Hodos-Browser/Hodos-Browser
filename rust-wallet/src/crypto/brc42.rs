@@ -328,6 +328,41 @@ mod tests {
     }
 
     #[test]
+    fn test_self_derivation_consistency() {
+        // Self-derivation: sender == recipient (BRC-42 self-derivation)
+        // derive_child_public_key and derive_child_private_key must produce
+        // the same key pair when using the same master key as both sender/recipient
+        let secp = Secp256k1::new();
+
+        // Use several different key pairs to catch edge cases
+        for seed_byte in [1u8, 5, 42, 100, 200, 255] {
+            let mut privkey_bytes = [0u8; 32];
+            privkey_bytes[31] = seed_byte;
+            privkey_bytes[0] = seed_byte.wrapping_add(1);
+
+            let secret = SecretKey::from_slice(&privkey_bytes).unwrap();
+            let pubkey = PublicKey::from_secret_key(&secp, &secret).serialize().to_vec();
+
+            for invoice in ["2-receive address-0", "2-receive address-6", "2-receive address-100"] {
+                let child_pubkey = derive_child_public_key(&privkey_bytes, &pubkey, invoice).unwrap();
+                let child_privkey = derive_child_private_key(&privkey_bytes, &pubkey, invoice).unwrap();
+
+                // Derive pubkey from the child private key
+                let child_secret = SecretKey::from_slice(&child_privkey).unwrap();
+                let child_pubkey_from_priv = PublicKey::from_secret_key(&secp, &child_secret).serialize().to_vec();
+
+                assert_eq!(
+                    child_pubkey, child_pubkey_from_priv,
+                    "Self-derivation mismatch for seed={}, invoice={}: \
+                     derive_child_public_key={} but derive_child_private_key→pubkey={}",
+                    seed_byte, invoice,
+                    hex::encode(&child_pubkey), hex::encode(&child_pubkey_from_priv)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_shared_secret_symmetry() {
         // Shared secret should be the same from both perspectives
         let alice_privkey = [1u8; 32];
