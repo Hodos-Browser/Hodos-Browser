@@ -5265,8 +5265,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         // Off-thread + detached (matches the startup init-thread idiom). Touches
         // NO CEF objects — only SyncHttpClient/filesystem/OpenSSL/Logger — so it
         // is safe to abandon at exit. Sleeps past first-paint, bails on shutdown
-        // via g_update_abort, and single-flights across profiles via a named mutex
-        // (multiple HodosBrowser.exe share the one %LOCALAPPDATA% pending dir).
+        // via g_update_abort, and single-flights across the profiles of ONE install
+        // via a dev/prod-namespaced mutex (all HodosBrowser.exe of an install share
+        // the one namespaced %LOCALAPPDATA%\<AppDir>\update\pending dir; dev + prod
+        // are separate names so neither blocks the other — gap L1).
         if (browserSettings.autoUpdateMode == "silent") {
             std::string silentAppcastUrl = appcastUrl;
             int stageDelaySec = 60;
@@ -5289,7 +5291,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
                     return;
                 }
                 // Single-flight: only one instance stages at a time (shared dir).
-                HANDLE mtx = CreateMutexW(nullptr, FALSE, L"Local\\HodosUpdateStaging");
+                // Name is dev/prod-namespaced so a dev build never blocks prod (L1).
+                HANDLE mtx = CreateMutexW(nullptr, FALSE, AppPaths::GetUpdateStagingMutexNameW().c_str());
                 if (!mtx || WaitForSingleObject(mtx, 0) != WAIT_OBJECT_0) {
                     if (mtx) CloseHandle(mtx);
                     LOG_INFO("Silent update: another instance is staging — skipping");

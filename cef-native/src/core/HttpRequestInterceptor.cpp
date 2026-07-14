@@ -3719,7 +3719,8 @@ CefRefPtr<CefResourceHandler> HttpRequestInterceptor::GetResourceHandler(
 
     LOG_DEBUG_HTTP("🌐 HTTP Request intercepted: " + method + " " + url);
 
-    // Normalize BRC-100 wallet requests to our standard port 31301
+    // Normalize BRC-100 wallet requests to the ACTIVE wallet port via
+    // hodos::WalletPortStr() (31301 prod / 31401 dev) — never a hardcoded literal.
     std::string originalUrl = url;
 
     // Handle localhost/127.0.0.1 port redirection (string ops instead of regex — F5 perf fix)
@@ -3763,7 +3764,8 @@ CefRefPtr<CefResourceHandler> HttpRequestInterceptor::GetResourceHandler(
                 }
             }
 
-            // Replace the domain with localhost:31301 (string ops instead of regex — F5 perf fix)
+            // Replace the domain with the local wallet base URL (hodos::WalletBaseUrl(),
+            // active port — string ops instead of regex, F5 perf fix)
             size_t schemeEnd = url.find("://");
             if (schemeEnd != std::string::npos) {
                 size_t hostEnd = url.find('/', schemeEnd + 3);

@@ -19,8 +19,9 @@
   (one backend on 31301/31401). Per-profile wallet was discussed 2026-07-09: **deferred**; the future
   migration is **non-destructive/opt-in** (existing profiles keep the shared wallet; per-profile wallets are
   additive — never force-split funds), so delay is cheap. Cheap hedges to keep the door open: (a) frame the
-  profile UI honestly ("profiles share one wallet"), (b) incrementally route wallet calls through
-  `WalletPort()` instead of literal `31301` (interceptor `HttpRequestInterceptor.cpp` still hardcodes it).
+  profile UI honestly ("profiles share one wallet"), (b) keep wallet calls routed through
+  `WalletPort()`/`WalletBaseUrl()` rather than literal `31301` (the interceptor `HttpRequestInterceptor.cpp`
+  already does this and rewrites stray literals to the active port — 2026-07-14 deconfliction audit).
   NOT this sprint — noted for later.
 - Owner is happy with the current stable state. **This sprint shifts to the Chromium/CEF rebuild.**
 

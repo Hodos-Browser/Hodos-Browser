@@ -85,9 +85,9 @@ Windows counterpart: `AutoUpdater::Initialize` (`cef_browser_shell.cpp:5238-5254
 | C2 | Launcher kills prod by image name | Critical | ✅ Win fixed + validated; ⏳ Mac verify | Win done; Mac verifies |
 | H1 | macOS Sparkle ungated in dev | High | Open | Mac |
 | M1 | macOS debug port 9222 not dev-gated | Medium | Open | Mac |
-| L1 | Staging mutex not namespaced | Low | Open (compiled out today) | Win |
-| L2 | Update-helper hardcodes ports | Low | Open | Win |
-| L3 | Comment/doc drift | Low | Open | Win |
+| L1 | Staging mutex not namespaced | Low | ✅ Fixed — namespaced via `AppPaths::GetUpdateStagingMutexNameW()` (kept, not removed; still compiled-off — future-safe to enable) | Win |
+| L2 | Update-helper hardcodes ports | Low | Open (benign — helper only runs for a prod install; left per owner) | Win |
+| L3 | Comment/doc drift | Low | ✅ Fixed — interceptor comments + kickoff-doc corrected | Win |
 
 **Mode-B implementation note:** the guard is bidirectional in the existing dev-safeguards. `enforce_dev_safeguard()` (`rust-wallet/src/main.rs`) and `AppPaths::EnforceDevSafeguard()` (`cef-native/include/core/AppPaths.h`) now, when a **non-dev-build** binary sees a stray `HODOS_DEV=1`, scrub it (Rust `env::remove_var`; C++ `_putenv_s`/`unsetenv`) + warn, then proceed in the prod namespace. Runs first in each `main()` before any namespace read, so every downstream read (`app_dir_name`/`wallet_port`/`keychain_service`/`GetAppDirName`/`IsDevEnv`) resolves to prod, and every spawned child (wallet, adblock, CEF subprocs) inherits the scrubbed env — so the shell's scrub alone covers the adblock daemon too (adblock's own `main` not touched). Chosen behavior: **force-prod + warn** (least disruptive; flip to hard-refuse trivially by returning false / exiting instead of scrubbing).
 

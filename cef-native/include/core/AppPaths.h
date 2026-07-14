@@ -133,6 +133,17 @@ inline std::wstring GetInstanceMutexNameW() {
     std::string n = "Local\\" + GetAppDirName() + "_AnyInstance";
     return std::wstring(n.begin(), n.end());
 }
+
+/// Silent-update STAGING single-flight mutex — dev/prod-namespaced (like
+/// GetInstanceMutexNameW) so a dev build never blocks a prod staging cycle, and
+/// vice-versa (dev/prod deconfliction audit, gap L1). The pending dir itself is
+/// already namespaced via GetPendingUpdateDir(); this makes the lock match. All
+/// profiles of ONE install still share this lock (they share the pending dir),
+/// which is the intended single-flight behavior. Session-local, ASCII-only.
+inline std::wstring GetUpdateStagingMutexNameW() {
+    std::string n = "Local\\" + GetAppDirName() + "_UpdateStaging";
+    return std::wstring(n.begin(), n.end());
+}
 #endif
 
 /// Dev/prod deconfliction guard. Call FIRST in main(), before any GetAppDirName()/
