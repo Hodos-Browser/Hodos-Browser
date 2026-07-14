@@ -50,8 +50,17 @@ codesign --force --sign - \
 codesign --force --sign - --entitlements "$ENTITLEMENTS" \
     "HodosBrowser.app"
 
-# Kill any existing instance
-pkill -9 HodosBrowser 2>/dev/null || true
+# Kill any existing DEV instance ONLY. Match by the dev BUNDLE PATH, never by bare
+# process name: dev and installed-prod both run a process named "HodosBrowser"
+# (CMakeLists OUTPUT_NAME), so `pkill -9 HodosBrowser` force-killed the running
+# INSTALLED production app too (dev/prod deconfliction audit 2026-07-14, gap C2).
+# The dev bundle lives under $SCRIPT_DIR/build/bin; the installed app lives under
+# /Applications, so a path-scoped match hits only the dev bundle (main + helpers).
+# NOTE (Mac Claude): VERIFY AT RUNTIME that this matches the dev processes and NOT
+# the installed app — pkill -f matches against the full argv, which is why the launch
+# below uses the ABSOLUTE bundle path so argv[0] contains "build/bin/HodosBrowser.app".
+DEV_BUNDLE="$SCRIPT_DIR/build/bin/HodosBrowser.app"
+pkill -9 -f "$DEV_BUNDLE" 2>/dev/null || true
 
 # Launch in dev mode (separate data directory from installed app)
 export HODOS_DEV=1
@@ -59,4 +68,6 @@ export HODOS_DEV=1
 # requires proper code signing that only the release build has)
 export HODOS_MAC_DEV_FLAGS=1
 echo "Launching HodosBrowser (DEV MODE)..."
-./HodosBrowser.app/Contents/MacOS/HodosBrowser
+# Absolute path (not ./...) so the process argv is path-scoped and the pkill above
+# can distinguish this dev bundle from the installed /Applications app.
+"$DEV_BUNDLE/Contents/MacOS/HodosBrowser"

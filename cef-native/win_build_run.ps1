@@ -23,8 +23,14 @@ try {
     cmake --build build --config Release
     if ($LASTEXITCODE -ne 0) { throw "Build failed" }
 
-    # Kill any existing instance
-    Stop-Process -Name "HodosBrowser" -Force -ErrorAction SilentlyContinue
+    # Kill any existing DEV instance ONLY. Match by exe path under THIS build dir, never
+    # by bare image name: dev and installed-prod both ship the image name HodosBrowser.exe
+    # (CMakeLists OUTPUT_NAME), so `Stop-Process -Name HodosBrowser` force-killed the running
+    # INSTALLED production browser too (dev/prod deconfliction audit 2026-07-14, gap C2).
+    $devExeDir = Join-Path $PSScriptRoot "build\bin\Release"
+    Get-CimInstance Win32_Process |
+        Where-Object { $_.Name -eq "HodosBrowser.exe" -and $_.ExecutablePath -and $_.ExecutablePath.StartsWith($devExeDir, [System.StringComparison]::OrdinalIgnoreCase) } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
     # Launch in dev mode
     $env:HODOS_DEV = "1"
