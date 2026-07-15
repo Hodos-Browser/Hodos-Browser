@@ -10,7 +10,7 @@
 
 ## Current Status (2026-07-09)
 
-**Last shipped (promoted): `v0.3.0-beta.26`** — live + marked **Latest**.
+**Last shipped (promoted): `v0.3.0-beta.28`** — live + marked **Latest** (promoted 2026-07-15: dev/prod deconfliction + WS1 wallet-hardening reconcile; Win10 dead-buttons resolved as install corruption, no code change). Prior promoted: beta.26.
 
 > **Silent-update saga is COMPLETE.** Windows SILENT auto-update — including through the two-process
 > profile picker — is DONE and **PROVEN LIVE** (beta.25 → beta.26 silently applied on real hardware;
@@ -466,7 +466,9 @@ If we ever land back on `EOC CA 02` (the pre-regression CA) on a future release,
 - beta.12 — `EOC CA 04` (back to beta.8's CA after three on AOC CA 03)
 - beta.13 — (not separately checked — failed validation release for beta.12's XPC fix)
 - beta.14 — (not separately checked — shipped the integer-CFBundleVersion fix that made macOS auto-update finally work)
-- beta.15 — `AOC CA 03` (latest, shipped 2026-05-07 with backup-fix bundle on top of beta.14's auto-update foundation)
+- beta.15 — `AOC CA 03` (shipped 2026-05-07 with backup-fix bundle on top of beta.14's auto-update foundation)
+- beta.16–beta.27 — not separately cert-checked (silent-update saga iteration releases)
+- beta.28 — `EOC CA 03` (back on the March-2026 regression cohort; leaf thumbprint `63478F7FEDBB38C553A459E3AFCF29EBBD4F6A25`. Called out in the Defender submission.)
 
 #### 2.5.2 Per-release submission tracking
 
@@ -524,6 +526,14 @@ Skipped formal AV submissions for these — they were rapid iteration releases s
 - MS Defender: submitted 2026-05-07 10:12 MT, ID `9c8774de-8094-4193-bd55-53005488aafb` (status: Submitted). Note in submission: multiple releases now signed under AOC CA 03; reputation should accrue against that thumbprint.
 - Norton: skipped (not flagged in the wild)
 - **macOS auto-update outcome:** Verified end-to-end. beta.14 install on test Mac auto-detected beta.15 via Sparkle (manual trigger via Settings → About → Check for updates; Sparkle's default 24h check interval delayed an unprompted notification). Download → EdDSA verify → install → relaunch all completed silently because the App Management permission was already granted in the beta.12 → beta.14 transition.
+
+**beta.28 submission record:**
+- Cert chain: signed via `Microsoft ID Verified CS EOC CA 03` (back on the March-2026 SmartScreen regression CA) — leaf `CN=Marston Enterprises`, thumbprint `63478F7FEDBB38C553A459E3AFCF29EBBD4F6A25`, leaf validity 2026-07-14 → 2026-07-17 (3-day Azure leaf). Signature **Valid** + timestamped (Microsoft Public RSA Time Stamping Authority).
+- Installer SHA-256: `6408a0f8651143b3b4bf18a58643284158d31f208948fc45a7a7708c46f74d32`
+- VirusTotal: submitted 2026-07-15 — **0/72 clean** — https://www.virustotal.com/gui/file/6408a0f8651143b3b4bf18a58643284158d31f208948fc45a7a7708c46f74d32/detection
+- MS Defender: submitted 2026-07-15 13:46 MT, ID `ba087e87-5515-49d8-a6f2-f4d8fea5bb13` (status: Submitted → Pending). Proactive publisher-reputation submission (no active detection); note called out the EOC CA 03 regression and asked to correlate reputation across the EOC/AOC families.
+- Norton: skipped (not flagged in the wild)
+- Shipped in beta.28: dev/prod deconfliction + WS1 wallet-hardening (reconcile broadcast paths, validated by a real send). Win10 dead-3-buttons resolved as install/update corruption (narrow — reinstall fix, no overlay code change).
 
 #### 2.5.3 Reputation-building strategy (per-release)
 
