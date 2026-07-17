@@ -39,7 +39,7 @@ re-point it at the new subfolder during the next congruence pass.)
 ## Companion folder (marketing / pitch half)
 
 ```
-C:\Users\archb\Marston Enterprises\Hodos\marketing\intelligence\features\Dolphin Milk + Edwin Integration\
+C:\Users\archb\Marston Enterprises\Hodos\Product\Native AI Assistant\
 ```
 
 See that folder's `README.md` for the full pitch/product/outreach index.
