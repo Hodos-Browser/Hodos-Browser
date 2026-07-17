@@ -1,5 +1,12 @@
 # Hodos + Edwin + Dolphin Milk — Integration Plan
 
+> ℹ️ **PARTNER-FACING / PARTLY SUPERSEDED (2026-06-29).** This is the external-send integration
+> overview written for Jake, John, and Calhoun. Its §1–§3 (three-party architecture, bundling intent,
+> API-key/cost-mode UX) and §7 (test plan) remain useful, but its **Windows install sequencing (§4.1,
+> WSL-based)** has been overtaken by the native-sidecar, no-WSL direction. For the current internal build
+> sequencing see `../implementation/IMPLEMENTATION_PLAN_v1.md`, which supersedes §6 here and carries the
+> still-valid API-key/cost material forward.
+
 **Audience:** Jake (Edwin), John (Dolphin Milk), Calhoun, Matt (Hodos)
 **Status:** Living document. Appended as we learn. Distributed for review and discussion.
 **Companion docs:**
@@ -279,12 +286,12 @@ That's a **200× slowdown**, almost entirely waiting on Windows file I/O through
 
 This rewires Option C's status:
 - **Option B (Hodos requires user to install WSL):** broken UX for any user with content on Windows. Cannot ship to non-developer audience.
-- **Option A (Hodos installer provisions WSL automatically):** still suffers the 9P problem. Workaround: WSL-side mirror of user content via git-sync layer (designed in `../DevOps-CICD/WSL_HYBRID_WORKSPACE.md`). Works for our own dev/pitch use; not acceptable for end users.
+- **Option A (Hodos installer provisions WSL automatically):** still suffers the 9P problem. Workaround: WSL-side mirror of user content via git-sync layer (designed in `../../DevOps-CICD/WSL_HYBRID_WORKSPACE.md`). Works for our own dev/pitch use; not acceptable for end users.
 - **Option C (Windows-native Edwin gateway):** the only path that gives Windows users chat-speed responses against their own documents.
 
 **Therefore Option C moves from "ideal long-term answer" to "required for any Windows-audience product."** The pitch deck should reflect this — "Hodos is making Edwin's Windows experience first-class" is now a measured commitment, not a UX wish.
 
-The interim sync-layer architecture is documented in `../DevOps-CICD/WSL_HYBRID_WORKSPACE.md` for use during our own pre-Option-C development cycle. It's a developer tool, not a consumer-shippable workaround.
+The interim sync-layer architecture is documented in `../../DevOps-CICD/WSL_HYBRID_WORKSPACE.md` for use during our own pre-Option-C development cycle. It's a developer tool, not a consumer-shippable workaround.
 
 **Most-elegant integration question for Hodos:** if Option A (Hodos provisions WSL) is the near-term reality while we wait for Option C, how do we make the install feel like one click? Concrete sub-questions:
 - Can Hodos's installer carry the WSL kernel + a pre-built Ubuntu image as embedded resources, avoiding the post-reboot download step?
