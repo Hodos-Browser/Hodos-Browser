@@ -11214,7 +11214,9 @@ pub async fn acknowledge_message(
 /// Cancel a pending transaction before broadcast or if unconfirmed
 #[derive(Deserialize)]
 pub struct AbortActionRequest {
-    #[serde(rename = "referenceNumber")]
+    /// BRC-100 AbortActionArgs uses `reference` (Base64String). Accept the legacy
+    /// `referenceNumber` name too so older callers keep working.
+    #[serde(rename = "reference", alias = "referenceNumber")]
     pub reference_number: String,
 }
 
