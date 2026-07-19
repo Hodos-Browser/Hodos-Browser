@@ -4187,6 +4187,8 @@ pub async fn publish_certificate(
             send_with: None,
         }),
         input_beef: None,
+        lock_time: None,
+        version: None,
     };
 
     let ca_resp = create_action_internal(state.clone(), ca_req).await;

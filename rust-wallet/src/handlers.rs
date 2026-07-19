@@ -4141,6 +4141,18 @@ pub struct CreateActionRequest {
     /// Can be either a hex string or a byte array [u8, u8, ...]
     #[serde(rename = "inputBEEF")]
     pub input_beef: Option<serde_json::Value>,
+
+    /// BRC-100 top-level nLockTime for the built transaction (default 0).
+    /// MUST be honored: app-provided pre-signed inputs (OP_PUSH_TX contracts that
+    /// commit to nLockTime in their sighash preimage) fail script verification if
+    /// the wallet builds a different lockTime than the caller signed against.
+    #[serde(rename = "lockTime", default)]
+    pub lock_time: Option<u32>,
+
+    /// BRC-100 top-level transaction version specifier (default 1). Honored for the
+    /// same reason as lock_time — it is part of the sighash preimage.
+    #[serde(rename = "version", default)]
+    pub version: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -5188,6 +5200,17 @@ pub(crate) async fn create_action_internal(
 
     // Build transaction
     let mut tx = Transaction::new();
+
+    // BRC-100: honor caller-provided top-level lockTime/version (createAction args).
+    // These are part of the sighash preimage, so app-provided pre-signed inputs
+    // (e.g. OP_PUSH_TX contracts) only validate if the built tx reproduces them
+    // exactly. Set here — BEFORE any input is signed — so the wallet's own input
+    // sighashes (which read tx.lock_time / tx.version) commit to the same values.
+    tx.lock_time = req.lock_time.unwrap_or(0);
+    tx.version = req.version.unwrap_or(1);
+    if tx.lock_time != 0 || tx.version != 1 {
+        log::info!("   🔒 Honoring caller-provided lockTime={}, version={}", tx.lock_time, tx.version);
+    }
 
     // Add USER inputs first (may have pre-signed unlocking scripts)
     for user_input in &user_inputs {
@@ -8396,6 +8419,8 @@ pub async fn process_action(
             send_with: None,
         }),
         input_beef: None,
+        lock_time: None,
+        version: None,
     };
 
     let create_body = serde_json::to_vec(&create_req).unwrap();
@@ -9661,6 +9686,8 @@ pub async fn send_transaction(
             send_with: None,
         }),
         input_beef: None,
+        lock_time: None,
+        version: None,
     };
 
     log::info!("   📝 Creating transaction...");
@@ -17152,6 +17179,8 @@ pub async fn peerpay_send(
             send_with: None,
         }),
         input_beef: None,
+        lock_time: None,
+        version: None,
     };
 
     let create_body = match serde_json::to_vec(&create_req) {
@@ -17784,6 +17813,8 @@ pub async fn pay_402(
             send_with: None,
         }),
         input_beef: None,
+        lock_time: None,
+        version: None,
     };
 
     let create_body = match serde_json::to_vec(&create_req) {
@@ -18193,6 +18224,8 @@ pub async fn paymail_send(
             send_with: None,
         }),
         input_beef: None,
+        lock_time: None,
+        version: None,
     };
 
     let create_body = match serde_json::to_vec(&create_req) {
