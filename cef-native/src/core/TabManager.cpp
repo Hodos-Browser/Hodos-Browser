@@ -543,6 +543,21 @@ bool TabManager::RegisterTabBrowser(int tab_id, CefRefPtr<CefBrowser> browser) {
     if (tab->is_visible && tab->hwnd) {
         browser->GetHost()->SetFocus(true);
         browser->GetHost()->WasResized();
+
+        // Race fix: CreateBrowser is async, so the WM_SIZE that CreateTab posted may
+        // have run while tab->browser was still null — in which case WM_SIZE sized the
+        // tab HWND but skipped the CEF child (its `if (tab->browser)` guard), leaving
+        // the browser at its SetAsChild bake-size (computed from the initial, possibly
+        // wrong-DPI bounds). WasResized() above only re-renders at the child's *current*
+        // size; it does not reposition the child to fill the tab. Now that the browser
+        // is registered, re-run the window layout so WM_SIZE's proven math SetWindowPos'es
+        // the CEF child to fill the tab. Race-free because tab->browser is set above, so
+        // whenever this WM_SIZE is processed the child is resized. Fixes the "page not
+        // centered until you resize the window" bug on machines whose monitor DPI differs
+        // from the system DPI at startup (seen on an older 1366x768 / scaled laptop).
+        if (HWND parent = GetParent(tab->hwnd)) {
+            PostMessage(parent, WM_SIZE, SIZE_RESTORED, 0);  // WM_SIZE re-reads GetClientRect itself
+        }
     }
 
     return true;
