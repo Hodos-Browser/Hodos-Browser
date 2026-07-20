@@ -621,7 +621,12 @@ const MainBrowserView: React.FC = () => {
                 </HodosButton>
 
                 {/* Address Bar with Inline Autocomplete - centered, constrained width */}
-                <Box sx={{ position: 'relative', flex: '0 1 1200px', minWidth: 200, maxWidth: 1200 }}>
+                {/* minWidth:0 (not 200) is load-bearing: it restores the horizontal
+                    "Fixed scaling for header bar" fix (7277980) that a later header-UX
+                    pass regressed to minWidth:200, which clipped the right-side toolbar
+                    buttons on narrow / high-DPI-scaled screens. overflow:hidden lets the
+                    address bar's own controls clip before the main toolbar's right cluster. */}
+                <Box sx={{ position: 'relative', flex: '0 1 1200px', minWidth: 0, maxWidth: 1200, overflow: 'hidden' }}>
                     {/* Site-info "Site Controls" hub trigger (replaces the passive lock):
                         a clickable TuneIcon whose color reflects the connection state.
                         Opens the left-anchored site-info overlay. */}
@@ -768,6 +773,7 @@ const MainBrowserView: React.FC = () => {
                         spellCheck={false}
                         style={{
                             width: '100%',
+                            minWidth: 0, // allow the flex input to shrink below its intrinsic size
                             boxSizing: 'border-box',
                             height: 36,
                             borderRadius: 20,
