@@ -37,6 +37,8 @@ The kickoff is meant to be ~15–30 minutes of work, not a re-plan. Its job is c
 | **Standard** | After sprint completion | 15 min | Auth category + 2-3 video/media + 1-2 news |
 | **Thorough** | Before release/demo | 30-45 min | Full basket, all categories |
 
+**Cross-DPI (Windows):** Before any release/demo, and after any header/toolbar/overlay/layout change, run the DPI & resolution matrix — minimum cells #4/#6/#9 (125%/1366, 150%/1366, mixed-DPI). This catches "works on my machine" scaling bugs (e.g. clipped toolbar buttons on a 1366×768 / 150% laptop). See `development-docs/DevOps-CICD/DPI_RESOLUTION_TEST_MATRIX.md`.
+
 **Categories:** Authentication (x.com, google.com, github.com), Video/Media (youtube.com, twitch.tv), News/Content (nytimes.com, reddit.com), E-commerce (amazon.com), Productivity (docs.google.com), BSV (whatsonchain.com)
 ## Overview
 
