@@ -1,9 +1,13 @@
 # HodosBrowser — Architecture & Project Overview
 
-**Last Updated**: 2026-02-19
-**Status**: Active development. BRC-100 Groups A & B complete. Browser core MVP sprints in progress.
+**Last Updated**: 2026-08-03
 
 > This document consolidates the former PROJECT_OVERVIEW.md, ARCHITECTURE.md, and WALLET_ARCHITECTURE.md into a single reference.
+>
+> **Scope rule**: this document carries **shape, contracts and pointers**. Layer inventory — file
+> rosters, handler catalogues, component tables, schema table lists — lives in the per-directory
+> `CLAUDE.md` files and is not duplicated here. Dated sprint/release status lives in root
+> `CLAUDE.md` ("Active sprint status").
 
 ---
 
@@ -18,7 +22,7 @@
 7. [Data Storage](#7-data-storage)
 8. [Background Services](#8-background-services)
 9. [BRC-100 Protocol](#9-brc-100-protocol)
-10. [Development Status](#10-development-status)
+10. [Status & Roadmap](#10-status--roadmap)
 
 ---
 
@@ -28,24 +32,34 @@ Three layers with strict separation:
 
 ```
 React Frontend (Port 5137)
-    | window.hodosBrowser.*
+    | window.hodosBrowser.*  (IPC bridge, not direct fetch)
     v
 C++ CEF Shell (CEF 136)
-    | HTTP interception -> localhost:3301 for wallet functions
+    | HTTP interception -> 127.0.0.1:31301 for wallet functions
     v
-Rust Wallet Backend (Port 3301)
+Rust Wallet Backend (127.0.0.1:31301)
     | Actix-web, SQLite (wallet.db)
     v
 Bitcoin SV Blockchain (WhatsOnChain, GorillaPool)
 ```
 
+**Ports.** The wallet backend binds `127.0.0.1:31301` in a release build and `127.0.0.1:31401`
+when `HODOS_DEV=1` (`rust-wallet/src/main.rs :: wallet_port`). The adblock engine is the same
+split at 31302 / 31402. `cef-native/include/core/PortConfig.h` is the single source of truth on
+the C++ side (`hodos::WalletPort()` / `hodos::WalletBaseUrl()`) — never hardcode either literal.
+
 | Layer | Tech | Responsibility |
 |-------|------|----------------|
-| Frontend | React, Vite, TypeScript, MUI | UI, user interactions; never handles keys or signing |
+| Frontend | React, Vite, TypeScript, MUI | UI, user interactions; performs no signing and never receives a derived EC private key |
 | CEF Shell | C++17, CEF 136 | Browser engine, V8 injection, HTTP interception; browser data (history, bookmarks) |
-| Wallet | Rust, Actix-web, SQLite | Crypto, signing, keys, BRC-100 protocol; private keys never leave this process |
+| Wallet | Rust, Actix-web, SQLite | Crypto, signing, keys, BRC-100 protocol |
 
-**Process-per-overlay**: Settings, Wallet Panel, Backup Modal, BRC-100 Auth, and Notification overlays each run as separate CEF subprocesses with isolated V8 contexts.
+The exact key-material boundary — including the one deliberate exception — is stated in
+[§6.4 Key Security Properties](#64-key-security-properties).
+
+**Process-per-overlay**: each overlay panel runs as its own CEF subprocess with an isolated V8
+context, rather than as a panel inside the header browser. Full overlay roster:
+`cef-native/CLAUDE.md` and `frontend/src/pages/CLAUDE.md`.
 
 ---
 
@@ -53,55 +67,79 @@ Bitcoin SV Blockchain (WhatsOnChain, GorillaPool)
 
 ### 2.1 Process Architecture
 
-The browser runs 9 distinct processes:
+The shell is a multi-process tree, not a fixed process count: a main browser process hosts the
+header browser (React UI at port 5137), **one windowed CEF browser per open tab** for external web
+content, and one browser per overlay HWND — so the renderer-process population scales with open
+tabs and live overlays. The Rust wallet and the adblock engine are separate OS processes started
+and supervised by the shell.
 
-```
-Main Browser Process (cef_browser_shell.cpp)
-    |-- Header Browser (React UI at port 5137)
-    |-- WebView Browser (external web content)
-    |-- Settings Overlay (WS_POPUP, own V8)
-    |-- Wallet Overlay (WS_POPUP, own V8)
-    |-- Backup Modal (WS_POPUP, own V8)
-    |-- BRC100 Auth Modal (WS_POPUP, own V8)
-    |-- Notification Overlay (keep-alive HWND, own V8)
-    |-- Rust Wallet Backend (separate process, Port 3301)
-```
+Process boundaries and what each one is trusted with are analysed in
+`SECURITY_AND_PROCESS_ISOLATION_ANALYSIS.md`, which owns the process map.
 
 ### 2.2 C++ Singletons
 
-| Singleton | File | Purpose |
-|-----------|------|---------|
-| `DomainPermissionCache` | HttpRequestInterceptor.cpp | In-memory cache of domain trust levels, backed by Rust DB |
-| `PendingRequestManager` | PendingAuthRequest.h | Thread-safe map of pending auth/payment/cert requests |
-| `SessionManager` | SessionManager.h | Per-browser session spending + rate tracking |
-| `BSVPriceCache` | HttpRequestInterceptor.cpp | BSV/USD price for auto-approve (5-min TTL) |
-| `WalletStatusCache` | HttpRequestInterceptor.cpp | Cached wallet exists/locked status |
-| `Logger` | cef_browser_shell.cpp | Singleton file logger |
+The shell keeps a small set of process-wide singletons for caches (domain trust, BSV price, wallet
+status), cross-thread pending-request tracking, and window/tab/profile management. Full roster:
+`cef-native/include/core/CLAUDE.md`.
+
+Two facts that matter above the layer:
+
+- **There is no C++ `SessionManager`.** It was deleted in Phase 2.6-H. Per-browser session
+  spending, payment-rate and max-tx counters now live in Rust
+  (`rust-wallet/src/permission_service/state.rs :: SessionCounters`, `record_spending`,
+  `increment_payment_rate_counter`). Every remaining C++ mention is a past-tense comment.
+- **There is no C++ auto-approve/permission decision engine.** The C++ `PermissionEngine` was
+  deleted in the same phase. See [§6.3](#63-defense-in-depth).
 
 ### 2.3 SimpleHandler (CEF Client)
 
-`simple_handler.cpp` implements 11 CEF handler interfaces:
-- `CefClient`, `CefLifeSpanHandler`, `CefLoadHandler`, `CefDisplayHandler`
-- `CefKeyboardHandler`, `CefContextMenuHandler`, `CefRequestHandler`, `CefResourceRequestHandler`
-- `CefDownloadHandler`, `CefFindHandler`, `CefJSDialogHandler`
+`simple_handler.cpp` is the CEF client object: it implements the browser-side handler interfaces
+(lifecycle, display, load, request, context menu, dialog, keyboard, permission, download, find,
+JS dialog) and dispatches IPC from the React overlays and the header. Exact interface list and IPC
+message roster: `cef-native/include/handlers/CLAUDE.md` and `cef-native/src/handlers/CLAUDE.md`.
 
-Context menus: 5 context types (page, selection, link, image, editable). All custom command IDs in `MENU_ID_USER_FIRST` range — CEF built-in IDs auto-disable after `model->Clear()`.
+**It does not implement `CefResourceRequestHandler`** — it *vends* one from
+`CefRequestHandler::GetResourceRequestHandler`. The implementations live in
+`HttpRequestInterceptor` (`cef-native/include/core/HttpRequestInterceptor.h`) and
+`CachedContentRequestHandler` (`cef-native/include/core/CachedContentResourceHandler.h`).
 
-IPC dispatch: `OnProcessMessageReceived()` handles 30+ message types from React overlays and the header.
+Context menus: all custom command IDs are in the `MENU_ID_USER_FIRST` range — CEF built-in IDs
+auto-disable after `model->Clear()`.
 
 ### 2.4 HTTP Interception Flow
 
+Interception starts at the handler-selection point, not at a resource-load callback:
+
 ```
-Web request -> OnBeforeResourceLoad (HttpRequestInterceptor.cpp)
-  -> Is it a wallet endpoint? -> AsyncWalletResourceHandler
-    -> Is domain approved? -> DomainPermissionCache check
-      -> Is it a payment endpoint? -> Auto-approve engine
-        -> Check rate limit (SessionManager)
-        -> Parse outputs, convert sats -> USD (BSVPriceCache)
-        -> Check per-tx and per-session limits
-        -> Auto-approve OR show payment confirmation notification
-      -> Forward to Rust (localhost:3301) via CefURLRequest on IO thread
+Web request
+  -> SimpleHandler::GetResourceRequestHandler        (selects a handler per request)
+       - local frontend file serving
+       - trusted-overlay direct bypass
+       - PaidContentCache playback (CachedContentRequestHandler)
+       - adblock
+       - HttpRequestInterceptor
+  -> HttpRequestInterceptor::GetResourceHandler
+       - isWalletEndpoint match -> AsyncWalletResourceHandler
+  -> AsyncWalletResourceHandler::Open()              (THIN PROXY, Phase 2.6-G)
+       - convert sats -> USD cents via BSVPriceCache, inject X-Payment-* headers
+       - forward EVERY external origin to http://127.0.0.1:31301 (:31401 under HODOS_DEV=1)
+         via CefURLRequest on the IO thread
+  -> Rust answers, and Rust is authoritative
+       200 -> pass through
+       202 -> C++ opens the modal Rust named (domain_approval, manifest_connect_bundle,
+              payment_confirmation, rate_limit_exceeded, cert disclosure, ...)
+       403 -> blocked
+  -> on an auto-approved payment: firePaymentSuccessIpc() -> gold-pill tab indicator
 ```
+
+`OnBeforeResourceLoad` is **not** on this path — that callback belongs to the adblock handlers in
+`AdblockCache.h`. BRC-121 `402 Payment Required` detection hangs off
+`HttpRequestInterceptor::OnResourceResponse`.
+
+`DomainPermissionCache` is still consulted inside `Open()`, but it no longer gates anything on this
+path. It survives for two ancillary uses: the BRC-100 auth-handshake modal branch, and
+`IsInternalOrigin`. (The BRC-121 402 pre-check is the one place a C++ cache check can still refuse
+to forward — see [§6.3](#63-defense-in-depth).)
 
 ### 2.5 Notification Overlay
 
@@ -109,25 +147,37 @@ Keep-alive HWND pattern:
 - HWND created once (pre-warmed during startup), reused via JS injection
 - `window.showNotification(queryString)` for instant React state update
 - `window.hideNotification()` + `SW_HIDE` to dismiss
-- 4 notification types: `domain_approval`, `brc100_auth`, `payment_confirmation`, `certificate_disclosure`
+- Prompt kinds are multiplexed through a single overlay: the URL carries `?type=<type>` and
+  `BRC100AuthOverlayRoot.tsx` dispatches on it. Adding a prompt kind means adding a case, not a new
+  HWND. Current type roster: `frontend/src/pages/CLAUDE.md`.
 - Atomic `compare_exchange_strong` on timeout vs response to prevent double-fire crashes
 
 ### 2.6 Window Hierarchy (Windows)
 
 ```
 Main Shell (g_hwnd)
-    |-- Header (g_header_hwnd) - WS_CHILD, React UI
-    |-- WebView (g_webview_hwnd) - WS_CHILD, web content
-    |-- Settings Overlay (g_settings_overlay_hwnd) - WS_POPUP, layered
-    |-- Wallet Overlay (g_wallet_overlay_hwnd) - WS_POPUP, layered
-    |-- Backup Modal (g_backup_overlay_hwnd) - WS_POPUP, layered
-    |-- BRC100 Auth (g_brc100_auth_overlay_hwnd) - WS_POPUP, layered
-    |-- Notification (g_notification_overlay_hwnd) - WS_POPUP, keep-alive
+    |-- Header (g_header_hwnd)          - WS_CHILD, React UI
+    |-- Tab windows (one per tab)       - WS_CHILD, windowed CEF browser, only the active one visible
+    |-- Overlay windows (one per panel) - WS_POPUP, layered, own V8 context
 ```
+
+Tab windows are created by `TabManager::CreateTab` (HWND, then `CefBrowserHost::CreateBrowser`) and
+parented to `g_hwnd`.
+
+`g_webview_hwnd` is **legacy**: `WS_CHILD`, never given `WS_VISIBLE`, hosts no browser, and is
+nulled on primary-window transfer. It is kept only for API compatibility — external content has not
+lived there since the tab system landed.
+
+Overlay HWND globals and their close/destroy semantics: `cef-native/CLAUDE.md` and root
+`CLAUDE.md` ("Overlay Lifecycle & Close Prevention").
 
 ### 2.7 macOS Port
 
-`cef_browser_shell_mac.mm` (1754 lines): NSWindow/NSView hierarchy, 5 overlay types, event forwarding. Build system supports macOS via CMake. See `development-docs/Final-MVP-Sprint/macos-port/MACOS-PORT-HANDOVER.md`.
+`cef_browser_shell_mac.mm` is the macOS entry point: NSWindow/NSView hierarchy, `NSPanel`-based
+overlays with `NSWindowDelegate` close handling, and event forwarding, alongside `TabManager_mac.mm`,
+`WindowManager_mac.mm` and `my_overlay_render_handler.mm`. Build system supports macOS via CMake.
+Per-file Windows/macOS parity tables: `cef-native/src/handlers/CLAUDE.md` and
+`cef-native/src/core/CLAUDE.md`. Port history: `development-docs/Final-MVP-Sprint/macos-port/`.
 
 ---
 
@@ -135,63 +185,63 @@ Main Shell (g_hwnd)
 
 ### 3.1 AppState (`src/main.rs`)
 
-Shared state accessible to all HTTP handlers:
+Shared state accessible to all HTTP handlers. Architecturally load-bearing fields:
 
 | Field | Type | Purpose |
 |-------|------|---------|
 | `database` | `Arc<Mutex<WalletDatabase>>` | SQLite connection (single writer) |
-| `balance_cache` | `BalanceCache` | In-memory balance with instant invalidation |
-| `price_cache` | `Arc<PriceCache>` | BSV/USD price (CryptoCompare + CoinGecko, 5-min TTL) |
-| `fee_rate_cache` | `FeeRateCache` | Cached fee rates from MAPI |
+| `balance_cache` | `Arc<BalanceCache>` | In-memory balance with instant invalidation |
+| `price_cache` | `Arc<PriceCache>` | BSV/USD price — WhatsOnChain -> CoinGecko -> MEXC, 300s TTL, SQLite-persisted last-known price |
+| `fee_rate_cache` | `Arc<FeeRateCache>` | Mining fee rate from the ARC policy endpoint, 1-hour TTL, 1000 sat/KB fallback |
 | `sync_status` | `Arc<RwLock<SyncStatus>>` | Wallet recovery/sync progress |
 | `current_user_id` | `i64` | Active user ID (default: 1) |
 | `shutdown` | `CancellationToken` | Graceful shutdown signal |
-| `auth_sessions` | `Arc<Mutex<HashMap>>` | BRC-103/104 auth session state |
-| `message_store` | `Arc<Mutex<HashMap>>` | BRC-33 in-memory message relay |
-| `pending_transactions` | `Arc<Mutex<HashMap>>` | Two-phase sign: createAction -> signAction |
+| `auth_sessions` | `Arc<AuthSessionManager>` | BRC-103/104 auth sessions — the manager privately holds a `Mutex<HashMap>` keyed `"identity_key:our_nonce"`, 24 h expiry |
+
+`AppState` also carries service handles, secondary caches and the permission-service state that
+backs the Rust permission engine. Full field list: `rust-wallet/src/main.rs :: AppState` and
+`rust-wallet/src/CLAUDE.md`.
+
+Two things are commonly assumed to be in `AppState` and are not:
+
+- **BRC-33 message relay.** There is no `message_store` field. The in-memory `MessageStore` type
+  still sits in `rust-wallet/src/message_relay.rs`, but the module is not declared in `main.rs` or
+  `lib.rs` — it is not compiled, and was superseded by the SQLite-backed `peerpay_repo`.
+- **Two-phase signing state.** See [§3.5](#35-transaction-lifecycle).
 
 ### 3.2 Database Layer (`src/database/`)
 
-SQLite with WAL mode, foreign keys enabled. Consolidated V1 schema for fresh databases; incremental migrations for existing.
+SQLite with WAL mode, foreign keys enabled. Consolidated V1 schema for fresh databases; incremental
+migrations for existing ones.
 
-**Repository pattern** (18+ repositories across 23 files):
-
-| Repository | Purpose |
-|------------|---------|
-| `WalletRepository` | Master key storage, HD index, DPAPI blob |
-| `UserRepository` | Identity mapping (pubkey -> userId) |
-| `AddressRepository` | HD address derivation cache |
-| `OutputRepository` | Primary UTXO tracking (spendable/spent_by model) |
-| `TransactionRepository` | Transaction lifecycle |
-| `ProvenTxRepository` | Immutable merkle proof records |
-| `ProvenTxReqRepository` | Proof acquisition lifecycle |
-| `CertificateRepository` | BRC-52 identity certificates |
-| `DomainPermissionRepository` | Per-domain trust levels, spending limits, rate limits |
-| `TagRepository` | Output tagging/basket assignment |
-| `CommissionRepository` | Fee tracking per transaction |
-| `SettingsRepository` | Persistent wallet configuration |
-| `SyncStateRepository` | Multi-device sync state |
+**Repository pattern** — each table group has its own `*Repository` over the shared SQLite
+connection; `WalletDatabase` owns that connection (single writer, `Arc<Mutex<…>>` in `AppState`)
+and runs migrations. New per-entity data extends an existing table group via a child table joined
+by FK + `CASCADE` (the `cert_field_permissions` pattern), rather than a parallel top-level table.
+Full repository roster and model map: `rust-wallet/src/database/CLAUDE.md`.
 
 ### 3.3 Cryptography (`src/crypto/`)
 
-11 modules:
+The crypto layer covers four concerns:
 
-| Module | Purpose |
-|--------|---------|
-| `brc42.rs` | ECDH-based child key derivation (Type-42) |
-| `brc43.rs` | Invoice number format: `{securityLevel}-{protocolID}-{keyID}` |
-| `signing.rs` | SHA-256, HMAC-SHA256, ECDSA signing |
-| `aesgcm_custom.rs` | AES-256-GCM encryption (BRC-2) |
-| `brc2.rs` | BRC-2 encrypt/decrypt with BRC-42 key derivation |
-| `dpapi.rs` | Windows DPAPI encrypt/decrypt (macOS Keychain stub) |
-| `pin.rs` | PIN-based encryption (AES-256-GCM + PBKDF2 600K iterations) |
-| `keys.rs` | Key computation and derivation helpers |
-| `ghash.rs` | GHASH for AES-GCM |
-| `mod.rs` | Key derivation routing, public key computation |
+- **Derivation** — BRC-42 ECDH child key derivation (Type-42) with BRC-43 invoice numbers
+  (`{securityLevel}-{protocolID}-{keyID}`), plus legacy BIP32 for recovery.
+- **Signing** — SHA-256, HMAC-SHA256, ECDSA with BSV ForkID SIGHASH.
+- **Encryption** — BRC-2 (AES-256-GCM over a BRC-42-derived key), used for certificate fields and
+  for MessageBox/PeerPay payloads.
+- **At-rest protection** — `dpapi.rs` has three platform arms: Windows DPAPI
+  (`CryptProtectData` / `CryptUnprotectData`) and macOS Keychain Services are **both full
+  implementations** (macOS is dev/prod-namespaced via `keychain_service()`); Linux/other is the only
+  stub. `pin.rs` layers PIN-based AES-256-GCM + PBKDF2 (600K iterations) on top.
+
+Note that `crypto/mod.rs` is module declarations only — key-derivation routing lives in
+`database/helpers.rs`, and public-key computation in `crypto/keys.rs`. Full module roster:
+`rust-wallet/src/crypto/CLAUDE.md`.
 
 ### 3.4 Key Derivation
 
-`derive_key_for_output()` in `database/helpers.rs` is the single entry point for all signing:
+`derive_key_for_output()` in `database/helpers.rs` is the single entry point for deriving the key
+that signs a wallet **UTXO input**. It routes on the output's stored derivation metadata:
 
 | `derivation_prefix` | `derivation_suffix` | `sender_identity_key` | Path |
 |---------------------|---------------------|----------------------|------|
@@ -200,13 +250,20 @@ SQLite with WAL mode, foreign keys enabled. Consolidated V1 schema for fresh dat
 | `NULL` | `NULL` | `None` | Master private key directly |
 | any | any | `Some(pubkey)` | BRC-42 counterparty derivation |
 
+Other signing and derivation paths do **not** go through it — `create_signature`, BRC-103 AuthFetch,
+certificate CSR signing and BRC-2 encryption each derive independently from
+`get_master_private_key_from_db` + `brc42::derive_child_private_key`.
+
 ### 3.5 Transaction Lifecycle
 
 ```
 createAction (build + select UTXOs)
     -> status: 'unsigned'
-    -> inputs reserved (spent_by set)
-    -> outputs created (spendable=0)
+    -> inputs reserved: spendable = 0, spending_description = 'pending-{ts}'
+       (spent_by is NULL at reservation time — no transactions row exists for the
+        placeholder txid yet; rollback keys off spending_description)
+    -> change/basket outputs created with spendable = 1
+       (change is spendable and the balance is accurate immediately)
 
 signAction (sign + broadcast)
     -> status: 'sending' -> 'unproven'
@@ -215,29 +272,44 @@ signAction (sign + broadcast)
 
 On failure:
     -> status: 'failed'
-    -> ghost outputs deleted
-    -> reserved inputs restored (spendable=1)
+    -> ghost outputs DISABLED, not deleted
+       (spendable = 0, spending_description = 'failed-tx-output', via disable_by_txid —
+        so TaskUnFail can reverse a false failure through reenable_failed_outputs)
+    -> reserved inputs restored (spendable = 1, spent_by = NULL, spending_description = NULL)
     -> balance cache invalidated
 ```
 
+Ghost outputs are only really `DELETE`d by startup stale-pending recovery.
+
+The two-phase `createAction` -> `signAction` map is **not** an `AppState` field: it is the
+file-scoped process-global `handlers.rs :: PENDING_TRANSACTIONS`
+(`Lazy<StdMutex<HashMap<String, PendingTransaction>>>`), inserted during `createAction`, read by
+`sign_action`, and removed once the transaction is fully signed. Anything that changes signing
+inputs (e.g. BRC-100 top-level `lockTime` / `version`) must be set on the in-memory transaction
+before signing, because both phases share that one object.
+
 ### 3.6 Wallet Security
 
-- **DPAPI auto-unlock**: Mnemonic stored twice — PIN-encrypted + DPAPI-encrypted. Startup: try DPAPI first, auto-cache mnemonic on success.
+- **DPAPI/Keychain auto-unlock**: Mnemonic stored twice — PIN-encrypted + OS-encrypted. Startup:
+  try the OS blob first, auto-cache mnemonic on success.
 - **PIN encryption**: AES-256-GCM with PBKDF2 (600K iterations). PIN used during create/recover.
-- **DPAPI backfill**: On PIN unlock, DPAPI blob stored for future auto-unlock.
-- **Legacy wallets**: `pin_salt=NULL` -> plaintext auto-cached. PIN-protected without DPAPI -> locked until PIN.
+- **DPAPI backfill**: On PIN unlock, the OS blob is stored for future auto-unlock.
+- **Legacy wallets**: `pin_salt=NULL` -> plaintext auto-cached. PIN-protected without an OS blob ->
+  locked until PIN.
 
 ### 3.7 API Endpoints
 
-68+ handlers in `handlers.rs`. Key groups:
+`handlers.rs` is the HTTP surface of the wallet: wallet CRUD and status, the BRC-100 protocol
+surface (auth, actions, signatures, HMACs, outputs, certificates, encryption, messages), domain and
+sub-permission CRUD, BRC-121 `402` payment, PeerPay, price and sync. New wallet endpoints are added
+to the C++ `isWalletEndpoint` route table so they go **through** interception rather than around it.
 
-**Wallet Operations**: `health`, `wallet_status`, `wallet_create`, `wallet_recover`, `wallet_unlock`, `wallet_balance`, `wallet_backup`, `wallet_sync`, `wallet_sync_status`, `wallet_bsv_price`
+Full endpoint roster with handler names: `rust-wallet/src/CLAUDE.md`. Handler names in this repo
+are not always the obvious ones — check the layer doc before assuming a name (`get_sync_status`,
+`get_bsv_price`, `set_domain_permission`, `list_domain_permissions`, `check_cert_permissions`).
 
-**BRC-100 Protocol**: `well_known_auth`, `get_public_key`, `create_action`, `sign_action`, `create_hmac`, `create_signature`, `verify_hmac`, `verify_signature`, `list_outputs`, `list_certificates`, `acquire_certificate`, `prove_certificate`, `encrypt`, `decrypt`, `send_message`, `list_messages`, `acknowledge_message`
-
-**Domain Permissions**: `get_domain_permission`, `add_domain_permission`, `delete_domain_permission`, `get_all_domain_permissions`, `get_cert_field_permissions`, `approve_cert_fields`
-
-**Internal**: `send_transaction` (wallet panel send), `generate_address`
+`send_transaction` is the **internal wallet-panel send path**, distinct from the BRC-100
+`create_action` path that dApps use — worth knowing when tracing a spend.
 
 ---
 
@@ -245,39 +317,37 @@ On failure:
 
 ### 4.1 Application Structure
 
-Single React codebase, multiple CEF instances. Route determines context:
+One React codebase, multiple CEF instances; the route determines context. `/` is the header
+browser (navigation toolbar and toolbar icon buttons); every panel is its own route rendered in its
+own overlay browser.
 
-| Route | Context | Purpose |
-|-------|---------|---------|
-| `/` | Header browser | Navigation toolbar, wallet/settings buttons |
-| `/wallet` | Wallet overlay | Balance, send/receive, transaction history |
-| `/settings` | Settings overlay | Browser and wallet settings |
-| `/backup` | Backup modal | Mnemonic backup, file backup |
-| `/brc100auth` | BRC100 auth overlay | Domain approval, auth approval, payment confirmation, cert disclosure |
-| `/notification` | Notification overlay | Keep-alive overlay for payment/cert/rate notifications |
+The BRC-100 prompt surface is a single route, `/brc100-auth`, multiplexed by a `type` query param —
+domain approval, auth approval, payment confirmation, certificate disclosure and the keep-alive
+notification overlay (`/brc100-auth?type=idle` when pre-warmed) all render
+`BRC100AuthOverlayRoot.tsx`. (`brc100auth` and `notification`, unhyphenated, are C++ SimpleHandler
+*role strings*, not URLs.)
+
+Full route table: `frontend/src/CLAUDE.md`.
 
 ### 4.2 Key Components
 
-| Component | Purpose |
-|-----------|---------|
-| `MainBrowserView.tsx` | Header with navigation bar, wallet/settings buttons |
-| `WalletPanel.tsx` | Balance display, send/receive tabs, sync status |
-| `TransactionForm.tsx` | Send form with BSV/USD conversion, validation |
-| `DomainPermissionsTab.tsx` | Manage approved sites (edit limits, revoke) |
-| `DomainPermissionForm.tsx` | Per-tx/per-session spending limits, rate limits |
-| `BRC100AuthOverlayRoot.tsx` | Domain approval, auth, payment confirmation, cert disclosure |
+Component roster and per-component responsibilities: `frontend/src/components/CLAUDE.md`,
+`frontend/src/components/wallet/CLAUDE.md` and `frontend/src/pages/CLAUDE.md`.
+
+The architectural constraint that governs this layer: **no new panels/menus/dropdowns go into
+`MainBrowserView.tsx`** — every panel is an overlay in its own CEF subprocess. See root `CLAUDE.md`
+("UI Architecture Rules").
 
 ### 4.3 Hooks
 
-| Hook | Purpose |
-|------|---------|
-| `useHodosBrowser()` | `getIdentity`, `generateAddress`, `navigate`, `markBackedUp`, `goBack`, `goForward`, `reload` |
-| `useBalance()` | Fetches balance + BSV price from Rust backend |
-| `useBackgroundBalancePoller()` | Polls balance every 30s for auto-refresh |
+Hooks wrap the bridge and the wallet calls — `useHodosBrowser()` for browser-shell actions,
+`useBalance()` for balance + BSV price, `useBackgroundBalancePoller()` for the 30s auto-refresh.
+Full roster: `frontend/src/hooks/CLAUDE.md`.
 
 ### 4.4 Bridge (`initWindowBridge.ts`)
 
 Defines `window.hodosBrowser.navigation` and `window.hodosBrowser.overlay` via `cefMessage.send()`.
+Wallet calls take the separate IPC path described in [§5.1](#51-three-communication-paths).
 
 ---
 
@@ -288,8 +358,12 @@ Defines `window.hodosBrowser.navigation` and `window.hodosBrowser.overlay` via `
 | Pattern | Direction | Mechanism | Used For |
 |---------|-----------|-----------|----------|
 | **CefURLRequest** (async) | C++ -> Rust | HTTP on IO thread | BRC-100 wallet endpoints (payment, auth, signing) |
-| **WinHTTP** (sync) | C++ -> Rust | Synchronous HTTP | Domain permission lookups, price cache, wallet status |
-| **Direct fetch** | React -> Rust | Frontend HTTP | Wallet panel operations (balance, send, backup) |
+| **SyncHttpClient / WinHTTP** (sync) | C++ -> Rust | Synchronous HTTP | Domain permission lookups, price cache, wallet status |
+| **IPC bridge** | React -> C++ -> Rust | `window.hodosBrowser.wallet.*` / `window.__hodos_walletCall` -> `"wallet_call"` `CefProcessMessage` -> C++ HTTP | All first-party wallet UI operations (balance, send, backup) |
+
+The first-party React wallet UI does **not** fetch Rust directly. Routing wallet calls through the
+C++ bridge means C++ owns the wallet port (dev 31401 / prod 31301) — the frontend never knows it —
+and each call is gated by an un-forgeable frame origin rather than by anything the page can claim.
 
 ### 5.2 IPC (C++ <-> React)
 
@@ -300,7 +374,8 @@ React -> cefMessage.send("command", data)
       -> dispatch by message name
 ```
 
-30+ IPC message types including: `navigate`, `overlay_show_*`, `overlay_close`, `brc100_auth_response`, `add_domain_permission`, `approve_cert_fields`, `tab_create`, `bookmark_add`.
+Message-name roster and payload shapes: `cef-native/src/handlers/CLAUDE.md` and
+`frontend/src/bridge/CLAUDE.md`.
 
 ---
 
@@ -309,36 +384,69 @@ React -> cefMessage.send("command", data)
 ### 6.1 Process Isolation
 
 - **Header browser**: Trusted React UI, isolated from web content
-- **WebView browser**: Untrusted web content, HTTP interception active
-- **Overlays**: Each in own process with own V8 context
-- **Rust wallet**: Separate process, only accessible via localhost HTTP
+- **Tab browsers**: Untrusted web content, HTTP interception active, one browser per tab
+- **Overlays**: Each in its own process with its own V8 context
+- **Rust wallet**: Separate process, only reachable over loopback HTTP on the wallet port
 - **Tab isolation**: Process-per-tab via CEF (Chromium's security model)
 
 ### 6.2 Domain Permission System
 
-Two effective trust levels: **unknown** (show approval overlay) and **approved** (check spending limits).
+Two effective trust levels: **unknown** (show approval overlay) and **approved** (evaluate the
+permission cascade).
 
-Per-domain controls:
-- Per-transaction spending limit (USD cents, default $0.10)
-- Per-session spending limit (USD cents, default $3.00)
-- Rate limiting (requests per minute, default 10)
-- Certificate field disclosure tracking
+Per-domain controls and their defaults:
+
+| Control | Default |
+|---------|---------|
+| Per-transaction spending limit | $1.00 (100 USD cents) |
+| Per-session spending limit | $10.00 (1000 USD cents) |
+| Rate limit | 30 requests/min |
+| Max transactions per session | 100 |
+| Certificate field disclosure | tracked per field |
+
+The defaults are mirrored in three places that must agree: the V1 schema and V12 backfill in
+`rust-wallet/src/database/migrations.rs`, the C++ fallbacks in
+`cef-native/src/core/HttpRequestInterceptor.cpp`, and the form defaults in
+`frontend/src/components/DomainPermissionForm.tsx`.
+
+"Always notify" in `DomainPermissionForm` zeros all limits — the cautious-user opt-in path.
+Per-session counters reset on tab close, by design.
 
 ### 6.3 Defense in Depth
 
-1. **C++ layer**: DomainPermissionCache checks domain status before forwarding
-2. **C++ auto-approve engine**: Rate limits, spending limits, payment confirmation notifications
-3. **Rust layer**: `check_domain_approved()` validates `X-Requesting-Domain` header
-4. **Rust spending check**: `create_action` verifies per-tx limit via price cache
+1. **C++ shell (thin proxy)** — forwards every external origin's wallet call to Rust regardless of
+   cached trust level; converts satoshis to USD cents via `BSVPriceCache` and injects the
+   `X-Payment-*` headers; opens whatever modal Rust names on a `202`; fires the gold-pill
+   `payment_success_indicator` IPC on every auto-approved payment. The one place a C++ cache check
+   still refuses to forward is the BRC-121 `402` pre-check for a non-approved domain.
+2. **Rust domain-trust middleware** — authoritative on domain trust for every wallet endpoint:
+   `200` allow / `202` prompt (`domain_approval` or `manifest_connect_bundle`) / `403` blocked.
+   `check_domain_approved()` validates the `X-Requesting-Domain` header.
+3. **Rust permission engine** — `rust-wallet/crates/hodos_permission_engine` (`decide()` in
+   `src/lib.rs`, the Matrix C cascade in `src/matrix_c.rs`), wrapped by
+   `rust-wallet/src/permission_service/` and wired as Actix middleware in `rust-wallet/src/main.rs`.
+   It runs domain trust -> privacy perimeter -> scoped grants -> payment caps -> cert disclosure ->
+   generic, and owns the per-tx / per-session / rate / max-tx-per-session counters.
+4. **Rust spend check at build time** — `create_action` re-verifies the per-tx limit against the
+   price cache before building the transaction.
+
+The C++ `PermissionEngine` and `SessionManager` were deleted in Phase 2.6-H. C++ now builds partial
+context, forwards, and renders the modal Rust asks for.
 
 ### 6.4 Key Security Properties
 
-1. Private keys never in JavaScript — all signing in Rust
-2. DPAPI/Keychain encryption for mnemonic at rest
+1. Signing keys never leave the Rust process. No EC private key is ever returned to JavaScript, and
+   no signing happens there. The BIP39 recovery phrase is the one deliberate exception: it is shown
+   once at wallet creation so the user can record it, and thereafter only through PIN
+   re-verification in the wallet overlay. It is never reachable from web content — the wallet's CORS
+   allowlist admits only Hodos's own local UI origins.
+2. DPAPI/Keychain encryption for the mnemonic at rest
 3. PIN encryption (AES-256-GCM + PBKDF2) as second layer
 4. Parameterized SQL — no string interpolation
 5. App-scoped identity keys — BRC-103/104 prevents cross-app tracking
 6. Atomic timeout handling — `compare_exchange_strong` prevents double-fire crashes
+7. Privacy perimeter prompts (identity-key reveal, key-linkage reveal, sensitive certificate
+   fields, large spends) ALWAYS prompt, regardless of any per-domain setting
 
 ---
 
@@ -351,15 +459,26 @@ Per-domain controls:
 | Windows | `%APPDATA%/HodosBrowser/` | `wallet/wallet.db` | `Default/` (history, bookmarks, cookies) |
 | macOS | `~/Library/Application Support/HodosBrowser/` | `wallet/wallet.db` | `Default/` |
 
-### 7.2 Database Schema (Consolidated V1)
+Dev builds use a separate root (`HodosBrowserDev/`) selected by `HODOS_DEV=1`, so a dev session can
+never touch the installed app's database. See root `CLAUDE.md` ("Dev/Production Data Isolation").
 
-All 24 incremental migrations collapsed into single `create_schema_v1()` for fresh databases. Existing databases migrate incrementally.
+### 7.2 Database Schema
 
-**Active tables**: wallets, users, addresses, transactions, outputs, parent_transactions, block_headers, proven_txs, proven_tx_reqs, output_baskets, output_tags, output_tag_map, certificates, certificate_fields, commissions, settings, sync_states, monitor_events, transaction_inputs, transaction_outputs, domain_permissions, cert_field_permissions
+Fresh databases are created from a single consolidated `create_schema_v1()`; existing databases
+migrate incrementally up the migration ladder in `rust-wallet/src/database/migrations.rs`.
+
+The schema is grouped roughly as: wallet/user identity, HD addresses, transactions and outputs
+(with the basket/tag side tables), SPV proof records, certificates and their fields, permissions
+(domain-level plus the protocol/basket/counterparty/cert-field child tables), and operational
+tables (settings, sync state, monitor events, caches, audit log).
+
+Current table roster and migration ladder: `rust-wallet/src/database/CLAUDE.md`. **Do not change
+the wallet DB schema without asking first** (root `CLAUDE.md`, invariant #2).
 
 ### 7.3 Browser Data (C++ Layer)
 
-History and bookmarks managed by C++ singletons (`HistoryManager`, `BookmarkManager`) with their own SQLite databases in `Default/`. Cookies managed by CEF's built-in cookie manager.
+History and bookmarks managed by C++ singletons (`HistoryManager`, `BookmarkManager`) with their own
+SQLite databases in `Default/`. Cookies managed by CEF's built-in cookie manager.
 
 ---
 
@@ -367,19 +486,16 @@ History and bookmarks managed by C++ singletons (`HistoryManager`, `BookmarkMana
 
 ### 8.1 Monitor Pattern
 
-The Monitor (`src/monitor/mod.rs`) runs as a single tokio task with a 30-second tick loop:
-
-| Task | Interval | Purpose |
-|------|----------|---------|
-| TaskCheckForProofs | 60s | Acquire merkle proofs (ARC -> WoC fallback) |
-| TaskSendWaiting | 120s | Crash recovery for stuck `sending` txs |
-| TaskFailAbandoned | 300s | Fail stuck unsigned/unprocessed txs |
-| TaskUnFail | 300s | Recover false failures (6-hour window) |
-| TaskReviewStatus | 60s | Status consistency across tables |
-| TaskPurge | 3600s | Cleanup old events and proof requests |
-| TaskSyncPending | 30s | UTXO sync for pending addresses |
+The Monitor (`src/monitor/mod.rs`) runs as a single tokio task with a 30-second tick loop. Each
+named task carries its own interval in `TaskSchedule` and covers one recovery or upkeep concern:
+merkle-proof acquisition, crash recovery for stuck sends, failing abandoned transactions, reversing
+false failures, cross-table status consistency, purging old records, pending-address UTXO sync,
+PeerPay polling, and periodic maintenance jobs.
 
 Uses `CancellationToken` for graceful shutdown and `try_lock()` to avoid blocking user requests.
+
+Task roster and intervals: `rust-wallet/src/monitor/CLAUDE.md`; the authoritative list is
+`monitor/mod.rs :: TaskSchedule`.
 
 ### 8.2 UTXO Synchronization
 
@@ -389,9 +505,16 @@ Two mechanisms:
 
 ### 8.3 Price & Fee Caching
 
-- **PriceCache** (Rust): CryptoCompare primary + CoinGecko fallback, 5-min TTL, thread-safe via `RwLock`
-- **BSVPriceCache** (C++): WinHTTP to `/wallet/bsv-price`, 5-min TTL, used by auto-approve engine
-- **FeeRateCache** (Rust): MAPI fee rates with TTL
+- **PriceCache** (Rust): WhatsOnChain primary -> CoinGecko (`bitcoin-cash-sv`) -> MEXC (BSVUSDT)
+  fallback chain, 300s in-memory TTL, thread-safe via `RwLock`, with a $0.01–$10k sanity filter.
+  The last good price is persisted to the `bsv_price_cache` table (source label `"persisted"`) and
+  reloaded on startup, so a cold start with all three sources down still yields a Silent decision
+  instead of `Prompt(price_unavailable)`. CryptoCompare was removed after it began returning HTTP 401.
+- **BSVPriceCache** (C++): WinHTTP to `/wallet/bsv-price`, 5-min TTL, used to convert satoshis to
+  USD cents before forwarding a payment.
+- **FeeRateCache** (Rust): mining fee rate from GorillaPool ARC's policy endpoint
+  (`https://arc.gorillapool.io/v1/policy`), 1-hour TTL, `RwLock`-guarded, falling back to
+  1000 sat/KB (1 sat/byte) when ARC is unreachable. Not mAPI.
 
 ---
 
@@ -399,14 +522,13 @@ Two mechanisms:
 
 ### 9.1 Implementation Status
 
-| Group | Status | Description |
-|-------|--------|-------------|
-| **A: Authentication** | Complete | BRC-103/104 mutual auth, key derivation |
-| **B: Transactions** | Complete | createAction, signAction, BRC-29 payments, BEEF/SPV |
-| **C: Output Management** | Partial | listOutputs, baskets, tags |
-| **D: Encryption** | Partial | BRC-2 AES-256-GCM encrypt/decrypt |
-| **E: Certificates** | Partial | Schema ready, acquireCertificate, proveCertificate |
-| **BRC-33 Messages** | Complete | sendMessage, listMessages, acknowledgeMessage |
+| Surface | Status | Description |
+|---------|--------|-------------|
+| **Authentication (BRC-103/104)** | Complete | Mutual auth, app-scoped identity keys, BRC-42/43 key derivation |
+| **Transactions (createAction/signAction, BRC-29, BEEF/SPV)** | Complete | Two-phase build/sign, BRC-29 PeerPay, BEEF broadcast with SPV ancestry |
+| **BRC-33 Messages** | Complete | sendMessage, listMessages, acknowledgeMessage over MessageBox (BRC-103 AuthFetch transport, BRC-2 encrypted payloads) |
+
+Which handlers exist for each surface: `rust-wallet/src/CLAUDE.md`.
 
 ### 9.2 Authentication Flow (BRC-104)
 
@@ -414,8 +536,12 @@ Two mechanisms:
 1. Client POST /.well-known/auth {initialNonce, identityKey}
 2. Server: BRC-42 key derivation (ECDH shared secret -> HMAC -> child key)
 3. Server: Sign concatenated nonces with derived key
-4. Response: {version, nonce, yourNonce, signature}
+4. Response: {version, messageType, identityKey, initialNonce, yourNonce, signature}
 ```
+
+`initialNonce` in the response carries our new B_Nonce (it is not named `nonce`); `yourNonce` echoes
+the client's A_Nonce; `identityKey` is BRC-42 app-scoped; `signature` is a DER **byte array**, not a
+hex string.
 
 ### 9.3 BEEF/SPV
 
@@ -427,32 +553,29 @@ Transactions broadcast in BEEF (Background Evaluation Extended Format):
 
 ---
 
-## 10. Development Status
+## 10. Status & Roadmap
 
-### Completed
-- BRC-100 Groups A & B (authentication + transactions)
+> **Authoritative, dated status lives in root `CLAUDE.md` ("Active sprint status") and in the
+> per-sprint folders under `development-docs/`.** The lists below are a coarse orientation only.
+
+### Landed
+
+- BRC-100 authentication + transactions
 - Database migration consolidation (V1 schema)
-- DPAPI auto-unlock + PIN encryption
-- Domain permission system + auto-approve engine
-- Notification overlay (keep-alive, 4 types)
-- Mnemonic recovery + Centbee sweep
-- Defense-in-depth (C++ + Rust permission checks)
-- Price cache migration (frontend -> backend)
-- Branding/CSS (black + gold theme)
-- SSL certificate handling + secure connection indicator
-- Download handler (progress, pause/resume/cancel, overlay panel)
+- DPAPI/Keychain auto-unlock + PIN encryption
+- Domain permission system; permission/auto-approve decisioning (now Rust-authoritative)
+- Notification overlay (keep-alive, type-multiplexed)
+- Defense-in-depth permission checks
 - Find-in-page (Ctrl+F, JS `window.find()` fallback)
-- Context menus (5 context types, custom command IDs)
+- Context menus (custom command IDs)
 - JS dialog handling (beforeunload trap suppression, native alert/confirm/prompt)
-- Keyboard shortcuts (Ctrl+H history, Ctrl+J downloads, Ctrl+D bookmark, Alt+Left/Right nav)
 
-### In Progress (Browser Core MVP)
-- Permission prompts (camera, mic, geolocation)
-- Ad & tracker blocking (adblock-rust FFI)
+### In Progress
+
 - Light wallet polish
 
 ### Future
-- macOS port (5-7 day sprint, see `development-docs/Final-MVP-Sprint/macos-port/`)
+
 - Full wallet view (transaction history, output browser)
 - Activity status indicator
 - Settings persistence + profile import
