@@ -48,7 +48,6 @@ export const useWallet = () => {
         version: walletData.wallet?.version ?? null
       });
 
-      console.log('🔑 Wallet created with mnemonic:', walletData.wallet?.mnemonic);
       return walletData;
     } catch (error) {
       console.error('❌ Failed to create wallet:', error);
