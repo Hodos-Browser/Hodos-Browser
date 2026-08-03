@@ -103,9 +103,9 @@ show-most-recent) — frontend, privacy-only; tracked in the WS3 ticket, do inde
 - **Invariants held by all three:** no crypto/derivation change; DB-schema change only if a workstream's design explicitly asks and owner approves (WS3 P1 may; WS1/WS2 do not).
 
 ## Doc index
-- [`RECONCILE_SPENT_INPUTS_PLAN.md`](./RECONCILE_SPENT_INPUTS_PLAN.md) — WS1 parent plan
+- [`RECONCILE_SPENT_INPUTS_PLAN.md`](../../archived-docs/Wallet-Hardening/RECONCILE_SPENT_INPUTS_PLAN.md) — WS1 parent plan
 - [`RECONCILE_PHASE2_DESIGN.md`](./RECONCILE_PHASE2_DESIGN.md) — WS1 buildable design + review log
-- [`FIX_A_RECONCILE_PLAN.md`](./FIX_A_RECONCILE_PLAN.md) / [`FIX_B_CRASH_SAFETY_SHUTDOWN_PLAN.md`](./FIX_B_CRASH_SAFETY_SHUTDOWN_PLAN.md) — WS1 precursors (backup-specific)
+- [`FIX_A_RECONCILE_PLAN.md`](../../archived-docs/Wallet-Hardening/FIX_A_RECONCILE_PLAN.md) / [`FIX_B_CRASH_SAFETY_SHUTDOWN_PLAN.md`](./FIX_B_CRASH_SAFETY_SHUTDOWN_PLAN.md) — WS1 precursors (backup-specific)
 - [`ONCHAIN_BACKUP_REVIEW.md`](./ONCHAIN_BACKUP_REVIEW.md) — backup subsystem review + field bug
 - [`FOLLOWUP_REORG_HANDLING.md`](./FOLLOWUP_REORG_HANDLING.md) — WS2 ticket + sketch
 - [`FOLLOWUP_NEXT_INDEX_UNIFICATION.md`](./FOLLOWUP_NEXT_INDEX_UNIFICATION.md) — WS3 ticket

@@ -5,8 +5,8 @@
 > reconciling a phantom UTXO (DB says spendable, chain says spent) against the
 > chain and recovering the successor's wallet-owned change.
 >
-> Parent: [`RECONCILE_SPENT_INPUTS_PLAN.md`](./RECONCILE_SPENT_INPUTS_PLAN.md).
-> Supersedes the backup-only [`FIX_A_RECONCILE_PLAN.md`](./FIX_A_RECONCILE_PLAN.md);
+> Parent: [`RECONCILE_SPENT_INPUTS_PLAN.md`](../../archived-docs/Wallet-Hardening/RECONCILE_SPENT_INPUTS_PLAN.md).
+> Supersedes the backup-only [`FIX_A_RECONCILE_PLAN.md`](../../archived-docs/Wallet-Hardening/FIX_A_RECONCILE_PLAN.md);
 > composes with [`FIX_B_CRASH_SAFETY_SHUTDOWN_PLAN.md`](./FIX_B_CRASH_SAFETY_SHUTDOWN_PLAN.md).
 
 **Status:** design **v2** — revised after a 4-agent adversarial review (2026-07-10)

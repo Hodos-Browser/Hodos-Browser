@@ -12,7 +12,7 @@ Research, planning, and security documentation for browser extension support in 
 | File | Purpose |
 |------|---------|
 | [BROWSER_PLUGINS_DEEP_DIVE.md](./BROWSER_PLUGINS_DEEP_DIVE.md) | Comprehensive background: history, architecture, landscape |
-| [IMPLEMENTATION_OUTLINE.md](./IMPLEMENTATION_OUTLINE.md) | High-level implementation reference for sprint planning |
+| [IMPLEMENTATION_OUTLINE.md](../../../archived-docs/Future-Features/browser-extensions/IMPLEMENTATION_OUTLINE.md) | High-level implementation reference for sprint planning |
 | [EXTENSION_SECURITY.md](./EXTENSION_SECURITY.md) | Security risks & best practices (marketing + development) |
 | [CRYPTO_WALLET_EXTENSIONS.md](./CRYPTO_WALLET_EXTENSIONS.md) | Competitor wallet analysis & user transition strategy |
 

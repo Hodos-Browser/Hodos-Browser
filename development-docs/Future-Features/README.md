@@ -14,7 +14,7 @@ Files in this folder are the **research depth** behind each row in the priority 
 |------|-------------|
 | [CONTENT_SIGNING_AND_TIPPING.md](./CONTENT_SIGNING_AND_TIPPING.md) | AuthSig-style content signing with payments. Includes Brave history, implementation plan. |
 | [SOCIALCERT_DEEP_DIVE.md](./SOCIALCERT_DEEP_DIVE.md) | How social certificates work, OAuth flows, Gmail/YouTube expansion, integration plan. |
-| [BRC52_CERTIFICATE_RESEARCH_PLAN.md](./BRC52_CERTIFICATE_RESEARCH_PLAN.md) | Social certificates linking social accounts (X, Discord, Gmail, YouTube) to BSV keys. |
+| [BRC52_CERTIFICATE_RESEARCH_PLAN.md](../../archived-docs/Future-Features/BRC52_CERTIFICATE_RESEARCH_PLAN.md) | Social certificates linking social accounts (X, Discord, Gmail, YouTube) to BSV keys. |
 | [PRIVILEGED_KEYRING_ANALYSIS.md](./PRIVILEGED_KEYRING_ANALYSIS.md) | Architectural analysis of a privileged-keyring approach to wallet key management. |
 | [Decentralized-Naming/](./Decentralized-Naming/) | Federated paymail + on-chain domain naming research — strategic planning, BOOTSTRAP_PROBLEM, NARRATIVES, plus Paymail and Domain-Names subfolders. |
 | [LINUX_BUILD.md](./LINUX_BUILD.md) | Linux build candidate — pre-decision stub. 3 user asks logged 2026-05-11; BACKLOG per priority matrix. |

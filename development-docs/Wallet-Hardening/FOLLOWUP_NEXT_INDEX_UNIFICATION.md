@@ -2,7 +2,7 @@
 
 > **Type:** Wallet-hardening cleanup (tech-debt / privacy, NOT a money bug).
 > **Priority:** Low–Medium. Not urgent; **explicitly out of scope** for the
-> spent-input reconcile sprint (see [`RECONCILE_SPENT_INPUTS_PLAN.md`](./RECONCILE_SPENT_INPUTS_PLAN.md)).
+> spent-input reconcile sprint (see [`RECONCILE_SPENT_INPUTS_PLAN.md`](../../archived-docs/Wallet-Hardening/RECONCILE_SPENT_INPUTS_PLAN.md)).
 > **Status:** identified 2026-07-10 during reconcile Phase-1 research; not started.
 
 ---

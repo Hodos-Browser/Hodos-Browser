@@ -3,7 +3,7 @@
 > **Priority: users must be able to spend their coins.** Ships in a near-term
 > `0.3.0-beta.XX` (pure Rust wallet — independent of the 0.4.0 chromium bump).
 >
-> Generalizes the backup-only [`FIX_A_RECONCILE_PLAN.md`](./FIX_A_RECONCILE_PLAN.md)
+> Generalizes the backup-only [`FIX_A_RECONCILE_PLAN.md`](FIX_A_RECONCILE_PLAN.md)
 > into ONE reconcile primitive that fixes BOTH the regular-send `"Missing inputs"`
 > loop AND the backup-token divergence. Companion:
 > [`ONCHAIN_BACKUP_REVIEW.md`](./ONCHAIN_BACKUP_REVIEW.md),

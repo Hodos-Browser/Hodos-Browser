@@ -6,7 +6,7 @@
 > the chain on startup — so shutdown never has to wait for the ~8.6s backup.
 >
 > Companion: [`ONCHAIN_BACKUP_REVIEW.md`](./ONCHAIN_BACKUP_REVIEW.md) and
-> [`FIX_A_RECONCILE_PLAN.md`](./FIX_A_RECONCILE_PLAN.md) (Fix A heals wallets ALREADY
+> [`FIX_A_RECONCILE_PLAN.md`](../../archived-docs/Wallet-Hardening/FIX_A_RECONCILE_PLAN.md) (Fix A heals wallets ALREADY
 > diverged; Fix B stops new ones).
 
 **Status:** design complete, hardened against adversarial review. NOT implemented.
