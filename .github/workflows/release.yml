@@ -153,23 +153,47 @@ jobs:
             rust-wallet
             adblock-engine
       
-      # Install Inno Setup
+      # Install Inno Setup — PINNED (DEP-1b).
+      # Unpinned `choco install innosetup` silently rolls the installer compiler
+      # forward. 6.7.1 is the newest version Chocolatey packages as of
+      # 2026-08-03 and is what the floating command resolved to for beta.29, so
+      # this pin records current behaviour rather than changing it.
+      # NOTE: upstream jrsoftware is already on 7.0.x — Chocolatey lags. Do NOT
+      # bump this to 7.x without re-validating installer/hodos-browser.iss
+      # against a major-version change of the compiler.
       - name: Install Inno Setup
         shell: pwsh
         run: |
-          choco install innosetup -y --no-progress
+          choco install innosetup -y --no-progress --version=6.7.1
       
-      # Install C++ dependencies via vcpkg
-      - name: Install vcpkg dependencies
+      # Install C++ dependencies via vcpkg — MANIFEST MODE (DEP-1a).
+      #
+      # cef-native/vcpkg.json is the single source of truth for the port set AND
+      # their exact versions (builtin-baseline + overrides). Manifest mode
+      # auto-activates because vcpkg.json sits beside cef-native/CMakeLists.txt,
+      # so the actual install happens during `cmake -B build` below — this step
+      # only makes the pinned baseline RESOLVABLE.
+      #
+      # Why the fetch: `builtin-baseline` is a commit in the microsoft/vcpkg
+      # history. The runner image's bundled vcpkg checkout can be older than our
+      # baseline, in which case resolution fails with "could not find the
+      # baseline". Fetching that exact commit fixes it without a full re-clone.
+      #
+      # openssl:x64-windows-static (triplet set in cef-native/CMakeLists.txt)
+      # gives find_package a STATIC-CRT (/MT) OpenSSL matching our /MT targets.
+      # Without it, CI falls back to the runner's system OpenSSL
+      # (libcrypto_static.lib, built for the /MD dynamic CRT). The main shell survives that
+      # mismatch because CEF's link drags in the dynamic CRT, but the minimal
+      # hodos-update-helper.exe (first built in CI as of the silent-update work) does not,
+      # so its OpenSSL link fails with __imp_ CRT unresolved externals (LNK1120).
+      - name: Pin vcpkg to the manifest baseline
         shell: pwsh
         run: |
-          # openssl:x64-windows-static gives find_package a STATIC-CRT (/MT) OpenSSL matching
-          # our /MT targets. Without it, CI falls back to the runner's system OpenSSL
-          # (libcrypto_static.lib, built for the /MD dynamic CRT). The main shell survives that
-          # mismatch because CEF's link drags in the dynamic CRT, but the minimal
-          # hodos-update-helper.exe (first built in CI as of the silent-update work) does not,
-          # so its OpenSSL link fails with __imp_ CRT unresolved externals (LNK1120).
-          vcpkg install nlohmann-json:x64-windows-static sqlite3:x64-windows-static openssl:x64-windows-static
+          $baseline = (Get-Content cef-native/vcpkg.json | ConvertFrom-Json).'builtin-baseline'
+          Write-Host "cef-native/vcpkg.json builtin-baseline = $baseline"
+          git -C "$env:VCPKG_INSTALLATION_ROOT" fetch --depth=1 origin $baseline
+          git -C "$env:VCPKG_INSTALLATION_ROOT" checkout $baseline
+          git -C "$env:VCPKG_INSTALLATION_ROOT" rev-parse HEAD
 
       # Download WinSparkle for auto-update support
       - name: Download WinSparkle
@@ -462,10 +486,13 @@ jobs:
             rust-wallet
             adblock-engine
 
-      # Install C++ dependencies
+      # Install C++ dependencies — declared in the Brewfile (DEP-1c).
+      # `brew "openssl@3"` is what the previous bare `brew install openssl`
+      # resolved to (openssl is an alias for openssl@3), so this is a
+      # single-sourcing change, not a dependency change.
       - name: Install macOS dependencies
         run: |
-          brew install openssl nlohmann-json sqlite3
+          brew bundle --file=Brewfile
 
       # Build Rust wallet
       - name: Build Rust wallet

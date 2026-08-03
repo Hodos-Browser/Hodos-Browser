@@ -1,0 +1,18 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "hodos-browser-cef-native",
+  "version-string": "0.4.0",
+  "description": "C++ CEF shell native dependencies. DEP-1a: pins the vcpkg port set so a CEF/toolchain bump cannot silently drag in new C++ dependency versions.",
+  "homepage": "https://github.com/BSVArchie/Hodos-Browser",
+  "dependencies": [
+    "nlohmann-json",
+    "sqlite3",
+    "openssl"
+  ],
+  "builtin-baseline": "fbb17a16a9728780088493ea7ffd965ccd50ea45",
+  "overrides": [
+    { "name": "nlohmann-json", "version": "3.12.0", "port-version": 2 },
+    { "name": "sqlite3", "version": "3.53.4", "port-version": 0 },
+    { "name": "openssl", "version": "3.6.3", "port-version": 0 }
+  ]
+}
