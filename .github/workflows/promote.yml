@@ -32,6 +32,14 @@ on:
         description: 'OPTIONAL but recommended: paste the draft''s SHA256SUMS.txt content to pin the exact bytes you tested. Leave blank to skip pinning (a warning is logged).'
         required: false
         type: string
+      virustotal_report_url:
+        description: 'VirusTotal report URL for THIS installer (https://www.virustotal.com/gui/file/<sha256>/detection). The hash in the URL is checked against the installer being promoted. Required unless av_seeding_waiver is set.'
+        required: false
+        type: string
+      virustotal_detections:
+        description: 'OPTIONAL: detection count off that report, e.g. "0/72". Recorded in the ledger row so we can track our false-positive noise floor across releases.'
+        required: false
+        type: string
       defender_submission_id:
         description: 'MS Defender submission ID (UUID from the WDSI portal / its confirmation email) proving this installer was seeded. Required unless av_seeding_waiver is set.'
         required: false
@@ -187,14 +195,21 @@ jobs:
       # the real one) and BEFORE the irreversible flip, so a miss blocks publication
       # instead of being discovered afterwards.
       #
-      # ASYMMETRY: VirusTotal is verified for real (404 on an unseen hash = definitive
-      # "not submitted"). MS Defender submission has no public status API, so that
-      # half is operator ATTESTATION — a fabricated UUID would pass. That is
-      # deliberate: the threat model is FORGETTING, not lying.
+      # BOTH HALVES ARE ATTESTATION — neither vendor is queried:
+      #   - VirusTotal's free API forbids use "in business workflows, commercial
+      #     products or services" (their own wording on the API-key page). Hodos is
+      #     a commercial product, and VT Enterprise cannot be justified for one
+      #     lookup per release. So we do NOT call the API.
+      #   - MS Defender submission has no public status API at all (the M365
+      #     Defender one needs a corporate tenant we don't have).
       #
-      # FAIL-SOFT: a VirusTotal outage or a missing API key warns and continues. A
-      # reminder that can take down the release pipeline is worse than no reminder.
-      # Only a definitive negative (404) or a real detection blocks.
+      # What we CAN check is that the evidence the operator pastes refers to THIS
+      # build: the SHA-256 embedded in the VirusTotal report URL must equal the
+      # hash of the installer about to be published. That catches the realistic
+      # mistake — a stale URL from the previous release — without touching the API.
+      #
+      # A fabricated Defender UUID still passes. Deliberate: the threat model is
+      # FORGETTING, not lying.
       #
       # Skipped entirely in recovery mode — the flip already happened.
       - name: AV seeding gate — waiver check
@@ -219,10 +234,11 @@ jobs:
             echo "AV_SEEDING_WAIVED=false" >> "$GITHUB_ENV"
           fi
 
-      - name: AV seeding gate — VirusTotal (verified)
+      - name: AV seeding gate — VirusTotal report (hash-checked attestation)
         if: env.ALREADY_PUBLIC != 'true' && env.AV_SEEDING_WAIVED != 'true'
         env:
-          VT_API_KEY: ${{ secrets.VIRUSTOTAL_API_KEY }}
+          VT_REPORT_URL: ${{ inputs.virustotal_report_url }}
+          VT_DETECTIONS_IN: ${{ inputs.virustotal_detections }}
         run: |
           set -euo pipefail
           EXE="artifacts/HodosBrowser-${VERSION}-setup.exe"
@@ -230,71 +246,43 @@ jobs:
           echo "VT_SHA=$SHA" >> "$GITHUB_ENV"
           echo "installer sha256: $SHA"
 
-          if [ -z "${VT_API_KEY:-}" ]; then
-            echo "::warning::VIRUSTOTAL_API_KEY not set — skipping the VirusTotal check. Add the repo secret to enable it (free tier is ample: 1 lookup per release)."
-            echo "VT_STATUS=skipped-no-key" >> "$GITHUB_ENV"
-            exit 0
+          URL="${VT_REPORT_URL//[[:space:]]/}"
+          if [ -z "$URL" ]; then
+            echo "::error::No VirusTotal report URL provided — this installer has not been scanned."
+            echo "::error::Upload HodosBrowser-${VERSION}-setup.exe (raw .exe, NOT zipped) at https://www.virustotal.com/, then paste the report URL and re-run."
+            echo "::error::Emergency override: re-run with av_seeding_waiver set to a reason."
+            exit 1
           fi
 
-          # Retry transient failures (429 rate-limit / 5xx). Only 200 and 404 are
-          # verdicts; anything else after retries degrades to a warning.
-          code=""; body=""
-          for i in 1 2 3; do
-            resp=$(curl -sS -m 30 -w '\n%{http_code}' \
-                     -H "x-apikey: ${VT_API_KEY}" \
-                     "https://www.virustotal.com/api/v3/files/${SHA}" || true)
-            code=$(printf '%s' "$resp" | tail -n1)
-            body=$(printf '%s' "$resp" | sed '$d')
-            case "$code" in
-              200|404) break ;;
-              *) echo "VirusTotal returned HTTP ${code:-none} — retry ${i}/3"; sleep 10 ;;
-            esac
-          done
+          echo "$URL" | grep -qiE '^https://(www\.)?virustotal\.com/gui/file/' \
+            || { echo "::error::'${URL}' is not a VirusTotal report URL (expected https://www.virustotal.com/gui/file/<sha256>...)."; exit 1; }
 
-          case "$code" in
-            404)
-              echo "::error::VirusTotal has never seen this installer (sha256 ${SHA}) — it was not submitted."
-              echo "::error::Upload HodosBrowser-${VERSION}-setup.exe (raw .exe, NOT zipped) at https://www.virustotal.com/ then re-run this workflow."
-              exit 1
-              ;;
-            200)
-              # A 200 whose body doesn't parse is an API-side anomaly, not an operator
-              # miss — degrade to the same warning path as unreachable rather than
-              # hard-failing the promote (`set -e` would otherwise abort on jq).
-              if ! printf '%s' "$body" | jq -e . >/dev/null 2>&1; then
-                echo "::warning::VirusTotal returned HTTP 200 but the body did not parse as JSON — submission could NOT be verified. Promotion continues; verify manually."
-                echo "VT_STATUS=unreachable" >> "$GITHUB_ENV"
-                exit 0
-              fi
-              mal=$(printf '%s' "$body" | jq -r '.data.attributes.last_analysis_stats.malicious  // 0')
-              sus=$(printf '%s' "$body" | jq -r '.data.attributes.last_analysis_stats.suspicious // 0')
-              tot=$(printf '%s' "$body" | jq -r '[.data.attributes.last_analysis_stats[]] | add // 0')
-              det=$(( mal + sus ))
-              url="https://www.virustotal.com/gui/file/${SHA}/detection"
-              {
-                echo "VT_URL=$url"
-                echo "VT_DETECTIONS=$det"
-                echo "VT_TOTAL=$tot"
-                echo "VT_STATUS=checked"
-              } >> "$GITHUB_ENV"
-              echo "VirusTotal: ${det}/${tot} engines flagged — ${url}"
-              if [ "$det" -gt 0 ]; then
-                echo "Flagging engines:"
-                printf '%s' "$body" | jq -r '
-                  .data.attributes.last_analysis_results
-                  | to_entries[]
-                  | select(.value.category == "malicious" or .value.category == "suspicious")
-                  | "  - \(.key): \(.value.category) (\(.value.result // "n/a"))"'
-                echo "::error::VirusTotal reports ${det}/${tot} detections for this installer — see ${url}"
-                echo "::error::Investigate before shipping. If these are known false positives, re-run with av_seeding_waiver set to a reason (D1: we start strict and learn our noise floor)."
-                exit 1
-              fi
-              ;;
-            *)
-              echo "::warning::VirusTotal unreachable (HTTP ${code:-none}) after retries — submission could NOT be verified. Promotion continues; verify manually."
-              echo "VT_STATUS=unreachable" >> "$GITHUB_ENV"
-              ;;
-          esac
+          # Every VT report URL embeds the file hash. Extract the sha256 and prove
+          # the report is about the bytes we are seconds away from publishing.
+          URL_SHA=$(printf '%s' "$URL" | grep -oiE '[0-9a-f]{64}' | head -n1 | tr '[:upper:]' '[:lower:]' || true)
+          if [ -z "$URL_SHA" ]; then
+            echo "::error::No SHA-256 found in that URL. VirusTotal also serves md5/sha1-keyed report URLs — open the report, copy the sha256 from its Details tab, and use the /gui/file/<sha256> form."
+            exit 1
+          fi
+          if [ "$URL_SHA" != "$SHA" ]; then
+            echo "::error::That VirusTotal report is for a DIFFERENT file."
+            echo "::error::  report URL hash : ${URL_SHA}"
+            echo "::error::  installer hash  : ${SHA}"
+            echo "::error::Most likely a stale URL from a previous release. Scan THIS installer and paste its report URL."
+            exit 1
+          fi
+
+          {
+            echo "VT_URL=$URL"
+            echo "VT_STATUS=attested"
+            echo "VT_DETECTIONS=${VT_DETECTIONS_IN//[[:space:]]/}"
+          } >> "$GITHUB_ENV"
+          echo "VirusTotal report hash matches this installer — ${URL}"
+          # No automated detection-count block: reading the count is a human step
+          # now (the operator is already on the report page to copy this URL).
+          if [ -n "${VT_DETECTIONS_IN//[[:space:]]/}" ]; then
+            echo "operator-reported detections: ${VT_DETECTIONS_IN}"
+          fi
 
       # ATTESTATION, not verification — see the block comment above. We can only
       # check the shape of the ID, never that it is real.
@@ -330,11 +318,15 @@ jobs:
             echo "**${VERSION} submission record:**"
             echo "- Cert chain: <run the §2.5.1 PowerShell check on Windows and paste the intermediate CA + leaf thumbprint>"
             echo "- Installer SHA-256: \`${VT_SHA}\`"
-            case "${VT_STATUS:-}" in
-              checked)     echo "- VirusTotal: submitted ${TODAY} — **${VT_DETECTIONS}/${VT_TOTAL} detections** — ${VT_URL}" ;;
-              unreachable) echo "- VirusTotal: API unreachable at promote time — **VERIFY MANUALLY**" ;;
-              *)           echo "- VirusTotal: not checked (VIRUSTOTAL_API_KEY unset) — **VERIFY MANUALLY**" ;;
-            esac
+            if [ "${VT_STATUS:-}" = "attested" ]; then
+              if [ -n "${VT_DETECTIONS:-}" ]; then
+                echo "- VirusTotal: submitted ${TODAY} — **${VT_DETECTIONS}** — ${VT_URL}"
+              else
+                echo "- VirusTotal: submitted ${TODAY} — <detections, e.g. 0/72> — ${VT_URL}"
+              fi
+            else
+              echo "- VirusTotal: NOT RECORDED — **VERIFY MANUALLY**"
+            fi
             echo "- MS Defender: submitted ${TODAY}, ID \`${DEFENDER_ID_OK}\` (status: Submitted — reconcile to Completed later)"
             echo "- Norton: skipped (submit only on a real detection)"
             echo '```'

@@ -3,9 +3,12 @@
 **Status:** **Phase 1 BUILT** (2026-08-03) — merged into `.github/workflows/promote.yml`,
 not yet exercised on a real promote. Phase 2 not started. **Created:** 2026-08-03.
 
-> **Before the gate can pass, someone must create the `VIRUSTOTAL_API_KEY` repo
-> secret.** Until it exists the VirusTotal half warns and skips (by design — see
-> §4 Step A), so the gate degrades to Defender attestation only.
+> **No secrets or accounts required.** An earlier revision of this plan called
+> VirusTotal's API to verify submission automatically. That was **withdrawn** —
+> VirusTotal's free tier states plainly that it "**must not be used in business
+> workflows, commercial products or services**," which covers our release
+> pipeline, and VT Enterprise cannot be justified for one lookup per release.
+> Both halves of the gate are now attestation; see §3.
 
 > **Where this lives when it ships.** This is a design doc for unbuilt work. Once
 > Phase 1 lands, the living behavior belongs in `BUILD_AND_RELEASE.md` §2.5 (which
@@ -84,29 +87,57 @@ silent.
 
 ---
 
-## 3. What can be checked automatically, and what can't
+## 3. Why neither vendor is queried automatically
 
 This is the constraint that shapes the whole design.
 
-| Vendor | Auto-verifiable? | Why |
+| Vendor | Auto-verifiable? | Why not |
 |---|---|---|
-| **VirusTotal** | **Yes** | Public API. Ask "have you seen this file?" by its hash. If VirusTotal has never seen it, it answers 404 — a definitive "not submitted." |
-| **Microsoft Defender** | **No** | Submission is a web form with no public status API. Microsoft's status API is part of Microsoft 365 Defender and needs a corporate tenant we do not appear to have (confirm before building). |
+| **VirusTotal** | **No — licensing** | The public API would answer "have you seen this hash?" perfectly. But the free tier states it "**must not be used in business workflows, commercial products or services**." Hodos is a commercial product and a CI pipeline is a business workflow, so we are not entitled to it. VT Enterprise runs into thousands per year — indefensible for one lookup per release. |
+| **Microsoft Defender** | **No — no API exists** | Submission is a web form. The status API is part of Microsoft 365 Defender and needs a paid corporate tenant we do not have (D2). |
 | Norton | n/a | Only submitted when Norton actually flags us. Out of scope. |
 
-So the gate **verifies VirusTotal and trusts you on Defender.**
+So **both halves are attestation.** The gate cannot prove the submissions
+happened — it can only prove the operator has evidence in hand.
 
-The Defender half is an honesty check, not a security control — a made-up ID
-would pass. That is fine and intentional. The problem being solved is
-*forgetting*, not *lying*. Making someone visit the portal to get a real-looking
-ID captures almost all the value.
+### What we check instead: hash-linked evidence
 
-### The free bonus
+Attestation does not have to mean a checkbox. Every VirusTotal report URL
+embeds the file's hash:
 
-Because we're already asking VirusTotal about the file, we get its detection
-count back. That means the gate can also **stop a release that antivirus
-software would flag** — before customers hit it, instead of after they email us.
-That is arguably worth more than the reminder.
+```
+https://www.virustotal.com/gui/file/6408a0f8…f74d32/detection
+                                    └── sha256 of the scanned file
+```
+
+The workflow already knows the SHA-256 of the installer it is about to publish,
+so it **compares the two**. A mismatch blocks. That catches the realistic
+mistake — pasting last release's URL — which a checkbox never would.
+
+The Defender half has no equivalent handle, so it is a format-checked UUID and
+nothing more. A fabricated one passes. That is fine and intentional: the problem
+being solved is *forgetting*, not *lying*, and making someone visit the portal
+to obtain a real-looking ID captures most of the value.
+
+### What was lost with the API
+
+The earlier API design also returned the detection count, letting the gate block
+a build that antivirus would flag. **That automated check is gone.** It becomes
+a human judgment — the operator is already on the report page to copy the URL,
+and the detection count is the largest thing on it. An optional
+`virustotal_detections` input records what they saw (`0/72`) into the ledger, so
+the noise-floor trend D1 wanted is still captured across releases, just not
+enforced.
+
+**The manual upload itself is unaffected.** Submitting our own binary through
+the VirusTotal website is what the public site is for, and it is what Step 8 has
+always done. Only the *automated API* was the problem. (Strictly, the
+"business workflows" language sits on the API-key page; whether it reaches the
+manual web path is a separate question in VirusTotal's general ToS that we have
+not read. Worth a look sometime — but note that the part which actually seeds
+SmartScreen is the **Microsoft Defender** submission, through Microsoft's own
+developer channel, which carries no such restriction. If VirusTotal ever became
+unusable entirely, the load-bearing half of the gate survives.)
 
 ---
 
@@ -125,33 +156,34 @@ so a failure blocks publication rather than being discovered afterwards.
 It is deliberately **not** a separate workflow. A separate workflow is exactly as
 forgettable as the manual step it replaces.
 
-### Two new inputs on the workflow
+### Four new inputs on the workflow
 
 | Input | Required | What it's for |
 |---|---|---|
+| `virustotal_report_url` | Yes, unless waived | The report URL from your manual upload. Its embedded hash is checked against the installer |
+| `virustotal_detections` | No | The count off that report, e.g. `0/72`. Recorded in the ledger to track our noise floor |
 | `defender_submission_id` | Yes, unless waived | The UUID Microsoft gives you after submitting |
 | `av_seeding_waiver` | No | A reason to promote without seeding. Emergency use only |
 
-There is deliberately **no VirusTotal input** — the workflow derives the file
-hash itself and looks it up. Less for you to paste, less to get wrong.
-
-### Step A — VirusTotal check
+### Step A — VirusTotal report, hash-checked
 
 1. Hash the installer the workflow already downloaded.
-2. Ask VirusTotal about that hash, using a new repository secret
-   `VIRUSTOTAL_API_KEY`.
-3. React to the answer:
+2. Take the pasted report URL and reject it unless it is a
+   `virustotal.com/gui/file/…` URL.
+3. Extract the 64-hex SHA-256 embedded in it.
+4. React:
 
-| Response | Action |
+| Case | Action |
 |---|---|
-| **404 — file unknown** | **Stop.** Not submitted. Error names the file and the upload URL. |
-| **200, detections = 0** | Pass. Record the report URL. |
-| **200, detections > 0** | **Stop.** An antivirus engine flags this build. See §6 D1. |
-| API error or rate-limited | Retry 3×, then warn and continue. A VirusTotal outage must never block a release. |
-| Secret not configured | Warn and skip. The gate degrades gracefully rather than bricking promotion the day it merges. |
+| URL missing | **Stop.** Names the file and the upload URL. |
+| Not a VirusTotal URL | **Stop.** |
+| No SHA-256 in the URL (md5/sha1-keyed report) | **Stop**, with instructions to grab the sha256 form from the report's Details tab. |
+| Hash ≠ installer hash | **Stop**, printing both hashes. Almost always a stale URL from the previous release. |
+| Hash matches | Pass. Record the URL and the operator's detection count. |
 
-The last two rows are the important safety valves. This gate is a reminder, and
-a reminder that can take down the release pipeline is worse than no reminder.
+No network call, no key, no outage mode — the check is entirely local, so unlike
+the API design there is nothing here that can fail for reasons outside the
+operator's control.
 
 ### Step B — Defender attestation
 
@@ -181,34 +213,29 @@ Phase 2.
 
 ### Size
 
-Landed at ~120 lines of workflow YAML across four steps (the estimate was ~70 —
-the flagging-engine breakdown, the retry loop and the fail-soft branches cost
-more than budgeted). One new repository secret. VirusTotal's free tier is ample
-(4 lookups/minute, 500/day; we use one per release).
+~100 lines of workflow YAML across four steps. **No secrets, no accounts, no
+network calls** — dropping the API made the gate both legal and simpler.
 
 ### Verification done at build time (2026-08-03)
 
-The four steps were extracted from the YAML and exercised directly. Behavioral
-cases, all passing:
+The four steps were extracted from the YAML and exercised directly. Every path
+is pure shell, so unlike the API design **all of it was testable locally** and
+all of it passed:
 
 | Case | Expected | Result |
 |---|---|---|
 | Waiver empty | continue to checks | ✅ |
 | Waiver set | skip checks, loud warning + summary block | ✅ |
+| VirusTotal URL missing | **block** | ✅ |
+| Non-VirusTotal URL | **block** | ✅ |
+| Stale URL (hash of another release) | **block**, both hashes printed | ✅ |
+| md5-keyed report URL | **block** with guidance | ✅ |
+| Correct hash + detections | pass, both recorded | ✅ |
+| Correct hash, uppercase, no `/detection` suffix, stray whitespace | pass | ✅ |
 | Defender ID missing | **block** | ✅ |
 | Defender ID malformed | **block** | ✅ |
 | Defender ID valid UUID | pass | ✅ |
-| VirusTotal key absent | warn + continue | ✅ |
-| VirusTotal 404 (unknown file) | **block** | ✅ |
-| VirusTotal 503 ×3 (API down) | warn + continue | ✅ |
-| Ledger row, checked + no-key variants | correct §2.5.2 shape | ✅ |
-
-**Not exercised locally:** the HTTP-200 detection-count path, because `jq` is not
-available in the Windows dev shell (it *is* preinstalled on the `ubuntu-24.04`
-runner). The `jq` expressions were verified for semantics against mock clean and
-dirty VirusTotal payloads reimplemented in Python — `0/72 → pass`,
-`3/72 → block` with the three flagging engines named. **This path is unproven
-end-to-end and should be watched on the first real run.**
+| Ledger row, with and without detection count | correct §2.5.2 shape | ✅ |
 
 ### How to test it safely
 
@@ -238,8 +265,9 @@ is a different and more invasive operation. Worth doing. Worth doing on its own.
 
 | # | Decision | Outcome |
 |---|---|---|
-| **D1** | **How many antivirus detections should block a release?** A single obscure engine flagging a Chromium installer is common and usually meaningless. Blocking on any detection risks false alarms; blocking on none loses the benefit. | **DECIDED 2026-08-03 — any detection blocks; the waiver absorbs false alarms.** We don't know our noise floor yet (beta.28 came back 0/72). Starting strict and loosening beats the reverse. Implemented as `malicious + suspicious > 0`, with the flagging engines and their verdicts printed so the operator can judge whether to waive. **Revisit after 3–4 releases** — if we're waiving routinely, move to a threshold or a known-noisy allowlist. |
-| **D2** | **Do we have a Microsoft 365 Defender tenant?** If so, the Defender half could be verified for real rather than attested. | **DECIDED 2026-08-03 — no.** (A Microsoft 365 Defender tenant is a paid corporate security subscription; we'd know if we had one.) Defender stays operator attestation. |
+| **D1** | **How many antivirus detections should block a release?** | **MOOTED 2026-08-03.** Originally decided as "any detection blocks, waiver absorbs false alarms" — then the VirusTotal API was withdrawn on licensing grounds, and with it the automated count. The judgment is now the operator's, made on the report page they are already looking at. The optional `virustotal_detections` input preserves the *data* (recorded per release in §2.5.2) without the *enforcement*. **Revisit only if a flagged build ever slips out** — that would be the evidence that a human check isn't enough. |
+| **D2** | **Do we have a Microsoft 365 Defender tenant?** If so, the Defender half could be verified for real rather than attested. | **DECIDED 2026-08-03 — no.** (It is a paid corporate security subscription; we'd know.) Defender stays operator attestation. |
+| **D4** | **May we call VirusTotal's free API from CI?** | **DECIDED 2026-08-03 — no.** The API-key page states the free tier "must not be used in business workflows, commercial products or services." Caught by the owner before the key was ever added. The API call was removed and replaced with hash-checked URL attestation. Revisit only if VT Enterprise is ever bought for unrelated reasons. |
 | **D3** | **Should the gate also cover macOS?** | **No.** Gatekeeper trust is binary — signed and notarized is trusted, with no per-developer reputation score (see `ORG_IDENTITY_SIGNING_MIGRATION.md`). There is nothing to seed. This is a Windows-only problem. |
 
 ---
