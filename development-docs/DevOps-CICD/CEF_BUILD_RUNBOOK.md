@@ -178,18 +178,25 @@ Diff CEF's release notes between branches and run the **dependency-verification*
 ```powershell
 mkdir C:\cef ; mkdir C:\cef\automate ; mkdir C:\cef\depot_tools ; mkdir C:\cef\chromium_git
 
-# depot_tools (Google's Chromium build tooling). 7-Zip preferred — preserves hidden .git.
+# depot_tools (Google's Chromium build tooling).
+# ⚠️ Clone FULL, never `--depth 1`. CEF pins an EXACT depot_tools commit in
+# cef/CHROMIUM_BUILD_COMPATIBILITY.txt and automate-git.py checks it out; a
+# shallow clone fails with "fatal: reference is not a tree: <sha>".
+# (Hit for real on the 2026-08-03 7871 checkout — see Lessons.)
 cd C:\cef
-Invoke-WebRequest "https://storage.googleapis.com/chrome-infra/depot_tools.zip" -OutFile depot_tools.zip
-Expand-Archive depot_tools.zip -DestinationPath C:\cef\depot_tools -Force
+git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git C:\cef\depot_tools
 cd C:\cef\depot_tools ; .\update_depot_tools.bat
 $env:PATH = "C:\cef\depot_tools;$env:PATH"     # (or add permanently via System env vars)
 gclient --version                               # sanity check
-
-# automate-git.py (CEF's build automation)
-cd C:\cef\automate
-Invoke-WebRequest "https://raw.githubusercontent.com/chromiumembedded/cef/master/tools/automate/automate-git.py" -OutFile automate-git.py
+# Already cloned shallow? Recover without re-cloning:  git fetch --unshallow
 ```
+
+**`automate-git.py` — use the BRANCH-MATCHED copy, not `master`.**
+`automate-git.py` is versioned with CEF, so the right copy is the one inside the CEF checkout the
+build is actually using: `<tree>\cef\tools\automate\automate-git.py`. Fetching it from `master` (as
+this runbook previously instructed) drifts it away from the branch and was found to differ on `7871`.
+Chicken-and-egg on a brand-new tree: run *once* with any recent copy to clone `cef/`, then re-run
+using the checkout's own copy — or clone `cef/` by hand first.
 
 #### Run the build (Windows)
 Canonical script: `scripts/build_hodos_cef.bat` (copy to `C:\cef\chromium_git\` and run from there in a
@@ -317,7 +324,36 @@ never auto-apply). Until scripted (see Open TODOs), run this as a checklist on e
 
 ---
 
-## Lessons learned (from the real 2026-03-12 build)
+## Lessons learned
+
+### From the 2026-08-03 M150 / `7871` checkout
+
+- **Clone `depot_tools` FULL. `--depth 1` breaks the checkout.** CEF pins an exact depot_tools
+  commit in `cef/CHROMIUM_BUILD_COMPATIBILITY.txt` (alongside the Chromium tag), and
+  `automate-git.py` does a hard `git checkout <sha>` on it. A shallow clone dies with
+  `fatal: reference is not a tree: <sha>` **after** cloning `cef/` — far enough in to look like
+  progress. Recovery is cheap and does not need a re-clone: `git fetch --unshallow`.
+
+- **`automate-git.py` is versioned with CEF — use the checkout's own copy.** The copy at
+  `<tree>\cef\tools\automate\automate-git.py` differs from `master` on `7871`, and differed from
+  our M136-era copy at `C:\cef\automate\`. This runbook previously told you to fetch it from
+  `master`; that instruction was wrong and has been corrected above.
+
+- **`CHROMIUM_BUILD_COMPATIBILITY.txt` is the ground truth for what a CEF pin means.** For
+  `94c1726` (= `150.0.17`) it reads `chromium_checkout: refs/tags/150.0.7871.187` — i.e. pinning
+  the CEF commit pins the Chromium tag transitively. Read this file to confirm a pin rather than
+  inferring the Chromium version from the CEF version string.
+
+- **Running a `.bat` from git-bash via `cmd.exe /c` silently no-ops.** MSYS rewrites the `/c` flag
+  into a path, so `cmd` starts *interactively*, prints its banner, hits EOF and exits **0** — a
+  green exit with zero work done. Use `MSYS_NO_PATHCONV=1`, `cmd.exe //c`, or (preferred) drive
+  `automate-git.py` from bash with exported env vars so exit codes are real.
+
+- **Toolchain measured on this host (2026-08-03):** MSVC **14.44.35207** (VS2022 BuildTools 17.14),
+  Windows SDK **10.0.26100** + 10.0.22621, Python 3.10.11 on PATH (depot_tools supplies its own;
+  `7871`'s `.vpython3` wants 3.11).
+
+### From the real 2026-03-12 build
 
 - **The build IS resumable — but the mechanism CHANGED. Read this before relying on it.**
   The 2026-03-12 M136 build used **Ninja**, which tracks completed work in `.ninja_log`. Interrupted by
