@@ -48,6 +48,11 @@ on:
         description: 'EMERGENCY ONLY: reason to promote WITHOUT AV seeding. Skips the seeding gate; the reason is logged loudly and written to the run summary.'
         required: false
         type: string
+      dry_run:
+        description: 'REHEARSAL: run every check (incl. the AV seeding gate) against the real draft bytes, then STOP before the flip. Nothing is published, the website is not touched. Use this to prove the gate behaves before depending on it.'
+        required: false
+        default: false
+        type: boolean
 
 # Never let two promotes (or a promote + re-run) race the irreversible flip or
 # the website push for the same tag.
@@ -68,8 +73,19 @@ jobs:
       - name: Validate tag input
         env:
           TAG_INPUT: ${{ inputs.tag }}
+          DRY_RUN_INPUT: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
+          # Resolve dry_run to a plain string env var rather than gating steps on
+          # the raw input. GitHub casts mismatched types when comparing a string
+          # to a boolean in an `if:`, and a stringly-typed 'true' would compare
+          # EQUAL to nothing and silently perform a REAL promote. Normalising here
+          # (same env-indirection convention as TAG) removes that whole class of bug.
+          case "${DRY_RUN_INPUT:-false}" in
+            true|True|TRUE) echo "DRY_RUN=true"  >> "$GITHUB_ENV"
+                            echo "::notice::DRY RUN — every check will run against the real draft bytes, then stop before the flip. Nothing will be published." ;;
+            *)              echo "DRY_RUN=false" >> "$GITHUB_ENV" ;;
+          esac
           TAG="$TAG_INPUT"
           # Accept only v<semver>[-beta.N] — no shell-metachar / path-traversal surface.
           echo "$TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$' \
@@ -338,7 +354,7 @@ jobs:
       # Point of no return — assets become public + Latest. Skipped in recovery mode
       # (already public) so a re-run resumes at website-sync without re-flipping.
       - name: Promote release to live (latest)
-        if: env.ALREADY_PUBLIC != 'true'
+        if: env.ALREADY_PUBLIC != 'true' && env.DRY_RUN != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -348,6 +364,7 @@ jobs:
           echo "Release $TAG is now LIVE and marked Latest."
 
       - name: Verify public download URLs resolve
+        if: env.DRY_RUN != 'true'
         run: |
           set -euo pipefail
           BASE="https://github.com/${{ github.repository }}/releases/download/${TAG}"
@@ -366,6 +383,7 @@ jobs:
       # page (src/pages/index.astro). Cloudflare Pages auto-deploys on push to main.
       # Idempotent (git diff --cached --quiet) so recovery re-runs are safe.
       - name: Update website (appcast + downloads + version)
+        if: env.DRY_RUN != 'true'
         env:
           WEBSITE_TOKEN: ${{ secrets.WEBSITE_DEPLOY_TOKEN }}
         run: |
@@ -433,6 +451,7 @@ jobs:
           fi
 
       - name: Verify website is live with new version
+        if: env.DRY_RUN != 'true'
         run: |
           set -euo pipefail
           WIN_EXE="HodosBrowser-${VERSION}-setup.exe"
@@ -468,6 +487,7 @@ jobs:
       # slipped past the .gitattributes guard. Fail-closed: a broken feed signature bricks
       # silent for the whole fleet, so refuse to consider the promotion complete.
       - name: Verify served appcast.xml.ed signature (byte-stability guard)
+        if: env.DRY_RUN != 'true'
         run: |
           set -euo pipefail
           ver=$(openssl version | awk '{print $2}')
@@ -494,3 +514,25 @@ jobs:
             echo "served .ed not verifying yet [${i}/20] (edge cache warming, or a normalization slipped in?)"; sleep 15
           done
           [ "$ok" = "1" ] || { echo "::error::served appcast.xml.ed does NOT verify against the served appcast.xml — a CRLF/normalization/edge transform broke the feed signature; every Windows silent client would fail-closed. Investigate before this build reaches silent users."; exit 1; }
+
+      # Closes a rehearsal by stating plainly what did and did not happen, so a
+      # green dry run is never mistaken for a completed promotion.
+      - name: Dry run — what did NOT happen
+        if: env.DRY_RUN == 'true'
+        run: |
+          set -euo pipefail
+          {
+            echo "## 🧪 DRY RUN — nothing was published"
+            echo ""
+            echo "Every pre-flip check ran against the real draft bytes of \`${TAG}\`:"
+            echo "asset presence, digest pinning, appcast assertions, cryptographic"
+            echo "signature re-verification, and the AV seeding gate."
+            echo ""
+            echo "**Skipped (rehearsal only):**"
+            echo "- the release was NOT flipped to public / Latest"
+            echo "- the website (appcast, download links, version) was NOT touched"
+            echo "- no public-URL or served-signature verification ran"
+            echo ""
+            echo "\`${TAG}\` is still a draft. Re-run with **dry_run unchecked** to promote for real."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "DRY RUN complete — ${TAG} is still a draft. Nothing was published."
