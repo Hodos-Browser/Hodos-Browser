@@ -70,3 +70,6 @@ docs/
 
 # Claude session logs
 /sessions/
+# Stray run/debug artifacts
+startup_log.txt
+Usersarchb*
