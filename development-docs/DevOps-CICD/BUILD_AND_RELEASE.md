@@ -144,8 +144,17 @@ DRAFT is the finish line." Nothing is customer-visible.
 smoke it (launch + core flows; per the update-stability rule, verify the real N−1→N update behavior where
 possible). Grab the draft's `SHA256SUMS.txt` to pin the exact bytes.
 
+> **⚠️ Do the AV seeding HERE, in Phase B — not after publishing.** Step 8 below used to say
+> "immediately after publishing"; that is **no longer possible**. `promote.yml` now refuses to
+> publish without the seeding evidence in hand (see §2.5.5). Seeding the draft installer is
+> equivalent to seeding the published one — they are the same bytes, which is exactly what
+> `SHA256SUMS.txt` pinning proves. While you have the installer downloaded for the smoke test,
+> upload it to VirusTotal and submit it to MS Defender, and keep the report URL + submission ID
+> for Phase C.
+
 **Phase C — `promote.yml` (manual `workflow_dispatch`):** run **Actions → "Promote release"** with the
-draft **tag** and (recommended) paste the **`SHA256SUMS.txt`** you tested to pin the bytes. It re-downloads
+draft **tag** and (recommended) paste the **`SHA256SUMS.txt`** you tested to pin the bytes. **Also required
+now: the VirusTotal report URL and the MS Defender submission ID from Phase B** (§2.5.5). It re-downloads
 the published draft bytes, flips the release **live + Latest**, and pushes the website
 (`Hodos-Browser/hodosbrowser.com` — a **Cloudflare Worker** named `hodosbrowser-com`, built via
 `npm run build` + a committed `wrangler.jsonc`, deployed with `npx wrangler deploy`; NOT Pages) via the
@@ -185,7 +194,12 @@ git add -A && git commit -m "Release vX.Y.Z-beta.N: appcast + download links + v
 
 #### Step 8: Anti-virus / reputation seeding
 
-Submit signed binaries to anti-virus vendors and reputation services **immediately after publishing**. Chromium-based executables trigger heuristic false positives — pre-submission builds reputation. See §2.5 for full detail; this is the operational summary.
+> **⚠️ ORDER CHANGED (2026-08-03).** This step used to run *after* publishing. It now runs in
+> **Phase B, before promoting** — `promote.yml` blocks the flip without the evidence (§2.5.5).
+> Same submissions, same vendors, earlier. What remains *here* is recording the ledger row,
+> which the promote run prints for you, pre-formatted.
+
+Submit signed binaries to anti-virus vendors and reputation services **while smoke-testing the draft, before Phase C**. Chromium-based executables trigger heuristic false positives — pre-submission builds reputation. See §2.5 for full detail; this is the operational summary.
 
 **Pre-step: verify which intermediate CA signed this build** (run on Windows in PowerShell):
 
@@ -566,6 +580,40 @@ Required fields per binary:
 | `OriginalFilename` | matches the exe name |
 
 Verify post-build via `(Get-Item HodosBrowser.exe).VersionInfo` — every field should be populated, not "Unknown".
+
+#### 2.5.5 The promote-time seeding gate (live since 2026-08-03)
+
+`promote.yml` **refuses to publish a release without seeding evidence.** Design + rationale:
+[`AV_SEEDING_GATE_PLAN.md`](./AV_SEEDING_GATE_PLAN.md).
+
+**Why it exists.** Seeding was well documented and routinely skipped — beta.16–27 have no record
+at all, and beta.28 was seeded but never promoted while beta.29 was promoted but never seeded.
+Nothing connected "going public" to "was seeded". Now the release cannot go out without it.
+
+**What you paste into the Promote workflow** (both required unless waived):
+
+| Input | Where it comes from |
+|---|---|
+| `virustotal_report_url` | The report URL from your Phase-B upload. **The sha256 in the URL is checked against the installer being promoted** — a stale URL from the previous release is rejected. |
+| `virustotal_detections` | Optional. The count off that report (`0/72`). Recorded in the §2.5.2 ledger so the noise floor is tracked across releases. |
+| `defender_submission_id` | The UUID from the WDSI portal or its confirmation email. Format-checked only — this half is attestation. |
+| `av_seeding_waiver` | **Emergency only.** A reason string. Skips the gate, logged loudly in the run summary. |
+
+**Neither vendor is queried automatically.** VirusTotal's free API forbids use "in business
+workflows, commercial products or services"; MS Defender has no public status API. See the plan
+doc §3.
+
+**On success the run prints the §2.5.2 ledger row pre-formatted** — paste it into this file. Fill
+the cert-chain line from §2.5.1 yourself.
+
+**`dry_run`** runs every check including this gate against the real draft bytes, then stops before
+the flip: nothing published, website untouched. Use it to rehearse. **Unproven as of 2026-08-03** —
+the gate's logic is unit-tested but has never run in CI; the first real exercise is scheduled for
+the next draft promote. If it misbehaves, `av_seeding_waiver` is the unblock.
+
+> **Ordering consequence:** seeding moved from *after* publish (old Step 8) to *during Phase B*.
+> Same submissions, earlier. The draft bytes and the published bytes are identical — that is what
+> `SHA256SUMS.txt` pinning proves.
 
 ### 2.6 Build Script
 

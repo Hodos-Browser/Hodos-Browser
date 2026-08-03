@@ -237,10 +237,48 @@ all of it passed:
 | Defender ID valid UUID | pass | ✅ |
 | Ledger row, with and without detection count | correct §2.5.2 shape | ✅ |
 
-### How to test it safely
+### How to test it safely — `dry_run`
 
-Run the workflow against a tag that is **already public**. Recovery mode skips
-the flip, so the new steps can be shaken out with no risk to a live release.
+The gate skips itself in recovery mode (correctly: a re-run should not re-block a
+flip that already happened), so it **cannot** be rehearsed against an
+already-public tag — everything would skip and you would learn nothing.
+
+`dry_run` exists for this. It runs every check, including the gate, against the
+real draft bytes and then stops before the flip: no publish, no website push, no
+public-URL or served-signature checks. A closing step states plainly what did and
+did not happen so a green dry run is never mistaken for a completed promotion.
+
+**Rehearsal recipe** (5 minutes, at the next real draft):
+
+1. Actions → **Promote release** on `Hodos-Browser/Hodos-Browser`.
+2. **tag:** the draft. **dry_run:** ✅ checked. Leave the VirusTotal and Defender
+   boxes **empty**.
+3. Expect it to **fail** at the VirusTotal step, telling you to upload the
+   installer. That failure *is* the gate working.
+4. Re-run with the real report URL + Defender ID, `dry_run` still checked.
+   Expect green, plus the §2.5.2 ledger row in the run summary.
+5. Then re-run with `dry_run` **unchecked** to promote for real.
+
+### Status: UNPROVEN in CI (decision 2026-08-03)
+
+The gate's logic is unit-tested (12 cases, §"Verification done at build time"),
+but **it has never run inside GitHub Actions.** What local testing cannot cover
+is the CI plumbing: whether inputs arrive as expected and whether the `env` a
+step writes is visible to the next step's `if:` condition.
+
+The owner chose to **defer the rehearsal to the next real draft** rather than
+dry-run against the stale beta.27 draft. Rationale: a dry run is safe only
+because the `dry_run` checkbox is ticked, and against beta.27 a misclick would
+have promoted a two-release-old build — repointing the website's download
+buttons at it (existing installs are protected by the `IsNewerBuild`
+anti-rollback gate, but fresh downloads are not). Rehearsing on the draft you
+intend to promote anyway removes that failure mode entirely: a misclick there
+just promotes the right build.
+
+**Cost of the deferral:** the first real exercise happens during a live release.
+Mitigated by the fail direction — a gate bug blocks the promote, it cannot
+publish something bad — and by `av_seeding_waiver` as the unblock. Anyone
+promoting should read §2.5.5 of `BUILD_AND_RELEASE.md` first.
 
 ---
 
