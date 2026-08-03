@@ -1,8 +1,13 @@
-Copyright 2025-2026 Marston Enterprises. All rights reserved.
+Copyright 2025-2026 Marston Enterprises.
 
-This software is proprietary and confidential. No part of this software may be
-reproduced, distributed, or transmitted in any form or by any means, including
-photocopying, recording, or other electronic or mechanical methods, without the
-prior written permission of Marston Enterprises.
+HodosBrowser is released as open source under the MIT License. The full grant,
+including the warranty disclaimer, is in the LICENSE file at the root of this
+repository — LICENSE is authoritative for all licensing questions.
+
+Third-party components carry their own licenses and are NOT relicensed by the
+grant above. In particular, the Chromium Embedded Framework and Chromium itself
+are governed by their own terms, and the bundled filter lists and the
+disconnect.me entity list carry their own (see adblock-engine/src/entities.json,
+CC BY-NC-SA 4.0).
 
 For licensing inquiries, contact: matthew.archbold@marstonenterprises.com
