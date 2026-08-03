@@ -1,7 +1,7 @@
 # Decentralized Naming — Problem Statement and Design Direction
 
 **Created:** 2026-05-09
-**Status:** Working hypothesis — research ongoing
+**Status:** Working hypothesis — research ongoing. **Current lean (2026-07-15): OpNS** (posture = *engage, prototype, watch*). See "Current direction" below + `OPNS_REVIEW.md`.
 **Owner:** Matt
 
 ## Why this folder exists
@@ -10,12 +10,35 @@ Two seemingly distinct features Hodos cares about — paymails (human-readable w
 
 ```
 Decentralized-Naming/
-├── README.md           ← this file (problem statement + design direction)
+├── README.md                       ← this file (problem statement + design direction)
+├── OPNS_REVIEW.md                  ← ⭐ current lean: deep review of OpNS / 1sat.name (2026-07-15)
+├── BOOTSTRAP_PROBLEM.md            ← adoption / network-effect strategy
+├── NARRATIVES.md                   ← externally-facing messaging
+├── Xanaverse-Contracts-Review/     ← the sCrypt-SMT identity-*number* covenant (complementary primitive)
 ├── Paymail/
 │   └── OPEN_PAYMAIL_PROTOCOL.md
 └── Domain-Names/
     └── WEBSITES_ON_CHAIN_RESEARCH.md
 ```
+
+---
+
+## Current direction (updated 2026-07-15)
+
+**We have a strong lean toward OpNS as the naming primitive** — and a posture of **"engage, prototype, and watch."** Full analysis in `OPNS_REVIEW.md`; the short version:
+
+- **OpNS** (David Case / @shruggr / b-open-io) is the strongest on-chain, human-readable, self-sovereign, *payable* naming primitive that exists on BSV today. Its name-mint **uniqueness is enforced by Bitcoin Script / consensus via an sCrypt covenant** — a *stronger* guarantee than our own Open Paymail design — and it delivers human-readable **names**, filling the exact gap the Xanaverse review left open (Xanaverse gives unique *numbers*, not names).
+- **But it is essentially pre-adoption**: near-zero names registered, a centralized closed-source paid miner (~0.25 BSV / ~$3 flat per name), no expiry, and squatting economics that are currently capital-bound rather than compute-bound. So it is a promising *primitive*, not a shipped *naming layer* we can depend on yet.
+
+**What "engage, prototype, watch" means concretely:**
+
+| Track | Posture | Why |
+|---|---|---|
+| **OpNS name resolution** (name → `opns.idKey` → BRC-29 address) | **Prototype** (read-only) | Cheap, reversible, dogfoods the primitive, and gives us a concrete artifact to design-partner with shruggr on. First home = a paymail-style resolver in the send form — see `../../Sigma-BRC121-Sprint/phase-3-ordinals/`. |
+| **OpNS as a design collaboration** (squatting economics, no-expiry, resale-binding resolver policy, canonical-genesis convention, client-side miner) | **Engage** | These open questions *are* our "how does the ecosystem converge on a naming solution" questions. We're positioned as a design partner, not just a consumer. |
+| **More decentralization at the indexer / overlay layer** (federated overlays, no single leader, micropayment-funded operators) | **Engage + watch** (NOT prototype yet) | Still the right long-term shape (see "The federated overlay path" below), but OpNS's overlay peering is currently a static leader and adoption is thin. Watch how it decentralizes; don't build overlay infra ourselves. |
+
+**Standing rules:** don't build our own name registry; don't depend on OpNS as a shipped layer yet; keep the OpNS × Xanaverse synthesis (name + verified-unique-number, both bound to one BRC-100 identity key) on the table with both shruggr and Calhoun.
 
 ---
 
@@ -43,6 +66,8 @@ That means uniqueness on Bitcoin can be enforced at one of three levels:
 **Earlier drafts of this doc said indexers were "the only way." That was wrong.** sCrypt with covenants and Merkle proofs CAN enforce uniqueness at the network level on the UTXO model. The trade-off is throughput, not possibility. Centralization remains philosophically misaligned with Bitcoin; the other two are both legitimate decentralized paths with different scaling characteristics.
 
 **Hybrid designs are possible.** The most interesting one for our use case: use the on-chain SMT-covenant path for identity-key uniqueness (slow, high-integrity, low volume), and federated overlays for human-readable names on top (fast, high-volume, reputation-secured). Each layer plays to its strength. See `Xanaverse-Contracts-Review/REVIEW.md` for detail on how the on-chain piece can work.
+
+> **⭐ Update (2026-07-15): OpNS already implements the covenant approach *for human-readable names*.** The row above ("On-chain via sCrypt SMT covenant") had only produced Xanaverse's identity-*number* registry when this table was written. **OpNS** (shruggr / b-open-io) is a live covenant-secured system that enforces name-mint uniqueness at consensus level and delivers actual human-readable names — a fan-out "mine tree" rather than a single choke-point registry, so it also sidesteps Xanaverse's ~6-registrations-per-block singleton bottleneck. It is our current lean. **Full teardown + reference links: `OPNS_REVIEW.md`.**
 
 ---
 
@@ -155,9 +180,11 @@ The deep insight: **paymails and domain names are the same protocol applied to d
 
 ## What's in the subfolders
 
-| Subfolder | What's there | What's missing |
+| Subfolder / doc | What's there | What's missing |
 |---|---|---|
-| `Paymail/OPEN_PAYMAIL_PROTOCOL.md` | Research and proposal for an open/decentralized paymail variant | Should evolve to incorporate the federated-overlay + micropayment thinking above |
-| `Domain-Names/WEBSITES_ON_CHAIN_RESEARCH.md` | Research on on-chain websites, ORDnet, NBDomain, Bottle browser, ENS, Babbage Metanet URI scheme | Should evolve to incorporate the same federated-overlay frame |
+| `OPNS_REVIEW.md` | ⭐ Current lean. Code-level teardown of OpNS / 1sat.name: char-by-char mine tree, consensus-covenant uniqueness, PoW, cost/adoption reality, weaknesses, comparison, reference links | Live end-to-end mint test; X/Twitter sentiment (blind spot); adoption trend over time |
+| `Xanaverse-Contracts-Review/REVIEW.md` | The sCrypt-SMT identity-*number* covenant (unique numbers, not names) — complementary to OpNS | The OpNS × Xanaverse synthesis (name + verified-number on one identity key) is noted, not yet designed |
+| `Paymail/OPEN_PAYMAIL_PROTOCOL.md` | Our own open/decentralized paymail proposal (overlay + PushDrop + first-seen-in-block uniqueness) | **Needs a rethink in light of OpNS** — OpNS is a live instance of much of this with a *stronger* (consensus) uniqueness guarantee |
+| `Domain-Names/WEBSITES_ON_CHAIN_RESEARCH.md` | Research on on-chain websites, ORDnet, NBDomain, Bottle browser, ENS, Babbage Metanet URI scheme | Should incorporate OpNS as the decentralized alternative to ORDnet's centralized `.web3` name layer |
 
-Both docs predate this overview. As the design crystallizes, they should be refactored to align with the shared architecture documented here.
+These docs predate the OpNS review. As the design crystallizes around OpNS, they should be refactored to align with `OPNS_REVIEW.md` and the current-direction block above.
