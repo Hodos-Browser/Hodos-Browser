@@ -200,12 +200,25 @@ the tracker; re-verify it still exists and still streams.
   does not transfer to us** — `"Hodos"` would be a strong identifier, not a weak one. Reporting the
   truth puts us in the largest available crowd for this signal. **Revisit if the user base grows.**
 
-### Awaiting owner
-| # | Decision | Recommendation |
+- **D4 — ✅ DECIDED 2026-08-03: DROP.** Owner confirmed. Do **not** add WebGL vendor/renderer faking.
+  Status quo; no `getParameter` hook. Removes the Mac GPU-string set from D3's scope (FB-6 is moot).
+
+### Decided by owner 2026-08-03
+
+| # | Decision | Outcome |
 |---|---|---|
-| **D9** | **P2a: re-build M136, or invoke the I5 guarded fallback?** `7103` is unsupported upstream; local CEF HEAD reads *"Pin depot_tools version for out-of-support branch."* But a complete tree + shipped binary exist on disk | **Fallback.** Use the existing tree + shipped binary as the last-known-good baseline; run the codec Layer-A probe against the **live M136 build** to capture the pre-bump baseline; skip a 10–12 h re-build of a dead branch. Go straight to P2b |
-| **D10** | **Siso vs Ninja** | **Build on Siso** (the default). Keep `use_siso=false` as a documented escape hatch, not the plan |
-| **D11** | **Disk layout** | Keep the M136 tree; build `7871` into a **second tree** (`C:\cef\cef150\`). 1203 GB free makes this comfortable and keeps D9 reversible. Separately: fix the `depot_tools` PATH ambiguity. **D: duplicate deletion needs owner approval** |
+| **D9** | P2a: re-build M136, or invoke the I5 guarded fallback? | **✅ SKIP the M136 re-build.** `7103` is unsupported upstream and a complete tree + the shipped binary already prove the environment worked. Instead: run the `PLAN_codecs.md` §6.1 Layer-A probe against the **live M136 build** (~10 min) to capture the pre-bump codec/HEVC baseline, then go straight to P2b. Per §7.2 of `PLAN_build_test_prod.md`, the P6 crash-rate + perf gates compare against **the currently shipping public M136 build**, not a from-source baseline |
+| **D10** | Siso vs Ninja | **✅ Build on Siso** (the default on a fresh out-dir). `use_siso=false` is a documented escape hatch, not the plan. Never mix — switching requires `gn clean` |
+| **D11** | Disk layout | **✅ New tree at `C:\cef\cef150\`; preserve `C:\cef\chromium_git` (M136).** 1203 GB free. Fix the `depot_tools` PATH ambiguity. **`D:\cef` (117 GB partial duplicate) — deletion NOT approved; leave it** |
+
+### Host prep — status
+
+- ✅ **Defender exclusion for `C:\cef` — DONE 2026-08-03** (`Add-MpPreference -ExclusionPath "C:\cef"`,
+  verified). Covers `depot_tools`, the M136 tree and the new `cef150` tree. Remove after the build work.
+- ⬜ **Windows Update pause + no-auto-restart — CONFIRM WITH OWNER before starting a long build.**
+  Walkthrough was given (Settings → pause 5 weeks; `gpedit.msc` → *No auto-restart with logged on
+  users* → Enabled; Active hours → Manually). **Do not assume this is done — ask.** A forced restart
+  killed the 2026-03-12 build at 78,821/96,000 objects, and hard-kill resume is unproven under Siso.
 
 **Deferred to their phases per the brief:** D3 (mac arch), D5 (C2 seed channel), D7 (signing sequencing).
 
@@ -224,16 +237,24 @@ TD-1 edits, and landing both together risks silently dropping one.
 
 ## 11. Immediate next steps
 
-**Owner (admin required — blocks the build):**
-1. Defender exclusion for the build directory (2–5× speedup on millions of small files).
-2. Pause Windows Update / disable auto-restart. **Hard-kill resume is unproven under Siso.**
-3. Answer **D9** and confirm **D4**.
+**Blockers — cleared except one:**
+1. ✅ Defender exclusion — done.
+2. ⬜ **Windows Update pause / no-auto-restart — CONFIRM WITH OWNER.** Not verified.
+3. ✅ D4 dropped, D9 skip — both decided.
 
-**Then (next session):**
-4. P1 pin + **DEP-1a..d** as four small commits — pure prep, no build, gates P2b.
-5. Codec Layer-A probe against the live M136 build (~10 min) — captures the pre-bump baseline.
-6. P2b: new tree, `--branch=7871`, `gn args --list` **pre-flight before the 10–12 h build** (a renamed
-   or flipped flag ships a green build with no codecs), then kick the build off in the background.
+**Execution order (next session):**
+4. **P1 pin + DEP-1a..d** as small commits — pure prep, no build, gates P2b. Include the two additions
+   the plan missed: `rust-wallet/Cargo.toml:29` `actix-web` caret, and the commented-out `*-latest` in
+   `test.yml:138/145/151`.
+5. **Codec Layer-A probe against the live M136 build** (~10 min) — the pre-bump baseline. Record
+   per-codec results incl. the machine-dependent HEVC row.
+6. **P2b:** new tree `C:\cef\cef150\`, `--branch=7871`, refresh `depot_tools`, `gclient sync`.
+7. **⛔ `gn args --list` PRE-FLIGHT before the 10–12 h build.** Confirm `proprietary_codecs=true`,
+   `ffmpeg_branding="Chrome"`, `chrome_pgo_phase=0`, `enable_widevine` resolve, and inspect the HEVC
+   derivations. **A flipped default ships a green build with no codecs** — catching it after 12 hours
+   is the expensive failure. Then start the build in the background.
+8. On green: Layer-A + Layer-B codec smoke, VER-5 drift audit (installer whitelist — §5 #1), wrapper +
+   `cef-native` rebuild, then the changelog into `CEF_VERSION_UPDATE_TRACKER.md`.
 
 **First milestone worth aiming at (unchanged from the brief): a clean `7871` build with codecs
 verified, before any source patching.**
