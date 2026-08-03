@@ -134,21 +134,29 @@ jobs:
   # STAGED Track E jobs — each is its own follow-up step (see TESTING.md).
   # Left commented so this workflow stays GREEN until each layer is built out.
   #
+  # ⚠️ These stubs carry PINNED images on purpose. They previously read
+  # `windows-latest` / `macos-latest` / `ubuntu-latest`. Commented-out YAML is
+  # still a copy-paste source, so a floating image would silently re-enter the
+  # workflow the moment one of these jobs is enabled — re-drifting the very
+  # thing T5(g) and VER-3 exist to prevent. Keep them pinned even while dead.
+  #
   # cpp:
-  #   strategy: { matrix: { os: [windows-latest, macos-latest] } }
+  #   strategy: { matrix: { os: [windows-2022, macos-15] } }
   #   runs-on: ${{ matrix.os }}
   #   - cmake configure with -DHODOS_BUILD_TESTS=ON (needs CEF binaries + vcpkg)
   #   - cmake --build + ctest
   #   - Pin GoogleTest by tag + actions/cache (NOT FetchContent-at-CI).
+  #   - windows-2022 is ABI-critical: it must match the toolset the CEF binary
+  #     was built with (VER-3). Do not "modernise" this to a newer image.
   #
   # frontend:
-  #   runs-on: ubuntu-latest
+  #   runs-on: ubuntu-24.04
   #   - npm ci
   #   - npm run test:unit      # Vitest — to be added (hooks + validators first)
   #   - npx playwright install --with-deps && npx playwright test   # e2e already exist
   #
   # coverage:
-  #   runs-on: ubuntu-latest
+  #   runs-on: ubuntu-24.04
   #   - cargo-llvm-cov (NOT tarpaulin); thresholds crypto>=90, certificate>=80, general>=60
   #   - publish to $GITHUB_STEP_SUMMARY
   # ===========================================================================
