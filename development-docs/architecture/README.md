@@ -1,67 +1,75 @@
 # Architecture Documentation
 
-> Centralized location for architectural reference docs. Every CLAUDE.md
-> file in the repo should link here when describing system boundaries,
-> data flow, or security gates.
+> **Last reviewed: 2026-08-03** (full rewrite against code — the previous
+> contents described the pre-Phase-2.6 C++ permission engine and were
+> substantially wrong).
+>
+> This folder carries **cross-layer** architecture: the flows that no single
+> layer's `CLAUDE.md` owns because they cross the React / C++ / Rust boundary.
 
-## Why this folder exists
+## The rule: one home per fact
 
-Architecture documentation was previously scattered across:
+| Kind of fact | Home |
+|---|---|
+| Shape, contracts, invariants, pointers | Root docs (`/CLAUDE.md`, `README.md`, `PROJECT_OVERVIEW.md`) |
+| Inventory — file rosters, endpoint lists, counts, exhaustive tables | The per-directory `CLAUDE.md` for that layer |
+| **A flow that crosses two or more layers** | **Here** |
 
-- Per-area `CLAUDE.md` files (cef-native, rust-wallet, etc.) — describing
-  their own layer
-- Sprint-specific docs in `development-docs/<sprint>/`
-- Inline code comments in load-bearing files
+If a fact appears both here and in a layer `CLAUDE.md`, **the layer doc wins
+and the copy here is a bug.** These docs deliberately do *not* re-list the
+110 wallet routes, the 32 `src/core/*.cpp` files, or the 14 overlays — they
+point at the layer doc that owns each roster.
 
-This was hard to find and prone to drift. This folder centralizes the
-cross-cutting docs that describe HOW THE SYSTEM IS PUT TOGETHER — security
-boundaries, request flows, endpoint contracts. Layer-specific docs stay
-in their CLAUDE.md files; cross-layer concerns live here.
+Cite `file.rs :: symbol_name`, not `file.rs:1234`. Symbols survive edits.
+
+## Index
+
+| Doc | Scope |
+|---|---|
+| [`AUTO_APPROVE_ENGINE.md`](./AUTO_APPROVE_ENGINE.md) | The permission decision flow end to end: what C++ collects, what Rust decides, how a prompt round-trips back. Matrix C branch order. |
+| [`IPC_BRIDGE.md`](./IPC_BRIDGE.md) | The `wallet_call` / `wallet_response` process-message bridge that carries every page-originated wallet call. Message contract, chunking, promise correlation. |
+| [`WALLET_API_MAP.md`](./WALLET_API_MAP.md) | Which wallet endpoints are permission-gated, by which dispatcher, and which shim method reaches them. The gate map — **not** an endpoint roster. |
+
+`PERMISSION_GATES.md` was listed as "TBD" here for two months and never
+written. It is not planned: everything it would have covered lives in
+`AUTO_APPROVE_ENGINE.md` §2 or in the Rust layer docs.
+
+## Where the authority actually lives
+
+These docs are a narrative over code. When they disagree with code, code wins.
+
+| Concern | Source of truth |
+|---|---|
+| Permission decision logic | `rust-wallet/crates/hodos_permission_engine/src/matrix_c.rs :: decide` |
+| Decision types | `hodos_permission_engine/src/decision.rs` (`PermissionDecision`, `PromptType`, `EngineReason`) |
+| Context fields the decision reads | `hodos_permission_engine/src/context.rs` (`PermissionContext`, `CallKind`, `TrustLevel`) |
+| Gate dispatch + HTTP envelopes | `rust-wallet/src/permission_service/request_gate.rs` |
+| Middleware wiring | `rust-wallet/src/main.rs :: domain_trust_mw` |
+| Route registration | `rust-wallet/src/main.rs` (roster in `rust-wallet/CLAUDE.md`) |
+| Wallet-call interception + modal orchestration | `cef-native/src/core/HttpRequestInterceptor.cpp` |
+| IPC bridge entry | `cef-native/src/core/HttpRequestInterceptor.cpp :: HandleIpcWalletCall` |
+| Page-facing shim | `cef-native/include/core/CWIShimScript.h` |
+| Backend ports | `cef-native/include/core/PortConfig.h` |
+| Modal rendering | `frontend/src/pages/BRC100AuthOverlayRoot.tsx` (type dispatch) |
+
+## Layer docs (inventory lives there, not here)
+
+| Layer | Doc |
+|---|---|
+| Rust wallet | `rust-wallet/CLAUDE.md`, `rust-wallet/src/CLAUDE.md`, `rust-wallet/src/database/CLAUDE.md` |
+| C++ shell | `cef-native/CLAUDE.md`, `cef-native/src/core/CLAUDE.md`, `cef-native/src/handlers/CLAUDE.md`, `cef-native/include/core/CLAUDE.md` |
+| React | `frontend/src/pages/CLAUDE.md`, `frontend/src/components/CLAUDE.md`, `frontend/src/hooks/CLAUDE.md` |
 
 ## Maintenance policy
 
 | When | Action |
 |---|---|
-| Adding a new wallet endpoint | Update `WALLET_API_MAP.md` in the same commit |
-| Changing the auto-approve engine logic | Update `AUTO_APPROVE_ENGINE.md` in the same commit |
-| Adding a new architectural concern that spans layers | New file in this folder + add to index below |
-| Architecture changes that break docs in this folder | Doc update is part of the PR's "definition of done" |
-| Quarterly | One-pass review — `git log -- development-docs/architecture/` since last review, verify against current code |
+| Changing the Matrix C cascade in `matrix_c.rs` | Update `AUTO_APPROVE_ENGINE.md` §2 in the same commit |
+| Adding or removing a `dispatch_*` call in a handler | Update the gate map in `WALLET_API_MAP.md` in the same commit |
+| Changing the `wallet_call` / `wallet_response` message shape | Update `IPC_BRIDGE.md` §2 in the same commit |
+| Adding a wallet endpoint | Update `rust-wallet/CLAUDE.md` (the roster). Only touch `WALLET_API_MAP.md` if the endpoint is permission-gated or shim-reachable |
+| Adding a new cross-layer concern | New file here + a row in the index above |
 
-Drift detection: if you grep for an endpoint, method, or invariant in code
-and it's not in the architecture docs (or vice versa), file a follow-up
-issue.
-
-## Index
-
-| Doc | Status | Purpose |
-|---|---|---|
-| `WALLET_API_MAP.md` | Skeleton (Phase 2.5-A will fill) | Every Rust wallet endpoint × what it does × which permission gate(s) fire × which shim call(s) reach it |
-| `AUTO_APPROVE_ENGINE.md` | Skeleton (Phase 2.5-A will fill) | Current C++ `PermissionEngine` design, decision matrix, modal dispatch flow |
-| `IPC_BRIDGE.md` | Stub (pointer to Phase 2.5 plan doc) | Wallet IPC bridge architecture (Phase 2.5 work in progress) |
-| `PERMISSION_GATES.md` | TBD | Higher-level security model — domain_permissions table, X-Requesting-Domain header, cascade order |
-
-## Related docs OUTSIDE this folder
-
-| Doc | Why it's not here |
-|---|---|
-| `../FUTURE_AUTO_APPROVE_ENGINE_ARCHITECTURE.md` | Future vision — explicit "if starting over today" thinking saved for Phase 4+ planning. Not current state, so not in `architecture/`. |
-| `cef-native/CLAUDE.md` and below | Layer-specific reference (CEF internals). |
-| `rust-wallet/CLAUDE.md` and below | Layer-specific reference (Rust wallet internals). |
-| `../Sigma-BRC121-Sprint/phase-2-window-cwi-shim/PHASE_2_5_IPC_REFACTOR.md` | Sprint-specific plan (will reference this folder's docs heavily). |
-| `../../CLAUDE.md` (root) | Project orientation + invariants. Should link here. |
-
-## Source-of-truth pointers
-
-When the docs in this folder describe code, they cite specific files +
-line numbers. Some critical ones:
-
-- Rust route table: `rust-wallet/src/main.rs` (search for `.route(`)
-- Permission engine: `cef-native/src/core/PermissionEngine.cpp`
-- HTTP interceptor + gate cascade: `cef-native/src/core/HttpRequestInterceptor.cpp::AsyncWalletResourceHandler::Open()`
-- Domain permission cache: `cef-native/src/core/HttpRequestInterceptor.cpp::DomainPermissionCache`
-- Domain permissions table: `rust-wallet/src/database/migrations.rs` (`domain_permissions`)
-- Shim injection: `cef-native/include/core/CWIShimScript.h`
-- Wallet IPC bridge (new): `cef-native/src/handlers/simple_handler.cpp` (`wallet_call` message handler)
-
-When the code moves, the docs follow.
+Drift shows up as a symbol name in these docs that no longer greps. A doc
+that names a deleted symbol is worse than no doc — it sends the next reader
+looking for code that does not exist.

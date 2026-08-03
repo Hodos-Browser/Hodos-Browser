@@ -476,7 +476,7 @@ Every outgoing transaction includes a **1000-satoshi service fee** output sent t
 
 | Folder | Purpose |
 |--------|---------|
-| `development-docs/architecture/` | ⚠️ **SUPERSEDED — DO NOT TRUST. Pending rewrite.** This folder describes the **pre-2.6 C++ permission/auto-approve engine**, which was deleted in Phase 2.6-H. An audit of it scored 31 claims wrong vs 14 right. For the live permission architecture read `rust-wallet/crates/hodos_permission_engine/` + `rust-wallet/src/permission_service/` and the Key Files rows above — not this folder. |
+| `development-docs/architecture/` | Cross-layer architecture — the flows no single layer's `CLAUDE.md` owns. Rewritten against code 2026-08-03 (the prior contents described the deleted C++ permission engine). Three docs: `AUTO_APPROVE_ENGINE.md` (permission decision flow + Matrix C branch order), `IPC_BRIDGE.md` (the `wallet_call` process-message contract), `WALLET_API_MAP.md` (which endpoints are gated by which Rust dispatcher, and the shim surface). Inventory stays in the layer docs; these three carry only cross-layer flow. |
 | `development-docs/FUTURE_AUTO_APPROVE_ENGINE_ARCHITECTURE.md` | The original "engine in Rust" vision doc. Largely **realized** by Phase 2.6 — read it as history, not as a plan |
 | `development-docs/Final-MVP-Sprint/` | Sprint: testing, optimization, security, macOS port |
 | `development-docs/Final-MVP-Sprint/macos-port/` | macOS port tracking: progress, handover docs, archived milestones |
