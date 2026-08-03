@@ -15,7 +15,17 @@
 
 **Bump `136` (branch `7103`) → `150` (branch `7871`): adopt branch `7871` and *ride it into the M150 LTS line*, gated on it reaching ≥ CEF-Stable channel by build day.**
 
-> **⚠️ Channel-maturity caveat (read before anything else).** As of the verification date, branch `7871` is **CEF *Beta*** — it is **not LTS, and not yet even CEF-Stable.** The *current* newest CEF **LTS** is **M144 (branch `7559`)**; the *current* newest CEF **Stable** is **M149 (branch `7827`)**. M150 is a **future** LTS milestone (the LTS cadence is every 6th branch: **M138 → M144 → M150 → M156**), but a branch only becomes LTS after it exits Stable → LTC (~3 mo) → LTS — roughly a year out. **We are deliberately adopting `7871` and riding the same branch as it matures Beta → Stable → LTC → M150 LTS**, to avoid a near-term second jump off M144. This is only acceptable if the §3 pre-flight channel gate holds — see below.
+> **✅ RESOLVED 2026-08-03 — the channel gate is SATISFIED; the caveat below is historical.**
+> Branch `7871` has since reached **CEF-Stable** (and entered **LTC on 2026-07-21**; it becomes **LTS on
+> 2026-10-06**, with security refresh through **2027-04-13**). Pin
+> `150.0.17+g94c1726+chromium-150.0.7871.187`. **The M149/`7827` fallback is dead** — `7827` is already
+> in CEF's *Unsupported* table. The LTS program was independently re-verified against primary sources;
+> the intervening "no CEF LTS channel exists" note (2026-06-17) is **retracted** — it read the CDN
+> `index.json`, which has no `lts` enum and labels LTS builds `"stable"`. Full record:
+> `../../DevOps-CICD/CEF_VERSION_UPDATE_TRACKER.md` §Version-lock. Keep the §3 build-day re-check for
+> the **point-release only**.
+
+> **⚠️ Channel-maturity caveat (HISTORICAL — superseded above; kept for the reasoning).** As of the 2026-07-10 verification date, branch `7871` was **CEF *Beta*** — **not LTS, and not yet even CEF-Stable.** The *current* newest CEF **LTS** is **M144 (branch `7559`)**; the *current* newest CEF **Stable** is **M149 (branch `7827`)**. M150 is a **future** LTS milestone (the LTS cadence is every 6th branch: **M138 → M144 → M150 → M156**), but a branch only becomes LTS after it exits Stable → LTC (~3 mo) → LTS — roughly a year out. **We are deliberately adopting `7871` and riding the same branch as it matures Beta → Stable → LTC → M150 LTS**, to avoid a near-term second jump off M144. This is only acceptable if the §3 pre-flight channel gate holds — see below.
 
 - **Placeholder resolved.** The in-repo target was written as "CEF 149 / M150-LTS placeholder." Primary sources now pin the milestone concretely: **M150 = CEF branch `7871`**, whose Chromium promoted to stable ≈ late June 2026. M150 is the **next LTS milestone**, but that LTS designation is a *future* state of the branch, not its maturity today.
 - **The old "no LTS exists" note is SUPERSEDED.** A real CEF LTC/LTS program exists, confirmed from three primary sources (below). Earlier session notes that said "CEF = stable M149, no LTS" were written before this was verified — treat them as stale. (Note: M149/`7827` *is* the current CEF-Stable — those notes had the *stable* milestone right; they were only wrong about LTS not existing.)
@@ -144,7 +154,31 @@ Per `CEF_VERSION_UPDATE_TRACKER.md` "macOS Minimum Deployment Version":
 - **Widevine:** confirm `enable_widevine=true` resolved + CDM auto-downloads (`Q4`).
 
 ### 4.6 — Runtime file-manifest diff (silent-drift guard)
-Diff M150's CEF dist file list (DLLs, `.bin`, `.pak`, `resources/`, `locales/`) against the hardcoded copy-lists in `cef-native/CMakeLists.txt` ("Copying CEF binaries") **and** the macOS framework-embed list in `build_hodos_cef_mac.sh`. A new/renamed/removed file we don't copy = green build, runtime crash. Cross-check the runbook "Output file checklist" (line 309). 14 milestones of drift makes this **high-yield** — expect at least one changed resource.
+
+> **⚠️ CORRECTED 2026-08-03 — the original audit target was wrong.** This section said to diff against
+> "the hardcoded copy-lists in `cef-native/CMakeLists.txt`." **There is no hardcoded copy-list there.**
+> `CMakeLists.txt:510-532` (Win) and `:638-657` (mac) do wholesale **`copy_directory`** of `Release/`
+> and `Resources/`; the only literal filename in the Windows block is `WinSparkle.dll`. New CEF files
+> are picked up **automatically** by CMake. Auditing that block finds nothing, because there is nothing
+> there to drift.
+
+Diff M150's CEF dist file list (DLLs, `.bin`, `.pak`, `resources/`, `locales/`) against the **three
+places that really do enumerate files**:
+
+1. **`installer/hodos-browser.iss:68-72` — the real Windows risk.** The installer ships an **extension
+   whitelist**: `*.dll`, `*.bin`, `*.dat`, `*.pak`, `*.json`, plus `locales\*` recursively. A new CEF
+   runtime file with **any other extension**, or in **any new subdirectory besides `locales/`**, is
+   **silently dropped at packaging time** — CMake copies it, the dev build works, and the *installed*
+   build is missing it. That is exactly the green-build / broken-install / broken-silent-update failure
+   mode §5 warns about, and a from-source smoke test cannot see it.
+2. **`cef-native/CMakeLists.txt:539-545` `CEF_HELPER_APP_SUFFIXES`** — the 5 macOS helper variants
+   (base, Alerts, GPU, Plugin, Renderer). A CEF that adds or renames a helper process type breaks here.
+3. **`.github/workflows/release.yml:604`** — the Sparkle framework item list; plus the minos-guard
+   `TARGETS` array at `:630-635`.
+
+A file we don't ship = green build, runtime crash, **and a broken update apply**. Cross-check the
+runbook "Output file checklist". 14 milestones of drift makes this **high-yield** — expect at least one
+changed resource. **Verify against the installed build, not just the build output.**
 
 ---
 

@@ -45,6 +45,7 @@ Full brief: **`CHROMIUM_CEF_SPRINT_KICKOFF.md`** (active — start there). The d
 | **B2 — Header** | Header/omnibox layer | **DONE** as the React-optimization + Header/Omnibox UX pass (native C++ port explicitly rejected); shipped |
 | **B3 — Bookmarks** | Bookmarks UI (add/list/delete, favicons) | **SHIPPED** (Windows 2026-06-19; favicon/delete landed beta.23). Mac parity tracked in `MACOS_PORT_0_4_0.md` |
 | **B4 — Extensions** | Deferred beyond this sprint | Moved to `../Future-Features/` |
+| **B5 — Wallet-provider injection privacy** | `window.CWI` is injected on every external HTTPS page, making Hodos trivially detectable and passively disclosing wallet ownership | **OPEN QUESTION** — scoping in `WALLET_PROVIDER_INJECTION_PRIVACY.md`; sequenced **after** the CEF rebuild (shares a file with the farbling teardown) |
 
 ---
 
@@ -57,6 +58,7 @@ Full brief: **`CHROMIUM_CEF_SPRINT_KICKOFF.md`** (active — start there). The d
 | `IMPLEMENTATION_ROADMAP_0_4_0_BETA1.md` | Phase-ordered roadmap + `v0.4.0-beta.1` readiness checklist |
 | `chromium-rebuild/` | Per-area deep-research plan docs + the Q1–Q5 answers |
 | `B1-farbling-design.md` | Canonical design for the farbling → Blink-patch work (feeds the CEF rebuild) |
+| `WALLET_PROVIDER_INJECTION_PRIVACY.md` | **B5 (open)** — should `window.CWI` be injected on every site? Scoping + options, no design committed. After P7 |
 | `BROADCAST_AND_EXPLORER_REVIEW.md` | Open scoping/reference for broadcast-freshness + ARCADE + de-hardcode-TAAL work |
 | `MACOS_PORT_0_4_0.md` | Living Windows→macOS parity delta log |
 | `MAC_WINDOWS_RELAY.md` | Persistent cross-device coordination hub (repointed at the CEF rebuild sprint) |

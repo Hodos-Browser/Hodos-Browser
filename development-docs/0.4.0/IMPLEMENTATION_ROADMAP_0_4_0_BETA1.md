@@ -29,6 +29,14 @@
 
 ## TARGET — resolved (was a placeholder) — `PLAN_version_bump.md`
 
+> **✅ UPDATED 2026-08-03 (kickoff review).** The build-day channel gate is **already satisfied** —
+> `7871` reached **CEF-Stable** and entered **LTC 2026-07-21**; it becomes **LTS 2026-10-06** with
+> security refresh through **2027-04-13**. Pin **`150.0.17+g94c1726+chromium-150.0.7871.187`**.
+> **The M149/`7827` fallback is DEAD** — `7827` is already in CEF's *Unsupported* table, so falling back
+> to it would land us on an unsupported branch. The only build-day re-check left is whether a newer
+> `7871` **point-release** exists. Full record + the retracted "no LTS exists" note:
+> `../DevOps-CICD/CEF_VERSION_UPDATE_TRACKER.md` §Version-lock.
+
 | Item | Value | Caveat / source |
 |---|---|---|
 | **Bump** | CEF 136 / branch `7103` → **CEF 150 / Chromium 150 / branch `7871`** | version §0/§1 |
@@ -78,8 +86,8 @@ P0 PROVISION ─▶ P1 PIN VERSION/TOOLCHAIN ─▶ P2 BASELINE BUILD ─▶ P3 
 1. Provision the **self-hosted build host(s), per OS** (Win → `libcef.dll`; Mac → framework — separate hosts): **≥150 GB NVMe/SSD** (100 GB min; two-tree footprint if 136 + TARGET coexist = 200 GB+), **32+ GB RAM**, **8+ cores**, NTFS/APFS (never exFAT), short ASCII base `C:\cef\`. The Chromium build **cannot** run on GitHub-hosted runners (6-hr cap, ~14–29 GB free).
 2. Install toolchain/tooling: VS2022 BuildTools (MSVC v143) + Win SDK + **Debugging Tools for Windows**; `depot_tools` + `automate-git.py`; branch-matched Python (re-confirm the `.vpython3` ceiling for TARGET — the M136-era 3.11 ceiling is not a carry-forward); Defender exclusions; pause Windows Update. Mac: Xcode + CLT.
 3. Provision **sccache** (`cc_wrapper="sccache"`; `chrome_pgo_phase=0` auto-drops `/Brepro`). Honest expectation: **cold builds get NO benefit**; MSVC/Windows historically yields few cache hits. Local disk for beta.1; S3 later.
-4. **TARGET default build-tool lookup (Ninja vs Siso).** Siso is now Chromium's default and its cold-resume differs from the `.ninja_log` path the M136 build relied on. Verify Siso resume/cache **or** set `use_siso=false` + confirm Ninja still supported on `7871` (gates the spot-vs-persistent-host decision — **default to a persistent/owned host** until resumability is proven).
-5. **OQ-7 / M136-still-builds confirmation.** Verify M136 still `gclient sync`s and builds on the pinned toolchain. If **bit-rotted** (deprecated sysroots/CIPD), **downgrade P2a** from a full cold build to a smoke of the last-known-good environment.
+4. **TARGET default build-tool lookup (Ninja vs Siso).** ✅ **ANSWERED 2026-08-03.** **Siso is the default** on `7871` for a *fresh* out-dir (`use_siso_default = true` when `build_with_chromium` and no `.ninja_deps`); our M136 out-dir keeps Ninja. Siso **runs fully local** — no RBE required (and Chromium's RBE is unavailable to external contributors on Windows regardless). Resume state = `.siso_fs_state` + `.siso_deps` + a replayed `.siso_fs_state.journal`; one Ctrl-C is graceful, a second aborts. `use_siso=false` still works but is **unsupported upstream since Sept 2025** — fallback only, and switching requires `gn clean`. **Hard-kill resume is unproven for us → keep the persistent/owned host and keep Windows Update paused.** Detail: `CEF_BUILD_RUNBOOK.md` Lessons.
+5. **OQ-7 / M136-still-builds confirmation.** ⚠️ **Evidence points at bit-rot — decide before spending 10–12 h.** Branch `7103` is in CEF's **Unsupported** table and the local CEF checkout's HEAD commit is literally *"Pin depot_tools version for out-of-support branch."* **However, a complete 175 GB M136 tree from 2026-03-12 still exists at `C:\cef\chromium_git\`** with `binary_distrib` intact, and its output (238 MB `libcef.dll`) is what we ship today. **Recommended: invoke the I5 guarded fallback now** — treat the existing tree + shipped binary as the last-known-good baseline, run the `PLAN_codecs.md` §6.1 Layer-A probe against the **live M136 build** to capture the pre-bump codec/HEVC baseline, and skip the re-build. *(Owner decision — tracked as D9 in the kickoff results doc.)*
 
 **Entry:** none. **Exit:** both hosts to spec; toolset noted; `gclient --version` sane; sccache backend chosen; TARGET build-tool resumability answered; M136-still-builds answered (full baseline vs last-known-good smoke decided).
 **Ownership:** **Windows = LEAD** (Win host). **Mac** owns Xcode/clang host provisioning.
@@ -132,7 +140,14 @@ P0 PROVISION ─▶ P1 PIN VERSION/TOOLCHAIN ─▶ P2 BASELINE BUILD ─▶ P3 
 
 ---
 
-## P3 — CEF PATCH TOOLCHAIN *(GREENFIELD — serial linchpin; blocks P4)*
+## P3 — CEF PATCH TOOLCHAIN *(serial linchpin; blocks P4)*
+
+> **✅ DE-RISKED 2026-08-03.** "GREENFIELD" overstates it. The **patch mechanism already exists and runs
+> on every build**: upstream CEF ships **105 patches** in `cef/patch/patches/` registered in
+> `patch.cfg`, all applied by `patcher.py` during `automate-git.py`. What is greenfield is **our fork
+> and our patches** (`hodos_*` count today: 0). We are adding a 106th patch to a working pipeline, not
+> standing a pipeline up. The no-op probe patch (CEF-1) therefore validates *our fork wiring*, not the
+> mechanism itself — keep it, but expect it to pass.
 
 **Plan docs:** `PLAN_patch_toolchain.md` (full); outline §3b/§4 P3.
 **Edit IDs:** CEF-1 (fork + patch.cfg + `automate-git --url` + no-op probe), CEF-2 (`cef_patch_drift_audit.py` Step-5.5 hook), CEF-3 (upstream security-pull duty / fork-watcher), CEF-4 (single `HODOS_FARBLING` `condition` gate), CEF-5 (check `build_hodos_cef.{bat,sh}` into `scripts/` + `HODOS_PATCHES.md` ledger — resolves OQ-1).
@@ -160,7 +175,30 @@ P0 PROVISION ─▶ P1 PIN VERSION/TOOLCHAIN ─▶ P2 BASELINE BUILD ─▶ P3 
 **Land order (each sub-step builds + smokes; each atomically deletes its own JS counterpart in the same commit — I-4, no double-farbling window, no guard flag):**
 - **P4a — C1 `HodosSessionCache : Supplement<ExecutionContext>` + C2 seed/channel → Canvas-first worker quick-win.** Persistent per-profile `profile_seed` (32B CSPRNG via **`BCryptGenRandom`**/`SecRandomCopyBytes`, NOT deprecated `CryptGenRandom`) stored in `%APPDATA%/HodosBrowser/<profile>/fingerprint_settings.json` (NOT the wallet). **Browser process computes `domain_key = HMAC-SHA256(profile_seed, first-party eTLD+1)` and delivers ONLY `{domain_key, farble_enabled}` to the renderer — master seed never leaves the browser** (supersedes B1-design's renderer-HMAC). Ship the Supplement wired to **Canvas (C3) only** first (highest-signal detection fix; closes the window-vs-worker mismatch for canvas). Delete the JS **canvas** fragment this same step. **C2 delivery channel = OPEN (FB-1):** default **(A) mojo / commit-params per-navigation**; fallback **(B) ephemeral per-launch nonce on cmdline** (a throwaway, not the seed).
 - **P4b — C4 WebGL incl. `readPixels` (its OWN patch point) + resolve FB-2** (WebGL vendor/renderer drop-vs-map). Delete JS WebGL fragment.
-- **P4c — C5 WebAudio + C6 Navigator (valid-set constrained — §B) + BOT-1.** deviceMemory **∈ {4,8,16,32}** (FB-8), hardwareConcurrency **reduce-only ≤ real cores** (FB-7), plugins realistic 5-PDF set. **BOT-1:** re-home `navigator.webdriver=false` + keep `window.chrome` stub (`:629-653`) byte-identical — bot signals, not farbling; must survive teardown. Delete JS audio fragment.
+- **P4c — C5 WebAudio + C6 Navigator (valid-set constrained — §B) + BOT-1.** deviceMemory **∈ {4,8,16,32}** (FB-8), hardwareConcurrency **reduce-only ≤ real cores** (FB-7), plugins realistic 5-PDF set. Delete JS audio fragment.
+
+> ### 🚨 BOT-1 — CORRECTED 2026-08-03. The citation was half wrong, and the wrong half bites.
+> **`navigator.webdriver = false` is NOT at `:629-653`.** Verified against the working tree, it lives at
+> **`FingerprintScript.h:128-133` — *inside* the block TD-1 deletes.** So does the 5-entry
+> **`navigator.plugins` spoof (`:99-126`)**. Both are **anti-bot** surfaces, not farbling surfaces.
+> Only the **`window.chrome` stub** is genuinely at `:629-653`; it has its own `isExternalPage` gate and
+> survives the teardown by construction.
+>
+> **Consequence:** performing TD-1 as written **silently drops `navigator.webdriver` and
+> `navigator.plugins` spoofing.** No compile error, no test failure — just bot-detection regressions in
+> the field.
+>
+> **This is not hypothetical.** `simple_app.cpp:92-94` already records that Cloudflare Turnstile rejects
+> detectable browsers on **whatsonchain.com** — a site in our own BSV regression basket — which is why
+> the detectable Chromium dev flags were moved behind `HODOS_MAC_DEV_FLAGS=1`. Git history shows the
+> same lesson: `4fad37b` "Fix Cloudflare bot detection blocking (B-5)" landed **the same day** as
+> `b514c30`, the refactor that removed the WebGL GPU-string spoofing.
+>
+> **Required sequencing — do this FIRST, as its own commit, BEFORE any teardown step:** re-home
+> `navigator.webdriver = false` and the `navigator.plugins` set into the independent `window.chrome`
+> stub block (or another carrier that does not depend on farbling being enabled). They must survive
+> **both** the JS-block deletion **and** a per-site farbling opt-out — a user disabling farbling on a
+> site must not thereby announce they are automated. Only then proceed to TD-1.
 - **P4d — C7 auth-domain exemption at the BROWSER process** (`Q3` — supersedes outline C7's "list passed to renderer"). One `ShouldFarble(top_frame) = GlobalEnabled && !IsAuthDomain(top_frame_HOST) && IsSiteEnabled(top_frame_eTLD+1)`; allowlist match on the **full committed top-frame host** (OQ3 — do NOT collapse to eTLD+1); registrable domain used only for the seed key. Delivers the single `farble_enabled` bit **alongside C2's `{domain_key}` payload** (no new IPC **iff** C2 = per-navigation channel — R2 fork). Structurally fixes the Turnstile parent/iframe inconsistency. **TD-4** migrate `IsAuthDomain` here; **TD-5/C7b** re-home the per-site user toggle (`IsSiteEnabled`) into `ShouldFarble` (owner sign-off; C7b sibling if C7 kept minimal). JS FP block now fully torn down → **M1 complete**.
 - **P4e — OOP seed/exemption plumbing:** deliver top-frame-derived `{domain_key, farble_enabled}` to **shared workers, service workers** (key = registration-scope eTLD+1, FB-3), **and cross-site (OOP) iframes** at subframe navigation commit. Audio/paint worklet + OffscreenCanvas-in-worker are in-process (free once C2 lands, but tested). Needs a purpose-built worker-parity harness (CreepJS only exercises the dedicated-worker column).
 

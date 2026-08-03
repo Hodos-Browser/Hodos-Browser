@@ -7,6 +7,33 @@ Track features, fixes, and investigations to research when updating the CEF buil
 
 ---
 
+## ⭐ Version-lock — CEF 150 / branch `7871` (recorded 2026-08-03, pre-build)
+
+The `PLAN_version_bump.md` §3 pre-flight, answered. **Re-verify the point-release on build day** — a
+newer `7871` patch may land. Everything else here is settled.
+
+| Item | Value | How verified |
+|---|---|---|
+| **Target branch** | **`7871`** = CEF 150 = Chromium 150 | `branches_and_building.html` + CDN `index.json` |
+| **Pinned point-release** | **`150.0.17+g94c1726+chromium-150.0.7871.187`** (newest, NOT `.0`) | `index.json`, both `windows64` and `macosarm64` |
+| **⛔ Channel gate** | **SATISFIED — `7871` is CEF-Stable.** It was Beta on 2026-07-10; it is not anymore | `branches_and_building.html` |
+| **M149/`7827` fallback** | **DEAD — do not use.** `7827` is already in CEF's *Unsupported* table | same |
+| **LTS window** | stable 2026-06-30 · **LTC 2026-07-21** · **LTS 2026-10-06** · security refresh ends **2027-04-13** (~9 mo) | chromiumdash; matches CEF's "Last Refresh" column exactly |
+| **Why 150 not 151** | M151 is not a 6th branch → **no LTS at all**. Taking it would force an early re-bump | CEF issue #3947 cadence |
+| **Coverage caveats** | **Platform-agnostic Chromium fixes only.** CEF's own fixes are **not** backported (maintainer, #3947) | #3947 |
+| **⚠️ Automation trap** | `index.json` has **no `lts` enum** — LTS builds are labelled `"stable"` there. **Key off branch number `7871`, never the JSON `channel`** | reproduced locally: only `stable`/`beta` across 1,195 `windows64` builds |
+| **Python** | `.vpython3` pins **3.11** on `7871` — **unchanged from `7103`** | `.vpython3` @ branch-heads/7871 |
+| **Build tool** | **Siso** by default on a fresh out-dir (Ninja unsupported upstream since Sept 2025) | `build/toolchain/siso.gni` @ 7871 |
+| **Codec GN args** | `proprietary_codecs` + `ffmpeg_branding` **unchanged** — no rename, no value change M136→M150 | `features.gni` / `ffmpeg_options.gni` @ 7871 |
+| **Toolchain — OPEN** | CEF's table says **VS2022 17.13.4 + SDK `10.0.26100.4654`**; Chromium's own 7871 docs say **SDK `10.0.26100.7705`** and list **VS2026/VC145** as the packaged toolchain (VS2022/VC143 still supported). **Provision from `build/vs_toolchain.py` on the synced branch.** This box has MSVC 14.44.35207 (VS2022 17.14) + SDK 10.0.26100 + Debugging Tools | conflicting primary sources; unresolvable without building |
+| **macOS floor** | **12.0 Monterey** (M150 is the last Chrome supporting it). Set `max(12.0, measured)` — the current 11.0 was **never `vtool`-measured** | Mac owns; VER-4 |
+
+**Ledger:** the earlier "there is no CEF LTS channel" correction (2026-06-17, now in
+`../0.4.0/archive/SPRINT_0_4_0_MASTER_PLAN.md`) is **retracted**. It was an artifact of reading the CDN
+JSON rather than the website table. Full reasoning: `CEF_BUILD_RUNBOOK.md` Step 1.
+
+---
+
 ## Must Investigate on Next CEF Update
 
 ### Toolchain (MSVC) & Dependency Alignment

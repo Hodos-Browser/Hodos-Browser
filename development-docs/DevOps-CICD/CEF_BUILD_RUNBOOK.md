@@ -1,8 +1,15 @@
 # CEF/Chromium Full-Build Runbook (Tier 1)
 
-**Created:** 2026-06-01 · **Last updated:** 2026-06-16
-**Status:** ✅ WORKING — grounded in `scripts/build_hodos_cef.bat` + `scripts/build_hodos_cef_mac.sh`
-and the real build done 2026-03-12 (merged in from the former `CEF_BUILD_FROM_SOURCE_GUIDE.md`).
+**Created:** 2026-06-01 · **Last updated:** 2026-08-03
+**Status:** ✅ WORKING — grounded in `development-docs/DevOps-CICD/scripts/build_hodos_cef.bat` +
+`build_hodos_cef_mac.sh` and the real build done 2026-03-12 (merged in from the former
+`CEF_BUILD_FROM_SOURCE_GUIDE.md`).
+
+> **⚠️ Script path corrected 2026-08-03.** Both build scripts live at
+> **`development-docs/DevOps-CICD/scripts/`**, NOT at a repo-root `scripts/`. Every doc that cites
+> `scripts/build_hodos_cef.bat` is citing a path that does not exist. (`Q5` CEF-5's "check them in —
+> absent today" is likewise wrong: they exist, just not where cited. CEF-5 reduces to a *move*
+> decision, not authoring.)
 **Owner:** DevOps/CI-CD · **Covers:** A1 (self-build), A2 (latest stable), A3 (dependency bump), A5 (Tier 1)
 
 > **Read this first — terminology.** We are a **CEF-based browser that does custom Chromium builds.**
@@ -46,12 +53,12 @@ Both use the **same patch toolchain** (`cef/patch/patch.cfg`). The decision for 
 
 | Setting | Value | Source |
 |---------|-------|--------|
-| CEF branch | `7103` (CEF 136 / Chromium 136.0.7103.x) — **currently ~12 mo behind stable; see §1** | both scripts |
+| CEF branch | `7103` (CEF 136 / Chromium 136.0.7103.x) — **~14 milestones behind; branch `7103` is now in CEF's *Unsupported* list and its own HEAD commit reads "Pin depot_tools version for out-of-support branch." Expect bit-rot on a re-sync; see §1** | both scripts |
 | GN_DEFINES | `is_official_build=true proprietary_codecs=true ffmpeg_branding=Chrome chrome_pgo_phase=0` | both scripts |
 | Build tool | CEF `automate-git.py` (`--minimal-distrib --client-distrib --no-debug-build --force-build`) | both scripts |
 | Win toolchain | VS 2022 BuildTools; `DEPOT_TOOLS_WIN_TOOLCHAIN=0`; `GYP_MSVS_VERSION=2022` | `.bat` |
 | Win SDK | 10.0.22621.0+, **with Debugging Tools for Windows** (not installed by default) | guide §4.2 |
-| Python | 3.9–3.11 (**NOT 3.12+** — compat issues) | both scripts / guide |
+| Python | **Set by the branch's `.vpython3`, not a universal ceiling.** Measured 2026-08-03: **both** `7103` and `7871` pin `python_version: "3.11"`. depot_tools also ships its own interpreter. Re-read `src/.vpython3` on each bump instead of trusting a fixed "3.12+ breaks" rule | `src/.vpython3` @ branch |
 | Mac | Xcode + CLT; arch auto-detect (`--arm64-build` Apple Silicon / `--x64-build` Intel) | `.sh` |
 | Archive format | `tar.bz2` (`CEF_ARCHIVE_FORMAT`) | `.bat` |
 | Resources | ~100 GB disk (150 GB SSD rec.), 16 GB RAM min (32 rec.), 4 cores min (8+ rec.) | `.sh` header / guide §3 |
@@ -75,20 +82,52 @@ and "what's current stable" come from the CEF release surface:
 - **CEF builds CDN / version list:** https://cef-builds.spotifycdn.com/index.html (gives version → branch).
 - **Chromium release schedule (for milestone exit dates / LTS windows):** the Chromium Dash schedule.
 
-| CEF Version | Chromium | Branch |
-|-------------|----------|--------|
-| CEF 149 | Chromium 149 | 7827 (current stable, 2026-06) |
-| CEF 136 | Chromium 136 | 7103 (**what we ship — ~12 mo old**) |
-| CEF 127 | Chromium 127 | 6533 |
-| CEF 120 | Chromium 120 | 6167 |
+| CEF Version | Chromium | Branch | CEF channel (verified 2026-08-03) |
+|-------------|----------|--------|-----------------------------------|
+| CEF 151 | Chromium 151 | 7922 | Beta |
+| **CEF 150** | **Chromium 150** | **7871** | **Stable → LTC since 2026-07-21 → LTS 2026-10-06. ⭐ OUR TARGET** |
+| CEF 149 | Chromium 149 | 7827 | **Unsupported** (already dropped off the supported table) |
+| CEF 144 | Chromium 144 | 7559 | LTS (expires 2026-10-06, hands off to M150) |
+| CEF 136 | Chromium 136 | 7103 (**what we ship**) | **Unsupported** |
+| CEF 127 | Chromium 127 | 6533 | Unsupported |
 
-> ### ⚠️ Pin to a CEF LTS branch — target **M150** — NOT newest stable (verified 2026-06, master-plan §7.3)
-> Chromium moves to a **2-week stable cadence** in **Sept 2026**. The **LTS branches** (M138, M144,
-> **M150**, …) get **~8 months of security fixes** and only take **feature churn every 6 months** — far
-> easier to maintain than chasing a fast-moving stable line.
+> ### ⚠️ Pin to a CEF LTS branch — target **M150 / branch `7871`** — NOT newest stable
 >
-> Our current `7103`/M136 is **~12 months behind** stable **AND predates the M138 LTS program**, so it
-> has **ZERO current security-patch coverage**. The plan: move to the **M150 LTS** branch and pin there.
+> **The LTS program is REAL — re-verified from primary sources 2026-08-03.** This block was written
+> 2026-06-16, then contradicted by a 2026-06-17 note (now in `../0.4.0/archive/SPRINT_0_4_0_MASTER_PLAN.md`)
+> claiming *"CEF publishes only stable + beta — there is NO CEF LTS channel, so the 'pin to LTS (M150)'
+> premise was false."* **That correction was itself wrong.** The runbook's original guidance stands.
+>
+> **How the confusion happened — and the trap to avoid:** `cef-builds.spotifycdn.com/index.json`
+> exposes only `"channel": "stable"` and `"channel": "beta"`. There is **no `lts` enum in the JSON**, so
+> LTS builds are labelled `stable` there. The 2026-06-17 note read the JSON and concluded no LTS exists.
+> The authority is the **website table** (`branches_and_building.html`), not the JSON.
+> **⇒ Any automation must key off the BRANCH NUMBER (`7871`), never the JSON `channel` field.**
+>
+> **Proof the train is running:** M144 (branch `7559`) branched Dec 2025, exited stable months ago, and
+> still shipped a fresh build on 2026-07-31 — newer than any M150 or M151 build. Meanwhile M149 (`7827`)
+> is *already* unsupported. An LTS branch outliving a newer stable one only makes sense if LTS is real.
+>
+> **M150's window (chromiumdash, cross-checked against CEF's "Last Refresh" column — exact match):**
+> stable 2026-06-30 · **LTC 2026-07-21** · **LTS 2026-10-06** · security refresh ends **2027-04-13**.
+> Roughly 9 months of coverage. M151 is not a 6th branch and gets **no LTS at all** — which is why we
+> take 150 over the newer 151.
+>
+> **Two limits to hold in mind:**
+> 1. LTS carries **platform-agnostic Chromium security fixes only**. A Windows-sandbox- or macOS-specific
+>    CVE may not be backported and could force an off-cadence jump.
+> 2. **CEF's own fixes are not backported.** Maintainer, CEF issue #3947: *"There is no plan to actively
+>    backport CEF fixes to LTC/LTS branches. It may still occur in certain rare cases."*
+>
+> Our current `7103`/M136 predates the M138 LTS program entirely → **ZERO current security coverage.**
+>
+> **Primary sources:** https://chromiumembedded.github.io/cef/branches_and_building.html ·
+> CEF issue [#3947](https://github.com/chromiumembedded/cef/issues/3947) (closed 2025-08-07, LTC builds
+> live; cadence: ~1 mo stable → ~2.5 mo LTC → ~6 mo LTS ≈ 9.5 mo total) ·
+> CEF issue [#4114](https://github.com/chromiumembedded/cef/issues/4114) (open — Chromium's 2-week
+> cadence from Sept 2026 *"will not impact LTC/LTS builds which will continue to run with an ~9 month
+> lifespan"*; note CEF's **stable**-channel policy after Sept 2026 is still undecided, which strengthens
+> the case for anchoring on LTS).
 
 > ### Cadence — two distinct rebases
 > - **Quarterly (cheap):** pull the latest **security point-release** of the pinned LTS branch. Patches
@@ -280,10 +319,33 @@ never auto-apply). Until scripted (see Open TODOs), run this as a checklist on e
 
 ## Lessons learned (from the real 2026-03-12 build)
 
-- **The build IS resumable.** Ninja tracks completed work in `.ninja_log`. If interrupted (power loss,
-  crash, Windows restart), just re-run the script — it skips already-compiled objects. Our build was
-  killed by a Windows auto-restart at **78,821** objects; the resume only had to compile **~17,336**
-  more (of ~96K total). `make_distrib.py` packaging took ~404 s (~7 min).
+- **The build IS resumable — but the mechanism CHANGED. Read this before relying on it.**
+  The 2026-03-12 M136 build used **Ninja**, which tracks completed work in `.ninja_log`. Interrupted by
+  a Windows auto-restart at **78,821** objects, the resume only had to compile **~17,336** more (of ~96K
+  total). `make_distrib.py` packaging took ~404 s (~7 min).
+
+  **From M150 (branch `7871`) onward this evidence does NOT carry forward.** Chromium switched its
+  default build tool from Ninja to **Siso**; Ninja has been *officially unsupported for external
+  developers since end of September 2025*. On branch `7871`, `use_siso_default = true` whenever
+  `build_with_chromium` is set (it is, in a CEF checkout) **and the output dir has no `.ninja_deps`** —
+  so **a fresh out-dir gets Siso**, while our existing M136 out-dir keeps Ninja. CEF's `automate-git.py`
+  calls bare `autoninja`, which makes this choice for you.
+
+  | | Ninja (M136 build) | Siso (M150 onward) |
+  |---|---|---|
+  | Incremental state | `.ninja_log` | `.siso_fs_state` + `.siso_deps` |
+  | Crash recovery | implicit | append-only **`.siso_fs_state.journal`**, replayed on next start |
+  | Interrupt | any kill | **one Ctrl-C is graceful** (state is flushed); a **second aborts** |
+  | Remote backend | n/a | **not required** — runs fully local. External contributors can't use Chromium's RBE on Windows anyway |
+  | Concurrent builds in one out-dir | allowed (racy) | **locked** |
+
+  **Escape hatch:** `use_siso=false` in `args.gn` still works on `7871`, but is unsupported upstream and
+  untested on Chromium CI — treat as a fallback, not the plan. **Never mix**: switching requires
+  `gn clean` (depot_tools refuses otherwise).
+
+  ⚠️ **Not yet proven for us:** whether a *hard* kill (power loss / forced restart) resumes cleanly under
+  Siso. The journal is designed for exactly that, but only a real interrupted build proves it. Until
+  then, keep Windows Update paused and assume a hard kill may cost the build.
 - **Disable Windows auto-restart before starting** — see Step 3 setup. This is the #1 cause of a lost
   overnight build.
 - **`chrome_pgo_phase=0`** disables PGO (which needs pre-existing profile data we don't have) → avoids
@@ -315,7 +377,10 @@ attribution to the About page; consult legal if Hodos grows significantly.
 ---
 
 ## Open TODOs to make this fully turnkey
-- [ ] Execute the **M150 LTS** branch move (Step 1) — this is the priority; M136 is past the drift red-line.
+- [ ] Execute the **M150 / branch `7871`** move (Step 1) — **IN FLIGHT as of 2026-08-03.** Kickoff review
+      done; target pinned to `150.0.17+g94c1726+chromium-150.0.7871.187` (newest security point-release,
+      re-verify on build day). The channel gate is **satisfied** — `7871` reached CEF-Stable, so the
+      M149/`7827` fallback is dead. See `../0.4.0/chromium-rebuild/KICKOFF_REVIEW_RESULTS_2026_08_03.md`.
 - [ ] A1: stand up the **self-hosted runner / beefy VM + shared sccache** path; evaluate **Siso + a
       third-party REAPI backend** (EngFlow / BuildBuddy / NativeLink) for distributed builds.
 - [ ] B1: farbling patch set + `patch.cfg` integration (own design session — `../0.4.0/B1-farbling-design.md`).
