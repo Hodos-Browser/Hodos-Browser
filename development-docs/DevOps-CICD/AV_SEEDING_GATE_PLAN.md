@@ -1,6 +1,11 @@
 # AV Seeding Gate — design plan
 
-**Status:** PLAN — not built. **Created:** 2026-08-03.
+**Status:** **Phase 1 BUILT** (2026-08-03) — merged into `.github/workflows/promote.yml`,
+not yet exercised on a real promote. Phase 2 not started. **Created:** 2026-08-03.
+
+> **Before the gate can pass, someone must create the `VIRUSTOTAL_API_KEY` repo
+> secret.** Until it exists the VirusTotal half warns and skips (by design — see
+> §4 Step A), so the gate degrades to Defender attestation only.
 
 > **Where this lives when it ships.** This is a design doc for unbuilt work. Once
 > Phase 1 lands, the living behavior belongs in `BUILD_AND_RELEASE.md` §2.5 (which
@@ -176,13 +181,39 @@ Phase 2.
 
 ### Size
 
-Roughly 70 lines of workflow YAML, one new repository secret. VirusTotal's free
-tier is ample (4 lookups/minute, 500/day; we use one per release).
+Landed at ~120 lines of workflow YAML across four steps (the estimate was ~70 —
+the flagging-engine breakdown, the retry loop and the fail-soft branches cost
+more than budgeted). One new repository secret. VirusTotal's free tier is ample
+(4 lookups/minute, 500/day; we use one per release).
+
+### Verification done at build time (2026-08-03)
+
+The four steps were extracted from the YAML and exercised directly. Behavioral
+cases, all passing:
+
+| Case | Expected | Result |
+|---|---|---|
+| Waiver empty | continue to checks | ✅ |
+| Waiver set | skip checks, loud warning + summary block | ✅ |
+| Defender ID missing | **block** | ✅ |
+| Defender ID malformed | **block** | ✅ |
+| Defender ID valid UUID | pass | ✅ |
+| VirusTotal key absent | warn + continue | ✅ |
+| VirusTotal 404 (unknown file) | **block** | ✅ |
+| VirusTotal 503 ×3 (API down) | warn + continue | ✅ |
+| Ledger row, checked + no-key variants | correct §2.5.2 shape | ✅ |
+
+**Not exercised locally:** the HTTP-200 detection-count path, because `jq` is not
+available in the Windows dev shell (it *is* preinstalled on the `ubuntu-24.04`
+runner). The `jq` expressions were verified for semantics against mock clean and
+dirty VirusTotal payloads reimplemented in Python — `0/72 → pass`,
+`3/72 → block` with the three flagging engines named. **This path is unproven
+end-to-end and should be watched on the first real run.**
 
 ### How to test it safely
 
-Run it against a tag that is **already public**. Recovery mode skips the flip, so
-there is no risk to a live release while shaking out the new steps.
+Run the workflow against a tag that is **already public**. Recovery mode skips
+the flip, so the new steps can be shaken out with no risk to a live release.
 
 ---
 
@@ -205,10 +236,10 @@ is a different and more invasive operation. Worth doing. Worth doing on its own.
 
 ## 6. Decisions for the owner
 
-| # | Decision | Recommendation |
+| # | Decision | Outcome |
 |---|---|---|
-| **D1** | **How many antivirus detections should block a release?** A single obscure engine flagging a Chromium installer is common and usually meaningless. Blocking on any detection risks false alarms; blocking on none loses the benefit. Options: any detection, a threshold like 3+, an allowlist of known-noisy engines, or warn-only. | **Start at "any detection blocks," and let the waiver absorb false alarms.** We don't yet know our real noise floor — beta.28 came back 0/72. A few releases of data will tell us whether a threshold is needed. Starting strict and loosening is safer than the reverse. |
-| **D2** | **Confirm we have no Microsoft 365 Defender tenant.** If we do, the Defender half could be verified for real instead of attested. | Check before building. Low likelihood, high payoff if true. |
+| **D1** | **How many antivirus detections should block a release?** A single obscure engine flagging a Chromium installer is common and usually meaningless. Blocking on any detection risks false alarms; blocking on none loses the benefit. | **DECIDED 2026-08-03 — any detection blocks; the waiver absorbs false alarms.** We don't know our noise floor yet (beta.28 came back 0/72). Starting strict and loosening beats the reverse. Implemented as `malicious + suspicious > 0`, with the flagging engines and their verdicts printed so the operator can judge whether to waive. **Revisit after 3–4 releases** — if we're waiving routinely, move to a threshold or a known-noisy allowlist. |
+| **D2** | **Do we have a Microsoft 365 Defender tenant?** If so, the Defender half could be verified for real rather than attested. | **DECIDED 2026-08-03 — no.** (A Microsoft 365 Defender tenant is a paid corporate security subscription; we'd know if we had one.) Defender stays operator attestation. |
 | **D3** | **Should the gate also cover macOS?** | **No.** Gatekeeper trust is binary — signed and notarized is trusted, with no per-developer reputation score (see `ORG_IDENTITY_SIGNING_MIGRATION.md`). There is nothing to seed. This is a Windows-only problem. |
 
 ---

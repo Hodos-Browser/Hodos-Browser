@@ -32,6 +32,14 @@ on:
         description: 'OPTIONAL but recommended: paste the draft''s SHA256SUMS.txt content to pin the exact bytes you tested. Leave blank to skip pinning (a warning is logged).'
         required: false
         type: string
+      defender_submission_id:
+        description: 'MS Defender submission ID (UUID from the WDSI portal / its confirmation email) proving this installer was seeded. Required unless av_seeding_waiver is set.'
+        required: false
+        type: string
+      av_seeding_waiver:
+        description: 'EMERGENCY ONLY: reason to promote WITHOUT AV seeding. Skips the seeding gate; the reason is logged loudly and written to the run summary.'
+        required: false
+        type: string
 
 # Never let two promotes (or a promote + re-run) race the irreversible flip or
 # the website push for the same tag.
@@ -161,6 +169,179 @@ jobs:
             --macos-dmg "artifacts/HodosBrowser-${VERSION}.dmg" \
             --autoupdater-src cef-native/src/core/AutoUpdater.cpp \
             --info-plist cef-native/Info.plist
+
+      # ============================================================
+      # AV / SMARTSCREEN SEEDING GATE
+      # ============================================================
+      # Plan + rationale: development-docs/DevOps-CICD/AV_SEEDING_GATE_PLAN.md
+      # Process being enforced: BUILD_AND_RELEASE.md §2.5 (Step 8 of the checklist).
+      #
+      # WHY: SmartScreen reputation is keyed on file-hash + cert-thumbprint and only
+      # accrues from real installs. Seeding (VirusTotal + an MS Defender "software
+      # developer" submission) is well documented and historically skipped —
+      # beta.16–27 have no record at all; beta.28 was seeded and never promoted while
+      # beta.29 was promoted and never seeded. Nothing connected "going public" to
+      # "was seeded". This gate does.
+      #
+      # WHERE: after the crypto re-verify (bytes downloaded + pinned, so the hash is
+      # the real one) and BEFORE the irreversible flip, so a miss blocks publication
+      # instead of being discovered afterwards.
+      #
+      # ASYMMETRY: VirusTotal is verified for real (404 on an unseen hash = definitive
+      # "not submitted"). MS Defender submission has no public status API, so that
+      # half is operator ATTESTATION — a fabricated UUID would pass. That is
+      # deliberate: the threat model is FORGETTING, not lying.
+      #
+      # FAIL-SOFT: a VirusTotal outage or a missing API key warns and continues. A
+      # reminder that can take down the release pipeline is worse than no reminder.
+      # Only a definitive negative (404) or a real detection blocks.
+      #
+      # Skipped entirely in recovery mode — the flip already happened.
+      - name: AV seeding gate — waiver check
+        if: env.ALREADY_PUBLIC != 'true'
+        env:
+          WAIVER: ${{ inputs.av_seeding_waiver }}
+        run: |
+          set -euo pipefail
+          if [ -n "${WAIVER//[[:space:]]/}" ]; then
+            echo "AV_SEEDING_WAIVED=true" >> "$GITHUB_ENV"
+            echo "::warning::AV seeding WAIVED for ${TAG} — reason: ${WAIVER}"
+            {
+              echo "### ⚠️ AV seeding WAIVED"
+              echo ""
+              echo "**Tag:** \`${TAG}\`"
+              echo "**Reason:** ${WAIVER}"
+              echo ""
+              echo "Promoted **without** VirusTotal / MS Defender seeding. Seed manually as soon"
+              echo "as possible (\`BUILD_AND_RELEASE.md\` §2.5) and record the row in §2.5.2."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "AV_SEEDING_WAIVED=false" >> "$GITHUB_ENV"
+          fi
+
+      - name: AV seeding gate — VirusTotal (verified)
+        if: env.ALREADY_PUBLIC != 'true' && env.AV_SEEDING_WAIVED != 'true'
+        env:
+          VT_API_KEY: ${{ secrets.VIRUSTOTAL_API_KEY }}
+        run: |
+          set -euo pipefail
+          EXE="artifacts/HodosBrowser-${VERSION}-setup.exe"
+          SHA=$(sha256sum "$EXE" | awk '{print $1}')
+          echo "VT_SHA=$SHA" >> "$GITHUB_ENV"
+          echo "installer sha256: $SHA"
+
+          if [ -z "${VT_API_KEY:-}" ]; then
+            echo "::warning::VIRUSTOTAL_API_KEY not set — skipping the VirusTotal check. Add the repo secret to enable it (free tier is ample: 1 lookup per release)."
+            echo "VT_STATUS=skipped-no-key" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          # Retry transient failures (429 rate-limit / 5xx). Only 200 and 404 are
+          # verdicts; anything else after retries degrades to a warning.
+          code=""; body=""
+          for i in 1 2 3; do
+            resp=$(curl -sS -m 30 -w '\n%{http_code}' \
+                     -H "x-apikey: ${VT_API_KEY}" \
+                     "https://www.virustotal.com/api/v3/files/${SHA}" || true)
+            code=$(printf '%s' "$resp" | tail -n1)
+            body=$(printf '%s' "$resp" | sed '$d')
+            case "$code" in
+              200|404) break ;;
+              *) echo "VirusTotal returned HTTP ${code:-none} — retry ${i}/3"; sleep 10 ;;
+            esac
+          done
+
+          case "$code" in
+            404)
+              echo "::error::VirusTotal has never seen this installer (sha256 ${SHA}) — it was not submitted."
+              echo "::error::Upload HodosBrowser-${VERSION}-setup.exe (raw .exe, NOT zipped) at https://www.virustotal.com/ then re-run this workflow."
+              exit 1
+              ;;
+            200)
+              # A 200 whose body doesn't parse is an API-side anomaly, not an operator
+              # miss — degrade to the same warning path as unreachable rather than
+              # hard-failing the promote (`set -e` would otherwise abort on jq).
+              if ! printf '%s' "$body" | jq -e . >/dev/null 2>&1; then
+                echo "::warning::VirusTotal returned HTTP 200 but the body did not parse as JSON — submission could NOT be verified. Promotion continues; verify manually."
+                echo "VT_STATUS=unreachable" >> "$GITHUB_ENV"
+                exit 0
+              fi
+              mal=$(printf '%s' "$body" | jq -r '.data.attributes.last_analysis_stats.malicious  // 0')
+              sus=$(printf '%s' "$body" | jq -r '.data.attributes.last_analysis_stats.suspicious // 0')
+              tot=$(printf '%s' "$body" | jq -r '[.data.attributes.last_analysis_stats[]] | add // 0')
+              det=$(( mal + sus ))
+              url="https://www.virustotal.com/gui/file/${SHA}/detection"
+              {
+                echo "VT_URL=$url"
+                echo "VT_DETECTIONS=$det"
+                echo "VT_TOTAL=$tot"
+                echo "VT_STATUS=checked"
+              } >> "$GITHUB_ENV"
+              echo "VirusTotal: ${det}/${tot} engines flagged — ${url}"
+              if [ "$det" -gt 0 ]; then
+                echo "Flagging engines:"
+                printf '%s' "$body" | jq -r '
+                  .data.attributes.last_analysis_results
+                  | to_entries[]
+                  | select(.value.category == "malicious" or .value.category == "suspicious")
+                  | "  - \(.key): \(.value.category) (\(.value.result // "n/a"))"'
+                echo "::error::VirusTotal reports ${det}/${tot} detections for this installer — see ${url}"
+                echo "::error::Investigate before shipping. If these are known false positives, re-run with av_seeding_waiver set to a reason (D1: we start strict and learn our noise floor)."
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::warning::VirusTotal unreachable (HTTP ${code:-none}) after retries — submission could NOT be verified. Promotion continues; verify manually."
+              echo "VT_STATUS=unreachable" >> "$GITHUB_ENV"
+              ;;
+          esac
+
+      # ATTESTATION, not verification — see the block comment above. We can only
+      # check the shape of the ID, never that it is real.
+      - name: AV seeding gate — MS Defender submission (attested)
+        if: env.ALREADY_PUBLIC != 'true' && env.AV_SEEDING_WAIVED != 'true'
+        env:
+          DEFENDER_ID: ${{ inputs.defender_submission_id }}
+        run: |
+          set -euo pipefail
+          ID="${DEFENDER_ID//[[:space:]]/}"
+          if [ -z "$ID" ]; then
+            echo "::error::No MS Defender submission ID provided — this installer has not been seeded."
+            echo "::error::Submit HodosBrowser-${VERSION}-setup.exe at https://www.microsoft.com/en-us/wdsi/filesubmission (submission type: 'Software developer'), then re-run with the ID it returns."
+            echo "::error::Emergency override: re-run with av_seeding_waiver set to a reason."
+            exit 1
+          fi
+          echo "$ID" | grep -qiE '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' \
+            || { echo "::error::'${ID}' is not a valid submission ID (expected a UUID from the WDSI portal or its confirmation email)."; exit 1; }
+          echo "DEFENDER_ID_OK=$ID" >> "$GITHUB_ENV"
+          echo "MS Defender submission ID recorded: $ID"
+
+      # Emits the §2.5.2 ledger row pre-formatted for paste. Phase 2 of the plan
+      # appends this to BUILD_AND_RELEASE.md automatically.
+      - name: AV seeding gate — emit §2.5.2 ledger row
+        if: env.ALREADY_PUBLIC != 'true' && env.AV_SEEDING_WAIVED != 'true'
+        run: |
+          set -euo pipefail
+          TODAY=$(date -u +%Y-%m-%d)
+          {
+            echo "### AV seeding — ledger row for \`BUILD_AND_RELEASE.md\` §2.5.2"
+            echo ""
+            echo '```markdown'
+            echo "**${VERSION} submission record:**"
+            echo "- Cert chain: <run the §2.5.1 PowerShell check on Windows and paste the intermediate CA + leaf thumbprint>"
+            echo "- Installer SHA-256: \`${VT_SHA}\`"
+            case "${VT_STATUS:-}" in
+              checked)     echo "- VirusTotal: submitted ${TODAY} — **${VT_DETECTIONS}/${VT_TOTAL} detections** — ${VT_URL}" ;;
+              unreachable) echo "- VirusTotal: API unreachable at promote time — **VERIFY MANUALLY**" ;;
+              *)           echo "- VirusTotal: not checked (VIRUSTOTAL_API_KEY unset) — **VERIFY MANUALLY**" ;;
+            esac
+            echo "- MS Defender: submitted ${TODAY}, ID \`${DEFENDER_ID_OK}\` (status: Submitted — reconcile to Completed later)"
+            echo "- Norton: skipped (submit only on a real detection)"
+            echo '```'
+            echo ""
+            echo "Paste into \`development-docs/DevOps-CICD/BUILD_AND_RELEASE.md\` §2.5.2."
+            echo "_Phase 2 of \`AV_SEEDING_GATE_PLAN.md\` will append this automatically._"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # Point of no return — assets become public + Latest. Skipped in recovery mode
       # (already public) so a re-run resumes at website-sync without re-flipping.
