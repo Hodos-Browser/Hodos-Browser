@@ -32,6 +32,43 @@ newer `7871` patch may land. Everything else here is settled.
 `../0.4.0/archive/SPRINT_0_4_0_MASTER_PLAN.md`) is **retracted**. It was an artifact of reading the CDN
 JSON rather than the website table. Full reasoning: `CEF_BUILD_RUNBOOK.md` Step 1.
 
+**Build-day re-check (2026-08-03):** `index.json` re-queried — `150.0.17+g94c1726+chromium-150.0.7871.187`
+is still the newest `7871` build (8 total on the branch; next-newest `150.0.14`). **No newer
+point-release; the pin stands.** The CEF checkout's own
+`cef/CHROMIUM_BUILD_COMPATIBILITY.txt` @ `94c1726` confirms the transitive Chromium pin:
+`chromium_checkout: refs/tags/150.0.7871.187`.
+
+---
+
+## Codec baseline — M136, measured pre-bump (2026-08-03)
+
+`PLAN_codecs.md` §6.1 Layer-A probe, run against the **live shipping M136 build**
+(`libcef.dll` `136.1.7+g15882fe+chromium-136.0.7103.114`, 249 MB, our own codec build) per **D9**
+— the M136 re-build was skipped, so this is the pre-bump reference the P2b/P5 comparison uses.
+
+Harness: local HTTP page calling `canPlayType`, results POSTed back (no human transcription).
+Run under `cefclient.exe` from the M136 out-dir rather than the shipping shell, so the user's live
+browser session was not disturbed. UA confirmed `Chrome/136.0.0.0`.
+
+| Codec | Query | Gate | **M136 result** |
+|---|---|---|---|
+| H.264 baseline | `avc1.42E01E` | GATE | `probably` |
+| H.264 High | `avc1.640028` | GATE | `probably` |
+| AAC-LC | `mp4a.40.2` | GATE | `probably` |
+| MP3 | `audio/mpeg` | GATE | `probably` |
+| VP9 | `vp09.00.10.08` | GATE | `probably` |
+| AV1 | `av01.0.05M.08` | assert present | `probably` |
+| HEVC | `hvc1.1.6.L93.B0` | **non-gating** | `probably` |
+| HEVC | `hev1.1.6.L93.B0` | **non-gating** | `probably` |
+
+**All GATE rows pass.** HEVC answers `probably` **on this machine** (i9-12950HX) — it is
+hardware-dependent and inherited-on, so it is recorded, not gated. A different test machine may
+return `""` for the HEVC rows without that being a regression.
+
+⚠️ **Post-bump comparison rule:** any GATE row returning `""` on `7871` = codec build regressed →
+block the bump and re-audit `args.gn`. A change in the **HEVC** rows alone is *not* a blocker, but
+must be recorded here alongside the machine it was measured on.
+
 ---
 
 ## Must Investigate on Next CEF Update
