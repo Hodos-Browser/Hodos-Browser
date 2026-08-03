@@ -2,7 +2,7 @@
 
 > **Purpose**: This document articulates the rationale behind our architectural and language decisions, providing research-backed arguments that validate our approach.
 
-**Last Updated**: 2026-02-19
+**Last Updated**: 2026-08-03
 
 ---
 
@@ -59,9 +59,13 @@ const encryptedKey = encrypt(masterKey);
 //   - Extension injection
 ```
 
-**Our Solution**: Private keys never leave the native Rust process. They're stored in process-isolated memory with:
-- **Zero JavaScript Exposure**: Keys never enter the render process
-- **Secure Memory Management**: Rust's ownership model ensures keys are cleared from memory when no longer needed
+**Our Solution**:
+
+> Signing keys never leave the Rust process. No EC private key is ever returned to JavaScript, and no signing happens there. The BIP39 recovery phrase is the one deliberate exception: it is shown once at wallet creation so the user can record it, and thereafter only through PIN re-verification in the wallet overlay. It is never reachable from web content — the wallet's CORS allowlist admits only Hodos's own local UI origins.
+
+Concretely:
+- **No key material in the render process**: all key derivation and signing live in `rust-wallet/src/crypto/`. No secp256k1/ECDSA private-key code exists anywhere in `cef-native/`. The recovery-phrase API is injected only into Hodos's own internal pages and overlays (`cef-native/src/handlers/simple_render_process_handler.cpp`), never into a web-content context.
+- **Memory handling**: key material is confined to the wallet process. Note that Rust's `Drop` deallocates but does not zero memory, and the wallet does not yet zeroize secrets — there is no `zeroize`/`secrecy` dependency, and `WalletDatabase::clear_cached_mnemonic()` (`rust-wallet/src/database/connection.rs`) merely drops the `Option<String>`, and is called only on wallet delete. Adding zeroization is an open hardening item.
 - **No Developer Tools Access**: Native processes aren't accessible via browser console
 
 **Research Validation**:
@@ -70,7 +74,7 @@ const encryptedKey = encrypt(masterKey);
 - Native processes can use secure memory allocation APIs (platform-specific secure heaps)
 
 **Concrete Example (Hodos Browser)**:
-- Our Rust wallet uses **DPAPI** (Windows Data Protection API) to encrypt the mnemonic at the OS level. The mnemonic is decrypted into Rust's process memory only when needed, then used for key derivation. JavaScript has no equivalent — `window.crypto.subtle` can encrypt but can't protect the key in memory from DevTools, extensions, or XSS.
+- Our Rust wallet uses **DPAPI** (Windows Data Protection API) / **Keychain** (macOS) to encrypt the mnemonic at rest at the OS level. On startup the wallet auto-unlocks (`rust-wallet/src/main.rs` → `WalletDatabase::try_dpapi_unlock`) and holds the plaintext mnemonic in Rust process memory for the life of the unlocked session (`WalletDatabase::cached_mnemonic`, `rust-wallet/src/database/connection.rs`), where it is used for key derivation. The guarantee is that the plaintext never leaves the native process and is never reachable from JavaScript — not that it is decrypted per-use. JavaScript has no equivalent — `window.crypto.subtle` can encrypt but can't protect the key in memory from DevTools, extensions, or XSS.
 
 #### 1.3 Cross-Site Scripting (XSS) Attack Surface
 
@@ -87,7 +91,7 @@ const encryptedKey = encrypt(masterKey);
 **Our Solution**: Wallet operations don't run in JavaScript at all. They run in a native process that:
 - **Cannot be accessed by XSS attacks** (different process, different security boundary)
 - **Cannot be intercepted by browser extensions** (native process, not JavaScript)
-- **Uses controlled API exposure** (only safe, high-level functions via `window.hodosBrowser`)
+- **Uses controlled API exposure** (a fixed set of safe, high-level bridge functions — the injected JavaScript surfaces are inventoried in `cef-native/include/core/CLAUDE.md` and `cef-native/src/handlers/CLAUDE.md`)
 
 **Research Validation**:
 - XSS attacks are the #1 web vulnerability (see: [OWASP Top 10](https://owasp.org/www-project-top-ten/))
@@ -95,7 +99,12 @@ const encryptedKey = encrypt(masterKey);
 - Financial applications require defense-in-depth beyond web security best practices
 
 **Concrete Example (Hodos Browser)**:
-- Our **domain permission system** enforces per-domain spending limits in USD. Even if XSS somehow triggered a `createAction` call, the C++ auto-approve engine checks spending limits before forwarding to Rust, and Rust has its own defense-in-depth checks via the `X-Requesting-Domain` header. Three layers of defense — none of which exist in a JavaScript-only wallet.
+- Our **domain permission system** enforces per-domain spending limits in USD (defaults: $1.00 per transaction, $10.00 per session). Even if XSS somehow triggered a `createAction` call, the request traverses three independent enforcement layers — none of which exist in a JavaScript-only wallet:
+  1. **The C++ interceptor stamps the truth onto the request.** It attaches the true requesting origin and the pre-computed cost (`X-Requesting-Domain`, `X-Payment-Satoshis`, `X-Payment-Cents`, `X-Bsv-Price-Available`) in `cef-native/src/core/HttpRequestInterceptor.cpp`, so the page cannot lie about who it is or what it is spending.
+  2. **The Rust permission engine decides.** Allow / prompt / deny is evaluated against the per-domain caps in `rust-wallet/src/permission_service/request_gate.rs :: dispatch_payment`, backed by the decision engine in `rust-wallet/crates/hodos_permission_engine/`.
+  3. **The signing keys are not in a JavaScript context at all.** A compromised page can at most *ask*; it can never sign.
+
+  (Historical note: the cap comparison used to live in a C++ `PermissionEngine` / `SessionManager`. Both were deleted in Phase 2.6-H, and the decision logic now lives only in Rust. C++ builds partial context, forwards it, and renders whatever modal Rust asks for.)
 
 ### User Experience Benefits
 
@@ -413,11 +422,14 @@ const encryptedKey = encrypt(masterKey);
 
 ### 4.2 Controlled API Exposure
 
-**Our Approach**: Only safe, high-level functions are exposed through `window.hodosBrowser`.
+**Our Approach**: Only safe, high-level functions are exposed to page JavaScript. The injected surfaces are inventoried in `cef-native/include/core/CLAUDE.md` and `cef-native/src/handlers/CLAUDE.md` — root docs deliberately do not enumerate them.
 
 **Why This Matters**:
 - **Principle of Least Privilege**: Only expose what's necessary
-- **No Sensitive Data**: Private keys never leave the native process
+- **No Sensitive Data**:
+
+  > Signing keys never leave the Rust process. No EC private key is ever returned to JavaScript, and no signing happens there. The BIP39 recovery phrase is the one deliberate exception: it is shown once at wallet creation so the user can record it, and thereafter only through PIN re-verification in the wallet overlay. It is never reachable from web content — the wallet's CORS allowlist admits only Hodos's own local UI origins.
+
 - **Controlled Interface**: All wallet operations go through a controlled API
 
 **Research Validation**:
@@ -480,5 +492,5 @@ const encryptedKey = encrypt(masterKey);
 
 ---
 
-**Last Updated**: 2026-02-19
+**Last Updated**: 2026-08-03
 **Status**: Living document - updated as we learn and validate our choices

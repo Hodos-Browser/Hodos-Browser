@@ -1,5 +1,7 @@
 # HodosBrowser - Project Context for Claude
 
+> **Last reviewed: 2026-08-03.** This root doc carries **shape, contracts and pointers**. Per-directory `CLAUDE.md` files carry **inventory** — file rosters, counts, exhaustive lists. If you need "which repos / which handlers / which overlays exist", go to the layer doc; if the same fact lives in both places, the layer doc wins and the duplicate here is a bug. Prefer `file.rs :: symbol_name` over `file.rs:1234` — symbols survive edits, line numbers do not.
+
 # Guidelines
 
 Build with a production-focused mindset. Do not take shortcuts. If you get stuck do research on proper implementation plans/debugging steps.
@@ -11,16 +13,16 @@ Sprint phases live in `development-docs/<sprint>/phase-*/` folders. Before writi
 1. **Re-read the phase docs.** The phase's `README.md` plus every doc it links. Don't trust prior session memory or earlier summaries — code and line numbers may have moved.
 2. **Verify cited code is current.** For every file:line reference in the phase doc, grep/Read the cited code and confirm it still exists at that location with the documented shape. Update the doc inline if anything moved.
 3. **Reuse-first audit.** Map every change to existing functions/code/components. **Before writing anything new, prove the equivalent doesn't already exist** — grep for similar handlers, repos, components, IPC types. If something close exists, extend it rather than creating a parallel structure. Common reuse anchors:
-   - Rust handlers in `rust-wallet/src/handlers.rs` — most BRC-100 + payment primitives are already there (80+ handlers)
+   - Rust handlers in `rust-wallet/src/handlers.rs` — most BRC-100 + payment primitives are already there. Full roster: `rust-wallet/src/CLAUDE.md`
    - C++ overlays — the shared `notification_browser_` overlay multiplexes prompt types via `BRC100AuthOverlayRoot.tsx`'s type dispatch; add new types as new cases, don't add new HWNDs without strong reason
    - DB tables — extend via child tables joined by FK + CASCADE, mirroring the `cert_field_permissions` pattern (don't create parallel top-level tables)
-   - Permission gates — `check_domain_approved`, `SessionManager`, `domain_permissions` row already enforce per-tx / per-session / rate / max-tx-per-session limits
+   - Permission gates — the decision engine is Rust (`rust-wallet/crates/hodos_permission_engine`, driven by `rust-wallet/src/permission_service/`). `check_domain_approved` + the `domain_permissions` row already enforce per-tx / per-session / rate / max-tx-per-session limits, and per-session counters live in `PermissionService.session_counters` (`rust-wallet/src/permission_service/state.rs`), cleared per browser via `POST /wallet/session/close`. The C++ `PermissionEngine` and `SessionManager` were deleted in Phase 2.6-H — do not resurrect them
    - HTTP interception — `isWalletEndpoint` route table is the entry point for all new wallet endpoints; new endpoints go through the table, never around it
 4. **Risk assessment.** What existing functionality could this change touch or break? Especially audit the **load-bearing UX safeguards**:
-   - **Tab payment badge animation** (`payment_success_indicator` IPC chain: `HttpRequestInterceptor.cpp` — 2 fire sites: `AsyncHTTPClient::OnRequestComplete` (createAction silent-approve) + `firePaymentSuccessIpc()` (BRC-121 paid retry) → `simple_render_process_handler.cpp:1051` → `useTabManager.ts:141`) — green-dot fires on every auto-approved payment; the user's primary visual safeguard against silent payment abuse
-   - **Right-click "Manage Site Permissions"** (`MENU_ID_MANAGE_PERMISSIONS` at `simple_handler.cpp:6696`) — quick revoke flow
-   - **`DomainPermissionForm` "Always notify" toggle** — zeros all limits; the cautious-user opt-in path
-   - **Privacy perimeter prompts** — identity-key reveal, key-linkage reveal, sensitive cert fields, large spends ALWAYS prompt regardless of any setting
+   - **Tab payment badge — the GOLD PILL indicator** (`payment_success_indicator` IPC chain: `HttpRequestInterceptor.cpp :: OnWalletCallSuccess` is the single emit site, reached from two logical paths — createAction silent-approve and `firePaymentSuccessIpc()` on the BRC-121 paid retry → relayed by `simple_render_process_handler.cpp` → consumed by `useTabManager.ts`) — fires on every auto-approved payment; the user's primary visual safeguard against silent payment abuse. It is a **gold pill**, never a "green dot"; it must survive every refactor
+   - **Right-click "Manage Site Permissions"** (`MENU_ID_MANAGE_PERMISSIONS` in `simple_handler.cpp`) — quick revoke flow
+   - **`DomainPermissionForm` "Always notify" toggle** — zeros the three spending limits (per-tx, per-session, max-tx-per-session), forcing a prompt on every payment; `rate_limit_per_min` is deliberately left alone (and floored to 1 by `parseInt(rateLimitPerMin) || 1`). The cautious-user opt-in path
+   - **Privacy perimeter gates** — identity-key reveal, key-linkage reveal, sensitive cert fields, over-cap spends. Audit these four for regressions. Only **sensitive certificate fields** prompt unconditionally with no opt-out (`matrix_c.rs`); identity-key reveal goes silent when `domain_permissions.identity_key_disclosure_allowed=1` (user-facing toggle, global default ON) or on a session opt-in, key-linkage reveal goes silent on a session opt-in, and a spend is "large" only when it exceeds the user-configured `per_tx_limit_cents` (default 100 cents = $1.00)
    - **Per-session counter behavior** (resets on tab close — kept by design)
 5. **Confirm the test plan** is actionable for this phase. Each phase needs unit + integration + smoke tests before merge, with explicit Windows/macOS parity verification per the Testing Standards table below.
 6. **Hand back a tight summary** to the user listing remaining open questions / assumptions / decisions before any code is written. Wait for confirmation before writing the first commit.
@@ -52,26 +54,29 @@ Three layers with strict separation:
 
 ```
 React Frontend (Port 5137)
-    │ window.hodosBrowser.*
+    │ window.hodosBrowser.*  (wallet calls ride the "wallet_call" CefProcessMessage
+    │                         IPC bridge, NOT a direct fetch from the page)
     ▼
 C++ CEF Shell
-    │ HTTP interception & forwarding → localhost:31301 for wallet functions
+    │ HTTP interception & forwarding → 127.0.0.1:31301 for wallet functions
     ▼
-Rust Wallet Backend (Port 31301)
+Rust Wallet Backend (127.0.0.1:31301)
     │
     ▼
 Bitcoin SV Blockchain (WhatsOnChain, GorillaPool)
 ```
 
+> **Ports are environment-dependent — never hardcode them.** Wallet backend: **31301** release / **31401** under `HODOS_DEV=1`. Adblock engine: **31302** release / **31402** dev. Single source of truth is `cef-native/include/core/PortConfig.h` (`hodos::WalletPort()`, `hodos::WalletBaseUrl()`, `hodos::WalletUrl()`) mirrored by `wallet_port()` in `rust-wallet/src/main.rs`. Route every new call site through those helpers.
+
 | Layer | Tech | Responsibility |
 |-------|------|----------------|
 | Frontend | React, Vite, TypeScript, MUI | UI, user interactions; never handles keys or signing |
-| CEF Shell | C++17, CEF 136 | Browser engine, V8 injection, HTTP interception; browser data (history, bookmarks) |
-| Wallet | Rust, Actix-web, SQLite | Crypto, signing, keys, BRC-100 protocol; private keys never leave this process |
+| CEF Shell | C++17, CEF (exact pin: `CEF_VERSION` in `cef-binaries/include/cef_version.h` — read it, don't quote it from memory) | Browser engine, V8 injection, HTTP interception; browser data (history, bookmarks) |
+| Wallet | Rust, Actix-web, SQLite | Crypto, signing, keys, BRC-100 protocol. Signing keys never leave this process — see Invariants #1 for the exact guarantee and its one deliberate exception |
 
 **Overlay Model**: Settings, Wallet Panel, Backup Modal, and BRC-100 Auth each run as separate CEF subprocesses with isolated V8 contexts.
 
-> **⚠️ "CEF-based" ≠ "limited to prebuilt CEF."** We **build our own custom Chromium+CEF from source** (see `development-docs/DevOps-CICD/CEF_BUILD_RUNBOOK.md`) and apply source patches via `cef/patch/` (farbling is the first). CEF is our *embedding API*, but the underlying Chromium is **ours to patch** — so capability is bounded by **patch scale + per-Chromium-bump maintenance, NOT by CEF's stock behavior.** When weighing a feature, don't reason "CEF won't let us"; reason "how large is the patch and how much does it churn each Chromium bump." (We remain a CEF *embedder*, not a full fork like Vivaldi — the more we patch the browser-UI layer, the closer we move to fork-level upkeep.)
+> **⚠️ "CEF-based" ≠ "limited to prebuilt CEF."** We **build our own custom Chromium+CEF from source** (see `development-docs/DevOps-CICD/CEF_BUILD_RUNBOOK.md`). The CEF source-patch mechanism (`cef/patch/patch.cfg`, applied by `patcher.py` during `automate-git.py`) is the path by which we **will** patch Chromium — it is **not stood up yet, and no patches exist today** (greenfield as of 2026-07-10; see `development-docs/0.4.0/chromium-rebuild/PLAN_patch_toolchain.md`). A Blink-level farbling patch is planned as the first one (`PLAN_farbling_blink.md`); farbling today is implemented in the embedder as injected JavaScript (`cef-native/include/core/FingerprintScript.h`, per-domain seeds from `FingerprintProtection.h`). CEF is our *embedding API*, but the underlying Chromium is **ours to patch** — so capability is bounded by **patch scale + per-Chromium-bump maintenance, NOT by CEF's stock behavior.** When weighing a feature, don't reason "CEF won't let us"; reason "how large is the patch and how much does it churn each Chromium bump." (We remain a CEF *embedder*, not a full fork like Vivaldi — the more we patch the browser-UI layer, the closer we move to fork-level upkeep.)
 
 ---
 
@@ -79,18 +84,7 @@ Bitcoin SV Blockchain (WhatsOnChain, GorillaPool)
 
 **NEVER add new panels/menus/dropdowns directly to MainBrowserView.tsx (header_hwnd).**
 
-All UI panels MUST be implemented as **overlays** in their own CEF subprocess:
-
-| Component | Implementation | Location |
-|-----------|---------------|----------|
-| Wallet Panel | ✅ Overlay | `WalletPanelPage.tsx` → `WalletOverlayRoot.tsx` |
-| Settings | ✅ Overlay | `SettingsOverlayRoot.tsx` |
-| Cookie Panel | ✅ Overlay | `CookiePanelOverlayRoot.tsx` |
-| Downloads | ✅ Overlay | `DownloadsOverlayRoot.tsx` |
-| Privacy Shield | ✅ Overlay | `PrivacyShieldOverlayRoot.tsx` |
-| Omnibox | ✅ Overlay | `OmniboxOverlayRoot.tsx` |
-| Menu | ✅ Overlay | `MenuOverlayRoot.tsx` |
-| Profile Picker | ✅ Overlay | `ProfilePickerOverlayRoot.tsx` |
+All UI panels MUST be implemented as **overlays** in their own CEF subprocess. Every panel — wallet, settings, cookies, downloads, privacy shield, omnibox, menu, profile picker, bookmarks, site info, tab list — ships as a `<Name>OverlayRoot.tsx` page routed in `frontend/src/App.tsx`. **Roster: `frontend/src/pages/CLAUDE.md`.**
 
 **Why overlays?**
 - Each overlay is isolated V8 context (security)
@@ -115,7 +109,7 @@ All UI panels MUST be implemented as **overlays** in their own CEF subprocess:
 
 ## ⚠️ Overlay Lifecycle & Close Prevention (IMPORTANT — Windows)
 
-> **macOS note:** On macOS, overlays use `NSPanel` (not `WS_POPUP`). Close behavior is handled via `NSWindowDelegate` and `resignKey`/`resignMain` notifications in `cef_browser_shell_mac.mm`. The patterns below are Windows-specific.
+> **macOS note:** On macOS, overlays are **borderless `NSWindow`s** (`NSWindowStyleMaskBorderless`; `GenericOverlayWindow : NSWindow` in `cef-native/OverlayHelpers_mac.h`), not `NSPanel`s and not `WS_POPUP`. Click-outside dismissal is handled by paired NSEvent local+global monitors installed via `InstallClickOutsideMonitor()` (`cef-native/OverlayHelpers_mac.mm`), which consult `g_wallet_overlay_prevent_close` for the wallet overlay. `MainWindowDelegate::windowDidResignKey` only logs; there is no `resignMain` handler. The patterns below are Windows-specific.
 
 Overlays are WS_POPUP windows (not children of `g_hwnd`). Each overlay has a different close/destroy pattern. Understanding these is critical for UX work.
 
@@ -123,11 +117,11 @@ Overlays are WS_POPUP windows (not children of `g_hwnd`). Each overlay has a dif
 
 | Mechanism | Where | Overlays Affected |
 |-----------|-------|-------------------|
-| **Click-outside (React)** | `handleBackgroundClick()` in overlay page | Wallet, Settings (full-page overlays with transparent backdrop) |
-| **Click-outside (Mouse hook)** | `WH_MOUSE_LL` hook in C++ | Cookie, Download, Menu, Profile, Omnibox (dropdown-style overlays) |
-| **IPC `overlay_close`** | React → `simple_handler.cpp` | All overlays (explicit close from React) |
-| **Focus loss (`WM_ACTIVATEAPP`)** | `cef_browser_shell.cpp` WndProc | Omnibox only. **Wallet is exempt** (user may switch apps to paste mnemonic) |
-| **Old overlay cleanup** | `CreateXxxOverlay()` functions | Destroys existing overlay before creating new one |
+| **Click-outside (Mouse hook)** | `WH_MOUSE_LL` hook in C++ | Dropdown-style overlays (cookie, download, menu, profile, omnibox, …) — roster in `cef-native/src/handlers/CLAUDE.md` |
+| **HWND activation loss (`WM_ACTIVATE`)** | overlay's own WndProc, e.g. `WalletOverlayWndProc` | Wallet — **the primary wallet close path**. Guarded by `g_wallet_overlay_prevent_close` |
+| **IPC `overlay_close`** | React → `simple_handler.cpp` | Only the five full-panel roles: settings, wallet, backup, brc100auth, notification. Wallet and notification **hide** (keep-alive) rather than destroy. Dropdown panels are NOT handled here — each has its own hide IPC (`bookmarks_panel_hide`, `cookie_panel_hide`, `download_panel_hide`, `profile_panel_hide`, `siteinfo_panel_hide`, …). **A new overlay that sends `overlay_close` without a role arm silently no-ops.** |
+| **Focus loss (`WM_ACTIVATEAPP`)** | `cef_browser_shell.cpp` main WndProc (primary window only) | Hides the **wallet**, the **omnibox** and the **site-info hub**. The wallet is *not* exempt — it is spared only while `g_wallet_overlay_prevent_close` is set; `g_file_dialog_active` spares all overlays by breaking out early |
+| **Old overlay cleanup** | Only `CreateSettingsOverlayWithSeparateProcess()` (destroy + recreate) and `CreateSettingsMenuOverlay()` (destroy + return = toggle-close). `CreateNotificationOverlay()` is keep-alive, reusing the HWND and injecting `window.showNotification()`, destroying only a stale HWND. | **Every other overlay — wallet included — takes the keep-alive early return** (`if (hwnd && IsWindow(hwnd)) { Show*Overlay(...); return; }`) and reuses the existing browser |
 
 ### Close Prevention Patterns
 
@@ -139,12 +133,12 @@ Overlays are WS_POPUP windows (not children of `g_hwnd`). Each overlay has a dif
 
 **2. `g_wallet_overlay_prevent_close` (React → C++ IPC flag)**
 - Set via `wallet_prevent_close` / `wallet_allow_close` IPC messages from React
-- Guards React's `handleBackgroundClick()` (click-outside in React code)
-- **⚠️ Cannot guard `WM_ACTIVATEAPP`** — IPC is async, flag may not be set before focus loss fires
+- Consulted by the C++ close paths: `WalletOverlayWndProc`'s `WM_ACTIVATE(WA_INACTIVE)`, the main WndProc's `WM_ACTIVATEAPP`, and the `WH_MOUSE_LL` click-outside hook (and, on macOS, `InstallClickOutsideMonitor`)
+- **⚠️ A React-set flag cannot reliably guard `WM_ACTIVATEAPP`** — IPC is async, and the flag may not have arrived before focus loss fires. That is why creation-time default (#3) exists
 - Auto-cleared on `overlay_close` IPC
 
 **3. Wallet creation-time default (flag set in C++, cleared by React)**
-- `g_wallet_overlay_prevent_close` is set to `true` in `CreateWalletOverlayWithSeparateProcess()` (synchronous, no race)
+- `g_wallet_overlay_prevent_close` is set to `true` inside the Windows creator `CreateWalletOverlay(HINSTANCE, bool showImmediately, int iconRightOffset)` in `simple_app.cpp` (synchronous, no race). *(`CreateWalletOverlayWithSeparateProcess()` is the **macOS-only** entry point, in `cef_browser_shell_mac.mm`.)*
 - React sends `wallet_allow_close` IPC once user reaches a safe state (live wallet, loading, locked)
 - React sends `wallet_prevent_close` IPC when entering unsafe state (mnemonic display, PIN entry)
 - Result: new overlay survives focus loss by default; React opts in to allow close once ready
@@ -156,27 +150,31 @@ Overlays are WS_POPUP windows (not children of `g_hwnd`). Each overlay has a dif
 **Safe pattern:** Set flag in `CreateXxxOverlay()` or in `OnFileDialog()` (C++ side)
 **Unsafe pattern:** Set flag via React `useEffect` → `cefMessage.send()` → IPC handler (async, race condition)
 
-### Destruction Paths for Wallet Overlay (5 total)
+### Destruction / hide paths for the wallet overlay
 
-1. **`WM_ACTIVATE(WA_INACTIVE)` in `WalletOverlayWndProc`** — THE PRIMARY close path. Fires when wallet HWND loses activation (click outside, Alt+Tab, click another app). Guarded by `g_wallet_overlay_prevent_close`. This is the WndProc for the overlay HWND itself (`cef_browser_shell.cpp` ~line 1297).
-2. **`WM_ACTIVATEAPP` in main WndProc** — App-level focus loss. Also guarded by `g_wallet_overlay_prevent_close`. (`cef_browser_shell.cpp` ~line 952).
-3. **IPC `overlay_close`** from React → `simple_handler.cpp` destroys HWND
-4. **Old overlay cleanup** in `CreateWalletOverlayWithSeparateProcess()` → destroys existing before creating new
-5. **Application shutdown** → `ShutdownApplication()` cleanup
+1. **`WM_ACTIVATE(WA_INACTIVE)` in `WalletOverlayWndProc`** — THE PRIMARY close path. Fires when the wallet HWND loses activation (click outside, Alt+Tab, click another app). Guarded by `g_wallet_overlay_prevent_close`. This is the WndProc for the overlay HWND itself, in `cef_browser_shell.cpp`.
+2. **`WM_ACTIVATEAPP` in the main WndProc** — app-level focus loss, primary window only. Also guarded by `g_wallet_overlay_prevent_close` (and by `g_file_dialog_active`), in `cef_browser_shell.cpp`.
+3. **IPC `overlay_close`** from React → `simple_handler.cpp` (wallet arm hides, keep-alive)
+4. **Application shutdown** → `ShutdownApplication()` cleanup
+
+> Note: the wallet creator does **not** destroy-and-recreate. `CreateWalletOverlay()` takes the keep-alive early return when a live HWND already exists.
 
 > **Key lesson:** Overlays have BOTH app-level (`WM_ACTIVATEAPP`) AND HWND-level (`WM_ACTIVATE`) close paths. Both must be guarded. The HWND-level `WM_ACTIVATE` in the overlay's own WndProc is typically the one that actually fires first.
 
 ### Code Locations
 
-| What | File | Line Reference |
-|------|------|----------------|
-| Overlay globals & flags | `cef_browser_shell.cpp` | Lines 51-90 (globals section) |
-| `WalletOverlayWndProc` (`WM_ACTIVATE`) | `cef_browser_shell.cpp` | ~line 1297 (**primary close path**) |
-| `WM_ACTIVATEAPP` handler (main WndProc) | `cef_browser_shell.cpp` | ~line 952 |
-| `overlay_close` IPC | `simple_handler.cpp` | ~line 3020 |
-| Wallet overlay creation + flag init | `simple_app.cpp` | `CreateWalletOverlayWithSeparateProcess()` ~line 654 |
-| Prevent-close IPC handlers | `simple_handler.cpp` | `wallet_prevent_close` / `wallet_allow_close` ~line 3005 |
-| React preventClose logic | `WalletPanelPage.tsx` | `preventClose` derived state + `useEffect` |
+> Symbols, not line numbers — line numbers rot, symbols survive edits.
+
+| What | Where |
+|------|-------|
+| Overlay globals & flags | `cef_browser_shell.cpp` — top-of-file globals section |
+| `WM_ACTIVATE` (**primary wallet close path**) | `cef_browser_shell.cpp :: WalletOverlayWndProc` |
+| `WM_ACTIVATEAPP` handler (app-level focus loss) | `cef_browser_shell.cpp` — main `WndProc` |
+| `overlay_close` IPC | `simple_handler.cpp` — IPC dispatch, five role arms |
+| Wallet overlay creation + prevent-close flag init (Windows) | `simple_app.cpp :: CreateWalletOverlay` |
+| Wallet overlay creation (macOS) | `cef_browser_shell_mac.mm :: CreateWalletOverlayWithSeparateProcess` |
+| Prevent-close IPC handlers | `simple_handler.cpp` — `wallet_prevent_close` / `wallet_allow_close` |
+| React preventClose logic | `WalletPanelPage.tsx` — `preventClose` derived state + `useEffect` |
 
 ---
 
@@ -282,7 +280,7 @@ Dev builds and the installed app use **separate data directories** to prevent da
 
 ### Run order (all three must be running):
 
-1. **Rust wallet** (PowerShell): `.\dev-wallet.ps1` → localhost:31301
+1. **Rust wallet** (PowerShell): `.\dev-wallet.ps1` → **127.0.0.1:31401** (the launcher sets `HODOS_DEV=1`; 31301 is the release port)
    - Mac/Linux: `./dev-wallet.sh`
 2. **Frontend dev server**: `cd frontend && npm run dev` → localhost:5137
 3. **CEF browser**:
@@ -349,7 +347,10 @@ cmake --build build --config Release
 
 ## Invariants / Safety Rules
 
-1. **Private keys never in JavaScript** - all signing happens in Rust
+1. **Private keys never in JavaScript** — all signing happens in Rust.
+
+   Signing keys never leave the Rust process. No EC private key is ever returned to JavaScript, and no signing happens there. The BIP39 recovery phrase is the one deliberate exception: it is shown once at wallet creation so the user can record it, and thereafter only through PIN re-verification in the wallet overlay. It is never reachable from web content -- the wallet's CORS allowlist admits only Hodos's own local UI origins.
+
 2. **Do not change wallet DB schema** without asking first
 3. **Do not change crypto/signing/derivation logic** without asking first
 4. **Plan first** for cross-cutting refactors; implement in small steps
@@ -372,41 +373,40 @@ cmake --build build --config Release
 
 | File | Purpose |
 |------|---------|
-| `rust-wallet/src/handlers.rs` | 89+ HTTP endpoint handlers: wallet CRUD (`wallet_create`, `wallet_recover`, `wallet_balance`, `wallet_backup`), BRC-100 (`well_known_auth`, `create_action`, `create_hmac`, `create_signature`), BRC-72 linkage (`reveal_counterparty_key_linkage`, `reveal_specific_key_linkage`), domain permissions (incl. Step 3 sub-permission CRUD at `/domain/permissions/{protocol,basket,counterparty}` POST/DELETE/GET), price, sync status, PeerPay (`peerpay_send`, `peerpay_check`, `peerpay_status`, `peerpay_dismiss`), BRC-121 (`pay_402` mints nosend BRC-29 BEEF + emits 5 retry headers; `broadcast_nosend` broadcasts after the paid retry returns 200), and more. `get_public_key` gate (Phase 1.5 Step 1): identity-key-style requests from external domains require `X-Identity-Key-Approved` header OR `domain_permissions.identity_key_disclosure_allowed=1` |
-| `rust-wallet/src/crypto/` | 12 modules: `brc42`, `brc43`, `signing`, `aesgcm_custom`, `dpapi` (Windows DPAPI / macOS Keychain stub), `pin` (PBKDF2+AES-GCM), `keys`, `brc2`, `ghash`, `key_linkage` (BRC-72 counterparty + specific linkage), plus tests |
+| `rust-wallet/src/handlers.rs` | The wallet's HTTP endpoint surface: wallet CRUD, BRC-100, BRC-72 key linkage, domain permissions (incl. sub-permission CRUD at `/domain/permissions/{protocol,basket,counterparty}` POST/DELETE/GET), price, sync status, PeerPay, BRC-121 (`pay_402` mints a nosend BRC-29 BEEF + emits the 5 retry headers; `broadcast_nosend` broadcasts after the paid retry returns 200). **Full handler roster: `rust-wallet/src/CLAUDE.md`.** `/getPublicKey` gate: identity-key-style requests from external domains (`X-Requesting-Domain` present) route through `permission_service::dispatch_privacy_perimeter` with `CallKind::IdentityKeyReveal` — silent only when `domain_permissions.identity_key_disclosure_allowed=1` (V17) or a session opt-in is set; otherwise Rust returns 202 PENDING + `approvalId` and C++ re-issues with `X-User-Approved: <approvalId>`. The legacy `X-Identity-Key-Approved` header is ignored and no longer injected. |
+| `rust-wallet/src/crypto/` | All crypto primitives: BRC-42/43 derivation, ECDSA signing (ForkID SIGHASH), BRC-2 encryption, BIE1, AES-GCM + GHASH, BRC-72 key linkage (counterparty + specific), PIN wrapping (PBKDF2+AES-GCM), and at-rest key protection (Windows DPAPI / macOS Keychain). Module roster: `rust-wallet/src/crypto/CLAUDE.md` |
 | `rust-wallet/src/authfetch.rs` | BRC-103 AuthFetch HTTP client: 401 challenge-response with ECDSA signing, server/client nonce exchange, authenticated requests to external BRC-103 servers (MessageBox) |
 | `rust-wallet/src/messagebox.rs` | MessageBox API client: BRC-2 encrypted message send/receive/acknowledge via `messagebox.babbage.systems`, deterministic HMAC message IDs, uses AuthFetch for authentication |
-| `rust-wallet/src/database/` | 24 files, 19+ repos: `wallet_repo`, `address_repo`, `output_repo`, `certificate_repo`, `proven_tx_repo`, `domain_permission_repo`, `peerpay_repo`, `user_repo`, `settings_repo`, `backup`, `migrations`, `connection`, and more |
+| `rust-wallet/src/database/` | Repository pattern — each table group has a `*Repository<'a>` borrowing `&'a Connection`; `WalletDatabase` (`database/connection.rs`) owns the connection, caches the unlocked mnemonic, and runs `migrate()` against `database/migrations.rs`. Full roster: `rust-wallet/src/database/CLAUDE.md`. Note: backup/restore is a **top-level** module (`rust-wallet/src/backup.rs`), not a database submodule |
 | `rust-wallet/src/recovery.rs` | BIP32 legacy key derivation (`derive_private_key_bip32`), wallet recovery from mnemonic |
-| `rust-wallet/src/price_cache.rs` | BSV/USD price cache (CryptoCompare primary + CoinGecko fallback, 5-min TTL) |
-| `rust-wallet/src/monitor/` | Background task scheduler: `Monitor`, `TaskCheckForProofs`, `TaskSendWaiting`, `TaskFailAbandoned`, `TaskUnFail`, `TaskReviewStatus`, `TaskPurge`, `TaskSyncPending`, `TaskCheckPeerPay` (BRC-103 AuthFetch + BRC-2 encrypted MessageBox polling + auto-accept via `internalize_action`) |
-| `cef-native/cef_browser_shell.cpp` | Windows entry point; globals: `g_hwnd`, `g_header_hwnd`, `g_webview_hwnd`, overlay HWNDs (incl. `g_download_panel_overlay_hwnd`); class: `Logger`; overlay functions: `CreateDownloadPanelOverlay`, `ShowDownloadPanelOverlay`, `HideDownloadPanelOverlay` |
-| `cef-native/cef_browser_shell_mac.mm` | macOS entry point (~3900 lines); NSWindow/NSView hierarchy, 10 overlay types (settings, wallet, backup, BRC100 auth, notification, settings menu, cookie panel, omnibox, downloads, profile picker), event forwarding, multi-window support |
-| `adblock-engine/src/engine.rs` | AdblockEngine wrapper: filter list downloading, engine compilation, serialization, `RwLock<Engine>` thread-safe checking. 4 filter lists (EasyList, EasyPrivacy, uBlock Filters, uBlock Privacy) + 6 bundled extra scriptlets. Auto-update every 6 hours. |
-| `adblock-engine/src/handlers.rs` | HTTP endpoints on port 31302: `/health`, `/check`, `/status`, `/toggle`, `/cosmetic-resources`, `/cosmetic-hidden-ids` |
+| `rust-wallet/src/price_cache.rs` | BSV/USD price cache: WhatsOnChain primary → CoinGecko (slug `bitcoin-cash-sv`) → MEXC fallback chain, 5-min in-memory TTL (`CACHE_TTL_SECONDS = 300`), plus SQLite `bsv_price_cache` restart persistence (V21) so a cold start falls back to the last known good price instead of `price_unavailable`. CryptoCompare was removed in the 2026-06-09 redesign after it began returning HTTP 401 |
+| `rust-wallet/src/monitor/` | Background task scheduler (`Monitor` + named tasks on configurable intervals). Task roster: `rust-wallet/src/monitor/CLAUDE.md`. Notable: `TaskCheckPeerPay` — BRC-103 AuthFetch + BRC-2 encrypted MessageBox polling, then auto-accept via `store_derived_utxo`, guarded by an on-chain existence check (`check_tx_exists_on_chain`, a duplicated copy of `internalize_action`'s) with a `broadcast_transaction` fallback |
+| `cef-native/cef_browser_shell.cpp` | Windows entry point; owns the overlay globals/flags, `WalletOverlayWndProc` and the main `WndProc` (incl. `WM_ACTIVATEAPP`), plus the `LOG_*` macro wrappers and the `Logger` lifecycle calls. (`Logger` itself is declared in `cef-native/include/core/Logger.h` / implemented in `src/core/Logger.cpp`.) Overlay create/show/hide functions are **not** here — they live in `cef-native/src/handlers/simple_app.cpp` (`CreateDownloadPanelOverlay`, `ShowDownloadPanelOverlay`, `HideDownloadPanelOverlay`, …); this file only holds `extern` decls and call sites |
+| `cef-native/cef_browser_shell_mac.mm` | macOS entry point; NSWindow/NSView hierarchy, the macOS overlay creation functions (`Create*OverlayMacOS`), event forwarding, multi-window support. Overlay roster: `cef-native/include/handlers/CLAUDE.md` |
+| `adblock-engine/src/engine.rs` | AdblockEngine wrapper: filter list downloading, engine compilation, serialization. Thread-safe checking through `RwLock<Option<Engine>>` — the `Option` lets the HTTP server come up before the compiled engine is available (`None` until load/compile completes). Auto-update every 6 hours. Filter lists + bundled scriptlets: `adblock-engine/src/CLAUDE.md` |
+| `adblock-engine/src/handlers.rs` | Adblock HTTP endpoints on port 31302 (31402 under `HODOS_DEV=1`). Endpoint roster: `adblock-engine/src/CLAUDE.md` |
 | `cef-native/include/core/AdblockCache.h` | `AdblockCache` singleton: sync WinHTTP to port 31302, URL result cache, per-browser blocked counts, cosmetic resource fetching. `AdblockBlockHandler` cancels blocked requests. `AdblockResponseFilter` (CefResponseFilter) buffers YouTube responses and renames ad-configuration JSON keys. `CookieFilterResourceHandler` returns cookie filter + response filter for YouTube. |
-| `cef-native/src/handlers/simple_handler.cpp` | CEF client handler (12 interfaces incl. CefDownloadHandler, CefFindHandler, CefJSDialogHandler); IPC dispatch, keyboard shortcuts (Ctrl+F/H/J/D, Alt+Left/Right), context menus (5 context types, all custom `MENU_ID_USER_FIRST` IDs — see working-notes.md #8), download tracking, find-in-page (JS `window.find()` — CEF Find API non-functional in CEF 136), beforeunload trap suppression, `OnBeforeBrowse` scriptlet pre-cache + fingerprint seed IPC, cosmetic CSS/scriptlet injection, menu IPC (print/devtools/zoom/exit), DNT/GPC header injection, settings_set dispatch. Helpers: `CreateNewTabWithUrl()`, `CopyTextToClipboard()`. Cross-platform wrapped. |
-| `cef-native/src/handlers/simple_render_process_handler.cpp` | V8 injection; class: `CefMessageSendHandler`; helper: `escapeJsonForJs`; scriptlet pre-cache (`s_scriptCache` + `OnContextCreated` early injection); cosmetic CSS/script IPC handlers; fingerprint seed cache (`s_domainSeeds`) + fingerprint script injection in `OnContextCreated` |
+| `cef-native/src/handlers/simple_handler.cpp` | CEF client handler (implements many CEF interfaces incl. CefDownloadHandler, CefFindHandler, CefJSDialogHandler); IPC dispatch, keyboard shortcuts, context menus (all custom `MENU_ID_USER_FIRST`-based IDs — see working-notes.md #8), download tracking, find-in-page (JS `window.find()` — the CEF Find API is non-functional in our CEF build), beforeunload trap suppression, `OnBeforeBrowse` scriptlet pre-cache + fingerprint seed IPC, cosmetic CSS/scriptlet injection, menu IPC (print/devtools/zoom/exit), DNT/GPC header injection, settings_set dispatch. Helpers: `CreateNewTabWithUrl()`, `CopyTextToClipboard()`. Cross-platform wrapped. Interface list, shortcut table and menu-ID roster: `cef-native/src/handlers/CLAUDE.md` |
+| `cef-native/src/handlers/simple_render_process_handler.cpp` | V8 injection; class: `CefMessageSendHandler`; scriptlet pre-cache (`s_scriptCache` + `OnContextCreated` early injection); cosmetic CSS/script IPC handlers; fingerprint seed cache (`s_domainSeeds`) + fingerprint script injection in `OnContextCreated`. It **calls** `escapeJsonForJs` but does not define it — the canonical JS-string-literal encoder lives in `cef-native/include/core/JsStringEscape.h` (extracted by the F6 HelicOps audit fix so it is unit-testable without CEF and shared by every injection site) |
 | `cef-native/include/core/FingerprintProtection.h` | `FingerprintProtection` singleton: platform CSPRNG session token, per-domain seed generation via hash mixing, enable/disable toggle |
 | `cef-native/include/core/FingerprintScript.h` | Embedded JS constant `FINGERPRINT_PROTECTION_SCRIPT`: Mulberry32 PRNG, Canvas/WebGL/Navigator/AudioContext farbling (no screen resolution spoofing) |
-| `cef-native/src/core/HttpRequestInterceptor.cpp` | HTTP routing + auto-approve engine; classes: `DomainPermissionCache`, `BSVPriceCache`, `WalletStatusCache`, `AsyncWalletResourceHandler`, `Async402ResourceHandler` + `Async402HTTPClient` (BRC-121 paid retry handler with paid-retry context registry); functions: `TryHandleBrc121_402`, `InstallAsync402HandlerIfPending`; singleton: `PendingRequestManager` (in PendingAuthRequest.h). After `firePaymentSuccessIpc()` writes the paid response into `PaidContentCache` so reload of the same URL serves bytes from disk instead of re-paying. |
-| `cef-native/src/core/PermissionEngine.cpp` | Pure-logic decision engine for wallet permission gates (Phase 1.5 Step 3). `PermissionEngine::Decide(PermissionContext)` returns `PermissionDecision{Silent\|Prompt\|Deny, promptType, reason}`. Implements `PERMISSION_UX_DESIGN.md` Matrix C: domain trust → privacy perimeter → scoped grants → payment caps → cert disclosure → generic. No CEF/HTTP/globals — testable in isolation. 25 unit tests in `cef-native/tests/permission_engine_test.cpp` (first C++ tests in the project). Not yet on the production hot path; Step 6 wires `Open()` through it. |
-| `cef-native/src/core/ManifestFetcher.cpp` | Fetches + parses `.well-known/wallet-manifest.json` from dApp origins (Phase 1.5 Step 4). `Fetch(origin)` uses `SyncHttpClient` (3s timeout, 64 KB cap); `ParseFromJson(json)` is pure and lenient (forward-compatible: unknown fields ignored, malformed entries dropped, never throws). `Manifest` struct mirrors `PERMISSION_UX_DESIGN.md` §5 shape. 13 parse-only unit tests. Stand-alone — Step 5 wires the three-mode dispatch (valid/404/timeout) into `Open()`'s unknown-trust branch. |
+| `cef-native/src/core/HttpRequestInterceptor.cpp` | HTTP routing + modal orchestration + payment-context computation (satoshis→cents via `BSVPriceCache`). **NOT the decision engine.** Since Phase 2.6-H all permission/auto-approve *decisions* are Rust-authoritative; C++ forwards the call, intercepts Rust's 202 PENDING envelope, opens the modal via `OpenPromptModal`, and re-issues with `X-User-Approved: <approvalId>`. Also owns the BRC-121 402 paid-retry chain (`TryHandleBrc121_402`, `InstallAsync402HandlerIfPending`, `Async402ResourceHandler` + `Async402HTTPClient` and their paid-retry context registry) — the one subsystem here that spends money. After `firePaymentSuccessIpc()` it writes the paid response into `PaidContentCache` so a reload of the same URL serves bytes from disk instead of re-paying. Class roster: `cef-native/src/core/CLAUDE.md` |
+| `rust-wallet/crates/hodos_permission_engine/` | **The** pure-logic decision engine for wallet permission gates. `decide(&PermissionContext) -> PermissionDecision` (`src/lib.rs`) delegates to `src/matrix_c.rs`, implementing `PERMISSION_UX_DESIGN.md` Matrix C: domain trust → privacy perimeter → scoped grants → payment caps → cert disclosure → generic. `PermissionDecision` (`src/decision.rs`) is a `#[serde(tag="kind")]` sum type — `Silent{reason}` / `Prompt{prompt_type, reason}` / `Deny{reason}`. No CEF/HTTP/globals; unit-tested in isolation. Wrapped by `rust-wallet/src/permission_service/` (`request_gate.rs`, `context_builder.rs`, `state.rs`, `audit.rs`; `dispatch_payment` / `dispatch_privacy_perimeter`) and wired as Actix middleware in `rust-wallet/src/main.rs`. Default limits: **$1.00 per transaction, $10.00 per session** (100 / 1000 USD cents). ⚠️ The C++ `PermissionEngine`, `PermissionGate` and `SessionManager` were **deleted** in Phase 2.6-H — stale comments still naming them are dead references, not code |
+| `cef-native/src/core/ManifestFetcher.cpp` | Parses `.well-known/wallet-manifest.json` from dApp origins. `ParseFromJson(json)` is pure, lenient (unknown fields ignored, malformed entries dropped, never throws) and **still live** — the interceptor re-parses the manifest bytes Rust embeds in the `manifest_connect_bundle` 202 payload before opening the connect modal, falling back to `domain_approval` if unparseable. `Manifest` mirrors `PERMISSION_UX_DESIGN.md` §5. `Fetch(origin)` is **no longer on the production path**: the network fetch moved to Rust in Phase 2.6-G.2 (`rust-wallet/src/manifest.rs :: fetch_manifest`, called from `permission_service/request_gate.rs`). Its only remaining C++ caller, `handleIpcUnknownTrust`, is dead code slated for removal |
 | `cef-native/src/core/PaidContentCache.cpp` | Phase 1 BRC-121 paid response cache. SQLite-backed singleton at `<profile>/paid_content_cache.db`. URL-keyed entries with TTL from server `Cache-Control: max-age` and a 500 MB LRU cap on `last_access`. Best-effort `Put` swallows exceptions. Read-side dispatch in `simple_handler.cpp::GetResourceRequestHandler` (single call site at the top, before adblock/wallet routing). Hard-reload (Ctrl+Shift+R) bypasses via `Cache-Control: no-cache` request header. Header-only playback handler: `cef-native/include/core/CachedContentResourceHandler.h`. |
 | `cef-native/include/core/PendingAuthRequest.h` | `PendingRequestManager` singleton — thread-safe request tracking for auth/domain/payment/cert approvals |
-| `cef-native/include/core/SessionManager.h` | `SessionManager` singleton + `BrowserSession` — per-browser session spending/rate tracking for auto-approve |
 | `cef-native/include/core/ProfileManager.h` | `ProfileManager` singleton: multi-profile support, profile creation/switching, profile directory management |
-| `cef-native/include/core/TabManager.h` | `TabManager` singleton: per-window tab tracking, tab creation/close/switch, multi-window tab coordination |
-| `cef-native/include/core/WindowManager.h` | `WindowManager` singleton: multi-window lifecycle, window creation/destruction, window-to-tab mapping |
+| `cef-native/include/core/TabManager.h` | `TabManager` singleton: per-window tab tracking, tab creation/close/switch, multi-window tab coordination, and the window→active-tab mapping (`GetActiveTabIdForWindow`, `MoveTabToWindow`) |
+| `cef-native/include/core/WindowManager.h` | `WindowManager` singleton: multi-window lifecycle (`CreateWindowRecord` / `RemoveWindow` / `CreateFullWindow`), active + primary window tracking, and `GetWindowForBrowser` — which resolves the `BrowserWindow` owning a given **role** browser (header/webview/overlay), *not* tab browsers. It holds no tab state; window↔tab mapping belongs to `TabManager`. Its only tab call is one `TabManager::CreateTab()` to seed a new window's initial NTP tab |
 | `cef-native/include/core/SettingsManager.h` | `SettingsManager` singleton: persistent settings storage, cross-platform settings resolution |
-| `cef-native/include/core/ProfileImporter.h` | Chrome/Edge profile importer: bookmarks, history, cookies import from other browsers |
+| `cef-native/include/core/ProfileImporter.h` | Chrome/Brave/Edge profile importer: **bookmarks and history only — no cookie import**. A Firefox stub exists (`GetFirefoxProfilePath()` returns `""`) but Firefox is never detected or imported |
 | `cef-native/include/core/SyncHttpClient.h` | Cross-platform sync HTTP client (WinHTTP on Windows, libcurl on macOS). Use this for new singletons instead of raw WinHTTP |
-| `frontend/src/hooks/useHodosBrowser.ts` | React hook: `useHodosBrowser()` with `getIdentity`, `generateAddress`, `navigate`, `markBackedUp`, `goBack`, `goForward`, `reload` |
-| `frontend/src/hooks/useDownloads.ts` | React hook for download state; listens for `download_state_update` IPC; exposes control functions (cancel, pause, resume, open, showInFolder, clearCompleted) |
+| `frontend/src/hooks/useHodosBrowser.ts` | React hook wrapping the identity + navigation half of the `window.hodosBrowser` bridge. API surface: `frontend/src/hooks/CLAUDE.md` |
+| `frontend/src/hooks/useDownloads.ts` | React hook for download state; listens for the `download_state_update` IPC and exposes the download control functions. API surface: `frontend/src/hooks/CLAUDE.md` |
 | `frontend/src/pages/DownloadsOverlayRoot.tsx` | Download panel overlay page; lists active/completed downloads with progress bars, pause/resume/cancel, open/show-in-folder |
 | `frontend/src/components/FindBar.tsx` | Find-in-page bar component; Ctrl+F triggered; sends `find_text`/`find_stop` IPC; displays "X of Y" match count |
-| `frontend/src/components/MenuOverlay.tsx` | Three-dot menu dropdown: New Tab, Find, Print, Zoom controls, Bookmark, Downloads, History, DevTools, Settings, Exit. Replaces old History+Settings buttons. |
-| `frontend/src/pages/SettingsPage.tsx` | Full-page settings with sidebar navigation (General, Privacy, Downloads, Wallet, About). Route: `/settings-page/:section` |
+| `frontend/src/components/MenuOverlay.tsx` | Three-dot menu dropdown; replaced the old standalone History+Settings toolbar buttons. Item roster: `frontend/src/components/CLAUDE.md` |
+| `frontend/src/pages/SettingsPage.tsx` | Full-page settings with sidebar navigation. Route: `/settings-page/:section`; section roster: `frontend/src/pages/CLAUDE.md` |
 | `frontend/src/hooks/usePrivacyShield.ts` | Composed privacy hook: adblock + cookie blocking + scriptlet toggle state. Used by `PrivacyShieldPanel` overlay |
 | `frontend/src/bridge/initWindowBridge.ts` | Defines `window.hodosBrowser.navigation`, `window.hodosBrowser.overlay` via `cefMessage.send()` |
 
@@ -414,13 +414,14 @@ cmake --build build --config Release
 
 ## Wallet Service Fee
 
-Every outgoing transaction includes a **1000-satoshi service fee** output sent to the Hodos company treasury address (`1Q1A2rq6trBdptd3t6n53vB79mRN6JHEFT`). This applies to all three transaction builders:
+Every outgoing transaction includes a **1000-satoshi service fee** output sent to the Hodos company treasury address (`1Q1A2rq6trBdptd3t6n53vB79mRN6JHEFT`). This applies to all four transaction builders:
 
 | Builder | Location |
 |---------|----------|
 | `create_action_internal` | `handlers.rs` — standard sends, PeerPay, Paymail |
 | `publish_certificate` | `certificate_handlers.rs` — identity certificate publish |
 | `unpublish_certificate_core` | `certificate_handlers.rs` — identity certificate unpublish |
+| `task_consolidate_dust` | `monitor/task_consolidate_dust.rs` — scheduled dust consolidation. ⚠️ This one is **not user-initiated**: a background task moves 1000 sats to the treasury on its own schedule |
 
 **Constants**: `HODOS_FEE_ADDRESS`, `HODOS_SERVICE_FEE_SATS` in `handlers.rs` (both `pub`).
 
@@ -428,7 +429,7 @@ Every outgoing transaction includes a **1000-satoshi service fee** output sent t
 
 **Commission tracking**: Each service fee is recorded in the `commissions` table. Commission records are cleaned up on broadcast failure.
 
-**Implementation doc**: `development-docs/WALLET_SERVICE_FEE_IMPLEMENTATION.md`
+*(This section **is** the implementation doc — the standalone `WALLET_SERVICE_FEE_IMPLEMENTATION.md` was deliberately deleted in 3a7007d and its content folded in here.)*
 
 ---
 
@@ -452,7 +453,7 @@ Every outgoing transaction includes a **1000-satoshi service fee** output sent t
 | UTXO | Unspent Transaction Output |
 | V8 Injection | Adding `window.hodosBrowser` API to JavaScript from C++ |
 | `window.hodosBrowser` | JavaScript API exposed to React for wallet operations |
-| Monitor Pattern | Background task scheduler (`src/monitor/`) with 7 named tasks on configurable intervals. Replaced ad-hoc background services in Phase 6 |
+| Monitor Pattern | Background task scheduler (`src/monitor/`): named tasks registered in a `TaskSchedule` on configurable intervals. Replaced ad-hoc background services in Phase 6. Task roster: `rust-wallet/src/monitor/CLAUDE.md` |
 | Browser Data | History, bookmarks, cookies — stored in C++ layer (`%APPDATA%/HodosBrowser/Default/`), separate from wallet |
 | CefResponseFilter | CEF API for streaming modification of HTTP response bodies. Used by `AdblockResponseFilter` to strip YouTube ad keys at the network level before JavaScript sees the data |
 | Cosmetic Filtering | CSS selector injection to hide ad-related DOM elements + scriptlet injection to override JavaScript ad behavior. Two-phase: hostname-specific selectors on page load, generic selectors after DOM class/ID collection |
@@ -475,16 +476,20 @@ Every outgoing transaction includes a **1000-satoshi service fee** output sent t
 
 | Folder | Purpose |
 |--------|---------|
-| `development-docs/architecture/` | Centralized cross-layer architecture reference — wallet API map, auto-approve engine, IPC bridge, permission gates. Layer-specific docs stay in CLAUDE.md files; cross-layer concerns live here. |
-| `development-docs/FUTURE_AUTO_APPROVE_ENGINE_ARCHITECTURE.md` | Phase 4+ vision — "engine in Rust" design captured for back-of-mind / future quarter planning |
-| `development-docs/Final-MVP-Sprint/` | Active sprint: testing, optimization, security, macOS port |
+| `development-docs/architecture/` | Cross-layer architecture — the flows no single layer's `CLAUDE.md` owns. Rewritten against code 2026-08-03 (the prior contents described the deleted C++ permission engine). Three docs: `AUTO_APPROVE_ENGINE.md` (permission decision flow + Matrix C branch order), `IPC_BRIDGE.md` (the `wallet_call` process-message contract), `WALLET_API_MAP.md` (which endpoints are gated by which Rust dispatcher, and the shim surface). Inventory stays in the layer docs; these three carry only cross-layer flow. |
+| `development-docs/FUTURE_AUTO_APPROVE_ENGINE_ARCHITECTURE.md` | The original "engine in Rust" vision doc. Largely **realized** by Phase 2.6 — read it as history, not as a plan |
+| `development-docs/Final-MVP-Sprint/` | Sprint: testing, optimization, security, macOS port |
 | `development-docs/Final-MVP-Sprint/macos-port/` | macOS port tracking: progress, handover docs, archived milestones |
-| `development-docs/Sigma-BRC121-Sprint/` | Active sprint: BRC-100 surface completion (Phase 1.5 permission UX, Phase 2 window-CWI shim, Phase 2.5 IPC bridge in progress) |
+| `development-docs/Sigma-BRC121-Sprint/` | Sprint: BRC-100 surface completion. Phase folders are the authoritative status source — see the phase README in each |
+| `development-docs/Sigma-BRC121-Sprint/phase-2.6-engine-to-rust/` | The permission-engine port to Rust (sub-phases A–H) — the change that deleted the C++ `PermissionEngine`, `PermissionGate` and `SessionManager` |
+| `development-docs/Sigma-BRC121-Sprint/phase-4-demos/` | Phase 4 (demos); absorbed Phase 1.5 Step 7 |
 | `archived-docs/UX_UI/` | Wallet UI phases (setup, notifications, wallet panel polish) — completed sprint, archived |
 | `development-docs/Future-Features/` | Future feature docs (e.g. extensions) deferred beyond the current sprint |
 | `build-instructions/` | Platform-specific build guides (Windows, macOS) |
 
-### Active sprint status (2026-05-30)
+### Active sprint status (as of 2026-05-30)
+
+> ⚠️ **Stale — awaiting owner review (flagged 2026-08-03).** The as-of date has not been re-verified and several rows are known to have moved since (Phase 2.5 closed 2026-06-02 at `0baec25`; Phase 2.6 ran to completion at `f02cf91`). Until this table is refreshed, treat the phase folders under `development-docs/Sigma-BRC121-Sprint/` as authoritative for phase status.
 
 | Phase | Status |
 |-------|--------|

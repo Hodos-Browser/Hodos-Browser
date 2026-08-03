@@ -34,6 +34,15 @@
 > - **Mac equivalent:** `file_mac.mm:fn` (or `#elif __APPLE__` block) — what to do.
 > - **Risk / notes:** platform-specific gotchas, test to run.
 
+### ⚠️ OPEN BUG — wallet overlay is not close-guarded on macOS (found 2026-08-03, docs-truth audit)
+
+- **Windows behaviour (correct):** `simple_app.cpp :: CreateWalletOverlayWithSeparateProcess` sets `g_wallet_overlay_prevent_close = true` at creation time (`simple_app.cpp:772`), and clears it at `:970`. This is deliberately synchronous C++ — root `CLAUDE.md` documents why: React→IPC is async and loses the race against `WM_ACTIVATE`/`WM_ACTIVATEAPP`, so the flag must be set before focus can move.
+- **macOS defect:** `cef_browser_shell_mac.mm:286` *defines* `bool g_wallet_overlay_prevent_close = false;` but **nothing on the Mac path ever assigns it.** The only writers are the two Windows-only sites above. The flag is therefore permanently `false` on macOS.
+- **User-visible impact:** the guard that keeps the wallet overlay alive while the recovery phrase is on screen, or during PIN entry, does not exist on macOS. A focus change while the user is writing down their seed phrase can dismiss the overlay. This is one of the load-bearing UX safeguards in `CLAUDE.md`'s kickoff risk list.
+- **Mac equivalent to implement:** set the flag in the macOS wallet-overlay creation function in `cef_browser_shell_mac.mm`, and honour it in the `NSWindowDelegate` / `resignKey`/`resignMain` close path the way `WalletOverlayWndProc`'s `WM_ACTIVATE` handler does on Windows. Also confirm the `wallet_prevent_close` / `wallet_allow_close` IPC handlers in `simple_handler.cpp` reach the Mac flag.
+- **Risk / notes:** verify against the five Windows destruction paths listed in root `CLAUDE.md`; macOS has its own equivalents. Test: open wallet → reach mnemonic display → click another app → overlay must survive. Then reach a safe state (live wallet) → click away → overlay should close normally.
+- **Provenance:** surfaced as owner-flag `ROOT_CLAUDE-048` during the root-docs verification pass; absence of any Mac assignment confirmed by grep across `cef_browser_shell_mac.mm` and `simple_app.cpp`.
+
 ### Wave 0 — secret-log removal (2026-06-17, branch `0.4.0`)
 - **Windows change:** `WalletService.cpp::createWallet` — deleted mnemonic `std::cout`. Plus Rust deletions in `crypto/brc2.rs`, `certificate/verifier.rs`, `handlers/certificate_handlers.rs`, `handlers.rs`.
 - **Mac equivalent:** **None required.** `WalletService_mac.cpp` (libcurl) never logged the mnemonic — swept all `*_mac.*` + `*.mm` for secret `cout`/`NSLog`/`os_log`, zero siblings. Rust is single cross-platform source (no `_mac` variant).
