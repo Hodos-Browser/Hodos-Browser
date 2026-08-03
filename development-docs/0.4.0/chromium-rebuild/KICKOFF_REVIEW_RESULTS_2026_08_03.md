@@ -215,10 +215,12 @@ the tracker; re-verify it still exists and still streams.
 
 - ✅ **Defender exclusion for `C:\cef` — DONE 2026-08-03** (`Add-MpPreference -ExclusionPath "C:\cef"`,
   verified). Covers `depot_tools`, the M136 tree and the new `cef150` tree. Remove after the build work.
-- ⬜ **Windows Update pause + no-auto-restart — CONFIRM WITH OWNER before starting a long build.**
-  Walkthrough was given (Settings → pause 5 weeks; `gpedit.msc` → *No auto-restart with logged on
-  users* → Enabled; Active hours → Manually). **Do not assume this is done — ask.** A forced restart
-  killed the 2026-03-12 build at 78,821/96,000 objects, and hard-kill resume is unproven under Siso.
+- ⚠️ **Windows Update pause — NOT done. Owner decision 2026-08-03: risk accepted, proceed without it.**
+  Do **not** re-raise this or block on it. Rationale: a restart costs *hours*, not the build — the
+  2026-03-12 interruption at 78,821/96,000 objects resumed with only ~17,336 objects left to compile.
+  Siso's resume path (`.siso_fs_state.journal`) is designed for exactly this, though unproven for us.
+  **If a restart does interrupt this build, treat it as the Siso hard-kill resume experiment** — record
+  the outcome in `CEF_BUILD_RUNBOOK.md`, since it closes a genuinely open question either way.
 
 **Deferred to their phases per the brief:** D3 (mac arch), D5 (C2 seed channel), D7 (signing sequencing).
 
@@ -237,9 +239,9 @@ TD-1 edits, and landing both together risks silently dropping one.
 
 ## 11. Immediate next steps
 
-**Blockers — cleared except one:**
+**Blockers — all cleared. Start the build.**
 1. ✅ Defender exclusion — done.
-2. ⬜ **Windows Update pause / no-auto-restart — CONFIRM WITH OWNER.** Not verified.
+2. ✅ Windows Update — **owner accepted the risk; proceed without pausing.** Do not re-raise.
 3. ✅ D4 dropped, D9 skip — both decided.
 
 **Execution order (next session):**
