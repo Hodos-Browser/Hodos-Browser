@@ -1,10 +1,14 @@
 # Crypto — Wallet Cryptographic Operations
 
 > Self-contained cryptographic module implementing BRC protocol key derivation, signing, encryption, and platform-native credential storage. Security-critical: all private key operations happen here.
+>
+> **Last updated:** 2026-08-03
 
 ## Overview
 
-This module provides the complete cryptographic foundation for the HodosBrowser wallet. It implements the BSV BRC protocol suite (BRC-2, BRC-42, BRC-43) for key derivation and encryption, ECDSA signing for transactions and authentication, PIN-based mnemonic encryption, and platform-native auto-unlock (Windows DPAPI / macOS Keychain). The custom AES-GCM implementation matches the TypeScript BSV SDK byte-for-byte to ensure cross-platform interoperability.
+This module provides the complete cryptographic foundation for the HodosBrowser wallet. It implements the BSV BRC protocol suite (BRC-2, BRC-42, BRC-43) for key derivation and encryption, BRC-72 key-linkage revelation primitives, BIE1 (ECIES Electrum) legacy-compat encryption, ECDSA signing for transactions and authentication, PIN-based mnemonic encryption, and platform-native auto-unlock (Windows DPAPI / macOS Keychain). The custom AES-GCM implementation matches the TypeScript BSV SDK byte-for-byte to ensure cross-platform interoperability.
+
+`mod.rs` declares **11 public modules** plus one test-only module (`aesgcm_custom_test`, gated `#[cfg(test)]` and declared private). There are 13 `.rs` files in the directory (11 public modules + `mod.rs` + the test module).
 
 **Security invariant**: Private keys are only handled as `&[u8]` slices and `SecretKey` structs — never serialized to strings or logged. All signing and key derivation stays within this module.
 
@@ -12,17 +16,19 @@ This module provides the complete cryptographic foundation for the HodosBrowser 
 
 | File | Purpose |
 |------|---------|
-| `mod.rs` | Module exports — publishes all submodules, no re-exports (binary application) |
+| `mod.rs` | Module declarations — publishes all 11 submodules, no re-exports (binary application). `aesgcm_custom_test` is declared `#[cfg(test)] mod` (private) |
 | `keys.rs` | secp256k1 public key derivation (compressed 33-byte and uncompressed 65-byte) |
 | `signing.rs` | ECDSA signing/verification, SHA-256, double-SHA-256, HMAC-SHA256 with constant-time comparison |
 | `brc42.rs` | BRC-42 ECDH key derivation: shared secrets, child key derivation (public and private), symmetric key derivation |
 | `brc43.rs` | BRC-43 invoice number formatting: `SecurityLevel` enum, `InvoiceNumber` struct, protocol ID normalization |
 | `brc2.rs` | BRC-2 encryption/decryption using BRC-42 derived AES-256-GCM keys; certificate field encryption helpers |
+| `bie1.rs` | **BIE1 / ECIES-Electrum legacy compat** (Phase 2 Step 3c.1). Wire-compatible with `@bsv/sdk`'s `ECIES.electrumEncrypt/Decrypt`. AES-128-CBC + PKCS#7 under an SHA-512-split ephemeral ECDH secret, HMAC-SHA256 MAC-then-decrypt. Exists so the `window.yours.encrypt/decrypt` shim can read Yours/RelayX-era ciphertexts — **not** a Hodos primary cipher |
+| `key_linkage.rs` | **BRC-72 key-linkage revelation primitives.** Mirrors `@bsv/sdk` `KeyDeriver.revealCounterpartySecret` / `revealSpecificSecret`. Composes `brc42` primitives only — deliberately does not extend `brc42.rs`. The Schnorr DLEQ proof is deferred; handlers emit the SDK's `[0]` no-proof marker |
 | `aesgcm_custom.rs` | Custom AES-GCM implementation matching TypeScript SDK exactly, including 32-byte IV support via GHASH |
-| `aesgcm_custom_test.rs` | Roundtrip and known-value tests for the custom AES-GCM implementation |
+| `aesgcm_custom_test.rs` | Roundtrip, known-value, and cross-implementation vector tests for the custom AES-GCM implementation (test-only module) |
 | `ghash.rs` | GHASH (Galois Hash) for AES-GCM: GF(2^128) multiplication, hash subkey generation |
 | `pin.rs` | PIN-based mnemonic encryption: PBKDF2-HMAC-SHA256 (600K iterations) + AES-256-GCM |
-| `dpapi.rs` | Platform-native auto-unlock: Windows DPAPI, macOS Keychain, Linux stub |
+| `dpapi.rs` | Platform-native auto-unlock: Windows DPAPI (full impl), macOS Keychain (full impl), Linux/other stub |
 
 ## Key Exports
 
@@ -74,6 +80,36 @@ This module provides the complete cryptographic foundation for the HodosBrowser 
 | `encrypt_certificate_field` | `(privkey, pubkey, field_name, serial?, plaintext) → Vec<u8>` | BRC-52 certificate field encryption (protocol: `"certificate field encryption"`, level 2) |
 | `decrypt_certificate_field` | `(privkey, pubkey, field_name, serial?, ciphertext) → Vec<u8>` | Corresponding decryption |
 
+### bie1.rs
+
+| Item | Signature | Purpose |
+|------|-----------|---------|
+| `encrypt_bie1` | `(plaintext, recipient_pubkey, sender_privkey: Option<&[u8]>) → Vec<u8>` | Build a BIE1 envelope. `None` sender key → fresh ephemeral key from OS CSPRNG (standard Electrum behavior); `Some(bytes)` locks the ephemeral scalar for deterministic tests |
+| `decrypt_bie1` | `(envelope, recipient_privkey) → Vec<u8>` | Parse + verify + decrypt. Order is length check → magic → ephemeral pubkey curve check → ECDH/SHA-512 subkeys → **HMAC verify** → AES decrypt + PKCS#7 unpad |
+| `Bie1Error` | enum | See Error Types below |
+| `derive_subkeys` | `(shared_compressed) → ([u8;16], [u8;16], [u8;32])` | **Private.** SHA-512 split: `iv = hash[0..16]`, `aeKey = hash[16..32]`, `macKey = hash[32..64]` — the exact `@bsv/sdk` convention |
+
+Envelope layout constants (all private): `MAGIC = b"BIE1"`, `MAGIC_LEN = 4`, `PUBKEY_LEN = 33`, `MAC_LEN = 32`, `MIN_ENVELOPE_LEN = 4 + 33 + 16 + 32 = 85`.
+
+```text
+[ "BIE1" 4B ][ ephemeral_pub 33B compressed ][ AES-128-CBC ciphertext NB ][ HMAC-SHA256 32B ]
+```
+
+> **MAC-then-decrypt is load-bearing.** The HMAC is verified *before* AES decryption via `Hmac::verify_slice` (constant-time). Corrupting bytes inside the ciphertext therefore surfaces as `MacMismatch`, never `InvalidPadding` — no padding oracle. `decrypt_rejects_corrupted_ciphertext_via_mac_check` in `bie1.rs` locks this behavior; do not reorder the steps.
+
+HTTP surface: `POST /wallet/encrypt-bie1` → `handlers.rs :: encrypt_bie1_handler`, `POST /wallet/decrypt-bie1` → `handlers.rs :: decrypt_bie1_handler` (routes registered in `main.rs`; both are gated by `permission_service/request_gate.rs`).
+
+### key_linkage.rs
+
+| Function | Signature | Purpose |
+|----------|-----------|---------|
+| `compute_counterparty_linkage` | `(master_privkey, counterparty_pubkey) → Vec<u8>` | `revealCounterpartySecret` value: 33-byte compressed ECDH shared secret. Thin wrapper over `brc42::compute_shared_secret`. The SDK forbids `counterparty === 'self'` here — callers must resolve/validate first |
+| `compute_specific_linkage` | `(master_privkey, counterparty_pubkey, invoice_number) → Vec<u8>` | `revealSpecificSecret` value: 32-byte `HMAC-SHA256(shared_secret, invoice_number)`. Composes `compute_shared_secret` + `compute_invoice_hmac` |
+
+Both return `Result<Vec<u8>, Brc42Error>` — this module defines **no error type of its own**.
+
+Consumers: `handlers.rs :: reveal_counterparty_key_linkage` and `handlers.rs :: reveal_specific_key_linkage`, routed as `POST /revealCounterpartyKeyLinkage` / `POST /revealSpecificKeyLinkage` in `main.rs`. Both are privacy-perimeter gated by the Rust permission engine (`PromptType::KeyLinkageReveal`); per-domain session opt-in lives in `permission_service/state.rs :: approve_key_linkage_session` / `is_key_linkage_session_approved`.
+
 ### aesgcm_custom.rs
 
 | Function | Purpose |
@@ -98,13 +134,25 @@ This module provides the complete cryptographic foundation for the HodosBrowser 
 
 ### dpapi.rs
 
-| Function | Platform | Purpose |
-|----------|----------|---------|
-| `dpapi_encrypt` | Windows | `CryptProtectData` — ties encrypted blob to current Windows user |
-| `dpapi_encrypt` | macOS | Deletes existing entry, then `set_generic_password` — stores in Keychain (service: `"HodosBrowser"`, account: `"wallet-mnemonic"`); returns sentinel `b"KEYCHAIN"` for DB |
-| `dpapi_decrypt` | Windows | `CryptUnprotectData` — decrypts if same Windows user |
-| `dpapi_decrypt` | macOS | `get_generic_password` — retrieves from Keychain (ignores sentinel input) |
-| `dpapi_encrypt/decrypt` | Linux | Stubs returning `Err` — wallet still works, just requires PIN |
+Two public functions, `dpapi_encrypt` and `dpapi_decrypt`, each with three mutually exclusive `cfg` bodies. **Windows and macOS are both full implementations; only Linux/other is a stub.**
+
+| Function | Platform (`cfg`) | Purpose |
+|----------|------------------|---------|
+| `dpapi_encrypt` | `windows` — **full impl** | `CryptProtectData` with `CRYPTPROTECT_UI_FORBIDDEN` — ties encrypted blob to current Windows user; copies then `LocalFree`s the system buffer |
+| `dpapi_decrypt` | `windows` — **full impl** | `CryptUnprotectData` — decrypts only if the same Windows user is logged in |
+| `dpapi_encrypt` | `target_os = "macos"` — **full impl** | `delete_generic_password` (clears any existing entry) then `set_generic_password`; returns sentinel `b"KEYCHAIN"` for the DB column |
+| `dpapi_decrypt` | `target_os = "macos"` — **full impl** | `get_generic_password` — retrieves from Keychain; the `_encrypted` sentinel argument is ignored |
+| `dpapi_encrypt` / `dpapi_decrypt` | `all(not(windows), not(macos))` — **stub** | Both return `Err("Platform auto-unlock not available. Use PIN to unlock wallet.")`. Wallet still works, just always requires the PIN |
+
+macOS Keychain identifiers (all private to `dpapi.rs`):
+
+| Item | Value |
+|------|-------|
+| `KEYCHAIN_SENTINEL` | `b"KEYCHAIN"` — must be non-empty so `mnemonic_dpapi.is_some()` reads as "auto-unlock available" |
+| `KEYCHAIN_ACCOUNT` | `"wallet-mnemonic"` |
+| `keychain_service()` | **Function, not a constant.** Returns `"HodosBrowserDev"` when `HODOS_DEV=1`, else `"HodosBrowser"` — the dev/prod deconfliction guard that stops a dev wallet overwriting the production mnemonic in the Keychain |
+
+Storage on both real platforms is the `wallets.mnemonic_dpapi` BLOB column (added by migration V4 for pre-V4 DBs; present in the V1 consolidated schema). On Windows it holds the raw DPAPI blob; on macOS it holds only the sentinel.
 
 ## Architecture: BRC-2 Encryption Pipeline
 
@@ -128,6 +176,10 @@ BRC-2: AES-256-GCM encryption
   2. Custom AESGCM (32-byte IV → GHASH pre-counter block)
   3. Output: [IV(32)][ciphertext][tag(16)]
 ```
+
+`key_linkage.rs` taps the same chain at the top two stages: the counterparty linkage value **is** the stage-1 shared secret, and the specific linkage value **is** the stage-2 invoice HMAC. That is why it composes `brc42` primitives rather than duplicating them.
+
+BIE1 (`bie1.rs`) is a **separate, non-BRC pipeline** — no invoice number, no BRC-42 child keys, AES-128-CBC instead of AES-256-GCM. Do not mix the two paths.
 
 ## ⚠️ CRITICAL: Rust ↔ TypeScript SDK Interop Rules
 
@@ -165,20 +217,30 @@ TypeScript's `String.fromCharCode()` accepts surrogate values (0xD800-0xDFFF) an
 
 `aesgcm_custom_test.rs` contains test vectors generated by the TypeScript SDK (`reference/ts-brc100/test-aesgcm-vectors.mjs`). These verify byte-for-byte compatibility for AESGCM encryption and BRC-42 key derivation. Run `cargo test aesgcm` after any crypto changes.
 
+**Known gap:** `bie1.rs` has *no* cross-implementation vectors yet. Its 16 tests lock the wire format against our own implementation only (`deterministic_with_explicit_sender_priv` + `subkey_layout_matches_canonical_split`). The module doc-comment flags this: `@bsv/sdk` vectors are to be locked in at Phase 2 Step 3c.2 integration smoke once a Node helper is wired. Until then, BIE1 byte-compatibility with the SDK is asserted by code review, not by test.
+
 ## Custom AES-GCM: Why Not Use a Standard Library?
 
 The `aesgcm_custom.rs` + `ghash.rs` modules exist because BRC-2 uses **32-byte IVs**, while standard AES-GCM libraries only accept 12-byte nonces. The TypeScript BSV SDK handles non-standard IVs by hashing them through GHASH to produce the initial counter block. This custom implementation replicates that exact behavior to ensure byte-for-byte compatibility with the TypeScript SDK.
 
-Standard `aes-gcm` crate is still used in `pin.rs` (which uses standard 12-byte nonces for local PIN encryption).
+Standard `aes-gcm` crate is still used in `pin.rs` (which uses standard 12-byte nonces for local PIN encryption). `bie1.rs` uses neither — it needs AES-128-**CBC** with PKCS#7, so it pulls the `cbc` crate.
 
 ## Mnemonic Protection: Two Layers
 
 | Layer | Mechanism | When Used |
 |-------|-----------|-----------|
-| **PIN encryption** (`pin.rs`) | PBKDF2 (600K rounds) + AES-256-GCM | Always — stored in `wallets.mnemonic` as hex |
-| **Platform auto-unlock** (`dpapi.rs`) | DPAPI / Keychain | Optional — stored in `wallets.mnemonic_dpapi` |
+| **PIN encryption** (`pin.rs`) | PBKDF2-HMAC-SHA256, `PBKDF2_ITERATIONS = 600_000`, `SALT_LEN = 16`, `NONCE_LEN = 12`, then AES-256-GCM | Always — stored in `wallets.mnemonic` as hex |
+| **Platform auto-unlock** (`dpapi.rs`) | DPAPI (Windows) / Keychain (macOS); unavailable on Linux | Optional — stored in `wallets.mnemonic_dpapi` |
 
 Both can coexist. Auto-unlock bypasses the PIN prompt on startup if the same OS user is logged in. The PIN-encrypted version remains as fallback.
+
+Consumers of these two modules outside `crypto/`:
+
+| Caller | Uses |
+|--------|------|
+| `database/wallet_repo.rs` | `pin::encrypt_mnemonic` + `dpapi::dpapi_encrypt` on wallet create and on mnemonic re-encrypt |
+| `database/connection.rs` | `pin::decrypt_mnemonic` (PIN unlock) and `dpapi::dpapi_decrypt` / `dpapi_encrypt` (auto-unlock path) |
+| `backup.rs` | `pin::derive_key_from_pin` — the encrypted wallet backup file reuses the PIN KDF (it does **not** reuse `encrypt_mnemonic`) |
 
 ## Usage Patterns
 
@@ -224,54 +286,84 @@ let mnemonic = decrypt_mnemonic(&encrypted_hex, "1234", &salt_hex)?;
 
 ## Error Types
 
-Each submodule defines its own error enum with `thiserror::Error`:
+Five submodules define their own error enum with `thiserror::Error`; the rest use `String`. Two modules (`ghash`, `key_linkage`) define no error type at all — `ghash` is infallible and `key_linkage` returns `Brc42Error` from the primitives it composes.
 
-| Module | Error Type | Key Variants |
-|--------|-----------|--------------|
-| `keys` | `KeyDerivationError` | `InvalidPrivateKey` |
-| `signing` | `SigningError` | `InvalidPrivateKey`, `InvalidMessage`, `InvalidSignature` |
-| `brc42` | `Brc42Error` | `InvalidPrivateKey`, `InvalidPublicKey`, `DerivationFailed`, `Secp256k1Error` |
-| `brc2` | `Brc2Error` | `InvalidPrivateKey`, `InvalidPublicKey`, `InvalidInvoiceNumber`, `KeyDerivationFailed`, `EncryptionFailed`, `DecryptionFailed`, `InvalidCiphertext`, `AesGcmError` |
-| `aesgcm_custom` | `String` | Free-form error strings |
+| Module | Error Type | Variants (complete) |
+|--------|-----------|---------------------|
+| `keys` | `KeyDerivationError` | `InvalidPrivateKey(String)` — single variant |
+| `signing` | `SigningError` | `InvalidPrivateKey`, `InvalidMessage`, `InvalidSignature` (all `(String)`) |
+| `brc42` | `Brc42Error` | `InvalidPrivateKey`, `InvalidPublicKey`, `DerivationFailed`, `Secp256k1Error` (all `(String)`) |
+| `brc2` | `Brc2Error` | `InvalidPrivateKey`, `InvalidPublicKey`, `InvalidInvoiceNumber`, `KeyDerivationFailed`, `EncryptionFailed`, `DecryptionFailed`, `InvalidCiphertext`, `AesGcmError` — 8 variants |
+| `bie1` | `Bie1Error` | `InvalidRecipientPublicKey`, `InvalidSenderPrivateKey`, `InvalidRecipientPrivateKey`, `EcdhFailed`, `EnvelopeTooShort { len, min }`, `InvalidMagic`, `InvalidEphemeralPublicKey`, `MacMismatch`, `InvalidPadding`, `AesError`, `HmacInitError` — 11 variants |
+| `key_linkage` | *(none — reuses `Brc42Error`)* | — |
+| `ghash` | *(none — infallible)* | — |
+| `aesgcm_custom` | `String` | Free-form error strings (e.g. `"Authentication tag verification failed"`) |
 | `pin` | `String` | `"Invalid PIN"` on wrong PIN, format errors otherwise |
 | `dpapi` | `String` | Platform-specific error messages |
 
+> `bie1`'s error variants are deliberately fine-grained but the **handlers collapse them** — `handlers.rs :: decrypt_bie1_handler` maps every parse/MAC/padding variant to one opaque client-facing error so the distinction can't be used as an oracle.
+
 ## Dependencies
 
-| Crate | Used By | Purpose |
-|-------|---------|---------|
-| `secp256k1` | keys, signing, brc42, brc2 | Elliptic curve operations (ECDSA, ECDH, point arithmetic) |
-| `sha2` | signing, pin | SHA-256 hashing |
-| `hmac` | signing, brc42 | HMAC-SHA256 |
-| `aes` | aesgcm_custom, ghash | Raw AES-256 block encryption (for custom GCM) |
-| `aes-gcm` | pin | Standard AES-256-GCM (12-byte nonce, for PIN encryption) |
-| `pbkdf2` | pin | Key stretching (600K iterations) |
-| `rand` | brc2, pin | Cryptographic random IV/nonce/salt generation |
-| `hex` | brc2, pin | Hex encoding for storage format |
-| `base64` | brc2 | Base64 encoding (imported but used in handlers) |
-| `log` | brc2, aesgcm_custom | Debug/info logging for key derivation and encryption operations |
-| `thiserror` | keys, signing, brc42, brc2 | Derive `Error` trait for error enums |
-| `security-framework` | dpapi (macOS) | macOS Keychain access |
-| `windows` | dpapi (Windows) | Windows DPAPI (CryptProtectData/CryptUnprotectData) |
+| Crate | Version | Used By | Purpose |
+|-------|---------|---------|---------|
+| `secp256k1` | 0.28 (`rand-std`) | keys, signing, brc42, brc2, bie1 | Elliptic curve operations (ECDSA, ECDH, point arithmetic) |
+| `sha2` | 0.10 | signing, brc42, pin, bie1 | SHA-256 hashing; **SHA-512** for the BIE1 subkey split |
+| `hmac` | 0.12 | signing, brc42, bie1 | HMAC-SHA256 |
+| `subtle` | 2 | signing, aesgcm_custom | **Constant-time comparison** (`ConstantTimeEq`) for HMAC verify and GCM auth-tag verify. Was missing from this table — it is production code, not a test dep |
+| `aes` | 0.8 | aesgcm_custom, ghash (AES-256), bie1 (AES-128) | Raw AES block encryption |
+| `cbc` | 0.1 (`alloc`) | bie1 | AES-128-CBC mode + PKCS#7 padding for the BIE1 envelope |
+| `aes-gcm` | 0.10 | pin | Standard AES-256-GCM (12-byte nonce, for PIN encryption) |
+| `pbkdf2` | 0.12 | pin | Key stretching (600K iterations) |
+| `rand` | 0.8 | brc2, pin, bie1 | Cryptographic random IV / nonce / salt / ephemeral-key generation |
+| `hex` | 0.4 | brc2, pin | Hex encoding for storage format |
+| `base64` | 0.22 | brc2 | Imported in `brc2.rs` but **not referenced there** — a dead import; actual base64 work happens in `handlers.rs` |
+| `log` | 0.4 | brc2, aesgcm_custom, dpapi (macOS) | Debug/info logging for key derivation and encryption operations |
+| `thiserror` | 1.0 | keys, signing, brc42, brc2, bie1 | Derive `Error` trait for error enums |
+| `security-framework` | 2 | dpapi (macOS) | macOS Keychain access — declared under `[target.'cfg(target_os = "macos")'.dependencies]` |
+| `windows` | 0.62 | dpapi (Windows) | Windows DPAPI (`CryptProtectData`/`CryptUnprotectData`) — declared under `[target.'cfg(windows)'.dependencies]`, features `Win32_Security_Cryptography` + `Win32_Foundation` |
 
 ## Testing
 
-All modules have inline `#[cfg(test)]` tests. BRC-42 tests use **official spec test vectors**.
+Every module has inline `#[cfg(test)]` tests. BRC-42 tests use **official spec test vectors** (`test_private_key_derivation_vector_1/2`, `test_public_key_derivation_vector_1/2`).
+
+| Module | `#[test]` count | Notes |
+|--------|-----------------|-------|
+| `bie1.rs` | 16 | Round-trips (empty / 1-block / multi-block), envelope layout, determinism, and 7 negative/corruption cases |
+| `brc43.rs` | 14 | Invoice number parse/format + `normalize_protocol_id` charset & length rules |
+| `signing.rs` | 13 | ECDSA sign/verify, SHA-256, double-SHA-256, HMAC |
+| `aesgcm_custom_test.rs` | 7 | Includes 2 cross-impl vectors (32-byte and 12-byte IV) generated by `@bsv/sdk` |
+| `brc42.rs` | 6 | 4 spec vectors + self-derivation consistency + shared-secret symmetry |
+| `key_linkage.rs` | 6 | Length/prefix assertions, ECDH symmetry, invoice- and counterparty-sensitivity |
+| `keys.rs` | 5 | Compressed / uncompressed derivation |
+| `brc2.rs` | 3 | Encrypt/decrypt roundtrip + certificate field helpers |
+| `dpapi.rs` | 3 | **Mutually exclusive** — exactly one compiles per platform |
+| `aesgcm_custom.rs` | 2 | Roundtrip + tag verification |
+| `pin.rs` | 2 | PIN encryption roundtrip + wrong-PIN rejection |
+| `ghash.rs` | 1 | GF(2^128) multiply / subkey generation |
+
+That is **78 declared `#[test]` functions**; because `dpapi`'s three are mutually exclusive, **76 compile on any single platform**.
 
 ```bash
 cd rust-wallet
-cargo test crypto          # Run all crypto tests
-cargo test brc42::tests    # BRC-42 test vectors only
-cargo test pin::tests      # PIN encryption roundtrip
+cargo test crypto             # Run all crypto tests
+cargo test brc42::tests       # BRC-42 spec vectors only
+cargo test aesgcm             # Custom AES-GCM incl. cross-impl vectors
+cargo test bie1               # BIE1 roundtrip + corruption cases
+cargo test pin::tests         # PIN encryption roundtrip
 ```
 
-Platform-specific tests (`dpapi`) are gated with `#[cfg(windows)]` / `#[cfg(target_os = "macos")]`.
+Platform-specific tests (`dpapi`) are gated with `#[cfg(windows)]` / `#[cfg(target_os = "macos")]` / `#[cfg(all(not(windows), not(target_os = "macos")))]`.
 
 ## Related
 
 - `../database/CLAUDE.md` — Database layer that stores encrypted mnemonics and derived keys
 - `../database/helpers.rs` — `derive_key_for_output()` calls into `brc42` for output signing
-- `../handlers.rs` — HTTP handlers that invoke crypto functions for BRC-100 protocol endpoints
+- `../database/wallet_repo.rs`, `../database/connection.rs` — the only callers of `pin.rs` + `dpapi.rs`
+- `../backup.rs` — reuses `pin::derive_key_from_pin` for encrypted wallet backups
+- `../handlers.rs` — HTTP handlers that invoke crypto functions for BRC-100 protocol endpoints, plus `encrypt_bie1_handler` / `decrypt_bie1_handler` and `reveal_counterparty_key_linkage` / `reveal_specific_key_linkage`
+- `../permission_service/` — Rust wrapper around the permission decision engine; gates the key-linkage and BIE1 endpoints before they reach this module
+- `../../crates/hodos_permission_engine/` — the permission **decision** engine (`decide()` in `src/lib.rs`, cascade in `src/matrix_c.rs`). `PromptType::KeyLinkageReveal` is the privacy-perimeter gate in front of `key_linkage.rs`
 - `../authfetch.rs` — BRC-103 AuthFetch uses `signing.rs` for ECDSA request signing
 - `../messagebox.rs` — MessageBox uses `brc2.rs` for BRC-2 message encryption
 - `../../CLAUDE.md` — Root project context with full architecture overview
