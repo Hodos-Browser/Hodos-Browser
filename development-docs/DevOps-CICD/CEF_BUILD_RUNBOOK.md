@@ -353,7 +353,30 @@ never auto-apply). Until scripted (see Open TODOs), run this as a checklist on e
   Windows SDK **10.0.26100** + 10.0.22621, Python 3.10.11 on PATH (depot_tools supplies its own;
   `7871`'s `.vpython3` wants 3.11).
 
-- **The build outlives any supervising process — DETACH IT.** A Chromium checkout is hours and the
+- **`gclient sync` dying on "Failed to remove path `_gclient_src_<random>`" does NOT mean re-clone.**
+  Seen on the 7871 checkout after the full 65 GiB clone completed. gclient clones into a temp
+  `chromium\_gclient_src_<random>` directory and then moves it to `chromium\src`. **The move
+  succeeded**; what failed was deleting the now-empty temp directory, and gclient treats that as
+  fatal. The give-away in the log is the line just above the traceback:
+
+  ```
+  rd exited with code 3221225794
+  ```
+
+  `3221225794` = `0xC0000142` = `STATUS_DLL_INIT_FAILED` — the `rd` **process could not start at
+  all** (transient Windows resource/desktop-heap exhaustion after a very long, very
+  process-heavy operation). It is not a file lock, not corruption, and not antivirus.
+
+  **Recovery (seconds, not hours):**
+  1. Confirm the clone really did land: `chromium\src` is a git repo with a multi-GB
+     `size-pack` (`git -C chromium/src count-objects -vH`), and
+     `chromium\_gclient_src_<random>` is **empty**. An empty working tree is expected — the clone
+     is `--no-checkout`.
+  2. `rmdir` the empty temp directory.
+  3. Re-run the checkout. gclient sees `src` and continues into the DEPS sync.
+
+  **Do not delete `src` and start over.** The failure happens *after* the expensive part, so a
+  reflexive clean re-clone throws away hours of transfer to fix an empty folder. A Chromium checkout is hours and the
   build is 10–12 h, longer than an agent tool call, a CI step, or an SSH session. Start it with
   `nohup … > build.log 2>&1` so it is reparented and survives its launcher, then **watch the log
   file**, never the process handle. Verified the hard way: the supervising invocation was killed
