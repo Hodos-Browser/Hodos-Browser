@@ -353,6 +353,20 @@ never auto-apply). Until scripted (see Open TODOs), run this as a checklist on e
   Windows SDK **10.0.26100** + 10.0.22621, Python 3.10.11 on PATH (depot_tools supplies its own;
   `7871`'s `.vpython3` wants 3.11).
 
+- **The build outlives any supervising process — DETACH IT.** A Chromium checkout is hours and the
+  build is 10–12 h, longer than an agent tool call, a CI step, or an SSH session. Start it with
+  `nohup … > build.log 2>&1` so it is reparented and survives its launcher, then **watch the log
+  file**, never the process handle. Verified the hard way: the supervising invocation was killed
+  mid-checkout and the detached `bash`/`python`/`git` chain carried on regardless — the clone
+  finished and delta resolution continued, with output still landing in the log. Had it *not* been
+  detached, ~66 GB of transfer would have been lost.
+
+  Corollary for whoever automates this: **"my watcher died" and "the build died" are different
+  events and must be distinguished.** Confirm with
+  `Get-CimInstance Win32_Process -Filter "Name='bash.exe'"` (or `ps`) before concluding anything
+  failed, and make the script's last line an explicit `echo EXIT=$?` marker so log-watchers have an
+  unambiguous terminal signal rather than inferring completion from silence.
+
 ### From the real 2026-03-12 build
 
 - **The build IS resumable — but the mechanism CHANGED. Read this before relying on it.**
