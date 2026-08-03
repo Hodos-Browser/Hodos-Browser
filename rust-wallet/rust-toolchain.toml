@@ -1,0 +1,22 @@
+# DEP-1d — Rust toolchain pin (wallet workspace).
+#
+# THIS FILE IS THE SINGLE SOURCE OF TRUTH for the Rust toolchain used to build
+# the wallet, locally and in CI. rustup honours it for every cargo invocation
+# under this directory, so the `dtolnay/rust-toolchain@stable` steps in
+# .github/workflows/{release,test}.yml are only bootstrapping rustup — this file
+# wins over whatever they install.
+#
+# Why: `@stable` floats. A new stable can change codegen, MSRV resolution or
+# lint behaviour in a money-handling binary between one release and the next
+# with no diff anywhere in the repo. 1.97.1 is what `@stable` resolved to on
+# 2026-08-03, so this pin records current behaviour rather than changing it.
+#
+# Bumping: change it deliberately, rebuild both Rust workspaces, and re-run the
+# wallet test suite. Never bump it as a side effect of another change.
+# Keep in step with adblock-engine/rust-toolchain.toml unless there is a
+# recorded reason for them to differ.
+
+[toolchain]
+channel = "1.97.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

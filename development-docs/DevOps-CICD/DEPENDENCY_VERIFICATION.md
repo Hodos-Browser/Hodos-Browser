@@ -33,6 +33,52 @@ For **every** dependency above, record:
 - A short table appended to `CEF_VERSION_UPDATE_TRACKER.md` (the living log): each dep, old→new version, verdict, notes.
 - Any surprise/breakage → **document the lesson here** and update the runbook (Invariant #12).
 
+---
+
+## DEP-1a..d — the silent-drift pins (landed 2026-08-03, pre-`7871`-build)
+
+Before this pass, **four of the five inventory layers floated.** The checklist above asks "is this
+the right version and why" — but there was no pinned answer to compare against, so a re-run could
+silently get different versions with no diff anywhere in the repo. These pins give each layer a
+declared version so drift becomes a reviewable change.
+
+**Principle: every pin below records what the floating command already resolved to on 2026-08-03.**
+None of them is an upgrade. That is deliberate — a pin and a bump must never land in the same
+commit, or a build break is ambiguous between the two.
+
+| ID | Layer | Was | Now | Where |
+|---|---|---|---|---|
+| **DEP-1a** | C++ / vcpkg | classic mode, whatever the runner image shipped | manifest mode, `builtin-baseline` + exact `overrides` (nlohmann-json 3.12.0#2, sqlite3 3.53.4, openssl 3.6.3) | `cef-native/vcpkg.json` |
+| **DEP-1b** | Installer | `choco install innosetup` (floating) | `--version=6.7.1` | `release.yml` |
+| **DEP-1c** | macOS libs | `brew install openssl nlohmann-json sqlite3` (floating) | `brew bundle --file=Brewfile` | `/Brewfile` |
+| **DEP-1d** | Rust toolchain | `dtolnay/rust-toolchain@stable` ×4 | `channel = "1.97.1"` | `rust-wallet/`, `adblock-engine/rust-toolchain.toml` |
+| *(extra)* | Rust crates | `actix-web = "4.9"` caret, held only by `Cargo.lock` | `= "=4.11.0"` | `rust-wallet/Cargo.toml` |
+| *(extra)* | CI runners | commented-out `*-latest` in disabled `test.yml` stubs | pinned images | `test.yml` |
+
+### Verification performed
+- **Rust:** `cargo build --release` green on 1.97.1 for **both** workspaces (wallet 3m00s). **Both
+  `Cargo.lock` files unchanged** — proving the `actix-web` exact pin records the existing resolution
+  rather than moving it.
+- **vcpkg / Inno / Brew: NOT verifiable locally.** These only execute in the release workflow. Their
+  first real exercise is the next release build — treat a failure there as *this* change, not as a
+  CEF-bump symptom.
+
+### Lessons
+- **A crate pin without a compiler pin is half a pin.** `adblock-engine` already had exact crate
+  pins (`adblock = "=0.10.3"`, `rmp = "=0.8.14"`) chosen to hold an MSRV-sensitive graph together,
+  while the toolchain that had to satisfy that MSRV floated. Pin both or neither.
+- **Chocolatey lags upstream — check the packaging source, not the project.** Inno Setup upstream is
+  on 7.0.x (7.0.0 released 2026-05-18), but Chocolatey's `innosetup` package tops out at **6.7.1**.
+  Pinning to the upstream-latest would have produced an uninstallable version string. Always read
+  the version list of the *channel you install through*.
+- **Commented-out YAML still drifts.** Disabled job stubs carrying `*-latest` are a copy-paste
+  source that re-introduces floating images the moment someone enables the job. Pin dead code too.
+- **Adding `vcpkg.json` changes vcpkg's MODE, not just its versions.** Manifest mode auto-activates
+  from the file's mere presence next to `CMakeLists.txt`, so the CI step that ran a classic
+  `vcpkg install` had to be replaced in the same commit — otherwise classic and manifest installs
+  fight over the same `find_package` resolution. Also note `builtin-baseline` must exist in the
+  runner's vcpkg git history; the workflow now fetches that exact commit before configure.
+
 ## Automation goal (0.4.0 target)
 This checklist should become **scripted + test-gated** so it runs the same way every time:
 - a script that enumerates the pinned versions across all 5 layers and diffs against the new CEF's expected toolchain,

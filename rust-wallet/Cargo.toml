@@ -26,7 +26,14 @@ winresource = "0.1"
 
 [dependencies]
 # HTTP server
-actix-web = "4.9"
+# Exact pin (DEP-1a..d sweep, 2026-08-03). This was `"4.9"` — an unpinned caret
+# that resolved to 4.11.0, held in place only by Cargo.lock. That undercut the
+# rustc-ceiling argument used to justify adblock-engine's exact pins
+# (`adblock = "=0.10.3"`, `rmp = "=0.8.14"`): actix-web is the HTTP surface of a
+# money-handling process, so it deserves at least the same treatment.
+# 4.11.0 is the version already resolved in Cargo.lock — this records current
+# behaviour rather than changing it. Bump deliberately, with a test run.
+actix-web = "=4.11.0"
 actix-cors = "0.7"
 
 # JSON handling

@@ -1,0 +1,15 @@
+# DEP-1d — Rust toolchain pin (adblock-engine workspace).
+#
+# Single source of truth for the toolchain that builds the adblock engine.
+# See rust-wallet/rust-toolchain.toml for the full rationale; the two are kept
+# in step unless there is a recorded reason to diverge.
+#
+# Extra reason this workspace needs the pin: adblock-engine already carries
+# EXACT crate pins (`adblock = "=0.10.3"`, `rmp = "=0.8.14"`) that exist to hold
+# an MSRV-sensitive dependency graph together. Pinning the crates while letting
+# the compiler float only pins half the problem.
+
+[toolchain]
+channel = "1.97.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"
