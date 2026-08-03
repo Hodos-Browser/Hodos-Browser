@@ -1,10 +1,31 @@
 @echo off
 REM ============================================
-REM CEF Build Script for Hodos Browser
-REM Builds CEF 136 with proprietary codecs (H.264, AAC, MP3)
+REM CEF Build Script for Hodos Browser (Windows)
 REM
-REM USAGE: Copy this file to C:\cef\chromium_git\ and run from there
-REM        Run in a normal cmd or PowerShell (NOT Developer Command Prompt)
+REM VER-1: branch 7871 = CEF 150 = Chromium 150 (the M150 LTS line).
+REM Pinned point-release: 150.0.17+g94c1726+chromium-150.0.7871.187
+REM   -> CEF commit 94c1726, which pins Chromium refs/tags/150.0.7871.187
+REM      transitively via cef\CHROMIUM_BUILD_COMPATIBILITY.txt.
+REM
+REM Builds with proprietary codecs (H.264, AAC, MP3, VP9, AV1).
+REM
+REM TREE LAYOUT (D11): the 7871 tree lives at C:\cef\cef150\ and has its OWN
+REM depot_tools. C:\cef\chromium_git (the 175 GB M136 tree) is PRESERVED and
+REM must not be reused: automate-git.py hard-checkouts depot_tools to the
+REM commit its branch pins, so a shared depot_tools ends up pinned to whichever
+REM branch ran last.
+REM
+REM THIS SCRIPT IS PHASE 3 OF 3. Run them in order:
+REM   1. checkout : automate-git.py ... --no-build --no-distrib
+REM   2. GATE     : gn_args_gate.sh    <-- codec pre-flight, DO NOT SKIP
+REM   3. build    : this script (--force-build)
+REM The gate exists because a flipped or renamed codec default produces a GREEN
+REM build with NO codecs, and discovering that after 10-12 hours is the
+REM expensive failure mode.
+REM
+REM Run from a normal cmd or PowerShell (NOT a Developer Command Prompt).
+REM Do NOT invoke via `cmd.exe /c` from git-bash: MSYS rewrites /c into a path,
+REM so cmd opens interactively and exits 0 having done nothing.
 REM ============================================
 
 REM Set Visual Studio version and path
@@ -17,47 +38,37 @@ REM Tell Chromium where BuildTools edition is installed
 set GYP_MSVS_OVERRIDE_PATH=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools
 set vs2022_install=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools
 
-REM GN build defines for proprietary codecs
+REM GN build defines for proprietary codecs.
+REM Byte-identical to the M136 build's args.gn - carried forward verbatim.
 set GN_DEFINES=is_official_build=true proprietary_codecs=true ffmpeg_branding=Chrome chrome_pgo_phase=0
 
 REM Archive format
 set CEF_ARCHIVE_FORMAT=tar.bz2
 
-REM Ensure depot_tools is on PATH
-set PATH=C:\cef\depot_tools;%PATH%
+REM Use THIS tree's depot_tools, not the M136 tree's.
+set PATH=C:\cef\cef150\depot_tools;%PATH%
 
-REM Step 1: Run gclient sync to download all dependencies (ninja, node, etc.)
+REM ============================================
+REM Build. Siso is the default build tool on a fresh 7871 out-dir (Ninja has
+REM been unsupported upstream since Sept 2025). Never mix - switching requires
+REM `gn clean`.
+REM
+REM --force-build forces a rebuild but KEEPS existing objects, so an interrupted
+REM build resumes. We deliberately do NOT use --force-clean on re-runs.
+REM
+REM NOTE: automate-git.py is taken from the CEF CHECKOUT, not from master. It is
+REM versioned with CEF and the master copy differs from 7871's.
+REM ============================================
 echo.
-echo === Step 1: Running gclient sync to download dependencies ===
+echo === Running automate-git.py build (branch 7871) ===
 echo.
-cd /d C:\cef\chromium_git\chromium
-call C:\cef\depot_tools\gclient.bat sync --nohooks --no-history
-if %ERRORLEVEL% NEQ 0 (
-  echo.
-  echo WARNING: gclient sync had errors, continuing...
-  echo.
-)
+cd /d C:\cef\cef150
 
-REM Step 1b: Run hooks
-echo.
-echo === Step 1b: Running gclient runhooks ===
-echo.
-call C:\cef\depot_tools\gclient.bat runhooks
-if %ERRORLEVEL% NEQ 0 (
-  echo.
-  echo WARNING: gclient runhooks had errors, attempting build anyway...
-  echo.
-)
-
-REM Step 2: Run the automated build
-echo.
-echo === Step 2: Running automate-git.py build ===
-echo.
-cd /d C:\cef\chromium_git
-python C:\cef\automate\automate-git.py ^
-  --download-dir=C:\cef\chromium_git ^
-  --depot-tools-dir=C:\cef\depot_tools ^
-  --branch=7103 ^
+python C:\cef\cef150\cef\tools\automate\automate-git.py ^
+  --download-dir=C:\cef\cef150 ^
+  --depot-tools-dir=C:\cef\cef150\depot_tools ^
+  --branch=7871 ^
+  --checkout=94c1726 ^
   --x64-build ^
   --minimal-distrib ^
   --client-distrib ^
@@ -72,7 +83,11 @@ if %ERRORLEVEL% NEQ 0 (
 ) else (
   echo.
   echo BUILD SUCCEEDED
-  echo Output: C:\cef\chromium_git\chromium\src\cef\binary_distrib\
+  echo Output: C:\cef\cef150\chromium\src\cef\binary_distrib\
+  echo.
+  echo Next: Layer-A codec probe, then the VER-5 dist drift audit
+  echo       ^(scripts\cef_dist_drift_audit.sh^), then rebuild
+  echo       libcef_dll_wrapper + cef-native.
 )
 
 pause

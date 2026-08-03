@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================
 # CEF Build Script for Hodos Browser (macOS)
-# Builds CEF 136 (branch 7103) with proprietary codecs (H.264, AAC, MP3)
+# Builds CEF 150 (branch 7871) with proprietary codecs (H.264, AAC, MP3, VP9, AV1)
 #
 # WHAT THIS DOES:
 #   1. Checks prerequisites (Xcode CLI tools, Python, git, disk space)
@@ -12,7 +12,8 @@
 # REQUIREMENTS:
 #   - macOS 13+ (Ventura or later recommended)
 #   - Xcode Command Line Tools (full Xcode NOT required)
-#   - Python 3.9 - 3.11 (NOT 3.12+ due to compatibility issues)
+#   - Python 3.9 - 3.11. The real ceiling is per-branch: 7871's .vpython3
+#     pins 3.11 (same as 7103). depot_tools also ships its own Python.
 #   - git (comes with Xcode CLI tools)
 #   - ~100 GB free disk space (SSD strongly recommended)
 #   - 16 GB RAM minimum, 32 GB recommended
@@ -23,8 +24,12 @@
 #   ./build_hodos_cef_mac.sh
 #
 # OUTPUT:
-#   ~/cef/chromium_git/chromium/src/cef/binary_distrib/
-#   Look for: cef_binary_136.*_macos{arm64,x86_64}/
+#   ~/cef/cef150/chromium/src/cef/binary_distrib/
+#   Look for: cef_binary_150.*_macos{arm64,x86_64}/
+#
+# ⛔ BEFORE THE 10-12 h BUILD: run the gn-args codec pre-flight gate. A flipped
+#    or renamed codec default produces a GREEN build with NO codecs, and finding
+#    that out afterwards is the expensive failure. See PLAN_codecs.md §7.
 # ============================================
 
 set -euo pipefail
@@ -33,11 +38,20 @@ set -euo pipefail
 # Configuration
 # --------------------------------------------------
 
+# VER-1: branch 7871 = CEF 150 = Chromium 150 (the M150 LTS line).
+# Pinned point-release 150.0.17+g94c1726+chromium-150.0.7871.187 -> CEF commit
+# 94c1726, which pins Chromium refs/tags/150.0.7871.187 transitively via
+# cef/CHROMIUM_BUILD_COMPATIBILITY.txt.
+#
+# Give 7871 its OWN tree and depot_tools; do not reuse an M136 tree.
+# automate-git.py hard-checkouts depot_tools to the commit its branch pins, so a
+# shared depot_tools ends up pinned to whichever branch ran last.
 CEF_BASE_DIR="$HOME/cef"
 CEF_AUTOMATE_DIR="$CEF_BASE_DIR/automate"
-CEF_DEPOT_TOOLS_DIR="$CEF_BASE_DIR/depot_tools"
-CEF_CHROMIUM_DIR="$CEF_BASE_DIR/chromium_git"
-CEF_BRANCH="7103"
+CEF_DEPOT_TOOLS_DIR="$CEF_BASE_DIR/cef150/depot_tools"
+CEF_CHROMIUM_DIR="$CEF_BASE_DIR/cef150"
+CEF_BRANCH="7871"
+CEF_CHECKOUT="94c1726"
 
 # GN build defines for proprietary codecs
 export GN_DEFINES="is_official_build=true proprietary_codecs=true ffmpeg_branding=Chrome chrome_pgo_phase=0"
@@ -102,9 +116,9 @@ if ! xcode-select -p &>/dev/null; then
 fi
 echo "[OK] Xcode Command Line Tools: $(xcode-select -p)"
 
-# Check Python version (need 3.9 - 3.11)
+# Check Python version (7871's .vpython3 pins 3.11)
 if ! command -v python3 &>/dev/null; then
-    log_error "Python 3 not found. Install Python 3.9-3.11."
+    log_error "Python 3 not found. Install Python 3.11 (7871 .vpython3 pin)."
     echo "  brew install python@3.11"
     exit 1
 fi
@@ -114,8 +128,8 @@ PYTHON_MAJOR=$(echo "$PYTHON_VERSION" | cut -d. -f1)
 PYTHON_MINOR=$(echo "$PYTHON_VERSION" | cut -d. -f2)
 
 if [ "$PYTHON_MAJOR" -ne 3 ] || [ "$PYTHON_MINOR" -lt 9 ] || [ "$PYTHON_MINOR" -gt 11 ]; then
-    log_warn "Python $PYTHON_VERSION detected. Recommended: 3.9-3.11."
-    echo "Python 3.12+ has known compatibility issues with Chromium builds."
+    log_warn "Python $PYTHON_VERSION detected. 7871 .vpython3 pins 3.11."
+    echo "The ceiling is per-branch - re-read .vpython3 on any branch bump."
     echo "Install 3.11 with: brew install python@3.11"
     echo "Then: export PATH=\"\$(brew --prefix python@3.11)/bin:\$PATH\""
     read -p "Continue anyway? (y/N) " -n 1 -r
@@ -187,10 +201,19 @@ if [ -d "$CEF_DEPOT_TOOLS_DIR/.git" ]; then
     echo "depot_tools already cloned. Updating..."
     cd "$CEF_DEPOT_TOOLS_DIR"
     git pull --quiet
+    # Recover a previously-shallow clone (see the FULL-clone note below).
+    if [ -f "$CEF_DEPOT_TOOLS_DIR/.git/shallow" ]; then
+        echo "depot_tools is a shallow clone - unshallowing..."
+        git fetch --unshallow
+    fi
 else
     echo "Cloning depot_tools from chromium.googlesource.com..."
     # Remove directory contents if it exists but isn't a git repo
     rm -rf "${CEF_DEPOT_TOOLS_DIR:?}/"*
+    # MUST be a FULL clone, never --depth 1. CEF pins an exact depot_tools
+    # commit in cef/CHROMIUM_BUILD_COMPATIBILITY.txt and automate-git.py hard-
+    # checkouts it; a shallow clone dies with "reference is not a tree: <sha>"
+    # AFTER cloning cef/ - far enough in to look like progress.
     git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git "$CEF_DEPOT_TOOLS_DIR"
 fi
 
@@ -205,17 +228,25 @@ export PATH="$CEF_DEPOT_TOOLS_DIR:$PATH"
 
 log_info "Setting up automate-git.py"
 
+# automate-git.py is VERSIONED WITH CEF. The copy inside the branch checkout is
+# authoritative and differs from master's (verified on 7871). Prefer it; only
+# fall back to master for the chicken-and-egg first run, where cef/ does not
+# exist yet and something has to clone it.
+CHECKOUT_AUTOMATE="$CEF_CHROMIUM_DIR/cef/tools/automate/automate-git.py"
 AUTOMATE_SCRIPT="$CEF_AUTOMATE_DIR/automate-git.py"
 
-if [ -f "$AUTOMATE_SCRIPT" ]; then
-    echo "automate-git.py already exists. Downloading fresh copy..."
+if [ -f "$CHECKOUT_AUTOMATE" ]; then
+    AUTOMATE_SCRIPT="$CHECKOUT_AUTOMATE"
+    echo "[OK] using the branch-matched automate-git.py from the CEF checkout"
+else
+    echo "No CEF checkout yet - bootstrapping with the master copy."
+    echo "     Re-run this script after the checkout exists to pick up the"
+    echo "     branch-matched copy."
+    curl -fsSL \
+        "https://raw.githubusercontent.com/chromiumembedded/cef/master/tools/automate/automate-git.py" \
+        -o "$AUTOMATE_SCRIPT"
+    echo "[OK] automate-git.py downloaded (bootstrap copy)"
 fi
-
-curl -fsSL \
-    "https://raw.githubusercontent.com/chromiumembedded/cef/master/tools/automate/automate-git.py" \
-    -o "$AUTOMATE_SCRIPT"
-
-echo "[OK] automate-git.py downloaded"
 
 # --------------------------------------------------
 # Step 5: Print build configuration
@@ -223,7 +254,8 @@ echo "[OK] automate-git.py downloaded"
 
 log_info "Build Configuration"
 
-echo "  CEF Branch:     $CEF_BRANCH (CEF 136 / Chromium 136)"
+echo "  CEF Branch:     $CEF_BRANCH (CEF 150 / Chromium 150, M150 LTS)"
+echo "  CEF Checkout:   $CEF_CHECKOUT (150.0.17 -> chromium 150.0.7871.187)"
 echo "  Architecture:   $ARCH_LABEL ($BUILD_ARCH_FLAG)"
 echo "  GN_DEFINES:     $GN_DEFINES"
 echo "  Archive Format: $CEF_ARCHIVE_FORMAT"
@@ -252,6 +284,7 @@ python3 "$AUTOMATE_SCRIPT" \
     --download-dir="$CEF_CHROMIUM_DIR" \
     --depot-tools-dir="$CEF_DEPOT_TOOLS_DIR" \
     --branch="$CEF_BRANCH" \
+    --checkout="$CEF_CHECKOUT" \
     "$BUILD_ARCH_FLAG" \
     --minimal-distrib \
     --client-distrib \
@@ -274,7 +307,7 @@ if [ $BUILD_EXIT_CODE -ne 0 ]; then
     echo "Build duration: ${BUILD_DURATION} minutes"
     echo ""
     echo "Common issues:"
-    echo "  - Python version incompatibility (need 3.9-3.11)"
+    echo "  - Python version incompatibility (7871 .vpython3 pins 3.11)"
     echo "  - Insufficient disk space (need ~100GB)"
     echo "  - Insufficient RAM (need 16GB+)"
     echo "  - Network interruption during source download"
@@ -292,7 +325,7 @@ echo "Output directory:"
 echo "  $CEF_CHROMIUM_DIR/chromium/src/cef/binary_distrib/"
 echo ""
 echo "Look for a folder named:"
-echo "  cef_binary_136.*_macos${ARCH_LABEL}/"
+echo "  cef_binary_150.*_macos${ARCH_LABEL}/"
 echo ""
 echo "Inside you will find:"
 echo "  Release/                    - CEF framework and libraries"
