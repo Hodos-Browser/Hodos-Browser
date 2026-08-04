@@ -69,6 +69,21 @@ REM build resumes. We deliberately do NOT use --force-clean on re-runs.
 REM
 REM NOTE: automate-git.py is taken from the CEF CHECKOUT, not from master. It is
 REM versioned with CEF and the master copy differs from 7871's.
+REM
+REM --no-depot-tools-update: automate-git.py runs update_depot_tools.bat on
+REM EVERY invocation, re-pulling depot_tools OFF the pinned commit and rewriting
+REM its files. That re-dirties the tree and makes the very next step -- the
+REM checkout of the pinned depot_tools sha from CHROMIUM_BUILD_COMPATIBILITY.txt
+REM -- fail with "your local changes would be overwritten", killing the build 3
+REM seconds in. Check depot_tools out to the pin FIRST, then skip the update.
+REM
+REM PREREQUISITE, once per tree (repo-local beats system AND global, and unlike
+REM GIT_CONFIG_GLOBAL it is honoured by depot_tools' own bundled git):
+REM   for %%r in (depot_tools cef chromium\src) do (
+REM     git -C %%r config core.autocrlf false
+REM     git -C %%r config core.filemode false
+REM     git -C %%r reset --hard
+REM   )
 REM ============================================
 echo.
 echo === Running automate-git.py build (branch 7871) ===
@@ -84,6 +99,7 @@ python C:\cef\cef150\cef\tools\automate\automate-git.py ^
   --minimal-distrib ^
   --client-distrib ^
   --no-debug-build ^
+  --no-depot-tools-update ^
   --force-build
 
 REM Exit code check

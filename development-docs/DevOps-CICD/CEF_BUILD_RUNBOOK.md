@@ -521,6 +521,32 @@ never auto-apply). Until scripted (see Open TODOs), run this as a checklist on e
   protected it all along (3 untracked DEPS dirs, zero tracked modifications), which is a useful
   confirmation that the protection theory is right rather than a coincidence.
 
+  **`GIT_CONFIG_GLOBAL` alone is NOT enough — set `core.autocrlf=false` REPO-LOCALLY.** The damage
+  came back and killed the build **3 seconds in**, at
+  `git checkout <pinned depot_tools sha>` → *"your local changes would be overwritten"*, with the
+  same equal-count diffstat (403 files, 127154/127154). Two compounding reasons:
+
+  1. **`automate-git.py` runs `update_depot_tools.bat` on EVERY invocation.** That re-pulls
+     depot_tools, moves it **off** the pinned commit, and re-writes its files — so any line-ending
+     repair you did by hand is undone on the next run, and the pinned checkout that immediately
+     follows then fails.
+  2. **depot_tools ships its own bundled git**, which does not necessarily honour the
+     `GIT_CONFIG_GLOBAL` you exported for your shell.
+
+  Repo-local config is the only scope that survives both (precedence: system < global < **local**):
+
+  ```bash
+  for r in depot_tools cef chromium/src; do
+    git -C "$r" config core.autocrlf false
+    git -C "$r" config core.filemode false
+    git -C "$r" reset --hard
+  done
+  ```
+
+  **Then pass `--no-depot-tools-update`** to `automate-git.py` for the build, having first checked
+  depot_tools out to the pinned sha yourself. Once it is *at* the pin, the update step is pure churn
+  risk with no upside.
+
   ⚠️ **This matters beyond the sync:** P3 applies CEF patches with `git apply -p0` **exact-context,
   no fuzz**. CRLF-contaminated sources would fail to patch, and the error would point at the patch
   rather than at git config.

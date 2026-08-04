@@ -28,12 +28,17 @@ if [ ! -f "$SRC/build/util/LASTCHANGE" ]; then
   echo "RUNHOOKS_EXIT=$?"
 fi
 
-echo "=== Generating GN projects (cef_create_projects) ==="
-# MUST run from src/cef: the .bat is literally `python3.bat tools\gclient_hook.py`,
-# a RELATIVE path. Running it from src/ resolves to src\tools\gclient_hook.py,
-# which does not exist, and the gate then reports every flag as MISSING —
-# looking exactly like "the codec flags were renamed" when nothing is wrong.
-( cd "$SRC/cef" && cmd.exe //c "cef_create_projects.bat" ) 2>&1 | tail -25
+echo "=== Generating GN projects (gclient_hook.py) ==="
+# cef_create_projects.bat is literally `python3.bat tools\gclient_hook.py` — a
+# RELATIVE path, so it must run from src/cef. But invoking it through cmd.exe
+# from git-bash does not inherit the POSIX working directory and fails with
+# "'cef_create_projects.bat' is not recognized". Same family as the cmd.exe /c
+# trap in the Lessons section.
+#
+# So skip the wrapper and call the python directly from bash, which is what the
+# .bat does anyway. One fewer shell, real exit codes, correct cwd.
+( cd "$SRC/cef" && python tools/gclient_hook.py ) 2>&1 | tail -30
+echo "GCLIENT_HOOK_EXIT=$?"
 
 echo
 echo "=== args.gn as written ==="
