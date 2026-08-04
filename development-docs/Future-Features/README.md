@@ -64,3 +64,5 @@ Files in this folder are the **research depth** behind each row in the priority 
 ---
 
 *Created: 2026-03-04*
+
+- **`AI_ASSISTANT_SECURITY_NOTES.md`** — security constraints for the native AI assistant (the GTM wedge / Demo-Day prototype), captured 2026-08-04 during the DevTools/CDP hardening. Key rule: treat the assistant as untrusted content with its own permission identity, not as the user; do NOT build it on the remote debugging port. Pairs with `../0.4.0/DEVTOOLS_SECURITY_DESIGN.md`.

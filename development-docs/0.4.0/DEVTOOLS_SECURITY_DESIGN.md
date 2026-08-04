@@ -91,12 +91,11 @@ content nothing it did not already have.
 Gate `settings.remote_debugging_port` so release ships with it **off**. Dev keeps 9322 unchanged
 (the smoke harness and our own workflow depend on it).
 
-Two shapes, decide in **Q1**:
-- **(a) Dev-only** — wrap in `hodos::IsDevEnv()`. Simplest; matches how the port is already
-  dev/prod-namespaced. Cost: we can no longer attach to a *user's installed* browser to diagnose.
-- **(b) Explicit setting, default off in release** — keeps (a)'s protection but leaves a deliberate
-  door for power users and support. More surface: needs a settings UI entry, persistence, and a
-  clear warning string.
+✅ **RESOLVED (owner, 2026-08-04): shape (a), dev-only.** Wrap in `hodos::IsDevEnv()`. Matches how
+the port is already dev/prod-namespaced, and adds no settings surface. Accepted cost: we can no
+longer attach to a *user's installed* browser to diagnose — "reproduce it in a dev build" is the
+supported path. (Rejected: (b) an explicit default-off setting — more surface for a door we do not
+currently need. Revisit only if support hits a case that genuinely cannot be reproduced.)
 
 ### D3 — Drop `--remote-allow-origins=*` from production
 
@@ -114,32 +113,41 @@ there — one chokepoint, and the existing `HasDevTools()` de-dup starts applyin
 instead of just the keyboard shortcut. Also stop adding `MENU_ID_DEV_TOOLS_INSPECT` in the non-tab
 branch (~8668) so the menu doesn't offer something the guard will refuse.
 
-**How to decide "privileged" — see Q2.** `SimpleHandler::role_` is the robust signal: tab browsers
-are `tab_<id>`, everything else is a named role (`header`, `wallet`, `brc100auth`, …). A
-`role_.rfind("tab_", 0) == 0` check is simple and does not depend on URL parsing.
+**How to decide "privileged" — ✅ RESOLVED (owner, 2026-08-04): role-only.** `SimpleHandler::role_`
+is the signal: tab browsers are `tab_<id>`, everything else is a named role (`header`, `wallet`,
+`brc100auth`, …). Gate on `role_.rfind("tab_", 0) == 0` — no URL parsing, no origin matching.
+
+Accepted consequence: a tab that navigates to an internal page (`/browser-data`, `/settings-page`)
+is still inspectable. That is deliberate — those pages are reachable through normal UI anyway, so
+DevTools grants nothing new there, and the simpler gate is far less likely to rot or be bypassed
+than URL matching. (Rejected: role + URL — stricter, but the added strictness buys little and the
+extra logic is a liability.)
 
 > ⚠️ Do **not** reach for `IsInternalOrigin()` without fixing it first — a known open item records
 > that `IsInternalOrigin("") == true`. Reusing it here would make that bug security-relevant.
 
 ## 5. Open questions
 
-**Q1 — D2 shape: dev-only, or a default-off setting?** The tradeoff is diagnosing a *user's*
-installed browser. Does support ever need that, or is "reproduce it in a dev build" always
-acceptable? *Owner decision.*
+**Q1 — ✅ RESOLVED: dev-only.** See D2.
+**Q2 — ✅ RESOLVED: role-only.** See D4.
 
-**Q2 — What counts as privileged for D4?** Role alone (`tab_*` allowed), or role **plus** URL? A tab
-can navigate to internal pages (`/browser-data`, `/settings-page`) which carry injected
-`window.hodosBrowser` APIs. Strictly these are privileged too — but they are also reachable by the
-user through normal UI, so DevTools adds little. Role-only is simpler and probably sufficient;
-role+URL is stricter. *Recommend role-only, confirm.*
-
-**Q3 — Does CEF support `--remote-debugging-pipe`?** Chromium defines the switch
+### ⭐ Q3 — RESEARCH SPIKE (carried; not blocking) — does CEF support `--remote-debugging-pipe`? Chromium defines the switch
 (`content/public/common/content_switches.cc:608` = `kRemoteDebuggingPipe`) but `libcef/` has **no
 handling for it** — `CefSettings` only exposes `remote_debugging_port`. Pipe mode is the industry
 answer to unauthenticated CDP: it speaks the protocol over an inherited file descriptor, so only the
 launching process can reach it — unreachable rather than authenticated. **If it works in a CEF
 embedder it is strictly better than a port** and could serve any future automation need without
 reopening this hole. Needs a spike.
+
+**Why this spike matters more than it looks.** It is the same question the **native AI assistant**
+(the go-to-market wedge, Demo-Day prototype) will have to answer: *how does an in-browser agent get
+programmatic control without an unauthenticated socket?* Answering Q3 early gives that work a safe
+foundation instead of the tempting-but-wrong "just turn the port back on." Carried in
+`../Future-Features/AI_ASSISTANT_SECURITY_NOTES.md` §3.
+
+**Spike shape (~1h):** pass `--remote-debugging-pipe` via `OnBeforeCommandLineProcessing` in a dev
+build with `remote_debugging_port = 0`; check whether the browser starts, whether fds 3/4 carry CDP
+traffic, and whether CEF strips the switch. Failure is cheap and informative either way.
 
 **Q4 — Is there a future need for authenticated remote CDP at all?** If BSV devs eventually want to
 drive Hodos from Playwright/Puppeteer, D2(a) blocks it. Options if so: pipe mode (Q3), a one-time
