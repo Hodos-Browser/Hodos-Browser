@@ -104,8 +104,11 @@ Full diagnosis + recovery for each is in `../DevOps-CICD/CEF_BUILD_RUNBOOK.md` (
 | 4 | **googlesource HTTP 429**, also surfacing as `expected 'packfile'` / `expected flush after ref listing`. | **YES, likely** — a cold checkout is a lot of traffic. Resume with `gclient sync … -j2`; `automate-git.py` has no `--jobs` passthrough |
 | 5 | **`core.autocrlf=true`** breaking third_party sub-repo checkouts. | **NO** — Git-for-Windows-specific installer default |
 | 6 | **Flipping autocrlf on an existing tree** → equal-count diffstats, `git reset --hard` per repo. | **NO** — follow-on from 5 |
+| 7 | **`update_depot_tools.bat` re-dirties depot_tools on EVERY `automate-git.py` run**, moving it off the pinned commit so the next pinned checkout fails — killed the build 3 s in. | **YES** — this is `automate-git.py` behaviour, not Windows. Pass **`--no-depot-tools-update`** after checking depot_tools out to the pin yourself |
+| 8 | **The gate itself failing and looking exactly like a codec regression** (all four flags "MISSING"). Causes: `cef_create_projects.bat` uses a **relative** path so it must run from `src/cef`; and hooks had never run because every sync used `--nohooks`. | **YES, both** — run the gate's self-check (arg count + a control flag) before believing any MISSING verdict |
 
-**#4 is the one to plan around.** Budget for it; don't treat it as breakage.
+**#4 and #7 are the ones to plan around.** Budget for them; they are not breakage.
+**#8 is the one that could waste a day** — it will tell you the codec flags were renamed. They were not.
 
 ---
 
@@ -116,9 +119,36 @@ Full diagnosis + recovery for each is in `../DevOps-CICD/CEF_BUILD_RUNBOOK.md` (
 - ✅ M136 codec Layer-A baseline captured
 - ✅ VER-5 drift audit script written, M136 baseline **CLEAN**
 - ✅ `cef-binaries/Release` + `Resources` backed up before any staging
-- ⏳ Checkout finalize running
-- ⏳ gn-args gate — **not yet run**
-- ⏳ 10–12 h build — **not yet started**
+- ✅ Checkout complete — Chromium `30f6543a` = `refs/tags/150.0.7871.187`, CEF `94c17267e`
+- ✅ **gn-args codec gate PASSED** (see table below)
+- ⏳ Build running since `2026-08-04T01:49:56Z` (~10–12 h)
+
+### ⛔ gn-args gate result — run this same gate before your build
+
+1211 args resolved; self-check clean (a real `gn args --list` emits hundreds — a *broken* gate run
+emitted 5, see the "gate must prove itself" lesson in the runbook).
+
+| Flag | Resolved | Note |
+|---|---|---|
+| `proprietary_codecs` | `true` | **GATE** ✅ |
+| `ffmpeg_branding` | `"Chrome"` | **GATE** ✅ |
+| `chrome_pgo_phase` | `0` | **GATE** ✅ |
+| `is_official_build` | `true` | **GATE** ✅ |
+| `enable_widevine` | `true` | resolves |
+| `enable_library_cdms` | `true` | resolves |
+| `enable_cdm_host_verification` | `true` | already true on M136 — relevant to the Q4 VMP question |
+| `enable_cdm_storage_id` | `true` | same |
+| `enable_platform_hevc` | `true` | non-gating (build flag; runtime answer is machine-dependent) |
+| `enable_hevc_parser_and_hw_decoder` | `true` | non-gating |
+| `enable_av1_decoder` / `enable_dav1d_decoder` | `true` | AV1 present |
+| `enable_mse_mpeg2ts_stream_parser` | `true` | recorded |
+| `enable_platform_ac3_eac3_audio` | `false` | recorded |
+| **`enable_platform_dolby_vision`** | **`true`** | ✅ **checked — not a bump regression.** `media/media_options.gni` is byte-identical on 7103 and 7871: `proprietary_codecs && (is_cast_media_device || is_win)`. It was already `true` on shipped M136. **`is_win`-gated, so it should resolve `false` for you** — expect a legitimate Win/Mac difference here, not a fault |
+| `media/BUILD.gn` coupling guard | present | `assert(ffmpeg_branding != "Chromium", …)` survived 14 milestones |
+
+**Headline: no codec flag was renamed or flipped M136 → M150.** The `GN_DEFINES` carried forward
+verbatim, exactly as `PLAN_codecs.md` predicted. The generated `args.gn` matches the shipped M136
+`args.gn` on every key flag.
 
 **Nothing in §5 is blocked on the above.** Start your own provisioning and D3 now.
 

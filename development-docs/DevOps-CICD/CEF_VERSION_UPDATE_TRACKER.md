@@ -71,6 +71,58 @@ must be recorded here alongside the machine it was measured on.
 
 ---
 
+## GN-args pre-flight gate — `7871`, run 2026-08-04 (pre-build)
+
+`PLAN_codecs.md` §7 steps 1–2, run **before** the 10–12 h build. **Result: PASS.** 1211 args
+resolved. **No codec flag was renamed or flipped M136 → M150** — `GN_DEFINES` carried forward
+verbatim, and the generated `args.gn` matches the shipped M136 `args.gn` on every key flag.
+
+| Flag | `7871` | Status |
+|---|---|---|
+| `proprietary_codecs` | `true` | **GATE** ✅ |
+| `ffmpeg_branding` | `"Chrome"` | **GATE** ✅ |
+| `chrome_pgo_phase` | `0` | **GATE** ✅ |
+| `is_official_build` | `true` | **GATE** ✅ |
+| `enable_widevine` / `enable_library_cdms` | `true` | resolves |
+| `enable_cdm_host_verification` / `enable_cdm_storage_id` | `true` | resolves — relevant to the Q4 VMP question |
+| `enable_platform_hevc` / `enable_hevc_parser_and_hw_decoder` | `true` | non-gating |
+| `enable_av1_decoder` / `enable_dav1d_decoder` | `true` | AV1 present |
+| `enable_mse_mpeg2ts_stream_parser` | `true` | recorded |
+| `enable_platform_ac3_eac3_audio` | `false` | recorded |
+| **`enable_platform_dolby_vision`** | **`true`** | ⚠️ see below |
+| `media/BUILD.gn` coupling guard | present | `assert(ffmpeg_branding != "Chromium", …)` **survived 14 milestones** |
+
+### ✅ RESOLVED — `enable_platform_dolby_vision=true` is NOT a bump regression
+
+Flagged as unexpected because every plan doc says **"Dolby out-of-scope / Dolby off"**
+(`PLAN_codecs.md` §6.3, roadmap P5 step 1, readiness checklist), yet `7871` resolves it **`true`**
+and we never set it.
+
+**Checked against the M136 tree the same day — the declared default is byte-identical:**
+
+```gn
+# media/media_options.gni — IDENTICAL in 7103 and 7871
+enable_platform_dolby_vision =
+    proprietary_codecs && (is_cast_media_device || is_win)
+```
+
+Since we set `proprietary_codecs=true` and build on Windows (`is_win`), it resolved `true` on
+**M136 as well**. **Nothing changed in the bump; the shipping M136 build already has it on.**
+
+**What this actually corrects is the plan docs, not the build.** "Dolby off" describes an intent we
+never implemented — the flag has been **inherited-on since M136**, exactly like HEVC, as a
+consequence of `proprietary_codecs=true` on Windows rather than a choice. Treat it the same way:
+**inherited, recorded, non-gating.** `enable_platform_ac3_eac3_audio=false` is unrelated (Dolby
+*audio*, separately defaulted) — the pairing only looked odd.
+
+**No action, and specifically do NOT "fix" it during the bump.** Adding
+`enable_platform_dolby_vision=false` would be a *behaviour change* introduced under cover of a
+version bump — the opposite of the pin-don't-bump discipline used for DEP-1a..d. If Dolby is
+genuinely unwanted, that is its own owner-decided change with its own smoke test, on the M136
+baseline as much as on `7871`.
+
+---
+
 ## Must Investigate on Next CEF Update
 
 ### Toolchain (MSVC) & Dependency Alignment
