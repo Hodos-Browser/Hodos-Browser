@@ -96,21 +96,72 @@ Before the fix the dev button rendered a generic blank-window icon.
 
 ---
 
-## S2 — Commit 2b: turn the Chromium sandbox ON
+## S2 — Commit 2b: turn the Chromium sandbox ON ⛔ **ATTEMPTED 2026-08-04, BLOCKED, REVERTED**
 
-Currently `settings.no_sandbox = true` on **both** platforms (Windows explicitly since commit 1;
-macOS unconditionally in `cef_browser_shell_mac.mm`). The bootstrap already hands us a real
-`sandbox_info` — commit 1 deliberately ignores it.
+Real exposure being closed: an unsandboxed renderer can socket straight to the wallet port,
+bypassing the C++ interception layer and every permission gate. Still worth doing — but it is a
+bigger job than "pass the pointer through", and the tree is back at known-good until it is solved.
 
-- Pass `sandbox_info` through from `RunWinMain` and drop `settings.no_sandbox = true`.
-- Add `SET_LPAC_ACLS`-equivalent handling: CEF's own cmake applies LPAC ACLs to the output dir for
-  Windows sandbox support (`tests/cefclient/CMakeLists.txt`). Ours does not yet.
-- **Expected failure shape is a renderer crash-loop at startup.** That is exactly why this is its
-  own commit.
-- Real exposure being closed: an unsandboxed renderer can socket straight to the wallet port,
-  bypassing the C++ interception layer and every permission gate.
-- Smoke per `DevOps-CICD/TESTING.md` §14.4: overlays render and take keyboard input; file dialogs
-  open; downloads write; adblock + farbling still inject; wallet bridge round-trips.
+### What was tried, and what it proved
+
+1. **Threaded `sandbox_info` through** from `RunWinMain` → `RunHodosMain` → **both**
+   `CefExecuteProcess` and `CefInitialize`, and made `no_sandbox` conditional
+   (`if (!sandbox_info) settings.no_sandbox = true;`), matching CEF's own
+   `tests/cefclient/cefclient_win.cc :: RunMain`. **Necessary but NOT sufficient.**
+2. **Added the LPAC ACLs** (`icacls <out dir> /grant *S-1-15-2-2:(OI)(CI)(RX)`, mirroring CEF's
+   `SET_LPAC_ACLS`). Verified applied — `icacls` shows
+   `ALL RESTRICTED APPLICATION PACKAGES:(OI)(CI)(RX)`.
+
+**⭐ The load-bearing discovery: `settings.browser_subprocess_path` silently disables the sandbox.**
+With it set (as it has always been, to the main exe path), the browser process reported
+`no_sandbox=0` **and** `sandbox_info=non-null` at `CefInitialize` — and yet *every* child process was
+spawned with `--no-sandbox` and ran at **MEDIUM** integrity. Removing it flipped that instantly:
+`--no-sandbox` disappeared from every child and the GPU process came up at **LOW integrity —
+genuinely sandboxed**. On Windows an empty value already means "use the main process executable",
+which under the bootstrap model is what we want, so setting it buys nothing and costs the sandbox.
+
+> Do not trust "no_sandbox = 0" as evidence the sandbox is on. It is not. Read the child process
+> **token integrity level** — MEDIUM means unsandboxed no matter what the settings say. The helper
+> used here is kept at `scratchpad/check-sandbox.ps1` (OpenProcessToken + TokenIntegrityLevel).
+
+### The actual blocker
+
+With the sandbox genuinely engaged, **zero renderer processes start.** Not a crash-loop with
+retries — they never appear at all. All 11 overlay browsers log as "created" in the browser process
+and the window paints **completely blank**. Browser + GPU + one utility survive; nothing else.
+
+Ruled out:
+
+- **`RendererCodeIntegrity`** — the obvious suspect, since an unsigned dev DLL being refused by a
+  sandboxed renderer would fit the symptom exactly. Added to the `disable-features` list; **no
+  change**. (Note it must be added to *that list* — `AppendSwitchWithValue` replaces, so a
+  command-line `--disable-features` is silently discarded.)
+- **Missing LPAC ACLs** — verified present, see above.
+
+### ⚠️ Fix this FIRST next time: Chromium's own log is broken
+
+`settings.log_file` is set to the **relative** path `"debug.log"`, which Chromium rejects on every
+launch with `Invalid logging destination: debug.log`. That means the engine cannot tell us why the
+renderers die — the whole investigation above ran blind. Point it at an absolute path under the
+profile's `logs/` directory before attempting the sandbox again. (Workaround used here: pass
+`--enable-logging --log-file=<abs> --log-severity=verbose` on the command line; it produced 8167
+lines with **no** sandbox diagnostics, only unrelated "Privacy Sandbox" component-updater noise.)
+
+### Suggested order for the next attempt
+
+1. Fix `settings.log_file` to an absolute path (its own tiny commit — it is a real defect and it
+   blinds every future engine investigation).
+2. **Rule out our embedder first**, per the runbook's own lesson: run the CEF 150 distribution's
+   prebuilt `cefclient.exe` **with the sandbox on**. If its renderers also fail on this machine, the
+   problem is environmental/CEF-150, not our code, and that reframes everything.
+3. Only then re-apply the three changes above (they are ~15 lines total and are recorded here).
+
+Smoke gate when it does work, per `DevOps-CICD/TESTING.md` §14.4: overlays render **and take
+keyboard input**; file dialogs open; downloads write; adblock + farbling still inject; wallet bridge
+round-trips.
+
+> macOS sets `no_sandbox = true` unconditionally in `cef_browser_shell_mac.mm` and was deliberately
+> **not** touched — that is a separate change, on a platform this session could not test.
 
 ---
 
