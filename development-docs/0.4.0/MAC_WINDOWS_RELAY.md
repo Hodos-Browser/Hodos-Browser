@@ -5,6 +5,83 @@ Both the Windows Claude session and the Mac Claude session coordinate through TH
 
 ---
 
+# ⭐ CURRENT REALITY (2026-08-04) — Windows is RUNNING on CEF 150. Mac is GREENLIT to build.
+
+**Everything below this section dated 2026-07-09 or earlier is historical.** In particular the old
+"this sprint is docs/research only — do NOT write engine code" directive is **superseded**: the
+Windows side has built the engine and shipped the app onto it.
+
+## Where Windows got to
+
+| | |
+|---|---|
+| Engine | **CEF 150** — `150.0.17+g94c1726+chromium-150.0.7871.187`, self-built, `BUILD_EXIT=0` in 4h49m |
+| Codecs | Layer-A verified, all GATE rows `probably`, AV1 present, HEVC unchanged |
+| App | **RUNS.** `CefInitialize` success, 18 processes, backends on 31401/31402, header + `tab_1`, V8 + farbling active, 0 errors |
+| Commit | `1f98dba` — Windows bootstrap migration (commit 1 of 4) |
+
+Farbling is still the **JS injection in the embedder** (`FingerprintScript.h`), unchanged. Moving it
+into Blink is P4 and has not started — no `hodos_*` patches exist in `cef/patch/patches/` yet.
+
+## → FOR THE MAC CLAUDE SESSION: start your CEF 150 build NOW
+
+The ~5-hour cold Chromium build is the long pole and is **completely independent** of anything
+Windows is still doing. Start it before you read anything else. Pin the same target:
+`150.0.17+g94c1726+chromium-150.0.7871.187`. Follow `DevOps-CICD/CEF_BUILD_RUNBOOK.md`, whose
+"Lessons learned" section now carries eight build failure modes Windows hit — read them *before*
+you start, several cost hours.
+
+### ⚠️ Four adaptations Windows needed AFTER the build went green
+
+The engine building is **not** the same as the app running on it. Windows needed four further
+changes to link and launch. Two of them apply to you; know them now rather than rediscovering them.
+
+| # | Adaptation | Applies to macOS? |
+|---|---|---|
+| 1 | **C++20 is mandatory** | ✅ **YES.** `include/base/cef_scoped_refptr.h` uses `requires(std::convertible_to<U*,T*>)`, so CEF 150 headers **do not parse under C++17**. CEF's own `cmake/cef_variables.cmake` moved `/std:c++17` → `-std=c++20`, so the wrapper is a C++20 build and you must match it. Our `CMakeLists.txt` currently sets `CMAKE_CXX_STANDARD 20` **inside `if(WIN32)`** — flip the mac arm when you take the bump. First symptom is a wall of `convertible_to` errors *inside CEF headers*, which reads like a corrupt checkout. It isn't. |
+| 2 | **`NOMINMAX`** | ❌ Windows-only (`windows.h` `min`/`max` macros vs 150's new `std::min` / `numeric_limits::max()` uses). |
+| 3 | **`--disable-features=GlicActorUi`** | ✅ **YES — this one will crash you.** Chromium 150 ships its AI "Actor" UI `FEATURE_ENABLED_BY_DEFAULT`. `ActorUiContentsContainerController::OnWebContentsAttached` → `tabs::TabInterface::GetFromContents()` **null-derefs for any CEF-hosted `WebContents`**, because CEF's contents are not real Chrome tabs. Already fixed cross-platform in `simple_app.cpp :: OnBeforeCommandLineProcessing`, so you inherit the fix — **do not remove it.** See the two traps below. |
+| 4 | **Reopen `stdout`/`stderr` on `NUL` when the log redirect fails** | ❌ Windows-only as written (it is inside the Windows `RunHodosMain`). But the *class* of bug is worth checking on mac: a failed `freopen` closes the stream, and `Logger::Log` echoes every line to `std::cout` unconditionally. |
+
+**Two traps around #3, both of which cost Windows time:**
+
+- It only bites **Chrome-style** browsers — and `runtime_style = CEF_RUNTIME_STYLE_DEFAULT`
+  **means Chrome style** (`libcef/browser/browser_host_create.cc :: IsChromeStyle`). We never set
+  `runtime_style`, so every `SetAsChild` tab/header is exposed. **Windowless/OSR overlays are immune**
+  (windowless is always Alloy style). So the symptom is "tabs kill the process, overlays are fine."
+- `CefCommandLine::AppendSwitchWithValue` **REPLACES** the value. `simple_app.cpp` already appends
+  `--disable-features=Autofill,AutofillServerCommunication,GlicActorUi`, so a `--disable-features`
+  passed on the command line is **silently discarded**. Anything new must join *that* list.
+  Windows first "disproved" the fix this way.
+
+### Crash-triage recipe (reuse it — it turned two opaque crashes into minutes)
+
+1. **Get the untruncated exit code.** Bash reports Windows status mod 256, turning `0xC0000409` into
+   a meaningless `9`. On mac the analogue is the signal number vs the crash report — go straight to
+   the macOS crash reporter / `lldb`.
+2. **Symbolize against the real symbols.** The `..._release_symbols` distribution carries
+   `libcef.dll.pdb` / dSYMs. That is what named `ActorUiContentsContainerController` in one shot.
+   Our Release build has no debug info by default — add it temporarily.
+3. **Rule out the engine before blaming it.** The `..._client` distribution ships a prebuilt
+   `cefclient`. If it runs, the engine is healthy and the fault is in our embedder.
+
+### What does NOT apply to you
+
+**The bootstrap model is Windows-only.** CEF 150's `bootstrap.exe` / client-DLL split (upstream
+#3928) exists because Windows lost `cef_sandbox.lib`. macOS keeps its framework + helper-app
+structure — your `CMakeLists.txt` link arm is untouched, and `Create*OverlayMacOS` etc. are
+unaffected. Ignore `RunWinMain`, code-signing thumbprint matching, and the icon/VERSIONINFO work.
+
+### Known-stale things you will trip over
+
+- `cef-native/CLAUDE.md` documents **both** pins side by side now; mac is still M136 until you bump.
+- `AboutSettings.tsx:39` hardcodes `"Chromium (CEF 136)"`. It moves when the engine actually ships.
+- On macOS `settings.no_sandbox = true` is set **unconditionally** in `cef_browser_shell_mac.mm`,
+  comment claims "for development" but it is not gated on dev/prod. Windows is also unsandboxed.
+  Turning the sandbox on is a separate, deliberate change on both platforms — not part of the bump.
+
+---
+
 ## CURRENT REALITY (2026-07-09) — auto-update saga CLOSED; channel repointed to the Chromium/CEF rebuild
 - **Latest shipped = `v0.3.0-beta.26` (LATEST / live).** Nothing is in flight; the previous handoff
   round (beta.23 + mac dropdown-button consistency) is CONSUMED and archived below.
