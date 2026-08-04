@@ -443,8 +443,17 @@ never auto-apply). Until scripted (see Open TODOs), run this as a checklist on e
   ```
 
   Precedence is **system < global < local**, so a global `autocrlf=false` overrides the installer
-  default without touching it. Then re-sync with `--force --reset` to discard the damaged
-  working-tree state in already-cloned sub-repos.
+  default without touching it.
+
+  **Then re-sync with `--force --reset -D`.** `--reset` alone is not enough: it discards local
+  modifications to **tracked** files, and the sync then fails a second time with a *different*
+  message — "The following **untracked** working tree files would be overwritten by checkout".
+  `-D` (`--delete_unversioned_trees`) is what clears those. Prefer letting gclient clean its own
+  tree over hand-deleting sub-repo directories:
+
+  ```bash
+  gclient sync --nohooks --with_branch_heads --force --reset -D -j2
+  ```
 
   ⚠️ **This matters beyond the sync:** P3 applies CEF patches with `git apply -p0` **exact-context,
   no fuzz**. CRLF-contaminated sources would fail to patch, and the error would point at the patch
