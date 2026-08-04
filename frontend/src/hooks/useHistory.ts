@@ -6,7 +6,7 @@ export const useHistory = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchHistory = useCallback((params: HistoryGetParams = { limit: 50, offset: 0 }) => {
+  const fetchHistory = useCallback(async (params: HistoryGetParams = { limit: 50, offset: 0 }) => {
     console.log('📚 useHistory: fetchHistory called with params:', params);
     setLoading(true);
     setError(null);
@@ -18,7 +18,7 @@ export const useHistory = () => {
       }
 
       console.log('🔄 useHistory: Calling window.hodosBrowser.history.get()');
-      const entries = window.hodosBrowser.history.get(params);
+      const entries = await window.hodosBrowser.history.get(params);
       console.log('✅ useHistory: Retrieved', entries.length, 'entries');
 
       setHistory(entries);
@@ -31,7 +31,7 @@ export const useHistory = () => {
     }
   }, []);
 
-  const searchHistory = useCallback((params: HistorySearchParams) => {
+  const searchHistory = useCallback(async (params: HistorySearchParams) => {
     console.log('🔍 useHistory: searchHistory called with params:', params);
     setLoading(true);
     setError(null);
@@ -43,7 +43,7 @@ export const useHistory = () => {
       }
 
       console.log('🔄 useHistory: Calling window.hodosBrowser.history.search()');
-      const results = window.hodosBrowser.history.search(params);
+      const results = await window.hodosBrowser.history.search(params);
       console.log('✅ useHistory: Search returned', results.length, 'entries');
 
       setHistory(results);
@@ -56,7 +56,7 @@ export const useHistory = () => {
     }
   }, []);
 
-  const deleteEntry = useCallback((url: string) => {
+  const deleteEntry = useCallback(async (url: string) => {
     console.log('🗑️ useHistory: deleteEntry called for URL:', url);
 
     try {
@@ -65,7 +65,7 @@ export const useHistory = () => {
         throw new Error('History API not available');
       }
 
-      const success = window.hodosBrowser.history.delete(url);
+      const success = await window.hodosBrowser.history.delete(url);
       console.log('✅ useHistory: Delete result:', success);
 
       if (success) {
@@ -81,7 +81,7 @@ export const useHistory = () => {
     }
   }, []);
 
-  const clearAllHistory = useCallback(() => {
+  const clearAllHistory = useCallback(async () => {
     console.log('🗑️ useHistory: clearAllHistory called');
 
     try {
@@ -90,7 +90,7 @@ export const useHistory = () => {
         throw new Error('History API not available');
       }
 
-      const success = window.hodosBrowser.history.clearAll();
+      const success = await window.hodosBrowser.history.clearAll();
       console.log('✅ useHistory: Clear all result:', success);
 
       if (success) {
@@ -106,7 +106,7 @@ export const useHistory = () => {
     }
   }, []);
 
-  const clearHistoryRange = useCallback((startTime: number, endTime: number) => {
+  const clearHistoryRange = useCallback(async (startTime: number, endTime: number) => {
     console.log('🗑️ useHistory: clearHistoryRange called');
 
     try {
@@ -115,12 +115,12 @@ export const useHistory = () => {
         throw new Error('History API not available');
       }
 
-      const success = window.hodosBrowser.history.clearRange({ startTime, endTime });
+      const success = await window.hodosBrowser.history.clearRange({ startTime, endTime });
       console.log('✅ useHistory: Clear range result:', success);
 
       if (success) {
         // Refresh history after clearing range
-        fetchHistory();
+        await fetchHistory();
       }
 
       return success;

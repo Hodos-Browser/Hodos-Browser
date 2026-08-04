@@ -5826,6 +5826,100 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // ========== HISTORY (browser-process authoritative) ==========
+    //
+    // These 7 handlers exist because the render process must NOT open the history
+    // SQLite database itself. It used to: SimpleRenderProcessHandler's constructor
+    // called HistoryManager::Initialize() in every --type=renderer process, giving
+    // every renderer — including ones hosting arbitrary web pages — a live read/write
+    // handle on the profile's history DB.
+    //
+    // That is exactly the capability the Chromium sandbox removes, so it was a hard
+    // blocker for enabling the sandbox, and a standing security problem regardless.
+    // It also meant history was simply broken on macOS, where the renderer-side init
+    // is #ifdef'd out entirely.
+    //
+    // Every reply goes back as a single "history_response" carrying the requestId, so
+    // the renderer can resolve the matching JS Promise. One response name (rather than
+    // seven) is deliberate: the promise map keys on requestId, so per-op response names
+    // would add dispatch code and carry no information.
+    if (message_name.rfind("history_", 0) == 0) {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        const int requestId = args->GetInt(0);
+        auto& history = HistoryManager::GetInstance();
+
+        nlohmann::json payload;
+        bool handled = true;
+
+        auto entriesToJson = [](const auto& entries) {
+            nlohmann::json arr = nlohmann::json::array();
+            for (const auto& e : entries) {
+                nlohmann::json o;
+                o["url"] = e.url;
+                o["title"] = e.title;
+                o["visitCount"] = e.visit_count;
+                o["visitTime"] = static_cast<int64_t>(e.visit_time);
+                o["transition"] = e.transition;
+                arr.push_back(o);
+            }
+            return arr;
+        };
+
+        if (message_name == "history_get") {
+            payload = entriesToJson(history.GetHistory(args->GetInt(1), args->GetInt(2)));
+        }
+        else if (message_name == "history_search") {
+            HistorySearchParams p;
+            p.search_term = args->GetString(1).ToString();
+            p.limit       = args->GetInt(2);
+            p.offset      = args->GetInt(3);
+            p.start_time  = static_cast<int64_t>(args->GetDouble(4));
+            p.end_time    = static_cast<int64_t>(args->GetDouble(5));
+            payload = entriesToJson(history.SearchHistory(p));
+        }
+        else if (message_name == "history_test") {
+            payload = entriesToJson(history.GetHistorySimple(args->GetInt(1)));
+        }
+        else if (message_name == "history_search_frecency") {
+            // Different shape from the others: carries lastVisitTime + frecencyScore.
+            payload = nlohmann::json::array();
+            for (const auto& r : history.SearchHistoryWithFrecency(args->GetString(1).ToString(),
+                                                                   args->GetInt(2))) {
+                nlohmann::json o;
+                o["url"] = r.entry.url;
+                o["title"] = r.entry.title;
+                o["visitCount"] = r.entry.visit_count;
+                o["lastVisitTime"] = static_cast<int64_t>(r.entry.last_visit_time);
+                o["frecencyScore"] = r.frecency_score;
+                payload.push_back(o);
+            }
+        }
+        else if (message_name == "history_delete") {
+            payload = history.DeleteHistoryEntry(args->GetString(1).ToString());
+        }
+        else if (message_name == "history_clear_all") {
+            payload = history.DeleteAllHistory();
+        }
+        else if (message_name == "history_clear_range") {
+            payload = history.DeleteHistoryRange(static_cast<int64_t>(args->GetDouble(1)),
+                                                 static_cast<int64_t>(args->GetDouble(2)));
+        }
+        else {
+            handled = false;
+        }
+
+        if (handled) {
+            CefRefPtr<CefProcessMessage> reply = CefProcessMessage::Create("history_response");
+            reply->GetArgumentList()->SetInt(0, requestId);
+            reply->GetArgumentList()->SetString(1, payload.dump());
+            frame->SendProcessMessage(PID_RENDERER, reply);
+            LOG_DEBUG_BROWSER("📚 " + message_name + " -> history_response (requestId " +
+                              std::to_string(requestId) + ")");
+            return true;
+        }
+        // Fall through — an unrecognized history_* name is not ours to swallow.
+    }
+
     if (message_name == "get_session_blocked_total") {
         int total = AdblockCache::GetInstance().getTotalSessionBlocked();
 

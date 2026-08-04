@@ -6,17 +6,14 @@
 
 // Cross-platform handlers (work on both platforms)
 #include "../../include/core/NavigationHandler.h"
-#include "../../include/core/HistoryManager.h"
 #include "../../include/core/AddressHandler.h"
-#include "../../include/core/AppPaths.h"
-#include "../../include/core/ProfileManager.h"  // ParseProfileArgument / IsValidProfileId (per-profile history)
 #include "../../include/core/JsStringEscape.h"  // F6: canonical escapeJsonForJs encoder
 
 #include "wrapper/cef_helpers.h"
 #include "include/cef_v8.h"
 #include <iostream>
-#include <fstream>
 #include <cstdio>
+#include <map>
 
 #include "../../include/core/Logger.h"
 #include "../../include/core/FingerprintScript.h"
@@ -79,10 +76,6 @@ public:
         LOG_DEBUG_RENDER("📤 Arguments count: " + std::to_string(arguments.size()));
 
         // Also try writing to a different file
-        std::ofstream testLog("test_debug.log", std::ios::app);
-        testLog << "📤 cefMessage.send() called with message: " << messageName << std::endl;
-        testLog.flush();
-        testLog.close();
 
         // Create the process message
         CefRefPtr<CefProcessMessage> message = CefProcessMessage::Create(messageName);
@@ -225,7 +218,65 @@ private:
     IMPLEMENT_REFCOUNTING(OmniboxCloseHandler);
 };
 
-// Handler for history operations (cross-platform)
+// ========== HISTORY V8 HANDLER ==========
+//
+// window.hodosBrowser.history.* — all 7 methods return a Promise and are serviced by
+// the BROWSER process over IPC.
+//
+// This used to call HistoryManager directly from the renderer, which meant every
+// renderer process (including ones hosting arbitrary web pages) held a read/write
+// handle on the profile's history SQLite DB. Three reasons that had to go:
+//   1. It is the exact capability the Chromium sandbox exists to remove, so it was a
+//      hard blocker for turning the sandbox on.
+//   2. It is a standing security problem even unsandboxed.
+//   3. It never worked on macOS at all — the renderer-side init is #ifdef'd out, so
+//      history.* silently returned empty there. Routing through IPC fixes mac too.
+//
+// The browser process already has an initialized HistoryManager bound to the correct
+// profile; `get_most_visited` was already using it this way, so this follows an
+// established path rather than inventing one.
+//
+// Threading: Execute() and OnProcessMessageReceived() both run on the renderer
+// thread, so the pending map below needs no lock. CEF_REQUIRE_RENDERER_THREAD()
+// asserts that in debug builds.
+
+struct PendingHistoryRequest {
+    CefRefPtr<CefV8Value> promise;
+    CefRefPtr<CefV8Context> context;
+};
+static std::map<int, PendingHistoryRequest> s_pendingHistory;
+static int s_nextHistoryRequestId = 1;
+
+// Resolve the promise for `requestId` with `json`. Called from the history_response
+// IPC handler. No-ops if the context died (page navigated away mid-request).
+void ResolveHistoryRequest(int requestId, const std::string& json) {
+    CEF_REQUIRE_RENDERER_THREAD();
+
+    auto it = s_pendingHistory.find(requestId);
+    if (it == s_pendingHistory.end()) {
+        LOG_DEBUG_RENDER("📚 history_response for unknown requestId " + std::to_string(requestId));
+        return;
+    }
+
+    PendingHistoryRequest pending = it->second;
+    s_pendingHistory.erase(it);
+
+    if (!pending.context || !pending.context->IsValid()) {
+        LOG_DEBUG_RENDER("📚 history_response dropped — context gone (requestId " +
+                         std::to_string(requestId) + ")");
+        return;
+    }
+
+    // Promise resolution must happen inside the owning V8 context.
+    pending.context->Enter();
+    try {
+        pending.promise->ResolvePromise(jsonToV8(nlohmann::json::parse(json)));
+    } catch (const std::exception& e) {
+        pending.promise->RejectPromise(std::string("history: bad response — ") + e.what());
+    }
+    pending.context->Exit();
+}
+
 class HistoryV8Handler : public CefV8Handler {
 public:
     HistoryV8Handler() {}
@@ -238,219 +289,107 @@ public:
 
         CEF_REQUIRE_RENDERER_THREAD();
 
-        LOG_INFO_RENDER("📚 HistoryV8Handler::Execute called with name: " + name.ToString());
+        LOG_DEBUG_RENDER("📚 history." + name.ToString() + "() called");
 
-        auto& manager = HistoryManager::GetInstance();
+        CefRefPtr<CefV8Context> context = CefV8Context::GetCurrentContext();
+        if (!context) {
+            exception = "history: no V8 context";
+            return true;
+        }
 
-        // Note: Database opens lazily on first access
-        // Manager is always "initialized" even if database doesn't exist yet
+        const int requestId = s_nextHistoryRequestId++;
+        CefRefPtr<CefProcessMessage> msg;
+        CefRefPtr<CefListValue> args;
+
+        auto begin = [&](const char* ipcName) {
+            msg = CefProcessMessage::Create(ipcName);
+            args = msg->GetArgumentList();
+            args->SetInt(0, requestId);
+        };
+
+        // Optional-parameter readers matching the previous synchronous defaults.
+        auto objArg = [&](size_t i) -> CefRefPtr<CefV8Value> {
+            return (arguments.size() > i && arguments[i]->IsObject()) ? arguments[i] : nullptr;
+        };
+        auto intField = [](CefRefPtr<CefV8Value> o, const char* k, int fallback) {
+            if (o && o->HasValue(k) && o->GetValue(k)->IsInt()) return o->GetValue(k)->GetIntValue();
+            return fallback;
+        };
+        auto strField = [](CefRefPtr<CefV8Value> o, const char* k) -> std::string {
+            if (o && o->HasValue(k) && o->GetValue(k)->IsString())
+                return o->GetValue(k)->GetStringValue().ToString();
+            return "";
+        };
+        // Times cross the wire as doubles: they are Chromium-epoch microseconds and do
+        // not fit an int32.
+        auto timeField = [](CefRefPtr<CefV8Value> o, const char* k) -> double {
+            if (o && o->HasValue(k) && o->GetValue(k)->IsDouble())
+                return o->GetValue(k)->GetDoubleValue();
+            return 0.0;
+        };
 
         if (name == "get") {
-            LOG_INFO_RENDER("📚 history.get() called - calling BROWSER process");
-
-            // Get parameters
-            int limit = 50;
-            int offset = 0;
-
-            if (arguments.size() > 0 && arguments[0]->IsObject()) {
-                CefRefPtr<CefV8Value> params = arguments[0];
-                if (params->HasValue("limit") && params->GetValue("limit")->IsInt()) {
-                    limit = params->GetValue("limit")->GetIntValue();
-                }
-                if (params->HasValue("offset") && params->GetValue("offset")->IsInt()) {
-                    offset = params->GetValue("offset")->GetIntValue();
-                }
-            }
-
-            // For now, call GetInstance() which will be uninitialized in render process
-            // This returns empty array - the proper fix is to use process messages
-            // but that requires async callbacks which complicates the API
-            auto entries = manager.GetHistory(limit, offset);
-
-            // Convert to V8 array
-            retval = CefV8Value::CreateArray(static_cast<int>(entries.size()));
-            for (size_t i = 0; i < entries.size(); i++) {
-                CefRefPtr<CefV8Value> entry_obj = CefV8Value::CreateObject(nullptr, nullptr);
-                entry_obj->SetValue("url", CefV8Value::CreateString(entries[i].url), V8_PROPERTY_ATTRIBUTE_NONE);
-                entry_obj->SetValue("title", CefV8Value::CreateString(entries[i].title), V8_PROPERTY_ATTRIBUTE_NONE);
-                entry_obj->SetValue("visitCount", CefV8Value::CreateInt(entries[i].visit_count), V8_PROPERTY_ATTRIBUTE_NONE);
-                entry_obj->SetValue("visitTime", CefV8Value::CreateDouble(static_cast<double>(entries[i].visit_time)), V8_PROPERTY_ATTRIBUTE_NONE);
-                entry_obj->SetValue("transition", CefV8Value::CreateInt(entries[i].transition), V8_PROPERTY_ATTRIBUTE_NONE);
-
-                retval->SetValue(static_cast<int>(i), entry_obj);
-            }
-
-            LOG_INFO_RENDER("📚 Returning " + std::to_string(entries.size()) + " entries from RENDER process");
-            return true;
+            CefRefPtr<CefV8Value> p = objArg(0);
+            begin("history_get");
+            args->SetInt(1, intField(p, "limit", 50));
+            args->SetInt(2, intField(p, "offset", 0));
         }
         else if (name == "search") {
-            // arguments[0] = { search, startTime, endTime, limit, offset }
-            if (arguments.size() == 0 || !arguments[0]->IsObject()) {
-                exception = "search() requires a parameters object";
-                return true;
-            }
-
-            HistorySearchParams params;
-            params.limit = 50;
-            params.offset = 0;
-            params.start_time = 0;
-            params.end_time = 0;
-
-            CefRefPtr<CefV8Value> search_params = arguments[0];
-
-            if (search_params->HasValue("search") && search_params->GetValue("search")->IsString()) {
-                params.search_term = search_params->GetValue("search")->GetStringValue().ToString();
-            }
-
-            if (search_params->HasValue("limit") && search_params->GetValue("limit")->IsInt()) {
-                params.limit = search_params->GetValue("limit")->GetIntValue();
-            }
-
-            if (search_params->HasValue("offset") && search_params->GetValue("offset")->IsInt()) {
-                params.offset = search_params->GetValue("offset")->GetIntValue();
-            }
-
-            if (search_params->HasValue("startTime") && search_params->GetValue("startTime")->IsDouble()) {
-                params.start_time = static_cast<int64_t>(search_params->GetValue("startTime")->GetDoubleValue());
-            }
-
-            if (search_params->HasValue("endTime") && search_params->GetValue("endTime")->IsDouble()) {
-                params.end_time = static_cast<int64_t>(search_params->GetValue("endTime")->GetDoubleValue());
-            }
-
-            std::cout << "🔍 history.search() called with term: " << params.search_term << std::endl;
-
-            auto results = manager.SearchHistory(params);
-
-            // Convert to V8 array
-            retval = CefV8Value::CreateArray(static_cast<int>(results.size()));
-            for (size_t i = 0; i < results.size(); i++) {
-                CefRefPtr<CefV8Value> entry_obj = CefV8Value::CreateObject(nullptr, nullptr);
-                entry_obj->SetValue("url", CefV8Value::CreateString(results[i].url), V8_PROPERTY_ATTRIBUTE_NONE);
-                entry_obj->SetValue("title", CefV8Value::CreateString(results[i].title), V8_PROPERTY_ATTRIBUTE_NONE);
-                entry_obj->SetValue("visitCount", CefV8Value::CreateInt(results[i].visit_count), V8_PROPERTY_ATTRIBUTE_NONE);
-                entry_obj->SetValue("visitTime", CefV8Value::CreateDouble(static_cast<double>(results[i].visit_time)), V8_PROPERTY_ATTRIBUTE_NONE);
-
-                retval->SetValue(static_cast<int>(i), entry_obj);
-            }
-
-            std::cout << "✅ Search returned " << results.size() << " entries" << std::endl;
-            return true;
+            CefRefPtr<CefV8Value> p = objArg(0);
+            if (!p) { exception = "search() requires a parameters object"; return true; }
+            begin("history_search");
+            args->SetString(1, strField(p, "search"));
+            args->SetInt(2, intField(p, "limit", 50));
+            args->SetInt(3, intField(p, "offset", 0));
+            args->SetDouble(4, timeField(p, "startTime"));
+            args->SetDouble(5, timeField(p, "endTime"));
+        }
+        else if (name == "searchWithFrecency") {
+            CefRefPtr<CefV8Value> p = objArg(0);
+            if (!p) { exception = "searchWithFrecency() requires a parameters object with query"; return true; }
+            begin("history_search_frecency");
+            args->SetString(1, strField(p, "query"));
+            args->SetInt(2, intField(p, "limit", 6));
         }
         else if (name == "delete") {
-            // arguments[0] = url string
-            if (arguments.size() == 0 || !arguments[0]->IsString()) {
+            if (arguments.empty() || !arguments[0]->IsString()) {
                 exception = "delete() requires a URL string";
                 return true;
             }
-
-            std::string url = arguments[0]->GetStringValue().ToString();
-            std::cout << "🗑️ history.delete() called for URL: " << url << std::endl;
-
-            bool success = manager.DeleteHistoryEntry(url);
-            retval = CefV8Value::CreateBool(success);
-
-            return true;
+            begin("history_delete");
+            args->SetString(1, arguments[0]->GetStringValue());
         }
         else if (name == "clearAll") {
-            std::cout << "🗑️ history.clearAll() called" << std::endl;
-
-            bool success = manager.DeleteAllHistory();
-            retval = CefV8Value::CreateBool(success);
-
-            return true;
+            begin("history_clear_all");
         }
         else if (name == "clearRange") {
-            // arguments[0] = { startTime, endTime }
-            if (arguments.size() == 0 || !arguments[0]->IsObject()) {
+            CefRefPtr<CefV8Value> p = objArg(0);
+            if (!p || !p->HasValue("startTime") || !p->HasValue("endTime")) {
                 exception = "clearRange() requires a parameters object with startTime and endTime";
                 return true;
             }
-
-            CefRefPtr<CefV8Value> params = arguments[0];
-
-            if (!params->HasValue("startTime") || !params->HasValue("endTime")) {
-                exception = "clearRange() requires startTime and endTime parameters";
-                return true;
-            }
-
-            int64_t start_time = static_cast<int64_t>(params->GetValue("startTime")->GetDoubleValue());
-            int64_t end_time = static_cast<int64_t>(params->GetValue("endTime")->GetDoubleValue());
-
-            std::cout << "🗑️ history.clearRange() called" << std::endl;
-
-            bool success = manager.DeleteHistoryRange(start_time, end_time);
-            retval = CefV8Value::CreateBool(success);
-
-            return true;
+            begin("history_clear_range");
+            args->SetDouble(1, p->GetValue("startTime")->GetDoubleValue());
+            args->SetDouble(2, p->GetValue("endTime")->GetDoubleValue());
         }
         else if (name == "test") {
-            LOG_INFO_RENDER("📚 history.test() called - running simple query");
-
-            auto results = manager.GetHistorySimple(10);
-
-            LOG_INFO_RENDER("📚 Simple query returned " + std::to_string(results.size()) + " entries");
-
-            // Convert to V8 array
-            retval = CefV8Value::CreateArray(static_cast<int>(results.size()));
-            for (size_t i = 0; i < results.size(); i++) {
-                CefRefPtr<CefV8Value> entry_obj = CefV8Value::CreateObject(nullptr, nullptr);
-                entry_obj->SetValue("url", CefV8Value::CreateString(results[i].url), V8_PROPERTY_ATTRIBUTE_NONE);
-                entry_obj->SetValue("title", CefV8Value::CreateString(results[i].title), V8_PROPERTY_ATTRIBUTE_NONE);
-                entry_obj->SetValue("visitCount", CefV8Value::CreateInt(results[i].visit_count), V8_PROPERTY_ATTRIBUTE_NONE);
-
-                retval->SetValue(static_cast<int>(i), entry_obj);
-            }
-
-            return true;
+            begin("history_test");
+            args->SetInt(1, 10);
         }
-        else if (name == "searchWithFrecency") {
-            // arguments[0] = { query: string, limit?: number }
-            if (arguments.size() == 0 || !arguments[0]->IsObject()) {
-                exception = "searchWithFrecency() requires a parameters object with query";
-                return true;
-            }
-
-            CefRefPtr<CefV8Value> params = arguments[0];
-
-            std::string query = "";
-            int limit = 6;
-
-            if (params->HasValue("query") && params->GetValue("query")->IsString()) {
-                query = params->GetValue("query")->GetStringValue().ToString();
-            }
-
-            if (params->HasValue("limit") && params->GetValue("limit")->IsInt()) {
-                limit = params->GetValue("limit")->GetIntValue();
-            }
-
-            LOG_INFO_RENDER("🔍 history.searchWithFrecency() called with query: " + query);
-
-            auto results = manager.SearchHistoryWithFrecency(query, limit);
-
-            // Convert to V8 array with score
-            retval = CefV8Value::CreateArray(static_cast<int>(results.size()));
-            for (size_t i = 0; i < results.size(); i++) {
-                CefRefPtr<CefV8Value> entry_obj = CefV8Value::CreateObject(nullptr, nullptr);
-                entry_obj->SetValue("url", CefV8Value::CreateString(results[i].entry.url), V8_PROPERTY_ATTRIBUTE_NONE);
-                entry_obj->SetValue("title", CefV8Value::CreateString(results[i].entry.title), V8_PROPERTY_ATTRIBUTE_NONE);
-                entry_obj->SetValue("visitCount", CefV8Value::CreateInt(results[i].entry.visit_count), V8_PROPERTY_ATTRIBUTE_NONE);
-                entry_obj->SetValue("lastVisitTime", CefV8Value::CreateDouble(static_cast<double>(results[i].entry.last_visit_time)), V8_PROPERTY_ATTRIBUTE_NONE);
-                entry_obj->SetValue("frecencyScore", CefV8Value::CreateDouble(results[i].frecency_score), V8_PROPERTY_ATTRIBUTE_NONE);
-
-                retval->SetValue(static_cast<int>(i), entry_obj);
-            }
-
-            LOG_INFO_RENDER("✅ searchWithFrecency returned " + std::to_string(results.size()) + " entries");
-            return true;
+        else {
+            return false;
         }
 
-        return false;
+        retval = CefV8Value::CreatePromise();
+        s_pendingHistory[requestId] = { retval, context };
+        context->GetBrowser()->GetMainFrame()->SendProcessMessage(PID_BROWSER, msg);
+        return true;
     }
 
 private:
     IMPLEMENT_REFCOUNTING(HistoryV8Handler);
 };
+
 
 // ========== GOOGLE SUGGEST V8 HANDLER ==========
 // Handler for window.hodosBrowser.googleSuggest API
@@ -510,41 +449,22 @@ SimpleRenderProcessHandler::SimpleRenderProcessHandler() {
     LOG_DEBUG_RENDER("🔧 Process ID: " + std::to_string(GetCurrentProcessId()));
     LOG_DEBUG_RENDER("🔧 Thread ID: " + std::to_string(GetCurrentThreadId()));
 
-    // Initialize HistoryManager for render process (Windows-only).
+    // The render process deliberately does NOT open the history database.
     //
-    // PER-PROFILE ISOLATION: this constructor runs in EVERY process (SimpleApp
-    // eagerly news this handler), including the browser process. We must:
-    //  (1) Only init here in a real renderer subprocess — the browser process
-    //      initializes its OWN HistoryManager with the resolved profile path
-    //      (cef_browser_shell.cpp DB-init). Running it here in the browser
-    //      process used to pre-open Default and, via OpenDatabase()'s already-open
-    //      guard, mask the correct per-profile init (history/omnibox leaked Default
-    //      into every profile).
-    //  (2) Use the ACTIVE profile, not a hardcoded "Default". The profile id is
-    //      propagated to child processes via SimpleApp::OnBeforeChildProcessLaunch
-    //      (--profile=). IsValidProfileId guards it; fall back to Default only if
-    //      absent/invalid.
-    std::wstring cmdlineW = GetCommandLineW();
-    const bool isRenderer = cmdlineW.find(L"--type=renderer") != std::wstring::npos;
-    if (isRenderer) {
-        std::string appdata_path = std::getenv("APPDATA") ? std::getenv("APPDATA") : "";
-        std::string profileId = ProfileManager::ParseProfileArgument(cmdlineW);
-        if (profileId.empty() || !ProfileManager::IsValidProfileId(profileId)) {
-            profileId = "Default";
-        }
-        std::string user_data_path = appdata_path + "\\" + AppPaths::GetAppDirName() + "\\" + profileId;
-
-        LOG_DEBUG_RENDER("🔧 Initializing HistoryManager in RENDER process for profile: " + profileId);
-        if (HistoryManager::GetInstance().Initialize(user_data_path)) {
-            LOG_DEBUG_RENDER("✅ HistoryManager initialized in RENDER process");
-        } else {
-            LOG_ERROR_RENDER("❌ Failed to initialize HistoryManager in RENDER process");
-        }
-    } else {
-        LOG_DEBUG_RENDER("🔧 Non-renderer process — HistoryManager left to the browser-process DB init");
-    }
-#else
-    LOG_DEBUG_RENDER("🔧 HistoryManager not available on macOS - stubbed");
+    // It used to: this constructor called HistoryManager::Initialize() with the
+    // profile path in every --type=renderer process, so every renderer — including
+    // ones rendering arbitrary web pages — held a read/write handle on the profile's
+    // history SQLite DB. That is precisely what the Chromium sandbox is meant to
+    // prevent, so it blocked enabling the sandbox, and it was a standing security
+    // problem in its own right.
+    //
+    // history.* is now serviced by the browser process over IPC (see
+    // HistoryV8Handler above and the history_* handlers in simple_handler.cpp),
+    // which already owns a correctly profile-bound HistoryManager. That also fixes
+    // macOS, where this init never ran at all and history silently returned empty.
+    //
+    // The per-profile plumbing this replaced is not lost: the browser process resolves
+    // the profile itself, so --profile= no longer has to be re-derived here.
 #endif
 }
 
@@ -1096,6 +1016,19 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
             return true;
         }
 
+        // ========== HISTORY RESPONSE ==========
+        // Reply to any of the seven history_* requests. Resolves the JS Promise that
+        // HistoryV8Handler::Execute() handed back, matched on requestId.
+        if (message_name == "history_response") {
+            CefRefPtr<CefListValue> args = message->GetArgumentList();
+            if (args->GetSize() < 2) {
+                LOG_WARNING_RENDER("history_response missing args (need 2)");
+                return true;
+            }
+            ResolveHistoryRequest(args->GetInt(0), args->GetString(1).ToString());
+            return true;
+        }
+
         // ========== WALLET IPC BRIDGE RESPONSE — CHUNKED (large payloads) ==========
         // Pair to the browser-process chunking in sendWalletResponseIpc. Each chunk
         // is forwarded to window.__hodos_walletResponseChunk with its framing
@@ -1460,9 +1393,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         std::string errorMessage = args->GetString(0);
 
         std::cout << "❌ Sign transaction error received: " << errorMessage << std::endl;
-        std::ofstream debugLog("debug_output.log", std::ios::app);
-        debugLog << "❌ Sign transaction error received: " << errorMessage << std::endl;
-        debugLog.close();
 
         // Execute JavaScript to handle the error
         std::string js = "if (window.onSignTransactionError) { window.onSignTransactionError('" + errorMessage + "'); }";
@@ -1478,11 +1408,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         std::cout << "✅ Broadcast transaction response received: " << responseJson << std::endl;
         std::cout << "🔍 Browser ID: " << browser->GetIdentifier() << std::endl;
         std::cout << "🔍 Frame URL: " << frame->GetURL().ToString() << std::endl;
-        std::ofstream debugLog("debug_output.log", std::ios::app);
-        debugLog << "✅ Broadcast transaction response received: " << responseJson << std::endl;
-        debugLog << "🔍 Browser ID: " << browser->GetIdentifier() << std::endl;
-        debugLog << "🔍 Frame URL: " << frame->GetURL().ToString() << std::endl;
-        debugLog.close();
 
         // Execute JavaScript to dispatch the response event
         std::string js = "window.dispatchEvent(new CustomEvent('cefMessageResponse', { detail: { message: 'broadcast_transaction_response', args: ['" + responseJson + "'] } }));";
@@ -1496,9 +1421,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         std::string errorMessage = args->GetString(0);
 
         std::cout << "❌ Broadcast transaction error received: " << errorMessage << std::endl;
-        std::ofstream debugLog("debug_output.log", std::ios::app);
-        debugLog << "❌ Broadcast transaction error received: " << errorMessage << std::endl;
-        debugLog.close();
 
         // Execute JavaScript to handle the error
         std::string js = "if (window.onBroadcastTransactionError) { window.onBroadcastTransactionError('" + errorMessage + "'); }";
@@ -1517,9 +1439,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
 
             std::string responseJson = args->GetString(0);
             std::cout << "✅ Send transaction response received (length: " << responseJson.length() << ")" << std::endl;
-            std::ofstream debugLog("debug_output.log", std::ios::app);
-            debugLog << "✅ Send transaction response received (length: " << responseJson.length() << "): " << responseJson << std::endl;
-            debugLog.close();
 
             // Execute JavaScript to call the callback function directly
             // Use JSON.parse() to safely parse the JSON string and avoid injection issues
@@ -1532,9 +1451,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
                                  escapedJson + "')); } catch(e) { console.error('Failed to parse transaction response:', e); } }";
 
                 std::cout << "🔍 Executing JavaScript (length: " << js.length() << ")" << std::endl;
-                debugLog.open("debug_output.log", std::ios::app);
-                debugLog << "🔍 Executing JavaScript (length: " << js.length() << ")" << std::endl;
-                debugLog.close();
 
                 if (frame) {
                     frame->ExecuteJavaScript(js, frame->GetURL(), 0);
@@ -1544,15 +1460,9 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
                 }
             } catch (const std::exception& e) {
                 std::cerr << "❌ Failed to execute JavaScript for send_transaction_response: " << e.what() << std::endl;
-                std::ofstream debugLog("debug_output.log", std::ios::app);
-                debugLog << "❌ Failed to execute JavaScript: " << e.what() << std::endl;
-                debugLog.close();
             }
         } catch (const std::exception& e) {
             std::cerr << "❌ Exception in send_transaction_response handler: " << e.what() << std::endl;
-            std::ofstream debugLog("debug_output.log", std::ios::app);
-            debugLog << "❌ Exception in send_transaction_response handler: " << e.what() << std::endl;
-            debugLog.close();
         }
 
         return true;
@@ -1563,9 +1473,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         std::string errorMessage = args->GetString(0);
 
         std::cout << "❌ Send transaction error received: " << errorMessage << std::endl;
-        std::ofstream debugLog("debug_output.log", std::ios::app);
-        debugLog << "❌ Send transaction error received: " << errorMessage << std::endl;
-        debugLog.close();
 
         // Execute JavaScript to handle the error
         std::string js = "if (window.onSendTransactionError) { window.onSendTransactionError('" + errorMessage + "'); }";
@@ -1581,11 +1488,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         std::cout << "✅ Get balance response received: " << responseJson << std::endl;
         std::cout << "🔍 Browser ID: " << browser->GetIdentifier() << std::endl;
         std::cout << "🔍 Frame URL: " << frame->GetURL().ToString() << std::endl;
-        std::ofstream debugLog("debug_output.log", std::ios::app);
-        debugLog << "✅ Get balance response received: " << responseJson << std::endl;
-        debugLog << "🔍 Browser ID: " << browser->GetIdentifier() << std::endl;
-        debugLog << "🔍 Frame URL: " << frame->GetURL().ToString() << std::endl;
-        debugLog.close();
 
         // Execute JavaScript to call the callback function directly
         std::string js = "if (window.onGetBalanceResponse) { window.onGetBalanceResponse(" + responseJson + "); }";
@@ -1599,9 +1501,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         std::string errorMessage = args->GetString(0);
 
         std::cout << "❌ Get balance error received: " << errorMessage << std::endl;
-        std::ofstream debugLog("debug_output.log", std::ios::app);
-        debugLog << "❌ Get balance error received: " << errorMessage << std::endl;
-        debugLog.close();
 
         // Execute JavaScript to handle the error
         std::string js = "if (window.onGetBalanceError) { window.onGetBalanceError('" + errorMessage + "'); }";
@@ -1617,11 +1516,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         std::cout << "✅ Get transaction history response received: " << responseJson << std::endl;
         std::cout << "🔍 Browser ID: " << browser->GetIdentifier() << std::endl;
         std::cout << "🔍 Frame URL: " << frame->GetURL().ToString() << std::endl;
-        std::ofstream debugLog("debug_output.log", std::ios::app);
-        debugLog << "✅ Get transaction history response received: " << responseJson << std::endl;
-        debugLog << "🔍 Browser ID: " << browser->GetIdentifier() << std::endl;
-        debugLog << "🔍 Frame URL: " << frame->GetURL().ToString() << std::endl;
-        debugLog.close();
 
         // Execute JavaScript to dispatch the response event
         std::string js = "window.dispatchEvent(new CustomEvent('cefMessageResponse', { detail: { message: 'get_transaction_history_response', args: ['" + responseJson + "'] } }));";
@@ -1635,9 +1529,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         std::string errorMessage = args->GetString(0);
 
         std::cout << "❌ Get transaction history error received: " << errorMessage << std::endl;
-        std::ofstream debugLog("debug_output.log", std::ios::app);
-        debugLog << "❌ Get transaction history error received: " << errorMessage << std::endl;
-        debugLog.close();
 
         // Execute JavaScript to handle the error
         std::string js = "if (window.onGetTransactionHistoryError) { window.onGetTransactionHistoryError('" + errorMessage + "'); }";
@@ -1654,9 +1545,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         std::string settingsJson = args->GetString(0);
 
         std::cout << "✅ Settings response received" << std::endl;
-        std::ofstream debugLog("debug_output.log", std::ios::app);
-        debugLog << "✅ Settings response received: " << settingsJson.substr(0, 100) << "..." << std::endl;
-        debugLog.close();
 
         // Execute JavaScript to call the callback function directly
         std::string js = "if (window.onSettingsResponse) { window.onSettingsResponse(" + settingsJson + "); }";
@@ -1684,9 +1572,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         std::string profilesJson = args->GetString(0);
 
         std::cout << "📂 Import profiles result received" << std::endl;
-        std::ofstream debugLog("debug_output.log", std::ios::app);
-        debugLog << "📂 Import profiles result: " << profilesJson << std::endl;
-        debugLog.close();
 
         std::string js = "if (window.onImportProfilesResult) { window.onImportProfilesResult(" + profilesJson + "); }";
         frame->ExecuteJavaScript(js, frame->GetURL(), 0);
@@ -1699,9 +1584,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         std::string resultJson = args->GetString(0);
 
         std::cout << "📦 Import complete" << std::endl;
-        std::ofstream debugLog("debug_output.log", std::ios::app);
-        debugLog << "📦 Import complete: " << resultJson << std::endl;
-        debugLog.close();
 
         std::string js = "if (window.onImportComplete) { window.onImportComplete(" + resultJson + "); }";
         frame->ExecuteJavaScript(js, frame->GetURL(), 0);
@@ -1714,9 +1596,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         std::string responseJson = args->GetString(0);
 
         std::cout << "✅ Wallet status check response received: " << responseJson << std::endl;
-        std::ofstream debugLog("debug_output.log", std::ios::app);
-        debugLog << "✅ Wallet status check response received: " << responseJson << std::endl;
-        debugLog.close();
 
         // Execute JavaScript to call the callback function directly
         std::string js = "if (window.onWalletStatusResponse) { window.onWalletStatusResponse(" + responseJson + "); }";
@@ -1730,9 +1609,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         std::string responseJson = args->GetString(0);
 
         std::cout << "✅ Create wallet response received: " << responseJson << std::endl;
-        std::ofstream debugLog("debug_output.log", std::ios::app);
-        debugLog << "✅ Create wallet response received: " << responseJson << std::endl;
-        debugLog.close();
 
         // Execute JavaScript to call the callback function directly
         std::string js = "if (window.onCreateWalletResponse) { window.onCreateWalletResponse(" + responseJson + "); }";
@@ -1746,9 +1622,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         std::string responseJson = args->GetString(0);
 
         std::cout << "✅ Load wallet response received: " << responseJson << std::endl;
-        std::ofstream debugLog("debug_output.log", std::ios::app);
-        debugLog << "✅ Load wallet response received: " << responseJson << std::endl;
-        debugLog.close();
 
         // Execute JavaScript to call the callback function directly
         std::string js = "if (window.onLoadWalletResponse) { window.onLoadWalletResponse(" + responseJson + "); }";
@@ -1762,9 +1635,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         std::string responseJson = args->GetString(0);
 
         std::cout << "✅ Get wallet info response received: " << responseJson << std::endl;
-        std::ofstream debugLog("debug_output.log", std::ios::app);
-        debugLog << "✅ Get wallet info response received: " << responseJson << std::endl;
-        debugLog.close();
 
         // Execute JavaScript to call the callback function directly
         std::string js = "if (window.onGetWalletInfoResponse) { window.onGetWalletInfoResponse(" + responseJson + "); }";
@@ -1778,9 +1648,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         std::string responseJson = args->GetString(0);
 
         std::cout << "✅ Get all addresses response received: " << responseJson << std::endl;
-        std::ofstream debugLog("debug_output.log", std::ios::app);
-        debugLog << "✅ Get all addresses response received: " << responseJson << std::endl;
-        debugLog.close();
 
         // Execute JavaScript to call the callback function directly
         std::string js = "if (window.onGetAllAddressesResponse) { window.onGetAllAddressesResponse(" + responseJson + "); }";
@@ -1794,9 +1661,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         std::string responseJson = args->GetString(0);
 
         std::cout << "✅ Get current address response received: " << responseJson << std::endl;
-        std::ofstream debugLog("debug_output.log", std::ios::app);
-        debugLog << "✅ Get current address response received: " << responseJson << std::endl;
-        debugLog.close();
 
         // Execute JavaScript to call the callback function directly
         std::string js = "if (window.onGetCurrentAddressResponse) { window.onGetCurrentAddressResponse(" + responseJson + "); }";
@@ -1810,9 +1674,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         std::string responseJson = args->GetString(0);
 
         std::cout << "✅ Mark wallet backed up response received: " << responseJson << std::endl;
-        std::ofstream debugLog("debug_output.log", std::ios::app);
-        debugLog << "✅ Mark wallet backed up response received: " << responseJson << std::endl;
-        debugLog.close();
 
         // Execute JavaScript to call the callback function directly
         std::string js = "if (window.onMarkWalletBackedUpResponse) { window.onMarkWalletBackedUpResponse(" + responseJson + "); }";
@@ -1826,9 +1687,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         std::string responseJson = args->GetString(0);
 
         std::cout << "✅ Get addresses response received: " << responseJson << std::endl;
-        std::ofstream debugLog("debug_output.log", std::ios::app);
-        debugLog << "✅ Get addresses response received: " << responseJson << std::endl;
-        debugLog.close();
 
         // Execute JavaScript to call the callback function directly
         std::string js = "if (window.onGetAddressesResponse) { window.onGetAddressesResponse(" + responseJson + "); }";

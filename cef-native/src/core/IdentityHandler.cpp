@@ -2,28 +2,65 @@
 #include "../../include/core/AppPaths.h"
 #include <fstream>
 #include <cstdlib>
+#include <cstdint>
 #include <filesystem>
 
+namespace {
+
+// Convert a JSON *scalar* to V8. Shared by both branches of jsonToV8 so that
+// integers are widened consistently.
+//
+// ⚠️ The int64 case is why this exists. CefV8Value::CreateInt takes an int32, so a
+// Chromium-epoch timestamp (microseconds since 1601 — comfortably past 2^31) used to
+// be silently truncated to garbage. JS numbers are IEEE doubles anyway, so emitting
+// CreateDouble for anything that doesn't fit int32 is both correct and lossless up to
+// 2^53. Returns null for a non-scalar so callers can decide how to render it.
+CefRefPtr<CefV8Value> jsonScalarToV8(const nlohmann::json& v) {
+    if (v.is_string())  return CefV8Value::CreateString(v.get<std::string>());
+    if (v.is_boolean()) return CefV8Value::CreateBool(v.get<bool>());
+    if (v.is_null())    return CefV8Value::CreateNull();
+    if (v.is_number_integer()) {
+        const int64_t n = v.get<int64_t>();
+        if (n >= INT32_MIN && n <= INT32_MAX) {
+            return CefV8Value::CreateInt(static_cast<int32_t>(n));
+        }
+        return CefV8Value::CreateDouble(static_cast<double>(n));
+    }
+    if (v.is_number_float()) return CefV8Value::CreateDouble(v.get<double>());
+    return nullptr;
+}
+
+}  // namespace
+
 CefRefPtr<CefV8Value> jsonToV8(const nlohmann::json& j) {
+    // Array + top-level-scalar support was added for the history-over-IPC move (2a).
+    if (j.is_array()) {
+        CefRefPtr<CefV8Value> arr = CefV8Value::CreateArray(static_cast<int>(j.size()));
+        for (size_t i = 0; i < j.size(); ++i) {
+            arr->SetValue(static_cast<int>(i), jsonToV8(j[i]));
+        }
+        return arr;
+    }
+
     if (j.is_object()) {
         CefRefPtr<CefV8Value> obj = CefV8Value::CreateObject(nullptr, nullptr);
         for (auto it = j.begin(); it != j.end(); ++it) {
             const std::string& key = it.key();
             const auto& value = it.value();
-            if (value.is_string()) {
-                obj->SetValue(key, CefV8Value::CreateString(value.get<std::string>()), V8_PROPERTY_ATTRIBUTE_NONE);
-            } else if (value.is_boolean()) {
-                obj->SetValue(key, CefV8Value::CreateBool(value), V8_PROPERTY_ATTRIBUTE_NONE);
-            } else if (value.is_number_integer()) {
-                obj->SetValue(key, CefV8Value::CreateInt(value), V8_PROPERTY_ATTRIBUTE_NONE);
-            } else if (value.is_number_float()) {
-                obj->SetValue(key, CefV8Value::CreateDouble(value), V8_PROPERTY_ATTRIBUTE_NONE);
+            if (CefRefPtr<CefV8Value> scalar = jsonScalarToV8(value)) {
+                obj->SetValue(key, scalar, V8_PROPERTY_ATTRIBUTE_NONE);
             } else {
+                // Nested object/array. Kept as the .dump() string ON PURPOSE — the
+                // existing identity.get / wallet-info callers parse it that way, and
+                // recursing here would be a silent contract change for them. History
+                // entries are flat, so this branch is not on the 2a path.
                 obj->SetValue(key, CefV8Value::CreateString(value.dump()), V8_PROPERTY_ATTRIBUTE_NONE);
             }
         }
         return obj;
     }
+
+    if (CefRefPtr<CefV8Value> scalar = jsonScalarToV8(j)) return scalar;
     return CefV8Value::CreateUndefined();
 }
 

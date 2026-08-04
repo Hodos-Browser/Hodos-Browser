@@ -61,7 +61,7 @@ export function useOmniboxSuggestions(): UseOmniboxSuggestionsResult {
   }, [suggestions]);
 
   // Main search function
-  const performSearch = useCallback((query: string) => {
+  const performSearch = useCallback(async (query: string) => {
     currentQueryRef.current = query;
 
     if (!query || query.length < 1) {
@@ -73,15 +73,22 @@ export function useOmniboxSuggestions(): UseOmniboxSuggestionsResult {
 
     setLoading(true);
 
-    // Fetch history immediately (synchronous V8 call)
+    // History now round-trips to the browser process (the renderer no longer opens
+    // the history DB), so this is awaited rather than a synchronous V8 return.
     let historyResults: HistoryEntryWithFrecency[] = [];
     try {
       if (window.hodosBrowser?.history?.searchWithFrecency) {
-        historyResults = window.hodosBrowser.history.searchWithFrecency({ query, limit: 6 });
+        historyResults = await window.hodosBrowser.history.searchWithFrecency({ query, limit: 6 });
       }
     } catch (error) {
       console.warn('History search failed:', error);
     }
+
+    // The await above is new (history used to return synchronously), so a fast typist
+    // can now land a newer query while this one is still in flight. Drop stale results
+    // rather than letting them overwrite fresher suggestions — same guard already used
+    // for the Google leg below.
+    if (currentQueryRef.current !== query) return;
 
     // Create initial suggestions from history
     const historySuggestions = rankAndMergeSuggestions(historyResults, [], query);

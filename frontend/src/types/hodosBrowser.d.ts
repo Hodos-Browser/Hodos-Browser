@@ -9,13 +9,16 @@ import type { BookmarkData, FolderData, BookmarkAddResponse, BookmarkUpdateRespo
 declare global {
   interface Window {
     hodosBrowser: {
+      // Promise-based since the history-over-IPC move: the render process no longer
+      // opens the history database itself, so every call is a round-trip to the
+      // browser process. Matches the shape `cookies` below has always had.
       history: {
-        get: (params?: HistoryGetParams) => HistoryEntry[];
-        search: (params: HistorySearchParams) => HistoryEntry[];
-        searchWithFrecency: (params: { query: string; limit?: number }) => HistoryEntryWithFrecency[];
-        delete: (url: string) => boolean;
-        clearAll: () => boolean;
-        clearRange: (params: ClearRangeParams) => boolean;
+        get: (params?: HistoryGetParams) => Promise<HistoryEntry[]>;
+        search: (params: HistorySearchParams) => Promise<HistoryEntry[]>;
+        searchWithFrecency: (params: { query: string; limit?: number }) => Promise<HistoryEntryWithFrecency[]>;
+        delete: (url: string) => Promise<boolean>;
+        clearAll: () => Promise<boolean>;
+        clearRange: (params: ClearRangeParams) => Promise<boolean>;
       };
       cookies: {
         getAll: () => Promise<CookieData[]>;
