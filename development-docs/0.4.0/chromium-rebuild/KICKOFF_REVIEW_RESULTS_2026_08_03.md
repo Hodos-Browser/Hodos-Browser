@@ -87,8 +87,11 @@ is real. Full record: `../../DevOps-CICD/CEF_VERSION_UPDATE_TRACKER.md` §Versio
   should clean up.
 - **TD-1 line refs** — `simple_render_process_handler.cpp:581–627` (FP block) and `:567–579` (adblock
   scriptlet) are **exact today**. The older `:586-632` is the stale one.
-- **A dynamic minos guard already exists** (`release.yml:621-645`) — reads the framework's real minos,
-  so VER-4 is **fail-loud**, not silent-drift.
+- **A dynamic minos guard already exists** — at **`release.yml:645-672`** (⚠️ corrected 2026-08-03;
+  `621-645` was wrong, that range is Sparkle XPC-service removal). It runs `vtool -show-build` and
+  fails if any shipped Mach-O's minos is *below* the CEF framework's, so VER-4 is **fail-loud**, not
+  silent-drift. **But note its limit:** it compares binaries against each other, so a consistently
+  wrong floor passes. It cannot tell you the *published* min is wrong.
 
 ---
 
