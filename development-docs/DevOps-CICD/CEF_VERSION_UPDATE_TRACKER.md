@@ -123,6 +123,70 @@ baseline as much as on `7871`.
 
 ---
 
+## ✅ BUILD CHANGELOG — CEF 150 / `7871` (Windows, 2026-08-04)
+
+| Item | Value |
+|---|---|
+| Branch / checkout | `7871` / `94c1726` = `150.0.17+g94c1726+chromium-150.0.7871.187` |
+| Chromium | `refs/tags/150.0.7871.187` = `30f6543ae91e6a860e73b76e3216b663b050f4e5` |
+| `GN_DEFINES` | `is_official_build=true proprietary_codecs=true ffmpeg_branding=Chrome chrome_pgo_phase=0` (unchanged from M136) |
+| Build tool | **Siso** (default on fresh out-dir) |
+| **Wall-clock** | **289 min (4 h 49 m)** — well under the 10–12 h estimate |
+| Host | i9-12950HX, 16C/24T, 31.7 GB RAM; 24 parallel `clang-cl` |
+| `libcef.dll` | **292 MB** (M136 was 249 MB) |
+| Wrapper | `libcef_dll_wrapper.lib` **104 MB**, builds clean on the new headers |
+| Patch set | none (P3 not yet stood up — this is a pure version bump) |
+| Deps touched | none in the CEF tree; DEP-1a..d pinned separately, no version moved |
+| Codec Layer-A | **PASS — all GATE rows `probably`**, AV1 present, HEVC unchanged vs M136 |
+| Est. per-bump patch-rebase hours (I10) | **N/A this bump** (zero Hodos patches). Baseline for the next one: ~5 h build + ~4 h of checkout/tooling firefighting, all now documented |
+
+**Failures survived (all documented in `CEF_BUILD_RUNBOOK.md` Lessons):** shallow `depot_tools`;
+stale `automate-git.py`; `rd`/`STATUS_DLL_INIT_FAILED` aborting gclient on an empty temp dir; HTTP
+429; `core.autocrlf`; the autocrlf follow-on; `update_depot_tools.bat` re-dirtying the pin; and a
+**gate malfunction that impersonated a codec regression**.
+
+### 🚨 VER-5 DRIFT FOUND — `cef_sandbox.lib` is GONE, `bootstrap.exe` is NEW
+
+**This is the drift audit paying for itself.** Comparing the shipped M136 `Release/` against `7871`:
+
+| File | M136 | 7871 |
+|---|---|---|
+| `cef_sandbox.lib` | **present** (we link it) | **ABSENT from the distribution** |
+| `bootstrap.exe` | — | **NEW** |
+| `bootstrapc.exe` | — | **NEW** |
+
+`cef_sandbox.lib` still *builds* (`out/Release_GN_x64/obj/cef/cef_sandbox.lib`) but CEF no longer
+copies it into the distribution — only `include/cef_sandbox_win.h` ships.
+
+**Root cause: CEF issue #3928 — CEF removed `cef_sandbox` linking in favour of a bootstrap
+executable.** On Windows, `USE_SANDBOX` now defines **`CEF_USE_BOOTSTRAP`** instead of
+`CEF_USE_SANDBOX` (`cmake/cef_variables.cmake:609-613`). CEF's own reference client shows the new
+model (`tests/cefclient/CMakeLists.txt:592-596`):
+
+```cmake
+add_library(${CEF_TARGET} SHARED ${CEFCLIENT_SRCS})   # the app becomes a DLL
+COPY_SINGLE_FILE(... bootstrap.exe → ${CEF_TARGET}.exe)  # CEF's exe, renamed
+```
+
+**Impact on Hodos — this is an architecture change, not a packaging tweak.**
+`cef-native/CMakeLists.txt:473` links `cef_sandbox`, so `cef-native` **cannot link as-is**. Adopting
+the upstream model means `HodosBrowser.exe` becomes `HodosBrowser.dll` + a renamed copy of CEF's
+`bootstrap.exe`, which touches:
+
+- **Code signing** — a new binary to Authenticode-sign (CN continuity gate).
+- **Silent auto-update** — the `{app}` file manifest changes shape. This is precisely the
+  VER-5 → P6 linkage the roadmap flagged: *a changed manifest is what breaks a silent update.*
+- **The installer** — `hodos-browser.iss` `[Files]` and the `.exe`/`.dll` split.
+- **Dev/prod safeguard + launcher scripts**, which key off the executable path/name.
+
+**⛔ NOT actioned — owner decision required.** Options: **(A)** adopt the bootstrap model (upstream's
+path; real work + a mandatory N-1→N update test); **(B)** hand-copy `cef_sandbox.lib` out of the
+build tree and keep linking it (non-standard, diverges from upstream, may not survive the sandbox
+init API change); **(C)** `USE_SANDBOX=OFF` — **rejected**, that disables the Chromium sandbox in a
+money-handling browser.
+
+---
+
 ## Must Investigate on Next CEF Update
 
 ### Toolchain (MSVC) & Dependency Alignment
