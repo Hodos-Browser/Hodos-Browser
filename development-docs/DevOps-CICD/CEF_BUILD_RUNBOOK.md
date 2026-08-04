@@ -455,6 +455,33 @@ never auto-apply). Until scripted (see Open TODOs), run this as a checklist on e
   gclient sync --nohooks --with_branch_heads --force --reset -D -j2
   ```
 
+  **Set `autocrlf=false` BEFORE the first clone if you can.** Flipping it on an existing tree makes
+  every repo that was already cloned under `autocrlf=true` look massively dirty, because the
+  worktree holds CRLF while git now expects LF. Next symptom, in a repo you never edited:
+
+  ```
+  error: Your local changes to the following files would be overwritten by checkout
+  ```
+
+  **Identify it by the diffstat — the two numbers are equal:**
+
+  ```
+  579 files changed, 193116 insertions(+), 193116 deletions(-)   # depot_tools
+  137 files changed,  50972 insertions(+),  50972 deletions(-)   # cef
+  ```
+
+  Identical insertions and deletions across every file is a pure line-ending rewrite, never real
+  content. **Repair is one command per affected repo** (safe — these are pristine upstream clones
+  with no local work):
+
+  ```bash
+  git -C <repo> reset --hard      # rewrites the worktree with LF
+  ```
+
+  Both `depot_tools` and `cef` needed it. `chromium/src` did **not** — its `.gitattributes` had
+  protected it all along (3 untracked DEPS dirs, zero tracked modifications), which is a useful
+  confirmation that the protection theory is right rather than a coincidence.
+
   ⚠️ **This matters beyond the sync:** P3 applies CEF patches with `git apply -p0` **exact-context,
   no fuzz**. CRLF-contaminated sources would fail to patch, and the error would point at the patch
   rather than at git config.
