@@ -376,7 +376,43 @@ never auto-apply). Until scripted (see Open TODOs), run this as a checklist on e
   3. Re-run the checkout. gclient sees `src` and continues into the DEPS sync.
 
   **Do not delete `src` and start over.** The failure happens *after* the expensive part, so a
-  reflexive clean re-clone throws away hours of transfer to fix an empty folder. A Chromium checkout is hours and the
+  reflexive clean re-clone throws away hours of transfer to fix an empty folder.
+
+- **A big cold checkout can get you HTTP 429'd by `chromium.googlesource.com` — and the throttle
+  does not always say 429.** After the 65 GiB main-repo clone succeeded, the small DEPS sub-repo
+  clones began failing with a *mix* of messages:
+
+  ```
+  fatal: unable to access '...': The requested URL returned error: 429
+  fatal: expected 'packfile'
+  fatal: expected flush after ref listing
+  ```
+
+  Only the first names the cause. The other two are the **same throttling**, seen as a response
+  truncated mid-protocol, and read convincingly as repo corruption or a bad network. If a cold
+  checkout starts failing on *small* third-party repos right after the *large* one succeeded,
+  suspect rate limiting before you suspect breakage.
+
+  **Diagnose cheaply — never re-run the whole checkout just to test.** One request settles it:
+  `git ls-remote <the-repo-that-failed> HEAD`. Success means the window has already reopened
+  (ours cleared within minutes).
+
+  **Then resume at REDUCED parallelism.** `automate-git.py` hardcodes its sync arguments
+  (`sync_args = '--nohooks --with_branch_heads'`) and has **no `--jobs` passthrough**, so re-running
+  it retries at full parallelism and can re-trip the limit. Do the expensive part by hand, then hand
+  back:
+
+  ```bash
+  # .gclient has managed:False, so gclient will NOT move src's revision for you.
+  git -C chromium/src checkout --force <chromium-tag-sha>
+  cd chromium && gclient sync --nohooks --with_branch_heads -j2   # the low -j IS the fix
+  # then re-run automate-git.py — its own revert/sync is now cheap
+  ```
+
+  Wrap that sync in retry-with-backoff rather than a bare retry: a 429 is transient, and hammering
+  it extends the block.
+
+- **The build outlives any supervising process — DETACH IT.** A Chromium checkout is hours and the
   build is 10–12 h, longer than an agent tool call, a CI step, or an SSH session. Start it with
   `nohup … > build.log 2>&1` so it is reparented and survives its launcher, then **watch the log
   file**, never the process handle. Verified the hard way: the supervising invocation was killed
