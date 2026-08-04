@@ -18,10 +18,31 @@ Windows side has built the engine and shipped the app onto it.
 | Engine | **CEF 150** — `150.0.17+g94c1726+chromium-150.0.7871.187`, self-built, `BUILD_EXIT=0` in 4h49m |
 | Codecs | Layer-A verified, all GATE rows `probably`, AV1 present, HEVC unchanged |
 | App | **RUNS.** `CefInitialize` success, 18 processes, backends on 31401/31402, header + `tab_1`, V8 + farbling active, 0 errors |
-| Commit | `1f98dba` — Windows bootstrap migration (commit 1 of 4) |
+| Commit | `1f98dba` bootstrap migration → `cf3b085` S0 staging + CI asset → `b8b8a13` S1 icon/VERSIONINFO. **2a + 1 + 3 done; only 2b (sandbox ON) left**, plus S3 (logging). |
 
 Farbling is still the **JS injection in the embedder** (`FingerprintScript.h`), unchanged. Moving it
 into Blink is P4 and has not started — no `hodos_*` patches exist in `cef/patch/patches/` yet.
+
+### ⚠️ Two things from the 2026-08-04 S0/S1 session that WILL affect you
+
+1. **Your CI asset is `cef-binaries-macos.tar.bz2` and it is still M136.** The `cef-binaries` release
+   lives on **`Hodos-Browser/Hodos-Browser`** (the signing org repo), *not* on `origin` — that
+   surprised the Windows side. When your 150 build is green, upload as a **new** asset
+   (`cef-binaries-macos-150.tar.bz2`) rather than clobbering, and point `release.yml:440` at it on
+   the `0.4.0` branch only. Reason: `main`/`staging` are still pre-bootstrap, and pointing the shared
+   filename at 150 breaks their build. Windows did exactly this at `release.yml:118`.
+   **Both platforms collapse back to the unversioned names when 0.4.0 lands on main.**
+2. **⛔ Do not merge-copy the 150 distribution over your existing `cef-binaries/`.** CMake probes
+   `${CEF_ROOT}/libcef_dll/wrapper/build/Release` **before** the dist's own wrapper location, and a
+   stale wrapper left at the first path wins the probe, links cleanly, and then corrupts memory at
+   runtime. Move the old tree away wholesale, then copy. Also note `CEF_ROOT` is a **cache**
+   variable — dropping `-DCEF_ROOT` keeps the old value; use `cmake -U CEF_ROOT`.
+
+Windows-only (no mac action, recorded so the platforms don't diverge silently): `HodosBrowser.exe`
+is now branded post-build by `cef-native/tools/stamp_win_resources.cpp`, and `hodos.rc`'s icon id was
+a **named** resource (`IDI_ICON1`) rather than integer `1`, so the window icon had never been set on
+Windows — `LoadImage` failed with 1813 and the `if (hIcon)` guard swallowed it. macOS uses `.icns`
+in the bundle and is unaffected.
 
 ## → FOR THE MAC CLAUDE SESSION: start your CEF 150 build NOW
 
