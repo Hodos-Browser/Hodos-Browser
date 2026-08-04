@@ -94,8 +94,23 @@ now know the toolchain, pins and codecs are sound, so any future breakage is att
 patches* rather than to the version bump.
 
 **Consequence to plan for: this binary is NOT the shipping binary.** Every farbling sub-step
-(C1…C7) requires its own rebuild — the roadmap budgets **~5 builds, not one**. At ~4 h 49 m each
-(now measured, not estimated), that is ~25 h of build time still ahead for P4.
+(C1…C7) requires its own rebuild — the roadmap budgets **~5 builds, not one**.
+
+> **⚠️ Cost correction.** Those are **INCREMENTAL** rebuilds, ~**30–60 min** each
+> (`CEF_BUILD_RUNBOOK.md` line 65), **not** repeats of the 4 h 49 m cold build. A farbling patch
+> touches a handful of Blink files; the 65 GiB checkout and the 32k-target full compile happen
+> **once**. Budget **~3–5 h total for all of P4**, not ~25 h.
+>
+> This is also *why* build-first-patch-second is the efficient order, not a detour:
+> 1. the expensive part is paid once and reused by every later build;
+> 2. the patches and the mechanism to apply them (our fork + `patch.cfg`) do not exist yet, so
+>    patching first would have blocked on design work with the toolchain unproven;
+> 3. **isolation** — with a proven-green baseline, any future breakage is attributable to *our
+>    Blink patches* rather than to the 14-milestone version jump.
+
+**Scope note:** moving farbling into Blink is a **co-equal half of 0.4.0**, not a follow-up. The
+version bump is the *enabler* — you cannot patch Blink without a source tree, a fork and a working
+build. This session built the foundation; the farbling feature work is still ahead.
 
 ---
 
@@ -115,6 +130,31 @@ patches* rather than to the version bump.
    "MISSING". The gate now self-checks (arg count + control flag) before accusing anything
 
 ---
+
+## 4b. Macro flow — and where the app first becomes runnable
+
+```
+[DONE] Version bump ──── 7871 engine built, codecs verified   (COLD build, once: 4h49m)
+   │
+   ▼
+(A) Bootstrap fix ────── cef-native links again          ◀── ★ FIRST RUNNABLE DEV APP
+   │                     app-layer only: cef-native + wrapper CMake.
+   │                     NO Chromium rebuild. 7871 engine + today's JS farbling.
+   │                     This is the real integration test of the bump.
+   ▼
+P3  Patch toolchain ──── fork chromiumembedded/cef → Hodos-Browser/cef,
+   │                     patch.cfg, prove a NO-OP patch applies + builds
+   ▼
+P4  Farbling → Blink ─── C1..C7, ~30–60 min INCREMENTAL rebuild each   ◀── ★ RUN AFTER EACH
+   │                     each sub-step atomically deletes its JS counterpart
+   ▼
+P5/P6/P7 ─────────────── DRM spike · full test suite · prod build → v0.4.0-beta.1
+```
+
+**Two runnable moments.** The first is close: after **(A)**, the dev app launches on the new engine
+with farbling behaving exactly as today. The second is progressive — P4 swaps farbling into Blink
+one vector at a time, with a run + smoke after each. The "have to build again" is deliberate
+small-step testing, not rework.
 
 ## 5. Immediate next steps
 
