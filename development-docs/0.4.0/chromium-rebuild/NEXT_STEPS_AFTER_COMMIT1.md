@@ -53,27 +53,46 @@ All five steps are complete. What was done, and the two things that differed fro
 
 ---
 
-## S1 — Commit 3: icon + VERSIONINFO ⭐ USER-VISIBLE, DO IT EARLY
+## S1 — Commit 3: icon + VERSIONINFO ✅ **DONE 2026-08-04**
 
 **Confirmed by inspection on 2026-08-04:** `HodosBrowser.exe` is byte-identical to CEF's
 `bootstrap.exe` and carries **CEF's** icon and version resources; our `hodos.ico` lives in
-`HodosBrowser.dll`. That is why the taskbar shows the wrong logo today.
+`HodosBrowser.dll`. That is why the taskbar showed the wrong logo.
 
-Split the two icons clearly, because they have different fixes:
+Both icons are fixed. Note the corrected status of the first row — it was **not** fixed in commit 1:
 
 | Icon | Source | Status |
 |------|--------|--------|
-| Window icon (title bar, Alt-Tab) | `LoadImage(g_hResourceModule, MAKEINTRESOURCE(1), …)` reading `hodos.rc` out of the DLL | **Fixed in commit 1** — needs a visual confirm |
-| Exe icon (taskbar button, Explorer, pinning) | the `.rsrc` of `HodosBrowser.exe` = bootstrap's | ❌ **Commit 3** |
+| Window icon (title bar, Alt-Tab, taskbar button of a running window) | `LoadImage(g_hResourceModule, MAKEINTRESOURCE(1), …)` reading `hodos.rc` out of the DLL | ✅ fixed here — see the `.rc` bug below |
+| Exe icon (Explorer, pinning) | the `.rsrc` of `HodosBrowser.exe` = bootstrap's | ✅ fixed by `tools/stamp_win_resources.cpp` |
 
-Implementation (already decided, do not re-litigate): a CMake `POST_BUILD` step that opens the
-copied `HodosBrowser.exe` with `BeginUpdateResource` / `UpdateResource` / `EndUpdateResource` and
-stamps in our `RT_GROUP_ICON` + `RT_ICON` + `VS_VERSIONINFO`. Patching CEF's `bootstrap.rc` through
-the P3 patch toolchain was **considered and rejected** — it needs a full Chromium rebuild per icon
-change and welds branding into CEF.
+Implemented as decided: a CMake `POST_BUILD` step running `tools/stamp_win_resources.cpp`, which
+opens the copied `HodosBrowser.exe` with `BeginUpdateResource` / `UpdateResource` /
+`EndUpdateResource` and stamps `RT_GROUP_ICON` + `RT_ICON` + `VS_VERSIONINFO`. Patching CEF's
+`bootstrap.rc` through the P3 patch toolchain was **considered and rejected**.
 
-Watch for: the taskbar also consults the per-profile **AUMID** set by `SetupTaskbarProfile`, so
-verify with more than one profile before calling it done.
+Three things worth carrying forward:
+
+1. **⚠️ The window icon was never actually fixed in commit 1.** `hodos.rc` declared
+   `IDI_ICON1 ICON "hodos.ico"`, and since windows.h does not define `IDI_ICON1`, RC treated it as a
+   resource **name** — the DLL carried `RT_GROUP_ICON "IDI_ICON1"` while both consumers asked for
+   `MAKEINTRESOURCE(1)`. `LoadImage` returned NULL with `ERROR_RESOURCE_TYPE_NOT_FOUND` (1813) and
+   the `if (hIcon)` guards swallowed it. Commit 1's `g_hResourceModule` change was necessary but not
+   sufficient. Fixed by making the id a bare integer `1`. **This is why the plan's "needs a visual
+   confirm" mattered — the claim was wrong.**
+2. **`BeginUpdateResource` must be called with `bDeleteExistingResources = FALSE`.** `TRUE` also
+   wipes `RT_MANIFEST`, which under the bootstrap model carries the Win10/11 `supportedOS` GUIDs.
+   Verified preserved byte-for-byte (978 bytes) against the pristine `bootstrap.exe`.
+3. CEF's own icons are **enumerated and deleted**, not merely shadowed. Explorer picks the lowest
+   `RT_GROUP_ICON` id, so adding ours alongside CEF's `#32512` would work today and break the day
+   CEF renumbers.
+
+**Verified:** exe resources go from CEF's (`RT_ICON #1-8`, `RT_GROUP_ICON #32512`) to ours
+(`RT_ICON #1-4`, `RT_GROUP_ICON #1`), all four images byte-identical to `hodos.ico`; Windows'
+own parser reads the version block (`Hodos Browser` / `0.4.1` / company / copyright); and the
+per-profile **AUMID** path still works — three simultaneous taskbar buttons each showed the Hodos
+gear with the correct badge (production **H**, dev `Dev_Env` **D** in red, dev `Test` **T** in gold).
+Before the fix the dev button rendered a generic blank-window icon.
 
 ---
 

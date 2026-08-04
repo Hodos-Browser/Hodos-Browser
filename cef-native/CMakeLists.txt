@@ -807,6 +807,46 @@ if(WIN32)
 endif()
 
 # ============================================================================
+# Windows: brand the copied bootstrap exe (CEF 150 bootstrap model, commit 3).
+#
+# HodosBrowser.exe is CEF's bootstrap.exe copied under another name, so it also
+# inherits CEF's icon and CEF's version resources — that is why the taskbar
+# button, Explorer and pin-to-taskbar all showed the wrong logo. Our hodos.ico
+# only ever reached HodosBrowser.dll, which the shell never displays.
+#
+# stamp_win_resources rewrites RT_ICON + RT_GROUP_ICON + RT_VERSION on the copy
+# after it lands. Patching CEF's bootstrap.rc through the P3 patch toolchain was
+# considered and rejected: it needs a full Chromium rebuild per icon change and
+# welds our branding into CEF.
+#
+# This is a SECOND POST_BUILD command on HodosBrowserShell. CMake runs POST_BUILD
+# commands in the order they were added, so it is guaranteed to run after the
+# block above that copies bootstrap.exe into place. That ordering matters: the
+# copy is copy_if_different against the pristine bootstrap, so it re-copies (and
+# thereby un-stamps) on every build, and we must re-stamp afterwards.
+# ============================================================================
+if(WIN32)
+    add_executable(stamp_win_resources tools/stamp_win_resources.cpp)
+    set_target_properties(stamp_win_resources PROPERTIES
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+        # Keep the build tool out of bin/, which is what gets staged for the installer.
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tools"
+    )
+    target_compile_definitions(stamp_win_resources PRIVATE UNICODE _UNICODE)
+
+    add_dependencies(HodosBrowserShell stamp_win_resources)
+
+    add_custom_command(TARGET HodosBrowserShell POST_BUILD
+        COMMAND "$<TARGET_FILE:stamp_win_resources>"
+            "${OUTPUT_DIR}/HodosBrowser.exe"
+            "${CMAKE_CURRENT_SOURCE_DIR}/hodos.ico"
+            "${APP_VERSION}"
+        COMMENT "Stamping Hodos icon + VERSIONINFO into HodosBrowser.exe"
+        VERBATIM
+    )
+endif()
+
+# ============================================================================
 # Optional C++ unit tests (Phase 1.5 Step 3 — first one).
 # Off by default so the regular shell build is unaffected. Configure with
 # -DHODOS_BUILD_TESTS=ON to enable. See cef-native/tests/CLAUDE.md.

@@ -4,4 +4,13 @@
 
 // Icon with lowest ID value placed first to ensure application icon
 // remains consistent on all systems.
-IDI_ICON1 ICON "hodos.ico"
+//
+// The id MUST stay a bare integer. This was `IDI_ICON1` for a long time, and
+// because windows.h does not define that symbol, RC fell back to treating it as
+// a resource *name* — the DLL ended up carrying RT_GROUP_ICON "IDI_ICON1" while
+// both consumers ask for MAKEINTRESOURCE(1). LoadImage then returned NULL with
+// ERROR_RESOURCE_TYPE_NOT_FOUND (1813), the `if (hIcon)` guards swallowed it,
+// and the window icon was silently never set. Consumers:
+//   cef_browser_shell.cpp :: (window creation, WM_SETICON)
+//   src/core/WindowManager.cpp :: CreateFullWindow
+1 ICON "hodos.ico"
