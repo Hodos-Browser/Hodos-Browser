@@ -138,7 +138,38 @@ Ruled out:
   command-line `--disable-features` is silently discarded.)
 - **Missing LPAC ACLs** — verified present, see above.
 
-### ⚠️ Fix this FIRST next time: Chromium's own log is broken
+### ✅ Follow-up 2026-08-04 (later the same day): logging fixed, and TWO decisive results
+
+**1. The engine's log is fixed** (`f0f3be5`) — `settings.log_file` now resolves through
+`AppPaths::GetLogDir()`. Chromium can report again, and it immediately did:
+
+```
+WARNING:chrome\browser\ui\sad_tab.cc:258] Tab Killed: http://127.0.0.1:5137/
+```
+
+repeated ~10× on a 1-second cadence. So the renderers are **not** failing to launch — they launch and
+are **killed instantly**, i.e. a genuine crash-loop. That is a materially different bug from "no
+renderer processes appear", which is what the process list alone suggested. `sad_tab.cc` does not
+print the reason; the next step is a renderer-side crash dump or `--enable-logging=stderr` on the
+child.
+
+**2. ⭐ CEF 150's own `cefclient.exe` sandboxes correctly on this machine.** Ran the prebuilt binary
+from the `..._client` distribution: renderers at **UNTRUSTED**, GPU at **LOW**, a utility at
+**UNTRUSTED** — and they all *run*. So the sandbox is **not** broken on this hardware, not broken in
+CEF 150, and not blocked by machine policy. **The fault is in our embedder.**
+
+That comparison also surfaced the structural difference most likely to matter: the prebuilt
+`cefclient.exe` is a **standalone executable** — its `Release/` has no `bootstrap.exe` and no client
+DLL. Ours is the **bootstrap + client-DLL** model, so every sandboxed child has to load
+`HodosBrowser.dll` before it can do anything. **Leading hypothesis: a sandboxed child cannot load
+the client DLL, and dies immediately.** Worth testing before anything else:
+
+- Build CEF's own `tests/cefclient` **with `CEF_USE_BOOTSTRAP`** and the sandbox on. If its renderers
+  die the same way, this is a CEF-150 bootstrap+sandbox interaction and belongs upstream
+  (chromiumembedded/cef), not in our code.
+- If they survive, diff our `CefSettings` against `MainContextImpl::PopulateSettings`.
+
+### ⚠️ Historical: Chromium's own log was broken (FIXED — see above)
 
 `settings.log_file` is set to the **relative** path `"debug.log"`, which Chromium rejects on every
 launch with `Invalid logging destination: debug.log`. That means the engine cannot tell us why the
