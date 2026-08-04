@@ -146,6 +146,7 @@ extern LRESULT CALLBACK CookiePanelOverlayWndProc(HWND, UINT, WPARAM, LPARAM);
 extern LRESULT CALLBACK DownloadPanelOverlayWndProc(HWND, UINT, WPARAM, LPARAM);
 extern LRESULT CALLBACK MenuOverlayWndProc(HWND, UINT, WPARAM, LPARAM);
 extern HINSTANCE g_hInstance;
+extern HINSTANCE g_hResourceModule;
 
 BrowserWindow* WindowManager::CreateFullWindow(bool createInitialTab) {
     int wid = CreateWindowRecord();
@@ -183,8 +184,10 @@ BrowserWindow* WindowManager::CreateFullWindow(bool createInitialTab) {
     }
 
     // Set window icon explicitly (preserves 32-bit RGBA alpha for rounded corners)
-    HICON hIconLarge = (HICON)LoadImage(g_hInstance, MAKEINTRESOURCE(1), IMAGE_ICON, 256, 256, LR_DEFAULTCOLOR);
-    HICON hIconSmall = (HICON)LoadImage(g_hInstance, MAKEINTRESOURCE(1), IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR);
+    // g_hResourceModule, NOT g_hInstance — under CEF's bootstrap model hodos.rc lives
+    // in HodosBrowser.dll while g_hInstance is bootstrap.exe's module.
+    HICON hIconLarge = (HICON)LoadImage(g_hResourceModule, MAKEINTRESOURCE(1), IMAGE_ICON, 256, 256, LR_DEFAULTCOLOR);
+    HICON hIconSmall = (HICON)LoadImage(g_hResourceModule, MAKEINTRESOURCE(1), IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR);
     if (hIconLarge) SendMessage(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIconLarge);
     if (hIconSmall) SendMessage(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIconSmall);
 

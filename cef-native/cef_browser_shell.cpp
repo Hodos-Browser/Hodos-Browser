@@ -25,6 +25,13 @@
 #include "include/cef_v8.h"
 #include "include/cef_browser.h"
 #include "include/internal/cef_types.h"
+// CEF 150 bootstrap model (upstream #3928): RunWinMain / CEF_BOOTSTRAP_EXPORT come
+// from cef_sandbox_win.h; the code-signing + libcef load helpers come from the wrapper.
+#include "include/cef_sandbox_win.h"
+#include "include/cef_version_info.h"
+#include "include/wrapper/cef_library_loader.h"
+#include "include/wrapper/cef_certificate_util_win.h"
+#include "include/wrapper/cef_util_win.h"
 #include "include/handlers/simple_handler.h"
 #include "include/handlers/simple_render_process_handler.h"
 #include "include/handlers/simple_app.h"
@@ -83,7 +90,13 @@
 HWND g_hwnd = nullptr;
 HWND g_header_hwnd = nullptr;
 HWND g_webview_hwnd = nullptr;
+// The HINSTANCE bootstrap.exe hands to RunWinMain — i.e. the EXECUTABLE's module.
+// Used for window classes, CreateWindow and CefMainArgs.
 HINSTANCE g_hInstance = nullptr;
+// The module that actually contains our code and our resources: HodosBrowser.dll.
+// Under the bootstrap model this is NOT the same module as g_hInstance, so anything
+// loading a resource compiled from hodos.rc (the app icon) must use this one.
+HINSTANCE g_hResourceModule = nullptr;
 
 // Global overlay HWNDs for shutdown cleanup
 HWND g_settings_overlay_hwnd = nullptr;
@@ -4377,7 +4390,93 @@ static bool MaybeApplyStagedUpdate(const std::string& profileId) {
 }
 #endif  // HODOS_SILENT_AUTOUPDATE
 
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
+// ============================================================================
+// CEF 150 bootstrap entry point (upstream #3928)
+//
+// We no longer ship our own executable. CEF's bootstrap.exe is copied to
+// HodosBrowser.exe at build time; at launch it verifies code signing, loads
+// HodosBrowser.dll from the same directory and calls the exported RunWinMain
+// below. Everything that used to live in WinMain now lives in RunHodosMain.
+//
+// Code-signing contract (bootstrap_win.cc :: CheckDllCodeSigning): the exe, the
+// client DLL and chrome_elf.dll must ALL be unsigned, or ALL share one primary
+// certificate thumbprint. Dev builds are entirely unsigned, so they pass with no
+// signing work. Any mismatch is a LOG(FATAL) at launch, not a soft failure.
+// ============================================================================
+namespace {
+
+// Handle of the module containing THIS code — HodosBrowser.dll, not the exe.
+HINSTANCE GetCodeModuleHandle() {
+    HMODULE hModule = nullptr;
+    ::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                             GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                         reinterpret_cast<LPCWSTR>(&GetCodeModuleHandle),
+                         &hModule);
+    return hModule;
+}
+
+// Hodos does not pin a certificate thumbprint. Dev builds are unsigned; release
+// builds are signed by CI (release.yml) over the whole staging directory in one
+// Azure batch, so exe/DLL/chrome_elf already share a primary thumbprint and CEF's
+// same-thumbprint check passes without us naming it here. Pinning a literal
+// thumbprint would break on every certificate rotation — the same trap the Windows
+// silent-updater signer gate already hit (it compares Subject CN, not a thumbprint).
+constexpr bool kAllowUnsigned = true;
+
+// Verify code signing and load libcef.dll. Mirrors cefclient_win.cc. Every failure
+// path inside is a FATAL error that terminates the process, so a false return is
+// effectively unreachable.
+bool VerifyCodeSigningAndLoad(CefScopedLibraryLoader& library_loader,
+                              cef_version_info_t* version_info) {
+    // Early logging support — required before libcef is loaded, because the
+    // *Assert() calls below log FATAL and crash on failure.
+    cef::logging::ScopedEarlySupport scoped_logging({});
+
+    if (library_loader.LoadInSubProcessAssert(version_info)) {
+        // Running as a (possibly sandboxed) sub-process. Nothing more to do:
+        // libcef.dll either loaded from --libcef-path or resolves through the
+        // delay-load helper from the executable's directory.
+        return true;
+    }
+
+    // Validate the already-loaded executable (bootstrap.exe under our name).
+    const std::wstring& exe_path = cef_util::GetExePath();
+    cef_certificate_util::ValidateCodeSigningAssert(exe_path, /*thumbprint=*/nullptr,
+                                                    kAllowUnsigned);
+
+    // Validate the already-loaded client DLL (HodosBrowser.dll). The bootstrap has
+    // checked it too, but it re-checks cheaply and keeps the requirement explicit.
+    const std::wstring& client_dll_path = cef_util::GetModulePath(GetCodeModuleHandle());
+    cef_certificate_util::ValidateCodeSigningAssert(client_dll_path, /*thumbprint=*/nullptr,
+                                                    kAllowUnsigned);
+
+    // libcef.dll must live next to the executable.
+    const auto sep_pos = exe_path.find_last_of(L"/\\");
+    if (sep_pos == std::wstring::npos) {
+        return false;
+    }
+    const std::wstring libcef_dll_path = exe_path.substr(0, sep_pos + 1) + L"libcef.dll";
+
+    // Validates signing AND, via version_info, the #4092 sandbox-compatibility hash
+    // plus the API hash between bootstrap.exe, the wrapper and libcef.dll. All three
+    // are LOG(FATAL) on mismatch, which is exactly what we want for a version bump.
+    return library_loader.LoadInMainAssert(libcef_dll_path.c_str(), /*thumbprint=*/nullptr,
+                                           kAllowUnsigned, version_info);
+}
+
+}  // namespace
+
+static int RunHodosMain(HINSTANCE hInstance, int nCmdShow,
+                        cef_version_info_t* version_info) {
+    // Load libcef.dll before ANY CEF call. The loader's destructor calls
+    // FreeLibrary, so it must be a local of the function that holds the whole
+    // application run — it has to outlive CefShutdown() at the bottom.
+    CefScopedLibraryLoader library_loader;
+    if (!VerifyCodeSigningAndLoad(library_loader, version_info)) {
+        // Unreachable in practice: every failure above is FATAL.
+        return CEF_RESULT_CODE_KILLED;
+    }
+
     // ── Startup performance timer ──
     auto t0 = std::chrono::steady_clock::now();
     auto elapsed = [&t0]() -> std::string {
@@ -4387,6 +4486,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     };
 
     g_hInstance = hInstance;
+    g_hResourceModule = GetCodeModuleHandle();
 
     // Initialize COM for taskbar integration (AUMID, ITaskbarList3).
     // CoInitializeEx is reference-counted; CEF's later COM init is compatible.
@@ -4449,12 +4549,38 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     errno_t result2 = freopen_s(&dummy, logPath.c_str(), "a", stderr);
 
     if (result1 != 0 || result2 != 0) {
+        // ⚠️ Do not remove: this reopen is what keeps the process alive.
+        //
+        // The redirect above ALWAYS fails with EACCES(13) — Logger::Initialize already
+        // holds logPath open for append, so a second writer can't have it. That has been
+        // true since long before CEF 150 (the M136 logs carry the identical warning).
+        //
+        // The part that is NOT survivable: a failed freopen_s CLOSES the stream first,
+        // so stdout/stderr are left with an invalid fd. Logger::Log unconditionally
+        // echoes every line to std::cout, and the very next log call goes
+        // fwrite -> __acrt_should_use_temporary_buffer -> _isatty(bad fd) ->
+        // _invalid_parameter -> __fastfail(FAST_FAIL_INVALID_ARG). As an EXE that was
+        // survivable; inside the bootstrap client DLL it kills the process instantly,
+        // ~40ms into startup, with no log line to explain it.
+        //
+        // Reopening on NUL restores a valid-but-inert fd, which is the pre-150
+        // behaviour. The deeper wart — Logger echoing to a stream this function
+        // deliberately redirects — is left alone on purpose; it belongs to Logger, is
+        // shared by every process type, and is not this commit's concern.
+        if (result1 != 0) freopen_s(&dummy, "NUL", "w", stdout);
+        if (result2 != 0) freopen_s(&dummy, "NUL", "w", stderr);
         LOG_WARNING("freopen failed - stdout: " + std::to_string(result1) + ", stderr: " + std::to_string(result2));
     } else {
         LOG_INFO("stdout/stderr successfully redirected to debug_output.log");
     }
 
     CefSettings settings;
+    // Commit 1 of the bootstrap migration: the Chromium sandbox stays OFF, exactly as
+    // it was pre-150 (that build passed nullptr for sandbox_info, and
+    // CefMainRunner::ContentMainInitialize sets no_sandbox = true on null). Stated
+    // explicitly here rather than left implicit so the state is auditable and so
+    // commit 2b — sandbox ON — is a visible one-line change, not a silent one.
+    settings.no_sandbox = true;
     settings.command_line_args_disabled = false;
     CefString(&settings.log_file).FromASCII("debug.log");
     settings.log_severity = LOGSEVERITY_INFO;
@@ -4974,8 +5100,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         rect.left, rect.top, width, height, nullptr, nullptr, hInstance, nullptr);
 
     // Set window icon explicitly (preserves 32-bit RGBA alpha for rounded corners)
-    HICON hIconLarge = (HICON)LoadImage(hInstance, MAKEINTRESOURCE(1), IMAGE_ICON, 256, 256, LR_DEFAULTCOLOR);
-    HICON hIconSmall = (HICON)LoadImage(hInstance, MAKEINTRESOURCE(1), IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR);
+    // g_hResourceModule, NOT hInstance: hodos.rc is compiled into HodosBrowser.dll,
+    // while hInstance is bootstrap.exe's module. Loading from hInstance silently
+    // returns null and the window falls back to the generic Windows icon.
+    HICON hIconLarge = (HICON)LoadImage(g_hResourceModule, MAKEINTRESOURCE(1), IMAGE_ICON, 256, 256, LR_DEFAULTCOLOR);
+    HICON hIconSmall = (HICON)LoadImage(g_hResourceModule, MAKEINTRESOURCE(1), IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR);
     if (hIconLarge) SendMessage(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIconLarge);
     if (hIconSmall) SendMessage(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIconSmall);
 
@@ -5381,4 +5510,24 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     Logger::Shutdown();
     CefShutdown();
     return 0;
+}
+
+// Entry point called by bootstrap.exe (HodosBrowser.exe) after it has verified code
+// signing and loaded this DLL. Must be an UNDECORATED export named "RunWinMain" —
+// C linkage comes from the extern "C" declaration in cef_sandbox_win.h, so no .def
+// file is needed.
+//
+// |sandbox_info| is deliberately ignored for now. Commit 1 of the bootstrap migration
+// keeps runtime behaviour byte-identical to the pre-150 build, which passed nullptr
+// and therefore ran with the Chromium sandbox DISABLED. Turning the sandbox on is
+// commit 2b, isolated on purpose so a renderer crash-loop is attributable to the
+// sandbox rather than to the 14-milestone engine bump.
+CEF_BOOTSTRAP_EXPORT int RunWinMain(HINSTANCE hInstance,
+                                    LPTSTR lpCmdLine,
+                                    int nCmdShow,
+                                    void* sandbox_info,
+                                    cef_version_info_t* version_info) {
+    UNREFERENCED_PARAMETER(lpCmdLine);   // the full command line is read via GetCommandLineW()
+    UNREFERENCED_PARAMETER(sandbox_info);  // see comment above — commit 2b turns this on
+    return RunHodosMain(hInstance, nCmdShow, version_info);
 }

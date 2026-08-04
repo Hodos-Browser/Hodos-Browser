@@ -168,6 +168,11 @@ Write-Host "[6/8] Verifying staging directory..." -ForegroundColor Yellow
 
 $requiredFiles = @(
     "HodosBrowser.exe",
+    # CEF 150 bootstrap model: HodosBrowser.exe is CEF's bootstrap.exe and is inert
+    # without the client DLL beside it. A missing DLL is a LOG(FATAL) at launch, not a
+    # degraded build, so it has to be a hard staging requirement. It arrives via the
+    # "*.dll" wildcard copy above.
+    "HodosBrowser.dll",
     "hodos-wallet.exe",
     "hodos-adblock.exe",
     "hodos-update-helper.exe",

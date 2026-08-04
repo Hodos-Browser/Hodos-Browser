@@ -107,8 +107,23 @@ void SimpleApp::OnBeforeCommandLineProcessing(const CefString& process_type,
     }
 #endif
 
-    // Disable Chromium's built-in autofill, autocorrect, and spell checking
-    command_line->AppendSwitchWithValue("disable-features", "Autofill,AutofillServerCommunication");
+    // Disable Chromium's built-in autofill, autocorrect, and spell checking.
+    //
+    // GlicActorUi is NOT a preference — it is a hard crash fix for CEF 150 and must not
+    // be dropped without re-testing. Chromium 150 ships its AI "Actor" UI
+    // FEATURE_ENABLED_BY_DEFAULT (chrome/common/chrome_features.cc). On every Chrome-style
+    // browser creation it runs ActorUiContentsContainerController::OnWebContentsAttached
+    // -> tabs::TabInterface::GetFromContents(), which null-derefs for a CEF-hosted
+    // WebContents because CEF's contents are not registered as Chrome tabs. Our tab and
+    // header browsers use SetAsChild with runtime_style DEFAULT, and DEFAULT means Chrome
+    // style (libcef browser_host_create.cc :: IsChromeStyle) — so every tab we create
+    // takes that path. Symptom without this switch: access violation inside libcef
+    // moments after CefRunMessageLoop, no log line. Windowless overlays are unaffected
+    // (windowless is always Alloy style).
+    //
+    // ⚠️ Single-value switch: AppendSwitchWithValue REPLACES any --disable-features passed
+    // on the command line. Anything that must be disabled has to be added to THIS list.
+    command_line->AppendSwitchWithValue("disable-features", "Autofill,AutofillServerCommunication,GlicActorUi");
     command_line->AppendSwitch("disable-spell-checking");
 
     // Additional GPU flags (keep commented for now):

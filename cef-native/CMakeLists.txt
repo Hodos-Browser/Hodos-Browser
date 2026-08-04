@@ -43,6 +43,18 @@ project(HodosBrowserShell)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+if(WIN32)
+    # CEF 150 requires C++20 — this is not optional and not a style choice:
+    #   * include/base/cef_scoped_refptr.h uses a `requires(std::convertible_to<...>)`
+    #     constraint, so the headers do not parse under /std:c++17 at all;
+    #   * the distribution's own cmake/cef_variables.cmake compiles with /std:c++20
+    #     (M136 used /std:c++17), so libcef_dll_wrapper.lib is a C++20 build and we
+    #     must match it.
+    # macOS still links the M136 distribution and therefore stays on C++17 until the
+    # Mac side takes the same engine bump.
+    set(CMAKE_CXX_STANDARD 20)
+endif()
+
 # App version — passed from CI via -DAPP_VERSION=X.Y.Z or defaults to dev
 if(NOT DEFINED APP_VERSION)
     set(APP_VERSION "0.2.0-dev")
@@ -139,7 +151,15 @@ if(WIN32)
 endif()
 
 # Paths
-set(CEF_ROOT "../cef-binaries")
+#
+# CEF_ROOT is a cache variable so a freshly-built CEF distribution can be linked
+# IN PLACE before it is staged into cef-binaries/:
+#   cmake -S . -B build -DCEF_ROOT=C:/cef/cef150/.../cef_binary_..._windows64
+# Default is the repo's staged cef-binaries/ — the same directory the previous
+# hardcoded relative "../cef-binaries" resolved to.
+set(CEF_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../cef-binaries" CACHE PATH
+    "Root of the CEF binary distribution (headers + Release/ + Resources/ + wrapper)")
+message(STATUS "CEF_ROOT: ${CEF_ROOT}")
 set(OUTPUT_DIR "$<TARGET_FILE_DIR:HodosBrowserShell>")
 
 # Platform-specific paths
@@ -149,10 +169,45 @@ if(APPLE)
     set(CEF_FRAMEWORK_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../cef-binaries/Release/Chromium Embedded Framework.framework")
     set(RESOURCES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../cef-binaries/Resources")
 elseif(WIN32)
-    # Windows: Wrapper built separately in wrapper subdirectory
-    set(WRAPPER_LIB_PATH "${CEF_ROOT}/libcef_dll/wrapper/build/Release")
-    set(RELEASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../cef-binaries/Release")
-    set(RESOURCES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../cef-binaries/Resources")
+    # Windows: locate libcef_dll_wrapper.lib. Two layouts exist and both are valid:
+    #   1. repo layout — we build the wrapper ourselves under
+    #      cef-binaries/libcef_dll/wrapper/build/Release (see cef-native/CLAUDE.md Step 0)
+    #   2. dist layout — an official or self-built binary_distrib ships a prebuilt
+    #      wrapper at build_wrapper/libcef_dll_wrapper/Release
+    # Probing both is what lets CEF_ROOT point straight at a binary_distrib.
+    set(_hodos_wrapper_candidates
+        "${CEF_ROOT}/libcef_dll/wrapper/build/Release"
+        "${CEF_ROOT}/build_wrapper/libcef_dll_wrapper/Release")
+    set(WRAPPER_LIB_PATH "")
+    foreach(_cand IN LISTS _hodos_wrapper_candidates)
+        if(EXISTS "${_cand}/libcef_dll_wrapper.lib")
+            set(WRAPPER_LIB_PATH "${_cand}")
+            break()
+        endif()
+    endforeach()
+    if(NOT WRAPPER_LIB_PATH)
+        string(REPLACE ";" "\n  " _hodos_wrapper_tried "${_hodos_wrapper_candidates}")
+        message(FATAL_ERROR
+            "libcef_dll_wrapper.lib not found under CEF_ROOT='${CEF_ROOT}'.\n"
+            "Looked in:\n  ${_hodos_wrapper_tried}\n"
+            "Build the wrapper (cef-native/CLAUDE.md Step 0) or pass -DCEF_ROOT=<binary_distrib>.")
+    endif()
+    message(STATUS "CEF wrapper lib dir: ${WRAPPER_LIB_PATH}")
+
+    set(RELEASE_DIR "${CEF_ROOT}/Release")
+    set(RESOURCES_DIR "${CEF_ROOT}/Resources")
+
+    # CEF 150+ (upstream issue #3928) replaced the linked cef_sandbox.lib with a
+    # bootstrap executable. Its absence is the single clearest signal that CEF_ROOT
+    # points at a pre-150 distribution, so fail at configure time with a real message
+    # instead of at link time with an unresolved-symbol wall.
+    set(CEF_BOOTSTRAP_EXE "${RELEASE_DIR}/bootstrap.exe")
+    if(NOT EXISTS "${CEF_BOOTSTRAP_EXE}")
+        message(FATAL_ERROR
+            "bootstrap.exe not found at '${CEF_BOOTSTRAP_EXE}'.\n"
+            "HodosBrowser builds against CEF's bootstrap model (CEF >= 150). "
+            "CEF_ROOT='${CEF_ROOT}' looks like an older distribution.")
+    endif()
 endif()
 
 set(OPENSSL_USE_STATIC_LIBS TRUE)
@@ -352,7 +407,13 @@ if(APPLE)
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${APP_VERSION}"
     )
 elseif(WIN32)
-    add_executable(HodosBrowserShell WIN32 ${SOURCES})
+    # CEF 150 bootstrap model (upstream #3928): the app is a DLL, not an exe.
+    # CEF's own bootstrap.exe is copied+renamed to HodosBrowser.exe (POST_BUILD,
+    # below); at launch it validates code signing, loads HodosBrowser.dll from the
+    # same directory and calls the exported RunWinMain (cef_browser_shell.cpp).
+    # The DLL name is derived from the exe name, so OUTPUT_NAME must stay
+    # "HodosBrowser" for both halves.
+    add_library(HodosBrowserShell SHARED ${SOURCES})
     set_target_properties(HodosBrowserShell PROPERTIES
         OUTPUT_NAME "HodosBrowser"
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
@@ -467,10 +528,12 @@ elseif(WIN32)
         "${WINSPARKLE_DIR}/x64/Release"
     )
 
+    # NOTE: no cef_sandbox here. CEF 150 stopped shipping cef_sandbox.lib in the
+    # distribution — the sandbox now lives behind bootstrap.exe, which hands us a
+    # sandbox_info pointer at RunWinMain. See the bootstrap block above.
     target_link_libraries(HodosBrowserShell PRIVATE
         libcef
         libcef_dll_wrapper.lib
-        cef_sandbox
         quirc
         user32
         gdi32
@@ -495,15 +558,25 @@ elseif(WIN32)
         unofficial::sqlite3::sqlite3
     )
 
-    # Windows delay-load + app.manifest supportedOS merge (0.4.0 startup fix).
-    # /MANIFESTINPUT merges hodos.manifest (Win10/11 supportedOS GUID) into the
-    # linker-generated manifest so Chromium detects the real OS and enables HW GPU
-    # compositing. /MANIFEST:EMBED is explicit so MANIFESTINPUT is honored.
+    # /DELAYLOAD:libcef.dll is MANDATORY under the bootstrap model — it is what lets
+    # CefScopedLibraryLoader validate and load libcef.dll explicitly before the first
+    # CEF call resolves through the delay-load helper.
+    #
+    # The app.manifest supportedOS merge (/MANIFESTINPUT hodos.manifest, the 0.4.0 W1
+    # startup/GPU fix) is deliberately NOT carried over: the process manifest now comes
+    # from bootstrap.exe, which already declares the Win10/11 supportedOS GUIDs, and a
+    # DLL-embedded manifest would be inert. hodos.manifest is kept in the tree as the
+    # record of what that manifest must contain.
     set_property(TARGET HodosBrowserShell PROPERTY LINK_FLAGS
-        "/DELAYLOAD:libcef.dll /MANIFEST:EMBED /MANIFESTINPUT:\"${CMAKE_CURRENT_SOURCE_DIR}/hodos.manifest\"")
+        "/DELAYLOAD:libcef.dll")
 
-    # Windows-specific macros
-    add_definitions(-DUNICODE -D_UNICODE)
+    # Windows-specific macros.
+    # NOMINMAX is required by CEF 150, not merely tidy: cef_ref_counted.h uses
+    # std::numeric_limits<int>::max() and cef_types_wrappers.h uses std::min(), both of
+    # which windows.h's min/max macros shred into syntax errors. M136's headers avoided
+    # both, so only the handful of .cpp files that #define NOMINMAX themselves used to
+    # matter. Defining it for the whole directory keeps every TU consistent.
+    add_definitions(-DUNICODE -D_UNICODE -DNOMINMAX)
 endif()
 
 # Platform-specific post-build steps
@@ -527,9 +600,22 @@ if(WIN32)
             "${WINSPARKLE_DIR}/x64/Release/WinSparkle.dll"
             "${OUTPUT_DIR}/WinSparkle.dll"
 
-        COMMAND ${CMAKE_COMMAND} -E echo "CEF files + WinSparkle.dll copied."
-        COMMENT "Copying all CEF binaries, resources, and WinSparkle"
+        # CEF 150 bootstrap: HodosBrowser.exe IS CEF's bootstrap.exe under another
+        # name. It must land AFTER the copy_directory above, which also drops the
+        # original bootstrap.exe/bootstrapc.exe into the output dir.
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CEF_BOOTSTRAP_EXE}"
+            "${OUTPUT_DIR}/HodosBrowser.exe"
+
+        COMMAND ${CMAKE_COMMAND} -E echo "CEF files + WinSparkle.dll + bootstrap copied."
+        COMMENT "Copying all CEF binaries, resources, WinSparkle and the bootstrap exe"
     )
+
+    if(CMAKE_GENERATOR MATCHES "Visual Studio")
+        # F5 in Visual Studio must start the bootstrap exe, not the DLL.
+        set_target_properties(HodosBrowserShell PROPERTIES
+            VS_DEBUGGER_COMMAND "$<TARGET_FILE_DIR:HodosBrowserShell>/HodosBrowser.exe")
+    endif()
 elseif(APPLE)
     # ============================================================================
     # macOS: Generate Helper App Bundles (5 variants for process isolation)

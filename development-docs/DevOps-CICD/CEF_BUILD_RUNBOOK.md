@@ -643,6 +643,67 @@ attribution to the About page; consult legal if Hodos grows significantly.
 `vulkan-1.dll`; `resources/` (`cef.pak`, `cef_100_percent.pak`, `cef_200_percent.pak`,
 `cef_extensions.pak`, `devtools_resources.pak`); `locales/` (`en-US.pak`, …).
 
+### From integrating the `7871` build into `cef-native` (2026-08-04)
+
+The engine building green is **not** the same as the app running on it. Linking + launching the
+existing embedder against CEF 150 took four further changes, none optional, none discoverable from
+the build log. Expect the macOS bump to hit all four.
+
+- **CEF 150 requires C++20 — the headers do not parse under C++17.** `include/base/cef_scoped_refptr.h`
+  uses a `requires(std::convertible_to<U*, T*>)` constraint. The distribution's own
+  `cmake/cef_variables.cmake` moved `/std:c++17` -> `/std:c++20`, so the shipped
+  `libcef_dll_wrapper.lib` is a C++20 build and the embedder must match it or risk an ABI mismatch.
+  The first symptom is a wall of `syntax error: identifier 'convertible_to'` **inside CEF headers**,
+  which reads like a corrupt checkout — it is not.
+
+- **`NOMINMAX` became mandatory.** 150's `cef_ref_counted.h` uses `std::numeric_limits<int>::max()`
+  and `cef_types_wrappers.h` uses `std::min()`; the `windows.h` `min`/`max` macros shred both into
+  `'(': illegal token on right side of '::'`. M136 avoided both spellings, so only the few `.cpp`
+  files that `#define NOMINMAX` themselves used to matter. Define it for the whole directory.
+
+- **⛔ Chromium 150 ships the AI "Actor" UI enabled by default, and it null-derefs on every
+  CEF-hosted browser.** `ActorUiContentsContainerController::OnWebContentsAttached` calls
+  `tabs::TabInterface::GetFromContents()`, which dereferences null for a `WebContents` that is not a
+  real Chrome tab — which is every browser CEF creates. Symptom: access violation deep inside
+  `libcef` moments after `CefRunMessageLoop`, **with no log line at all**. Fix:
+  `--disable-features=GlicActorUi`.
+
+  Two traps around it. First, this only bites **Chrome-style** browsers, and
+  `runtime_style = CEF_RUNTIME_STYLE_DEFAULT` **means Chrome style**
+  (`libcef/browser/browser_host_create.cc :: IsChromeStyle`) — so a client that never mentions
+  runtime style is fully exposed, while windowless/OSR browsers are immune (windowless is always
+  Alloy). Second, `CefCommandLine::AppendSwitchWithValue` **replaces** the value, so an app that
+  already appends `--disable-features=…` in `OnBeforeCommandLineProcessing` will silently discard a
+  `--disable-features` passed on the command line. Verifying the fix from the command line first
+  will appear to fail. Add to the existing list, don't pass a second one.
+
+- **A failed `freopen_s` on `stdout` becomes fatal inside the bootstrap client DLL.** `freopen_s`
+  closes the stream *before* it tries to reopen, so on failure `stdout` is left with an invalid fd;
+  the next `std::cout` write goes `fwrite` -> `_isatty(bad fd)` -> `_invalid_parameter` ->
+  `__fastfail(FAST_FAIL_INVALID_ARG)`. The same failure was survivable when the app was an EXE, so
+  a redirect that had been failing benignly for months turned into a startup crash. Reopen the
+  stream on `NUL` when the redirect fails.
+
+### Debugging technique that actually resolved both runtime crashes
+
+Guessing was useless; two cheap mechanical steps settled each in minutes.
+
+1. **Get the untruncated exit code.** Bash reports Windows status codes mod 256, which turns
+   `0xC0000409` into a meaningless `9` and `0xC06D007F` into `127`. Use
+   `Start-Process -PassThru -Wait` and print `$p.ExitCode` in hex. `0xC0000409` = `__fastfail`
+   (subcode 5 = `FAST_FAIL_INVALID_ARG`, i.e. a CRT invalid parameter — *not* a stack overrun,
+   despite the name `STATUS_STACK_BUFFER_OVERRUN`). `0xC06D007F` = delay-load, proc not found.
+2. **Symbolize.** Release builds carry no `/Zi`, so reconfigure with
+   `-DCMAKE_CXX_FLAGS_RELEASE="/O2 /Ob2 /DNDEBUG /Zi"` +
+   `-DCMAKE_SHARED_LINKER_FLAGS_RELEASE="/INCREMENTAL:NO /DEBUG"`, then run under
+   `cdb -g -G -y "<builddir>;<release_symbols dir>" -c "g;.lastevent;kp 25;q"`. The
+   `..._release_symbols` distribution has `libcef.dll.pdb` (5.2 GB) and gives fully named Chromium
+   frames — that is what identified the Actor UI in one shot. **Run cmake from git-bash with
+   `MSYS_NO_PATHCONV=1`**, or MSYS rewrites `/O2` into `C:/Program Files/Git/O2` and the flags land
+   as bogus source files (same class of bug as the `cmd /c` lesson above).
+3. **Rule out the engine before blaming it.** The `..._client` distribution ships a prebuilt
+   `cefclient.exe`; if it runs, `libcef` is healthy on that machine and the fault is in the embedder.
+
 ---
 
 ## Open TODOs to make this fully turnkey

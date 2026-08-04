@@ -1,6 +1,6 @@
 # CEF Native Shell Layer
 
-> Last Updated: 2026-08-03
+> Last Updated: 2026-08-04
 
 ## Responsibility
 
@@ -8,21 +8,49 @@ C++ browser shell using Chromium Embedded Framework. Provides process isolation 
 
 ## CEF / Chromium Version Pin
 
-This directory is the owning doc for the engine pin. Read from `cef-binaries/include/cef_version.h`:
+This directory is the owning doc for the engine pin. **The two platforms are mid-bump and are not on the same engine.** Always read the pin from the `cef_version.h` of the distribution the build actually points at — never quote it from memory.
 
-| Define | Value |
-|--------|-------|
-| `CEF_VERSION` | `136.1.7+g15882fe+chromium-136.0.7103.114` |
-| `CEF_VERSION_MAJOR` / `MINOR` / `PATCH` | 136 / 1 / 7 |
-| `CEF_COMMIT_NUMBER` | 3177 |
-| `CEF_COMMIT_HASH` | `15882fefc4339cb456a2654a2055d75e6467ccf1` |
-| `CHROME_VERSION` | 136.0.7103.114 |
+| | Windows | macOS |
+|---|---|---|
+| Distribution | self-built **CEF 150** at `C:\cef\cef150\…\cef_binary_150.0.17+g94c1726+chromium-150.0.7871.187_windows64` | staged `cef-binaries/` (**M136**) |
+| `CEF_VERSION` | `150.0.17+g94c1726+chromium-150.0.7871.187` | `136.1.7+g15882fe+chromium-136.0.7103.114` |
+| `CHROME_VERSION` | 150.0.7871.187 | 136.0.7103.114 |
+| Model | **bootstrap** (see below) | linked executable |
+| C++ standard | **20** (required by 150) | 17 |
 
-CMake points at `CEF_ROOT = ../cef-binaries`. On Windows it links `${CEF_ROOT}/Release` (libcef, cef_sandbox); on macOS it links the `Chromium Embedded Framework.framework` out of the same `Release/` dir. A CEF bump means changing the contents of `cef-binaries/`, not this CMakeLists — but re-verify the wrapper build (below) after any bump.
+`cef-binaries/` still holds M136 and is **untouched** — staging the 150 distribution into it is a separate, owner-gated step. Until then a Windows build must be pointed at the distribution explicitly:
+
+```powershell
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+  -DCEF_ROOT="C:/cef/cef150/chromium/src/cef/binary_distrib/cef_binary_150.0.17+g94c1726+chromium-150.0.7871.187_windows64"
+```
+
+`CEF_ROOT` is a **cache variable** (default `../cef-binaries`). Configure fails fast with a named error if `${CEF_ROOT}/Release/bootstrap.exe` is missing — that is the tell for "this is a pre-150 distribution". Building Windows against the default M136 `cef-binaries/` therefore no longer configures, by design.
+
+### The bootstrap model (Windows, CEF ≥ 150 — upstream issue #3928)
+
+CEF 150 stopped shipping `cef_sandbox.lib`. The application is now a **DLL**, and CEF's own `bootstrap.exe` is the executable:
+
+```
+HodosBrowser.exe   = CEF's bootstrap.exe, copied + renamed at build time (byte-identical)
+   │  verifies code signing of exe + HodosBrowser.dll + chrome_elf.dll
+   ▼
+HodosBrowser.dll   = our code; exports undecorated  RunWinMain
+```
+
+Consequences worth knowing before touching this layer:
+
+- **Entry point is `RunWinMain`, not `WinMain`** (`cef_browser_shell.cpp`). It is `extern "C"` via `cef_sandbox_win.h` — do **not** add a `.def` file.
+- **`/DELAYLOAD:libcef.dll` is mandatory** — it is what lets `CefScopedLibraryLoader` validate and load `libcef.dll` explicitly before the first CEF call resolves.
+- The loader must be a **local of the function holding the whole run**; its destructor `FreeLibrary`s libcef and has to outlive `CefShutdown()`.
+- **Code signing is all-or-nothing**: exe, client DLL and `chrome_elf.dll` must all be unsigned or all share one primary thumbprint. Dev builds are unsigned, so dev needs no signing work; a mismatch is `LOG(FATAL)` at launch.
+- **`hInstance` belongs to the exe, not to us.** Anything loading a resource compiled from `hodos.rc` (the app icon) must use `g_hResourceModule`, not `g_hInstance`.
+- The app manifest now comes from `bootstrap.exe`, which already carries the Win10/11 `supportedOS` GUIDs. `hodos.manifest` is kept as the record of what that must contain but is no longer merged in via `/MANIFESTINPUT`.
+- The Chromium sandbox is **off** (`settings.no_sandbox = true`), matching pre-150 behaviour. Turning it on is a deliberate separate change.
 
 ## Build (Windows)
 
-Requires: VS 2022, vcpkg (triplet `x64-windows-static`), CEF binaries in `../cef-binaries/`.
+Requires: VS 2022, vcpkg (triplet `x64-windows-static`), a CEF distribution (see `CEF_ROOT` above).
 
 `CMakeLists.txt` resolves **three** dependencies on Windows:
 
@@ -38,7 +66,14 @@ Also linked on Windows: `WinSparkle` (from `../external/winsparkle/WinSparkle-0.
 
 ### Step 0 — build the CEF wrapper first (required, easy to forget)
 
-The shell links `libcef_dll_wrapper.lib` from a path CMake does **not** build for you: `${CEF_ROOT}/libcef_dll/wrapper/build/Release`. If that .lib is missing, configure succeeds and the link fails.
+The shell links `libcef_dll_wrapper.lib`, which CMake does **not** build for you. Two layouts are accepted and probed in order — configure fails with a `FATAL_ERROR` naming both if neither exists:
+
+| Layout | Path | When |
+|--------|------|------|
+| repo | `${CEF_ROOT}/libcef_dll/wrapper/build/Release` | we built the wrapper ourselves (the recipe below) |
+| dist | `${CEF_ROOT}/build_wrapper/libcef_dll_wrapper/Release` | an official or self-built `binary_distrib` ships one prebuilt |
+
+The CEF 150 distribution ships a prebuilt wrapper, so Step 0 is a no-op there — but check that it was built with the same settings the app uses (`USE_SANDBOX=ON`, `/MT`, `/std:c++20`, no explicit `CEF_API_VERSION`). A wrapper built with a different C++ standard or API version will link and then corrupt memory at runtime.
 
 ```powershell
 cd cef-binaries/libcef_dll/wrapper
@@ -67,7 +102,8 @@ cmake --build build --config Release
 
 | Artifact | Path | Notes |
 |----------|------|-------|
-| Browser shell | `build/bin/Release/HodosBrowser.exe` | CMake **target** is `HodosBrowserShell`; `OUTPUT_NAME` is `HodosBrowser`. The shipped image name is `HodosBrowser.exe` — there is no `HodosBrowserShell.exe`. |
+| Browser shell (code) | `build/bin/Release/HodosBrowser.dll` | **Windows is a SHARED target now.** CMake **target** is `HodosBrowserShell`; `OUTPUT_NAME` is `HodosBrowser`. |
+| Browser shell (launcher) | `build/bin/Release/HodosBrowser.exe` | CEF's `bootstrap.exe`, copied + renamed by a POST_BUILD step. Byte-identical to `Release/bootstrap.exe`. Ships alongside the DLL and is useless without it. |
 | Solution file | `build/HodosBrowserShell.sln` | Named after `project()`, not the exe |
 | Update helper | `build/bin/Release/hodos-update-helper.exe` | Separate Win32 target, not linked against CEF (`update-helper/main.cpp` + `transaction.cpp` + shared `UpdateApply.cpp`/`UpdateFs.cpp`) |
 | Unit tests | `build/tests/Release/hodos_tests.exe` | Only with `-DHODOS_BUILD_TESTS=ON` (default OFF) |
@@ -98,7 +134,7 @@ cd cef-native
 
 Both Windows launchers kill only the DEV instance, matched by **executable path** under `build/bin/Release`, never by bare image name — dev and installed-prod ship the same image name `HodosBrowser.exe`, so a name-based kill would take down the user's installed browser.
 
-**⚠️ NEVER launch the exe directly from the build directory** — the dev safeguard will block it. Dev builds detect they are running from `build/bin/Release/` and refuse to start without `HODOS_DEV=1` to prevent hitting the production database (`cef_browser_shell.cpp :: WinMain`, `cef_browser_shell_mac.mm :: main`, backed by `include/core/AppPaths.h`). The reverse gate also exists: a stray `HODOS_DEV=1` on an installed/portable binary is scrubbed from the environment rather than honored.
+**⚠️ NEVER launch the exe directly from the build directory** — the dev safeguard will block it. Dev builds detect they are running from `build/bin/Release/` and refuse to start without `HODOS_DEV=1` to prevent hitting the production database (`cef_browser_shell.cpp :: RunHodosMain`, `cef_browser_shell_mac.mm :: main`, backed by `include/core/AppPaths.h`). The safeguard keys off the **executable** path, which under the bootstrap model is the copied `bootstrap.exe` — still under `build/bin/Release`, so the gate is unaffected. The reverse gate also exists: a stray `HODOS_DEV=1` on an installed/portable binary is scrubbed from the environment rather than honored.
 
 ### Backend ports
 
@@ -235,7 +271,7 @@ Cross-browser communication (e.g. header find bar → tab search) always routes 
 
 | File | Purpose |
 |------|---------|
-| `cef_browser_shell.cpp` | Windows entry `WinMain`; `ShellWindowProc`; all HWND globals; 14 overlay WndProcs + 9 mouse hooks; `Logger::Initialize` + stdout/stderr redirection; dev safeguard |
+| `cef_browser_shell.cpp` | Windows bootstrap entry `RunWinMain` -> `RunHodosMain` (was `WinMain` pre-150); `ShellWindowProc`; all HWND globals; 14 overlay WndProcs + 9 mouse hooks; `Logger::Initialize` + stdout/stderr redirection; dev safeguard |
 | `cef_browser_shell_mac.mm` | macOS entry `main`; NSWindow/NSView hierarchy; 14 overlay creation functions; event forwarding; multi-window support |
 | `src/handlers/simple_app.cpp` | `SimpleApp` (`OnContextInitialized`, `OnBeforeChildProcessLaunch`, `OnBeforeCommandLineProcessing`, `SetWindowHandles`, `SetMacOSWindow`); `InjectHodosBrowserAPI`; all 14 Windows overlay create/show/hide functions |
 | `src/handlers/simple_handler.cpp` | Browser-process message routing, overlay management, context menus, downloads, find-in-page |
@@ -260,7 +296,7 @@ Cross-browser communication (e.g. header find bar → tab search) always routes 
 
 | File | Identifiers |
 |------|-------------|
-| `cef_browser_shell.cpp` | `WinMain`, `ShellWindowProc`, `g_hwnd`, `g_header_hwnd`, `g_webview_hwnd`, the 14 overlay HWNDs, 14 overlay WndProcs, 9 `…MouseHookProc` click-outside hooks, `Logger::Initialize` + log-path resolution, dev safeguard |
+| `cef_browser_shell.cpp` | `RunWinMain` (exported bootstrap entry), `RunHodosMain`, `VerifyCodeSigningAndLoad`, `ShellWindowProc`, `g_hwnd`, `g_header_hwnd`, `g_webview_hwnd`, `g_hResourceModule`, the 14 overlay HWNDs, 14 overlay WndProcs, 9 `…MouseHookProc` click-outside hooks, `Logger::Initialize` + log-path resolution, dev safeguard |
 | `cef_browser_shell_mac.mm` | `main`, 14 macOS overlay creation functions, NSWindow/NSView hierarchy, `Logger::Initialize` |
 | `src/handlers/simple_render_process_handler.cpp` | `SimpleRenderProcessHandler::OnContextCreated`, and 5 V8 handler classes: `CefMessageSendHandler`, `OverlayCloseHandler`, `OmniboxCloseHandler`, `HistoryV8Handler`, `GoogleSuggestV8Handler` |
 | `include/core/JsStringEscape.h` | `escapeJsonForJs` — the canonical JS-string-literal encoder (header-only; moved out of `simple_render_process_handler.cpp`, which now `#include`s it) |
