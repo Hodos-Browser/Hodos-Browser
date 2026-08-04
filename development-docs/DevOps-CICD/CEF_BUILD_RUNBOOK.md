@@ -412,6 +412,44 @@ never auto-apply). Until scripted (see Open TODOs), run this as a checklist on e
   Wrap that sync in retry-with-backoff rather than a bare retry: a 429 is transient, and hammering
   it extends the block.
 
+- **`core.autocrlf=true` breaks the DEPS sync — and Git for Windows sets it by default.** The
+  installer ships `core.autocrlf=true` in its **system** config
+  (`C:/Program Files/Git/etc/gitconfig`), so it applies to every repo on the box. depot_tools prints
+  a warning about it on every invocation; that warning is easy to scroll past and is **not**
+  cosmetic.
+
+  Symptom: `gclient sync` fails on a *freshly cloned* third-party repo with
+
+  ```
+  <repo> (ERROR) ... Rebase produced error output:
+  error: Your local changes to the following files would be overwritten by checkout:
+  ```
+
+  listing essentially **every text file in the repo**. "Local changes" in a repo that was just
+  cloned is the tell.
+
+  **Why the main tree looks fine:** Chromium's own `src/.gitattributes` forces `text eol=lf` for
+  every source extension, which overrides `autocrlf`. Verified — `src/DEPS` and `src/BUILD.gn` are
+  LF-clean even with `autocrlf=true`. **`third_party` sub-repos carry no such protection**, so the
+  failure appears only there, which makes it look like a problem with one unlucky dependency rather
+  than a global config fault.
+
+  **Fix it build-scoped, not machine-wide.** Editing the system config would change how *every*
+  repo on the machine checks out, including this one. Instead point the build at its own config:
+
+  ```bash
+  export GIT_CONFIG_GLOBAL=C:/cef/cef150/gitconfig   # autocrlf=false, filemode=false,
+                                                     # fscache=true, preloadindex=true
+  ```
+
+  Precedence is **system < global < local**, so a global `autocrlf=false` overrides the installer
+  default without touching it. Then re-sync with `--force --reset` to discard the damaged
+  working-tree state in already-cloned sub-repos.
+
+  ⚠️ **This matters beyond the sync:** P3 applies CEF patches with `git apply -p0` **exact-context,
+  no fuzz**. CRLF-contaminated sources would fail to patch, and the error would point at the patch
+  rather than at git config.
+
 - **The build outlives any supervising process — DETACH IT.** A Chromium checkout is hours and the
   build is 10–12 h, longer than an agent tool call, a CI step, or an SSH session. Start it with
   `nohup … > build.log 2>&1` so it is reparented and survives its launcher, then **watch the log

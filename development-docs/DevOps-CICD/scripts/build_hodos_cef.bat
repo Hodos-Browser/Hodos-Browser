@@ -48,6 +48,17 @@ set CEF_ARCHIVE_FORMAT=tar.bz2
 REM Use THIS tree's depot_tools, not the M136 tree's.
 set PATH=C:\cef\cef150\depot_tools;%PATH%
 
+REM Build-scoped git config. Git for Windows ships core.autocrlf=true in its
+REM SYSTEM config, which makes `gclient sync` fail on freshly-cloned third_party
+REM repos ("your local changes would be overwritten"). Chromium's own
+REM .gitattributes protects the MAIN tree but not the sub-repos. Precedence is
+REM system < global < local, so this overrides the installer default WITHOUT
+REM editing the machine-wide config or affecting any other repo.
+REM Also required for P3: `git apply -p0` is exact-context with no fuzz, so
+REM CRLF-contaminated sources would fail to patch.
+REM Copy scripts\chromium-build-gitconfig next to the tree first.
+set GIT_CONFIG_GLOBAL=C:/cef/cef150/gitconfig
+
 REM ============================================
 REM Build. Siso is the default build tool on a fresh 7871 out-dir (Ninja has
 REM been unsupported upstream since Sept 2025). Never mix - switching requires

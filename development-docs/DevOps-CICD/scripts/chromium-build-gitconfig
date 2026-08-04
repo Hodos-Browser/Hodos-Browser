@@ -1,0 +1,46 @@
+# Build-scoped git config for the Chromium/CEF tree.
+#
+# Copy this next to the build tree and select it with:
+#     export GIT_CONFIG_GLOBAL=<path-to-this-file>     (bash)
+#     set GIT_CONFIG_GLOBAL=<path-to-this-file>        (cmd)
+#
+# It then applies ONLY to git operations spawned by the checkout/build. The
+# machine-wide config and every other repo on the box — including Hodos-Browser
+# itself — are left untouched.
+#
+# WHY THIS EXISTS
+#
+# Git for Windows ships `core.autocrlf=true` in its SYSTEM config
+# (C:/Program Files/Git/etc/gitconfig). That is the installer default and
+# applies to every repo. depot_tools warns about it on every invocation.
+#
+# The warning is not cosmetic. With autocrlf=true, `gclient sync` dies on a
+# FRESHLY CLONED third_party repo with:
+#
+#     <repo> (ERROR) ... Rebase produced error output:
+#     error: Your local changes to the following files would be overwritten by checkout:
+#
+# ...listing every text file in it. "Local changes" in a just-cloned repo is the
+# tell.
+#
+# Chromium's own src/.gitattributes forces `text eol=lf` for every source
+# extension, so the MAIN tree is protected (verified: src/DEPS and src/BUILD.gn
+# stay LF-clean even under autocrlf=true). third_party sub-repos have no such
+# protection — which is why the failure shows up there and reads like one
+# unlucky dependency rather than a global config fault.
+#
+# Config precedence is system < global < local, so setting autocrlf=false here
+# overrides the installer default without editing it.
+#
+# It also matters beyond the sync: P3 applies CEF patches with `git apply -p0`
+# exact-context and NO fuzz. CRLF-contaminated sources would fail to apply, and
+# the error would point at the patch instead of at git config.
+#
+# The remaining three are depot_tools' own recommended settings; fscache and
+# preloadindex are Windows performance settings.
+
+[core]
+	autocrlf = false
+	filemode = false
+	fscache = true
+	preloadindex = true
