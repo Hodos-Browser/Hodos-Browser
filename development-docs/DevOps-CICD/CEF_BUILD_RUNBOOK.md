@@ -500,6 +500,27 @@ never auto-apply). Until scripted (see Open TODOs), run this as a checklist on e
   failed, and make the script's last line an explicit `echo EXIT=$?` marker so log-watchers have an
   unambiguous terminal signal rather than inferring completion from silence.
 
+  **Do NOT use log freshness as your liveness check.** `git` suppresses progress output when
+  stdout/stderr is redirected to a file, so a **quiet log during `fetch`, delta resolution or
+  repack is completely normal** and can last 30+ minutes. A naive "log idle → stalled" watchdog
+  cries wolf exactly when the tool is working hardest. Ours did, twice, while a `git.exe` sat at
+  **528 s CPU and 10.4 GB resident.**
+
+  Use **CPU accumulation** instead — poll the total CPU time of the `git`/`python` processes and
+  treat "no increase across several consecutive polls" as the stall signal:
+
+  ```powershell
+  $p = Get-CimInstance Win32_Process -Filter "Name='git.exe' OR Name='python.exe'"
+  (($p | Measure-Object UserModeTime -Sum).Sum + ($p | Measure-Object KernelModeTime -Sum).Sum)/1e7
+  ```
+
+  Two more watchdog traps worth knowing, both of which bit here:
+  - **Match processes on the command line, not a substring that your own watcher also contains.**
+    A filter like `*sync_deps*` matches the watcher itself (its command line names the log file),
+    so it reports phantom survivors — or kills itself.
+  - **`comm` requires sorted input.** Diffing successive log snapshots with `comm` on unsorted
+    lines emits scrambled output that misrepresents the order events happened in. Use `diff`.
+
 ### From the real 2026-03-12 build
 
 - **The build IS resumable — but the mechanism CHANGED. Read this before relying on it.**
