@@ -8,30 +8,48 @@ The four-commit bootstrap plan is half done: **2a `83fe472`** (history off the r
 
 ---
 
-## S0 — Stage the 150 distribution into `cef-binaries/` ⭐ DO THIS FIRST
+## S0 — Stage the 150 distribution into `cef-binaries/` ✅ **DONE 2026-08-04**
 
 Owner decision (2026-08-04): **dev must run on the same binaries the next release ships.** So stop
 passing `-DCEF_ROOT` and make the repo default correct.
 
-`cef-binaries/` is **gitignored** (`.gitignore:27`, 0 tracked files), so this is a local-machine
-operation, not a commit. But it is **not** only local — see S0.3, which is the part that bites.
+`cef-binaries/` is **gitignored** (`.gitignore:27`, 0 tracked files), so the staging itself was a
+local-machine operation, not a commit. But it was **not** only local — see S0.3, the part that bites.
 
-1. **Archive M136.** A backup already exists at `C:\cef\cef150\m136_cef_binaries_backup\` (438 MB)
-   from the 7871 build session. Verify it before overwriting anything.
-2. **Copy the 150 distribution over `cef-binaries/`** — the whole thing, including
-   `build_wrapper/libcef_dll_wrapper/Release/`, because the CMake wrapper probe accepts that layout
-   and it saves rebuilding the wrapper. Then reconfigure **without** `-DCEF_ROOT` and confirm the
-   default path resolves. The `bootstrap.exe` existence gate should pass silently.
-3. **⚠️ Replace the CI asset too — this is the step that is easy to miss.**
-   `release.yml:113-128` does `gh release download cef-binaries --pattern "cef-binaries-windows.zip"`.
-   Staging locally does **nothing** for CI. Until that release asset is re-uploaded with the 150
-   distribution, the next release build downloads M136, and configure fails at the `bootstrap.exe`
-   gate. That failure is *loud and correct* — but it will fail. macOS has the same coupling at
-   `release.yml:440` (`cef-binaries-macos.tar.bz2`).
-4. **Bump `AboutSettings.tsx:39`** — hardcoded `"Chromium (CEF 136)"` → 150. It must move *with* the
-   binaries, not before. Better long-term: surface the real `CEF_VERSION_MAJOR` from C++ instead of
-   a literal that silently rots every bump.
-5. Update the pin table in `cef-native/CLAUDE.md` (currently documents both platforms side by side).
+All five steps are complete. What was done, and the two things that differed from this plan:
+
+1. ✅ **Archived M136.** The pre-existing backup at `C:\cef\cef150\m136_cef_binaries_backup\` turned
+   out to be **incomplete** — only `Release/` + `Resources/`, missing `include/`, `libcef_dll/`,
+   `cmake/`, `bazel/` and `cef-binaries/CLAUDE.md`. The whole tree was instead **moved** to
+   `C:\cef\cef150\m136_cef_binaries_FULL_backup` (lossless, and cheap since it is a rename).
+2. ✅ **Copied the 150 distribution in**, including `build_wrapper/libcef_dll_wrapper/Release/`.
+   ⛔ **It had to be a MOVE-then-copy, not a copy-over.** The wrapper probe checks
+   `${CEF_ROOT}/libcef_dll/wrapper/build/Release` **before** `${CEF_ROOT}/build_wrapper/...`, and the
+   150 dist has no first-path directory — so merge-copying would have left the **M136 wrapper**
+   in place, where it wins the probe, links cleanly, and then corrupts memory at runtime.
+   Reconfigured with `cmake -U CEF_ROOT` (it is a *cache* variable, so merely dropping the flag keeps
+   the old value), default resolved, `bootstrap.exe` gate passed silently, full rebuild green, dev app
+   launches on the default path — `CefInitialize success=true`, all 11 overlay browsers created, no errors.
+3. ✅ **CI asset published — but as a NEW asset, not a replacement.** The `cef-binaries` release lives
+   on **`Hodos-Browser/Hodos-Browser`** (the signing org repo), *not* on `origin`. Since
+   `cef-binaries-windows.zip` is shared by every branch and `main`/`staging` are still on the
+   pre-bootstrap CMakeLists, clobbering it would have broken their Windows build (CEF 150 dropped
+   `cef_sandbox.lib` → `LNK1181`). So 150 went up as **`cef-binaries-windows-150.zip`** and
+   `release.yml:118` now points at it **on this branch only**. macOS (`cef-binaries-macos.tar.bz2`)
+   is untouched and still M136.
+   > **When 0.4.0 lands on main:** collapse the pattern back to the unversioned name and re-upload
+   > the M136 asset as 150, so there is one asset again.
+   >
+   > Note: the zip had to be hand-built with **forward-slash** entry names —
+   > `ZipFile::CreateFromDirectory` emits backslashes on this host, which violates the ZIP spec and
+   > makes `7z x` extraction tool-dependent.
+4. ✅ **`AboutSettings.tsx` no longer carries a literal at all.** Rather than bumping 136→150, the
+   engine label is now derived at runtime from `navigator.userAgent` (`Chrome/(\d+)`), which cannot
+   rot across a bump. Verified against the running dev browser over CDP: renders `Chromium (CEF 150)`.
+   This matches the warning already in that file about the *app* version literal having silently drifted.
+5. ✅ Pin table in `cef-native/CLAUDE.md` updated (Windows now builds on the default staged path;
+   `-DCEF_ROOT` no longer needed), plus the merge-copy and CI-asset hazards recorded there and in
+   `cef-binaries/CLAUDE.md`.
 
 ---
 

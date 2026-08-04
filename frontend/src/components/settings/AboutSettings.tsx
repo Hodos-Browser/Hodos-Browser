@@ -9,6 +9,16 @@ import { useSettings } from '../../hooks/useSettings';
 // silently drifts (it was stuck at beta.18 while builds moved on).
 const APP_VERSION = (import.meta.env.VITE_APP_VERSION as string | undefined) || 'dev';
 
+// Engine version is read from the real UA string, not a literal, for exactly the reason
+// above: a hardcoded "CEF 136" survived the entire 136 -> 150 engine bump and shipped
+// wrong. We run inside CEF, so the UA always carries the true Chromium version, and CEF's
+// major tracks Chromium's (CEF 150 <-> Chromium 150.0.7871.187). No build-script or C++
+// coupling needed. Falls back to an unversioned label if the UA is ever unrecognisable.
+const ENGINE_LABEL = (() => {
+  const major = navigator.userAgent.match(/Chrome\/(\d+)/)?.[1];
+  return major ? `Chromium (CEF ${major})` : 'Chromium';
+})();
+
 const AboutSettings: React.FC = () => {
   const { settings, updateSetting } = useSettings();
   const [checkStatus, setCheckStatus] = useState<'idle' | 'checking' | 'up-to-date' | 'error'>('idle');
@@ -36,7 +46,7 @@ const AboutSettings: React.FC = () => {
           </Box>
           <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
             <Typography sx={{ color: '#888', fontSize: '0.85rem' }}>Engine</Typography>
-            <Typography sx={{ color: '#e0e0e0', fontSize: '0.85rem' }}>Chromium (CEF 136)</Typography>
+            <Typography sx={{ color: '#e0e0e0', fontSize: '0.85rem' }}>{ENGINE_LABEL}</Typography>
           </Box>
           <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
             <Typography sx={{ color: '#888', fontSize: '0.85rem' }}>Wallet Backend</Typography>

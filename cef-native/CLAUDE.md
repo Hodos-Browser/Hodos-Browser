@@ -12,20 +12,26 @@ This directory is the owning doc for the engine pin. **The two platforms are mid
 
 | | Windows | macOS |
 |---|---|---|
-| Distribution | self-built **CEF 150** at `C:\cef\cef150\…\cef_binary_150.0.17+g94c1726+chromium-150.0.7871.187_windows64` | staged `cef-binaries/` (**M136**) |
+| Distribution | staged `cef-binaries/` (**CEF 150**) | staged `cef-binaries/` (**M136**) |
 | `CEF_VERSION` | `150.0.17+g94c1726+chromium-150.0.7871.187` | `136.1.7+g15882fe+chromium-136.0.7103.114` |
 | `CHROME_VERSION` | 150.0.7871.187 | 136.0.7103.114 |
 | Model | **bootstrap** (see below) | linked executable |
 | C++ standard | **20** (required by 150) | 17 |
 
-`cef-binaries/` still holds M136 and is **untouched** — staging the 150 distribution into it is a separate, owner-gated step. Until then a Windows build must be pointed at the distribution explicitly:
+**The 150 distribution was staged into `cef-binaries/` on 2026-08-04** (S0), so a Windows build now works on the default path and **`-DCEF_ROOT` is no longer needed**:
 
 ```powershell
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
-  -DCEF_ROOT="C:/cef/cef150/chromium/src/cef/binary_distrib/cef_binary_150.0.17+g94c1726+chromium-150.0.7871.187_windows64"
+  -DCMAKE_TOOLCHAIN_FILE=[vcpkg_root]/scripts/buildsystems/vcpkg.cmake
 ```
 
-`CEF_ROOT` is a **cache variable** (default `../cef-binaries`). Configure fails fast with a named error if `${CEF_ROOT}/Release/bootstrap.exe` is missing — that is the tell for "this is a pre-150 distribution". Building Windows against the default M136 `cef-binaries/` therefore no longer configures, by design.
+The M136 tree it replaced is archived whole at `C:\cef\cef150\m136_cef_binaries_FULL_backup`.
+
+`CEF_ROOT` is a **cache variable** (default `../cef-binaries`). Configure fails fast with a named error if `${CEF_ROOT}/Release/bootstrap.exe` is missing — that is the tell for "this is a pre-150 distribution". Because it is *cached*, simply dropping the flag on an existing build directory keeps the old value; use `cmake -U CEF_ROOT -S . -B build` to force re-evaluation of the default.
+
+> ⚠️ **Staging is only half the job — CI does not use `cef-binaries/`.** It downloads `cef-binaries-windows.zip` from the release tagged `cef-binaries`, which lives on the **`Hodos-Browser/Hodos-Browser`** org repo, not on `origin` (`release.yml:113-128`; macOS `cef-binaries-macos.tar.bz2` at `release.yml:440`). Until that asset carries the 150 distribution, a release build compiles against M136 and dies at the `bootstrap.exe` gate.
+
+> ⛔ **Never merge-copy one distribution over another.** The wrapper probe checks `${CEF_ROOT}/libcef_dll/wrapper/build/Release` *before* `${CEF_ROOT}/build_wrapper/libcef_dll_wrapper/Release`. The 150 dist has no first-path directory, so an M136 wrapper left there survives the copy and **wins** — it links cleanly and then corrupts memory at runtime. Move the old tree away, then copy.
 
 ### The bootstrap model (Windows, CEF ≥ 150 — upstream issue #3928)
 

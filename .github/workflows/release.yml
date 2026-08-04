@@ -110,16 +110,23 @@ jobs:
           echo "BUILD_NUMBER=$buildNumber" >> $env:GITHUB_OUTPUT
           echo "Build number: $buildNumber"
       
-      # Download CEF binaries from the cef-binaries release
+      # Download CEF binaries from the cef-binaries release.
+      #
+      # CEF 150 ships as its OWN asset (cef-binaries-windows-150.zip) rather than
+      # replacing cef-binaries-windows.zip, because that filename is shared by every
+      # branch and main/staging are still on the pre-bootstrap M136 CMakeLists. Pointing
+      # the shared name at 150 would break their Windows build (CEF 150 dropped
+      # cef_sandbox.lib -> LNK1181). When 0.4.0 lands on main, collapse this back to the
+      # unversioned name and re-upload the M136 asset as 150.
       - name: Download CEF binaries
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download cef-binaries --pattern "cef-binaries-windows.zip" --repo ${{ github.repository }}
+          gh release download cef-binaries --pattern "cef-binaries-windows-150.zip" --repo ${{ github.repository }}
 
           echo "Extracting CEF binaries..."
-          7z x cef-binaries-windows.zip -y
-          del cef-binaries-windows.zip
+          7z x cef-binaries-windows-150.zip -y
+          del cef-binaries-windows-150.zip
 
           if (Test-Path "cef-binaries") {
             echo "CEF binaries extracted successfully"

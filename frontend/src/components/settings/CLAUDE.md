@@ -67,7 +67,7 @@ The settings overlay runs as a separate CEF subprocess (see root CLAUDE.md overl
 ### AboutSettings
 - **Hooks:** None (static content)
 - **Cards:** Version Information (browser, engine, wallet backend, protocol), About (description + link)
-- **Notes:** Version is hardcoded as "Hodos Browser 1.0.0". Engine shows "Chromium (CEF 136)". No IPC calls. Does not import `SettingRow` — uses custom `Box` layout for key-value pairs.
+- **Notes:** Neither version string is hardcoded any more. The browser version comes from `VITE_APP_VERSION` (embedded by the release build, `'dev'` locally); the engine label is derived at runtime from `navigator.userAgent` (`Chrome/(\d+)` → `Chromium (CEF <major>)`), so it cannot drift across an engine bump the way the old `"Chromium (CEF 136)"` literal did. Sends `check_for_updates` IPC; otherwise read-only. Does not import `SettingRow` — uses custom `Box` layout for key-value pairs.
 
 ## Data Flow
 
