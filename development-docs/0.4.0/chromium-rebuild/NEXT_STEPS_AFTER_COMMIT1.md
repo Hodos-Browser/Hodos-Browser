@@ -104,10 +104,22 @@ each sub-step atomically deleting its JS counterpart. Budget ~3–5 h for all of
 
 ---
 
+## New tickets from the 2a smoke (2026-08-04) — small, independent, good filler work
+
+- **Omnibox cold-start race.** First thing typed after launch shows "No suggestions":
+  `omnibox_update_query` is delivered ~400 ms before the overlay's React app mounts and is dropped.
+  Fix by replaying the last query when the overlay signals ready, or holding the query until
+  `allSystemsReady`. See `TESTING.md` §14.6.
+- **`clearRange` leaves a stale `last_visit_time`.** Deletes visit rows without recomputing the
+  URL's last visit, so cleared-range entries still show a timestamp inside the cleared window.
+  **Pre-existing** — 2a never touched `HistoryManager.cpp`.
+- **⚠️ CDP open in production** (`TESTING.md` §14.7) — owner decision, security-relevant. Port 9222
+  hardcoded on in release builds plus `--remote-allow-origins=*`, unauthenticated.
+
 ## Standing debt (unchanged, still owed)
 
-- **Runtime smoke of 2a** — history page + omnibox suggestions. Built and typechecked, **never run**.
-  Cheapest to do right now while a working dev app is in front of you.
+- **2a smoke on macOS** — ✅ done on Windows (`TESTING.md` §14.6), still owed on the Mac, where this
+  path was previously dead and is expected to start working.
 - **beta.29 AV seeding.**
 - **The two CI asserts** from `TESTING.md` §14.5: cert-thumbprint equality across
   exe/dll/`chrome_elf`; staging manifest completeness (half done — `HodosBrowser.dll` is now in
