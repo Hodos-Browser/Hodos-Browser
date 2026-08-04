@@ -227,7 +227,100 @@ you have no equivalent last-known-good, you may genuinely need the baseline buil
 
 ---
 
-## 6. Open questions Mac must answer
+## 6. App-layer findings from the Windows bootstrap migration (added 2026-08-04)
+
+Windows is mid-migration to CEF's bootstrap model. Most of it is Windows-only mechanics, but three
+findings either **cross over** or describe a symptom Mac shares through a *different* mechanism —
+which is exactly the kind of thing that costs a session to rediscover.
+
+### 6.1 The bootstrap model itself does NOT cross over
+
+CEF **#3928** (sandbox linking → bootstrap executable) is **Windows-only**. macOS keeps the
+helper-app model and `Chromium Embedded Framework.framework`. There is no `bootstrap.exe`
+equivalent, `cef_sandbox.lib` was never part of the mac link, and `CEF_USE_BOOTSTRAP` is set only
+under `if(OS_WINDOWS)` in `cmake/cef_variables.cmake`.
+
+**But do not conclude the drift audit is done.** Windows' VER-5 result (`cef_sandbox.lib` removed,
+`bootstrap.exe`/`bootstrapc.exe` added) tells you *nothing* about the mac dist. Run VER-5
+independently against `cef_binary_150…_macos*`, and specifically diff: the framework version
+directory layout, `CEF_HELPER_APP_SUFFIXES`, and any added/removed `.dylib`.
+
+### 6.2 ⚠️ CROSS-PLATFORM SECURITY FINDING — the Chromium sandbox is OFF on **both** platforms
+
+Found while scoping the Windows migration. Same outcome, two different causes:
+
+| Platform | Mechanism | Where |
+|---|---|---|
+| Windows | `CefExecuteProcess` / `CefInitialize` are both passed `nullptr`, and `cef_sandbox_info_create()` is **never called anywhere** in `cef-native/`. CEF's `CefMainRunner::ContentMainInitialize` sets `*no_sandbox = true` whenever `windows_sandbox_info == nullptr` — verified byte-identical in the M136 and 7871 trees. `cef_sandbox.lib` was linked but unused. | `cef_browser_shell.cpp :: WinMain` |
+| **macOS** | `settings.no_sandbox = true`, **unconditional**. The comment says *"Disable sandbox on macOS for development (requires code signing otherwise)"* — but it is **not gated on dev vs prod**, so shipped mac builds are unsandboxed too. | `cef_browser_shell_mac.mm` (~:5278) |
+
+**Why it matters here specifically:** an unsandboxed renderer that gets popped by a web page can
+read the profile databases off disk *and* open a socket straight to the wallet port, going around
+the C++ interception layer — and therefore around every permission gate, the spend caps, and the
+gold-pill payment indicator. Signing keys stay in Rust either way; the **authorization** boundary is
+what's lost.
+
+**Windows fixes this as a side effect of the migration** (bootstrap supplies real sandbox info, so
+it becomes a matter of forwarding it instead of passing `nullptr`).
+**macOS does NOT get it for free, and it is not the same change.** On mac the sandbox requires a
+properly signed app to initialize — which entangles it with **D7 (individual → org signing)**.
+Sequence it *after* D7 lands, and treat it as its own change with its own smoke matrix. Do not
+bundle it into the version bump.
+
+Note `--allow-loopback-in-sandbox` is already appended on mac in
+`simple_app.cpp :: OnBeforeCommandLineProcessing` — currently a no-op, but it becomes load-bearing
+the moment the sandbox goes on (the frontend dev server and both Rust backends are loopback).
+
+### 6.3 The renderer holds file handles it shouldn't — and fixing it helps Mac *more* than Windows
+
+`SimpleRenderProcessHandler`'s constructor opens the **history SQLite database directly inside every
+renderer process** on Windows (`HistoryManager::GetInstance().Initialize(%APPDATA%\…\<profile>)`,
+gated on `--type=renderer`). macOS takes the `#else` branch and is stubbed out — **which is why
+`window.hodosBrowser.history.*` already returns empty on mac today.**
+
+The fix is the same on both: route the 7 `history.*` V8 methods through `cefMessage.send` IPC to the
+browser process, where `HistoryManager` is already correctly initialized (precedent already exists —
+`get_most_visited` works exactly this way). That makes it:
+
+- a **sandbox prerequisite** on Windows (a sandboxed renderer cannot open the DB), and
+- a **straight bug fix** on macOS (history page + omnibox history suggestions currently blank).
+
+**Coordinate so this is done once, not twice.** Windows owns the first cut; Mac should verify the
+mac side of `HistoryV8Handler` afterward rather than writing a parallel implementation.
+
+Same file also carries **23 `std::ofstream` writes to relative-path `debug_output.log` /
+`test_debug.log`**, one of them firing on *every* `cefMessage.send()` call. Relative paths resolve
+against the CWD (the install root in a shipped build). Sandbox-incompatible, and a file
+open/write/flush/close per IPC message. **Delete rather than port** — `LOG_*_RENDER` already covers
+it and correctly no-ops in the renderer.
+
+### 6.4 Signing gains a hard *runtime* coupling on Windows — check for a mac analogue
+
+Windows bootstrap `LOG(FATAL)`s at launch unless `HodosBrowser.exe`, `HodosBrowser.dll` and
+`chrome_elf.dll` are **either all unsigned, or all validly signed with the same primary certificate
+thumbprint** (`bootstrap_win.cc :: CheckDllCodeSigning` → `ThumbprintsInfo::IsSame`). Dev builds
+pass trivially (all unsigned); release depends on one Azure Trusted Signing batch issuing one leaf.
+
+Mac question to answer: does the 7871 framework/helper load path impose any *new* signature-
+consistency requirement beyond what notarization already enforces? Check the non-Windows branch of
+`include/wrapper/cef_library_loader.h`, and whether the **#4092 sandbox-compatibility hash** check
+applies to the framework load path or only to `bootstrap ↔ libcef.dll`.
+
+### 6.5 Confirmed non-issues on Windows — spot-check the mac analogue, don't re-derive
+
+- **OS-version detection / app manifest.** Windows' Win10 `supportedOS` GUID survives the move
+  because `bootstrap.exe` embeds Chromium's `default_exe_manifest` — verified *in the binary*, not
+  just in GN. Mac analogue is `LSMinimumSystemVersion` + `minos`, already owned by VER-4.
+- **Auto-update version source.** WinSparkle takes its version from an explicit
+  `win_sparkle_set_app_details()` call, not from the binary's VERSIONINFO, so replacing the exe
+  didn't disturb it. Sparkle on mac reads `CFBundleVersion` — **re-verify it still resolves if the
+  framework version directory layout changed** (see 6.1).
+- **Installer file manifest.** Windows needed no `[Files]` change (wildcards already covered it).
+  Mac's analogue is the framework embed list — which is *not* wildcarded, so it is not free.
+
+---
+
+## 7. Open questions Mac must answer
 
 1. **D3 arch** — universal2 vs arm64. Recommendation + owner sign-off.
 2. **Measured `minos`** — what does `vtool` actually report on the 7871 framework?
@@ -237,10 +330,16 @@ you have no equivalent last-known-good, you may genuinely need the baseline buil
 6. **Does `CefResponseFilter` still exist and still stream on 7871?** It is flagged LOW-stability in
    the tracker and it is what strips YouTube ads. Windows will check too; compare notes.
 7. **Framework embed / helper-suffix drift** across 14 milestones.
+8. **Does the mac dist have its own VER-5 drift?** (framework version dir, helper suffixes,
+   added/removed dylibs) — §6.1. Windows' result does not transfer.
+9. **What is the mac path to enabling the Chromium sandbox**, and does it require D7 to land
+   first? — §6.2. Currently `no_sandbox = true` unconditionally, including in shipped builds.
+10. **Does `#4092`'s sandbox-compat hash apply to the mac framework load path**, or only to
+    Windows `bootstrap ↔ libcef.dll`? — §6.4.
 
 ---
 
-## 7. Protocol
+## 8. Protocol
 
 `git pull origin 0.4.0` before reading, `git push origin 0.4.0` after writing. Append findings under
 a `## MAC → WINDOWS` section here (build specifics) or in `MAC_WINDOWS_RELAY.md` (status). Windows
