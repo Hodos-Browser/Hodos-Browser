@@ -146,9 +146,9 @@ repayment case for the thin Vitest layer, not a hypothetical.
 
 ### 14.4 Smoke matrix owed by this workstream — write the test before the change
 
-- **history-over-IPC (landed `83fe472`)** — history page lists + paginates; omnibox history
-  suggestions appear and rank; delete / clear-all / clear-range each persist across restart;
-  **macOS too**, where this path was previously dead and is expected to start working.
+- **history-over-IPC (landed `83fe472`)** — ✅ **DONE on Windows 2026-08-04**, against the CEF 150
+  build. Results and method in §14.6 below. **Still owed on macOS**, where this path was previously
+  dead and is expected to start working.
 - **Sandbox ON (2b)** — the whole point is that renderers lose capabilities, so smoke exactly what a
   sandboxed renderer touches: overlays render and take keyboard input; file dialogs open; downloads
   write; adblock + farbling still inject; the wallet bridge still round-trips. A renderer crash-loop
@@ -169,3 +169,102 @@ machine:
 And the standing one, unchanged: a **real N-1 → N update apply test** before promote
 (`feedback_update_stability_principle`) — the `{app}` file manifest changes shape in this migration,
 and a partial apply that replaces the exe but not the DLL now hard-FATALs where it used to survive.
+
+### 14.6 The 2a history-over-IPC smoke — method and results (2026-08-04, Windows, CEF 150)
+
+**Result: the 2a transport is sound.** Every `history.*` method works over the new browser-process
+IPC path, the history page and omnibox both drive it correctly, and all three mutations persist
+across a restart. Two side findings below are *not* 2a regressions.
+
+#### Method — worth reusing, this is our first real UI smoke harness
+
+Driven over the **Chrome DevTools Protocol**, which turns "click through the UI" into something
+scriptable and repeatable:
+
+1. The dev build already opens a CDP port — `9222 + profileOffset`, **+100 under `HODOS_DEV=1`**
+   (`cef_browser_shell.cpp`, near `settings.remote_debugging_port`). So dev Default = **9322**.
+2. `http://127.0.0.1:9322/json` lists targets; each page target has a `webSocketDebuggerUrl`.
+3. Node 22+ has a global `WebSocket`, so a ~40-line script is enough to drive
+   `Runtime.evaluate` with `awaitPromise: true` — which is exactly what a promise-returning
+   `window.hodosBrowser.history.*` needs. No Puppeteer, no dependencies.
+
+> ⛔ **The near-miss that matters more than the harness.** Production Default is **9222**, dev
+> Default is **9322** — one digit apart. The first connection in this smoke landed on **9222**, i.e.
+> the *installed production browser* with the user's real session, one step before running
+> `clearAll()` against real browsing history. **Always confirm the owning process before driving a
+> CDP port**, e.g. `Get-NetTCPConnection -LocalPort <p> | ... Get-CimInstance Win32_Process` and
+> check `ExecutablePath`. A second cheap confirmation: `/json/version` reports the engine —
+> `Chrome/136.x` is production, `Chrome/150.0.7871.187` is the new dev build.
+
+Destructive steps were made safe by copying `HodosHistory`, `-wal` and `-shm` out of the profile
+first, running the full matrix including `clearAll()`, then restoring. Verified restored: 634 → 634.
+
+#### API contract (confirmed by reading `HistoryV8Handler`, after a positional-args test misled)
+
+All parameterised methods take an **options object**, not positional args. A positional call is not
+an error — it silently falls through to the defaults, which looks exactly like "the limit argument
+is ignored". That cost a false-positive bug report during this smoke.
+
+| Method | Signature | Default |
+|---|---|---|
+| `get` | `get({limit, offset})` | limit 50, offset 0 |
+| `search` | `search({search, limit, offset, startTime, endTime})` | limit 50, offset 0 |
+| `searchWithFrecency` | `searchWithFrecency({query, limit})` | limit 6 |
+| `delete` | `delete(urlString)` | — |
+| `clearRange` | `clearRange({startTime, endTime})` | — |
+| `clearAll` | `clearAll()` | — |
+
+#### Results
+
+| Check | Result |
+|---|---|
+| `get` returns a Promise resolving to an array | ✅ |
+| `get` default / `limit` honoured / `offset` paginates with no overlap | ✅ 50 / 5,3 / no overlap |
+| `search` limit honoured, all results relevant | ✅ |
+| `searchWithFrecency` default 6, limit honoured, `frecencyScore` present | ✅ |
+| History page renders through IPC | ✅ "625 entries • Showing 1-20", count matched the API exactly |
+| History page pagination | ✅ pages 1→2→3 changed both the range label and the rows |
+| Omnibox history suggestions appear **and rank above** Google Suggest | ✅ |
+| `delete` removes the URL | ✅ 634 → 633 |
+| `clearRange` scoped, leaves out-of-range data | ✅ 633 → 625 |
+| `clearAll` empties | ✅ 625 → 0 |
+| delete + clearRange persist across restart | ✅ 625 after restart, victim still gone |
+
+#### Two side findings — neither is a 2a regression
+
+1. **Omnibox cold-start race (new observation).** The *first* thing typed after launch shows
+   "No suggestions". `omnibox_update_query` was delivered at `12:39:57.604`, but the overlay's React
+   app did not finish loading until `12:39:58.01` — the query arrives ~400 ms before a listener
+   exists and is dropped. Typing again, with the overlay warm, works. Worth a ticket: either replay
+   the last query on overlay ready, or hold the query until the overlay signals `allSystemsReady`.
+2. **`clearRange` leaves stale `last_visit_time` (pre-existing).** After clearing a range, three
+   URLs still reported a `visitTime` inside the cleared window — all with high visit counts (18, 33,
+   15), i.e. URLs with visits both inside and outside the range. It deletes visit rows without
+   recomputing the URL's last-visit time. **`git show --stat 83fe472` confirms 2a never touched
+   `HistoryManager.cpp`**, so this predates the IPC move and is a separate data-consistency ticket.
+
+> Note on timestamps: Chromium-epoch microseconds are ~1.34e16, **larger than `2^53`**, and they
+> cross this IPC as **doubles**. They are therefore not exactly representable. It did not cause the
+> finding above (the survivors were far from the boundary, not off-by-a-few-microseconds), but any
+> future exact-boundary time logic on this path should not assume integer precision.
+
+### 14.7 ⚠️ Security finding surfaced by this smoke — CDP is open in production
+
+Not a testing issue; recorded here because the smoke is what exposed it.
+
+- `cef_browser_shell.cpp` sets `settings.remote_debugging_port = 9222` for the Default profile
+  (`9222 + N` for others) **unconditionally in production builds**. It is hardcoded, not a setting,
+  and there is no off switch short of picker mode.
+- `simple_app.cpp :: OnBeforeCommandLineProcessing` additionally appends
+  `--remote-allow-origins=*` **unconditionally**, which removes the Origin check on the DevTools
+  WebSocket.
+
+CDP has **no authentication**. Anything that can reach that port can enumerate tabs, read page
+content, execute arbitrary JS in any origin — *including the internal `127.0.0.1:5137` wallet and
+overlay pages* — and read cookies. For a browser that custodies a BSV wallet and auto-approves
+payments up to a configured cap, that is a material exposure, and `--remote-allow-origins=*`
+widens who can attempt the WebSocket upgrade beyond local tooling.
+
+**Not changed here** — turning it off would break the DevTools workflow and is an owner decision.
+Suggested shape: keep the port under `HODOS_DEV=1` only, or gate it behind an explicit setting that
+defaults to off in release, and drop `--remote-allow-origins=*` from production builds.
