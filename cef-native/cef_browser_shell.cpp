@@ -4582,7 +4582,23 @@ static int RunHodosMain(HINSTANCE hInstance, int nCmdShow,
     // commit 2b — sandbox ON — is a visible one-line change, not a silent one.
     settings.no_sandbox = true;
     settings.command_line_args_disabled = false;
-    CefString(&settings.log_file).FromASCII("debug.log");
+    // Chromium's own log. This MUST be an absolute path: a relative "debug.log" is
+    // rejected outright on every launch with
+    //     ERROR:chrome\common\logging_chrome.cc: Invalid logging destination: debug.log
+    // which means the engine silently cannot report ANYTHING. That is not cosmetic — it
+    // blinded the whole commit-2b sandbox investigation, where the renderer processes
+    // failed to start and Chromium had no way to say why.
+    //
+    // Reuses AppPaths::GetLogDir() (same directory as the Logger's debug_output.log and
+    // the wallet's logs, dev/prod-namespaced, deliberately OUTSIDE {app} so it cannot
+    // break the silent-update tree hash). Falls back to the old relative name only if
+    // APPDATA is unavailable, matching that helper's documented contract.
+    {
+        const std::string cef_log_dir = AppPaths::GetLogDir();
+        CefString(&settings.log_file).FromString(
+            cef_log_dir.empty() ? std::string("debug.log")
+                                : cef_log_dir + "\\cef_debug.log");
+    }
     settings.log_severity = LOGSEVERITY_INFO;
     settings.windowless_rendering_enabled = true;
 
