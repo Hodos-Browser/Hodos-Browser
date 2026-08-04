@@ -113,8 +113,13 @@ each sub-step atomically deleting its JS counterpart. Budget ~3–5 h for all of
 - **`clearRange` leaves a stale `last_visit_time`.** Deletes visit rows without recomputing the
   URL's last visit, so cleared-range entries still show a timestamp inside the cleared window.
   **Pre-existing** — 2a never touched `HistoryManager.cpp`.
-- **⚠️ CDP open in production** (`TESTING.md` §14.7) — owner decision, security-relevant. Port 9222
-  hardcoded on in release builds plus `--remote-allow-origins=*`, unauthenticated.
+- **⚠️ DevTools / CDP hardening** — **owner-approved 2026-08-04**, design + open questions in
+  `../DEVTOOLS_SECURITY_DESIGN.md`. Four decisions: keep DevTools on in production (D1), close the
+  remote debugging port in release (D2), drop `--remote-allow-origins=*` (D3), scope DevTools away
+  from the wallet/overlay origins (D4). D2+D3 are one small commit and nothing in the repo depends
+  on the removed surface; D4 routes the four DevTools entry points through one guard. Does not block
+  the CEF bump — land any time after S0/S1. Open: Q1 (dev-only vs default-off setting) and Q2
+  (role-only vs role+URL) need owner answers.
 
 ## Standing debt (unchanged, still owed)
 

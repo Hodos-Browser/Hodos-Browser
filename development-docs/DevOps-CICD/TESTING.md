@@ -268,3 +268,7 @@ widens who can attempt the WebSocket upgrade beyond local tooling.
 **Not changed here** — turning it off would break the DevTools workflow and is an owner decision.
 Suggested shape: keep the port under `HODOS_DEV=1` only, or gate it behind an explicit setting that
 defaults to off in release, and drop `--remote-allow-origins=*` from production builds.
+
+> **Update 2026-08-04:** owner-approved in principle. Design + open questions:
+> `development-docs/0.4.0/DEVTOOLS_SECURITY_DESIGN.md`. Key correction: closing the port does NOT
+> disable DevTools — all four entry points use in-process `ShowDevTools()`.
