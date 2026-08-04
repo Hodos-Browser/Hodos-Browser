@@ -44,6 +44,39 @@ a **named** resource (`IDI_ICON1`) rather than integer `1`, so the window icon h
 Windows — `LoadImage` failed with 1813 and the `if (hIcon)` guard swallowed it. macOS uses `.icns`
 in the bundle and is unaffected.
 
+### ⚠️ 2026-08-04 late — deconfliction, and one bug macOS SHARES
+
+**🔴 macOS has the same mute-engine bug. `cef_browser_shell_mac.mm:5273` sets
+`settings.log_file` to the relative `"debug.log"`.** Chromium rejects a relative log destination
+outright (`Invalid logging destination`) on every launch, so the engine cannot report **anything** —
+on Windows this blinded an entire sandbox investigation until it was fixed. Worth fixing on the Mac
+before the 150 bring-up, because that is exactly when you need the engine to be able to talk.
+
+> ⚠️ **You cannot reuse the Windows fix verbatim.** It routes through `AppPaths::GetLogDir()`, which
+> is Windows-only (`EnvUtf8_(L"APPDATA")` + backslashes; `AppPaths.h` has no `__APPLE__` arm). Build
+> the mac path the way that file already builds its Application Support paths at `:5263` / `:5305`
+> (`GetAppDirName()` + `NSString`), i.e. `~/Library/Application Support/<appdir>/logs/cef_debug.log`.
+
+**Do NOT attempt the Chromium sandbox on macOS yet.** Windows tried and is blocked: with the sandbox
+genuinely on, renderers launch and are killed instantly (`sad_tab.cc "Tab Killed"` on a ~1s cadence)
+and the window is blank. Full write-up in `chromium-rebuild/NEXT_STEPS_AFTER_COMMIT1.md` §S2. Two
+things that do **not** transfer to your side:
+
+- The Windows root cause was `settings.browser_subprocess_path` silently disabling the sandbox. On
+  **macOS that setting is required** (`:5429`, the helper bundles), so this is not a fix you can copy.
+- `no_sandbox = true` at `:5278` is unconditional on macOS. Leave it until Windows solves this.
+
+**Branching.** Both sides have been committing to `0.4.0` and **neither has pushed**, which is the
+real collision risk — not the code. Windows is now paused (S2 blocked) with 6 unpushed commits;
+macOS is active. Recommend macOS take **`0.4.0-mac`** and Windows keep `0.4.0`, then one deliberate
+merge. The file most likely to conflict is **`cef-native/CLAUDE.md`** — Windows rewrote the engine
+pin table and the bootstrap section, and macOS will want to edit the *same table* the moment it
+lands 150. `release.yml` is lower risk (the two arms are ~320 lines apart and auto-merge cleanly).
+
+**No action needed:** `AboutSettings.tsx` no longer hardcodes the engine version — it derives from
+`navigator.userAgent`, so a macOS build on M136 correctly shows "Chromium (CEF 136)" and will follow
+you to 150 by itself.
+
 ## → FOR THE MAC CLAUDE SESSION: start your CEF 150 build NOW
 
 The ~5-hour cold Chromium build is the long pole and is **completely independent** of anything
