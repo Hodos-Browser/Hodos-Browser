@@ -412,6 +412,45 @@ never auto-apply). Until scripted (see Open TODOs), run this as a checklist on e
   Wrap that sync in retry-with-backoff rather than a bare retry: a 429 is transient, and hammering
   it extends the block.
 
+- **⛔ The codec gate must distinguish "codecs are broken" from "my gate is broken." They look
+  identical.** The pre-build `gn args` gate reported:
+
+  ```
+  MISSING  proprietary_codecs  (flag renamed or removed?)  <-- GATE FAIL
+  MISSING  ffmpeg_branding     (flag renamed or removed?)  <-- GATE FAIL
+  MISSING  chrome_pgo_phase    (flag renamed or removed?)  <-- GATE FAIL
+  MISSING  is_official_build   (flag renamed or removed?)  <-- GATE FAIL
+  ```
+
+  Read literally that says "the codec flags were renamed on M150" — a serious finding that would
+  send you re-auditing `features.gni`. **It was wrong.** Nothing was renamed; the gate had failed to
+  generate the GN projects at all.
+
+  **The tell: implausible unanimity.** *All four* independent flags missing — including
+  `is_official_build`, which has nothing to do with codecs — plus **every** recorded section empty
+  (Widevine, HEVC, AV1). Four unrelated flags do not vanish together. When a check reports total
+  failure across independent dimensions, suspect the check.
+
+  Two real causes, both worth knowing:
+
+  1. **`cef_create_projects.bat` must be run from `src/cef`, not `src`.** Its entire contents are
+     `python3.bat tools\gclient_hook.py` — a **relative** path. From `src/` it resolves to
+     `src\tools\gclient_hook.py`, which does not exist, and it exits without generating anything.
+  2. **Hooks had never run.** Every `gclient sync` in the recovery path used `--nohooks`, and
+     `automate-git.py` only runs hooks as part of its **build** step — which the `--no-build`
+     checkout never reached. No `src/build/util/LASTCHANGE`, no toolchain, so `gn gen` cannot work.
+     Gate on that file's existence and run `gclient runhooks` if it is absent.
+
+  **Make the gate prove itself.** Before trusting a MISSING verdict, assert that
+  `gn args --list` produced a plausible line count (hundreds, not 5) and that a known-stable
+  control flag resolves. A gate that cannot tell its own failure from the failure it is looking for
+  is worse than no gate — it burns the credibility you built it to provide.
+
+  ✅ **Genuinely verified in the same run** (`PLAN_codecs.md` §7 step 2): the `media/BUILD.gn`
+  coupling guard **still exists on `7871`** —
+  `assert(... ffmpeg_branding != "Chromium", "proprietary codecs and ffmpeg_branding set to Chromium are incompatible")`
+  — so the fail-loud safety net survived the 14-milestone jump.
+
 - **`core.autocrlf=true` breaks the DEPS sync — and Git for Windows sets it by default.** The
   installer ships `core.autocrlf=true` in its **system** config
   (`C:/Program Files/Git/etc/gitconfig`), so it applies to every repo on the box. depot_tools prints
