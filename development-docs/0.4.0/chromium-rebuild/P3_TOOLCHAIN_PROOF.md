@@ -287,21 +287,60 @@ are the staged header, the stale `cef-binaries-backup/` M136 copy, and a comment
 our CI asset name is set by hand. Wrapper/`libcef` consistency is enforced by `CEF_API_HASH`, not this
 string, and both come from the same build.
 
-### Recommended fix (not applied — needs an owner call + a confirming build)
+### ✅ TESTED 2026-08-05 — and the test REVERSED the recommendation. **Do not apply the "fix".**
 
-`cef_version.py:213-216` is the escape hatch: when the branch name is **not** `master`/`HEAD`, it reads
-MINOR/PATCH from the branch components and gets the real values. And `get_branch_name(...).split('/')[-1]`
-turns **`hodos/7871`** into **`7871`** — not `master`, not `HEAD`. So passing
-**`--checkout=hodos/7871`** (a branch, so `git checkout` does not detach) should yield
-`150.0.17-7871.<n>+g<sha>+chromium-150.0.7871.187` — **patch level 17 preserved.**
+Measured with `cef/tools/cef_version.py current <chromium_src>`, which is the exact computation
+`version_manager.py` uses to write `cef_version.h` — seconds, no build required.
 
-The cost is that a branch tip is not a reproducible pin. The clean version is **both**: check out the
-branch *and* assert the resolved SHA equals an expected value in the build script, failing the build on
-mismatch. `CEF_COMMIT_HASH` in the produced header records the exact commit regardless.
+| In-tree `src/cef` state | Computed `CEF_VERSION` |
+|---|---|
+| detached at `0a709e584` (**what we ship today**) | `150.0.0-HEAD.3552+g0a709e5+chromium-150.0.7871.187` |
+| on branch `hodos/7871`, **same commit** | `150.0.19-7871.3552+g0a709e5+chromium-150.0.7871.187` |
 
-**Not blocking P3** — the toolchain works and this build is not shipping. Until it is decided, record the
-fork-commit → upstream-version mapping in `HODOS_PATCHES.md` and treat `CEF_COMMIT_HASH` as the
-authoritative build identifier.
+> **Method note:** a first attempt appeared to disprove the hypothesis, but the test was invalid.
+> `VersionFormatter` sets `cef_path = <chromium_src>/cef` (`cef_version.py:25`), so it *always* reads the
+> **in-tree copy** — the standalone checkout's branch state is irrelevant. Both runs had been measuring
+> the same detached copy.
+
+**The branch fix yields `PATCH 19`, not the 17 I predicted — and that is the reason to reject it.**
+`get_cef_branch_version_components()` (`cef_version.py:72-105`) computes `PATCH` as a **count of commits
+on the branch that did not modify the API-versions file**. Upstream at `94c1726` had 17; our two patch
+commits made it **19**. So the number is *upstream's counter plus our own commits*:
+
+- It **does not equal** the upstream patch level, so it does not actually answer "which upstream release
+  is this?" — the thing the fix was supposed to deliver.
+- It **drifts ahead of upstream** by our commit count, and will **collide**: upstream will eventually
+  publish a real `150.0.19`, after which two materially different binaries both report `150.0.19`,
+  distinguishable only by the `-7871.3552+g<sha>` suffix.
+- A number that *looks* like an upstream CEF release but isn't is worse than one that obviously isn't.
+  `150.0.0-HEAD` cannot be mistaken for an upstream release; `150.0.19-7871` invites exactly that.
+
+### ⚠️ Correcting the severity: the security level was never lost
+
+The original write-up above (and the P3 commit-7 message) said this "undercuts the CEF-3 security-pull
+duty." **That was overstated.** `chromium-150.0.7871.187` is present in the version string **in every
+variant**, including the current one — and the Chromium point release is what carries the CVE fixes. CEF's
+`150.0.x` counter tracks **CEF's own commits**, not Chromium security content.
+
+So what is actually missing is a secondary provenance nicety, and it is **exactly recoverable** from
+`CEF_COMMIT_HASH` (`0a709e5845…`), which is written into the same header and identifies the fork commit —
+and therefore its upstream ancestor — unambiguously. This is a **cosmetic/provenance** matter, not a
+security defect, and not urgent.
+
+### Decision: keep the SHA pin (status quo). No change to the build scripts.
+
+1. The security-relevant field (`chromium-150.0.7871.187`) is present either way.
+2. `150.0.0-HEAD` is *honest* — it is not an upstream release, and it says so. No collision is possible.
+3. It preserves an **exact, reproducible pin**, which is the property that matters for a signed
+   money-handling build. A branch tip is a moving target: `--checkout=hodos/7871` means two builds a day
+   apart can differ in source with no visible change in the build script. Recovering reproducibility
+   would need a SHA assertion bolted on — i.e. re-adding the pin we just gave up, to buy a version number
+   that is wrong anyway.
+4. `CEF_COMMIT_HASH` already gives exact provenance.
+
+**Close the real (small) gap in our records, not in the version string:** the fork-commit → upstream-base
+mapping belongs in `HODOS_PATCHES.md` §2 and the tracker, where it is unambiguous and cannot collide.
+That is already in place.
 
 ## 8. Remaining P3 gates — ⬜ NOT YET PROVEN
 

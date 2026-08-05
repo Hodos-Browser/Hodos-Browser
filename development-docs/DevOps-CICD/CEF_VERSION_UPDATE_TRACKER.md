@@ -151,12 +151,23 @@ pinned checkout. So **`--force-build` alone re-applies patches.**
    building means the copy never refreshes and **the build silently compiles zero Hodos patches** — with
    a green run and correct-looking checkouts. **Always confirm the patcher's `N patches total` line.**
    Fix: `--force-cef-update`.
-2. **Fork builds degrade the version string.** `CEF_VERSION` reads
-   `150.0.0-HEAD.<n>+g<sha>+chromium-150.0.7871.187` with **`CEF_VERSION_PATCH 0`**, not `150.0.17` /
-   `PATCH 17` (`cef_version.py:189-225` — our commits are *descendants* of `7871`, and the SHA checkout
-   detaches HEAD). **A fork-built binary therefore does not state which upstream security point-release
-   it contains** — record the fork-commit → upstream-version mapping, and treat `CEF_COMMIT_HASH` as the
-   authoritative identifier. Candidate fix: `--checkout=hodos/7871` + a SHA assertion. **OPEN.**
+2. **Fork builds report `CEF_VERSION_PATCH 0`** — `150.0.0-HEAD.<n>+g<sha>+chromium-150.0.7871.187`
+   instead of upstream's `150.0.17` / `PATCH 17` (`cef_version.py:189-225`: our commits are *descendants*
+   of `7871`, and the SHA checkout detaches HEAD). **✅ INVESTIGATED + CLOSED 2026-08-05 — accepted as-is,
+   no change.**
+   - **This is cosmetic, not a security gap.** `chromium-150.0.7871.187` — the field that carries the CVE
+     fixes — is present in the version string **in every variant**. CEF's `150.0.x` counter tracks CEF's
+     own commits, not Chromium security content. An earlier write-up called this a security-tracking
+     regression; that was **overstated**.
+   - The candidate fix (`--checkout=hodos/7871`, so the checkout lands on a named branch) was **tested**
+     via `cef_version.py`: it yields `150.0.19-7871.<n>+g<sha>+…`. `PATCH` there is a **count of branch
+     commits** (`:72-105`), i.e. upstream's 17 **plus our 2** — so it still does not state the upstream
+     level, it **drifts ahead of upstream**, and it will **collide** with a real upstream `150.0.19`.
+     A number that looks like an upstream release but isn't is worse than an obviously-synthetic `0`.
+   - It would also trade an exact reproducible pin for a moving branch tip, on a signed money-handling
+     build. Recovering that needs a SHA assertion — re-adding the pin to buy a wrong number.
+   - **Authoritative build identifier is `CEF_COMMIT_HASH`.** Fork-commit → upstream-base mapping lives in
+     `HODOS_PATCHES.md` §2, where it cannot collide.
 
 Full evidence: `../0.4.0/chromium-rebuild/P3_TOOLCHAIN_PROOF.md`. Restore point:
 `../0.4.0/chromium-rebuild/P3_BASELINE_94c1726.md`.
