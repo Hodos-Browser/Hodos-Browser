@@ -102,7 +102,60 @@ answering it properly would mean mutating the index.
 > as implying the rest of the tree is byte-pristine. `AUTHORS` was *clean by git's account* and still
 > CRLF-contaminated.
 
-## 4. Remaining P3 gates — ⬜ NOT YET PROVEN
+## 4. Drift audit (CEF-2) — ✅ PROVEN, both directions
+
+`DevOps-CICD/scripts/cef_patch_drift_audit.sh`. Clean run against the live tree:
+
+```
+patch.cfg entries : 115          .patch files : 116 (+1 allowed upstream orphan)
+Hodos entries     : 1  -> hodos_noop_probe  HODOS_FARBLING  src
+self-check OK     : 115 entries parsed, path map complete, 4 sub-repo entries
+upstream set matches baseline manifest
+already applied (reverses cleanly) : 114
+would apply cleanly                : 1
+applies but at an offset (warn)    : 0
+WILL NOT APPLY (hard fail)         : 0
+AUDIT_RESULT: CLEAN (exit 0)
+```
+
+**Negative test — a gate never proven to fail is not proven.** Registered a patch whose context lines
+do not exist in the target:
+
+```
+AUDIT_FAIL: hodos_negtest WILL NOT APPLY -- this aborts the build before compile
+WILL NOT APPLY (hard fail) : 1
+AUDIT_RESULT: HARD FAIL — DO NOT START THE BUILD (exit 1)
+```
+
+Removed afterwards; audit returned to `CLEAN (exit 0)`, and the in-tree `patch.cfg` verified
+byte-identical to the fork's copy.
+
+### Two design points that make the difference between a working gate and a decorative one
+
+1. **Reverse-check before forward-check.** On an already-patched tree a naive `git apply --check` fails
+   for *every* applied patch. A drift audit that reported 114 failures on a healthy tree would be
+   switched off within a day. So the audit mirrors `git_util.py`'s order: reverse-check first (reverses
+   cleanly ⇒ already applied **and** still matching the tree, itself a strong integrity signal), forward
+   only otherwise.
+2. **The path map must cover upstream entries, not just ours.** This audit's own first run produced
+   **4 confident false failures** — `tarball_gclient`, `v8_build`, `angle_commit_config`,
+   `dawn_dxil_redist`, the four upstream patches with a non-default `path`. It had built the target-dir
+   map from Hodos entries only, so those four were checked against the Chromium root. The output was
+   indistinguishable from real patch rot. Fixed, and a **second self-check** now asserts the map is
+   complete and that ≥1 sub-repo entry exists, because that specific malfunction mimics exactly the
+   failure the audit exists to detect.
+
+**Honest limitation, stated in the script:** hunk offsets can only be measured for patches *not yet
+applied*. Against a fully-patched tree this check proves "present and matching", not "would apply
+cleanly to pristine source". Getting the latter requires a fresh sync — which is what the scheduled
+fork-watcher (CEF-3) is for.
+
+**Deliberately not reimplemented:** the runtime file-manifest diff and the GN-args gate already exist
+(`cef_dist_drift_audit.sh`, `cef_gn_args_gate.sh`). The audit chains the first via `--with-dist` and
+tells you to run the second separately (it generates GN projects, which is slow and writes out-dirs).
+It prints that skipping is **not** the same as clean, so a skipped section can't be misread as a pass.
+
+## 5. Remaining P3 gates — ⬜ NOT YET PROVEN
 
 | Gate | What it needs | Cost |
 |---|---|---|
