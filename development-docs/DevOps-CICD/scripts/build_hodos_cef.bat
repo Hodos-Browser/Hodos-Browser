@@ -28,6 +28,34 @@ REM Do NOT invoke via `cmd.exe /c` from git-bash: MSYS rewrites /c into a path,
 REM so cmd opens interactively and exits 0 having done nothing.
 REM ============================================
 
+REM ============================================
+REM P3: our CEF fork + the farbling patch gate.
+REM
+REM CEF_URL points automate-git.py at Hodos-Browser/cef instead of upstream.
+REM Our source patches live in that fork under patch/patches/hodos_*.patch,
+REM registered in patch/patch.cfg. They are applied by gclient_hook.py ->
+REM patcher.py during the BUILD step (NOT by run_patch_updater -- that never
+REM applies on a pinned checkout). Consequence: --force-build alone re-applies.
+REM
+REM automate-git.py validates --url against the existing checkout's
+REM remote.origin.url and hard-errors on a mismatch. It does NOT require a clean
+REM dir -- our fork shares upstream's object graph, so:
+REM   git -C C:\cef\cef150\cef remote set-url origin <fork>
+REM satisfies the check and the pin still resolves. Done once, 2026-08-05.
+REM
+REM WARNING: changing CEF_CHECKOUT to a NEW commit makes automate-git delete
+REM chromium\src\cef -- which contains binary_distrib\. Move the tarballs out
+REM first (see P3_BASELINE_94c1726.md). Not triggered while the pin is 94c1726.
+set CEF_URL=https://github.com/Hodos-Browser/cef.git
+
+REM HODOS_FARBLING is the single condition gate on the whole C1-C7 farbling
+REM patch set (never gate them separately -- a half-applied set is worse than
+REM none). patcher.py applies a patch only if its 'condition' env var EXISTS.
+REM Unset this line to ship a farbling-free binary with no patch.cfg edit and no
+REM revert -- the patches are simply skipped. Upstream 7871 carries zero
+REM 'condition' entries, so ours is the first.
+set HODOS_FARBLING=1
+
 REM Set Visual Studio version and path
 set GYP_MSVS_VERSION=2022
 
@@ -93,6 +121,7 @@ cd /d C:\cef\cef150
 python C:\cef\cef150\cef\tools\automate\automate-git.py ^
   --download-dir=C:\cef\cef150 ^
   --depot-tools-dir=C:\cef\cef150\depot_tools ^
+  --url=%CEF_URL% ^
   --branch=7871 ^
   --checkout=94c1726 ^
   --x64-build ^

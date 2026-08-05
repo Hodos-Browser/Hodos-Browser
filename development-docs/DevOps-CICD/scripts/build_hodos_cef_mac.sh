@@ -53,6 +53,29 @@ CEF_CHROMIUM_DIR="$CEF_BASE_DIR/cef150"
 CEF_BRANCH="7871"
 CEF_CHECKOUT="94c1726"
 
+# P3: our CEF fork. Source patches live in it under patch/patches/hodos_*.patch,
+# registered in patch/patch.cfg, applied by gclient_hook.py -> patcher.py during
+# the BUILD step (NOT by run_patch_updater, which never applies on a pinned
+# checkout -- so --force-build alone re-applies them).
+#
+# automate-git.py validates this against the existing checkout's
+# remote.origin.url and hard-errors on a mismatch. A clean dir is NOT required:
+# our fork shares upstream's object graph, so
+#   git -C "$CEF_CHROMIUM_DIR/cef" remote set-url origin "$CEF_URL"
+# satisfies the check and CEF_CHECKOUT still resolves. Mac must run that once,
+# before its first fork build (Windows did on 2026-08-05).
+#
+# WARNING: pointing CEF_CHECKOUT at a NEW commit makes automate-git delete
+# <tree>/chromium/src/cef -- which contains binary_distrib/. Move the tarballs
+# out first. See PLAN_patch_toolchain.md R9 / P3_BASELINE_94c1726.md.
+CEF_URL="https://github.com/Hodos-Browser/cef.git"
+
+# Single condition gate for the whole C1-C7 farbling patch set. patcher.py
+# applies a patch only if its 'condition' env var EXISTS, so unsetting this
+# produces a farbling-free binary with no patch.cfg edit and no revert. Never
+# gate C1/C2 separately from C3-C7 -- a half-applied set is worse than none.
+export HODOS_FARBLING=1
+
 # GN build defines for proprietary codecs
 export GN_DEFINES="is_official_build=true proprietary_codecs=true ffmpeg_branding=Chrome chrome_pgo_phase=0"
 
@@ -283,6 +306,7 @@ BUILD_START=$(date +%s)
 python3 "$AUTOMATE_SCRIPT" \
     --download-dir="$CEF_CHROMIUM_DIR" \
     --depot-tools-dir="$CEF_DEPOT_TOOLS_DIR" \
+    --url="$CEF_URL" \
     --branch="$CEF_BRANCH" \
     --checkout="$CEF_CHECKOUT" \
     "$BUILD_ARCH_FLAG" \
