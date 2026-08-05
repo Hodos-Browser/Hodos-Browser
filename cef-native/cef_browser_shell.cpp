@@ -4466,7 +4466,7 @@ bool VerifyCodeSigningAndLoad(CefScopedLibraryLoader& library_loader,
 
 }  // namespace
 
-static int RunHodosMain(HINSTANCE hInstance, int nCmdShow,
+static int RunHodosMain(HINSTANCE hInstance, int nCmdShow, void* sandbox_info,
                         cef_version_info_t* version_info) {
     // Load libcef.dll before ANY CEF call. The loader's destructor calls
     // FreeLibrary, so it must be a local of the function that holds the whole
@@ -4488,12 +4488,28 @@ static int RunHodosMain(HINSTANCE hInstance, int nCmdShow,
     g_hInstance = hInstance;
     g_hResourceModule = GetCodeModuleHandle();
 
+    // Is this a CEF sub-process (renderer, GPU, utility, …)? Read from the COMMAND
+    // LINE rather than the environment: a sandboxed child does NOT reliably inherit
+    // our environment — see the dev-safeguard note below, where that cost us the
+    // whole sandbox.
+    const bool is_child_process =
+        (wcsstr(::GetCommandLineW(), L"--type=") != nullptr);
+
     // Initialize COM for taskbar integration (AUMID, ITaskbarList3).
     // CoInitializeEx is reference-counted; CEF's later COM init is compatible.
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
-    // Dev safeguard: refuse to run from build directory without HODOS_DEV=1
-    {
+    // Dev safeguard: refuse to run from build directory without HODOS_DEV=1.
+    //
+    // ⛔ BROWSER PROCESS ONLY. A sandboxed child does not see HODOS_DEV, so running
+    // this in children made EnforceDevSafeguard fail there and return 1 — every
+    // renderer exited immediately with RESULT_CODE_KILLED, Chromium logged only
+    // "sad_tab.cc Tab Killed", and no crash dump was produced because the process
+    // died before the crash handler existed. That is the entire S2 sandbox blocker.
+    // The guard loses nothing here: children are spawned by the browser process,
+    // which has already enforced it, and no child-process code resolves the dev/prod
+    // namespace (PortConfig/AppPaths consumers are all browser-side).
+    if (!is_child_process) {
         char exe_path[MAX_PATH];
         GetModuleFileNameA(NULL, exe_path, MAX_PATH);
         if (!AppPaths::EnforceDevSafeguard(std::string(exe_path))) {
@@ -4518,7 +4534,7 @@ static int RunHodosMain(HINSTANCE hInstance, int nCmdShow,
     CefMainArgs main_args(hInstance);
     CefRefPtr<SimpleApp> app(new SimpleApp());
 
-    int exit_code = CefExecuteProcess(main_args, app, nullptr);
+    int exit_code = CefExecuteProcess(main_args, app, sandbox_info);
     if (exit_code >= 0) return exit_code;
 
     // Initialize centralized logger FIRST. Log to an ABSOLUTE path OUTSIDE {app}: the
@@ -4575,12 +4591,16 @@ static int RunHodosMain(HINSTANCE hInstance, int nCmdShow,
     }
 
     CefSettings settings;
-    // Commit 1 of the bootstrap migration: the Chromium sandbox stays OFF, exactly as
-    // it was pre-150 (that build passed nullptr for sandbox_info, and
-    // CefMainRunner::ContentMainInitialize sets no_sandbox = true on null). Stated
-    // explicitly here rather than left implicit so the state is auditable and so
-    // commit 2b — sandbox ON — is a visible one-line change, not a silent one.
-    settings.no_sandbox = true;
+    // Commit 2b: the Chromium sandbox is ON whenever the bootstrap handed us a
+    // sandbox_info. Matches CEF's own tests/cefclient/cefclient_win.cc :: RunMain.
+    //
+    // ⛔ no_sandbox == 0 is NOT evidence the sandbox is engaged — see the
+    // browser_subprocess_path note further down, and verify with
+    // development-docs/0.4.0/chromium-rebuild/check-sandbox.ps1, which reads child
+    // token integrity. MEDIUM means unsandboxed no matter what these settings say.
+    if (!sandbox_info) {
+        settings.no_sandbox = true;
+    }
     settings.command_line_args_disabled = false;
     // Chromium's own log. This MUST be an absolute path: a relative "debug.log" is
     // rejected outright on every launch with
@@ -4907,10 +4927,6 @@ static int RunHodosMain(HINSTANCE hInstance, int nCmdShow,
     // Enable CEF's runtime API for JavaScript communication
     CefString(&settings.javascript_flags).FromASCII("--expose-gc");
 
-    // Get the executable path for subprocess
-    wchar_t exe_path[MAX_PATH];
-    GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
-
     // Set CEF resource paths — production vs dev
     {
         char exe_path_a[MAX_PATH];
@@ -4930,7 +4946,12 @@ static int RunHodosMain(HINSTANCE hInstance, int nCmdShow,
             CefString(&settings.locales_dir_path).FromWString(L"cef-binaries\\Resources\\locales");
         }
     }
-    CefString(&settings.browser_subprocess_path).FromWString(exe_path);
+    // ⛔ browser_subprocess_path is deliberately LEFT UNSET under the bootstrap model.
+    // Setting it (as this did, to the main exe path) SILENTLY DISABLES the Chromium
+    // sandbox: every child is then spawned with --no-sandbox at MEDIUM integrity even
+    // though the browser process reports no_sandbox=0 and a non-null sandbox_info. On
+    // Windows an empty value already means "re-launch the main process executable",
+    // which is exactly what we want, so setting it bought nothing and cost the sandbox.
 
     RECT rect;
     SystemParametersInfo(SPI_GETWORKAREA, 0, &rect, 0);
@@ -5194,7 +5215,7 @@ static int RunHodosMain(HINSTANCE hInstance, int nCmdShow,
     }
 
     LOG_INFO(elapsed() + "STARTUP: CefInitialize starting...");
-    bool success = CefInitialize(main_args, settings, app, nullptr);
+    bool success = CefInitialize(main_args, settings, app, sandbox_info);
     LOG_INFO(elapsed() + "STARTUP: CefInitialize done (success=" + std::string(success ? "true" : "false") + ")");
 
     if (!success) {
@@ -5533,17 +5554,14 @@ static int RunHodosMain(HINSTANCE hInstance, int nCmdShow,
 // C linkage comes from the extern "C" declaration in cef_sandbox_win.h, so no .def
 // file is needed.
 //
-// |sandbox_info| is deliberately ignored for now. Commit 1 of the bootstrap migration
-// keeps runtime behaviour byte-identical to the pre-150 build, which passed nullptr
-// and therefore ran with the Chromium sandbox DISABLED. Turning the sandbox on is
-// commit 2b, isolated on purpose so a renderer crash-loop is attributable to the
-// sandbox rather than to the 14-milestone engine bump.
+// |sandbox_info| is threaded through to BOTH CefExecuteProcess and CefInitialize
+// (commit 2b). Both are required: the first arms the sandbox in child processes, the
+// second in the browser process. Neither alone is sufficient.
 CEF_BOOTSTRAP_EXPORT int RunWinMain(HINSTANCE hInstance,
                                     LPTSTR lpCmdLine,
                                     int nCmdShow,
                                     void* sandbox_info,
                                     cef_version_info_t* version_info) {
     UNREFERENCED_PARAMETER(lpCmdLine);   // the full command line is read via GetCommandLineW()
-    UNREFERENCED_PARAMETER(sandbox_info);  // see comment above — commit 2b turns this on
-    return RunHodosMain(hInstance, nCmdShow, version_info);
+    return RunHodosMain(hInstance, nCmdShow, sandbox_info, version_info);
 }
