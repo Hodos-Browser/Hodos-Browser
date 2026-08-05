@@ -55,9 +55,9 @@ CEF_BRANCH="7871"
 # Pin an exact FORK commit, not the moving hodos/7871 branch tip: a build must be
 # reproducible, and patch content is part of the build. BUMP THIS every time a
 # patch lands on hodos/7871, and record the new SHA in the fork's
-# HODOS_PATCHES.md. Upstream content is unchanged -- 0a709e584 is 94c1726
+# HODOS_PATCHES.md. Upstream content is unchanged -- 4ed200cf9 is 94c1726
 # (upstream 7871 head) plus our patch commits.
-CEF_CHECKOUT="0a709e584"
+CEF_CHECKOUT="4ed200cf9"
 
 # ⚠️ <tree>/chromium/src/cef is a COPY of the standalone checkout, refreshed ONLY
 # when the CEF checkout HASH changes (automate-git.py:1358-1360). If you manually
@@ -65,7 +65,8 @@ CEF_CHECKOUT="0a709e584"
 # running this, the hashes already match, the copy never refreshes, and the build
 # silently uses the STALE in-tree patch set -- right fork, right pin, green run,
 # ZERO Hodos patches compiled in. Verify the patcher's count in the build log (it
-# must equal 114 upstream + our patches) or add --force-cef-update.
+# must equal 114 upstream + our patches). --force-cef-update is passed
+# unconditionally at the invocation below precisely so this cannot happen silently.
 # Measured on Windows 2026-08-05; the mechanism is platform-independent.
 
 # P3: our CEF fork. Source patches live in it under patch/patches/hodos_*.patch,
@@ -318,6 +319,19 @@ log_info "Starting CEF build (branch $CEF_BRANCH, $ARCH_LABEL)"
 
 BUILD_START=$(date +%s)
 
+# --force-cef-update: MANDATORY, not optional. <tree>/chromium/src/cef is a COPY,
+# and automate-git refreshes it only when cef_checkout_changed
+# (automate-git.py:1358-1360), computed as
+#     get_git_hash(<standalone cef dir>, 'HEAD') != get_git_hash(..., --checkout)
+# Landing a patch REQUIRES committing in that standalone checkout, which moves its
+# HEAD to exactly the SHA you then pin -- so current == desired and the copy is
+# NEVER refreshed on the normal patch-landing workflow. Measured on Windows
+# 2026-08-05 while landing C1: the build reported "114 patches total" instead of
+# 115 and would have compiled ZERO Hodos patches with a fully green run. The older
+# note claiming this "self-corrects" on the normal workflow is WRONG -- it
+# self-corrects only if you never commit locally, which is not a real workflow.
+# The refresh is a directory copy (seconds), so it is always passed rather than
+# remembered.
 python3 "$AUTOMATE_SCRIPT" \
     --download-dir="$CEF_CHROMIUM_DIR" \
     --depot-tools-dir="$CEF_DEPOT_TOOLS_DIR" \
@@ -328,6 +342,7 @@ python3 "$AUTOMATE_SCRIPT" \
     --minimal-distrib \
     --client-distrib \
     --no-debug-build \
+    --force-cef-update \
     --force-build
 
 BUILD_EXIT_CODE=$?

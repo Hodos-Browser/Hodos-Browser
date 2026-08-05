@@ -51,9 +51,9 @@ set CEF_URL=https://github.com/Hodos-Browser/cef.git
 REM Pin an exact FORK commit, not the moving hodos/7871 branch tip: a build must
 REM be reproducible, and patch content is part of the build. BUMP THIS every time
 REM a patch lands on hodos/7871, and record the new SHA in the fork's
-REM HODOS_PATCHES.md. Upstream content is unchanged -- 0a709e584 is
+REM HODOS_PATCHES.md. Upstream content is unchanged -- 4ed200cf9 is
 REM 94c1726 (upstream 7871 head) plus our patch commits.
-set CEF_CHECKOUT=0a709e584
+set CEF_CHECKOUT=4ed200cf9
 
 REM ⚠️ chromium\src\cef is a COPY of the standalone checkout, refreshed ONLY when
 REM the CEF checkout HASH changes (automate-git.py:1358-1360). If you manually
@@ -61,7 +61,8 @@ REM git-checkout or git-pull C:\cef\cef150\cef to the target commit before runni
 REM this, the hashes already match, the copy never refreshes, and the build
 REM silently uses the STALE in-tree patch set -- right fork, right pin, green run,
 REM ZERO Hodos patches compiled in. Verify the patcher's count in the build log
-REM (it must equal 114 upstream + our patches) or add --force-cef-update.
+REM (it must equal 114 upstream + our patches). --force-cef-update is passed
+REM unconditionally below precisely so this cannot silently happen.
 
 REM HODOS_FARBLING is the single condition gate on the whole C1-C7 farbling
 REM patch set (never gate them separately -- a half-applied set is worse than
@@ -129,6 +130,18 @@ REM     git -C %%r reset --hard
 REM   )
 REM ============================================
 echo.
+REM --force-cef-update: MANDATORY, not optional. chromium\src\cef is a COPY, and
+REM automate-git refreshes it only when cef_checkout_changed
+REM (automate-git.py:1358-1360), which is computed as
+REM     get_git_hash(<standalone cef dir>, 'HEAD') != get_git_hash(..., --checkout)
+REM Landing a patch REQUIRES committing in that standalone checkout, which moves its
+REM HEAD to exactly the SHA you then pin -- so current == desired and the copy is
+REM NEVER refreshed on the normal patch-landing workflow. Measured 2026-08-05 while
+REM landing C1: the build reported "114 patches total" instead of 115 and would have
+REM compiled ZERO Hodos patches with a fully green run. An earlier note claiming this
+REM "self-corrects" on the normal workflow is WRONG; it self-corrects only if you
+REM never commit locally, which is not a real workflow. The refresh is a directory
+REM copy -- seconds -- so it is always passed rather than remembered.
 echo === Running automate-git.py build (branch 7871) ===
 echo.
 cd /d C:\cef\cef150
@@ -144,6 +157,7 @@ python C:\cef\cef150\cef\tools\automate\automate-git.py ^
   --client-distrib ^
   --no-debug-build ^
   --no-depot-tools-update ^
+  --force-cef-update ^
   --force-build
 
 REM Exit code check

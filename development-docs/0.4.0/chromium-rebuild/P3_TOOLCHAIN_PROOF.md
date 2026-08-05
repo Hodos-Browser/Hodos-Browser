@@ -186,9 +186,32 @@ manually put on `0a709e584` already, so current == desired ⇒ **False** ⇒ nei
 >
 > **Fix:** `--force-cef-update`, or delete `chromium/src/cef` and let `:1597` re-copy.
 >
-> The *normal* workflow self-corrects — land a patch, bump `--checkout` to the new SHA, hashes differ,
-> refresh happens. The trap needs **manual intervention in the standalone checkout**, which is exactly
-> what a human debugging a patch problem does first.
+> ### ⛔ CORRECTION 2026-08-05 (landing C1) — "the normal workflow self-corrects" was WRONG
+>
+> This section originally read: *"The normal workflow self-corrects — land a patch, bump `--checkout`
+> to the new SHA, hashes differ, refresh happens. The trap needs manual intervention in the standalone
+> checkout."* **That is not what the code does, and believing it costs you a build.**
+>
+> `cef_current_hash = get_git_hash(cef_dir, 'HEAD')` (`automate-git.py:1351`) reads the **standalone
+> checkout**. Landing a patch *requires* committing there — that is the only place the patch can be
+> authored — which moves its `HEAD` to **exactly the SHA you then pin**. So `current == desired`,
+> `cef_checkout_changed` is `False`, and the copy is **never** refreshed. The trap does not need
+> "manual intervention"; it is the **default outcome of the normal patch-landing workflow**.
+>
+> Measured while landing C1: pin bumped `0a709e584` → `4ed200cf9`, fork pushed, build launched —
+> patcher printed **`114 patches total`**, not 115. A fully green run that would have compiled **zero
+> Hodos patches**. Re-run with `--force-cef-update`: **`115 patches total (1 applied, 114 skipped,
+> 0 failed)`**.
+>
+> **Both build scripts now pass `--force-cef-update` unconditionally** — the refresh is a directory
+> copy costing seconds, which is not worth trading against a silent multi-hour miscompile. Treat the
+> flag as part of the build, not as a recovery step.
+>
+> ⚠️ **The drift audit will not catch this for you.** `cef_patch_drift_audit.sh` sets
+> `CEF_SRC=/c/cef/cef150/chromium/src/cef` — the in-tree copy. Run it straight after committing to the
+> fork and it reports `Hodos entries : 0` / `AUDIT_RESULT: CLEAN`, which reads like success and is
+> really the audit telling you the copy is stale. Correct order: commit + push → bump pin → sync (with
+> `--force-cef-update`) → **then** audit → build, reading the `N patches total` line.
 
 ### Second attempt, with `--force-cef-update` — delivered
 

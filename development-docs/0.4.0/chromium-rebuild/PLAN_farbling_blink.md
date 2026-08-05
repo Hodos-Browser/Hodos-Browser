@@ -136,10 +136,24 @@ Brave hit exactly this seam (worker farbling follow-ups: brave-browser #42427 / 
 
 Highest fingerprint value first. All paths are `third_party/blink/renderer/...`. Each is an **in-place hook**: call `HodosSessionCache::From(*execution_context)`, early-return the native result if `!FarblingEnabledForThisContext()`, else perturb via the Supplement. Register every `.patch` in `cef/patch/patch.cfg` (P3 must exist first).
 
-### C1 — Supplement (new file + hooks) `[foundation]`
-- **New:** `hodos_session_cache.{h,cc}` under `core/execution_context/` (or a Hodos subdir added to the Blink BUILD.gn via patch). Defines `HodosSessionCache`, `From()`, `MakePrng()`, `PerturbPixels()`, `FarbleAudioSample()`, device-value helpers, `FarblingEnabledForThisContext()`.
-- **Hook:** `core/execution_context/execution_context.{h,cc}` — nothing behavioral; just make the Supplement attachable (Brave's shadow lives here — we insert the include/Provide hook instead).
-- **Seed intake:** the C2 delivery target (mojo method impl or cmdline-nonce reader) — see §4.
+### C1 — Supplement (new file + source-list entry) `[foundation]` — ✅ **LANDED 2026-08-05**
+- **New:** `hodos_session_cache.{h,cc}` under `core/execution_context/`. Defines `HodosSessionCache` (`From()`, `SetOriginKey()`, `FarblingEnabled()`, `HasOriginKey()`, `MakePrng(Stream)`, `PerturbPixels()`, `AudioFudgeFactor()`) and `HodosPrng`.
+- **Source list:** `core/execution_context/build.gni` — a two-line entry. **This is the only existing file C1 touches.**
+- **~~Hook: `execution_context.{h,cc}`~~ — NOT NEEDED, do not add.** See the landing note below.
+- **Seed intake:** `SetOriginKey(domain_key, farbling_enabled)` is the C2 delivery target — see §4.
+
+> ### ✅ C1 LANDED 2026-08-05 — and it needs **no** `execution_context.{h,cc}` hook
+>
+> Fork commit `4ed200cf9`, registered as `hodos_farble_session_cache` (`condition: HODOS_FARBLING`). Two findings that make C1–C7's rebase cost lower than this plan assumed — **defend both on every bump**:
+>
+> 1. **No hook in `execution_context.{h,cc}` is required.** `ExecutionContext` already derives from `Supplementable<ExecutionContext>` (`execution_context.h:130`), so a Supplement attaches entirely from its own translation unit via `ProvideTo`. §6 C1's "hook `execution_context.{h,cc}`" step is **unnecessary** — do not re-add it, and do not let a rebase reintroduce a hunk there.
+> 2. **Blink uses per-directory `build.gni` source lists**, not one monolithic `core/BUILD.gn`. The real target is `core/execution_context/build.gni` — a much lower-churn file than "a Blink `BUILD.gn`".
+>
+> Net: **C1 modifies no existing source file.** Two new files (which can never conflict) plus a two-line list entry. That is the target shape for all of C1–C7 — logic in `hodos_session_cache.cc`, one-liners on Chromium files.
+>
+> **Fail-closed contract (load-bearing for C7):** a cache with no delivered key reports `FarblingEnabled() == false`, so every call site returns the native value. There is deliberately **no "farble with a zero key" state** — a degenerate constant-seeded perturbation would be a worse fingerprint than none, and Q3 R6 requires the exemption bypass be a **true native pass-through**. `HasOriginKey()` is exposed separately so the C2 delivery path can tell "browser said don't farble" from "browser hasn't answered yet" — that distinction is what the lazy `[Sync]` pull keys off.
+>
+> Per-vector PRNG **streams** (canvas / webgl-readPixels / audio) so a site reading several vectors cannot correlate them back toward the seed. Perturbation matches the outgoing JS exactly (red-channel LSB on ~3% of pixels; ~1.0±2e-7 audio multiplier) so already-enrolled users keep their fingerprint across the migration. The small-canvas gate stays at the **call site** — only the caller knows the surface dimensions.
 
 ### C2 — Seed/enabled delivery (wiring, mostly shell-side) `[dep C1]`
 - **Shell (browser, `cef-native/`):** generate/store `profile_seed`; compute `domain_key`; decide `enabled` (= `!IsAuthDomain(top) && IsSiteEnabled(top)`); deliver at navigation commit + worker start. `#ifdef _WIN32` / `#elif __APPLE__` per Invariant #9; Mac creation paths in `cef_browser_shell_mac.mm`.
