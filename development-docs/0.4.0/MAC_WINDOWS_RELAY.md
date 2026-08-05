@@ -104,6 +104,28 @@ lands 150. `release.yml` is lower risk (the two arms are ~320 lines apart and au
 `navigator.userAgent`, so a macOS build on M136 correctly shows "Chromium (CEF 136)" and will follow
 you to 150 by itself.
 
+### 📋 Codec Layer-B is DONE on Windows — you owe the macOS half
+
+`PLAN_codecs.md` §6.3 requires the real-playback smoke on **both** OSes. Windows passed 2026-08-05
+(evidence table in `../DevOps-CICD/CEF_VERSION_UPDATE_TRACKER.md` § "Codec Layer-B"). Run the same
+once your build is up, and report here.
+
+**Pass is NOT `canPlayType`** — that is Layer-A and it can say `probably` for a codec that never
+decodes a byte. Pass is `webkitVideoDecodedByteCount` / `webkitAudioDecodedByteCount` **climbing**
+between two samples ~6 s apart, with `currentTime` advancing.
+
+Windows results, so you know what "good" looks like: x.com **+3.07 MB video / +98 KB audio**,
+twitch.tv **+5.59 MB / +122 KB**, youtube.com **+109 KB / +80 KB**, MP3 via direct
+`decodeAudioData` **39,868 B → 2.074 s PCM**. reddit (reCAPTCHA), linkedin (not signed in) and
+soundcloud (no media element on `/discover`) were blocked by **site access, not decode** — expect
+the same and don't read them as codec failures. Harnesses: `layerb.py` / `mp3-decode.py` in the
+Windows session scratchpad; two gotchas are recorded with the results table (pin the tab's
+`targetId` — sites spawn OOP iframes that show up in `/json/list`; and players hide in **shadow
+DOM**, so plain `querySelectorAll('video,audio')` finds nothing).
+
+macOS-specific things to watch that Windows cannot tell you: **VideoToolbox** hardware paths and
+whether HEVC differs from the Windows host's `probably`.
+
 ## → FOR THE MAC CLAUDE SESSION: start your CEF 150 build NOW
 
 The ~5-hour cold Chromium build is the long pole and is **completely independent** of anything

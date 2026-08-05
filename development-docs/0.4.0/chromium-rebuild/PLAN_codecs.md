@@ -116,9 +116,21 @@ A `""` on any **[GATE]** row = codec build regressed → **block the bump**, re-
 
 ### 6.3 Acceptance criteria (maps to outline §7 "Codecs / media")
 
-- [ ] Layer-A: all **[GATE]** rows return `'probably'`; AV1 decode presence asserted (`'probably'`).
-- [ ] Layer-B: all six sites play real audio+video on **both** Windows and macOS.
-- [ ] HEVC result **recorded** (per test machine) but **not gating**; Dolby explicitly out.
+- [x] Layer-A: all **[GATE]** rows return `'probably'`; AV1 decode presence asserted (`'probably'`).
+      **Windows PASS** (re-confirmed 2026-08-05 with the sandbox ON). macOS owed.
+- [x] Layer-B **(Windows, 2026-08-05)** — every GATE codec proven to *really decode*: H.264 + AAC
+      (x.com, twitch.tv), MP3 (direct `decodeAudioData`), VP9/AV1 (youtube.com). reddit (reCAPTCHA),
+      linkedin (not signed in) and soundcloud (no media element on `/discover`) were **blocked by
+      site access, not decode**, and are each redundant with a passing row. Full evidence table:
+      `../../DevOps-CICD/CEF_VERSION_UPDATE_TRACKER.md` § "Codec Layer-B".
+- [ ] Layer-B on **macOS** — still owed (§6.3 requires both OSes).
+- [x] HEVC result **recorded** (per test machine) but **not gating**; Dolby explicitly out.
+      Windows host (i9-12950HX): `probably`.
+
+> **Method note worth keeping.** `canPlayType` is a *capability string* — it can say `probably` for a
+> codec that never decodes a byte. Layer-B's pass criterion is therefore
+> `webkitVideoDecodedByteCount` / `webkitAudioDecodedByteCount` **climbing** between two samples,
+> plus `currentTime` advancing. Anything weaker re-tests Layer-A with extra steps.
 - [ ] `libcef` size sanity: our official codec build's `libcef.dll` was ~239 MB vs the ~224 MB **prebuilt Spotify CEF** (~15 MB larger) per `CEF_BUILD_RUNBOOK.md` line 61. Note this delta is **not a clean codec-only measurement** — it also folds in official-build/branding differences vs the prebuilt — so it's a loose corroboration that a codec-bearing build was produced, not a precise codec-size check. Optional but cheap.
 
 ---

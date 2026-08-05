@@ -137,8 +137,40 @@ baseline as much as on `7871`.
 | Wrapper | `libcef_dll_wrapper.lib` **104 MB**, builds clean on the new headers |
 | Patch set | none (P3 not yet stood up — this is a pure version bump) |
 | Deps touched | none in the CEF tree; DEP-1a..d pinned separately, no version moved |
-| Codec Layer-A | **PASS — all GATE rows `probably`**, AV1 present, HEVC unchanged vs M136 |
+| Codec Layer-A | **PASS — all GATE rows `probably`**, AV1 present, HEVC unchanged vs M136. Re-confirmed 2026-08-05 **with the Chromium sandbox ON** (HEVC also `probably` on this host) |
+| Codec Layer-B | **PASS — real decode proven** on 4 of 7 targets; every GATE codec covered. See below |
 | Est. per-bump patch-rebase hours (I10) | **N/A this bump** (zero Hodos patches). Baseline for the next one: ~5 h build + ~4 h of checkout/tooling firefighting, all now documented |
+
+#### Codec Layer-B — real-playback smoke (Windows, 2026-08-05, sandbox ON)
+
+`PLAN_codecs.md` §6.2. **Layer-A only proves a codec is *registered*.** Pass here is
+`webkitVideoDecodedByteCount` / `webkitAudioDecodedByteCount` actually **climbing** between two
+samples ~6 s apart, with `currentTime` advancing — i.e. bytes really decoded. Driven over CDP on the
+dev build (port 9322).
+
+| Target | Exercises | Result | Evidence (Δ over ~6 s) |
+|---|---|---|---|
+| **x.com** | H.264 + AAC | ✅ **PASS** | video **+3,074,656 B**, audio **+98,191 B**, `dt +6.0s` |
+| **twitch.tv** | live H.264/AAC (HLS) | ✅ **PASS** | video **+5,589,264 B**, audio **+121,839 B**, `dt +6.0s` |
+| **youtube.com** | VP9/AV1 + audio | ✅ **PASS** | video **+108,594 B**, audio **+80,321 B**, `dt +5.7s` |
+| **MP3** (direct decode) | MP3 | ✅ **PASS** | `decodeAudioData`: 39,868 B → **2.074 s PCM**, 48 kHz, 2 ch, 99,562 samples |
+| reddit.com | H.264 (v.redd.it) | ⚠️ **blocked** | enterprise reCAPTCHA interstitial killed the tab target. Bot detection, **not** a codec result |
+| linkedin.com | H.264 feed video | ⚠️ **blocked** | redirects to `/login`; no signed-in session on this host |
+| soundcloud.com | AAC/MP3 | ⚠️ **substituted** | `/discover` instantiates no media element. §6.2 explicitly permits substituting a stable MP3/AAC source — the direct MP3 decode above is that substitute |
+
+**Every GATE codec is covered by a passing row:** H.264 (x, twitch), AAC (x, twitch), MP3 (direct
+decode), VP9/AV1 (youtube). The three non-passing rows are all **access/bot-detection** problems on
+our side of the network, not decode failures, and each is redundant with a passing row for codec
+purposes (reddit + linkedin = H.264, already proven twice; soundcloud = MP3/AAC, both proven).
+
+> Repro harnesses: `layerb.py` (site smoke) and `mp3-decode.py` (direct decode) in the session
+> scratchpad. Two gotchas if rebuilding them: sites spawn **out-of-process iframes** that appear in
+> `/json/list`, so pin the tab's `targetId` once rather than re-picking by URL (a reCAPTCHA iframe
+> gets picked otherwise and you silently probe the wrong document); and reddit/twitch/soundcloud put
+> players in **shadow DOM**, so a plain `document.querySelectorAll('video,audio')` finds nothing.
+
+**Still owed:** the same Layer-B run on **macOS** (§6.3 requires both OSes) — tracked in
+`0.4.0/MAC_WINDOWS_RELAY.md`.
 
 **Failures survived (all documented in `CEF_BUILD_RUNBOOK.md` Lessons):** shallow `depot_tools`;
 stale `automate-git.py`; `rd`/`STATUS_DLL_INIT_FAILED` aborting gclient on an empty temp dir; HTTP
