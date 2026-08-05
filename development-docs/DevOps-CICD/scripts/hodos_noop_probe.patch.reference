@@ -1,0 +1,9 @@
+diff --git AUTHORS AUTHORS
+index fad9447cb7c85..3afc5aff7d9a5 100644
+--- AUTHORS
++++ AUTHORS
+@@ -1940,3 +1940,4 @@ Yandex LLC <*@yandex-team.ru>
+ Zoho Corporation <*@zohocorp.com>
+ # Please DO NOT APPEND here. See comments at the top of the file.
+ # END organizations section.
++# HODOS_NOOP_PROBE - PIPE-A1 pipeline smoke. Remove after P3 standup.
