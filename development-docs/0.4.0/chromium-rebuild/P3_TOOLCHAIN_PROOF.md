@@ -350,6 +350,25 @@ So what is actually missing is a secondary provenance nicety, and it is **exactl
 and therefore its upstream ancestor — unambiguously. This is a **cosmetic/provenance** matter, not a
 security defect, and not urgent.
 
+### ⭐ SUPERSEDED 2026-08-05 (landing C1): the version string changed on its own, and the owner ACCEPTED it
+
+The decision below assumed `150.0.0-HEAD` was ours to keep. It was not — it was an **artifact of
+pinning an intermediate commit**, and it disappeared the moment we pinned a real patch commit.
+
+`git_util.get_branch_name()` falls back on a detached HEAD to `git log -1 --pretty=%d` and takes the
+**last** decoration. `0a709e584` was mid-history and carried none → `"HEAD"` → MINOR/PATCH zeroed.
+`4ed200cf9` is the branch tip, so its decoration reads `(HEAD, origin/hodos/7871, hodos/7871)` →
+`"hodos/7871"` → `.split('/')[-1]` → `"7871"` → real MINOR/PATCH. **Every future landing pins the
+commit just pushed, i.e. the branch tip**, so `150.0.0-HEAD` is not reproducible going forward.
+
+Shipped at C1: `CEF_VERSION "150.0.22-7871.3555+g4ed200c+chromium-150.0.7871.187"`, `PATCH 22`
+(= upstream 17 + our 5 commits). **Owner accepted 2026-08-05**, collision risk recorded in the fork's
+`HODOS_PATCHES.md` §2. Note this was NOT caused by `--force-cef-update`; the SHA pin is unchanged and
+still exact. ⚠️ Distribution directory/tarball names now embed this version — the `cef-binaries/`
+staging step and the CI asset must not assume a fixed string.
+
+<details><summary>Historical: the superseded decision</summary>
+
 ### Decision: keep the SHA pin (status quo). No change to the build scripts.
 
 1. The security-relevant field (`chromium-150.0.7871.187`) is present either way.
@@ -379,3 +398,5 @@ That is already in place.
 > Chromium pin is unchanged and `chromium/src/out/` survives. A comment-only `AUTHORS` change should
 > recompile nothing at all. That has **not** been measured, and a future patch touching a
 > widely-included Blink header could still cascade broadly. Measure at the gate; do not promise it.
+
+</details>
