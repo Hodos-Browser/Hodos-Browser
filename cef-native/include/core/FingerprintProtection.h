@@ -69,7 +69,13 @@ public:
     }
 
     /// Get per-domain seed for fingerprint farbling.
-    /// Extracts eTLD+1 from URL and computes a hash with the session token.
+    /// Computes a hash of the session token and the URL's HOST.
+    ///
+    /// NOTE: this is the bare host, NOT eTLD+1 — ExtractDomain() does no Public
+    /// Suffix List lookup, so a.example.com and b.example.com get DIFFERENT seeds.
+    /// (This docstring claimed eTLD+1 until 2026-08-05; it never did that.)
+    /// The Blink migration's C2 seed key DOES require a real registrable domain —
+    /// it must use a new PSL-backed helper, not this function.
     uint32_t GetDomainSeed(const std::string& url) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!initialized_) return 0;

@@ -144,7 +144,7 @@ compile* (GN flag, `patch.cfg` `.patch` file, or automate-git config) — distin
 
 ### (c) Blink farbling patch set — FEAT-B1 `[NEW — owner-committed source/Blink migration]`
 Replaces today's JS-injection farbling (`cef-native/include/core/FingerprintScript.h`,
-`FingerprintProtection.h`, injected in `simple_render_process_handler.cpp:586-632`). Sub-edits, highest value
+`FingerprintProtection.h`, injected in `simple_render_process_handler.cpp:501–547` — **re-verified 2026-08-05**; the long-quoted `:586-632` was always stale and is now ~85 lines off). Sub-edits, highest value
 first (land incrementally — §4 P4):
 
 | Sub-edit | What | Blink files (`third_party/blink/renderer/...`) | Size | Dep |
@@ -177,7 +177,7 @@ OffscreenCanvas-in-worker** cases — not just the dedicated-worker column Creep
   Chrome 144 removed the flags → Win/Mac must re-implement. **Bromite = GPL-3 FORBIDDEN.**
 
 - **JS-farbling teardown checklist (M1).** Migration must retire, not just orphan, the old path:
-  delete injection at `simple_render_process_handler.cpp:586-632`; retire the `FingerprintProtection.h` /
+  delete injection at `simple_render_process_handler.cpp:501–547` (**re-verified 2026-08-05**; `:586-632` is stale); retire the `FingerprintProtection.h` /
   `FingerprintScript.h` singletons; remove the fingerprint-seed IPC chain (`s_domainSeeds`, the `OnBeforeBrowse`
   seed IPC); **migrate `IsAuthDomain`'s allowlist into C7** (do not leave two sources of truth). Guard against
   double-seeding / dead code.
@@ -385,7 +385,7 @@ patches, owns the OS-specific build/arch/minos/plist wiring + Mac GPU strings** 
   layer* and should not collide. **`hodos-unbreak.txt` is an adblock file and is untouched by this sprint
   (I1).** Verify: (1) **ordering** — cosmetic scriptlet injection in `simple_render_process_handler.cpp` and
   Blink farbling both touch the renderer; confirm no shared V8-timing assumption breaks; (2) the removed JS
-  farbling site (`:586-632`) is deleted cleanly without disturbing adjacent scriptlet/cosmetic IPC handlers
+  farbling site (`:501–547`, **re-verified 2026-08-05**) is deleted cleanly without disturbing adjacent scriptlet/cosmetic IPC handlers (scriptlet block `:487–499`)
   (per the M1 teardown checklist). → `chromium-rebuild/Q2_farbling_adblock.md`.
 - **Q3 — Farbling × OAuth pre-approved sites.** *Stub:* today JS-farbling **skips auth domains via the
   hardcoded C++ `FingerprintProtection::IsAuthDomain` list** (NOT `hodos-unbreak.txt`). C7 re-implements *that

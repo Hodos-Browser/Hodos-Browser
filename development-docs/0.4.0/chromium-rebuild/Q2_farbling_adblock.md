@@ -4,8 +4,8 @@
 **Status:** DETAILED PLAN (expands `CHROMIUM_CEF_BUILD_DESIGN_OUTLINE.md` §6 Q2). Research + design only — **NO code, NO builds.**
 **Answers:** When farbling moves from JS-injection (renderer, above JS) into Blink C++ patches (renderer, below JS), does it collide with the adblock engine (separate Rust process on 31302 + C++ `AdblockCache` + `AdblockResponseFilter` + cosmetic CSS + scriptlet injection)? What are the concrete touch points, ordering hazards, and regression tests?
 
-**Cross-refs:** `CHROMIUM_CEF_BUILD_DESIGN_OUTLINE.md` §3c (FEAT-B1 / M1 — the C1–C7 Blink patch set + teardown checklist; this doc assumes its teardown/seed model) and §4 (P4/P6 acceptance), `B1-farbling-design.md`, `DevOps-CICD/research/BRAVE_FORK_FEASIBILITY.md` §B1. Authoritative code cites below are verified current as of 2026-07-10.
-> **Doc-ordering note:** `PLAN_farbling_blink.md` (the standalone C1–C7 patch plan) and `Q3-farbling-x-oauth.md` (auth-domain exemption plan) are **planned, not-yet-written** as of 2026-07-10. Until they land, the outline §3c/§4 is the source-of-truth for C1–C7, the M1 teardown checklist, the C2 seed model, P4e, and P6. Where this doc says a decision "migrates into C7," treat that as a *proposed* dependency to be settled when the farbling/OAuth plans are authored — Q2 does not itself decide it.
+**Cross-refs:** `CHROMIUM_CEF_BUILD_DESIGN_OUTLINE.md` §3c (FEAT-B1 / M1 — the C1–C7 Blink patch set + teardown checklist; this doc assumes its teardown/seed model) and §4 (P4/P6 acceptance), `B1-farbling-design.md`, `DevOps-CICD/research/BRAVE_FORK_FEASIBILITY.md` §B1. Authoritative code cites below were **re-verified 2026-08-05** at the P4a kickoff; the original 2026-07-10 numbers had drifted 48–95 lines and are retained inline as "was …" so a reader mid-migration can tell which vintage they hold.
+> **Doc-ordering note (updated 2026-08-05):** `PLAN_farbling_blink.md` and `Q3_farbling_oauth.md` **now exist** — they are the source of truth for C1–C7, the C2 seed model, P4e and the M1 teardown; the outline §3c/§4 is no longer authoritative where it disagrees with them. Every "migrates into C7" dependency this doc raised **has been settled**: C7 owns `IsAuthDomain` (TD-4) and absorbs `IsSiteEnabled` as `ShouldFarble` input B (TD-5/C7b, Q3 §3).
 
 ---
 
@@ -15,8 +15,8 @@
 
 - **Net win:** moving farbling below JS makes `getImageData.toString()` etc. return `[native code]` again, which *improves* adblock/anti-adblock resilience (fewer tamper tells) and removes the `OnContextCreated` JS-injection timing coupling.
 - **Only real touch points are teardown hygiene, not runtime behaviour:**
-  1. The JS-farbling injection block being **deleted** (`simple_render_process_handler.cpp:581–627`) sits *directly adjacent* to the adblock **scriptlet injection** block (`:567–579`) — delete cleanly without disturbing it.
-  2. The `fingerprint_seed` / `fingerprint_site_disabled` IPC being **removed** (`simple_handler.cpp:7484–7521`) sits *directly adjacent* to the adblock `preload_cosmetic_script` IPC (`:7445–7461`) in the same `OnBeforeBrowse` — same hazard, same dispatcher.
+  1. The JS-farbling injection block being **deleted** (`simple_render_process_handler.cpp:501–547`) sits *directly adjacent* to the adblock **scriptlet injection** block (`:487–499`) — delete cleanly without disturbing it.
+  2. The `fingerprint_seed` / `fingerprint_site_disabled` IPC being **removed** (`simple_handler.cpp:7578–7615`) sits *directly adjacent* to the adblock `preload_cosmetic_script` IPC (`:7539–7555`) in the same `OnBeforeBrowse` — same hazard, same dispatcher.
 - **Recommendation:** proceed; treat Q2 as a **regression-test + deletion-hygiene** concern, not a design blocker. No adblock-engine code changes are required. `hodos-unbreak.txt` is an adblock-engine file and is **untouched** by this sprint (per outline I1).
 
 ---
@@ -26,10 +26,10 @@
 | Concern | Process | Thread | Layer vs JS | Code anchor |
 |---|---|---|---|---|
 | **Adblock network block** (`AdblockCache::check` → `AdblockBlockHandler` cancels) | **Browser** | **IO** | n/a (pre-network) | `simple_handler.cpp::GetResourceRequestHandler`; `AdblockCache.h` |
-| **Adblock response rewrite** (`AdblockResponseFilter` — YouTube ad-key strip) | **Browser** | **IO** | n/a (pre-renderer bytes) | `simple_handler.cpp:7541+` (`CefResponseFilter`) |
-| **Adblock cosmetic CSS** (`<style id="hodos-cosmetic-css">`) | **Renderer** | render | **above** JS (injected JS builds a `<style>`) | `simple_render_process_handler.cpp:1224–1263` (`inject_cosmetic_css` IPC) |
-| **Adblock scriptlets** (fetch/XHR/JSON.parse overrides) | **Renderer** | render | **above** JS (executes as page-context JS) | pre-cache `s_scriptCache` → inject in `OnContextCreated:567–579`; IPC `preload_cosmetic_script` `simple_handler.cpp:7454` |
-| **Farbling TODAY** (`FINGERPRINT_PROTECTION_SCRIPT`) | **Renderer** | render | **above** JS (Mulberry32 JS overwrites Canvas/WebGL/etc.) | `OnContextCreated:581–627`; IPC `fingerprint_seed` `simple_handler.cpp:7515` |
+| **Adblock response rewrite** (`AdblockResponseFilter` — YouTube ad-key strip) | **Browser** | **IO** | n/a (pre-renderer bytes) | `simple_handler.cpp:7635` (`class AdblockResponseFilter`, was `:7541+`) |
+| **Adblock cosmetic CSS** (`<style id="hodos-cosmetic-css">`) | **Renderer** | render | **above** JS (injected JS builds a `<style>`) | `simple_render_process_handler.cpp:1157–1196` (`inject_cosmetic_css` IPC, was `:1224–1263`) |
+| **Adblock scriptlets** (fetch/XHR/JSON.parse overrides) | **Renderer** | render | **above** JS (executes as page-context JS) | pre-cache `s_scriptCache` → inject in `OnContextCreated:487–499` (was `:567–579`); IPC `preload_cosmetic_script` `simple_handler.cpp:7548` (was `:7454`) |
+| **Farbling TODAY** (`FINGERPRINT_PROTECTION_SCRIPT`) | **Renderer** | render | **above** JS (Mulberry32 JS overwrites Canvas/WebGL/etc.) | `OnContextCreated:501–547` (was `:581–627`); IPC `fingerprint_seed` `simple_handler.cpp:7609` (was `:7515`) |
 | **Farbling AFTER (C1–C7)** (Blink patches reading `HodosSessionCache` Supplement) | **Renderer** | render | **below** JS (native C++ in `third_party/blink`) | new `.patch` files (see outline §3c FEAT-B1) |
 
 **The key structural fact:** the migration moves farbling from **"renderer / above JS"** to **"renderer / below JS."** Adblock never leaves its two homes: **"browser / IO"** (block + response filter) and **"renderer / above JS"** (cosmetic CSS + scriptlets). So after the migration:
@@ -54,13 +54,13 @@ Farbling and the two adblock homes never share a thread, process boundary, or ex
 `AdblockCache::check()` runs on the IO thread in the browser process and returns `AdblockBlockHandler` (`RV_CANCEL`) before a request ever reaches the renderer. Farbling has **no network component** (no port, no HTTP; the seed travels off-cmdline per C2). Different process, different thread, different phase. **No touch point.**
 
 ### 2.2 Adblock response filter (YouTube ad-key strip) — ZERO interaction ✅
-`AdblockResponseFilter` (`CefResponseFilter`) rewrites the response **body bytes** on the IO thread *before the renderer sees them* (`simple_handler.cpp:7536–7540` comment confirms). Farbling perturbs **canvas/WebGL/audio readback**, never network bytes. **No touch point.**
+`AdblockResponseFilter` (`CefResponseFilter`) rewrites the response **body bytes** on the IO thread *before the renderer sees them* (`simple_handler.cpp:7630` comment confirms, was `:7536–7540`). Farbling perturbs **canvas/WebGL/audio readback**, never network bytes. **No touch point.**
 
 ### 2.3 Adblock scriptlets vs farbling — ordering, and the "double-wrap" question ⚠️ (low risk)
 Both scriptlets (post-migration) and farbling execute in the renderer. But they execute at **different layers**:
 
 - **Farbling (Blink):** applies at **API-call time** — every `getImageData` / `getParameter` / `getChannelData` call funnels through the patched native function and reads `HodosSessionCache::From(ctx)`. It does **not** run at context-creation time and holds **no `OnContextCreated` timing assumption**.
-- **Scriptlets (JS):** inject at **context-creation time** (`OnContextCreated:567–579`, one-shot from `s_scriptCache`), *before* page JS runs, and typically override `fetch` / `XMLHttpRequest` / `JSON.parse` to strip ad data.
+- **Scriptlets (JS):** inject at **context-creation time** (`OnContextCreated:487–499`, one-shot from `s_scriptCache`), *before* page JS runs, and typically override `fetch` / `XMLHttpRequest` / `JSON.parse` to strip ad data.
 
 Because farbling is native and below JS, when a scriptlet or page script calls a canvas/WebGL/audio API, **Blink farbles first and the JS sees already-farbled bytes.** That is the correct order and matches Brave.
 
@@ -73,7 +73,7 @@ Because farbling is native and below JS, when a scriptlet or page script calls a
 Two sub-questions:
 
 - **"Does farbling break anti-adblock detection (making sites think we block)?"** No. Anti-adblock scripts detect blocking by planting bait elements / bait requests and checking whether they survive (confirmed by the uBO wiki: *"a script can't directly tell if a browser has an ad blocker… instead it tries adding something to the page to see if it gets blocked"*). That is orthogonal to canvas/audio perturbation. **No new breakage from farbling.**
-- **"Does native farbling help against anti-adblock/anti-bot fingerprinting?"** **Yes — this is the headline win.** Today's JS injection replaces `HTMLCanvasElement.prototype.toDataURL` (etc.) with a JS function, so `toDataURL.toString()` no longer returns `"function toDataURL() { [native code] }"`. Anti-bot stacks (Cloudflare Turnstile, DataDome, PerimeterX) flag exactly this kind of prototype tampering. Moving to Blink patches restores `[native code]` integrity → **fewer bot-detection false positives**, which also reduces the Turnstile "Verify you are human" loops the codebase already fights (see the `OnBeforeBrowse` comment at `simple_handler.cpp:7440–7442`). Adblock's own resilience against *anti-adblock* fingerprinting improves for free.
+- **"Does native farbling help against anti-adblock/anti-bot fingerprinting?"** **Yes — this is the headline win.** Today's JS injection replaces `HTMLCanvasElement.prototype.toDataURL` (etc.) with a JS function, so `toDataURL.toString()` no longer returns `"function toDataURL() { [native code] }"`. Anti-bot stacks (Cloudflare Turnstile, DataDome, PerimeterX) flag exactly this kind of prototype tampering. Moving to Blink patches restores `[native code]` integrity → **fewer bot-detection false positives**, which also reduces the Turnstile "Verify you are human" loops the codebase already fights (see the `OnBeforeBrowse` comment at `simple_handler.cpp:7534–7536`, was `:7440–7442`). Adblock's own resilience against *anti-adblock* fingerprinting improves for free.
 
 > Residual: farbling still perturbs the fingerprint, so a site that *keys* anti-bot on a stable canvas hash will see our (stable-per-profile-per-site) farbled hash. Our persistent-per-profile seed (outline §3c C2) keeps it stable across sessions → no new friction vs today. No adblock impact.
 
@@ -87,23 +87,29 @@ Adblock already covers worker *requests* at the network layer (`CefResourceTypeT
 Both are consequences of the M1 teardown checklist (retire the JS farbling path) landing in files the adblock engine *also* uses. Neither is a behavioural interaction; both are "don't nick the neighbour" surgical-hygiene items.
 
 ### TP-1 — `OnContextCreated`: FP-injection block is adjacent to the scriptlet-injection block
-`simple_render_process_handler.cpp`:
-- **Keep:** scriptlet injection `:567–579` (`s_scriptCache` / `preload_cosmetic_script`) — **adblock, stays.**
-- **Delete (farbling):** `:581–627` (auth-domain skip, `s_fingerprintDisabledUrls`, `s_domainSeeds` lookup, `FINGERPRINT_PROTECTION_SCRIPT` patch+inject).
-- **Keep:** the `window.chrome` stub `:629–653` — **not farbling, not adblock; stays** (bot-signal). Note it currently sits *after* the FP block; verify its guard (`isExternalPage`) is independent of the deleted block (it is — recomputed at `:631`).
-- **Also delete:** the static caches/mutexes used only by FP — `s_domainSeeds` + `s_seedMutex` (`:37–38`), `s_fingerprintDisabledUrls` + `s_fpDisabledMutex` (`:42–43`) — but **keep** `s_scriptCache` + `s_scriptCacheMutex` (`:33–34`, adblock).
 
-**Acceptance:** after deletion, the scriptlet block still compiles and injects (T2), and `git diff` shows the `:567–579` block byte-identical.
+> **All line numbers below re-verified 2026-08-05** at the P4a kickoff. The 2026-07-10 originals had drifted ~48–80 lines; the old values are shown struck through so a reader mid-migration can tell which vintage they are holding.
+
+`simple_render_process_handler.cpp :: OnContextCreated` (**`:471–573`**, was `:551–653`):
+- **Keep:** scriptlet injection **`:487–499`** (was `:567–579`) (`s_scriptCache` / `preload_cosmetic_script`) — **adblock, stays.**
+- **Delete (farbling):** **`:501–547`** (was `:581–627`) — auth-domain skip (**`:505`**, was `:585`), `s_fingerprintDisabledUrls` (erase **`:515`**, was `:595`), `s_domainSeeds` lookup (erase **`:529`**, was `:609`; URL-hash fallback **`:533`**, was `:613`), `FINGERPRINT_PROTECTION_SCRIPT` patch+inject (**`:537–544`**, was `:617`).
+- **Keep:** the `window.chrome` stub **`:549–573`** (was `:629–653`) — **not farbling, not adblock; stays** (bot-signal). Note it currently sits *after* the FP block; verify its guard (`isExternalPage`) is independent of the deleted block (it is — recomputed at **`:551`**, was `:631`).
+- **Also delete:** the static caches/mutexes used only by FP — `s_seedMutex` + `s_domainSeeds` (**`:34–35`**, was `:37–38`), `s_fpDisabledMutex` + `s_fingerprintDisabledUrls` (**`:39–40`**, was `:42–43`) — but **keep** `s_scriptCacheMutex` + `s_scriptCache` (**`:30–31`**, was `:33–34`, adblock).
+
+**Acceptance:** after deletion, the scriptlet block still compiles and injects (T2), and `git diff` shows the **`:487–499`** block byte-identical.
+
+> ✅ **Additional safeguard checked 2026-08-05:** `payment_success_indicator` — the GOLD PILL relay — lives at **`:971`**, far from every symbol above and from the FP IPC handlers below. It is not in any teardown diff. Re-assert this after each teardown step; it is the user's primary visual safeguard against silent payment abuse.
 
 ### TP-2 — `OnBeforeBrowse`: `fingerprint_seed` IPC is adjacent to `preload_cosmetic_script` IPC
-`simple_handler.cpp::OnBeforeBrowse`:
-- **Keep:** `:7445–7461` `preload_cosmetic_script` send — **adblock, stays.**
-- **Delete (farbling):** `:7484–7521` — the `fingerprint_seed` + `fingerprint_site_disabled` sends and the `IsAuthDomain` (hardcoded auth allowlist) gate. The auth-domain logic is **proposed to migrate into C7** (per the not-yet-written OAuth plan; do not leave a second source of truth). **Delete only once C7 actually owns it.**
-- **⚠️ DO NOT blindly delete `IsSiteEnabled` / `SetSiteEnabled` — that is a shipped user control, not the auth allowlist.** `IsSiteEnabled` is the user-facing Privacy-Shield **per-site fingerprint on/off toggle**, backed by real IPC (`fingerprint_get_site_enabled` / `fingerprint_set_site_enabled` at `simple_handler.cpp:6191/6210`; `FingerprintProtection.h:123/135`). Outline C7 **only re-implements `IsAuthDomain`, not this toggle.** Deleting it drops a shipped feature with no replacement. **This is OUT of Q2 scope → the farbling plan owns re-homing it** (browser decides farbling on/off per eTLD+1 from the user toggle and passes it to the renderer alongside the seed, per C2's "browser process decides farbling on/off … per eTLD+1"). Until the farbling plan provides that destination, treat `IsSiteEnabled` + its IPC chain as an **unresolved gap — do not lump into C7.**
-- **Keep:** `:7463–7482` domain-permission pre-warm (wallet, unrelated).
-- **Renderer side:** delete the matching IPC handlers `fingerprint_seed` (`simple_render_process_handler.cpp:1198`) and `fingerprint_site_disabled` (`:1213`) — but **keep** `preload_cosmetic_script` (`:1183`), `inject_cosmetic_css` (`:1224`), `inject_cosmetic_script` (`:1264`), and `cosmetic_class_id_query` handling.
+`simple_handler.cpp :: OnBeforeBrowse` (**`:7521–7618`**, was `:7434–7524`; all values re-verified 2026-08-05):
+- **Keep:** **`:7539–7555`** (was `:7445–7461`) `preload_cosmetic_script` send (**`:7548`**, was `:7454`) — **adblock, stays.**
+- **Delete (farbling):** **`:7578–7615`** (was `:7484–7521`) — the `fingerprint_seed` (**`:7609`**, was `:7515`) + `fingerprint_site_disabled` sends and the `IsAuthDomain` (hardcoded auth allowlist) gate; the `frame->IsMain()` gate is at **`:7579`** (was `:7485`). The auth-domain logic **migrates into C7** (`Q3_farbling_oauth.md`, now written — do not leave a second source of truth). **Delete only once C7 actually owns it.**
+- **Also inside this block:** a **hand-inlined copy of `ExtractDomain`** at **`:7584–7596`**, commented "mirrors `FingerprintProtection::ExtractDomain`". It is host-only, like the original. C2 needs a real eTLD+1, so both copies collapse into one new registrable-domain helper — do not port the duplicate forward.
+- **⚠️ DO NOT blindly delete `IsSiteEnabled` / `SetSiteEnabled` — that is a shipped user control, not the auth allowlist.** `IsSiteEnabled` is the user-facing Privacy-Shield **per-site fingerprint on/off toggle**, backed by real IPC (`fingerprint_get_site_enabled` / `fingerprint_set_site_enabled` at **`simple_handler.cpp:6285/6304`**, was `:6191/6210`; `FingerprintProtection.h :: IsSiteEnabled` / `:: SetSiteEnabled`, now `:129`/`:141` — cited by symbol because the 2026-08-05 docstring fix shifted the file +6 below `:72`). Outline C7 **only re-implements `IsAuthDomain`, not this toggle.** Deleting it drops a shipped feature with no replacement. **This is OUT of Q2 scope → the farbling plan owns re-homing it** (browser decides farbling on/off per eTLD+1 from the user toggle and passes it to the renderer alongside the seed, per C2's "browser process decides farbling on/off … per eTLD+1"). Until the farbling plan provides that destination, treat `IsSiteEnabled` + its IPC chain as an **unresolved gap — do not lump into C7.**
+- **Keep:** **`:7557–7576`** (was `:7463–7482`) domain-permission pre-warm (wallet, unrelated).
+- **Renderer side:** delete the matching IPC handlers `fingerprint_seed` (**`simple_render_process_handler.cpp:1131`**, was `:1198`) and `fingerprint_site_disabled` (**`:1146`**, was `:1213`) — but **keep** `preload_cosmetic_script` (**`:1116`**, was `:1183`), `inject_cosmetic_css` (**`:1157`**, was `:1224`), `inject_cosmetic_script` (**`:1197`**, was `:1264`), and `cosmetic_class_id_query` handling. Note a **third** FP handler the original list missed: `fingerprint_get_site_enabled_response` at **`:2033`** — that one belongs to the **user toggle**, so it is **TD-5-gated and must NOT be deleted with TD-3.**
 
-**Acceptance:** after deletion, `preload_cosmetic_script` still fires on nav (T2), and the `cosmetic_class_id_query` post-load path (`simple_handler.cpp:6265`) is untouched.
+**Acceptance:** after deletion, `preload_cosmetic_script` still fires on nav (T2), and the `cosmetic_class_id_query` post-load path (**`simple_handler.cpp:6359`**, was `:6265`) is untouched.
 
 > Both TPs are pure deletion adjacency. There is **no shared state** between the FP caches/IPC and the adblock caches/IPC — they are distinct message names, distinct maps, distinct mutexes. The risk is a careless multi-line delete clipping a neighbouring block, which the T2 regression catches.
 
@@ -159,4 +165,4 @@ Run on **both** Windows and macOS. All must pass **in the same session as farbli
 ## Sources
 - uBO fingerprinting/anti-adblock behaviour: [Does uBO protect against fingerprinting? — gorhill/uBlock Wiki](https://github.com/gorhill/uBlock/wiki/Does-uBO-protect-against-fingerprinting%3F)
 - Canvas fingerprinting mechanics & API-interception defenses: [How ad blockers can be used for browser fingerprinting — Fingerprint](https://fingerprint.com/blog/ad-blocker-fingerprinting/), [The WASM Cloak (arXiv 2508.21219)](https://arxiv.org/html/2508.21219v1)
-- Repo (verified 2026-07-10): `cef-native/src/handlers/simple_render_process_handler.cpp` (`OnContextCreated` :551–653; FP block :581–627; scriptlet block :567–579; IPC handlers :1183–1271), `cef-native/src/handlers/simple_handler.cpp` (`OnBeforeBrowse` :7434–7524; `AdblockResponseFilter` :7541+), `cef-native/include/core/AdblockCache.h`, `development-docs/0.4.0/B1-farbling-design.md`, `development-docs/0.4.0/CHROMIUM_CEF_BUILD_DESIGN_OUTLINE.md` §6 Q2.
+- Repo (**re-verified 2026-08-05** at the P4a kickoff; the 2026-07-10 values had drifted 48–95 lines and are kept inline above as "was" for readers mid-migration): `cef-native/src/handlers/simple_render_process_handler.cpp` (`OnContextCreated` :471–573; FP block :501–547; scriptlet block :487–499; IPC handlers :1116–1204, plus the TD-5-gated `fingerprint_get_site_enabled_response` :2033; GOLD PILL relay `payment_success_indicator` :971), `cef-native/src/handlers/simple_handler.cpp` (`OnBeforeBrowse` :7521–7618; `AdblockResponseFilter` :7635), `cef-native/include/core/AdblockCache.h`, `development-docs/0.4.0/B1-farbling-design.md`, `development-docs/0.4.0/CHROMIUM_CEF_BUILD_DESIGN_OUTLINE.md` §6 Q2.
