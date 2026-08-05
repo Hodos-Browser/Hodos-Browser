@@ -273,6 +273,7 @@ set(SOURCES
     src/core/GoogleSuggestService.cpp
     src/core/CookieManager.cpp
     src/core/CookieBlockManager.cpp
+    src/core/FarblingPolicy.cpp
     src/core/BookmarkManager.cpp
     src/core/SitePermissionStore.cpp
     src/core/PaidContentCache.cpp
@@ -303,6 +304,7 @@ if(APPLE)
         src/core/WindowManager.cpp
         src/core/SettingsManager.cpp
         src/core/EphemeralCookieManager.cpp
+        src/core/FarblingPolicy.cpp
         src/core/ProfileImporter.cpp
         src/core/IdentityHandler.cpp
         src/core/HttpRequestInterceptor.cpp

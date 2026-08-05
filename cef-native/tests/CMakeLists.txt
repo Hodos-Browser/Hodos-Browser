@@ -39,6 +39,7 @@ add_executable(hodos_tests
     update_apply_test.cpp               # commit 6b.1 — apply-transaction pure model
     update_fs_test.cpp                  # commit 6b.2a — backup/verify/restore primitives
     silent_state_writer_test.cpp        # #1 — silent-eligibility mirror pure helpers
+    farbling_policy_test.cpp            # C2 — eTLD+1 keying, seed persistence, HMAC
 
     # Production sources under test (built into the test exe directly).
     # (Phase 2.6-H removed permission_engine_test / permission_gate_test along
@@ -55,12 +56,14 @@ add_executable(hodos_tests
     ../src/core/UpdateApply.cpp           # commit 6b.1 — apply-transaction pure model
     ../src/core/UpdateFs.cpp              # commit 6b.2a — backup/verify/restore primitives
     ../src/core/SilentStateWriter.cpp     # #1 — silent-eligibility mirror
+    ../src/core/FarblingPolicy.cpp        # C2 — farbling seed/key derivation
     ../src/core/Logger.cpp
 )
 
 # SyncHttpClient pulls platform HTTP libs; UpdateStager pulls Windows trust libs.
 if(WIN32)
-    target_link_libraries(hodos_tests PRIVATE winhttp wintrust crypt32)
+    # bcrypt: FarblingPolicy's BCryptGenRandom (C2 profile-seed generation).
+    target_link_libraries(hodos_tests PRIVATE winhttp wintrust crypt32 bcrypt)
 elseif(APPLE)
     find_package(CURL REQUIRED)
     target_link_libraries(hodos_tests PRIVATE CURL::libcurl)

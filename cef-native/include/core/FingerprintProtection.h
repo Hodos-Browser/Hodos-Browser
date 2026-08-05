@@ -174,17 +174,40 @@ public:
     }
 
     /// Persist current per-site overrides to fingerprint_settings.json.
+    ///
+    /// ⚠️ READ-MODIFY-WRITE, deliberately. This file is shared with the farbling
+    /// migration: `FarblingPolicy::EnsureProfileSeed` stores the persistent per-profile
+    /// `profileSeed` here too. An earlier version of this function built a fresh JSON
+    /// object containing only `siteSettings` and overwrote the file, which would have
+    /// silently destroyed the seed every time a user toggled Privacy Shield for any
+    /// site -- rotating that profile's whole fingerprint and breaking the
+    /// stable-across-restarts property the seed exists to provide. So: load whatever is
+    /// there, replace only our key, write it back. Do not "simplify" this.
     void SaveSiteSettings() {
         if (settingsFilePath_.empty()) return;
         try {
-            nlohmann::json j;
+            nlohmann::json j = nlohmann::json::object();
+            {
+                std::ifstream in(settingsFilePath_);
+                if (in.is_open()) {
+                    try {
+                        in >> j;
+                    } catch (...) {
+                        j = nlohmann::json::object();
+                    }
+                    if (!j.is_object()) j = nlohmann::json::object();
+                }
+            }
+
+            nlohmann::json site_obj = nlohmann::json::object();
             {
                 std::lock_guard<std::mutex> lock(siteMutex_);
                 for (auto& [domain, enabled] : siteOverrides_) {
-                    j["siteSettings"][domain]["enabled"] = enabled;
+                    site_obj[domain]["enabled"] = enabled;
                 }
             }
-            if (!j.contains("siteSettings")) j["siteSettings"] = nlohmann::json::object();
+            j["siteSettings"] = site_obj;
+
             std::ofstream file(settingsFilePath_);
             if (file.is_open()) {
                 file << j.dump(2);
