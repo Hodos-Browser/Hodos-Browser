@@ -31,6 +31,11 @@ namespace {
 
 std::mutex g_seed_mutex;
 
+// Cached once at startup so the per-navigation path never touches disk.
+std::mutex g_cached_mutex;
+std::array<uint8_t, 32> g_cached_seed{};
+bool g_cached_valid = false;
+
 // ---------------------------------------------------------------------------
 // Multi-label public suffixes.
 //
@@ -315,6 +320,38 @@ bool EnsureProfileSeed(const std::string& profile_dir,
 
   LOG_INFO_FP("🔒 FarblingPolicy: generated a new persistent profile seed");
   return true;
+}
+
+void InitializeForProfile(const std::string& profile_dir) {
+  std::lock_guard<std::mutex> lock(g_cached_mutex);
+  if (g_cached_valid) {
+    return;
+  }
+  std::array<uint8_t, 32> seed{};
+  if (EnsureProfileSeed(profile_dir, seed)) {
+    g_cached_seed = seed;
+    g_cached_valid = true;
+  } else {
+    // Leave invalid: DomainKeyForUrl will refuse, and the browser will send
+    // farbling_enabled = false rather than farble with a predictable key.
+    LOG_ERROR_FP("🔒 FarblingPolicy: no profile seed -- farbling disabled for this run");
+  }
+}
+
+bool DomainKeyForUrl(const std::string& url, std::array<uint8_t, 32>& out_key) {
+  std::array<uint8_t, 32> seed{};
+  {
+    std::lock_guard<std::mutex> lock(g_cached_mutex);
+    if (!g_cached_valid) {
+      return false;
+    }
+    seed = g_cached_seed;
+  }
+  const std::string registrable = RegistrableDomainFromUrl(url);
+  if (registrable.empty()) {
+    return false;
+  }
+  return ComputeDomainKey(seed, registrable, out_key);
 }
 
 bool ComputeDomainKey(const std::array<uint8_t, 32>& profile_seed,

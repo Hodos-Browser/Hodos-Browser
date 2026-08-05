@@ -46,6 +46,7 @@
 #include "include/core/PaidContentCache.h"
 #include "include/core/SettingsManager.h"
 #include "include/core/FingerprintProtection.h"
+#include "include/core/FarblingPolicy.h"
 #include "include/core/ProfileManager.h"
 #include "include/core/ProfileLock.h"
 #include "include/core/TaskbarProfile.h"
@@ -4881,6 +4882,9 @@ static int RunHodosMain(HINSTANCE hInstance, int nCmdShow, void* sandbox_info,
     FingerprintProtection::GetInstance().Initialize();
     // Load per-site fingerprint overrides from fingerprint_settings.json
     FingerprintProtection::GetInstance().LoadSiteSettings(profile_cache);
+    // C2: load/generate the persistent per-profile farbling seed from the same
+    // file, so the per-navigation path never touches disk.
+    FarblingPolicy::InitializeForProfile(profile_cache);
     // Sync global toggle from persisted settings
     FingerprintProtection::GetInstance().SetEnabled(
         SettingsManager::GetInstance().GetPrivacySettings().fingerprintProtection);

@@ -130,6 +130,7 @@ namespace fs = std::filesystem;
 #include "include/core/SyncHttpClient.h"
 #include "include/core/AdblockCache.h"
 #include "include/core/FingerprintProtection.h"
+#include "include/core/FarblingPolicy.h"
 #include "include/core/CookieBlockManager.h"
 #include "include/core/BookmarkManager.h"
 #include "include/core/PaidContentCache.h"
@@ -5373,6 +5374,9 @@ int main(int argc, char* argv[]) {
 
             FingerprintProtection::GetInstance().Initialize();
             FingerprintProtection::GetInstance().LoadSiteSettings(profile_cache);
+            // C2: load/generate the persistent per-profile farbling seed from the same
+            // file, so the per-navigation path never touches disk.
+            FarblingPolicy::InitializeForProfile(profile_cache);
             FingerprintProtection::GetInstance().SetEnabled(
                 SettingsManager::GetInstance().GetPrivacySettings().fingerprintProtection);
             LOG_INFO("Fingerprint protection initialized");

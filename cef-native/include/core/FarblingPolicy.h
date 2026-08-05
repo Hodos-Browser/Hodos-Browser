@@ -71,6 +71,16 @@ bool ComputeDomainKey(const std::array<uint8_t, 32>& profile_seed,
                       const std::string& registrable_domain,
                       std::array<uint8_t, 32>& out_key);
 
+/// Loads (or generates) this profile's seed once at startup and caches it in-process.
+/// Call beside FingerprintProtection::LoadSiteSettings, with the same profile dir.
+/// Safe to call more than once; only the first call touches disk.
+void InitializeForProfile(const std::string& profile_dir);
+
+/// Per-navigation convenience: derive the key for `url`'s first party using the
+/// cached seed. Returns false when the seed is unavailable or the key cannot be
+/// derived -- and on false the caller MUST NOT farble (see ComputeDomainKey).
+bool DomainKeyForUrl(const std::string& url, std::array<uint8_t, 32>& out_key);
+
 /// Hex helpers for persistence (lowercase, no separators). DecodeHex returns false on
 /// any malformed input rather than partially decoding.
 std::string EncodeHex(const std::array<uint8_t, 32>& bytes);

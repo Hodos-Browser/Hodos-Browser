@@ -39,6 +39,7 @@
 #include "../../include/core/SettingsManager.h"
 #include "../../include/core/AutoUpdater.h"
 #include "../../include/core/FingerprintProtection.h"
+#include "../../include/core/FarblingPolicy.h"
 #include "../../include/core/ProfileManager.h"
 #include "../../include/core/TaskbarProfile.h"
 #include "../../include/core/ProfileImporter.h"
@@ -7603,6 +7604,19 @@ bool SimpleHandler::OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
                     CefProcessMessage::Create("fingerprint_site_disabled");
                 msg->GetArgumentList()->SetString(0, navUrl);
                 frame->SendProcessMessage(PID_RENDERER, msg);
+
+                // C2: tell the renderer explicitly that this navigation is NOT farbled.
+                // Sending enabled=false rather than staying silent matters: silence is
+                // indistinguishable from "the key has not arrived yet", and we want the
+                // exempt case to be a decided native pass-through, not an accident.
+                std::array<uint8_t, 32> exemptKey{};
+                if (FarblingPolicy::DomainKeyForUrl(navUrl, exemptKey)) {
+                    CefRefPtr<CefProcessMessage> fmsg =
+                        CefProcessMessage::Create("hodos_farble_key");
+                    fmsg->GetArgumentList()->SetString(0, FarblingPolicy::EncodeHex(exemptKey));
+                    fmsg->GetArgumentList()->SetBool(1, false);
+                    frame->SendProcessMessage(PID_RENDERER, fmsg);
+                }
             } else {
                 // Normal path: send seed for farbling
                 uint32_t seed = FingerprintProtection::GetInstance().GetDomainSeed(navUrl);
@@ -7610,6 +7624,20 @@ bool SimpleHandler::OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
                 msg->GetArgumentList()->SetInt(0, static_cast<int>(seed));
                 msg->GetArgumentList()->SetString(1, navUrl);
                 frame->SendProcessMessage(PID_RENDERER, msg);
+
+                // C2: also deliver the NATIVE farbling key. Sent alongside the legacy
+                // seed IPC on purpose -- the JS path above still owns canvas until C3
+                // lands, and TD-3 forbids retiring the old chain until this one is
+                // proven delivering. Nothing reads this key yet, so there is no
+                // double-farbling window.
+                std::array<uint8_t, 32> farbleKey{};
+                if (FarblingPolicy::DomainKeyForUrl(navUrl, farbleKey)) {
+                    CefRefPtr<CefProcessMessage> fmsg =
+                        CefProcessMessage::Create("hodos_farble_key");
+                    fmsg->GetArgumentList()->SetString(0, FarblingPolicy::EncodeHex(farbleKey));
+                    fmsg->GetArgumentList()->SetBool(1, true);
+                    frame->SendProcessMessage(PID_RENDERER, fmsg);
+                }
             }
         }
     }
