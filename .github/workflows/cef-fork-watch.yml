@@ -1,0 +1,150 @@
+# CEF-3 — watch upstream CEF for in-branch security point-releases.
+#
+# WHY THIS EXISTS. The whole justification for the M136 -> M150 bump was security
+# coverage. That benefit erodes the moment our fork stops tracking upstream's
+# in-branch security commits, and between milestone jumps nothing would tell us.
+# This job is that something.
+#
+# WHAT IT DELIBERATELY DOES NOT DO. PLAN_patch_toolchain.md §7.4 imagined a job
+# that rebases our patch commits and runs patch apply-health. It cannot:
+# apply-health needs a synced Chromium tree, and a GitHub-hosted runner has
+# neither the ~200 GB nor the hours. Pretending otherwise would produce a green
+# check that proves nothing. So this job DETECTS and REPORTS; the rebase and the
+# drift audit happen on the build host, where the tree lives.
+#
+# ⚠️ Scheduled workflows only fire from a repository's DEFAULT branch. This file
+# is authored on 0.4.0, so the cron will NOT run until 0.4.0 reaches main. Until
+# then, use the workflow_dispatch button. Stated rather than assumed, because a
+# watcher that silently never fires is worse than no watcher.
+name: CEF fork watch
+
+on:
+  schedule:
+    # Mondays 07:00 UTC. Chromium security releases land on no fixed weekday, but
+    # weekly is well inside the point-release cadence and costs ~10 s of runner.
+    - cron: '0 7 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  UPSTREAM_REPO: chromiumembedded/cef
+  UPSTREAM_BRANCH: '7871'
+  FORK_REPO: Hodos-Browser/cef
+  FORK_BRANCH: hodos/7871
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compare upstream branch against our fork's integration branch
+        id: cmp
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # gh's built-in --jq is used throughout instead of piping to jq: one
+          # fewer runtime dependency, and it works identically off-runner when
+          # someone reproduces this by hand.
+          up_sha=$(gh api "repos/$UPSTREAM_REPO/branches/$UPSTREAM_BRANCH" --jq .commit.sha)
+          fork_sha=$(gh api "repos/$FORK_REPO/branches/$FORK_BRANCH" --jq .commit.sha)
+          echo "upstream $UPSTREAM_BRANCH : $up_sha"
+          echo "fork     $FORK_BRANCH     : $fork_sha"
+
+          # Compare by SHA, not branch name: FORK_BRANCH contains a slash and is
+          # ambiguous in the compare path.
+          #
+          # Do NOT test the `status` field. While upstream is quiet our branch is a
+          # strict descendant of it, so status reads "behind" (verified 2026-08-05);
+          # once upstream moves it becomes "diverged". The invariant that actually
+          # answers the question is the MERGE BASE: while it still equals upstream's
+          # head, upstream has not advanced past our base.
+          CMP="repos/$FORK_REPO/compare/${fork_sha}...${up_sha}"
+          base=$(gh api "$CMP" --jq .merge_base_commit.sha)
+          ahead=$(gh api "$CMP" --jq .ahead_by)
+
+          if [ "$base" = "$up_sha" ]; then
+            echo "up_to_date=true" >> "$GITHUB_OUTPUT"
+            echo "RESULT: up to date — upstream has not advanced past our base."
+            exit 0
+          fi
+
+          echo "up_to_date=false" >> "$GITHUB_OUTPUT"
+          echo "up_sha=$up_sha"   >> "$GITHUB_OUTPUT"
+          echo "ahead=$ahead"     >> "$GITHUB_OUTPUT"
+          echo "RESULT: upstream advanced by $ahead commit(s) beyond our base ($base)."
+
+          {
+            echo 'commits<<FORKWATCH_EOF'
+            gh api "$CMP" --jq '.commits[] | "- `" + .sha[0:9] + "` " + (.commit.message | split("\n")[0])' | head -40
+            echo 'FORKWATCH_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Open or update the rebase tracking issue
+        if: steps.cmp.outputs.up_to_date == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UP_SHA: ${{ steps.cmp.outputs.up_sha }}
+          AHEAD: ${{ steps.cmp.outputs.ahead }}
+          COMMITS: ${{ steps.cmp.outputs.commits }}
+        run: |
+          set -euo pipefail
+          TITLE="CEF fork: upstream $UPSTREAM_BRANCH advanced — rebase $FORK_BRANCH"
+
+          BODY_FILE=$(mktemp)
+          cat > "$BODY_FILE" <<EOF
+          Upstream \`$UPSTREAM_REPO@$UPSTREAM_BRANCH\` is **$AHEAD commit(s)** ahead of the base of
+          \`$FORK_REPO@$FORK_BRANCH\`. Upstream head: \`$UP_SHA\`.
+
+          These are in-branch commits on a supported CEF branch, so they are **mostly security
+          fixes** — the reason we bumped to M150 in the first place. Pull them.
+
+          ## New upstream commits
+
+          $COMMITS
+
+          ## Runbook (build host — CI cannot do this)
+
+          Our fork's \`origin\` is the fork itself, so upstream needs its own remote once:
+
+          \`\`\`bash
+          cd /c/cef/cef150/cef
+          git remote add upstream https://github.com/$UPSTREAM_REPO.git   # first time only
+          git fetch upstream $UPSTREAM_BRANCH
+          git checkout $FORK_BRANCH
+          git rebase $UP_SHA        # our commits are few and touch only patch/
+          git push --force-with-lease origin $FORK_BRANCH
+          \`\`\`
+
+          Then, **on the build host with a synced tree**:
+
+          \`\`\`bash
+          bash development-docs/DevOps-CICD/scripts/cef_patch_drift_audit.sh
+          \`\`\`
+
+          Exit 0 = clean · 2 = hunk offsets (may proceed with sign-off, but the patch is drifting and
+          will likely break at the next milestone jump) · 1 = a patch will not apply, **do not build**.
+
+          Finally update the \`Last rebase\` / \`Last apply reading\` columns in the fork's
+          \`HODOS_PATCHES.md\`, and re-pin \`--checkout\` in
+          \`development-docs/DevOps-CICD/scripts/build_hodos_cef.bat\` / \`_mac.sh\`.
+
+          > ⚠️ Retargeting \`--checkout\` makes \`automate-git.py\` delete \`chromium/src/cef\`, which
+          > contains \`binary_distrib/\`. Move those tarballs out first — \`PLAN_patch_toolchain.md\` R9.
+
+          <sub>Opened by \`.github/workflows/cef-fork-watch.yml\`. Apply-health is deliberately not run
+          here: it needs a synced Chromium tree, which a hosted runner cannot provide.</sub>
+          EOF
+          sed -i 's/^          //' "$BODY_FILE"
+
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+                       --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body-file "$BODY_FILE"
+            echo "Updated issue #$existing"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file "$BODY_FILE"
+          fi
