@@ -117,6 +117,37 @@ This matches the outline's §3d default ("OUT of beta.1 unless the free componen
 
 **Precondition:** P5 of the outline (codecs/DRM verify) — a working target-CEF build exists on the build host.
 
+### ✅ Spike-1 RESULTS — steps 0, 3 and 4 executed 2026-08-05 on CEF 150 (sandbox ON)
+
+**Verdict: the VMP thesis is CONFIRMED, and the two cheap escape hatches are both closed.**
+Only step 5 (the actual Amazon title) still needs an owner with a Prime account.
+
+| Step | Question | Result |
+|---|---|---|
+| **0** | Does *our* build suppress the component updater? (would make this a free fix) | **NO.** No `--disable-component-update`, no component-updater suppression in `cef-native/` or the launchers. `googleapis.com` appears in the adblock engine only as **entity-mapping** for first-party detection and in an unbreak *exception* comment — `update.googleapis.com` is **not** blocklisted. `enable_widevine = true` confirmed in the real 7871 `gn_args_full.txt`. **Free-fix hypothesis is dead.** |
+| **3** | Does the CDM actually download? | **YES** — `<user_data>/<profile>/WidevineCdm/4.10.3050.0/_platform_specific/win_x64/widevinecdm.dll`, downloaded **per profile** (Default, Profile_1, Profile_2, and the picker cache). Dev is on a **newer** CDM than the installed 0.3.x prod build (3050.0 vs 2934.0). |
+| **premise** | Do we ship VMP `.sig` files? | **NO — premise confirmed, no longer an assumption.** No `*.sig` beside `HodosBrowser.exe` / `libcef.dll`, and no VMP signing step anywhere in `release.yml` or `scripts/` (the single `.sig` hit is `test-update-feed.ps1`'s unrelated update-feed signature). ⚠️ Do not be fooled by `widevinecdm.dll.sig` — that is **Google's signature on their own CDM**, shipped with it, not VMP attestation of *our* binaries. |
+| **4** | EME classification (`requestMediaKeySystemAccess('com.widevine.alpha')`, secure origin) | See table below |
+
+```
+robustness           access   mediaKeys
+(unspecified)        YES      created      <- CDM loads and works
+SW_SECURE_CRYPTO     YES      created      <- lowest tier only
+SW_SECURE_DECODE     NO       -            NotSupportedError
+HW_SECURE_CRYPTO     NO       -            NotSupportedError
+HW_SECURE_ALL        NO       -            NotSupportedError
+```
+
+**What this establishes:**
+
+1. **It is NOT a CDM-load problem.** EME resolves and `createMediaKeys()` succeeds, so risk **R1** (issue #3820's "downloads but doesn't wire") is **ruled out** — no cheap layout/symlink fix to chase.
+2. **We are capped at the lowest robustness tier.** `SW_SECURE_CRYPTO` is offered; **`SW_SECURE_DECODE` is refused.** Premium services require at least `SW_SECURE_DECODE`. This is exactly the shape CEF #3404 describes — Chromium "selectively enables CDM host verification at runtime if valid sig files exist", and without them the attested tiers simply are not offered.
+3. Combined with the confirmed absence of `.sig` files, the Amazon failure is a **robustness/attestation gap**, not codec, not EME, not CDM presence. **Nothing we can flag, configure or build our way out of.**
+
+> **Strictly speaking:** the *final* confirmation is a license-server refusal on a real Amazon title (step 5). But the robustness-tier evidence above is stronger than what §1 originally had, and it is now hard to construct a story where Amazon works while `SW_SECURE_DECODE` is unavailable. Treat **R2** ("VMP may gate even L3") as partially observed: we do get *a* working L3 tier, just the unattested one.
+
+**Recommendation unchanged and now better-supported: DEFER Amazon-movie DRM out of beta.1.** The free path was genuinely tested and genuinely does not fix it.
+
 ### Spike-1 — Free component-updater CDM test (~1 hr, $0) — DO THIS
 **Goal:** confirm the CDM loads on the target build and enumerate exactly which DRM sites work vs break, and *classify* each failure (EME-resolve vs license-refused).
 
