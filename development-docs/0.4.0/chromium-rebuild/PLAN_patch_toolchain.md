@@ -1,27 +1,53 @@
-# PLAN — CEF Patch Toolchain Standup (PIPE-A1, GREENFIELD)
+# PLAN — CEF Patch Toolchain Standup (PIPE-A1)
 
-**Created:** 2026-07-10 · **Owner:** Matthew (Marston Enterprises) · **Lead:** Windows Claude
-**Status:** DETAILED PLAN — Workflow-2 expansion of `CHROMIUM_CEF_BUILD_DESIGN_OUTLINE.md` §3b (PIPE-A1) + §4 P3. Research + design only — **NO code, NO builds.**
-**One-line purpose:** Stand up, from zero, the CEF source-patch pipeline (fork `chromiumembedded/cef` → `patch/patches/*.patch` → register in `patch/patch.cfg` → `automate-git.py --url=<fork>` → `patcher.py` applies pre-compile), so the Blink farbling patch set (FEAT-B1 / C1–C7) has a place to land. **This is the serial linchpin that blocks all source-level farbling.**
+**Created:** 2026-07-10 · **Revised:** 2026-08-05 (P3 kickoff — verified against the pinned tree)
+**Owner:** Matthew (Marston Enterprises) · **Lead:** Windows Claude
+**Status:** IN EXECUTION (P3).
+
+> **⚠️ "GREENFIELD" was dropped from the title, and five substantive corrections landed 2026-08-05.**
+> Every mechanism claim below was re-verified against the actual build-host tree (`C:\cef\cef150`,
+> CEF `94c1726`) rather than against upstream `master` or recollection. What changed:
+>
+> | # | Was | Now |
+> |---|---|---|
+> | 1 | Patches apply via **`run_patch_updater`** in the update phase | **`gclient_hook.py:37` → `patcher.py`**, in the *build* phase. `run_patch_updater` **never applies** on our pinned path (§1.3) |
+> | 2 | "~150" / "105" / "`cef/patch/**` empty" | **114 registered entries, 115 files on disk** (§0, §1.1) |
+> | 3 | Fork switch **requires a clean CEF dir** (R1, blocking) | One `git remote set-url`. R1 **downgraded**; the real hazard is the previously-undocumented **R9** distrib deletion |
+> | 4 | Acceptance = "`applied +1`" | `skipped` is an **ambiguous bucket**; correct reading is `115 total (1 applied, 114 skipped, 0 failed)` (§1.1) |
+> | 5 | CEF-2 authors a new manifest + GN-args audit | **Both already exist** — call, don't reimplement (§7.1) |
+>
+> OQ-1/2/3/4 **closed**, plus a new **OQ-8** (fork visibility) — §11.
+
+**One-line purpose:** Wire the CEF source-patch pipeline to a fork we control (fork `chromiumembedded/cef` → `patch/patches/*.patch` → register in `patch/patch.cfg` → `automate-git.py --url=<fork>` → `patcher.py` applies pre-compile), so the Blink farbling patch set (FEAT-B1 / C1–C7) has a place to land. **This is the serial linchpin that blocks all source-level farbling.**
 
 > **Authoritative inputs:** outline §3b / §3f / §4 P3 / §5 / §8; `DevOps-CICD/CEF_BUILD_RUNBOOK.md` (Step 2, Step 5.5, Step 3 build flow); `0.4.0/B1-farbling-design.md` ("Build integration (CEF patch.cfg)"); `chromium-rebuild/Q5_full_edit_list.md` (rows CEF-1..CEF-4, CEF↔farbling deps); `CEF_VERSION_UPDATE_TRACKER.md`; `DEPENDENCY_VERIFICATION.md`.
 > **Primary sources (mechanism):** CEF `tools/patcher.py`, `tools/git_util.py` (the actual `git apply` invocation), `patch/patch.cfg`, `tools/automate/automate-git.py`, `tools/patch_updater.py` (all `github.com/chromiumembedded/cef`); the CEF wiki `branches_and_building.html`; CEF forum threads on persisting Chromium patches via `automate-git.py`. Cited inline.
 
-> **TARGET = placeholder.** Exact CEF stable version + branch (e.g. the runbook's candidate CEF 149 / Chromium 149 / branch `7827`, or an LTS pin) resolves from `cef-builds.spotifycdn.com/index.json` in the version-target plan (outline §2 Step 0). The toolchain design here is **branch-agnostic** — it works identically on 136 or TARGET.
+> **TARGET — RESOLVED (was a placeholder).** **CEF 150 / Chromium 150.0.7871.187 / branch `7871`**, pinned at `150.0.17+g94c1726+chromium-150.0.7871.187` (CEF commit `94c1726`). The M149/`7827` fallback is **dead** — `7827` is already in CEF's *Unsupported* table. Every `<TARGET>` below means **`7871`**. The toolchain design remains branch-agnostic; the measured numbers in §0/§1.1 are specific to `94c1726`.
 
 ---
 
-## 0. Verified starting state (greenfield — confirmed 2026-07-10)
+## 0. Verified starting state
+
+> **⚠️ REWRITTEN 2026-08-05 (P3 kickoff).** The original table below said "greenfield" and was wrong in
+> both directions: it conflated *"not in the Hodos app repo"* with *"does not exist"*, and it declared
+> two scripts absent that are checked in under a different path. Measurements are from the pinned build
+> host tree (`C:\cef\cef150`, CEF `94c1726`); full detail in `P3_BASELINE_94c1726.md`.
 
 | Check | Result |
 |---|---|
-| `cef/patch/` directory in repo | **absent** |
-| `patch.cfg` anywhere in repo | **absent** |
-| `patcher.py` / `patch_updater.py` in repo | **absent** |
-| `automate-git.py` in repo | **absent** (fetched ad-hoc into `C:\cef\automate\` per runbook §3) |
-| `scripts/build_hodos_cef.bat` / `_mac.sh` in repo | **absent** — the runbook names them "canonical" but they are **not checked in** (only DevOps release scripts live in `scripts/`). **See OQ-1.** |
+| CEF patch mechanism | **EXISTS AND RUNS ON EVERY BUILD** — `patch/patch.cfg` + `tools/patcher.py` in the CEF checkout, invoked pre-compile. We are adding an entry to a working pipeline. |
+| `patch.cfg` entries / `.patch` files | **114 registered / 115 on disk** on `94c1726` (one upstream orphan — §7.1) |
+| Entries carrying a `condition` | **0** — ours will be the first |
+| `cef/patch/`, `patcher.py`, `automate-git.py` **in the Hodos app repo** | absent **by design** — they live in the CEF checkout, which is what the fork replaces. Nothing to check in. |
+| `build_hodos_cef.bat` / `_mac.sh` | **PRESENT** at `development-docs/DevOps-CICD/scripts/` — not at a repo-root `scripts/`. **OQ-1 RESOLVED:** that path is canonical; the 35 references to a **repo-root** `scripts/build_hodos_cef*` across 12 docs were the bug — rewritten in P3 commit 2. |
+| File-manifest drift audit | **PRESENT** — `DevOps-CICD/scripts/cef_dist_drift_audit.sh` |
+| GN-args gate | **PRESENT** — `DevOps-CICD/scripts/cef_gn_args_gate.sh` |
 
-**Consequence:** there is nothing to extend — we are building the patch pipeline, its hosting, and its maintenance model from zero. Everything below is net-new (`Q5` rows **CEF-1..CEF-4**, all status GREENFIELD/NEW).
+**Consequence — the opposite of the original one:** most of this plan is *extension*, not authoring.
+Genuinely net-new is only: our fork, our `.patch` files, the patch-apply half of the drift audit, and
+the fork-watcher. The manifest and GN-args halves of CEF-2 already exist and must be **called**, not
+reimplemented (§7.1).
 
 ---
 
@@ -45,9 +71,16 @@ patches = [
   { 'name': 'gritsettings' },                                  # applies to Chromium src (default path)
   { 'name': 'gn_config' },
   { 'name': 'tarball_gclient', 'path': 'third_party/depot_tools' },
-  # ... ~150 upstream CEF patches ...
+  # ... 114 upstream CEF entries total on branch 7871 @ 94c1726 ...
 ]
 ```
+**Count discipline:** `patch.cfg` is Python — **parse it by `exec`ing it, never by grepping.** The
+header comment block contains the words `name`, `path` and `condition`, so `grep -c` over this file
+overcounts. Verified figures on `94c1726`: **114 entries, 115 files on disk**, 4 entries using a
+non-default `path` (`v8`, `third_party/depot_tools`, `third_party/angle`, `third_party/dawn`),
+0 using `condition`. (Earlier doc figures of "empty", "105" and "~150" were all wrong —
+`P3_BASELINE_94c1726.md` §2.)
+
 There is **no `sha1`/checksum/version field** — integrity is by filename + the patch's own context lines. Note CEF applies with `git apply` (§1.2), which is **exact-context, not fuzzy** — there is effectively no fuzz tolerance; a context mismatch fails loud rather than shifting. *(Source: chromiumembedded/cef `patch/patch.cfg`.)*
 
 ### 1.2 `tools/patcher.py` / `tools/patch_updater.py` — the applier
@@ -55,15 +88,40 @@ There is **no `sha1`/checksum/version field** — integrity is by filename + the
 - **How the patch is applied (matters for drift):** `patcher.py` calls `tools/git_util.py::git_apply_patch_file`, which runs `git apply --check` then `git apply -p0 --ignore-whitespace`. This means: **(a)** patch paths are consumed at **`-p0`** — zero leading path components stripped (unlike a normal `git diff` which is authored for `-p1`); **(b)** whitespace differences are ignored; **(c)** there is **NO fuzz / `-C` context reduction / `--3way` / `--recount` / retry** — application is exact-context and **fail-loud**. (`git_util` only falls back to system `patch` if the target dir is not a git repo, which never applies to the Chromium `src` tree.)
 - **Condition gate:** `if patch['condition'] not in os.environ: dopatch = False` → the patch is **skipped** (not failed) when its env var is unset.
 - **Reporting:** prints `'%d patches total (%d applied, %d skipped, %d failed)'` — **no fuzz metric is emitted** (there is no fuzz to report). **On any failure it exits status 1 and prints revert instructions** — a failed patch **aborts the build before compile** (this is what makes drift loud, see §7).
+- **⚠️ `skipped` is AMBIGUOUS — two unrelated causes share the bucket.** `git_util.py :: git_apply_patch_file` runs a **reverse-check** (`git apply --reverse --check`) before applying, and returns `'skip'` when the patch is **already applied**. `patcher.py` also returns `'skip'` for **condition-gated-off**, and for a **missing target directory**. So a `skipped` count alone cannot distinguish "gate is off" from "already applied" from "target dir vanished". Consequences: **(a)** the CEF-4 toggle proof must read the *per-patch* stdout lines (`Skipping patch file X` = gate off, vs `... already applied (skipping).` = reverse-check), not the summary count; **(b)** this plan's repeated acceptance criterion "expect `applied +1`" **only holds against a freshly-synced tree.** Against an already-patched tree — which is what the build host has — adding one patch correctly reads **`115 total (1 applied, 114 skipped, 0 failed)`**. Every "+1 applied" gate below is annotated accordingly.
+- **Idempotent by construction:** because of that reverse-check, re-running `patcher.py` against an already-patched tree is a safe no-op. This is what makes the seconds-long apply check in Step 3 possible without a build or a clean tree.
 - Single-file mode: `--patch-file FILE --patch-dir DIR` applies one patch outside the cfg loop (useful for testing a candidate patch in isolation).
 - Authoring/regeneration: `patch_updater.py` both **re-applies** all registered patches to a fresh checkout and, in its resave mode, **regenerates the `.patch` files from a modified `src` tree** — this is the supported way to author/update a patch after hand-editing Chromium source (§8.2). **⚠️ `patch_updater.py` has no dry-run mode** and is **write-capable** — with `--restore` it *resaves* `.patch` files when the backed-up source changed, so it must never be pointed at the canonical fork as a "read-only check" (use `patcher.py` / `git apply --check` for that — I1, §7.1). Exact resave/add flag names, and the exact arg string `automate-git` passes on the normal build path, to confirm against the target-branch `patch_updater.py` — **OQ-2**.
 
 *(Sources: chromiumembedded/cef `tools/patcher.py`, `tools/patch_updater.py`.)*
 
 ### 1.3 `tools/automate/automate-git.py` — where patches enter the build
-- `--url=<git url>` points the checkout at **our CEF fork** instead of the upstream default, which is now **`https://github.com/chromiumembedded/cef.git`** (the current `automate-git.py` default `cef_url`; Bitbucket is the legacy remote — see §2.1 / OQ-4). The script **validates the URL against any existing checkout** (`Requested CEF checkout URL … does not match existing URL` → hard error), so a fork switch requires a clean CEF dir.
+- `--url=<git url>` points the checkout at **our CEF fork** instead of the upstream default, which is now **`https://github.com/chromiumembedded/cef.git`** (the current `automate-git.py` default `cef_url`; Bitbucket is the legacy remote — see §2.1 / OQ-4). The script **validates the URL against any existing checkout** (`:1320-1326`: `Requested CEF checkout URL … does not match existing URL` → hard error).
+- **⚠️ "a fork switch requires a clean CEF dir" is FALSE — corrected 2026-08-05.** The check reads the URL via `get_git_url(cef_dir)` (`:274-278`), which is just `git config --get remote.origin.url`. We own that checkout, so the cheap fix is to change what it reports:
+  ```
+  git -C C:/cef/cef150/cef remote set-url origin https://github.com/Hodos-Browser/cef.git
+  ```
+  Our fork is a **GitHub fork of upstream — same object graph** — so the pinned `94c1726` resolves inside it and `--checkout` keeps working. **Zero re-clone, zero re-sync.** Two further outs: the whole check is bypassed by `--no-cef-update` (`:1321` is `if not options.nocefupdate and ...`), and the standalone checkout is only **65 MB** anyway, so even a real re-clone is a sub-minute operation. **R1 is downgraded from a blocking risk to a one-line command** (§10).
+- **⚠️ The actual destructive hazard is elsewhere and was undocumented — see R9.** At `:1535-1539`, when `cef_checkout_changed` is true, `automate-git.py` calls **`delete_directory(cef_src_dir)`** — and `chromium/src/cef/binary_distrib/` is *inside* that directory. Pointing `--checkout` at a new fork revision therefore deletes the previous build's distribution tarballs, including the 898 MB `release_symbols` one that cannot be regenerated without a full rebuild. Moved aside in P3 commit 1 (`P3_BASELINE_94c1726.md` §3).
 - `--branch=<n>` selects the CEF branch (and the per-branch sub-checkout name); the download root is set separately by `--download-dir`. `--checkout=<rev>` optionally pins an exact CEF revision (default = `origin/<branch>`).
-- **Apply point (unchanged by us):** after Chromium `gclient sync`, before compile — `apply_deps_patch()` → `gclient runhooks` → `apply_runhooks_patch()` → **`run_patch_updater(...)`** (this is the step that applies **our** `patch/patches/*.patch` via `patch.cfg`) → build. So our patches are guaranteed to land on the Chromium source **pre-compile**, every build, with no extra wiring beyond populating `patch.cfg`. *(Exact `run_patch_updater` arg string on the build path — the primary source shows `run_patch_updater(output_file=...)` and a `--resave` branch, not clearly `--reapply --restore` — confirm against the target-branch tool: OQ-2.)*
+- **Apply point — ⚠️ CORRECTED 2026-08-05.** This plan previously named **`run_patch_updater`** as the step that applies our patches. **That is wrong, and on our pinned build path `run_patch_updater` never applies anything at all.** Verified against `94c1726`:
+
+  | `run_patch_updater` call site | Args | Fires on our path? |
+  |---|---|---|
+  | `:1369`, `:1543` | `--backup --revert` | only when the checkout is *changing* — and it **reverts**, never applies |
+  | `:1596` | `--reapply --restore` | **no** — guarded by `cef_dir == cef_src_dir`, i.e. `--fast-update` mode, which we don't pass |
+  | `:1625` | *(no args)* | **no** — guarded by `chromium_checkout != chromium_compat_version`. We pin `--checkout=94c1726`, so Chromium **is** the compat version and this is False |
+  | `:1628` | `--resave` | **no** — requires `--resave` |
+
+  **The real apply point is `cef/tools/gclient_hook.py:37` → `tools/patcher.py`** (the full `patch.cfg` loop), invoked from `automate-git.py:1671-1672` inside the **build** step, immediately before `autoninja`.
+
+  The plan's *conclusion* survives — our patches do land on the Chromium source pre-compile on every build, with no wiring beyond `patch.cfg`. Three consequences change:
+
+  1. **`--force-build` alone re-applies patches.** No re-sync, no re-checkout, no `--force-clean` needed to iterate on a patch. The P3 loop is far cheaper than this plan assumed.
+  2. **`patcher.py` runs from `chromium/src/cef`, and `src/cef` is only re-copied from the standalone checkout when `cef_checkout_changed`** (`:1597-1599`). So **editing the standalone `C:\cef\cef150\cef\patch\` does not propagate to the tree that actually builds.** For iteration, edit `chromium/src/cef/patch/` (also a full git checkout at the same HEAD); for reproducibility, let the fork-checkout copy carry it.
+  3. **The `condition` env var is read by `patcher.py`**, which inherits the environment from the build script through `automate-git` → `gclient_hook`. A `set HODOS_FARBLING=1` at the top of `build_hodos_cef.bat` reaches it correctly (§5).
+
+  **OQ-2 is RESOLVED, not deferred.** `patch_updater.py` on 7871 accepts `--resave --reapply --revert --backup --restore --patch --add`; the authoring path is `--resave --patch <name> --add <path>` (`cef/docs/chromium_update.md:136`). There is no "exact `run_patch_updater` arg string on the build path" left to confirm, because there is no such call.
 
 *(Sources: chromiumembedded/cef `tools/automate/automate-git.py`; CEF forum "Persist Chromium Patch Using automate-git.py".)*
 
@@ -126,12 +184,17 @@ cef/                                   (= our fork, e.g. Hodos-Browser/cef, bran
 
 ### 3.2 Inside the Hodos-Browser app repo (glue that points the build at the fork)
 ```
-scripts/
-├─ build_hodos_cef.bat                 # CHECK IN (OQ-1) — add --url=<fork> --branch=TARGET --checkout=<pin>
-├─ build_hodos_cef_mac.sh              # CHECK IN (OQ-1) — same, Mac
-└─ cef_patch_drift_audit.py            # NEW — §7 drift-audit script (cross-platform Python)
+development-docs/DevOps-CICD/scripts/        # <-- canonical (OQ-1 (c)); NOT a repo-root scripts/
+├─ build_hodos_cef.bat                 # EXISTS — edit: add --url=<fork> [--checkout=<pin>]
+├─ build_hodos_cef_mac.sh              # EXISTS — same, Mac
+├─ cef_dist_drift_audit.sh             # EXISTS — file-manifest half of CEF-2; CALL, don't reimplement
+├─ cef_gn_args_gate.sh                 # EXISTS — GN-args half of CEF-2; CALL, don't reimplement
+├─ chromium-build-gitconfig            # EXISTS — CRLF guard (load-bearing for -p0 exact-context)
+├─ cef_patch_baseline_7871.txt         # NEW (P3 commit 1) — 115-name baseline manifest
+└─ cef_patch_drift_audit.sh            # NEW — §7.1 checks 1-3 only, + invokes the two above
 development-docs/0.4.0/chromium-rebuild/
-└─ PLAN_patch_toolchain.md             # this doc
+├─ PLAN_patch_toolchain.md             # this doc
+└─ P3_BASELINE_94c1726.md              # NEW (P3 commit 1) — restore point + measured baseline
 ```
 > The **only** app-repo change to *use* the toolchain is adding `--url`/`--checkout` to the two build scripts (§6). All patch content lives in the fork.
 
@@ -149,19 +212,24 @@ Ordered; each has an acceptance gate. **Phase P3 in the outline; runs after P2 (
 
 ### Step 2 — Point the build at the fork
 1. Add to both build scripts (§6): `--url=https://github.com/Hodos-Browser/cef.git --branch=<TARGET> --checkout=<fork-rev-or-branch>`.
-2. **Clean-dir caveat:** `automate-git.py` refuses to switch URLs on an existing checkout. On a host that previously built stock CEF, the CEF sub-dir must be removed first (do **not** blow away `chromium_git/` — only the CEF checkout dir). Document the exact path in the runbook.
-3. **Acceptance:** a build (or a `--no-build` dry checkout, if available) fetches CEF from **our fork** — verify `git -C <cef dir> remote -v` shows the fork URL and `run_patch_updater` reports **`N patches total (N applied, 0 skipped, 0 failed)`** with the stock upstream count (proves our fork's patch pipeline is intact and we've added nothing yet).
+2. **URL switch (corrected — no clean dir needed):** `git -C C:/cef/cef150/cef remote set-url origin <fork>`. Same object graph, so the pin still resolves. Do **not** delete the CEF checkout, and never touch `chromium_git/` or `chromium/src`. (§1.3)
+3. **Acceptance:** `git -C C:/cef/cef150/cef remote -v` shows the fork URL, and `automate-git.py --dry-run` gets **past** the URL validation at `:1320-1326` printing `CEF URL: <fork>`. Note the baseline patch-report line comes from **`patcher.py` via `gclient_hook.py`** during the *build* step, not from `run_patch_updater` (§1.3) — so the full baseline reading (`114 patches total`, 0 failed) is observed at the Step-3/§9 build, not here.
 
 ### Step 3 — Prove the pipeline with a no-op patch
 1. Author a trivial, harmless patch (e.g. add a comment line to a stable, low-churn Chromium file, or a `.md`/`OWNERS` no-op) via the authoring workflow (§8.2).
 2. Save as `patch/patches/hodos_noop_probe.patch`; append `{ 'name': 'hodos_noop_probe', 'note': 'PIPE-A1 pipeline smoke — remove after standup' }` to `patch.cfg`.
-3. Verify apply on an **already-synced throwaway tree** via the **apply-only path** — `patcher.py` (or `git apply --check -p0 --ignore-whitespace` per patch). **Do not use `patch_updater.py --reapply`/`--restore`** (write-capable, resaves `.patch` files — I1). This is a **seconds-long** check, not a build.
-4. **Acceptance:** patcher reports **applied count +1**, `0 failed`; the change is present in the Chromium `src` tree pre-compile. Confirming apply-health does **not** require a full build; a single end-to-end build is the final gate (§9), **not** one per probe/toggle iteration. **Then remove the probe** (patch file + cfg entry) and re-verify count returns to baseline.
+3. Verify apply via the **apply-only path**, run from `chromium/src/cef` (so `patcher.py` resolves `src_dir` to the Chromium tree — it derives both paths from its own location): single-file mode `python tools/patcher.py --patch-file hodos_noop_probe --patch-dir <dir>`, or a bare `git apply --check -p0 --ignore-whitespace`. **Do not use `patch_updater.py --reapply`/`--restore`** (write-capable, resaves `.patch` files — I1). This is a **seconds-long** check, not a build.
+   > **⚠️ Never run `patcher.py` from the standalone `C:\cef\cef150\cef`.** Its `src_dir` is the *parent* of the CEF dir, which there is `C:\cef\cef150` — not a git repo. `git_util.py` would fall back to the **GNU `patch` tool with `--force`** (`_patch_apply_patch_string`), which *does* fuzz and *can* misland. The exact-context / fail-loud guarantee this plan relies on holds **only** inside `chromium/src`.
+4. **Acceptance:** `0 failed`, and the change is present in the Chromium `src` tree pre-compile. On the build host's **already-patched** tree the summary line reads **`115 total (1 applied, 114 skipped, 0 failed)`** — *not* "applied +1 over 114" (§1.1 `skipped` ambiguity). Confirming apply-health does **not** require a full build; a single end-to-end build is the final gate (§9), **not** one per probe/toggle iteration. **Then remove the probe** (patch file + cfg entry) and re-verify the count returns to baseline.
 
 ### Step 4 — Wire the `condition` env gate (optional-but-recommended, Q5 row CEF-4)
 1. Decide the gate variable name (recommend `HODOS_FARBLING` — §5).
-2. Prove it via the **apply-only path** (`patcher.py` on a synced tree — no build needed): register the no-op probe with `'condition': 'HODOS_FARBLING'`; run once **without** the env var (expect **skipped +1**), once **with** it (expect **applied +1**).
-3. **Acceptance:** condition toggles the patch between *applied* and *skipped* with no *failed*, exactly per `patcher.py`'s `condition not in os.environ` logic (no full build required to prove this).
+2. Prove it via the **apply-only path** (`patcher.py` from `chromium/src/cef` — no build needed): register the no-op probe with `'condition': 'HODOS_FARBLING'`; run once **without** the env var, once **with** it.
+3. **Acceptance — read the per-patch stdout line, not the summary count.** Because `skipped` is an ambiguous bucket (§1.1), the summary alone cannot prove the gate worked. The unambiguous signals are:
+   - env var **unset** → `Skipping patch file hodos_noop_probe` (emitted by `patcher.py` *before* it ever calls the applier)
+   - env var **set**, patch not yet applied → `... successfully applied.`
+   - env var **set**, patch already applied → `... already applied (skipping).` — also lands in `skipped`, which is exactly why the summary count is not the proof
+   In all three cases `failed` must be **0**. Upstream carries **zero** `condition` entries on 7871, so ours is the first and no other patch can perturb the reading.
 
 ### Step 5 — Stand up the drift-audit hook (Q5 row CEF-2)
 1. Land `scripts/cef_patch_drift_audit.py` (§7).
@@ -198,25 +266,29 @@ Adopt **one** env-var gate for the whole farbling patch set: **`HODOS_FARBLING`*
 ## 6. Integration with build scripts + `CEF_BUILD_RUNBOOK.md`
 
 ### 6.1 Build-script edits (the only app-repo glue)
-In `build_hodos_cef.bat` / `_mac.sh`, the `automate-git.py` invocation gains three flags (runbook §Step 3 shows the current invocation without them):
+**⚠️ The snippet this section used to show was against the stale M136 invocation** (`--download-dir=C:\cef\chromium_git`, `--depot-tools-dir=C:\cef\depot_tools`, `--branch=7103`, and `automate-git.py` taken from `C:\cef\automate\`). The live script is already on the 7871 tree layout (D11) and takes `automate-git.py` **from the CEF checkout**, not from master. Only **one** flag is genuinely new; `--branch`/`--checkout` are already there:
+
 ```
-python C:\cef\automate\automate-git.py ^
-  --download-dir=C:\cef\chromium_git --depot-tools-dir=C:\cef\depot_tools ^
-  --url=https://github.com/Hodos-Browser/cef.git ^      REM NEW — our fork
-  --branch=<TARGET> ^                                    REM was 7103
-  --checkout=<fork-rev-or-hodos/branch> ^                REM NEW — pin exact fork revision
-  --x64-build --minimal-distrib --client-distrib --no-debug-build --force-build
+set HODOS_FARBLING=1                                       REM NEW — condition gate (§5)
+
+python C:\cef\cef150\cef\tools\automate\automate-git.py ^
+  --download-dir=C:\cef\cef150 ^
+  --depot-tools-dir=C:\cef\cef150\depot_tools ^
+  --url=https://github.com/Hodos-Browser/cef.git ^         REM NEW — our fork
+  --branch=7871 ^                                          REM already present
+  --checkout=94c1726 ^                                     REM already present; retarget to the fork rev
+  --x64-build --minimal-distrib --client-distrib ^
+  --no-debug-build --no-depot-tools-update --force-build
 ```
-And an env line for the gate:
-```
-set HODOS_FARBLING=1                                     REM condition gate (§5)
-```
-Plus a **pre-build audit gate** (§7): run `python scripts\cef_patch_drift_audit.py` and **abort the build on non-zero exit** before the expensive `automate-git.py` call.
+
+Do **not** drop `--no-depot-tools-update` when adding `--url` — the live script documents why (it re-pulls depot_tools off its pinned commit and kills the build seconds in).
+
+Plus a **pre-build audit gate** (§7): run `bash cef_patch_drift_audit.sh` and **abort on non-zero exit** before the expensive `automate-git.py` call. Note it must run *before* the call but its patch-apply check reads a **synced** tree, so on a cold host the first run has nothing to check — it is a re-build gate, not a first-build gate.
 
 ### 6.2 Runbook edits (fold this plan into the canonical P&P — Invariant #12)
 Update `CEF_BUILD_RUNBOOK.md`:
-- **Step 2.2 "Farbling patches (B1)"** — replace the current forward-reference with: "patches live in the `Hodos-Browser/cef` fork under `patch/patches/hodos_farble_*.patch`, registered in `patch.cfg`, gated by `HODOS_FARBLING`; applied automatically by `run_patch_updater` in the `automate-git` flow. See `PLAN_patch_toolchain.md`."
-- **Step 5.5 "Patches — re-apply `cef/patch/`"** — point its "report failures/offsets" line at `scripts/cef_patch_drift_audit.py` (this plan **is** the "A1 patch toolchain owns this" owner named there). Correct any "fuzz" wording in that step: CEF applies with `git apply` and does not fuzz (§1.2).
+- **Step 2.2 "Farbling patches (B1)"** — replace the current forward-reference with: "patches live in the `Hodos-Browser/cef` fork under `patch/patches/hodos_farble_*.patch`, registered in `patch.cfg`, gated by `HODOS_FARBLING`; applied automatically by **`gclient_hook.py` → `patcher.py`** during the build step of the `automate-git` flow. See `PLAN_patch_toolchain.md`." *(Do **not** write "`run_patch_updater`" here — that was this plan's own error, corrected in §1.3.)*
+- **Step 5.5 "Patches — re-apply `cef/patch/`"** — point its "report failures/offsets" line at `DevOps-CICD/scripts/cef_patch_drift_audit.sh` (this plan **is** the "A1 patch toolchain owns this" owner named there). Correct the "fuzz" wording in that step: CEF applies with `git apply -p0 --ignore-whitespace` and **does not fuzz** (§1.2) — the only sub-failure signal is a hunk **offset**.
 - **Open TODOs** — check off "B1: farbling patch set + `patch.cfg` integration" (toolchain half) and "Automate the Step 5.5 drift audit" (§7).
 - **Resolve OQ-1:** check the two `build_hodos_cef*` scripts into `scripts/` (they are referenced as canonical but absent from the repo — §0).
 
@@ -236,10 +308,13 @@ So this script exists to (a) catch the fail-loud cases **cheaply and early** rat
 
 ### 7.1 What it checks
 1. **Patch apply health** — run **read-only** against a **throwaway synced tree**: either `patcher.py` (apply-only) or, per patch, `git apply --check -p0 --ignore-whitespace`. **⚠️ Never use `patch_updater.py --reapply`/`--restore` for this — it has no dry-run mode and is write-capable (it *resaves* the `.patch` files it's supposed to be validating; I1).** Signals to collect: **(a)** per-patch `git apply --check` pass/fail; **(b)** the patcher's `N patches total (A applied, S skipped, F failed)` line — **any `failed` → hard fail** (CEF's `git apply` is exact-context, so a `failed` means the patch will abort the real build too); **(c)** scrape `git apply`'s **stderr offset lines** (`Hunk #n succeeded at NNN (offset ±M lines)`) as the **soft early-warning** that the target moved under the patch and the next milestone jump will likely break it. There is **no fuzz metric** to parse — CEF does not fuzz (§1.2); do not key on one.
-2. **Registry integrity** — every `'name'` in `patch.cfg`'s Hodos block has a matching `patch/patches/<name>.patch` file and vice-versa (no orphan files, no dangling registry entries). Cross-check against `HODOS_PATCHES.md`.
+2. **Registry integrity** — every `'name'` in `patch.cfg`'s Hodos block has a matching `patch/patches/<name>.patch` file and vice-versa (no orphan files, no dangling registry entries). Cross-check against `HODOS_PATCHES.md`. Parse `patch.cfg` by **`exec`ing it** (as `patcher.py` does), never by grepping — the header comment overcounts (§1.1).
+   > **⚠️ Upstream already ships one orphan.** `chrome_browser_privacy_1119417.patch` is on disk but **not registered** in `patch.cfg` on `94c1726`. It is upstream's, not ours. **The orphan check must scope to the Hodos block and carry this as an explicit baselined allowance** — otherwise the audit exits 1 on every run from day one, and a gate that always fails is a gate that gets ignored. Baseline manifest: `DevOps-CICD/scripts/cef_patch_baseline_7871.txt`.
 3. **Target-file existence** — for each Hodos patch, confirm the file(s) it targets still exist at the expected path in the new Chromium `src` (catches upstream renames/deletes *before* apply, with a clearer message than a raw hunk-fail).
-4. **Runtime file-manifest drift (folds in runbook Step 5.5)** — diff the new CEF dist's DLL/`.bin`/`.pak`/`resources`/`locales` list against the hardcoded copy-lists in `cef-native/CMakeLists.txt` (Win) + the mac framework-embed list. A new/renamed/removed runtime file we don't copy = green build, runtime crash or missing feature — **and is exactly what breaks a silent auto-update** (feeds the outline §7 auto-update apply gate).
-5. **GN-args drift** — diff our pinned `GN_DEFINES` against the target CEF's generated `args.gn` defaults; assert `ffmpeg_branding=Chrome` + `proprietary_codecs=true` still take effect (a flipped default ships a green build with no codecs — runbook Step 5.5).
+4. **Runtime file-manifest drift** — **⚠️ ALREADY BUILT. Do not reimplement; call it.** `DevOps-CICD/scripts/cef_dist_drift_audit.sh` covers this, and its header documents that *this plan's stated target was wrong*: there are no "hardcoded copy-lists in `cef-native/CMakeLists.txt`" — CMake does a wholesale `copy_directory` and can never drop a file. The real gate is the **installer's extension whitelist** (`installer/hodos-browser.iss`: `*.dll`/`*.bin`/`*.dat`/`*.pak`/`*.json` + `locales\*`); a CEF file with any other extension survives a from-source smoke test and is then **silently dropped at packaging**, which is precisely the class of change that breaks a silent auto-update.
+5. **GN-args drift** — **⚠️ ALREADY BUILT. Do not reimplement; call it.** `DevOps-CICD/scripts/cef_gn_args_gate.sh` is already the mandatory pre-build codec gate (asserts `ffmpeg_branding=Chrome` + `proprietary_codecs=true` take effect; a flipped default ships a green build with no codecs).
+
+> **Scope correction (reuse-first, 2026-08-05):** of the five checks above, only **1–3 (the patch-apply half) are net-new.** CEF-2 is therefore a *patch* audit that **invokes** the two existing scripts, not a new tool that duplicates them. It also lands as **bash alongside them** in `DevOps-CICD/scripts/`, not as a lone `.py` at a repo-root `scripts/` — matching its neighbours (`cef_dist_drift_audit.sh`, `cef_gn_args_gate.sh`, `chromium-build-gitconfig`) and the OQ-1 (c) resolution.
 
 ### 7.2 Output
 A single human-review report (stdout + a file artifact): per-patch apply status + any hunk **offset** lines, registry/orphan findings, target-file-missing list, manifest add/remove/rename diff, GN-args diff. **Manifest + args + apply diffs are scriptable; cmake/copy-list *edits* need human judgment — the script REPORTS, never auto-edits** (runbook Step 5.5).
@@ -288,13 +363,14 @@ FEAT-B1 (C1–C7, Q5 §A.3) is the **first and, for beta.1, only** consumer. Thi
 
 ## 9. Acceptance criteria (toolchain standup complete)
 
-- [ ] `Hodos-Browser/cef` fork exists; `hodos/<TARGET-branch>` created off upstream; URL reachable by the build host; upstream remote recorded.
-- [ ] Both build scripts pass `--url`/`--branch`/`--checkout` at the fork; `git remote -v` in the CEF checkout shows the fork; `run_patch_updater` reports the **stock upstream patch count, 0 failed** (baseline, no Hodos patches yet).
-- [ ] No-op probe patch demonstrably **applies pre-compile** (`applied +1, 0 failed`), build completes, probe removed and count returns to baseline.
-- [ ] `condition: HODOS_FARBLING` demonstrably toggles a patch between **applied** (env set) and **skipped** (env unset), never **failed**.
-- [ ] `scripts/cef_patch_drift_audit.py` runs, establishes baseline, emits a human-readable report, and is wired as a **pre-build gate** (exit 1 aborts) + a scheduled fork-watcher.
+- [ ] `Hodos-Browser/cef` fork exists; `hodos/7871` created off upstream `7871`; URL reachable by the build host; upstream remote recorded.
+- [ ] Both build scripts pass `--url` at the fork; `git remote -v` in the CEF checkout shows the fork; **`patcher.py` (via `gclient_hook.py`)** reports the **114-entry upstream baseline, 0 failed** — no Hodos patches yet.
+- [ ] No-op probe patch demonstrably **applies pre-compile** with **`0 failed`** (on the already-patched host tree that reads `115 total (1 applied, 114 skipped, 0 failed)` — *not* "applied +1"); build completes; probe removed and count returns to the 114 baseline.
+- [ ] `condition: HODOS_FARBLING` demonstrably toggles the probe, **proven from the per-patch stdout line** (`Skipping patch file …` vs `… successfully applied.`) rather than the ambiguous `skipped` count (§1.1), never **failed**.
+- [ ] `DevOps-CICD/scripts/cef_patch_drift_audit.sh` runs, establishes baseline, emits a human-readable report, **invokes rather than duplicates** `cef_dist_drift_audit.sh` + `cef_gn_args_gate.sh`, baselines the known upstream orphan, and is wired as a **pre-build gate** (exit 1 aborts) + a scheduled fork-watcher.
 - [ ] `HODOS_PATCHES.md` (fork) + `CEF_VERSION_UPDATE_TRACKER.md` (app repo) record the standup; `CEF_BUILD_RUNBOOK.md` Step 2.2 / 5.5 / Open-TODOs updated (§6.2).
-- [ ] OQ-1 resolved: `build_hodos_cef.bat` / `_mac.sh` checked into `scripts/`.
+- [ ] OQ-1 resolved **as (c)**: `DevOps-CICD/scripts/` confirmed canonical; the 35 repo-root `scripts/build_hodos_cef*` citations across 12 docs corrected.
+- [ ] R9 discharged: distrib tarballs moved outside the `delete_directory(cef_src_dir)` path before any `--checkout` retarget.
 - [ ] **Ready-for-consumer gate:** a single real farbling patch (C1 alone) can be authored, registered, applied, and built end-to-end — proving the pipeline is ready for FEAT-B1 P4a.
 
 ---
@@ -303,7 +379,9 @@ FEAT-B1 (C1–C7, Q5 §A.3) is the **first and, for beta.1, only** consumer. Thi
 
 | # | Risk | Mitigation |
 |---|---|---|
-| R1 | **URL-switch hard error** — `automate-git.py` refuses to change checkout URL on an existing CEF dir; a host that built stock CEF blocks the fork switch. | Document the exact CEF-checkout dir to remove (not `chromium_git/`); do it once at standup; capture in the runbook. |
+| ~~R1~~ | ~~**URL-switch hard error** blocks the fork switch on a host that built stock CEF.~~ **DOWNGRADED 2026-08-05 — not a real risk.** The check just reads `git config --get remote.origin.url`, so `git remote set-url origin <fork>` satisfies it with no re-clone (same object graph, pin still resolves). Also bypassable via `--no-cef-update`, and the checkout is only 65 MB regardless. | One command, §1.3 / §4 Step 2. |
+| **R9** | **`delete_directory(cef_src_dir)` destroys the previous build's distrib output** — `automate-git.py:1535-1539` deletes `chromium/src/cef` on any CEF checkout change, and `binary_distrib/` lives inside it. That includes the **898 MB `release_symbols` tarball**, which cannot be regenerated without a full ~5 h rebuild. **This was the real hazard R1 was mistaken for**, and it was undocumented. | Move `binary_distrib/*.tar.bz2` outside the delete path **before** changing `--checkout` (done, P3 commit 1 → `C:\cef\cef150\binary_distrib_94c1726\`). Standing rule for every future fork-revision bump. |
+| **R10** | **`patcher.py` run from the wrong directory silently loses the fail-loud guarantee.** From the standalone `C:\cef\cef150\cef`, `src_dir` resolves to a non-git dir, and `git_util.py` falls back to GNU `patch --force`, which **fuzzes and can misland** — the exact failure mode §7 says "essentially cannot occur here". | Always invoke from `chromium/src/cef`. Called out at §4 Step 3; the drift audit asserts its own CWD. |
 | R2 | **Hunk offset (not fuzz)** — CEF's `git apply` is exact-context and fail-loud, so a context mismatch **hard-fails the build before compile** (not a silent misland). The residual risk is a hunk landing at a line **offset** — it still applies, but signals the patch is drifting toward a future break. | Rely on the fail-loud model for outright mismatches (build aborts, §1.2); drift audit (§7.1) scrapes `git apply` offset lines as the exit-2 early-warning; farbling acceptance tests (worker==window) catch any behavioral misland downstream. |
 | R3 | **High-churn Blink files** — `base_rendering_context_2d.cc` etc. conflict on most milestone jumps → rebase labor. | Keep patches minimal + disjoint; budget ~2–8 h/bump; record actuals; the scheduled fork-watcher (§7.4) catches drift early, not at build time. |
 | R4 | **BUILD.gn coupling** — C1's new-file patch also edits a Blink `BUILD.gn`; build files churn and rename. | Flag in `HODOS_PATCHES.md`; treat the `BUILD.gn` hunk as the canary in each rebase; verify the new source actually compiles into `libcef`. |
@@ -316,12 +394,15 @@ FEAT-B1 (C1–C7, Q5 §A.3) is the **first and, for beta.1, only** consumer. Thi
 
 ## 11. Open questions (with recommended defaults)
 
-| # | Question | Recommended default |
+> **OQ-1 through OQ-4 and OQ-8 are all CLOSED as of 2026-08-05** (owner decisions + P3 kickoff verification). Retained with their resolutions for the record.
+
+| # | Question | **RESOLUTION** |
 |---|---|---|
-| **OQ-1** | The runbook's "canonical" `build_hodos_cef.bat`/`_mac.sh` are **not in the repo** (§0). Where do they live? | **Check them into `scripts/`** as part of this standup so `--url` wiring is version-controlled and reviewable. Treat their current absence as a gap to close. |
-| **OQ-2** | Exact `patch_updater.py` flags to **author/regenerate** a `.patch` on the TARGET branch (resave/add), and the exact `run_patch_updater` arg string on `automate-git`'s build path. | Confirm against the TARGET-branch tool at author time; **fallback = hand-crafted unified diff**, rooted at the tree `path` and **formatted for `git apply -p0`** (no `a/`…`b/` prefixes — §8.2 step 3), else it reports `failed`. Non-blocking for standup (the no-op probe can be hand-diffed). |
-| **OQ-3** | Fork name/owner. | **`Hodos-Browser/cef`** (org that already holds signing trust for `cef-binaries`); default branch `hodos/<CEF-branch>`. |
-| **OQ-4** | Upstream rebase remote — GitHub (authoritative) vs legacy Bitbucket. | **GitHub** (`github.com/chromiumembedded/cef`) — it is `automate-git.py`'s default clone source and the post-2023 canonical home; Bitbucket is legacy and likelier to lag. Record the choice in `HODOS_PATCHES.md`. |
+| **OQ-1** | The runbook's "canonical" `build_hodos_cef.bat`/`_mac.sh` are not in the repo (§0). Where do they live? | ✅ **CLOSED — they were never missing.** They are at `development-docs/DevOps-CICD/scripts/`, and the runbook already declares that path canonical (line 9). **Owner chose (c): leave them there.** CEF-5 reduces from "check in two scripts" to "fix the 35 repo-root citations across 12 docs" (done, P3 commit 2). New patch tooling lands beside them, not at a repo root. |
+| **OQ-2** | Exact `patch_updater.py` flags to author/regenerate a `.patch`, and the `run_patch_updater` arg string on the build path. | ✅ **CLOSED by direct inspection of `94c1726`.** Flags: `--resave --reapply --revert --backup --restore --patch --add`; authoring path `--resave --patch <name> --add <path>` (`cef/docs/chromium_update.md:136`). The second half of the question **dissolves**: `run_patch_updater` is not on the apply path at all (§1.3). |
+| **OQ-3** | Fork name/owner. | ✅ **CLOSED — `Hodos-Browser/cef`** (owner-approved). Name is free in the org; matches GitHub's default fork name and upstream tooling expectations. Integration branch `hodos/7871`. Operator is **org admin**, so `gh repo fork --org` works directly. |
+| **OQ-4** | Upstream rebase remote — GitHub vs legacy Bitbucket. | ✅ **CLOSED — GitHub**, and now settled empirically rather than by inference: the checkout that produced the green 150 build already has `origin = https://github.com/chromiumembedded/cef.git`. Bitbucket was never involved. |
+| **OQ-8** | **NEW.** Fork visibility. A GitHub fork **cannot be private** — it inherits the upstream network — so the C1–C7 farbling patches become public as authored. | ✅ **CLOSED — public fork accepted** (owner). Correct rationale: farbling is **per-domain seeded**, so its effectiveness does not depend on the patch being secret (Brave ships theirs openly). CEF is BSD, so licensing is not a constraint either way. **⚠️ The rationale offered at decision time — "we're just taking Brave's public code" — is NOT the basis, and must not become one:** Brave is **MPL-2.0**, and transcribing it makes our patches a derivative work carrying MPL obligations. The **M7 clean-room boundary stands unchanged** (§8.2 step 2, R6): author from spec/behavior/CreepJS expectations, never from Brave source. Recorded per-patch in `HODOS_PATCHES.md`. |
 | **OQ-5** | One `HODOS_FARBLING` gate vs per-patch conditions. | **Single gate** for the whole set (§5) — a half-applied farbling set is worse than all-or-nothing; no per-patch conditions. |
 | **OQ-6** | Should the drift audit run in CI (not just the build host)? | **Yes** — it's cheap and needs no Chromium build; run it as the scheduled fork-watcher (§7.4) even though the full build can't run in CI. |
 | **OQ-7** | Do we `condition`-gate the no-op probe permanently or remove it? | **Remove after Step 3/4** — the probe is standup scaffolding; leaving it in ships a pointless hunk and inflates the patch count the drift audit baselines against. |

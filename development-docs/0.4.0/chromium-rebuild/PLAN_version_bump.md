@@ -6,7 +6,7 @@
 
 > **Scope boundary.** This doc owns the **version-target decision** and the **mechanics of moving the branch pin**. It does *not* own: codec flags (`PLAN_codecs.md`), farbling patches (`Q2_farbling_adblock.md` + `PLAN_farbling_blink.md`), Widevine/DRM (`Q4_widevine_amazon_drm.md`), or the full edit inventory (`Q5_full_edit_list.md`). Where those intersect the bump (patch rebase, codec re-verify, `enable_widevine` resolution) this doc points at them and states the *bump-time* obligation only.
 
-> **Authoritative inputs (repo):** `DevOps-CICD/CEF_BUILD_RUNBOOK.md` (Step 1 branch choice, lines 71–108; §7.3 LTS rationale), `CEF_VERSION_UPDATE_TRACKER.md` (current version, macOS floor, must-investigate list), `DEPENDENCY_VERIFICATION.md` (per-bump dep checklist), `0.4.0/CHROMIUM_CEF_BUILD_DESIGN_OUTLINE.md` §2 Step 0 (version resolution) + open-question **C1** (LTS-vs-Extended-Stable conflation), `0.4.0/B1-farbling-design.md` (patch rebase cost), `scripts/build_hodos_cef.bat` / `scripts/build_hodos_cef_mac.sh` (the `--branch=` invocation).
+> **Authoritative inputs (repo):** `DevOps-CICD/CEF_BUILD_RUNBOOK.md` (Step 1 branch choice, lines 71–108; §7.3 LTS rationale), `CEF_VERSION_UPDATE_TRACKER.md` (current version, macOS floor, must-investigate list), `DEPENDENCY_VERIFICATION.md` (per-bump dep checklist), `0.4.0/CHROMIUM_CEF_BUILD_DESIGN_OUTLINE.md` §2 Step 0 (version resolution) + open-question **C1** (LTS-vs-Extended-Stable conflation), `0.4.0/B1-farbling-design.md` (patch rebase cost), `development-docs/DevOps-CICD/scripts/build_hodos_cef.bat` / `development-docs/DevOps-CICD/scripts/build_hodos_cef_mac.sh` (the `--branch=` invocation).
 > **Authoritative inputs (primary, web — verified 2026-07-10):** CEF `branches_and_building.html`; CEF issue #3947 (LTC/LTS automated builds); CEF issue #4114 (2-week-cadence adjustments); Chrome Releases blog + chromiumdash (M150 stable date + macOS floor).
 
 ---
@@ -49,7 +49,7 @@ From CEF `branches_and_building.html` ("Supported Release Branches"), quoted exa
 
 > **Do not conflate two channel systems.** Chromium-150 promoting to *upstream* stable (≈ late June 2026) is independent of **CEF's own `Beta` label on branch `7871`**, which is CEF's assessment of *its binary's* maturity. As of the verification date, `7871` is **CEF Beta** — pinning it *today* yields a CEF-Beta-maturity binary. There is no evidence the Beta label is a stale table entry; treat it as authoritative. The branch number (`7871`) is what `automate-git --branch=` consumes, but **the maturity of that branch is gated by its CEF channel, which must reach ≥ Stable before we build for production** (§3 pre-flight, §7 acceptance). Sequence of maturity for `7871`: **Beta → Stable → LTC → M150 LTS.**
 
-Our current pin: **branch `7103` = CEF 136 = Chromium 136** (`CEF_BUILD_RUNBOOK.md` line 82; `scripts/build_hodos_cef.bat` `--branch=7103`). This is **~14 months / 14 milestones behind stable** and **predates the M138 LTS program → zero current security-patch coverage.**
+Our current pin: **branch `7103` = CEF 136 = Chromium 136** (`CEF_BUILD_RUNBOOK.md` line 82; `development-docs/DevOps-CICD/scripts/build_hodos_cef.bat` `--branch=7103`). This is **~14 months / 14 milestones behind stable** and **predates the M138 LTS program → zero current security-patch coverage.**
 
 ### 1.2 The LTC/LTS program is real (resolves outline open-question C1)
 
@@ -113,7 +113,7 @@ Version data drifts; re-verify these **the day the build starts** (outline §2 S
 > Runs inside `CEF_BUILD_RUNBOOK.md`'s Tier-1 flow. This section is the **version-specific overlay** — what changes *because* it's a 136→150 jump. Do NOT re-derive the environment setup; that's the runbook (Steps 3 env setup, depot_tools, `automate-git.py` fetch).
 
 ### 4.1 — Move the branch pin
-- Edit the pin in **both** build scripts: `scripts/build_hodos_cef.bat` and `scripts/build_hodos_cef_mac.sh` — change `--branch=7103` → `--branch=7871`.
+- Edit the pin in **both** build scripts: `development-docs/DevOps-CICD/scripts/build_hodos_cef.bat` and `development-docs/DevOps-CICD/scripts/build_hodos_cef_mac.sh` — change `--branch=7103` → `--branch=7871`.
 - If/when the farbling CEF fork exists (`Q5` CEF-1 / GREENFIELD), also rebase the fork onto upstream `7871` and keep `automate-git.py --url=<fork> --branch=7871` consistent. For the *pure version bump* baseline (P1, no farbling patches yet) this is stock upstream CEF at `7871`.
 - Keep `GN_DEFINES` **byte-identical** to today for the baseline bump: `is_official_build=true proprietary_codecs=true ffmpeg_branding=Chrome chrome_pgo_phase=0` (`CEF_BUILD_RUNBOOK.md` line 164). Codec/DRM flag *changes* are `PLAN_codecs.md` / `Q4`, not this doc — bump first on unchanged flags to isolate version breakage from flag breakage.
 

@@ -4,7 +4,7 @@
 **Created:** 2026-07-10 · **Owner:** Matthew (Marston Enterprises) · **Lead:** Windows Claude
 **What this plans:** How to confirm proprietary codecs (H.264 / AAC / MP3 / VP9 / AV1, plus the already-inherited HEVC/H.265) still build and function after the 136 → TARGET bump — the exact GN flags, the codec-flag changes to watch, the media smoke matrix, and the relationship to `is_official_build` and to Widevine (separate). **TARGET is a placeholder** (per outline §2 / Step 0): resolve the exact CEF stable version + branch from `cef-builds.spotifycdn.com/index.json` at plan time — do NOT bake a milestone number into this doc. Per the runbook (`CEF_BUILD_RUNBOOK.md` lines 80–85) current stable at time of writing is **CEF 149 / Chromium 149 (branch 7827)** with **M150 LTS** as the pin candidate; the codec audit window must be re-anchored to whichever milestone Step 0 resolves. **Feeds research question Q5** (full reconciled edit list). This is the smallest of the rebuild docs by design — the codec path is a *carry-forward*, not a redesign; the value is in the drift audit + smoke gate.
 
-> **Authoritative inputs:** `DevOps-CICD/CEF_BUILD_RUNBOOK.md` (§"Why we self-build", Step 5.5, Step 6, Step 7), `DevOps-CICD/CEF_VERSION_UPDATE_TRACKER.md`, `scripts/build_hodos_cef.bat` / `scripts/build_hodos_cef_mac.sh`, `reference_cef_self_build_reason`, `BRAVE_FORK_FEASIBILITY.md` §4. Widevine/DRM lives in the sibling `Q4-amazon-drm.md` — **out of scope here except the boundary note in §5.**
+> **Authoritative inputs:** `DevOps-CICD/CEF_BUILD_RUNBOOK.md` (§"Why we self-build", Step 5.5, Step 6, Step 7), `DevOps-CICD/CEF_VERSION_UPDATE_TRACKER.md`, `development-docs/DevOps-CICD/scripts/build_hodos_cef.bat` / `development-docs/DevOps-CICD/scripts/build_hodos_cef_mac.sh`, `reference_cef_self_build_reason`, `BRAVE_FORK_FEASIBILITY.md` §4. Widevine/DRM lives in the sibling `Q4-amazon-drm.md` — **out of scope here except the boundary note in §5.**
 
 ---
 
@@ -18,7 +18,7 @@
 
 ## 2. The flags — carry forward verbatim
 
-Current known-good (from `scripts/build_hodos_cef.bat` / `_mac.sh`, confirmed in `CEF_BUILD_RUNBOOK.md` line 50):
+Current known-good (from `development-docs/DevOps-CICD/scripts/build_hodos_cef.bat` / `_mac.sh`, confirmed in `CEF_BUILD_RUNBOOK.md` line 50):
 
 ```
 set GN_DEFINES=is_official_build=true proprietary_codecs=true ffmpeg_branding=Chrome chrome_pgo_phase=0

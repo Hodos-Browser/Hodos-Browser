@@ -23,7 +23,7 @@
 > - Build→test→prod pipeline + auto-update/signer gate: `chromium-rebuild/PLAN_build_test_prod.md`
 > - Q1 Mac farbling: `chromium-rebuild/Q1_mac_farbling.md` · Q2 farbling×adblock: `chromium-rebuild/Q2_farbling_adblock.md` · Q3 farbling×OAuth: `chromium-rebuild/Q3_farbling_oauth.md` · Q4 Widevine/DRM: `chromium-rebuild/Q4_widevine_amazon_drm.md`
 > - DevOps P&P: `DevOps-CICD/CEF_BUILD_RUNBOOK.md`, `CEF_VERSION_UPDATE_TRACKER.md`, `DEPENDENCY_VERIFICATION.md`, `SILENT_UPDATE_TEST_PLAN.md`, `WINDOWS_AUTOUPDATE_PLAN.md`, `AUTO_UPDATE_AND_SIGNING_0_4_0.md`, `ORG_IDENTITY_SIGNING_MIGRATION.md`, `research/BRAVE_FORK_FEASIBILITY.md`
-> - Build scripts: `scripts/build_hodos_cef.bat` / `scripts/build_hodos_cef_mac.sh` (**not yet checked in — OQ-1 in `PLAN_patch_toolchain.md`**)
+> - Build scripts: `development-docs/DevOps-CICD/scripts/build_hodos_cef.bat` / `development-docs/DevOps-CICD/scripts/build_hodos_cef_mac.sh` (**not yet checked in — OQ-1 in `PLAN_patch_toolchain.md`**)
 
 ---
 
@@ -142,12 +142,21 @@ P0 PROVISION ─▶ P1 PIN VERSION/TOOLCHAIN ─▶ P2 BASELINE BUILD ─▶ P3 
 
 ## P3 — CEF PATCH TOOLCHAIN *(serial linchpin; blocks P4)*
 
-> **✅ DE-RISKED 2026-08-03.** "GREENFIELD" overstates it. The **patch mechanism already exists and runs
-> on every build**: upstream CEF ships **105 patches** in `cef/patch/patches/` registered in
-> `patch.cfg`, all applied by `patcher.py` during `automate-git.py`. What is greenfield is **our fork
-> and our patches** (`hodos_*` count today: 0). We are adding a 106th patch to a working pipeline, not
-> standing a pipeline up. The no-op probe patch (CEF-1) therefore validates *our fork wiring*, not the
-> mechanism itself — keep it, but expect it to pass.
+> **✅ DE-RISKED 2026-08-03 · numbers + mechanism CORRECTED 2026-08-05 (P3 kickoff).** "GREENFIELD"
+> overstates it. The **patch mechanism already exists and runs on every build**. Measured on the pinned
+> tree (CEF `94c1726`): **114 registered `patch.cfg` entries / 115 `.patch` files on disk** — the "105"
+> figure was wrong, as were the plan's "~150" and Q5's "empty". Parse `patch.cfg` by `exec`ing it, not
+> by grepping; the header comment overcounts.
+>
+> Applied by **`cef/tools/gclient_hook.py:37` → `tools/patcher.py`**, invoked from
+> `automate-git.py:1671` in the **build** step — **not** by `run_patch_updater`, which on our pinned
+> path (`--checkout=94c1726`, Chromium == compat version) never applies anything. Practical upside:
+> **`--force-build` alone re-applies patches**, so P3 iteration needs no re-sync.
+>
+> What is greenfield is **our fork and our patches** (`hodos_*` count today: 0). We are adding a 115th
+> entry to a working pipeline, not standing a pipeline up. The no-op probe (CEF-1) validates *our fork
+> wiring*, not the mechanism — keep it, but expect it to pass. Full measured baseline + restore point:
+> `chromium-rebuild/P3_BASELINE_94c1726.md`.
 
 **Plan docs:** `PLAN_patch_toolchain.md` (full); outline §3b/§4 P3.
 **Edit IDs:** CEF-1 (fork + patch.cfg + `automate-git --url` + no-op probe), CEF-2 (`cef_patch_drift_audit.py` Step-5.5 hook), CEF-3 (upstream security-pull duty / fork-watcher), CEF-4 (single `HODOS_FARBLING` `condition` gate), CEF-5 (check `build_hodos_cef.{bat,sh}` into `scripts/` + `HODOS_PATCHES.md` ledger — resolves OQ-1).
@@ -155,9 +164,9 @@ P0 PROVISION ─▶ P1 PIN VERSION/TOOLCHAIN ─▶ P2 BASELINE BUILD ─▶ P3 
 **Steps**
 1. **CEF-1:** fork `chromiumembedded/cef` → **`Hodos-Browser/cef`**, branch `hodos/7871`; add `patch/patches/hodos_*.patch` + register in `patch/patch.cfg`; point the build at the fork via `automate-git.py --url=https://github.com/Hodos-Browser/cef.git --branch=7871 --checkout=<pin>`. Patches apply via `git apply -p0 --ignore-whitespace` (**exact-context, fail-loud, no fuzz** — a context mismatch aborts before compile). **Prove a no-op probe patch applies pre-compile + builds**, then remove it and re-verify the count returns to the stock upstream baseline. Clean-dir caveat: `automate-git` refuses a URL switch on an existing CEF checkout — remove the CEF sub-dir first (not `chromium_git/`).
 2. **CEF-4:** wire the single `HODOS_FARBLING` `condition` gate (all-or-nothing; never half-apply the set); prove toggle applied↔skipped, never failed. Escape hatch for beta.1 stability.
-3. **CEF-2:** land `scripts/cef_patch_drift_audit.py` — read-only per-patch `git apply --check` (**never** write-capable `patch_updater.py --reapply/--restore`), scrape hunk-**offset** lines (soft warning), registry/orphan + target-file-existence checks, **folds VER-5 file-manifest diff + GN-args diff**. Exit 1 = build must not start; wire as a pre-build gate.
+3. **CEF-2:** land `DevOps-CICD/scripts/cef_patch_drift_audit.sh` — read-only per-patch `git apply --check` (**never** write-capable `patch_updater.py --reapply/--restore`), scrape hunk-**offset** lines (soft warning), registry/orphan + target-file-existence checks. **Reuse-first: the VER-5 file-manifest diff and the GN-args diff ALREADY EXIST** as `cef_dist_drift_audit.sh` + `cef_gn_args_gate.sh` — invoke them, do not reimplement. Must baseline the pre-existing upstream orphan `chrome_browser_privacy_1119417.patch`, or the gate exits 1 on every run. Exit 1 = build must not start; wire as a pre-build gate.
 4. **CEF-3:** document + automate the recurring duty to pull upstream in-branch security point-releases into the fork (scheduled `gh`/Actions fork-watcher that opens a rebase PR when upstream `7871` advances). Record in `CEF_VERSION_UPDATE_TRACKER.md`.
-5. **CEF-5:** check the two `build_hodos_cef*` scripts into `scripts/` (referenced as canonical but **absent** today); create `HODOS_PATCHES.md` fork ledger.
+5. **CEF-5:** **OQ-1 closed as (c)** — the two `build_hodos_cef*` scripts already exist at `development-docs/DevOps-CICD/scripts/`, which the runbook already declares canonical; fix the 35 repo-root `scripts/` citations across 12 docs instead of moving them (done, P3 commit 2). Create `HODOS_PATCHES.md` fork ledger.
 6. **Attachment map ready** (patch_toolchain §8.1): C1 first, then C2–C7 → `hodos_farble_{session_cache,seed_wiring,canvas2d,webgl,webaudio,navigator,auth_exempt}.patch`, all `condition: HODOS_FARBLING`, all `path: src`. C1 also patches a Blink `BUILD.gn` (its higher-churn rebase target).
 
 > **Prerequisite authoring (no build dependency — start as early as P0).** `PLAN_farbling_blink.md` and `Q3_farbling_oauth.md` are **now written** — they no longer block P4 entry. Remaining pre-P4 design work is only the two owner value-fills (FB-1 seed channel, FB-2 WebGL vendor/renderer) and the FEDCM/OQ housekeeping; none require a build.
@@ -325,7 +334,7 @@ Concrete, testable gate items — **all green on both Windows and macOS** before
 **Build integrity (P1/P2/P7)**
 - [ ] Target = **CEF 150 / branch `7871`** confirmed from `index.json`; **`7871` is ≥ CEF-Stable on build day** (NOT Beta) OR the recorded fallback to M149/`7827` is in effect; **LTS-vs-stable decision recorded** with the Extended-Stable-conflation hypothesis tested (C1); cadence corrected (4-week, I13).
 - [ ] Target branch confirmed on **ACTIVE security support**; support-end date + in-flight point-release cadence recorded in `CEF_VERSION_UPDATE_TRACKER.md` (I12); **CEF fork tracks upstream in-branch security point-releases (CEF-3 fork-watcher live)**.
-- [ ] Build is **buildable/repeatable** from `scripts/build_hodos_cef.{bat,sh}` (now checked in — CEF-5) on the pinned toolchain; changelog appended (branch, milestone, GN_DEFINES, patch-set version, deps, duration, **per-bump patch-rebase hours — I10**).
+- [ ] Build is **buildable/repeatable** from `development-docs/DevOps-CICD/scripts/build_hodos_cef.{bat,sh}` (now checked in — CEF-5) on the pinned toolchain; changelog appended (branch, milestone, GN_DEFINES, patch-set version, deps, duration, **per-bump patch-rebase hours — I10**).
 - [ ] **CI app-build runner images pinned** (`runs-on:` — no `*-latest`) so MSVC/Clang **match the CEF binary's toolset** (ABI, I9); build-host toolchain documented separately; **Windows SDK the runner ships covers what `7871` needs (OQ-6)**.
 - [ ] **DEP-1a..d silent-drift re-pins landed** (vcpkg baseline manifest, Inno `<6.7.x>`, Brewfile, `rust-toolchain.toml`); DEP-1 pass with touched/deferred table; **no silent wallet-crypto-crate bump (Invariant #3)**.
 - [ ] **VER-5 Step 5.5 file-manifest + GN-args drift audit** produced a clean human-reviewed diff; `cef-native` copy-lists updated; all output-checklist files present (`libcef.dll`, `icudtl.dat`, `v8_context_snapshot.bin`, `resources/`, `locales/`, …).

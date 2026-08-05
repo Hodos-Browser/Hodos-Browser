@@ -5,11 +5,15 @@
 `build_hodos_cef_mac.sh` and the real build done 2026-03-12 (merged in from the former
 `CEF_BUILD_FROM_SOURCE_GUIDE.md`).
 
-> **⚠️ Script path corrected 2026-08-03.** Both build scripts live at
-> **`development-docs/DevOps-CICD/scripts/`**, NOT at a repo-root `scripts/`. Every doc that cites
-> `scripts/build_hodos_cef.bat` is citing a path that does not exist. (`Q5` CEF-5's "check them in —
-> absent today" is likewise wrong: they exist, just not where cited. CEF-5 reduces to a *move*
-> decision, not authoring.)
+> **⚠️ Script path corrected 2026-08-03 · OQ-1 CLOSED 2026-08-05.** Both build scripts live at
+> **`development-docs/DevOps-CICD/scripts/`**, NOT at a repo-root `scripts/`. `Q5` CEF-5's "check them
+> in — absent today" was wrong: they exist, just not where most docs cited them.
+>
+> **Owner decision (2026-08-05): this path is canonical — the scripts stay put.** CEF-5 therefore
+> reduces to a *citation* fix, not a move and not authoring. The 35 stale `scripts/build_hodos_cef*`
+> references across 12 docs were rewritten to the full path in P3 commit 2. New CEF build/patch tooling
+> lands **here**, beside `cef_gn_args_gate.sh` / `cef_dist_drift_audit.sh` / `chromium-build-gitconfig`.
+
 **Owner:** DevOps/CI-CD · **Covers:** A1 (self-build), A2 (latest stable), A3 (dependency bump), A5 (Tier 1)
 
 > **Read this first — terminology.** We are a **CEF-based browser that does custom Chromium builds.**
@@ -199,7 +203,7 @@ Chicken-and-egg on a brand-new tree: run *once* with any recent copy to clone `c
 using the checkout's own copy — or clone `cef/` by hand first.
 
 #### Run the build (Windows)
-Canonical script: `scripts/build_hodos_cef.bat` (copy to `C:\cef\chromium_git\` and run from there in a
+Canonical script: `development-docs/DevOps-CICD/scripts/build_hodos_cef.bat` (copy to `C:\cef\chromium_git\` and run from there in a
 **normal** cmd/PowerShell, *not* a Developer Command Prompt). What it does:
 
 ```batch
@@ -233,7 +237,7 @@ python C:\cef\automate\automate-git.py ^
 | `--force-build` | force rebuild **but keep existing objects → resumable** (we do NOT use `--force-clean` on re-runs) |
 
 #### macOS
-Use `scripts/build_hodos_cef_mac.sh`. Same `automate-git.py` + ninja flow; needs **Xcode + Command
+Use `development-docs/DevOps-CICD/scripts/build_hodos_cef_mac.sh`. Same `automate-git.py` + ninja flow; needs **Xcode + Command
 Line Tools**; same ~100 GB / 16 GB (32 rec.) requirements. Arch: `--arm64-build` on Apple Silicon
 (M1+), `--x64-build` on Intel. Output is `Chromium Embedded Framework.framework` instead of `libcef.dll`
 — Windows DLLs cannot be used on macOS; this is a fully separate build.

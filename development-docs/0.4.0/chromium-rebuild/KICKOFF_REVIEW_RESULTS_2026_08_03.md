@@ -126,7 +126,7 @@ they are automated.
 | 3 | Runbook: Ninja `.ninja_log` resumability | **Siso is default** on a fresh `7871` out-dir. State = `.siso_fs_state` + journal. One Ctrl-C graceful, second aborts. Runs fully local |
 | 4 | Runbook LTS text "retracted" | **Vindicated** — see §2 |
 | 5 | Runbook "Python 3.12+ breaks" | Ceiling is per-branch `.vpython3`; both branches want 3.11 |
-| 6 | `scripts/build_hodos_cef.bat` | Lives at **`development-docs/DevOps-CICD/scripts/`**. CEF-5 reduces to a *move* decision, not authoring |
+| 6 | repo-root `scripts/build_hodos_cef.bat` citations | Scripts actually live at **`development-docs/DevOps-CICD/scripts/`**. CEF-5 reduces to a *move* decision, not authoring. **Superseded 2026-08-05:** owner chose to keep them there, so it is a *citation* fix, not a move |
 | 7 | BOT-1 citation | §4 above |
 | 8 | Runbook L82 → 7103 row; "runbook §7.3" | Row is L81; §7.3 belongs to the archived master plan |
 

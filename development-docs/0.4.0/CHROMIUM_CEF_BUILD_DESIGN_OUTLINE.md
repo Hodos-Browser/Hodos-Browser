@@ -11,8 +11,8 @@
 > `DevOps-CICD/research/BRAVE_FORK_FEASIBILITY.md`, `DevOps-CICD/DEPENDENCY_VERIFICATION.md`,
 > `DevOps-CICD/WINDOWS_AUTOUPDATE_PLAN.md` + `AUTO_UPDATE_AND_SIGNING_0_4_0.md` (for the §7 update-apply gate),
 > `0.4.0/B1-farbling-design.md`, `0.4.0/SPRINT_0_4_0_MASTER_PLAN.md` (§7.3, §7.6, §11), the kickoff
-> `0.4.0/CHROMIUM_CEF_SPRINT_KICKOFF.md`, and the build scripts `scripts/build_hodos_cef.bat` /
-> `scripts/build_hodos_cef_mac.sh` (paths referenced throughout the runbook; confirm at plan time).
+> `0.4.0/CHROMIUM_CEF_SPRINT_KICKOFF.md`, and the build scripts `development-docs/DevOps-CICD/scripts/build_hodos_cef.bat` /
+> `development-docs/DevOps-CICD/scripts/build_hodos_cef_mac.sh` (paths referenced throughout the runbook; confirm at plan time).
 
 ---
 
@@ -118,7 +118,7 @@ compile* (GN flag, `patch.cfg` `.patch` file, or automate-git config) — distin
 
 ### (a) Proprietary codecs — GN flags `[EXISTS — carry forward]`
 - **What:** `GN_DEFINES = is_official_build=true proprietary_codecs=true ffmpeg_branding=Chrome
-  chrome_pgo_phase=0` in `scripts/build_hodos_cef.bat` / `_mac.sh`.
+  chrome_pgo_phase=0` in `development-docs/DevOps-CICD/scripts/build_hodos_cef.bat` / `_mac.sh`.
 - **Why:** Stock CEF omits H.264/AAC/MP3 → breaks video/audio across the open web. This is the reason we
   self-build (`BRAVE_FORK_FEASIBILITY.md` §4; `reference_cef_self_build_reason`).
 - **Platform:** both. **Size:** tiny (flags; ~15 MB codec code in `libcef.dll`). **Dependency:** none —
@@ -416,7 +416,7 @@ Gate items — all green before cutting `v0.4.0-beta.1` (each maps to a phase):
       Extended-Stable-conflation hypothesis explicitly tested (C1)**; cadence corrected per I13.
 - [ ] **Target branch confirmed on ACTIVE security support; support-end date recorded in
       `CEF_VERSION_UPDATE_TRACKER.md`; in-flight security point-release cadence documented (I12).**
-- [ ] Build is **reproducible** from `scripts/build_hodos_cef.{bat,sh}` on the pinned toolchain; changelog
+- [ ] Build is **reproducible** from `development-docs/DevOps-CICD/scripts/build_hodos_cef.{bat,sh}` on the pinned toolchain; changelog
       appended to `CEF_VERSION_UPDATE_TRACKER.md` (branch, milestone, GN_DEFINES, patch-set version, deps,
       duration, **estimated per-bump patch-rebase hours — I10**).
 - [ ] **CI app-build runner** images pinned (`runs-on:` — no `*-latest`) so their MSVC/Clang **match the CEF

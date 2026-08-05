@@ -490,7 +490,7 @@ After writing each chunk, before build:
 
 | # | Blocker | Status |
 |---|---------|--------|
-| **1** | **CEF framework at `../cef-binaries/`** | **HARD STOP — MISSING.** Directory does not exist on this Mac. No prebuilt from-source framework found anywhere on the machine. `CEF_BUILD_RUNBOOK.md` documents a ~10–12 hr from-source build via `scripts/build_hodos_cef_mac.sh`. **Owner must confirm acquisition path before any build attempt.** |
+| **1** | **CEF framework at `../cef-binaries/`** | **HARD STOP — MISSING.** Directory does not exist on this Mac. No prebuilt from-source framework found anywhere on the machine. `CEF_BUILD_RUNBOOK.md` documents a ~10–12 hr from-source build via `development-docs/DevOps-CICD/scripts/build_hodos_cef_mac.sh`. **Owner must confirm acquisition path before any build attempt.** |
 | 2 | Homebrew deps (OpenSSL 3, nlohmann-json, sqlite3) | **ALL PRESENT** — OpenSSL 3.6.2, nlohmann-json 3.12.0, sqlite 3.53.0 |
 | 3 | cmake | **PRESENT** — cmake 4.3.1 (`/opt/homebrew/bin/cmake`) |
 | 4 | Sparkle framework (`../external/Sparkle.framework`) | **ABSENT** — not a blocker (auto-update disables gracefully via `#if SPARKLE_AVAILABLE`) |
@@ -557,7 +557,7 @@ Stale `.o` build artifacts exist in `CMakeFiles/` — harmless, cleared on next 
 | `MACOS_PORT_0_4_0.md` | Read, current | 7 waves logged; posix_spawn compile-verify + shutdown cascade + flock timeout are the open mac items |
 | `STARTUP_OPTIMIZATION.md` | Read, current | Root cause: sync `brc100.isAvailable()` blocks renderer ~1.9s. Frontend fix implemented but uncommitted. Mac measurement obligation open |
 | `MACOS_PARITY_REVIEW.md` | Read, trust-caveated per §4-B | Architecture verdict valid. Gap #1 stale (SessionManager deleted). Remaining debt is runtime-verification only |
-| `CEF_BUILD_RUNBOOK.md` | Exists, read | Mac build via `scripts/build_hodos_cef_mac.sh`, branch 7103 (Chromium 136), ~10–12 hr first build, needs Xcode + ~100 GB disk |
+| `CEF_BUILD_RUNBOOK.md` | Exists, read | Mac build via `development-docs/DevOps-CICD/scripts/build_hodos_cef_mac.sh`, branch 7103 (Chromium 136), ~10–12 hr first build, needs Xcode + ~100 GB disk |
 
 ### 9.5 Proposed Chunk Order (once CEF resolved)
 
