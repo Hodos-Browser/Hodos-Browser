@@ -2,6 +2,21 @@
 # A sandboxed Chromium child runs at UNTRUSTED integrity (S-1-16-0); an unsandboxed
 # one inherits the parent's MEDIUM (S-1-16-8192). Absence of --no-sandbox on the
 # command line proves nothing on its own, so read the token.
+#
+# Defaults to the dev build. Point -Path at an INSTALLED build to verify the sandbox
+# on a real user install (the only test that proves it for production):
+#   .\check-sandbox.ps1 -Path "$env:LOCALAPPDATA\HodosBrowser"
+#
+# PASS = every renderer UNTRUSTED and the GPU LOW. Expect ~12-14 renderers on a
+# fully-loaded window; ZERO renderers is the classic "sandbox on but broken" signature.
+#
+# Watch the AppContainer column. It is empty today, which is why LPAC ACLs on the
+# program directory are currently unnecessary (verified 2026-08-05 by removing them).
+# If a future Chromium bump ever makes renderers AppContainer processes, that column
+# flips to "yes" and LPAC ACLs become REQUIRED in both the build and the installer.
+param(
+    [string]$Path = 'C:\Users\archb\Hodos-Browser\cef-native\build\bin\Release'
+)
 
 $src = @"
 using System;
@@ -63,9 +78,8 @@ $labels = @{
     'S-1-16-12288' = 'HIGH       <- NOT sandboxed'
 }
 
-$dev = 'C:\Users\archb\Hodos-Browser\cef-native\build\bin\Release'
 Get-CimInstance Win32_Process -Filter "Name='HodosBrowser.exe'" |
-  Where-Object { $_.ExecutablePath -like "$dev*" } |
+  Where-Object { $_.ExecutablePath -like "$Path*" } |
   ForEach-Object {
       $type = if ($_.CommandLine -match '--type=([a-z-]+)') { $Matches[1] } else { 'browser' }
       $int  = [Tok]::Integrity($_.ProcessId)
