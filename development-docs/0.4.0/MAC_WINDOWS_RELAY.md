@@ -57,14 +57,41 @@ before the 150 bring-up, because that is exactly when you need the engine to be 
 > the mac path the way that file already builds its Application Support paths at `:5263` / `:5305`
 > (`GetAppDirName()` + `NSString`), i.e. `~/Library/Application Support/<appdir>/logs/cef_debug.log`.
 
-**Do NOT attempt the Chromium sandbox on macOS yet.** Windows tried and is blocked: with the sandbox
-genuinely on, renderers launch and are killed instantly (`sad_tab.cc "Tab Killed"` on a ~1s cadence)
-and the window is blank. Full write-up in `chromium-rebuild/NEXT_STEPS_AFTER_COMMIT1.md` §S2. Two
-things that do **not** transfer to your side:
+**✅ UPDATE 2026-08-04 (late): Windows has SOLVED the sandbox.** 14 renderers at UNTRUSTED, real
+sites rendering, 0 errors. Full write-up in `chromium-rebuild/NEXT_STEPS_AFTER_COMMIT1.md` §S2.
+Still **do not turn the sandbox on for macOS as part of the 150 bump** — it is its own change, on its
+own platform, and should follow your bring-up rather than ride along with it. But read the root
+cause now, because the shape of it is cross-platform:
 
-- The Windows root cause was `settings.browser_subprocess_path` silently disabling the sandbox. On
-  **macOS that setting is required** (`:5429`, the helper bundles), so this is not a fix you can copy.
-- `no_sandbox = true` at `:5278` is unconditional on macOS. Leave it until Windows solves this.
+> **A sandboxed child process does not inherit `HODOS_DEV`.** On Windows the dev safeguard ran
+> *before* `CefExecuteProcess`, so it fired in every child, failed there, and `return 1`'d — every
+> renderer exited with `RESULT_CODE_KILLED` before any crash handler existed. No dump, no log, and
+> the renderer never lived long enough to appear in the process list. It cost two sessions.
+
+What this means for macOS specifically:
+
+- **You dodge the exact bug.** Your helper processes enter through `mac/process_helper_mac.mm`, which
+  has no dev safeguard; `cef_browser_shell_mac.mm :: main` runs only in the browser process.
+- **⚠️ But you have the same hazard one layer down.** `process_helper_mac.mm` calls
+  `AppPaths::GetAppDirName()` **in the render process** to pick the history DB. That reads
+  `HODOS_DEV`. If macOS sandboxed helpers also lose the environment, a dev build's renderer would
+  resolve to the **production** Application Support directory and open the production history DB —
+  a dev/prod isolation break, not just a crash. Worth checking whenever you do enable the sandbox.
+- **Related divergence worth a look regardless of the sandbox:** that file's comment says it matches
+  "the Windows render-process fix", but Windows commit **2a moved `HistoryManager` OFF the renderer
+  entirely**. macOS still initialises it there, so the two platforms are no longer doing the same
+  thing and the comment is stale.
+- **Rule to carry:** never gate child-process behaviour on an environment variable. Pass a
+  command-line switch, the way `SimpleApp::OnBeforeChildProcessLaunch` already passes `--profile=`.
+  (Three env-gated diagnostics silently no-op'd in children during this investigation and produced
+  three false "exonerations".)
+
+Two Windows specifics that do **not** transfer:
+
+- Part of the Windows fix was removing `settings.browser_subprocess_path`, which silently disables
+  the sandbox there. On **macOS that setting is required** (`:5429`, the helper bundles) — do not
+  copy that.
+- `no_sandbox = true` at `:5278` is unconditional on macOS. Leave it for now.
 
 **Branching.** Both sides have been committing to `0.4.0` and **neither has pushed**, which is the
 real collision risk — not the code. Windows is now paused (S2 blocked) with 6 unpushed commits;
