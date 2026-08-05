@@ -4897,6 +4897,30 @@ static int RunHodosMain(HINSTANCE hInstance, int nCmdShow, void* sandbox_info,
     // Default=9222, others get 9223+ based on profile number, or 0 to disable.
     // Picker mode owns no profile -> disable (0) so it can't collide with a
     // running profile's DevTools port.
+    //
+    // ⚠️ TRIPWIRE — this block is the ONLY code path that can set navigator.webdriver = true.
+    // Blink's AutomationControlled feature (which backs navigator.webdriver) is off by
+    // default and is switched on by exactly four things
+    // (chromium content/child/runtime_features.cc, SetRuntimeFeaturesFromCommandLine):
+    //     --enable-automation | --headless | --remote-debugging-pipe
+    //     --remote-debugging-port=0   <-- ephemeral port; an EXPLICIT port is left unset
+    //                                     on purpose, because that means "attach a debugger",
+    //                                     not "under automation control".
+    // We are safe here by two independent margins: we pass none of the first three, AND the
+    // `= 0` above never reaches Chromium, because CEF only appends the switch when the value
+    // is within [1024, 65535] (cef/libcef/common/chrome/chrome_main_delegate_cef.cc).
+    //
+    // So do NOT: pass --remote-debugging-pipe, pass --enable-automation, or "simplify" the
+    // disable path into literally forwarding port 0 on the command line. Any of those flips
+    // navigator.webdriver to true browser-wide, which reads as a bot to Cloudflare Turnstile
+    // and friends — including on whatsonchain.com, which is in our own regression basket and
+    // has already cost us a debugging cycle once (see simple_app.cpp's HODOS_MAC_DEV_FLAGS
+    // gate, added for exactly this class of bug).
+    //
+    // This comment replaces the JS `navigator.webdriver = false` override that used to live
+    // inside FINGERPRINT_PROTECTION_SCRIPT (BOT-1, 2026-08-05). That override was redundant
+    // — native is already false — and defining the property on the navigator instance was
+    // itself a prototype-tamper tell. The guarantee now comes from not tripping this wire.
     if (g_picker_mode) {
         settings.remote_debugging_port = 0;
     } else if (profileId == "Default") {

@@ -13,6 +13,13 @@
 //       cross-referenced by anti-fraud systems against real performance characteristics.
 // NOTE: WebGL vendor/renderer spoofing REMOVED — hardcoded GPU string creates detectable
 //       inconsistency with actual WebGL extension list and rendering behavior.
+// NOTE: navigator.plugins + navigator.webdriver spoofing REMOVED 2026-08-05 (BOT-1) —
+//       native Chromium already emits the correct values and our overrides were themselves
+//       detectable. Details, evidence and the tripwire pointer are inline below.
+//
+// What remains in this script is farbling ONLY: Canvas, WebGL readPixels, WebAudio. Each of
+// those three fragments is deleted in the same commit its native Blink replacement lands
+// (P4a canvas, P4b WebGL, P4c audio — the atomic per-value teardown rule, I-4).
 static const char* FINGERPRINT_PROTECTION_SCRIPT = R"JS(
 (function(seed) {
     'use strict';
@@ -96,41 +103,33 @@ static const char* FINGERPRINT_PROTECTION_SCRIPT = R"JS(
         protectWebGL(WebGL2RenderingContext.prototype);
     }
 
-    // === Navigator Plugins (realistic Chrome 136 set) ===
-    // Real Chrome exposes 5 PDF-related plugins. Empty array is a bot signal.
-    var fakePluginData = [
-        { name: 'PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-        { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-        { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-        { name: 'Microsoft Edge PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-        { name: 'WebKit built-in PDF', filename: 'internal-pdf-viewer', description: 'Portable Document Format' }
-    ];
-    var fakePluginArray = {length: fakePluginData.length};
-    for (var pi = 0; pi < fakePluginData.length; pi++) {
-        var fp = {
-            name: fakePluginData[pi].name,
-            filename: fakePluginData[pi].filename,
-            description: fakePluginData[pi].description,
-            length: 1
-        };
-        fakePluginArray[pi] = fp;
-        fakePluginArray[fakePluginData[pi].name] = fp;
-    }
-    fakePluginArray.item = function(i) { return this[i] || null; };
-    fakePluginArray.namedItem = function(n) { return this[n] || null; };
-    fakePluginArray.refresh = function() {};
-    Object.setPrototypeOf(fakePluginArray, PluginArray.prototype);
-    Object.defineProperty(navigator, 'plugins', {
-        get: function() { return fakePluginArray; },
-        enumerable: true, configurable: true
-    });
-
-    // === navigator.webdriver ===
-    // Explicitly set to false — absence or true triggers bot detection.
-    Object.defineProperty(navigator, 'webdriver', {
-        get: function() { return false; },
-        enumerable: true, configurable: true
-    });
+    // === Navigator Plugins / navigator.webdriver — REMOVED 2026-08-05 (BOT-1) ===
+    //
+    // Both overrides lived here and both were REMOVED, not re-homed, because measurement
+    // against our own M150 build showed native Chromium already does the right thing and
+    // our overrides were making us MORE detectable, not less:
+    //
+    //   navigator.plugins  — we shipped a 5-entry list naming "Chrome PDF Plugin". Chromium
+    //     returns the spec'd hard-coded list from whatwg/html#6738 (blink DOMPluginArray,
+    //     gated on IsPdfViewerAvailable()), which names "Chromium PDF Viewer" in that slot;
+    //     "Chrome PDF Plugin" is the pre-2021 name. So our spoof produced a plugin list no
+    //     real Chrome has — a one-line diff against a published constant. We build with
+    //     enable_pdf=true, so the native list is present and correct.
+    //
+    //   navigator.webdriver — native is already false (Blink's AutomationControlled feature
+    //     is off unless --enable-automation / --headless / --remote-debugging-pipe /
+    //     --remote-debugging-port=0; we pass none). Redefining it here put an own-property
+    //     accessor on the navigator instance where real Chrome has a prototype accessor —
+    //     which is precisely the prototype-tamper signal Turnstile/DataDome look for, i.e.
+    //     the same class of tell this whole Blink migration exists to remove.
+    //
+    // Deleting them also makes both values correct when the user turns farbling OFF for a
+    // site — the old overrides vanished with the script, so an opt-out silently changed the
+    // bot signature. The guarantee is now structural, not injected.
+    //
+    // The one path that can still flip webdriver to true is the remote-debugging-port block
+    // in cef_browser_shell.cpp; see the TRIPWIRE comment there. Both values are asserted at
+    // P6 farbling acceptance so this is re-checked every release rather than assumed.
 
     // === AudioContext Farbling ===
     // Subtle audio sample noise — imperceptible but changes the fingerprint hash.
