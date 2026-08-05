@@ -51,7 +51,22 @@ CEF_AUTOMATE_DIR="$CEF_BASE_DIR/automate"
 CEF_DEPOT_TOOLS_DIR="$CEF_BASE_DIR/cef150/depot_tools"
 CEF_CHROMIUM_DIR="$CEF_BASE_DIR/cef150"
 CEF_BRANCH="7871"
-CEF_CHECKOUT="94c1726"
+
+# Pin an exact FORK commit, not the moving hodos/7871 branch tip: a build must be
+# reproducible, and patch content is part of the build. BUMP THIS every time a
+# patch lands on hodos/7871, and record the new SHA in the fork's
+# HODOS_PATCHES.md. Upstream content is unchanged -- 0a709e584 is 94c1726
+# (upstream 7871 head) plus our patch commits.
+CEF_CHECKOUT="0a709e584"
+
+# ⚠️ <tree>/chromium/src/cef is a COPY of the standalone checkout, refreshed ONLY
+# when the CEF checkout HASH changes (automate-git.py:1358-1360). If you manually
+# git-checkout or git-pull "$CEF_CHROMIUM_DIR/cef" to the target commit before
+# running this, the hashes already match, the copy never refreshes, and the build
+# silently uses the STALE in-tree patch set -- right fork, right pin, green run,
+# ZERO Hodos patches compiled in. Verify the patcher's count in the build log (it
+# must equal 114 upstream + our patches) or add --force-cef-update.
+# Measured on Windows 2026-08-05; the mechanism is platform-independent.
 
 # P3: our CEF fork. Source patches live in it under patch/patches/hodos_*.patch,
 # registered in patch/patch.cfg, applied by gclient_hook.py -> patcher.py during

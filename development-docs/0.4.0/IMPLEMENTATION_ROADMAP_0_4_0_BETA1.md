@@ -140,7 +140,26 @@ P0 PROVISION ─▶ P1 PIN VERSION/TOOLCHAIN ─▶ P2 BASELINE BUILD ─▶ P3 
 
 ---
 
-## P3 — CEF PATCH TOOLCHAIN *(serial linchpin; blocks P4)*
+## P3 — CEF PATCH TOOLCHAIN *(serial linchpin; blocks P4)* — 🟢 SUBSTANTIALLY COMPLETE 2026-08-05
+
+> **Status.** Fork `Hodos-Browser/cef` + `hodos/7871` live; `--url` wired into both build scripts and
+> pinned at a fork commit; `HODOS_FARBLING` condition gate proven in all three states; drift audit landed
+> and negative-tested; fork-watcher landed. A patch authored in our fork was proven to reach the Chromium
+> source **pre-compile through the real build path** (`115 patches total (1 applied, 114 skipped,
+> 0 failed)`). **P4 is unblocked for authoring.**
+>
+> Still open: the probe's *build-completes* half, probe removal, the `CEF_VERSION_UPDATE_TRACKER.md`
+> entry, Mac-side verification, and the ready-for-consumer gate (C1 end-to-end — deliberately deferred,
+> since `AUTHORS` is not compiled and so the probe cannot prove a patch reaching the *compiler*).
+>
+> **Three findings worth carrying into P4** — evidence in `chromium-rebuild/P3_TOOLCHAIN_PROOF.md`:
+> 1. Patches apply via `gclient_hook.py:37` → `patcher.py` in the **build** step, **not**
+>    `run_patch_updater`. So `--force-build` alone re-applies; no re-sync needed to iterate.
+> 2. `chromium/src/cef` is a **copy** refreshed only when the CEF checkout **hash** changes. Manually
+>    checking out the standalone dir first makes the build silently compile **zero** Hodos patches, with
+>    a green run. Watch the patch count; fix with `--force-cef-update`.
+> 3. The patcher's **`skipped` count is ambiguous** (gated-off vs already-applied vs missing-target-dir).
+>    Prove a `condition` gate from the per-patch stdout line, never the summary.
 
 > **✅ DE-RISKED 2026-08-03 · numbers + mechanism CORRECTED 2026-08-05 (P3 kickoff).** "GREENFIELD"
 > overstates it. The **patch mechanism already exists and runs on every build**. Measured on the pinned

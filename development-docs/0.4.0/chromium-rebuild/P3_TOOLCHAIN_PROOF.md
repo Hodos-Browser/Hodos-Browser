@@ -155,7 +155,155 @@ fork-watcher (CEF-3) is for.
 tells you to run the second separately (it generates GN projects, which is slow and writes out-dirs).
 It prints that skipping is **not** the same as clean, so a skipped section can't be misread as a pass.
 
-## 5. Remaining P3 gates — ⬜ NOT YET PROVEN
+## 5. Fork delivery + apply-pre-compile — ✅ PROVEN (and it exposed a footgun)
+
+To make delivery a real proof rather than an assumption, the probe was first **deleted** from the
+in-tree copy (`chromium/src/cef` back to pristine 114 entries, no `hodos_noop_probe`). Then
+`automate-git.py` was pointed at the fork commit and asked to sync.
+
+### ⚠️ First attempt delivered NOTHING — and reported success
+
+```
+--> CEF URL: https://github.com/Hodos-Browser/cef.git
+--> CEF Current Checkout: 0a709e5845...   Desired: 0a709e5845... (0a709e584)
+--> Chromium Current/Desired: 30f6543ae9 (refs/tags/150.0.7871.187)
+```
+…and afterwards: in-tree still **114** entries, **no** `hodos_noop_probe.patch`, **no**
+`HODOS_PATCHES.md`.
+
+**Mechanism** (`automate-git.py:1358-1360`): `cef_checkout_changed = cef_checkout_new or force_change
+or --force-cef-update or cef_current_hash != cef_desired_hash`. The standalone checkout had been
+manually put on `0a709e584` already, so current == desired ⇒ **False** ⇒ neither the
+`delete_directory(cef_src_dir)` at `:1535-1539` nor the `copy_directory` at `:1597-1599` fires.
+
+> **This is the sharpest trap found in P3.** You can have the correct fork, the correct pin, a clean
+> green `automate-git` run — and build with **zero Hodos patches compiled in**, because the tree that
+> actually builds is a stale *copy*. Nothing in the output says so.
+>
+> **Detection:** the patcher's own count in the build log (114 vs 115), and the drift audit's
+> `Hodos entries` line. Both would have caught it. This is precisely why the patch-count acceptance
+> gate is worth keeping rather than waving through.
+>
+> **Fix:** `--force-cef-update`, or delete `chromium/src/cef` and let `:1597` re-copy.
+>
+> The *normal* workflow self-corrects — land a patch, bump `--checkout` to the new SHA, hashes differ,
+> refresh happens. The trap needs **manual intervention in the standalone checkout**, which is exactly
+> what a human debugging a patch problem does first.
+
+### Second attempt, with `--force-cef-update` — delivered
+
+```
+--> Removing directory C:\cef\cef150\chromium\src\cef
+--> Copying directory C:\cef\cef150\cef to C:\cef\cef150\chromium\src\cef
+```
+
+| Check | Result |
+|---|---|
+| `hodos_noop_probe.patch` in-tree | ✅ 348 bytes, from the fork |
+| `HODOS_PATCHES.md` in-tree | ✅ 8279 bytes |
+| in-tree `patch.cfg` entries | ✅ **115**, ours last, `condition: HODOS_FARBLING` |
+| `chromium/src` patch state | ✅ intact, 442 |
+| `out/Release_GN_x64` | ✅ survived (rebuild stays incremental) |
+
+### Applies pre-compile, in the real build flow — ✅
+
+From the actual `--force-build` run (`gclient_hook.py` → `patcher.py`, not a hand-invoked patcher):
+
+```
+Apply hodos_noop_probe.patch in C:\cef\cef150\chromium\src
+        1       0       AUTHORS
+... successfully applied.
+-------------------------------------------------------------------------------
+!!!! NOTE: PIPE-A1 pipeline smoke -- remove after standup (CEF-1)
+-------------------------------------------------------------------------------
+
+115 patches total (1 applied, 114 skipped, 0 failed)
+
+Generating CEF project files...
+```
+
+A patch authored in our fork reached the Chromium source **before compile**, on the real build path,
+with the predicted count and the `note` breadcrumb printed. R9's `delete_directory` fired for real and
+the distrib tarballs were already out of its way (commit 1).
+
+## 6. Build completes — ✅ PROVEN (`AUTOMATE_EXIT=0`)
+
+Full `--force-build` through the fork, ending in all four distributions:
+
+```
+115 patches total (0 applied, 115 skipped, 0 failed)     ← probe already applied from the prior run
+[Process 1] Creating tar.bz2 archive for ..._windows64_release_symbols...
+[Process 1] Exited with code 0     Execution time: 589.9 seconds
+AUTOMATE_EXIT=0
+```
+
+The `0 applied / 115 skipped` reading is correct, not a regression: `AUTHORS` still carried the probe
+from the earlier run, so the reverse-check reported `already applied (skipping)` — the third state
+proven in §2.
+
+### First attempt failed, and it was NOT the patch
+
+Worth recording so nobody re-litigates it. The first run died at **`726 done, 1 failed, 1 remaining`**:
+
+```
+FAILED: LINK cefclient.exe
+err: exit status 0xc0000142
+```
+
+`0xC0000142` is `STATUS_DLL_INIT_FAILED` — `lld-link.exe` could not *initialize*, i.e. the process
+failed to launch. It is not a compile or link error. Corroborating evidence: **zero** `error C####` or
+`fatal error` lines in 1836 log lines; the same linker had produced a 292 MB `libcef.dll` + 5.2 GB PDB
+minutes earlier; and the failure landed at the exact moment the harness force-stopped the task tree.
+Re-running the same inputs succeeded. **Collateral from process termination, not a defect.**
+
+Process fix: the build now launches via `Start-Process` and redirects its own output with `exec`, so it
+is fully detached and a killed wrapper cannot reach into it.
+
+## 7. ⚠️ FINDING — building from the fork degrades the CEF version string
+
+The fork build produced:
+
+```
+CEF_VERSION       "150.0.0-HEAD.3552+g0a709e5+chromium-150.0.7871.187"
+CEF_VERSION_PATCH 0
+CEF_COMMIT_HASH   "0a709e5845602e5e5dfce35f04552f867c831dc9"
+```
+
+versus the staged upstream dist's `"150.0.17+g94c1726+chromium-150.0.7871.187"`, `PATCH 17`.
+
+**Mechanism** (`cef/tools/cef_version.py:189-225`):
+1. `on_release_branch = is_ancestor(HEAD, '7871') or is_ancestor(HEAD, 'origin/7871')`. Our patch commits
+   are **descendants** of `7871`, not ancestors ⇒ **False**. Any fork that adds commits on top of a
+   release branch fails this test by construction.
+2. It then reads the branch name — but `automate-git` does `git checkout <rev>`, which **detaches HEAD**,
+   so the name is literally `"HEAD"` ⇒ the `master`/`HEAD` arm at `:202` sets `MINOR = PATCH = 0`.
+
+**Why it matters:** the binary no longer reports which upstream security point-release it is based on.
+That directly undercuts the CEF-3 tracking duty — you cannot tell from a `150.0.0-HEAD` binary whether
+it contains the `150.0.17` fixes. It also changes every distribution directory and tarball name.
+
+**Blast radius is otherwise small:** nothing in `cef-native` compares `CEF_VERSION` (the only repo hits
+are the staged header, the stale `cef-binaries-backup/` M136 copy, and a comment in `release.yml`), and
+our CI asset name is set by hand. Wrapper/`libcef` consistency is enforced by `CEF_API_HASH`, not this
+string, and both come from the same build.
+
+### Recommended fix (not applied — needs an owner call + a confirming build)
+
+`cef_version.py:213-216` is the escape hatch: when the branch name is **not** `master`/`HEAD`, it reads
+MINOR/PATCH from the branch components and gets the real values. And `get_branch_name(...).split('/')[-1]`
+turns **`hodos/7871`** into **`7871`** — not `master`, not `HEAD`. So passing
+**`--checkout=hodos/7871`** (a branch, so `git checkout` does not detach) should yield
+`150.0.17-7871.<n>+g<sha>+chromium-150.0.7871.187` — **patch level 17 preserved.**
+
+The cost is that a branch tip is not a reproducible pin. The clean version is **both**: check out the
+branch *and* assert the resolved SHA equals an expected value in the build script, failing the build on
+mismatch. `CEF_COMMIT_HASH` in the produced header records the exact commit regardless.
+
+**Not blocking P3** — the toolchain works and this build is not shipping. Until it is decided, record the
+fork-commit → upstream-version mapping in `HODOS_PATCHES.md` and treat `CEF_COMMIT_HASH` as the
+authoritative build identifier.
+
+## 8. Remaining P3 gates — ⬜ NOT YET PROVEN
 
 | Gate | What it needs | Cost |
 |---|---|---|

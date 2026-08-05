@@ -123,6 +123,46 @@ baseline as much as on `7871`.
 
 ---
 
+## ✅ P3 PATCH TOOLCHAIN STOOD UP — our CEF fork (2026-08-05)
+
+From this point the build no longer consumes upstream CEF directly. Source patches are ours to add.
+
+| Item | Value |
+|---|---|
+| **Fork** | **`github.com/Hodos-Browser/cef`** — public fork of `chromiumembedded/cef` |
+| **Upstream remote (rebase from)** | `https://github.com/chromiumembedded/cef.git` — GitHub, **not** legacy Bitbucket |
+| **Integration branch** | `hodos/7871`, created off upstream `7871` @ `94c17267eb` |
+| **Build pin** | `--url=<fork>` + `--checkout=0a709e584` in both `scripts/build_hodos_cef.{bat,sh}` |
+| **Condition gate** | `HODOS_FARBLING=1` set in both build scripts — one gate for the whole C1–C7 set |
+| **Registered Hodos patches** | **0** — the standup probe was proven then removed (OQ-7). Count is back to upstream **114** |
+| **Ledger** | `HODOS_PATCHES.md` **in the fork** (not this repo) |
+| **Drift audit** | `scripts/cef_patch_drift_audit.sh` — exit 0 clean / 2 offsets / 1 do-not-build |
+| **Security watcher** | `.github/workflows/cef-fork-watch.yml` — weekly; ⚠️ cron only fires from the **default branch**, so it is dormant until 0.4.0 reaches `main` |
+| **Verification build** | `AUTOMATE_EXIT=0`, all four distributions produced |
+
+**Where patches apply:** `cef/tools/gclient_hook.py:37` → `tools/patcher.py`, invoked from
+`automate-git.py:1671` in the **build** step — **not** `run_patch_updater`, which never applies on a
+pinned checkout. So **`--force-build` alone re-applies patches.**
+
+### ⚠️ Two traps to re-check on every future bump
+
+1. **`chromium/src/cef` is a COPY**, refreshed only when the CEF checkout **hash** changes
+   (`automate-git.py:1358-1360`). Manually checking out the standalone dir to the target commit before
+   building means the copy never refreshes and **the build silently compiles zero Hodos patches** — with
+   a green run and correct-looking checkouts. **Always confirm the patcher's `N patches total` line.**
+   Fix: `--force-cef-update`.
+2. **Fork builds degrade the version string.** `CEF_VERSION` reads
+   `150.0.0-HEAD.<n>+g<sha>+chromium-150.0.7871.187` with **`CEF_VERSION_PATCH 0`**, not `150.0.17` /
+   `PATCH 17` (`cef_version.py:189-225` — our commits are *descendants* of `7871`, and the SHA checkout
+   detaches HEAD). **A fork-built binary therefore does not state which upstream security point-release
+   it contains** — record the fork-commit → upstream-version mapping, and treat `CEF_COMMIT_HASH` as the
+   authoritative identifier. Candidate fix: `--checkout=hodos/7871` + a SHA assertion. **OPEN.**
+
+Full evidence: `../0.4.0/chromium-rebuild/P3_TOOLCHAIN_PROOF.md`. Restore point:
+`../0.4.0/chromium-rebuild/P3_BASELINE_94c1726.md`.
+
+---
+
 ## ✅ BUILD CHANGELOG — CEF 150 / `7871` (Windows, 2026-08-04)
 
 | Item | Value |
@@ -135,7 +175,7 @@ baseline as much as on `7871`.
 | Host | i9-12950HX, 16C/24T, 31.7 GB RAM; 24 parallel `clang-cl` |
 | `libcef.dll` | **292 MB** (M136 was 249 MB) |
 | Wrapper | `libcef_dll_wrapper.lib` **104 MB**, builds clean on the new headers |
-| Patch set | none (P3 not yet stood up — this is a pure version bump) |
+| Patch set | none at build time (P3 stood up **after** this build — see the P3 entry above) |
 | Deps touched | none in the CEF tree; DEP-1a..d pinned separately, no version moved |
 | Codec Layer-A | **PASS — all GATE rows `probably`**, AV1 present, HEVC unchanged vs M136. Re-confirmed 2026-08-05 **with the Chromium sandbox ON** (HEVC also `probably` on this host) |
 | Codec Layer-B | **PASS — real decode proven** on 4 of 7 targets; every GATE codec covered. See below |

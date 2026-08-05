@@ -152,10 +152,22 @@ Diff CEF's release notes between branches and run the **dependency-verification*
 ### Step 2 — Apply OUR source modifications (before build)
 1. **Codec flags** — confirm `GN_DEFINES` includes `proprietary_codecs=true ffmpeg_branding=Chrome`.
    (We set codecs via `GN_DEFINES`, **not** the `--proprietary-codecs` automate-git flag — more reliable.)
-2. **Farbling patches (B1)** — NEW step once B1 lands. Apply our Blink farbling patches via CEF's
-   `cef/patch/patch.cfg` mechanism (add our `.patch` files + register them) so they're applied to the
-   Chromium source before compile. The B1 Blink farbling work **rides on this build** — see
-   `../0.4.0/B1-farbling-design.md`. Log "same as last build, or with these changes: ___" per build.
+2. **Farbling patches (B1)** — **toolchain LIVE as of 2026-08-05 (P3).** Our patches live in the
+   **`Hodos-Browser/cef` fork** on branch **`hodos/7871`**, under `patch/patches/hodos_*.patch` and
+   registered in `patch/patch.cfg`, gated by the single **`HODOS_FARBLING`** env var. Nothing to do
+   per build: they are applied automatically by **`cef/tools/gclient_hook.py` → `tools/patcher.py`**
+   during the build step of the `automate-git` flow. The build scripts already pass
+   `--url=https://github.com/Hodos-Browser/cef.git` and pin `--checkout` at a fork commit.
+   - **Do not write "`run_patch_updater` applies them"** — it does not; on a pinned checkout that
+     function never applies anything. See `../0.4.0/chromium-rebuild/PLAN_patch_toolchain.md` §1.3.
+   - **Adding a patch:** land it on `hodos/7871`, then **bump `CEF_CHECKOUT`** in both build scripts and
+     record the new SHA in the fork's `HODOS_PATCHES.md`. A moving branch tip is not a reproducible build.
+   - **Turning farbling off** for a build: unset `HODOS_FARBLING`. The patches are *skipped*, no
+     `patch.cfg` edit and no revert needed. All-or-nothing — never gate a subset.
+   - Log the patch count from the build log per build ("`N patches total`"): it is the cheapest detector
+     of a stale in-tree `src/cef` copy silently dropping every Hodos patch.
+   Plan: `PLAN_patch_toolchain.md` · evidence: `P3_TOOLCHAIN_PROOF.md` · content design (C1–C7, still to
+   author): `PLAN_farbling_blink.md`.
 3. **Extensions** — **N/A on CEF.** Extensions are chrome-layer; self-build does NOT unlock them. Do
    not add extension patches here. (Strategic future item; see `../Future-Features/B4-extensions.md`.)
 4. **Any other custom patches** — list and version them.
@@ -297,8 +309,19 @@ glue (not just deps) for drift:
   flipped default ships a green build with no codecs).
 - **cmake / toolchain** — CEF version macro, sandbox/linking changes, vcpkg ABI, wrapper rebuild
   (`Unsupported CEF version` ⇒ delete `CMakeCache`, rebuild — see Lessons).
-- **Patches** — re-apply `cef/patch/` (farbling) and report any fuzz/failures (the A1 patch toolchain
-  owns this).
+- **Patches** — run **`scripts/cef_patch_drift_audit.sh`** (landed 2026-08-05, P3/CEF-2). Exit `0` clean ·
+  `2` hunk **offsets** present (may proceed with sign-off; the patch is drifting and will likely break at
+  the next milestone jump) · `1` a patch will not apply → **do not start the build**. It also chains the
+  file-manifest audit via `--with-dist`.
+  > **There is no "fuzz" to report here** — CEF applies with `git apply -p0 --ignore-whitespace`, which is
+  > exact-context and **fail-loud**: a context mismatch aborts before compile rather than fuzzily landing a
+  > hunk in the wrong place. The only sub-failure signal is a hunk applied at a line **offset**. Do not key
+  > any check on a fuzz metric; there isn't one.
+  >
+  > **⚠️ Also confirm the patch COUNT in the build log** (`N patches total`). `chromium/src/cef` is a
+  > *copy* refreshed only when the CEF checkout hash changes, so a stale copy means the build silently
+  > compiles **none** of our patches — with a green run and correct-looking checkouts. See
+  > `PLAN_patch_toolchain.md` §1.3 and the warning block in the build scripts. Fix: `--force-cef-update`.
 - **macOS parity** — `Info.plist` CEF framework version, helper-app embedding, entitlements.
 Emit a **human-review diff report** (manifest + args diffs are scriptable; cmake changes need judgment —
 never auto-apply). Until scripted (see Open TODOs), run this as a checklist on every bump.
@@ -717,9 +740,17 @@ Guessing was useless; two cheap mechanical steps settled each in minutes.
       M149/`7827` fallback is dead. See `../0.4.0/chromium-rebuild/KICKOFF_REVIEW_RESULTS_2026_08_03.md`.
 - [ ] A1: stand up the **self-hosted runner / beefy VM + shared sccache** path; evaluate **Siso + a
       third-party REAPI backend** (EngFlow / BuildBuddy / NativeLink) for distributed builds.
-- [ ] B1: farbling patch set + `patch.cfg` integration (own design session — `../0.4.0/B1-farbling-design.md`).
+- [x] **B1 toolchain half: `patch.cfg` integration — DONE 2026-08-05 (P3).** Fork `Hodos-Browser/cef`,
+      branch `hodos/7871`, `--url` wired into both build scripts, `HODOS_FARBLING` condition gate proven,
+      no-op probe proven to apply pre-compile through the real build path. The farbling patch *content*
+      (C1–C7) is still to author — `../0.4.0/chromium-rebuild/PLAN_farbling_blink.md`. Evidence:
+      `../0.4.0/chromium-rebuild/P3_TOOLCHAIN_PROOF.md`; ledger: `HODOS_PATCHES.md` in the fork.
 - [ ] Decide whether premium DRM (VMP) is a product goal (own mini-spike).
-- [ ] Automate the **Step 5.5 build-config / file-manifest drift audit**: a CEF-version-pin–triggered
-      `cef-bump-audit` script that diffs the new CEF dist manifest vs our cmake/mac copy-lists +
-      `args.gn`, re-applies `cef/patch/` and reports fuzz, emitting a human-review diff. Build it
-      alongside the A1 patch toolchain (`../0.4.0/B1-farbling-design.md` / CEF track).
+- [x] **Automate the Step 5.5 drift audit — DONE 2026-08-05 (P3/CEF-2).** Three scripts, not one:
+      `scripts/cef_patch_drift_audit.sh` (patch apply health, registry integrity, target-file existence;
+      chains the next via `--with-dist`), `scripts/cef_dist_drift_audit.sh` (file manifest), and
+      `scripts/cef_gn_args_gate.sh` (`args.gn` / codecs). Two corrections to the wording above: the
+      manifest target is the **installer's extension whitelist**, not `cef-native/CMakeLists.txt`
+      copy-lists (CMake does a wholesale copy and can never drop a file); and there is **no fuzz to
+      report** — CEF's `git apply -p0` is exact-context and fail-loud, so the only sub-failure signal is
+      a hunk **offset**.

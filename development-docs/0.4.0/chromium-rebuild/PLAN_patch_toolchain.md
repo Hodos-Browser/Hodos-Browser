@@ -118,7 +118,17 @@ There is **no `sha1`/checksum/version field** — integrity is by filename + the
   The plan's *conclusion* survives — our patches do land on the Chromium source pre-compile on every build, with no wiring beyond `patch.cfg`. Three consequences change:
 
   1. **`--force-build` alone re-applies patches.** No re-sync, no re-checkout, no `--force-clean` needed to iterate on a patch. The P3 loop is far cheaper than this plan assumed.
-  2. **`patcher.py` runs from `chromium/src/cef`, and `src/cef` is only re-copied from the standalone checkout when `cef_checkout_changed`** (`:1597-1599`). So **editing the standalone `C:\cef\cef150\cef\patch\` does not propagate to the tree that actually builds.** For iteration, edit `chromium/src/cef/patch/` (also a full git checkout at the same HEAD); for reproducibility, let the fork-checkout copy carry it.
+  2. **`patcher.py` runs from `chromium/src/cef`, which is a COPY that is only refreshed when the CEF checkout *hash* changes** (`:1535-1539` delete, `:1597-1599` re-copy, both gated on `cef_checkout_changed`, computed at `:1358-1360` as `cef_current_hash != cef_desired_hash` — or `--force-cef-update`).
+
+     > **⚠️ FOOTGUN, measured 2026-08-05.** If the standalone checkout is **already at** the target commit — e.g. someone `git checkout`s or `git pull`s it manually before running the build — then `cef_current_hash == cef_desired_hash`, `cef_checkout_changed` is **False**, and automate-git **neither deletes nor re-copies `src/cef`**. The build then silently uses whatever stale patch set the in-tree copy happens to hold. **You can have the right fork, the right pin, a green `automate-git` run, and zero Hodos patches compiled in.**
+     >
+     > Observed exactly this: with the standalone dir pre-checked-out to `0a709e584`, a full sync run reported both checkouts correct and delivered **nothing** — in-tree stayed at 114 entries with no `hodos_noop_probe`. Adding `--force-cef-update` produced the `Removing directory …\src\cef` + `Copying directory …` pair and delivered 115.
+     >
+     > **Detection:** the patcher's own count in the build log (114 vs 115), and the drift audit's `Hodos entries` line. **Fix:** `--force-cef-update`, or delete `chromium/src/cef` and let `:1597` re-copy it.
+     >
+     > The *normal* workflow self-corrects — push a patch, bump `--checkout` to the new SHA, hashes differ, refresh happens. The trap is specifically **manual intervention in the standalone checkout**, which is exactly what a human debugging a patch problem is most likely to do.
+
+     For fast local iteration, edit `chromium/src/cef/patch/` directly (also a full git checkout); for a reproducible build, let the fork carry it and bump the pin.
   3. **The `condition` env var is read by `patcher.py`**, which inherits the environment from the build script through `automate-git` → `gclient_hook`. A `set HODOS_FARBLING=1` at the top of `build_hodos_cef.bat` reaches it correctly (§5).
 
   **OQ-2 is RESOLVED, not deferred.** `patch_updater.py` on 7871 accepts `--resave --reapply --revert --backup --restore --patch --add`; the authoring path is `--resave --patch <name> --add <path>` (`cef/docs/chromium_update.md:136`). There is no "exact `run_patch_updater` arg string on the build path" left to confirm, because there is no such call.
@@ -363,15 +373,15 @@ FEAT-B1 (C1–C7, Q5 §A.3) is the **first and, for beta.1, only** consumer. Thi
 
 ## 9. Acceptance criteria (toolchain standup complete)
 
-- [ ] `Hodos-Browser/cef` fork exists; `hodos/7871` created off upstream `7871`; URL reachable by the build host; upstream remote recorded.
-- [ ] Both build scripts pass `--url` at the fork; `git remote -v` in the CEF checkout shows the fork; **`patcher.py` (via `gclient_hook.py`)** reports the **114-entry upstream baseline, 0 failed** — no Hodos patches yet.
-- [ ] No-op probe patch demonstrably **applies pre-compile** with **`0 failed`** (on the already-patched host tree that reads `115 total (1 applied, 114 skipped, 0 failed)` — *not* "applied +1"); build completes; probe removed and count returns to the 114 baseline.
-- [ ] `condition: HODOS_FARBLING` demonstrably toggles the probe, **proven from the per-patch stdout line** (`Skipping patch file …` vs `… successfully applied.`) rather than the ambiguous `skipped` count (§1.1), never **failed**.
-- [ ] `DevOps-CICD/scripts/cef_patch_drift_audit.sh` runs, establishes baseline, emits a human-readable report, **invokes rather than duplicates** `cef_dist_drift_audit.sh` + `cef_gn_args_gate.sh`, baselines the known upstream orphan, and is wired as a **pre-build gate** (exit 1 aborts) + a scheduled fork-watcher.
-- [ ] `HODOS_PATCHES.md` (fork) + `CEF_VERSION_UPDATE_TRACKER.md` (app repo) record the standup; `CEF_BUILD_RUNBOOK.md` Step 2.2 / 5.5 / Open-TODOs updated (§6.2).
-- [ ] OQ-1 resolved **as (c)**: `DevOps-CICD/scripts/` confirmed canonical; the 35 repo-root `scripts/build_hodos_cef*` citations across 12 docs corrected.
-- [ ] R9 discharged: distrib tarballs moved outside the `delete_directory(cef_src_dir)` path before any `--checkout` retarget.
-- [ ] **Ready-for-consumer gate:** a single real farbling patch (C1 alone) can be authored, registered, applied, and built end-to-end — proving the pipeline is ready for FEAT-B1 P4a.
+- [x] **DONE 2026-08-05.** `Hodos-Browser/cef` fork exists (public); `hodos/7871` created off upstream `7871` @ `94c1726`; reachable; upstream remote recorded in `HODOS_PATCHES.md`.
+- [x] **DONE 2026-08-05.** Both scripts pass `--url` + a pinned fork `--checkout`; `git remote -v` shows the fork; URL validation passed via `--dry-run`; the real build path reported `115 patches total (1 applied, 114 skipped, 0 failed)`.
+- [x] **Applies pre-compile: DONE 2026-08-05**, through the real `gclient_hook.py`→`patcher.py` path, reading exactly `115 total (1 applied, 114 skipped, 0 failed)` as predicted. ⬜ *build completes* + ⬜ *probe removed, count returns to 114* — in progress.
+- [x] **DONE 2026-08-05.** All three states measured from the per-patch stdout line: gated-off → `Skipping patch file hodos_noop_probe`; on → `... successfully applied.`; re-run → already-applied, not duplicated. `failed` 0 throughout. Confirmed the gated-off and already-applied summary lines are **byte-identical**, so the count alone could never have proven it.
+- [x] **DONE 2026-08-05.** Audit lands, runs clean (exit 0), and was **negative-tested** (deliberately broken patch → exit 1, "DO NOT START THE BUILD"). Chains `cef_dist_drift_audit.sh` via `--with-dist`, points at `cef_gn_args_gate.sh`, baselines the upstream orphan. Fork-watcher landed as `.github/workflows/cef-fork-watch.yml` — **scoped down**: CI cannot run apply-health (no Chromium tree), so it detects + reports and the audit stays on the build host.
+- [x] `HODOS_PATCHES.md` created in the fork; `CEF_BUILD_RUNBOOK.md` Step 2.2 / Step 5.5 / Open-TODOs updated. ⬜ `CEF_VERSION_UPDATE_TRACKER.md` entry still owed.
+- [x] **DONE.** OQ-1 resolved as (c); 35 citations across 12 docs corrected.
+- [x] **DONE, and it mattered.** Tarballs moved in commit 1; `Removing directory C:\cef\cef150\chromium\src\cef` then fired for real during the fork-delivery sync.
+- [ ] **Ready-for-consumer gate:** a single real farbling patch (C1 alone) authored, registered, applied and built end-to-end. **Deliberately still open** — the probe proves the *pipeline*, not that a patch reaching the *compiler* works, since `AUTHORS` is not compiled. C1 is the first real test of that, in P4a.
 
 ---
 

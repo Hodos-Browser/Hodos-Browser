@@ -48,6 +48,21 @@ REM chromium\src\cef -- which contains binary_distrib\. Move the tarballs out
 REM first (see P3_BASELINE_94c1726.md). Not triggered while the pin is 94c1726.
 set CEF_URL=https://github.com/Hodos-Browser/cef.git
 
+REM Pin an exact FORK commit, not the moving hodos/7871 branch tip: a build must
+REM be reproducible, and patch content is part of the build. BUMP THIS every time
+REM a patch lands on hodos/7871, and record the new SHA in the fork's
+REM HODOS_PATCHES.md. Upstream content is unchanged -- 0a709e584 is
+REM 94c1726 (upstream 7871 head) plus our patch commits.
+set CEF_CHECKOUT=0a709e584
+
+REM ⚠️ chromium\src\cef is a COPY of the standalone checkout, refreshed ONLY when
+REM the CEF checkout HASH changes (automate-git.py:1358-1360). If you manually
+REM git-checkout or git-pull C:\cef\cef150\cef to the target commit before running
+REM this, the hashes already match, the copy never refreshes, and the build
+REM silently uses the STALE in-tree patch set -- right fork, right pin, green run,
+REM ZERO Hodos patches compiled in. Verify the patcher's count in the build log
+REM (it must equal 114 upstream + our patches) or add --force-cef-update.
+
 REM HODOS_FARBLING is the single condition gate on the whole C1-C7 farbling
 REM patch set (never gate them separately -- a half-applied set is worse than
 REM none). patcher.py applies a patch only if its 'condition' env var EXISTS.
@@ -123,7 +138,7 @@ python C:\cef\cef150\cef\tools\automate\automate-git.py ^
   --depot-tools-dir=C:\cef\cef150\depot_tools ^
   --url=%CEF_URL% ^
   --branch=7871 ^
-  --checkout=94c1726 ^
+  --checkout=%CEF_CHECKOUT% ^
   --x64-build ^
   --minimal-distrib ^
   --client-distrib ^
