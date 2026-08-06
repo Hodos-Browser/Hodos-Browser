@@ -60,14 +60,35 @@ That means uniqueness on Bitcoin can be enforced at one of three levels:
 | Approach | What it looks like | Who we're trusting | Trade-off |
 |---|---|---|---|
 | **Centralization** | One operator (ICANN, ORDnet, a single paymail provider) maintains the canonical registry and arbitrates conflicts | The operator | Single point of failure |
-| **On-chain via sCrypt SMT covenant** | A singleton UTXO holds a Sparse Merkle Tree root of registered keys. Registration spends the singleton, providing a non-membership proof. Miners validate the proof on-chain. (See `Xanaverse-Contracts-Review/` for a working example of this pattern.) | The protocol + Bitcoin's miners | Singleton bottleneck — only one registration per block. Hard ceiling on throughput. |
+| **On-chain via sCrypt SMT covenant** | A singleton UTXO holds a Sparse Merkle Tree root of registered keys. Registration spends the singleton, providing a non-membership proof. Miners validate the proof on-chain. (See `Xanaverse-Contracts-Review/` for a working example of this pattern.) | The protocol + Bitcoin's miners | **Coordination** bottleneck, not a throughput one *(corrected 2026-08-05)* — a sequencer can chain thousands of registrations into one block (ancestor-height limit 10,000 / Teranode 1M), but **whoever sequences is a de-facto centralized coordinator**. Uncoordinated writers get ~1/block plus retry storms. |
 | **Federated consensus among indexers** | Many independent operators follow the same deterministic protocol; given the same chain data, they converge on the same answer | The protocol + the federation as a whole | No single bottleneck, scales horizontally; residual operator-honesty trust |
 
-**Earlier drafts of this doc said indexers were "the only way." That was wrong.** sCrypt with covenants and Merkle proofs CAN enforce uniqueness at the network level on the UTXO model. The trade-off is throughput, not possibility. Centralization remains philosophically misaligned with Bitcoin; the other two are both legitimate decentralized paths with different scaling characteristics.
+**Earlier drafts of this doc said indexers were "the only way." That was wrong.** sCrypt with covenants and Merkle proofs CAN enforce uniqueness at the network level on the UTXO model. The trade-off is ~~throughput~~ **coordination** *(corrected 2026-08-05)*, not possibility. Centralization remains philosophically misaligned with Bitcoin; the other two are both legitimate decentralized paths with different scaling characteristics.
+
+### ⚠️ The shard-spawn race — why you cannot shard your way out of contention (added 2026-08-05)
+
+The obvious fix for a contended singleton is to **partition the namespace** — shard by a hash prefix of the name, so `shard(name) = H(name) mod N`. The uniqueness argument is sound *as far as it goes*: a deterministic, total, fixed name→shard map means every name lives in exactly one shard, so **shard-local uniqueness ⇒ global uniqueness**, with no cross-shard collision by construction. It also fixes hot-prefix skew, which a literal-character trie suffers from.
+
+**What breaks is shard creation.** If shards are created lazily — shard #7 exists only once someone registers a name hashing to 7 — then shard #7's genesis is itself an unclaimed slot. Two parties concurrently creating shard #7 produce **two valid, non-conflicting transactions**. They don't spend a common UTXO, so first-seen never fires, both confirm, and you have rival shard-7 roots in which `alice` can exist twice.
+
+> **The failure in one line: sharding converts a *double-spend* (which consensus resolves for free) into a *duplicate-creation* (which consensus cannot see at all).** You have re-introduced the original naming problem one level up, at the shard layer.
+
+Only two sound fixes:
+
+| Fix | How | Verdict |
+|---|---|---|
+| **Pre-create all N shards at genesis** | One deployment fans out all N shard roots from a single genesis outpoint; lazy creation banned | Clean, but N is fixed forever and you pay for N roots up front |
+| **Make shard-spawn a contended spend** | Shard root *k* is spawned by spending a parent node whose bitmap marks slot *k* claimed — so spawning twice **is** a double-spend | **Better**, and pay-as-you-grow |
+
+**OpNS already does the second one.** Its char-by-char mine tree is a trie of UTXOs where creating a child means spending the parent's claimed-bitmap. That is not incidental to the design — **it is load-bearing**, and it is the reason OpNS's fan-out is sound where a naive hash-sharded map would not be.
+
+**General rule to carry forward:** *a sound sharded namespace has exactly one uncontended layer (the genesis); every other layer must derive from it by a spend.*
+
+Four secondary problems remain even when spawn is sound: **shard discovery** (shard→tip mapping isn't queryable on-chain — needs an indexer or a genesis walk), **proving non-existence** (needs an SMT non-membership proof per shard — i.e. sharded Xanaverse, ~8 KB per registration), **hot shards** (a tail problem under hashing, survivable given chained spends), and **root trust anchoring** (every shard must be provably descended from one genesis, or rival trees are indistinguishable — OpNS embeds the 36-byte genesis outpoint in every node and the indexer rejects mismatches, but this remains *convention, not consensus*).
 
 **Hybrid designs are possible.** The most interesting one for our use case: use the on-chain SMT-covenant path for identity-key uniqueness (slow, high-integrity, low volume), and federated overlays for human-readable names on top (fast, high-volume, reputation-secured). Each layer plays to its strength. See `Xanaverse-Contracts-Review/REVIEW.md` for detail on how the on-chain piece can work.
 
-> **⭐ Update (2026-07-15): OpNS already implements the covenant approach *for human-readable names*.** The row above ("On-chain via sCrypt SMT covenant") had only produced Xanaverse's identity-*number* registry when this table was written. **OpNS** (shruggr / b-open-io) is a live covenant-secured system that enforces name-mint uniqueness at consensus level and delivers actual human-readable names — a fan-out "mine tree" rather than a single choke-point registry, so it also sidesteps Xanaverse's ~6-registrations-per-block singleton bottleneck. It is our current lean. **Full teardown + reference links: `OPNS_REVIEW.md`.**
+> **⭐ Update (2026-07-15): OpNS already implements the covenant approach *for human-readable names*.** The row above ("On-chain via sCrypt SMT covenant") had only produced Xanaverse's identity-*number* registry when this table was written. **OpNS** (shruggr / b-open-io) is a live covenant-secured system that enforces name-mint uniqueness at consensus level and delivers actual human-readable names — a fan-out "mine tree" rather than a single choke-point registry, so it also sidesteps Xanaverse's singleton **sequencer** bottleneck (see the correction above — the old "~6 registrations per block" framing was wrong). It is our current lean. **Full teardown + reference links: `OPNS_REVIEW.md`** — note that doc's "adoption is near-zero" finding was **retracted 2026-08-05**; the tree is substantially claimed.
 
 ---
 

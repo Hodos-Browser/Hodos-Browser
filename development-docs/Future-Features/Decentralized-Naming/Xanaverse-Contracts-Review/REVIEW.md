@@ -13,7 +13,7 @@ The package is **mostly a trustless social-media protocol** (posts, upvotes, rep
 
 **However**, the registry has real trade-offs that mean it doesn't fully solve Hodos's decentralized-naming problem:
 
-1. **Singleton UTXO bottleneck:** only one registration per block (BSV's 10-minute average).
+1. **Singleton UTXO bottleneck:** ~~only one registration per block (BSV's 10-minute average)~~ — **CORRECTED 2026-08-05, see § "Correction: the throughput ceiling was wrong" below.** The real constraint is that registrations must be *sequenced by one party*, not that they are capped per block.
 2. **Assigns sequential numbers, not human-readable names.** Each user gets `userId: bigint`. No `marston` → identity mapping.
 3. **Centralized deployer:** the `treasuryAddress` (registration fees) and `platformAddress` (1% marketplace fees) are baked into the singleton at deployment. Whoever deploys gets the fees and influence over future versions.
 4. **Cost per registration ~1500+ sats:** 8KB SMT proof + 1000 sat registration fee.
@@ -89,15 +89,41 @@ That was incomplete. With sCrypt covenants and an SMT, you can encode "this key 
 
 ### 1. Singleton UTXO contention (the structural one)
 
-The entire registry state lives in ONE UTXO. To register, you must spend that UTXO and create a successor. **Only one registration can be confirmed per block** — because two transactions trying to spend the same UTXO are double-spends, and miners only include one.
+> ⚠️ **CORRECTED 2026-08-05.** The original text of this section (struck through below) asserted a hard ~6-registrations-per-block ceiling. **That was wrong.** See § "Correction: the throughput ceiling was wrong" immediately after this section for the verified facts. The bottleneck is real but it is a *coordination* bottleneck, not a throughput one — which makes it materially more tractable, and changes the strategic conclusion.
 
-BSV blocks average ~10 minutes. So:
+~~The entire registry state lives in ONE UTXO. To register, you must spend that UTXO and create a successor. **Only one registration can be confirmed per block** — because two transactions trying to spend the same UTXO are double-spends, and miners only include one.~~
 
-- 6 registrations per hour
-- ~144 per day
-- ~52,000 per year
+~~BSV blocks average ~10 minutes. So: 6 registrations per hour, ~144 per day, ~52,000 per year. For a niche social-media protocol with slow growth, this is fine. For a name registry that wants to absorb millions of users (or even tens of thousands), it's a hard ceiling.~~
 
-For a niche social-media protocol with slow growth, this is fine. For a name registry that wants to absorb millions of users (or even tens of thousands), it's a hard ceiling.
+**What is still true:** the entire registry state lives in ONE UTXO, and to register you must spend it and create a successor. Two *independent* parties racing the tip do produce a genuine double-spend, and first-seen resolves it — the loser must rebuild against the new state.
+
+### Correction: the throughput ceiling was wrong (added 2026-08-05)
+
+**A contended UTXO is NOT limited to one spend per block.** BSV's mempool ancestor limit is measured as chain **height**, not ancestor count, and it is very high:
+
+| Node | Limit | Source |
+|---|---|---|
+| SV Node | **10,000** | `DEFAULT_ANCESTOR_LIMIT`, `bitcoin-sv/src/validation.h` |
+| Teranode | **1,000,000** | `LimitAncestorCount`, policy settings |
+| BTC Core | 25 | (contrast) |
+
+`CTxMemPool::CheckAncestorLimitsNL` uses `std::max(ancestorsCount, parent->ancestorsCount + 1)` — it measures the **longest ancestor path**, so a wide DAG costs nothing and only depth counts. BSV also **deleted** the descendant-count, descendant-size and ancestor-size limits entirely in v1.0.7 (2021-02-10); they are not options that exist. The metric switched from count to height in v1.0.10, going 25 → 1,000 → 10,000.
+
+Parents and children are ordered topologically into the same block — SV Node's **Journaling Block Assembler** keeps a `CJournal` (a `boost::multi_index_container` with a sequenced "order of replay" index) so a child can never precede its parent; Teranode sorts topologically by `createdAt`. **A ~9,999-deep chain of registry state transitions can therefore be broadcast and mined into a single block.**
+
+**So the correct framing is:**
+
+> Throughput is **unbounded in practice if one party serializes the chain**, and ~1 registration/block only if participants are *uncoordinated*. The singleton is a **coordination** bottleneck, not a consensus or throughput one.
+
+The cost of that is the thing to design around: **whoever sequences the chain is a de-facto centralized coordinator**, because you cannot build tx *N+1* without knowing tx *N*'s exact txid and script. This is very likely why a paid orchestrator exists in comparable systems (e.g. `mine.shruggr.cloud` for OpNS) — it isn't only outsourcing PoW, it's *being the sequencer*.
+
+**Practical hazards that replace the old "6/block" concern:**
+1. **Orphan-mempool stranding (the real killer).** If tx *N+1* reaches a node before tx *N*, it lands in the orphan pool — and ARC returns **HTTP 200** while the transaction never mines (`bitcoin-sv/arc` issue #1006 documents 34 consecutive such transactions). Gate on `txStatus`, never the HTTP code; treat `SEEN_IN_ORPHAN_MEMPOOL` as failure. **Better: submit the chain as a single BEEF bundle carrying its unconfirmed ancestors**, so parent and child arrive together and there is nothing to orphan. Idempotent retries do *not* fix this — the request was accepted, not rejected.
+2. **Fee-tier trap.** The 10,000 budget is the *primary* mempool. A transaction below the miner's fee rate drops to the secondary mempool, capped at **25** (`limitcpfpgroupmemberscount`). Every link must pay full rate (currently 100 sat/KB) or the chain collapses to depth 25.
+3. **Poison-pill propagation.** Any transaction spending from a conflicting transaction is itself marked conflicting — one bad link invalidates every descendant.
+4. **Teranode `MaxTxChainValidationBudget = 50 ms`** may bound deep chains on *time* rather than count. Untested.
+
+**Still unverified:** what TAAL/GorillaPool actually accept in practice. `/v1/policy` does not expose `limitancestorcount`. Worth an empirical probe (broadcast a 100- and 1,000-deep chain) before betting a design on this.
 
 There are workarounds:
 - **Sharding by namespace** (one registry per first letter, etc.). XanaVerse doesn't do this.
@@ -152,7 +178,7 @@ This isn't broken — it's a design choice for cleanup — but it interacts oddl
 | Property | XanaVerse SMT covenant | Federated overlay (BRC-22) |
 |---|---|---|
 | Uniqueness enforcement | Network (miners) | Protocol convergence among operators |
-| Throughput ceiling | ~6 registrations/block (BSV) | Bounded by chain throughput, not protocol contention |
+| Throughput ceiling | **Unbounded with a sequencer** (ancestor-height limit 10,000 / Teranode 1M); ~1/block uncoordinated. Cost = a mandatory sequencer role. *(corrected 2026-08-05)* | Bounded by chain throughput, not protocol contention |
 | Operator trust required | Just trust deterministic miner validation | Trust at least one honest operator (cross-checking detects dishonesty) |
 | Deployer privilege | Treasury + platform fee recipients | None inherent (operators compete on quality) |
 | Human-readable names | Not built in | Designed for it |

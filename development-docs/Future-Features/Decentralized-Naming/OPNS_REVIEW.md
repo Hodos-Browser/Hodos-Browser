@@ -94,10 +94,41 @@ plus an output-commitment check (`hash256(outputs) == ctx.hashOutputs`) that for
 
 - **Cost:** `GET mine.shruggr.cloud/price?name=<anything>` returned identical `25000000 sats` (**0.25 BSV, ~$3**) for every name tested — `a`, `bitcoin`, `zzzzzzzzzz`, empty string. Flat fee, any length.
 - **You don't mine it yourself.** The browser does **not** grind PoW in the shipped product; mining is delegated to a **separate, closed-source, paid orchestrator** (`go-opns-mint` / `mine.shruggr.cloud`, BRC-103 authenticated). A client-side/WASM miner is noted as "later, not shipped."
-- **Adoption is near-zero.** Probing the live overlay (`api.1sat.app/1sat/opns/mine/:name`): only `bo` (prefix of `bopen`) was found. `bitcoin`, `satoshi`, `alice`, `bob`, `shruggr`, `1sat`, `opns`, single chars `a`/`b`/`s` — **all "No outpoint found."** No public dashboard/leaderboard. The sole contract repo (`op-enheimer/op-ns`) has 7 stars, 0 forks, 0 issues, no third-party builders found.
+- ~~**Adoption is near-zero.** Probing the live overlay (`api.1sat.app/1sat/opns/mine/:name`): only `bo` (prefix of `bopen`) was found. `bitcoin`, `satoshi`, `alice`, `bob`, `shruggr`, `1sat`, `opns`, single chars `a`/`b`/`s` — all "No outpoint found."~~ ⚠️ **RETRACTED 2026-08-05 — this conclusion was wrong.** It was an artifact of misreading the endpoint. `/mine/:name` is a **mining cursor** ("where do I resume mining?"), *not* an availability check: `LookupService.Mine()` returns 404 when an **exact match already exists** (i.e. the name is **TAKEN**), and its prefix loop never queries the empty root, so single-character queries always 404 by construction. See § "Correction: adoption" below for the re-measurement against the correct endpoint. *(The sole contract repo `op-enheimer/op-ns` having 7 stars / 0 forks and no third-party builders is still accurate.)*
 - **X/Twitter sentiment is a blind spot** — no X API access in the research passes, so "no public critiques found" is *not* a clean bill of health.
 
 ---
+
+## Correction: adoption (added 2026-08-05) `[LIVE]`
+
+The real registry lookup is **`/1sat/opns/origin/:name`**, not `/mine/:name`. Re-measured 2026-08-05 — independently verified twice:
+
+| name | result |
+|---|---|
+| `bitcoin` | `3ae7afaeb0029d255422c20120501c5a31565fe3991c594f489b72ed60914a90.2` |
+| `satoshi` | `033558deedecd68384783fd6096f52a3438900f68d7bde365c5047d5b36f26e3.2` |
+| `matt` | `2c693b24b8dcdf12787658b7449231fbcc64afbc7104020a15706b8950305393.2` |
+| `shruggr` | `d10057af8e5365d259a3401b542ca94f9a210f8ff8dd04346b0d3661bf46b84b.2` |
+| `alice`, `bob`, `a`, `aq`, `hod` | all registered |
+| **`hodos`**, **`marston`** | **`Name not registered`** — still available |
+
+A sweep of all 37 legal first characters (probe `<c>qzjx7`) found **every one of `a-z`, `0-9`, `-` has a claimed child node**. The root UTXO's 37-slot bitmap is fully or near-fully exhausted and the tree has been swept to depth ≥2 across the whole alphabet.
+
+**Strategic implication:** the "pre-adoption, nobody has claimed anything" premise under the current *engage/watch, don't depend* posture is **factually wrong**. But note this **cuts both ways** and does not automatically argue for adopting sooner:
+
+- ❓ **Organic adoption vs operator pre-mine is UNVERIFIED and is now the single highest-value question to put to shruggr.** A systematically pre-mined tree changes the squatting analysis from "capital-bound" (bad) to "the good names are already gone" (worse). Weak supporting signal: `a` and `2320c9d7…` appear as *test fixtures* in `pkg/template/opns/testdata/`.
+- Answerable ourselves by crawling from genesis and checking whether the name ordinals' `lock` scripts all resolve to a single address.
+
+**Action:** `hodos` and `marston` are unclaimed at ~0.25 BSV (~$3) each. Deferred by owner decision 2026-08-05 — not urgent, but the availability window is not guaranteed.
+
+## Correction: contract parameters (added 2026-08-05) `[SRC]`
+
+Two items above are stated too strongly:
+
+- **`difficulty` is a constructor prop, not a hardcoded constant.** The value `22` lives in the *indexer/SDK* (`const DIFFICULTY = 22` in `1sat-stack/pkg/template/opns/opns.go`), not in the contract. It is a per-deployment parameter — true of the live instance, false of the contract.
+- **There is a `tld` prop.** `buildInscription` appends `"." + tld` when `len(tld) > 0`. The live genesis tree uses an empty tld, but the contract **natively supports multiple TLDs**, each its own tree with its own genesis. Relevant if we ever want a `.hodos` namespace.
+- SIGHASH is `ANYONECANPAY_ALL`, so third parties can add funding inputs — which is what makes a paid mining service possible without custody of the covenant.
+- The PoW preimage is exactly 65 bytes: `pow(32) || char(1) || nonce(32)`.
 
 ## Weaknesses & open questions
 

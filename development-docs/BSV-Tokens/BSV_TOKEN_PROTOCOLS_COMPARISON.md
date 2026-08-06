@@ -1,9 +1,11 @@
 # BSV Token Protocols Comparison
 
-> **Purpose**: Compare BSV-20, BSV-21, STAS, and BRC Push Drop token protocols. Analyze implementation requirements for Hodos Browser's BRC-100 wallet.
+> **Purpose**: Compare BSV token protocols and analyze implementation requirements for Hodos Browser's BRC-100 wallet.
 >
-> **Created**: March 2026
+> **Created**: March 2026 · **Major revision**: 2026-08-05
 > **Status**: Research Complete - Recommendation Included
+>
+> **2026-08-05 revision** added BOLT, OrdLock, Shrug, BRC-147/150 and BRC-226; corrected the MNEE and STAS rows; and added hard cost/enforcement numbers verified against mainnet. Companion docs: **`BOLT_ASSESSMENT.md`** (full BOLT teardown), **`MNEE_STABLECOIN_IMPLEMENTATION.md`**.
 
 ---
 
@@ -11,12 +13,23 @@
 
 | Protocol | Type | Validation | Current Status | Recommendation |
 |----------|------|------------|----------------|----------------|
-| **BSV-20** | Fungible (ticker-based) | External indexer | Legacy, less popular | ❌ Skip |
-| **BSV-21** | Fungible (tickerless) | External indexer | Active ecosystem | ✅ Implement |
-| **STAS** | Fungible/NFT | Miner-enforced | Enterprise use, MIT licensed | ⏳ Consider later |
-| **BRC Push Drop** | Data carrier | Overlay network | **Already implemented** | ✅ Leverage existing |
+| **BSV-20** | Fungible (ticker-based) | External indexer | **Officially deprecated** — "no reference implementation" | ❌ Skip |
+| **BSV-21** | Fungible (tickerless) | External indexer — **zero script enforcement** | Active but **90% of it is MNEE**; median token = 9 outputs | ✅ Implement |
+| **1Sat Ordinals** (NFT) | Non-fungible | Indexer convention; **provenance now SPV-verifiable via BRC-150** | Active | ✅ Implement to **BRC-147 + BRC-150** |
+| **MNEE** | Stablecoin | BSV-21 + **script-enforced 2-of-2 cosigner** | Live; the dominant real token | ✅ Comes ~free with BSV-21 |
+| **OrdLock** | Marketplace listing | **Genuinely script-enforced** (OP_PUSH_TX covenant) | Live sales; unmaintained since 2023 | ⏳ Read-side first |
+| **STAS** | Fungible/NFT | Script-enforced | MIT since ~2025; ecosystem has moved away | ⏳ Low priority |
+| **PushDrop (BRC-48)** | **Data carrier — NOT a token protocol** | n/a (P2PK spend only) | **Already implemented** | ✅ Leverage existing |
+| **BOLT** | Covenant token protocol | Script-enforced (latching + induction) | Whitepaper 2024; **pending patent**; ~19 KB/transfer | ⏸️ Watch — see `BOLT_ASSESSMENT.md` |
+| **Shrug** ("binary BSV21") | Fungible | Indexer, but **covenant-friendly** | Experimental; docs say use BSV-21 for production | 👀 Watch closely — likely the convergence point |
 
-**Bottom Line**: Implement BSV-21 support by leveraging our existing Push Drop infrastructure. BSV-21 tokens can be tracked in baskets alongside our existing BRC-100 outputs. STAS is a longer-term consideration for enterprise use cases.
+**Bottom Line**: Implement **1Sat ordinals to BRC-147 + BRC-150** and **BSV-21 (which brings MNEE nearly free)**, tracked in BRC-46 baskets alongside our existing BRC-100 outputs. PushDrop is a *script template*, not a token standard — we already have it and it stays where it is. BOLT is interesting and patent-encumbered; watch it.
+
+### ⚠️ The three things that changed the picture since March 2026
+
+1. **BSV-21 has no on-chain enforcement whatsoever.** The inscription lives behind `OP_FALSE OP_IF … OP_ENDIF`, which is **never executed** — the spec itself calls it "a NOP." Miners secure the *satoshi*; **nothing on-chain secures the token amount.** An over-spend confirms as valid Bitcoin and is simply ignored (or silently dropped) by indexers. The March table's "External indexer" was right but far too gentle.
+2. **The 1Sat indexer stack is unlicensed and metered.** `shruggr/1sat-indexer`, `b-open-io/1sat-stack`, `bsv21-overlay` and `1sat-sdk` carry **NO LICENSE** (all rights reserved — not legally forkable or self-hostable); JungleBus **server** is closed source. Only the spec is CC0. Indexing charges **1,000 sats per token output**, tokens carry a prepaid balance that halts indexing at zero, and live `is_whitelisted`/`is_blacklisted` flags exist. **Plan the discovery dependency deliberately.**
+3. **BRC-147 + BRC-150 exist now** and define exactly the basket/provenance surface we would otherwise have invented — with provenance **verifiable offline from AtomicBEEF, no global indexer required.** This is the single biggest de-risking development for our Phase 3 work.
 
 ---
 
@@ -234,6 +247,77 @@ STAS Output Specification (DPP):
 
 ---
 
+---
+
+## Verified cost & enforcement data (measured 2026-08-05)
+
+**Baseline:** BSV **$12.93**; miner fee **100 sat/KB = 0.1 sat/byte** (TAAL and GorillaPool ARC agree exactly); chain height 961,028.
+
+> ⚠️ Our `DEFAULT_SATS_PER_KB = 1000` fallback in `rust-wallet/src/fee_rate_cache.rs` is **10× the live rate** — it only bites when ARC is unreachable. Note GorillaPool's legacy mAPI still advertises 1 sat/KB (a 100× disagreement from the same operator), so probe empirically before changing it.
+
+### Per-transfer cost
+
+| Protocol | Locking script | Total tx | Cost |
+|---|---|---|---|
+| Plain P2PKH | 25 B | ~250 B | ~25 sat ($0.0003) |
+| **BSV-21 transfer** | **179 B** (154 B overhead) | ~450–500 B | ~50 sat ($0.0006) |
+| BSV-21 + OrdLock listing | **1,013 B** | 1,550 B | ~155 sat ($0.002) |
+| **BOLT transfer** | — | **~19 KB** | **~1,970 sat ($0.025)** |
+
+BSV-21's 154 B of overhead per output includes the **66-byte token `id`, repeated in full in every output forever** (37% of the payload).
+
+### Container overhead for *arbitrary data* — the decisive table
+
+For a payload of N bytes, wrapper overhead is **constant regardless of N**:
+
+| Container | Fixed overhead | Spendable? | UTXO set |
+|---|---|---|---|
+| `OP_FALSE OP_RETURN` | **2 B** (+ push prefix) | No — provably unspendable | **Pruned** |
+| PushDrop, 1 field, no sig | **36 B** (**+34** vs OP_RETURN) | Yes | Permanent until spent |
+| PushDrop, 1 field, **+ default sig** | **108 B** (+107) | Yes | Permanent until spent |
+| 1Sat inscription + P2PKH | **~59 B** (+57) | Yes, exactly 1 sat | Permanent until spent |
+
+**⇒ Protocol choice is cost-irrelevant for data.** At 100 KB the spread is 0.05–0.1%. Choose on *semantics* (do you need an owner and a spend?) and *UTXO-set hygiene*, never on fees. See the wallet-backup case study below.
+
+> **`includeSignature` defaults to `true` in `@bsv/sdk`'s PushDrop** — that's a silent ~72 bytes. Our Rust `encode()` does not add one.
+
+### Enforcement model — precise
+
+| Protocol | Model | What consensus actually secures |
+|---|---|---|
+| BSV-20 / BSV-21 | **Indexer-arbitrated** | The satoshi only. Invalid transfers **confirm** and are ignored. |
+| 1Sat Ordinals | **Indexer convention** | The satoshi. (BRC-150 adds *offline SPV provenance* on top.) |
+| **MNEE** | **Hybrid** | Cosigner requirement is **script-enforced** (`OP_CHECKSIGVERIFY` vs approver pubkey); amounts are indexer-arbitrated. |
+| **OrdLock** | **Script-enforced** | The *payment* to the seller (73 × `OP_CAT` rebuilding the preimage). **Not** token validity. |
+| STAS | Script-enforced | Token rules in the locking script. |
+| **BOLT** | Script-enforced | Token rules + ancestry by induction. |
+| PushDrop | **None** | The P2PK spend. No token semantics at all. |
+
+---
+
+## MNEE — correction to the March 2026 entry
+
+**MNEE is BSV-21 plus a 2-of-2 cosigner locking template.** (Launch-era press announced it on *Tokenized*; that marketing is stale relative to what shipped.) Verified on chain — deploy `ae59f3b8…8127_0`, block 883,989:
+
+```json
+{"p":"bsv-20","op":"deploy+mint","amt":"18446744073709500000","dec":"5","sym":"MNEE",...}
+```
+
+Transfer lock: `OP_DUP OP_HASH160 <userPKH> OP_EQUALVERIFY OP_CHECKSIGVERIFY <approverPubKey> OP_CHECKSIG` — the approver key matches `PROD_APPROVER` in `mnee-xyz/mnee` exactly.
+
+**What this means for us — and it is a real product risk, not a footnote:**
+
+- **Every MNEE transfer requires the issuer's co-signature.** No timeout, no escape hatch, no unilateral user path. MNEE withholding a signature makes those tokens **permanently unspendable**.
+- Holders have a **liveness dependency on `proxy-api.mnee.net`**. If it's down, MNEE cannot move. **You cannot spend MNEE offline.**
+- The user does not broadcast; transfers go through MNEE's proxy and return a `ticketId`.
+- Freeze, blacklist, mint and burn are all available to the issuer.
+
+**This must be surfaced in our UI, not hidden.** A stablecoin that behaves like spendable cash but can be frozen by a third party is exactly the kind of thing our permission/disclosure philosophy says the user should be told about plainly.
+
+**Implementation cost on top of BSV-21:** the `CosignTemplate` locking script + a proxy round-trip. Small. **The UI impact is the larger piece** — MNEE behaves like a spendable balance (a second "currency"), not a collectible, so it touches send flows, balance display and fee handling in ways ordinals do not.
+
+---
+
 ## Comparison Matrix
 
 | Feature | BSV-20 | BSV-21 | STAS | BRC Push Drop |
@@ -444,11 +528,37 @@ But no BRC-100 wallet supports them. Hodos could be first.
 
 ---
 
+---
+
+## Case study: our on-chain wallet backup (settled 2026-08-05)
+
+The question asked: *should the backup token move from PushDrop to BSV-21 to be cheaper?* **No — and the substitution isn't even possible.**
+
+| | |
+|---|---|
+| Raw JSON payload | 388,814 B |
+| After gzip-9 + AES-256-GCM | **69,882 B** |
+| Broadcast fee | **~7,045 sats ≈ $0.0009** |
+| PushDrop wrapper | **41 B incl. push prefix (+34 B vs bare `OP_RETURN`) = 0.05%** |
+
+1. **BSV-21 cannot carry the blob.** A BSV-21 output's inscription content *is* the token JSON, and only the **first** envelope in an output is honored — so an arbitrary payload has no home there. It would need a separate output regardless, at which point BSV-21 is irrelevant to the question.
+2. **The wrapper is noise.** Cost is ~99.9% raw bytes. An ord envelope (+57 B) is *larger* than `OP_DROP` (+34 B).
+3. **PushDrop is the correct choice on semantics.** It is spendable, so each backup **spends the previous one** — recycling the sats and chaining the history. `OP_RETURN` would be 34 B cheaper and would break that. (It also means we hold exactly one live pair, so the UTXO-set objection to PushDrop doesn't apply to us.)
+
+**Real levers, in order:** the planned strips (`outputs` alone is 48.8% of the payload), delta/incremental backups instead of a full snapshot each cycle, or hash-commitment with off-chain storage (~800× cheaper, but buys a data-availability problem). See `Final-MVP-Sprint/wallet-backup-efficiency-plan.md`.
+
+**Also settled:** BRC-226 (Miner-Enforced Resale-Royalty Covenant Tokens, PushDrop + OP_PUSH_TX, added 2026-07-30) is **not** needed for BSV-21 and is **no help** for the backup — no resale semantics, larger script, same byte cost. Its value to us is as **precedent**: a worked, accepted example of covenant enforcement on standard rails.
+
+Minor: our backup marker output uses **546 sats** ("dust limit") — an inherited BTC constant. BSV's `GetDustThreshold()` is **hardcoded to 1 satoshi** and `-dustrelayfee`/`-dustlimitfactor` were removed in v1.0.11. Not a priority (owner decision 2026-08-05), but 545 sats/backup and a stale idiom.
+
+---
+
 ## Files in This Directory
 
 | File | Description |
 |------|-------------|
 | `BSV_TOKEN_PROTOCOLS_COMPARISON.md` | This document |
+| `BOLT_ASSESSMENT.md` | **BOLT teardown (2026-08-05)** — latching primitive, the Elas patent, the sharding-isn't-in-the-spec finding |
 | `BSV21_1SAT_ORDINALS_ANALYSIS.md` | Original BSV-21 research (Jan 2026) |
 | `BSV21_PLAN_A_BACKEND.md` | Rust implementation plan |
 | `BSV21_PLAN_B_FRONTEND.md` | React UI plan |

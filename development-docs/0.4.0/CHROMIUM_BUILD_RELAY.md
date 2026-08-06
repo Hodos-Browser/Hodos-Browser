@@ -345,3 +345,96 @@ applies to the framework load path or only to `bootstrap ↔ libcef.dll`.
 a `## MAC → WINDOWS` section here (build specifics) or in `MAC_WINDOWS_RELAY.md` (status). Windows
 will append the build result, the codec Layer-A/B comparison and the VER-5 drift outcome to §4 when
 the build finishes.
+
+---
+
+## WINDOWS → MAC (2026-08-06) — P3 is closed, P4 farbling is landing
+
+Windows has moved past the build-standup work this doc was written for. Read §1–§8 for the 150
+bring-up; this section supersedes anything above it that concerns **patches or farbling**.
+
+### 1. Take this pin, and note the flag that is now mandatory
+
+| | |
+|---|---|
+| Fork | `github.com/Hodos-Browser/cef`, branch `hodos/7871` |
+| **`CEF_CHECKOUT`** | **`7749aa3b6`** (already set in both build scripts) |
+| Contents | C1 `HodosSessionCache` · C2 renderer half · a temporary C2 probe |
+| Registered patches | **115** = upstream 114 + `hodos_farble_session_cache` |
+
+⛔ **`--force-cef-update` is now passed unconditionally by both scripts. Do not remove it.**
+`chromium/src/cef` is a COPY, refreshed only when `cef_checkout_changed`, which is computed from the
+**standalone checkout's HEAD** (`automate-git.py:1351`). Landing a patch *requires* committing there,
+which moves HEAD to exactly the SHA you then pin — so `current == desired` and the copy **never**
+refreshes. This is the DEFAULT outcome of the normal workflow, not an edge case. `P3_TOOLCHAIN_PROOF.md`
+used to claim it "self-corrects"; that was wrong and is corrected in place.
+
+**Your one cheap detector:** the patcher's `N patches total` line in the build log. It must read
+**115**. If it reads 114, you built with zero Hodos patches and a fully green run.
+
+⚠️ **The drift audit will NOT catch this** — it reads the in-tree copy (`CEF_SRC=…/chromium/src/cef`),
+so running it right after committing to the fork reports `Hodos entries : 0 / CLEAN`, which looks like
+success and means "your copy is stale". Correct order: **commit+push → bump pin → sync → audit → build**.
+
+### 2. Before your first fork build
+
+1. `git -C <tree>/cef remote set-url origin https://github.com/Hodos-Browser/cef.git` — `automate-git`
+   hard-errors on a `--url` mismatch. A clean dir is not required; the fork shares upstream's object graph.
+2. `git pull --rebase origin 0.4.0` — Windows has ~10 commits since your last sync.
+3. Bumping the pin makes automate-git **delete `chromium/src/cef`, which contains `binary_distrib/`**
+   (R9). Move it out first.
+
+### 3. ⚠️ The version string changed — this affects your packaging
+
+Fork builds now report a real patch level instead of `150.0.0-HEAD`:
+
+```
+CEF_VERSION "150.0.22-7871.3555+g4ed200c+chromium-150.0.7871.187"   CEF_VERSION_PATCH 22
+```
+
+`PATCH` = upstream's branch-commit count **plus ours**, so it drifts ahead and will eventually collide
+with a real upstream `150.0.22`. **Owner accepted this 2026-08-05**; provenance comes from
+`CEF_COMMIT_HASH`, not the version number. Not caused by `--force-cef-update`, and not reversible —
+the old `150.0.0-HEAD` was an artifact of pinning a commit that carried no branch decoration.
+
+**What this means for you:** distribution directory and tarball names now embed that string
+(`cef_binary_150.0.22-7871.3555+g4ed200c+..._macos*`). Anything matching them by name — your framework
+embed step, the `cef-binaries/` staging, the CI asset — must not assume a fixed string. Windows owes
+the same check.
+
+### 4. Two of your §7 open questions now have Windows answers
+
+- **Q6 — does `CefResponseFilter` still exist and stream on 7871?** Yes. Adblock verified live on the
+  150 build: 2357 engine events and 13 scriptlet injections in one session, YouTube path intact.
+- **Q9 — the mac path to enabling the Chromium sandbox.** Windows solved its equivalent: the blocker
+  was **the dev safeguard running inside child processes**, which do **not inherit the environment**,
+  so `HODOS_DEV` was invisible, the guard `return 1`'d, and every renderer died with no dump. Gate on
+  `--type=` from the **command line**, never an env var. Also: setting `browser_subprocess_path`
+  silently disables the sandbox, and `no_sandbox=0` is NOT proof — read child **token integrity**.
+
+### 5. What Mac owns in P4, and what just got cheaper
+
+✅ **FB-2 closed = DROP WebGL `UNMASKED_VENDOR/RENDERER`.** No GPU-string map. **So the Mac
+Apple-Silicon/Intel ANGLE string work (FB-6, `Q1_mac_farbling.md` §5) is CANCELLED** and must not block
+the farbling gate.
+
+Already done for you, needs only a compile check on your side: `FarblingPolicy::InitializeForProfile()`
+is wired into `cef_browser_shell_mac.mm` beside `FingerprintProtection::LoadSiteSettings`, and
+`FarblingPolicy` uses `SecRandomCopyBytes` on macOS.
+
+Still yours: the arm64/x64/universal2 decision, `minos` (floor is **12.0 Monterey**), framework
+packaging, and OOP-context verification (P4e).
+
+### 6. Instruments you should use rather than rebuild
+
+- **`development-docs/0.4.0/chromium-rebuild/farbling_probe.py`** — drives CDP and asserts
+  `navigator.webdriver`, the plugin list, and canvas `[native code]` on **both** an auth-exempt and a
+  farbled page. Run it against your build: `python farbling_probe.py --port 9322`. After C3 lands, add
+  `--expect-native-canvas`.
+- **`cef_patch_drift_audit.sh`** — run it *after* the sync, per §1.
+
+### 7. Owed: remove the C2 probe
+
+The fork carries a temporary `LOG(WARNING) HODOS_C2_PROBE` in `blink_glue.cc` proving the key reaches
+Blink. **It is removed as the first act of C3.** If you build before C3 lands, expect one log line per
+document; it prints the origin, the enabled bit, and 4 bytes of the key (not usable key material).

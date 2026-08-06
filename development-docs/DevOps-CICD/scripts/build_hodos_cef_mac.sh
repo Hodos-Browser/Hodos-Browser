@@ -55,9 +55,9 @@ CEF_BRANCH="7871"
 # Pin an exact FORK commit, not the moving hodos/7871 branch tip: a build must be
 # reproducible, and patch content is part of the build. BUMP THIS every time a
 # patch lands on hodos/7871, and record the new SHA in the fork's
-# HODOS_PATCHES.md. Upstream content is unchanged -- 4ed200cf9 is 94c1726
+# HODOS_PATCHES.md. Upstream content is unchanged -- 7749aa3b6 is 94c1726
 # (upstream 7871 head) plus our patch commits.
-CEF_CHECKOUT="4ed200cf9"
+CEF_CHECKOUT="7749aa3b6"
 
 # ⚠️ <tree>/chromium/src/cef is a COPY of the standalone checkout, refreshed ONLY
 # when the CEF checkout HASH changes (automate-git.py:1358-1360). If you manually

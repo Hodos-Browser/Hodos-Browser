@@ -2,6 +2,42 @@
 
 **Status:** Deferred to a later sprint.
 
+---
+
+## ⭐ DECISION (2026-08-05): implement to BRC-147 + BRC-150
+
+> **This doc predates both standards. When we build the 1Sat code, we follow BRC-147 and BRC-150. Owner-approved 2026-08-05.**
+
+Two standards were published (Brandon Cryderman / HandCash — see `Marketing/Profiles/bsv/brandon-cryderman.md`) that define exactly the surface this phase was going to have to invent:
+
+| BRC | What it defines | Why it matters to us |
+|---|---|---|
+| **[BRC-147](https://github.com/bsv-blockchain/BRCs/blob/master/tokens/0147.md)** — 1Sat Ordinals Basket Profile for BRC-46/BRC-100 | Reserves basket name **`1sat`**; eligibility (`satoshis === 1`); tag vocabulary (`ordinal`, `origin:<outpoint>`, `name:`, `app:`, `collection:`, `creator:`); the `customInstructions` JSON schema; dot↔underscore outpoint normalization | This *is* the "UTXO classification" bullet below. Don't design our own basket/tag scheme. |
+| **[BRC-150](https://github.com/bsv-blockchain/BRCs/blob/master/tokens/0150.md)** — 1Sat Provenance Remittance | An offline-verifiable `provenance` object in `customInstructions`: `{v:2, origin, tip, path[], beefB64, contentType}` using **AtomicBEEF (BRC-95)** + local check of the first `ord` envelope | **"Verification does not require a global ordinals indexer."** This is our best mitigation for indexer-dependency risk (see the warning below). |
+
+**We already have every primitive these need** — `output_baskets` + tags, `customInstructions` (BRC-37), BEEF/AtomicBEEF, SPV, and `createAction` accepting arbitrary locking **and** unlocking scripts with the two-phase `signAction` flow. This is closer to wiring than to building.
+
+### Two rules from BRC-147 that are load-bearing for us
+
+1. **Tags are claims, not proof.** "A malicious or buggy sender can attach another inscription's origin to an unrelated 1-sat UTXO." Without a *verifying* BRC-150 package, the receiver **MUST NOT** present sender-supplied `name`/`app`/`origin:` as authoritative. Our UI must distinguish *verified* from *claimed* provenance.
+2. **Spending a `1sat` output is NOT a BRC-29 payment.** BRC-147: "a general 'pay' or auto-pay grant **MUST NOT** authorize spending them." → This must be enforced in the **Rust permission engine** (`hodos_permission_engine`), not just the UI. A 1-sat ordinal caught by ordinary coin selection is a **permanently destroyed asset** — spending it into a >1-sat output annihilates the origin. Treat this with the same seriousness as the privacy-perimeter gates.
+
+### ⚠️ Indexer dependency — decide this deliberately (research 2026-08-05)
+
+Discovery is the unsolved half, and the honest picture is worse than the ecosystem markets it:
+
+- `shruggr/1sat-indexer`, `b-open-io/1sat-stack`, `bsv21-overlay` and `1sat-sdk` all carry **NO LICENSE** (= all rights reserved — **not legally forkable or self-hostable**). Only the spec (`BitcoinSchema/1sat-ordinals`) is CC0. JungleBus **server** is closed source.
+- BSV21 indexing is **metered and permissioned**: `@1sat/actions` adds a `fee:overlay` output of **1,000 sats per token output**; tokens carry a prepaid balance that halts indexing at zero; live `is_whitelisted` / `is_blacklisted` flags exist.
+- BRC-22/24/88 overlays are *architecturally* federated (SHIP/SLAP puts host discovery on-chain), but `1sat-stack` has **zero** hits for `SLAP` / `tm_ship` / `Advertiser` — federation isn't wired up, so hosts are known out-of-band today.
+
+**Consequence:** BRC-150 removes the indexer from **verification**. It does not remove it from **discovery**. Choose the discovery path *before* building on it, not after — this is a strategic decision, not an implementation detail.
+
+### Scope note on BSV21 vs ordinals
+
+BRC-147/150 cover **1Sat ordinals (NFT-style)**. **BSV21 fungible tokens are a separate protocol** (`{"p":"bsv-20","op":"transfer","id":...,"amt":...}`) with **no on-chain enforcement at all** — miners validate the satoshi, never the token amount. See `development-docs/BSV-Tokens/BSV_TOKEN_PROTOCOLS_COMPARISON.md` for the full comparison, and note **OpNS names are ordinals, not BSV21.**
+
+---
+
 Sigma auth (Phase 2) alone unlocks app discovery in Cluster B (users can sign in to 1sat.market with their Hodos identity). Ordinal *transfer* requires substantial new work and is a separate sprint:
 
 - New UTXO classification (1-sat outputs with inscribed data)
