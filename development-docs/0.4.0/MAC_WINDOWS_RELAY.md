@@ -225,7 +225,241 @@ The sprint is RESEARCH + DESIGN first (NO code yet) — see the kickoff brief:
 
 ## MAC → WINDOWS REPORT-BACK (Mac Claude fills this in + pushes)
 
-_(Awaiting the next round — Chromium/CEF rebuild research inputs. Previous rounds archived below.)_
+### 2026-08-05/06 — CEF 150 builds green on macOS; toolchain pinned. **Upstream only — no Hodos patches yet.**
+
+**Status:** A full CEF 150 macOS ARM64 build **COMPLETED GREEN** — 57,901 ninja targets, **0 failures**,
+~4h30m. `cefclient` launches and renders real pages (google.com confirmed visually). This supersedes
+the 2026-08-04 entry below, whose build was **still running and later failed** on an SDK gap.
+
+Full write-up, with exact error text for each blocker:
+**`development-docs/DevOps-CICD/MAC_XCODE26_BUILD_NOTES.md`** (new file, this push).
+It is written to be folded into `CEF_BUILD_RUNBOOK.md` — **Windows has lead on that consolidation;
+I did not touch the runbook.**
+
+#### ⚠️ What this build is NOT
+
+It was produced from a hand-rolled tree at `~/cef/cef150/`, **not** via `build_hodos_cef_mac.sh`,
+so it does **not** honour the `CEF_CHECKOUT` fork pin. Verified on that tree:
+
+| Check | Value |
+|---|---|
+| `cef` remote | `chromiumembedded/cef` — **upstream**, not the Hodos fork |
+| `cef` HEAD | `94c17267e` (upstream 7871 head) |
+| `hodos_*.patch` present | **0** |
+| Version string | `150.0.17+g94c1726+chromium-150.0.7871.187` |
+
+**Zero Hodos patches are compiled in.** Not stageable into `cef-binaries/`. Its value is that it
+**proves the macOS toolchain** and pins down what the real fork build needs — every blocker below
+would have hit the fork build identically.
+
+#### ❓ Patch-count reconciliation — please check this, it may be a live gate hazard
+
+`build_hodos_cef_mac.sh` says the patcher count "must equal **114 upstream** + our patches", and the
+C1 note records the stale-copy failure as reporting **114** where **115** was expected.
+
+**On upstream `94c17267e` I measure 115 upstream patches, with zero Hodos patches present.**
+Both counts agree: `ls patch/patches/*.patch` = 115, and `patch.cfg` `'name'` entries = 115.
+
+If upstream is genuinely 115 now, then "expected 115" no longer distinguishes *fork with 1 patch*
+from *pure upstream* — **a stale copy with zero Hodos patches would pass the gate silently**, which
+is the exact failure C1 was meant to catch. Either the 114 figure is stale by one, or my count
+includes something yours doesn't. I can't see the fork from here, so I can't resolve it — flagging
+rather than guessing. Suggest the gate assert on `hodos_*.patch` **presence**, not a total.
+
+#### ✅ Answers an open question from the 2026-08-04 round
+
+**macOS floor version — now measured.** The built framework reports `LC_BUILD_VERSION minos 12.0`,
+so `max(12.0, measured)` from VER-4 resolves to **12.0**. No change needed.
+
+#### Toolchain requirements (new on Chromium 150 — the runbook's "Xcode + CLT" row is now insufficient)
+
+| Component | Required | Note |
+|---|---|---|
+| macOS | 26.x Tahoe | needed to run Xcode 26 |
+| Xcode | **26.5** (`17F42`), SDK 26.5 | `mac_sdk.gni:51` pins `mac_sdk_official_version = "26.5"` |
+| Metal toolchain | separate 688 MB download | **not bundled with Xcode 26** |
+| clang-format | `buildtools/mac_arm64-format` | must be on `PATH` or packaging dies |
+
+Four blockers, all environment, none in CEF/Chromium source:
+
+1. **SDK 15.x too old** — `skia_utils_mac.mm:84: use of undeclared identifier 'kCGImageByteOrder32Host'`.
+   Fails ~4,825 objects in. Fixed by Xcode 26.5. (Also drop the old `use_clang_modules=false`
+   workaround once on SDK 26.)
+2. **Metal compiler unbundled in Xcode 26** — `cannot execute tool 'metal' due to missing Metal Toolchain`.
+   Fix: `xcodebuild -downloadComponent MetalToolchain` (no sudo). ⚠️ `xcrun -f metal` **succeeds even
+   when it's missing** — check `xcrun metal --version` instead.
+3. **`clang-format` not on PATH** — `make_distrib.py` calls it by bare name. Fires *after* the
+   multi-hour compile.
+4. **Missing dSYM at packaging** — only because I used `is_official_build=false`; the real build uses
+   `true`, so this one should not appear for you.
+
+**Strong suggestion:** add a preflight asserting `xcrun --show-sdk-version`, `xcrun metal --version`
+and `command -v clang-format` to `build_hodos_cef_mac.sh`. Blockers 1–3 all surface only *after* long
+phases; a 3-line check would have saved most of a day.
+
+#### ⚠️ Flag trap worth adding to the runbook
+
+`automate-git.py` flags and `make_distrib.py` flags look interchangeable and are not.
+`--no-debug-build` is valid on the former and **does not exist** on the latter; `--minimal-distrib` +
+`--client-distrib` are fine together, but `--minimal` + `--client` **hard-error as mutually exclusive**
+(`make_distrib.py:765`); `--output-dir` is required. Worst of all, **`--arm64-build` is required on
+macOS despite its help text saying "(Linux only)"** — without it `platform_arch` silently falls back
+to `'32'`/x86 (`make_distrib.py:842-853`) and you get a **mislabeled distribution rather than an error**.
+`build_hodos_cef_mac.sh` gets all of this right; a hand-rolled `make_distrib.py` call does not.
+
+#### Machine state (changed materially since 2026-08-04)
+
+| Item | 2026-08-04 | Now |
+|---|---|---|
+| Disk free | 148 GB | **28 GB** ⚠️ |
+| Xcode | CLT only | Xcode 26.5 + Metal toolchain |
+| RAM | 16 GB | unchanged — still exactly at the floor |
+
+**28 GB is below the script's own 100 GB preflight**, which will warn and prompt. Reclaimable before
+the fork build: Xcode 16.2 + 16.4 (~9.7 GB, now redundant), `out/Debug_GN_arm64` (2.2 GB), and the
+throwaway upstream distrib (~0.9 GB). Note `CEF_CHROMIUM_DIR` is `~/cef/cef150` — the **same tree**
+this build used, so the fork build reuses it rather than re-downloading 66 GB.
+
+Also note `is_official_build=true` (what the real build uses) generates dSYMs, which are multi-GB —
+budget for them.
+
+#### Next on Mac
+
+Run the real `build_hodos_cef_mac.sh` against the fork pin with `--force-cef-update`. No unknown
+blockers expected. Everything from the 2026-08-04 round below (C++20 `CMakeLists.txt` fix, stale
+HistoryManager TODO, staging, smoke tests) is still owed and unchanged — it was all gated on having
+a working build, which now exists in toolchain terms.
+
+---
+
+### 2026-08-04 — CEF 150 macOS kickoff review + cold build started
+
+> **⚠️ Superseded by the 2026-08-05/06 entry above.** The build described here as "RUNNING" later
+> **failed** on the macOS SDK gap (blocker 1). The review findings below remain valid and are still owed.
+
+**Status:** Cold Chromium build **RUNNING** (ARM64, `--branch=7871 --checkout=94c1726`). Kickoff review
+**COMPLETE**. No code changes yet — reporting first, per protocol.
+
+#### Machine state
+
+| Item | Value |
+|---|---|
+| CPU / RAM | Apple Silicon (ARM64), **16 GB** — exactly at the floor |
+| Disk | **148 GB free** — above the 100 GB minimum, but tight; monitoring |
+| Xcode CLI | `/Library/Developer/CommandLineTools` |
+| Python | 3.9.6 (in range; depot_tools ships its own; `.vpython3` wants 3.11) |
+| Build tree | `~/cef/cef150/` — clean tree, own depot_tools (per the lesson about shared depot_tools) |
+
+#### Build status
+
+Launched via detached `nohup` (per the "DETACH IT" lesson). `automate-git.py` is running:
+`--branch=7871 --checkout=94c1726 --arm64-build --minimal-distrib --client-distrib --no-debug-build --force-build`.
+Currently cloning the 66 GB Chromium source. Estimated ~4-6 hours for the full cold build on this
+machine.
+
+Log: `~/cef/cef150/build.log`. PID in `~/cef/cef150/build.pid`.
+
+#### Kickoff review findings
+
+**1. C++20 — confirmed, needs a one-line CMakeLists.txt fix.**
+`CMakeLists.txt:43` sets `CMAKE_CXX_STANDARD 17` globally. Line 55 overrides to 20 **inside
+`if(WIN32)`**. macOS stays on 17 and will hit the `requires(std::convertible_to<...>)` wall of errors
+in `cef_scoped_refptr.h`. Fix: add the same override inside the `if(APPLE)` path, gated on the
+distribution being 150+. Will do this as part of staging, not before — the current M136 distribution
+**requires** C++17, so flipping early breaks the current build.
+
+**2. `--disable-features=GlicActorUi` — already cross-platform, no action needed.**
+`simple_app.cpp:126` appends `--disable-features=Autofill,AutofillServerCommunication,GlicActorUi`
+in `OnBeforeCommandLineProcessing`, which is cross-platform. The fix is inherited. The two traps
+(Chrome-style default, `AppendSwitchWithValue` replaces) are documented in-line. No work needed.
+
+**3. Bootstrap model — does NOT apply to macOS.**
+Confirmed by CMakeLists.txt: the `bootstrap.exe` existence gate (line 204-210) is `if(WIN32)` only.
+macOS keeps the framework + helper-app structure. `Create*OverlayMacOS` etc. are untouched. The
+bootstrap model (`RunWinMain`, code-signing thumbprint matching, icon/VERSIONINFO) is Windows-only
+work.
+
+**4. `NOMINMAX` — does NOT apply to macOS.** Windows-only.
+
+**5. `freopen` / stdout crash class — NOT exposed on macOS.**
+macOS entry point does NOT use `freopen`. `Logger::Initialize` opens the log file directly. A few
+`fprintf(stderr, ...)` calls exist in the startup path but are diagnostic, not routing-dependent.
+The Windows-specific stdout-redirect-to-NUL fix is not needed here.
+
+**6. HistoryManager on macOS — works, but has a stale TODO.**
+`cef_browser_shell_mac.mm:5552-5556` initializes `HistoryManager` in the browser process with
+`cache_path`. It uses plain SQLite — **zero Windows-only dependencies**. However, line 5600-5602
+is a stale TODO claiming "HistoryManager is currently Windows-only (uses SQLite with Windows APIs)"
+— **this is wrong.** Both paths execute in sequence, so the init works and then a misleading log
+message fires. **Will remove the stale TODO when writing code.**
+
+**7. History-over-IPC smoke — should work on macOS.**
+The V8 handler (`HistoryV8Handler`) is registered cross-platform in `simple_render_process_handler.cpp:734`.
+It sends IPC messages to the browser process, which dispatches them to the already-initialized
+`HistoryManager`. The Windows smoke results (TESTING.md §14.6) show the contract is sound — the same
+CDP-driven method will be used for macOS verification. **Owed after the CEF 150 build is integrated.**
+
+**8. `CEF_ROOT` on macOS — partial support, staging into `cef-binaries/` is the path.**
+`CEF_ROOT` (cache variable, default `../cef-binaries`) is used for framework linking
+(`find_library` at line 465: `PATHS "${CEF_ROOT}/Release"`). BUT the wrapper path (line 168) and
+framework copy (line 732-734 via `CEF_FRAMEWORK_PATH`) are hardcoded to `../cef-binaries/`.
+Windows now uses `CEF_ROOT` throughout; macOS does not. For now, staging directly into
+`cef-binaries/` avoids the inconsistency. Unifying `CEF_ROOT` on macOS is a cleanup to do later.
+
+**9. `AboutSettings.tsx:39` — hardcoded `"Chromium (CEF 136)"`.** Will update to 150 when the
+distribution is staged, not before. Same as Windows's note.
+
+**10. CDP port in production — same exposure as Windows.** `cef_browser_shell_mac.mm:5413` sets
+`settings.remote_debugging_port = 9222` unconditionally. Same as TESTING.md §14.7. Not blocking.
+
+#### Reuse-first audit
+
+| Need | Exists at | Action |
+|---|---|---|
+| C++20 flip | `CMakeLists.txt:46-56` (WIN32 arm) | Add matching `APPLE` arm |
+| GlicActorUi fix | `simple_app.cpp:126` | Already cross-platform |
+| macOS overlay creation | 14 functions in `cef_browser_shell_mac.mm` | Untouched by engine bump |
+| History IPC routing | `simple_handler.cpp` (7 `history_*` IPC handlers) | Cross-platform, no change |
+| HistoryV8Handler | `simple_render_process_handler.cpp:734` | Cross-platform, no change |
+| HistoryManager | `cef_browser_shell_mac.mm:5552` + `HistoryManager.cpp` | Already initialized on macOS |
+| `no_sandbox = true` | `cef_browser_shell_mac.mm:5278` | Unchanged, matches Windows |
+| macOS dev flags | `simple_app.cpp:95-107` (HODOS_MAC_DEV_FLAGS gating) | Unchanged |
+
+**No duplicate creation needed.** Every anchor the build needs already exists.
+
+#### Risk assessment
+
+- **UX safeguards (gold pill, permission gates, "Always notify"):** Entirely in Rust + React.
+  A CEF bump cannot break them except at compile time (loudly). **LOW risk.**
+- **CEF interface types:** 23 interface types across 14 milestones. Will fail at compile time
+  if signatures changed. **MEDIUM risk — compile-time only.**
+- **Overlay rendering:** NSWindow/Core Animation-based, not bootstrap-dependent. **LOW risk.**
+- **`CefResponseFilter`** (YouTube ad stripping): flagged LOW-stability in the tracker.
+  Must verify it still exists and streams on M150. **MEDIUM risk.**
+
+#### Test plan (post-build)
+
+1. Verify `BUILD_EXIT=0` from `~/cef/cef150/build.log`
+2. Archive M136 `cef-binaries/`, stage 150 ARM64 distribution
+3. Rebuild or verify wrapper (C++20 match)
+4. Apply C++20 `CMakeLists.txt` fix
+5. Clean `cef-native` build (`cmake --build build --config Release`)
+6. Launch dev app (`HODOS_DEV=1 HODOS_MAC_DEV_FLAGS=1`)
+7. Codec verification: `canPlayType` for H.264, AAC, MP3, VP9, AV1
+8. GlicActorUi: confirm tabs don't crash (Chrome-style browsers live)
+9. History-over-IPC smoke per TESTING.md §14.6 (CDP method)
+10. Standard site basket: youtube.com, x.com, github.com
+11. Overlay spot-check: wallet, settings, downloads
+
+#### Open questions / decisions deferred
+
+- **macOS floor version (`vtool` measurement):** Never measured. The Windows kickoff (§6) notes
+  VER-4's `max(12.0, measured)` has no prior macOS measurement. Will measure after the build and
+  report back.
+- **`CEF_ROOT` unification on macOS** — cleanup, not blocking. Stage into `cef-binaries/` for now.
+- **Wrapper C++20 ABI match** — if the prebuilt wrapper in the distribution was built C++17, it must
+  be rebuilt. Will check after the distribution lands.
+
 
 ---
 
