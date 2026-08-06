@@ -63,7 +63,7 @@ Both use the **same patch toolchain** (`cef/patch/patch.cfg`). The decision for 
 | Win toolchain | VS 2022 BuildTools; `DEPOT_TOOLS_WIN_TOOLCHAIN=0`; `GYP_MSVS_VERSION=2022` | `.bat` |
 | Win SDK | 10.0.22621.0+, **with Debugging Tools for Windows** (not installed by default) | guide §4.2 |
 | Python | **Set by the branch's `.vpython3`, not a universal ceiling.** Measured 2026-08-03: **both** `7103` and `7871` pin `python_version: "3.11"`. depot_tools also ships its own interpreter. Re-read `src/.vpython3` on each bump instead of trusting a fixed "3.12+ breaks" rule | `src/.vpython3` @ branch |
-| Mac | Xcode + CLT; arch auto-detect (`--arm64-build` Apple Silicon / `--x64-build` Intel) | `.sh` |
+| Mac | **Xcode 26.5 (build `17F42`) + SDK 26.5 on macOS 26.x Tahoe**, plus the **separately-downloaded Metal toolchain** and `clang-format` on `PATH`; arch auto-detect (`--arm64-build` Apple Silicon / `--x64-build` Intel). "Xcode + CLT" is **no longer sufficient on Chromium 150** — see §macOS below | `.sh`, measured 2026-08-05 |
 | Archive format | `tar.bz2` (`CEF_ARCHIVE_FORMAT`) | `.bat` |
 | Resources | ~100 GB disk (150 GB SSD rec.), 16 GB RAM min (32 rec.), 4 cores min (8+ rec.) | `.sh` header / guide §3 |
 | Build duration | ~10–12 hr first build (download+compile+package); 30–60 min incremental | guide §1 (real build) |
@@ -249,10 +249,78 @@ python C:\cef\automate\automate-git.py ^
 | `--force-build` | force rebuild **but keep existing objects → resumable** (we do NOT use `--force-clean` on re-runs) |
 
 #### macOS
-Use `development-docs/DevOps-CICD/scripts/build_hodos_cef_mac.sh`. Same `automate-git.py` + ninja flow; needs **Xcode + Command
-Line Tools**; same ~100 GB / 16 GB (32 rec.) requirements. Arch: `--arm64-build` on Apple Silicon
-(M1+), `--x64-build` on Intel. Output is `Chromium Embedded Framework.framework` instead of `libcef.dll`
-— Windows DLLs cannot be used on macOS; this is a fully separate build.
+Use `development-docs/DevOps-CICD/scripts/build_hodos_cef_mac.sh`. Same `automate-git.py` + ninja flow.
+Arch: `--arm64-build` on Apple Silicon (M1+), `--x64-build` on Intel. Output is
+`Chromium Embedded Framework.framework` instead of `libcef.dll` — Windows DLLs cannot be used on macOS;
+this is a fully separate build. Budget **150 GB+** free disk (a 7871 tree measured 53 GB before the
+build and 123 GB after), and note `is_official_build=true` also generates multi-GB dSYMs.
+
+##### Toolchain — Chromium 150 needs more than "Xcode + CLT"
+
+| Component | Required | Notes |
+|---|---|---|
+| macOS | 26.x (Tahoe) | needed to run Xcode 26 |
+| Xcode | **26.5** (build `17F42`), SDK 26.5 | see rationale below |
+| Metal toolchain | separate 688 MB download | **not bundled with Xcode 26** |
+| `clang-format` | from the Chromium tree | must be on `PATH` at packaging time |
+
+**Why 26.5 specifically, not 26.6+.** `build/config/mac/mac_sdk.gni:51` pins
+`mac_sdk_official_version = "26.5"`, but that exact pin only binds for `is_official_build` *with
+hermetic Xcode*. With system Xcode the real constraint is `mac_sdk_min = "15"`
+(`build/config/mac/mac_sdk_overrides.gni:10`) — a floor, not an exact match, so a newer SDK configures
+fine. 26.5 is chosen deliberately anyway: **Chromium builds `-Werror`, and a newer SDK can introduce
+fresh deprecation warnings that break the build for no benefit.** Pin the whole team to 26.5.
+
+```bash
+brew install aria2          # optional; the .xip is ~12 GB and aria2 parallelises it
+xcodes install 26.5         # prompts for Apple ID + 2FA (App Store only offers latest)
+sudo xcode-select -s /Applications/Xcode-26.5.0.app/Contents/Developer
+sudo xcodebuild -license accept
+sudo xcodebuild -runFirstLaunch
+xcodebuild -downloadComponent MetalToolchain     # 688 MB; sudo NOT required
+export PATH="<tree>/chromium/src/buildtools/mac_arm64-format:$PATH"   # clang-format
+```
+
+##### ⛔ Preflight — run this BEFORE the multi-hour phases
+
+Both toolchain blockers surface only *after* long phases (one ~10 min in, one after the entire
+compile). Assert them up front:
+
+```bash
+xcrun --show-sdk-version | grep -q '^26\.' || { echo "Need macOS SDK 26.x (Xcode 26.5)"; exit 1; }
+xcrun metal --version >/dev/null 2>&1 || { echo "Metal toolchain missing: xcodebuild -downloadComponent MetalToolchain"; exit 1; }
+command -v clang-format >/dev/null || { echo "clang-format not on PATH (buildtools/mac_arm64-format)"; exit 1; }
+```
+
+⚠️ **Check `xcrun metal --version`, never `xcrun -f metal`.** When the Metal toolchain is missing the
+`metal` binary is still present as a **stub**, so `xcrun -f metal` **succeeds and is not a valid
+check**.
+
+##### ⚠️ `make_distrib.py` flags are NOT `automate-git.py` flags
+
+The two sets look interchangeable and are not. `build_hodos_cef_mac.sh` passes `--minimal-distrib
+--client-distrib --no-debug-build` to **`automate-git.py`**, which is correct there —
+`automate-git.py` invokes `make_distrib.py` once per distrib type internally. Passed to
+`make_distrib.py` **directly**, the equivalents differ:
+
+| Flag | On `automate-git.py` | On `make_distrib.py` |
+|---|---|---|
+| `--no-debug-build` | valid | **does not exist** — `--minimal` already means release-only |
+| `--minimal-distrib` / `--client-distrib` | valid together | `--minimal` + `--client` **hard-error as mutually exclusive** (`make_distrib.py:765`) |
+| output location | derived | `--output-dir` is **required** |
+| `--arm64-build` | — | **required on macOS**, despite help text saying *"(Linux only)"* |
+
+**`--arm64-build` is the dangerous one — its help string is wrong.** Without it `platform_arch`
+silently falls back to `'32'`/x86 (`make_distrib.py:842-853`), producing a **mislabeled distribution
+rather than an error**. Correct direct invocation:
+
+```bash
+python3 make_distrib.py --ninja-build --arm64-build --minimal \
+        --output-dir "<tree>/chromium/src/cef/binary_distrib"
+```
+
+Also: **missing Doxygen is non-fatal** — it prints `ERROR: Please install Doxygen` / `ERROR: No docs
+generated.` and continues. Ignore it, or `brew install doxygen`.
 
 #### A1 pain-reduction — build caching & remote/distributed build (verified 2026-06, master-plan §7.3)
 The point of A1 is to make this not take ~2 weeks. Levers, in priority order:
@@ -352,6 +420,62 @@ never auto-apply). Until scripted (see Open TODOs), run this as a checklist on e
 ---
 
 ## Lessons learned
+
+### From the 2026-08-05 macOS CEF 150 build (Xcode 26 / Tahoe)
+
+A full CEF 150 macOS ARM64 build completed green: **57,901 ninja targets, 0 failures, ~4 h 30 m**.
+Four blockers were hit; **all four were environment/toolchain gaps introduced by the Xcode 26
+transition** — none were defects in CEF or Chromium source. The requirements they establish are in
+§macOS above; this is the diagnosis record.
+
+> ⚠️ **That binary was UPSTREAM CEF, not the Hodos fork** — `cef` remote was
+> `chromiumembedded/cef`, HEAD `94c17267e`, `patch/patches/hodos_*.patch` = **0 present**, version
+> string `150.0.17+g94c1726+chromium-150.0.7871.187`. It was built from a hand-rolled tree, not via
+> `build_hodos_cef_mac.sh`, so it never honoured the `CEF_CHECKOUT` fork pin. **What it proves is the
+> toolchain, which is the transferable result. It is not a distributable Hodos CEF.**
+
+| # | Symptom | Fires at | Cause / fix |
+|---|---|---|---|
+| 1 | `skia_utils_mac.mm:84:11: error: use of undeclared identifier 'kCGImageByteOrder32Host'; did you mean 'kCGImageByteOrder32Big'?` | ~object 4,825/58,002, ~10 min in | SDK 15.x too old — that identifier exists only in the macOS 26 SDK. Fix: Xcode 26.5. **Also remove the `use_clang_modules=false` workaround** that SDK 15 needed for incompatible modulemaps; modules are fine on SDK 26 and leaving it off costs Objective-C compile time |
+| 2 | `error: cannot execute tool 'metal' due to missing Metal Toolchain; use: xcodebuild -downloadComponent MetalToolchain` | ~object 5,766/57,901, ~6 min in | Apple unbundled the Metal compiler in Xcode 26 to shrink the download. ANGLE needs it to compile `.metal` → `.air`. **The stub binary makes `xcrun -f metal` succeed** — check `xcrun metal --version` |
+| 3 | `FileNotFoundError: [Errno 2] No such file or directory: 'clang-format'` at `clang_util.py:44` → `make_distrib.py:319 transfer_gypi_files()` | **after the multi-hour compile** | `make_distrib.py` reformats the headers it copies and invokes `clang-format` **by bare name**, so it must resolve via `PATH`. Ships in-tree at `buildtools/mac_arm64-format` |
+| 4 | `FileNotFoundError: .../out/Release_GN_arm64/Chromium Embedded Framework.dSYM` | packaging | **Not a defect.** `make_distrib.py:1392`: *"dSYMs are only generated when `is_official_build=true` or `enable_dsyms=true`."* That build used `is_official_build=false`. **The real Hodos path uses `is_official_build=true`, so this should not appear there** — recorded only so it isn't misdiagnosed |
+
+**Low-memory host tuning (16 GB M1 — specific to that machine, not a general recommendation).**
+`ninja -j 8` instead of the default `ncpu+2 = 10`: some Chromium TUs peak near 1 GB and 10 concurrent
+jobs push a 16 GB machine into swap, which is net slower. At `-j 8` swap stayed at **0.00 MB**, memory
+free ~76%, no thermal throttling throughout. `is_official_build=false` was also used because official
+enables ThinLTO + whole-program devirtualization, and the Chromium Framework **link** is the single
+most memory-hungry step — a genuine OOM risk on 16 GB *after* hours of compiling. **The shippable
+Hodos build wants `is_official_build=true`, so use a larger host.** Flipping that flag invalidates
+**every** object file; decide before starting.
+
+**Timing reference (8-core M1, `-j 8`):** GN gen ~10 s · full compile+link of 57,901 targets ~4 h 30 m
+· `make_distrib.py --minimal` ~2 m. **Early progress badly overstates throughput** — the first ~5,000
+objects (sqlite, brotli, boringssl) fly by in minutes, then Blink/V8/WebRTC dominate. Do not
+extrapolate from the first 10 minutes.
+
+**Output verification that was performed** (`cef_binary_150.0.17+g94c1726+chromium-150.0.7871.187_macosarm64_minimal`,
+712 MB unpacked / 229 MB zip): framework is Mach-O 64-bit dylib **arm64**, `lipo -archs` = `arm64`,
+install name `@executable_path/../Frameworks/...`, **`LC_BUILD_VERSION minos` = 12.0** (matches VER-4's
+floor exactly — closes that open question), `otool -L` resolves clean. `cefclient.app` launched and
+stayed up: 1 browser, 1 `--type=gpu-process`, 2 `--type=renderer`, 2 `--type=utility`, one on-screen
+window 800×632.
+
+Two macOS verification tricks worth keeping:
+
+- When `osascript`/`screencapture` are blocked by missing Accessibility / Screen Recording permission
+  (both are, on a fresh Tahoe install), enumerate windows through Quartz instead:
+  ```bash
+  /usr/bin/python3 -c "
+  import Quartz
+  wl = Quartz.CGWindowListCopyWindowInfo(
+      Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements,
+      Quartz.kCGNullWindowID)
+  print([(w.get('kCGWindowOwnerName'), w.get('kCGWindowBounds')) for w in wl])"
+  ```
+- **`pgrep -f 'Helper (GPU)'` silently matches nothing** — `pgrep -f` takes an ERE, so the parentheses
+  are group syntax. Escape them, or match on `--type=` instead.
 
 ### From the 2026-08-03 M150 / `7871` checkout
 

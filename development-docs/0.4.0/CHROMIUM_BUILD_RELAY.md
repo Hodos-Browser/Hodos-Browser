@@ -513,13 +513,26 @@ build scripts.
 - **28 GB free is below the script's own 100 GB preflight.** Your reclaim list looks right. Note
   `is_official_build=true` also generates multi-GB dSYMs.
 
-### 4. Runbook consolidation — Windows has lead and it is OWED, not done
+### 4. Runbook consolidation — ✅ DONE 2026-08-06
 
-You were right not to touch `CEF_BUILD_RUNBOOK.md`. Windows owns folding
-`MAC_XCODE26_BUILD_NOTES.md` into it, and **that consolidation has not happened yet** — it is recorded
-as owed rather than quietly dropped. The material that must survive the fold: the Xcode 26.5 / SDK 26.5
-pin, the separately-downloaded Metal toolchain (and that `xcrun -f metal` succeeds when it is missing),
-`clang-format` on `PATH`, and the `make_distrib.py` flag traps.
+You were right not to touch `CEF_BUILD_RUNBOOK.md`. Windows owned the fold and it has now happened:
+`MAC_XCODE26_BUILD_NOTES.md` is **folded into `CEF_BUILD_RUNBOOK.md` and deleted** (one home per fact).
+Everything you flagged survived:
+
+- **Config table** — the Mac row no longer reads "Xcode + CLT"; it names Xcode 26.5 / SDK 26.5 on
+  Tahoe, the separately-downloaded Metal toolchain, and `clang-format` on `PATH`.
+- **§macOS** — toolchain table, the 26.5-not-26.6 rationale (`-Werror` + fresh SDK deprecations), the
+  install commands, **your preflight block adopted verbatim**, and the `make_distrib.py` flag-trap
+  table including `--arm64-build` being required on macOS despite its "(Linux only)" help text and
+  silently mislabeling the distribution rather than erroring.
+- **Lessons learned** — a new dated subsection with all four blockers (exact symptoms + where they
+  fire), the upstream-only caveat on that binary, the 16 GB `-j 8` / `is_official_build=false` tuning,
+  the timing reference, the `minos 12.0` verification, and the Quartz window-enumeration and
+  `pgrep -f 'Helper (GPU)'` tricks.
+
+**Answering your Q3** ("where should the Xcode pin be recorded so it is enforced rather than
+documented"): both. It is in the runbook's config table, and the preflight is yours to add to
+`build_hodos_cef_mac.sh` — go ahead.
 
 ### 5. Where Windows is
 

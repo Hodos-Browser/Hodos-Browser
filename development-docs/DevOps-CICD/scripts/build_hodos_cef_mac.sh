@@ -64,10 +64,19 @@ CEF_CHECKOUT="b911770b0"
 # git-checkout or git-pull "$CEF_CHROMIUM_DIR/cef" to the target commit before
 # running this, the hashes already match, the copy never refreshes, and the build
 # silently uses the STALE in-tree patch set -- right fork, right pin, green run,
-# ZERO Hodos patches compiled in. Verify the patcher's count in the build log (it
-# must equal 114 upstream + our patches). --force-cef-update is passed
-# unconditionally at the invocation below precisely so this cannot happen silently.
+# ZERO Hodos patches compiled in. --force-cef-update is passed unconditionally at
+# the invocation below precisely so this cannot happen silently.
 # Measured on Windows 2026-08-05; the mechanism is platform-independent.
+#
+# ⛔ VERIFY BY PRESENCE, NOT BY TOTAL. The gate is "at least one hodos_*.patch is
+# in the tree", which is invariant. Do NOT assert "N patches total" -- that number
+# changes on every landing, so it needs hand-editing each time, and a gate that
+# must be hand-updated is one that eventually gets updated wrongly. Use:
+#     ls "$CEF_CHROMIUM_DIR"/chromium/src/cef/patch/patches/hodos_*.patch | wc -l
+# or, better, cef_patch_drift_audit.sh, whose "hodos_*.patch files" /
+# "hodos_* patch.cfg entries" lines ARE the presence gate (HODOS_MIN_PATCHES).
+# The patcher's "N patches total" line remains useful as a cross-check and as the
+# cheapest stale-copy tell in a raw build log -- but it is not the gate.
 
 # P3: our CEF fork. Source patches live in it under patch/patches/hodos_*.patch,
 # registered in patch/patch.cfg, applied by gclient_hook.py -> patcher.py during

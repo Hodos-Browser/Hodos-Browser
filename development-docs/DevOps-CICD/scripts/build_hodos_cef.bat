@@ -60,9 +60,19 @@ REM the CEF checkout HASH changes (automate-git.py:1358-1360). If you manually
 REM git-checkout or git-pull C:\cef\cef150\cef to the target commit before running
 REM this, the hashes already match, the copy never refreshes, and the build
 REM silently uses the STALE in-tree patch set -- right fork, right pin, green run,
-REM ZERO Hodos patches compiled in. Verify the patcher's count in the build log
-REM (it must equal 114 upstream + our patches). --force-cef-update is passed
-REM unconditionally below precisely so this cannot silently happen.
+REM ZERO Hodos patches compiled in. --force-cef-update is passed unconditionally
+REM below precisely so this cannot silently happen.
+REM
+REM ⛔ VERIFY BY PRESENCE, NOT BY TOTAL. The gate is "at least one
+REM hodos_*.patch is in the tree", which is invariant. Do NOT assert
+REM "N patches total" -- that number changes on every landing, so it needs
+REM hand-editing each time, and a gate that must be hand-updated is one that
+REM eventually gets updated wrongly. Use:
+REM     dir /b chromium\src\cef\patch\patches\hodos_*.patch
+REM or, better, cef_patch_drift_audit.sh, whose "hodos_*.patch files" /
+REM "hodos_* patch.cfg entries" lines ARE the presence gate (HODOS_MIN_PATCHES).
+REM The patcher's "N patches total" line remains useful as a cross-check and as
+REM the cheapest stale-copy tell in a raw build log -- but it is not the gate.
 
 REM HODOS_FARBLING is the single condition gate on the whole C1-C7 farbling
 REM patch set (never gate them separately -- a half-applied set is worse than

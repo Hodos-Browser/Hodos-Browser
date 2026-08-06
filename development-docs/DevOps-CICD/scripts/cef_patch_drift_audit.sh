@@ -25,6 +25,8 @@
 # Usage:
 #   cef_patch_drift_audit.sh [--with-dist <release-dir> [<resources-dir>]]
 #
+# HODOS_MIN_PATCHES (env, default 1) -- the PRESENCE gate. See below.
+#
 # Exit: 0 clean · 2 warnings (hunk offsets present; build may proceed with
 #       sign-off) · 1 HARD FAIL (patch cannot apply, target file missing, orphan
 #       or dangling registry entry) -- build must not start.
@@ -40,6 +42,27 @@ BASELINE="$SCRIPT_DIR/cef_patch_baseline_7871.txt"
 # allowance the registry check would exit 1 on every single run from day one --
 # and a gate that always fails is a gate that gets ignored.
 UPSTREAM_ORPHAN_ALLOWANCE="chrome_browser_privacy_1119417"
+
+# ── THE PRESENCE GATE ─────────────────────────────────────────────────────────
+# Assert `hodos_*.patch` PRESENCE, never a TOTAL patch count.
+#
+# A total ("must equal 114 upstream + our patches") is the wrong invariant: the
+# expected number changes on every landing, so the gate needs hand-editing each
+# time -- and a gate that must be hand-updated is a gate that eventually gets
+# updated wrongly. Presence is invariant: we always ship >= 1 Hodos patch, and
+# the number only ever grows.
+#
+# What it actually catches is P3 trap #2. chromium/src/cef is a COPY refreshed
+# only when the CEF checkout HASH changes, and `cef_current_hash` is read from
+# the STANDALONE checkout's HEAD -- which landing a patch necessarily moves to
+# exactly the SHA you then pin. So current == desired, the copy never refreshes,
+# and the build compiles ZERO Hodos patches with a fully green run. Before this
+# gate existed the audit reported `Hodos entries: 0` / `CLEAN` in that state,
+# which reads as success and means "your copy is stale".
+#
+# Raise it via the env var once more patches land, if you want the stronger
+# equality; leaving it at 1 is still correct and still catches a stale copy.
+HODOS_MIN_PATCHES="${HODOS_MIN_PATCHES:-1}"
 
 WARN=0
 FAIL=0
@@ -128,8 +151,12 @@ echo "$REG" | sed -n 's/^HODOS_ENTRY=/    hodos: /p' | tr '|' ' '
 # A gate that cannot tell ITS OWN failure from the failure it is hunting is worse
 # than no gate. If patch.cfg parsed to a handful of entries, every downstream
 # verdict is meaningless -- and "0 patches, all clean" would read as PASS.
+# NB: this is a PARSE-SANITY FLOOR, not the landing gate. It only asserts that
+# patch.cfg parsed to something plausible. The gate that proves our patches are
+# actually present is the PRESENCE check in section 2 -- do not turn this into an
+# exact total, or it needs hand-editing on every upstream point-release too.
 if [ "${ENTRIES:-0}" -lt 100 ]; then
-  echo "  AUDIT_FAIL: only $ENTRIES entries parsed -- expected 114+ upstream."
+  echo "  AUDIT_FAIL: only $ENTRIES entries parsed -- upstream 7871 alone carries 114."
   echo "              AUDIT malfunction, not a patch finding. Check patch.cfg syntax."
   exit 1
 fi
@@ -167,11 +194,34 @@ else
 fi
 echo
 
-# ── 2. TARGET-FILE EXISTENCE (Hodos patches only) ─────────────────────────────
-# Catches an upstream rename/delete with a clearer message than a raw hunk fail.
-echo "=== 2. Hodos patch target files exist ==="
+# ── 2. HODOS PATCH PRESENCE + TARGET-FILE EXISTENCE ───────────────────────────
+# Presence is the gate (see THE PRESENCE GATE at the top). Target-file existence
+# then catches an upstream rename/delete with a clearer message than a raw hunk fail.
+echo "=== 2. Hodos patch presence + target files ==="
+
+# Count the FILES as well as the registry entries. They answer different
+# questions: a file with no patch.cfg entry is never applied (section 1 flags it
+# as an orphan), and an entry with no file hard-fails the build. Both numbers
+# being >= the floor is what "our patches are really in this tree" means.
+HODOS_FILES=$(ls "$CEF_SRC"/patch/patches/hodos_*.patch 2>/dev/null | wc -l | tr -d ' ')
+echo "  hodos_*.patch files      : $HODOS_FILES"
+echo "  hodos_* patch.cfg entries: ${HODOS:-0}   (floor: $HODOS_MIN_PATCHES)"
+
+if [ "$HODOS_FILES" -lt "$HODOS_MIN_PATCHES" ] || [ "${HODOS:-0}" -lt "$HODOS_MIN_PATCHES" ]; then
+  note_fail "PRESENCE GATE: expected >= $HODOS_MIN_PATCHES Hodos patch(es), found $HODOS_FILES file(s) / ${HODOS:-0} entry(ies)."
+  echo "            This is almost certainly a STALE in-tree copy, not a missing patch."
+  echo "            $CEF_SRC is a COPY of the standalone checkout, refreshed only when the"
+  echo "            CEF checkout HASH changes -- and landing a patch moves the standalone HEAD"
+  echo "            to exactly the SHA you then pin, so it never refreshes on its own."
+  echo "            Fix: re-run automate-git with --force-cef-update (both build scripts pass"
+  echo "            it unconditionally), or delete $CEF_SRC and let the re-copy fire."
+  echo "            Correct order: commit+push -> bump pin in BOTH scripts -> sync -> audit -> build."
+elif [ "$HODOS_FILES" -ne "${HODOS:-0}" ]; then
+  note_warn "hodos_*.patch file count ($HODOS_FILES) != registered entry count (${HODOS:-0}) -- see section 1 for which."
+fi
+
 if [ "${HODOS:-0}" -eq 0 ]; then
-  echo "  (no Hodos patches registered yet -- nothing to check)"
+  echo "  (no registered Hodos patches -- no target files to check)"
 else
   for pf in "$CEF_SRC"/patch/patches/hodos_*.patch; do
     [ -e "$pf" ] || continue
