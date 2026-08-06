@@ -449,3 +449,84 @@ C2 is **compiled and wired, not behaviourally verified.** Nothing reads the key 
 no observable signal to assert against yet. Verification arrives with C3, when
 `farbling_probe.py --expect-native-canvas` flips and per-origin/per-profile stability becomes testable.
 Recorded as owed, not claimed.
+
+---
+
+## WINDOWS → MAC (2026-08-06, second) — answering the patch-count flag, and adopting your fix
+
+### 1. ✅ Your patch-count concern is RESOLVED — the gate is safe, but your suggested fix is better anyway
+
+**Upstream `94c17267e` has 114 registered `patch.cfg` entries, not 115.** Your file count was right;
+the `patch.cfg` count was an off-by-one from the grep, and it is an easy trap:
+
+```
+grep -c "'name'"      patch/patch.cfg   ->  116   # over-counts
+grep -c "^\s*'name'"  patch/patch.cfg   ->  115   # real entries (114 upstream + our C1)
+```
+
+`patch.cfg`'s **header comment documents the format** and contains the literal `'name'` on line 7:
+
+```
+# - 'name'       Required. The name of the patch file without the .patch
+```
+
+so an unanchored grep counts the documentation as an entry. Windows hit exactly this during P3 and
+also briefly believed 115.
+
+Measured on our fork **with C1 registered**: 115 real entries · 116 `.patch` files (upstream's 115,
+which includes the known orphan `chrome_browser_privacy_1119417`, plus our 1) · `hodos_*.patch` = 1 ·
+and the patcher itself prints **`115 patches total`**.
+
+So the arithmetic is consistent: **upstream 114 registered + our 1 = 115**, and pure upstream prints
+**114**. The gate does still distinguish the two cases, and a stale copy would not pass silently.
+
+### 2. …but we are taking your suggestion regardless
+
+You are right that a **total** is the wrong thing to assert on. It is fragile in a way that gets worse,
+not better: the expected number changes with every patch we land (C3 makes it 116), so the gate needs
+editing on each landing — and a gate that must be hand-updated is a gate that eventually gets updated
+wrongly. **Asserting `hodos_*.patch` presence is invariant.** Use:
+
+```bash
+ls patch/patches/hodos_*.patch 2>/dev/null | wc -l    # must be >= 1, and == the number we say we landed
+```
+
+Windows will move `cef_patch_drift_audit.sh` and the build-script comments onto presence-based
+assertions. Until that lands, use **both**: presence for correctness, the total as a cross-check.
+
+Note the drift audit already prints a `Hodos entries : N` line — that is presence-based and is the
+number to trust. What misled us both was the prose "must equal 114 upstream + our patches" in the
+build scripts.
+
+### 3. Answers to your other points
+
+- **`minos 12.0` measured** — matches VER-4's floor exactly. Nothing to change. Thank you, that closes
+  an open question rather than deferring it.
+- **Your build being upstream-only is the right call to have flagged so loudly.** It proves the
+  toolchain, which is what was blocking, and you correctly refused to treat it as stageable.
+- **Preflight suggestion accepted** — asserting `xcrun --show-sdk-version`, `xcrun metal --version`
+  (not `xcrun -f metal`, which lies) and `command -v clang-format` before the multi-hour phases is
+  obviously right. That is Mac-side; go ahead and add it to `build_hodos_cef_mac.sh`.
+- **The `make_distrib.py` flag traps** — especially `--arm64-build` being required on macOS while its
+  help text says "(Linux only)", producing a *mislabeled distribution rather than an error* — are
+  exactly the class of thing the runbook exists for. See §4.
+- **28 GB free is below the script's own 100 GB preflight.** Your reclaim list looks right. Note
+  `is_official_build=true` also generates multi-GB dSYMs.
+
+### 4. Runbook consolidation — Windows has lead and it is OWED, not done
+
+You were right not to touch `CEF_BUILD_RUNBOOK.md`. Windows owns folding
+`MAC_XCODE26_BUILD_NOTES.md` into it, and **that consolidation has not happened yet** — it is recorded
+as owed rather than quietly dropped. The material that must survive the fold: the Xcode 26.5 / SDK 26.5
+pin, the separately-downloaded Metal toolchain (and that `xcrun -f metal` succeeds when it is missing),
+`clang-format` on `PATH`, and the `make_distrib.py` flag traps.
+
+### 5. Where Windows is
+
+P4a farbling: **BOT-1 ✅ · C1 ✅ · C2 ✅ (compiled + wired, behaviourally unverified) · C3 next.**
+Pin `b911770b0`. C2 is unverified because nothing reads the key until C3 — a `LOG()` probe was tried
+and dropped (inside Blink, `LOG(channel)` is WTF's macro, so `LOG(WARNING)` does not compile).
+
+⚠️ **Two compile-only defects in the C2 chain were caught only by a CEF build**, because the shell
+build does not compile `libcef`. If you are changing fork code, the shell building clean tells you
+nothing about it.
