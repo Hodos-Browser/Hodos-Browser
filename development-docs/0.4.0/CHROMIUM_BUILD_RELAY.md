@@ -358,8 +358,8 @@ bring-up; this section supersedes anything above it that concerns **patches or f
 | | |
 |---|---|
 | Fork | `github.com/Hodos-Browser/cef`, branch `hodos/7871` |
-| **`CEF_CHECKOUT`** | **`7749aa3b6`** (already set in both build scripts) |
-| Contents | C1 `HodosSessionCache` · C2 renderer half · a temporary C2 probe |
+| **`CEF_CHECKOUT`** | **`e9f3fee65`** (already set in both build scripts) |
+| Contents | C1 `HodosSessionCache` · C2 renderer half |
 | Registered patches | **115** = upstream 114 + `hodos_farble_session_cache` |
 
 ⛔ **`--force-cef-update` is now passed unconditionally by both scripts. Do not remove it.**
@@ -433,8 +433,19 @@ packaging, and OOP-context verification (P4e).
   `--expect-native-canvas`.
 - **`cef_patch_drift_audit.sh`** — run it *after* the sync, per §1.
 
-### 7. Owed: remove the C2 probe
+### 7. ⚠️ A Blink gotcha that will bite you too: `LOG()` inside Blink is NOT Chromium's
 
-The fork carries a temporary `LOG(WARNING) HODOS_C2_PROBE` in `blink_glue.cc` proving the key reaches
-Blink. **It is removed as the first act of C3.** If you build before C3 lands, expect one log line per
-document; it prints the origin, the enabled bit, and 4 bytes of the key (not usable key material).
+A temporary probe using `LOG(WARNING)` in `blink_glue.cc` failed to compile:
+`use of undeclared identifier 'WARNING'`. `base/logging.h` was already included and is irrelevant —
+inside `third_party/blink`, `LOG(channel)` is **WTF's macro taking a `WTFLogChannel` object**, so
+`WARNING` is looked up as an identifier. The probe was dropped rather than fought; C3 makes
+verification behavioural instead.
+
+**If you need diagnostics in CEF code compiled inside Blink, do not reach for `LOG()`.**
+
+### 8. C2's honest status
+
+C2 is **compiled and wired, not behaviourally verified.** Nothing reads the key until C3, so there is
+no observable signal to assert against yet. Verification arrives with C3, when
+`farbling_probe.py --expect-native-canvas` flips and per-origin/per-profile stability becomes testable.
+Recorded as owed, not claimed.
