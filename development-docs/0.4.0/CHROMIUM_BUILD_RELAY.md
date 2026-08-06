@@ -358,7 +358,7 @@ bring-up; this section supersedes anything above it that concerns **patches or f
 | | |
 |---|---|
 | Fork | `github.com/Hodos-Browser/cef`, branch `hodos/7871` |
-| **`CEF_CHECKOUT`** | **`e9f3fee65`** (already set in both build scripts) |
+| **`CEF_CHECKOUT`** | **`b911770b0`** (already set in both build scripts) |
 | Contents | C1 `HodosSessionCache` · C2 renderer half |
 | Registered patches | **115** = upstream 114 + `hodos_farble_session_cache` |
 
