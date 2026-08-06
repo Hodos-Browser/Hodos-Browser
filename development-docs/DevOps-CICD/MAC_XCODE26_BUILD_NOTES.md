@@ -197,7 +197,25 @@ that and are **specific to low-memory machines**, not general recommendations:
 Note that flipping `is_official_build` invalidates **every** object file — it is not a cheap thing
 to change your mind about. Decide before starting.
 
-Disk: the tree consumed ~53 GB before this build and ~123 GB after; budget **150 GB+** free.
+### Disk — budget 150 GB+, and beware a deleted `src/.git`
+
+Measured on this tree: ~53 GB before the build, ~123 GB after. The finished
+`out/Release_GN_arm64` alone was **56 GB** for a *non-official* build; `is_official_build=true` adds
+ThinLTO objects and multi-GB dSYMs on top, so budget **150 GB+**. A 256 GB machine is genuinely
+marginal for this work.
+
+⚠️ **Do not delete `chromium/src/.git` to reclaim space.** It was done on this machine in an earlier
+session (~97 GB reclaimed) and it is a trap: the dependency repos under `third_party/` keep their own
+`.git`, so the tree *looks* intact and still builds happily with ninja — but `src` is no longer a git
+repository at all, so `gclient sync` cannot run against it and `automate-git.py` cannot update or
+re-pin the checkout. You keep the ability to rebuild what you already have and lose the ability to
+change what you are building, which is the more valuable half.
+
+If it has already been deleted, `automate-git.py --no-chromium-history` is the cheap recovery path:
+it pins the gclient URL to `@<version>` and syncs without history, and its validation
+(`automate-git.py:1423-1436`) compares `chrome/VERSION` against the target — so a tree already at the
+right version is reused rather than re-fetched, provided you also pass `--force-update` or
+`--force-clean`. A full-history re-clone is the expensive alternative.
 
 ---
 
@@ -259,10 +277,25 @@ parentheses are group syntax. Escape them, or match on `--type=` instead.
 
 ## Open questions for the Windows side
 
-1. **Patch count.** This upstream tree carries **115** patches in `patch/patches/`. The note in
-   `build_hodos_cef_mac.sh` says the patcher "must equal 114 upstream + our patches". Is 114 stale,
-   or is one of the 115 here not counted the same way? Worth reconciling before the count is used
-   as a gate.
+1. ~~**Patch count.**~~ **RESOLVED 2026-08-06 — my error, recorded so nobody repeats it.**
+   I reported 115 upstream registered patches and flagged a possible silent-gate hazard. **Wrong.**
+   The count came from `grep -c "'name'" patch/patch.cfg`, and `patch.cfg`'s own header comment
+   documents the format on line 7 (`# - 'name'  Required. ...`), so an unanchored grep counts the
+   *documentation* as an entry. Verified both ways on `94c17267e`:
+
+   ```
+   grep -c "'name'"      patch/patch.cfg   ->  115   # WRONG, counts the doc comment
+   grep -c "^\s*'name'"  patch/patch.cfg   ->  114   # correct
+   ```
+
+   Upstream is **114 registered** entries and **115 `.patch` files** — the extra file is the known
+   orphan `chrome_browser_privacy_1119417`, which is present but not registered. So pure upstream
+   prints `114 patches total` and the fork with C1 prints `115`; the gate did distinguish them and
+   was never unsafe. Windows hit this same trap during P3.
+
+   **Always anchor the grep.** Better still, gate on presence, not a total —
+   `ls patch/patches/hodos_*.patch | wc -l` is invariant, whereas the expected total changes with
+   every patch landed. Windows has adopted presence-based gating for exactly that reason.
 2. **Does the `--force-cef-update` finding change anything for Mac?** It was measured on Windows
    2026-08-05 and described as platform-independent; nothing here contradicts that, but the Mac
    fork build hasn't been run yet to confirm.
