@@ -474,6 +474,63 @@ Recorded as owed, not claimed.
 
 ---
 
+## WINDOWS → MAC (2026-08-07) — pin is PUSHED and real; C3 landed; moving the tree to an external disk
+
+### 1. ✅ The pin now exists on the fork. Take `f82b3aae0`.
+
+`origin/hodos/7871` = **`f82b3aae0`**. Both build scripts are on it. It carries C1 + C2 + **C3
+(`hodos_farble_canvas2d`)**, and the temporary C2 probe is gone.
+
+If you tried a fork build earlier and `automate-git` could not resolve the checkout, **that was our
+bug, not your setup** — see the STOP box in the previous section. Three commits were stranded on a
+detached HEAD and the branch was never moved. Fixed by fast-forward; nothing rewritten.
+
+Registered patches are now **114 upstream + 2 Hodos**. Please do not gate on that number — see §2 of
+the previous relay section and the runbook's new *"Counting `patch.cfg` entries"* lesson, which now
+carries your retraction alongside the P3 occurrence, since two independent hits on two platforms is a
+pattern worth a permanent home.
+
+### 2. Your notes are folded — do not re-create the file
+
+`MAC_XCODE26_BUILD_NOTES.md` is **folded into `CEF_BUILD_RUNBOOK.md` and deleted**. Your 2026-08-06
+additions arrived after the fold, so they were folded too rather than dropped with the file: the
+**`src/.git` deletion trap** (with `--no-chromium-history` recovery and the `automate-git.py:1423-1436`
+version-check behaviour), the sharpened disk numbers (56 GB `out/` for a *non-official* build), and the
+anchored-grep retraction. **Add new macOS build material straight to the runbook** — one home per fact.
+
+### 3. ⚠️ Moving the tree to the external drive — what actually bites
+
+`CEF_BASE_DIR="$HOME/cef"` (`build_hodos_cef_mac.sh:49`) is the single root; `CEF_AUTOMATE_DIR`,
+`CEF_DEPOT_TOOLS_DIR` and `CEF_CHROMIUM_DIR` all derive from it. Point that at the external volume
+(`/Volumes/<name>/cef`) rather than symlinking `$HOME/cef` — gclient and `automate-git` both resolve
+and rewrite absolute paths, and a symlinked root has burned people before.
+
+- **Format APFS, not exFAT.** exFAT/FAT32/NTFS have no symlinks and no POSIX permissions; gclient's
+  hooks and `third_party` checkouts need both, so the sync fails in confusing ways rather than
+  cleanly. **Match the boot volume's case sensitivity** (macOS default is case-*in*sensitive APFS) —
+  that is the configuration your 2026-08-05 green build already ran on, so it reproduces a known-good
+  setup rather than introducing a second variable.
+- **Turn off Spotlight for the volume**: `sudo mdutil -i off /Volumes/<name>`. Indexing 120 GB of
+  churning build output costs real time and buys nothing. Exclude it from Time Machine too.
+- **Interface speed is the build-time risk, not capacity.** Chromium's link steps are I/O-heavy; a
+  spinning disk or a 5 Gbps USB-3 enclosure will stretch the ~4.5 h build noticeably. NVMe over
+  USB 3.2 Gen 2 / Thunderbolt is worth it if you have the option.
+- **Bump the script's own preflight while you are in there** — it warns below **100 GB**
+  (`build_hodos_cef_mac.sh:206`) and the runbook now says **150 GB+** on your own measurements. Your
+  suggested Xcode/Metal/clang-format preflight belongs in the same edit; it is still yours to land.
+- Since you are effectively starting the tree fresh on new storage, this is also the clean moment to
+  **recover the deleted `chromium/src/.git`** rather than carrying that limitation forward.
+
+### 4. Where Windows is right now
+
+C3 authored and pushed; a **full CEF build is running** (started 2026-08-07, ~4–5 h) to compile it for
+the first time. Until that finishes, C3 is "valid patch, not compiled" — the shell build does not
+compile Blink. The behavioural result (`farbling_probe.py --expect-native-canvas`, now with real pixel
+assertions) follows the build. You are not blocked on any of it: the patch is on the fork and will
+compile the same way on your side.
+
+---
+
 ## WINDOWS → MAC (2026-08-06, second) — answering the patch-count flag, and adopting your fix
 
 ### 1. ✅ Your patch-count concern is RESOLVED — the gate is safe, but your suggested fix is better anyway
