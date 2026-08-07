@@ -190,10 +190,36 @@ Highest fingerprint value first. All paths are `third_party/blink/renderer/...`.
 > then add a fork-internal `[Sync]` method on `cef.mojom`'s `BrowserFrame` that the renderer calls
 > from `OnContextCreated`, keyed by the document's origin.
 >
-> ⚠️ **PRE-EXISTING PRODUCTION BUG (not introduced by C2).** The legacy `fingerprint_seed` IPC is sent
-> from the same `OnBeforeBrowse` site and lands the same way, so **the shipped JS farbling has very
-> likely been running on its URL-hash fallback rather than real per-domain seeds.** Do not copy the
-> legacy pattern — it inherits the defect. Deserves its own ticket.
+> ## 🚨 CONFIRMED BY MEASUREMENT — a SHIPPED production privacy bug (2026-08-07)
+>
+> The legacy `fingerprint_seed` **also** never reaches the renderer. Shipped JS farbling runs on a
+> **constant**. Measured with a temporary browser-side log of the computed seed, across two restarts:
+>
+> | | browser-computed seed | farbled audio output |
+> |---|---|---|
+> | Run A | `2030444654` | `a10d2ba4` |
+> | Run B | `3258985367` | `a10d2ba4` |
+>
+> The browser computes a correct session-token-derived seed each launch. The farbled output is
+> **byte-identical**, so the renderer ignores it and falls back to
+> `std::hash<std::string>(url) & 0xFFFFFFFF` — a pure function of the URL, with no session token and
+> no profile seed. Controls: the auth-exempt page's audio hash was identical across restarts
+> (`84551a93`), proving the measurement is deterministic; the farbled value was also stable across
+> repeated away-and-back navigations, so it is not a one-shot-erase artifact.
+>
+> **Impact on shipped users:** every Hodos user farbles *identically* for a given URL. That is zero
+> cross-user unlinkability, and worse, a stable precomputable constant — i.e. a
+> **browser-identifying fingerprint**, the exact "worse than no farbling" outcome
+> `HodosSessionCache`'s own header warns about.
+>
+> **Both** the legacy seed and the C2 key fail for the **same** root reason (pre-commit send reaching
+> the wrong renderer process/document), so the renderer-side pull fixes both at once. This needs its
+> own ticket regardless, because it is live in production today while P4d is several phases away.
+>
+> 💡 Related, found the same day: **renderer-process logging is dead.** `Logger::Initialize` is only
+> called in the browser process, so every `LOG_*_RENDER` call is a silent no-op and `[RENDER]` has
+> never once appeared in `debug_output.log`. Use Chromium's `LOG()` (→ `cef_debug.log`) for renderer
+> diagnostics, and consider fixing the logger separately.
 >
 > ⚠️ **The acceptance harness was itself defective** — see `farbling_probe.py`. It created tabs with
 > CDP `PUT /json/new`, and those targets never reach `OnBeforeBrowse`, so they never receive a key at
