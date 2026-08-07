@@ -252,8 +252,28 @@ python C:\cef\automate\automate-git.py ^
 Use `development-docs/DevOps-CICD/scripts/build_hodos_cef_mac.sh`. Same `automate-git.py` + ninja flow.
 Arch: `--arm64-build` on Apple Silicon (M1+), `--x64-build` on Intel. Output is
 `Chromium Embedded Framework.framework` instead of `libcef.dll` — Windows DLLs cannot be used on macOS;
-this is a fully separate build. Budget **150 GB+** free disk (a 7871 tree measured 53 GB before the
-build and 123 GB after), and note `is_official_build=true` also generates multi-GB dSYMs.
+this is a fully separate build.
+
+##### Disk — budget 150 GB+, and NEVER delete `src/.git` to reclaim it
+
+Measured on a 7871 mac tree: **~53 GB before the build, ~123 GB after.** The finished
+`out/Release_GN_arm64` alone was **56 GB for a *non-official* build**; `is_official_build=true` adds
+ThinLTO objects and multi-GB dSYMs on top. Budget **150 GB+**, and treat a 256 GB machine as
+genuinely marginal for this work.
+
+> ⛔ **Do not delete `chromium/src/.git` to reclaim space.** Done on the mac host in an earlier
+> session (~97 GB reclaimed) and it is a trap with a delayed bill: the dependency repos under
+> `third_party/` keep their own `.git`, so the tree *looks* intact and **still builds happily under
+> ninja** — but `src` is no longer a git repository, so `gclient sync` cannot run against it and
+> `automate-git.py` cannot update or re-pin the checkout. **You keep the ability to rebuild what you
+> already have and lose the ability to change what you are building**, which is the more valuable
+> half — and the loss is invisible until the next pin bump.
+>
+> **Recovery if it is already gone:** `automate-git.py --no-chromium-history` is the cheap path — it
+> pins the gclient URL to `@<version>` and syncs without history. Its validation
+> (`automate-git.py:1423-1436`) compares `chrome/VERSION` against the target, so a tree already at the
+> right version is **reused rather than re-fetched**, provided you also pass `--force-update` or
+> `--force-clean`. A full-history re-clone is the expensive alternative.
 
 ##### Toolchain — Chromium 150 needs more than "Xcode + CLT"
 
@@ -420,6 +440,30 @@ never auto-apply). Until scripted (see Open TODOs), run this as a checklist on e
 ---
 
 ## Lessons learned
+
+### Counting `patch.cfg` entries — anchor the grep, then stop counting totals
+
+Hit **twice**, independently, on both platforms — Windows during P3 and macOS on 2026-08-06 — so it is
+a pattern, not an accident:
+
+```bash
+grep -c "'name'"      patch/patch.cfg    # 116 -- WRONG, counts the doc comment
+grep -c "^\s*'name'"  patch/patch.cfg    # 115 -- real entries (114 upstream + our C1)
+```
+
+`patch.cfg` is Python whose **header comment documents the format** and contains the literal `'name'`
+on line 7 (`# - 'name'  Required. …`), so an unanchored grep counts the documentation as an entry.
+On upstream `94c17267e` the true figures are **114 registered entries** and **115 `.patch` files** —
+the extra file being the known unregistered orphan `chrome_browser_privacy_1119417`.
+
+**The durable fix is not a better grep, it is not gating on a total at all.** The expected total
+changes on every patch landed, so the gate needs hand-editing each time, and a gate that must be
+hand-updated eventually gets updated wrongly. `cef_patch_drift_audit.sh` now (a) `exec`s `patch.cfg`
+the way `patcher.py` does rather than grepping it, (b) gates on `hodos_*.patch` **presence**
+(`HODOS_MIN_PATCHES`, default 1), and (c) — the load-bearing check — compares the **standalone
+checkout's** Hodos patch set against the **in-tree copy's**, since a copy stale by exactly one new
+patch still clears any fixed floor. The patcher's `N patches total` line stays useful as a cross-check
+and as the cheapest stale-copy tell in a raw build log; it is not the gate.
 
 ### From the 2026-08-05 macOS CEF 150 build (Xcode 26 / Tahoe)
 
