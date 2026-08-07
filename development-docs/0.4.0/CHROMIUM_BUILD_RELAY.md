@@ -474,6 +474,54 @@ Recorded as owed, not claimed.
 
 ---
 
+## WINDOWS → MAC (2026-08-07, second) — ⛔ C2 was silently broken; farbling never ran
+
+**Take pin `f429ba1e8`** (supersedes `f82b3aae0` in the section below — that one builds, but farbles
+nothing).
+
+### The failure, because it is the instructive part
+
+C1, C2 and C3 were all compiled, staged and running. Every `[native code]` assertion passed. And
+**canvas farbling did not happen at all** — the farbled page's canvas hashes were byte-identical to
+the auth-exempt page's.
+
+**`farbling_probe.py --expect-native-canvas` as originally written would have called that a full
+PASS.** It only asserted that `getImageData`/`toDataURL`/`toBlob` report `[native code]`, which becomes
+true the moment the JS fragment is deleted — whether or not anything replaced it. The probe now also
+hashes real pixels from a small canvas (inside the `<65536px` gate) and a large one (outside it), and
+asserts the small hashes **differ** across exempt/farbled pages while the large ones **match**. The
+large canvas is the control; without it, any incidental rendering difference between two pages would
+read as farbling success. **Run it with the behavioural assertions or you are not testing farbling.**
+
+### Root cause — worth knowing before you debug anything similar
+
+`CefFrameImpl::ExecuteOnLocalFrame` only **queues** while `context_created_` is false.
+`context_created_` has exactly one assignment in `frame_impl.cc` — set `true` in `OnContextCreated` —
+and is **never reset**, not on navigation, not in `OnContextReleased`. So from a frame's *second*
+document onward it runs the action **immediately**, and since the browser sends `hodos_farble_key`
+**pre-commit**, "immediately" means against the **outgoing** document's `LocalDOMWindow`. The incoming
+document got a key-less cache, `FarblingEnabled()` was false, and every C3 hook correctly returned the
+native value. A CDP-created tab is affected too — its initial empty document already made a context.
+
+The earlier design note ("ExecuteOnLocalFrame gives correct timing for free") was wrong; it holds only
+for a frame's first-ever load. **Fix:** hold the key in `pending_farble_key_` and install it in
+`OnContextCreated` — overwrite-on-arrival (makes a cancelled navigation safe) and consume-once (stops
+an `about:blank` context inheriting a previous document's key). No change to `context_created_` or
+`ExecuteOnLocalFrame`, so no other CEF caller moves.
+
+Note the legacy `fingerprint_seed` path had this right all along: its renderer handler **caches by URL
+and applies at `OnContextCreated`**. That caching is precisely what C2 skipped.
+
+### Cheap technique you can reuse
+
+To decide browser-side vs renderer-side without instrumenting anything: the legacy `fingerprint_seed`
+IPC rides the **same branch**, immediately before the farbling key. So checking whether
+`AudioBuffer.prototype.getChannelData` / `WebGLRenderingContext.prototype.readPixels` are non-native on
+the farbled page tells you whether that branch ran — zero builds. They were non-native, which acquitted
+the browser half immediately.
+
+---
+
 ## WINDOWS → MAC (2026-08-07) — pin is PUSHED and real; C3 landed; moving the tree to an external disk
 
 ### 1. ✅ The pin now exists on the fork. Take `f82b3aae0`.

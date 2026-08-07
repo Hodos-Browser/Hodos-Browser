@@ -51,9 +51,9 @@ set CEF_URL=https://github.com/Hodos-Browser/cef.git
 REM Pin an exact FORK commit, not the moving hodos/7871 branch tip: a build must
 REM be reproducible, and patch content is part of the build. BUMP THIS every time
 REM a patch lands on hodos/7871, and record the new SHA in the fork's
-REM HODOS_PATCHES.md. Upstream content is unchanged -- f82b3aae0 is
+REM HODOS_PATCHES.md. Upstream content is unchanged -- f429ba1e8 is
 REM 94c1726 (upstream 7871 head) plus our patch commits.
-set CEF_CHECKOUT=f82b3aae0
+set CEF_CHECKOUT=f429ba1e8
 
 REM ⚠️ chromium\src\cef is a COPY of the standalone checkout, refreshed ONLY when
 REM the CEF checkout HASH changes (automate-git.py:1358-1360). If you manually

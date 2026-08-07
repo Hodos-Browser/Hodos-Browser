@@ -155,7 +155,34 @@ Highest fingerprint value first. All paths are `third_party/blink/renderer/...`.
 >
 > Per-vector PRNG **streams** (canvas / webgl-readPixels / audio) so a site reading several vectors cannot correlate them back toward the seed. Perturbation matches the outgoing JS exactly (red-channel LSB on ~3% of pixels; ~1.0±2e-7 audio multiplier) so already-enrolled users keep their fingerprint across the migration. The small-canvas gate stays at the **call site** — only the caller knows the surface dimensions.
 
-### C2 — Seed/enabled delivery (wiring, mostly shell-side) `[dep C1]`
+### C2 — Seed/enabled delivery (wiring, mostly shell-side) `[dep C1]` — ⛔ **shipped BROKEN, fixed 2026-08-07 (fork `f429ba1e8`)**
+
+> **C2 delivered the key to the wrong document, so farbling never ran.** Everything compiled, staged
+> and looked green for two days. Caught only by the behavioural half of `farbling_probe.py`.
+>
+> `CefFrameImpl::ExecuteOnLocalFrame` only **queues** while `context_created_` is false, and that flag
+> has exactly one assignment in `frame_impl.cc` — set `true` in `OnContextCreated`, **never reset**.
+> From a frame's second document onward it therefore runs **immediately**, and because the browser
+> sends `hodos_farble_key` **pre-commit**, that means against the **outgoing** document's
+> `LocalDOMWindow`. The incoming document got a key-less `HodosSessionCache`, `FarblingEnabled()` was
+> false, and every C3 hook correctly returned the native value.
+>
+> ⇒ **This plan's claim that `ExecuteOnLocalFrame` gives correct timing "for free" is WRONG** and is
+> corrected here. It holds only for a frame's first-ever load. Fix: hold the key in
+> `pending_farble_key_`, install it in `OnContextCreated`, overwrite-on-arrival (cancelled navigation)
+> + consume-once (`about:blank` must not inherit a key).
+>
+> **The legacy `fingerprint_seed` path had this right all along** — its renderer handler caches by URL
+> and applies at `OnContextCreated`. Reuse-first would have found this: C2 invented a delivery
+> mechanism where a working one was sitting beside it.
+>
+> ⚠️ **FB-1 also specified a lazy `[Sync]` pull on first farbled API call** ("the push alone races the
+> first inline script"). That half is **still not implemented**. The push fix above addresses the
+> wrong-document bug but **not** the inline-script race — a page whose very first inline script reads
+> a canvas before `OnContextCreated`… cannot happen (context creation precedes script), but a
+> *subframe* or a worker with no delivery still has no key. Track separately; P4e owns OOP.
+
+### C2 (original plan text)
 - **Shell (browser, `cef-native/`):** generate/store `profile_seed`; compute `domain_key`; decide `enabled` (= `!IsAuthDomain(top) && IsSiteEnabled(top)`); deliver at navigation commit + worker start. `#ifdef _WIN32` / `#elif __APPLE__` per Invariant #9; Mac creation paths in `cef_browser_shell_mac.mm`.
 - **Blink:** receive `{domain_key, enabled}` into `HodosSessionCache`.
 
