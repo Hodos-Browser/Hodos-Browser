@@ -541,8 +541,24 @@ Two macOS verification tricks worth keeping:
 
 - **Running a `.bat` from git-bash via `cmd.exe /c` silently no-ops.** MSYS rewrites the `/c` flag
   into a path, so `cmd` starts *interactively*, prints its banner, hits EOF and exits **0** — a
-  green exit with zero work done. Use `MSYS_NO_PATHCONV=1`, `cmd.exe //c`, or (preferred) drive
-  `automate-git.py` from bash with exported env vars so exit codes are real.
+  green exit with zero work done.
+
+  > ⛔ **CORRECTED 2026-08-07: `MSYS_NO_PATHCONV=1` and `cmd //c` are NOT reliable fixes.** This
+  > runbook previously listed both as workarounds. Launching the C3 build as
+  > `MSYS_NO_PATHCONV=1 cmd //c "…build_hodos_cef.bat > log 2>&1"` reproduced the failure exactly:
+  > exit 0 in under a minute, **no log file created at all**, and the captured output was the cmd
+  > banner followed by an interactive prompt. Do not trust either form.
+  >
+  > **What works:** put the invocation in a **`.ps1` wrapper file** and run
+  > `powershell -NoProfile -ExecutionPolicy Bypass -File <wrapper>.ps1`. A file has no
+  > slash-arguments for MSYS to rewrite, so the command reaches `cmd` intact. See
+  > `C:\cef\cef150\run_build_c3.ps1` for the working shape. Driving `automate-git.py` directly from
+  > bash with exported env vars also works and keeps exit codes real.
+  >
+  > **Two consequences of the PowerShell route worth knowing before you read the log:** the log is
+  > **UTF-16**, so `grep` finds nothing until you strip NULs (`tr -d '\0' < build.log | grep …`);
+  > and PowerShell reports the child's *stderr* as `NativeCommandError` records, which look like
+  > failures and are not — `*>&1` merges them into the stream. Neither affects the build.
 
 - **Toolchain measured on this host (2026-08-03):** MSVC **14.44.35207** (VS2022 BuildTools 17.14),
   Windows SDK **10.0.26100** + 10.0.22621, Python 3.10.11 on PATH (depot_tools supplies its own;
