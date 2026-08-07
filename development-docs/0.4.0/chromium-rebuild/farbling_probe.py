@@ -134,16 +134,45 @@ PROBE_JS = r"""
 """
 
 
-def new_tab(cdp, url):
-    req = urllib.request.Request(cdp + "/json/new?" + url, method="PUT")
-    return json.load(urllib.request.urlopen(req, timeout=10))
+def cef_tab(cdp):
+    """Find an EXISTING CEF-created tab to drive.
+
+    ⛔ DO NOT go back to `PUT /json/new?<url>`. A target created that way does NOT
+    go through CEF's SimpleHandler::OnBeforeBrowse, so the browser process never
+    sends it a farbling key (nor a fingerprint seed) -- meaning every farbling
+    assertion below fails no matter how correct the implementation is. That
+    defect cost a full debugging cycle on 2026-08-07: the probe was reporting
+    "farbling is off" against a build where the browser was demonstrably sending
+    the key, because the tabs the probe made were invisible to CEF.
+
+    Driving a tab CEF made itself, via Page.navigate, is the only harness that
+    exercises the real navigation path.
+    """
+    targets = json.load(urllib.request.urlopen(cdp + "/json/list", timeout=10))
+    pages = [t for t in targets if t.get("type") == "page"]
+    # Prefer the NTP; any non-overlay page will do. Overlays are internal UI on
+    # 127.0.0.1:5137 and several are farbling-exempt by construction.
+    for t in pages:
+        if t.get("url", "").rstrip("/").endswith("/newtab"):
+            return t
+    for t in pages:
+        if not t.get("url", "").startswith("http://127.0.0.1:5137/"):
+            return t
+    if pages:
+        return pages[-1]
+    raise RuntimeError("no CEF page target found -- is the dev browser running?")
 
 
-def close_tab(cdp, tid):
+def navigate(ws_url, url, settle):
+    """Navigate an existing CEF tab and wait for it to settle."""
+    ws = websocket.create_connection(ws_url, timeout=30)
     try:
-        urllib.request.urlopen(cdp + "/json/close/" + tid, timeout=5).read()
-    except Exception:
-        pass
+        ws.send(json.dumps({"id": 1, "method": "Page.enable"}))
+        ws.send(json.dumps({"id": 2, "method": "Page.navigate",
+                            "params": {"url": url}}))
+        time.sleep(settle)
+    finally:
+        ws.close()
 
 
 def evaluate(ws_url, expr, timeout=25):
@@ -192,12 +221,15 @@ def main():
     for label, url, is_exempt in DEFAULT_TARGETS:
         print("=" * 78)
         print("%s  ->  %s" % (label, url))
-        tab = new_tab(cdp, url)
-        time.sleep(args.settle)
-        try:
-            r = evaluate(tab["webSocketDebuggerUrl"], PROBE_JS)
-        finally:
-            close_tab(cdp, tab["id"])
+        tab = cef_tab(cdp)
+        navigate(tab["webSocketDebuggerUrl"], url, args.settle)
+        # Re-resolve: a cross-site navigation swaps renderer process AND target,
+        # so the socket we navigated with may no longer address the new document.
+        tab = cef_tab(cdp)
+        r = evaluate(tab["webSocketDebuggerUrl"], PROBE_JS)
+        if r.get("host") not in url:
+            print("    [WARN] probed host %r does not match target %r -- "
+                  "the tab did not land where expected" % (r.get("host"), url))
         seen["exempt" if is_exempt else "farbled"] = r
 
         # --- BOT-1 invariants: identical on exempt AND farbled pages, by construction.

@@ -155,7 +155,52 @@ Highest fingerprint value first. All paths are `third_party/blink/renderer/...`.
 >
 > Per-vector PRNG **streams** (canvas / webgl-readPixels / audio) so a site reading several vectors cannot correlate them back toward the seed. Perturbation matches the outgoing JS exactly (red-channel LSB on ~3% of pixels; ~1.0±2e-7 audio multiplier) so already-enrolled users keep their fingerprint across the migration. The small-canvas gate stays at the **call site** — only the caller knows the surface dimensions.
 
-### C2 — Seed/enabled delivery (wiring, mostly shell-side) `[dep C1]` — ⛔ **shipped BROKEN, fixed 2026-08-07 (fork `f429ba1e8`)**
+### C2 — Seed/enabled delivery `[dep C1]` — ⛔ **STILL BROKEN. A PUSH CAN NEVER WORK. Needs FB-1's pull.**
+
+> ## ⭐ ROOT CAUSE PROVEN 2026-08-07 by an instrumented build — read this before touching C2
+>
+> Timeline for one navigation (from `cef_debug.log` — Chromium `LOG()` goes to `settings.log_file`,
+> **not** `debug_output.log`):
+>
+> ```
+> :21.000  CONTEXT-CREATED with NO pending key  url=https://example.com/      frame 11-982F70…
+> :26.954  RECV enabled=1 keyPrefix=b0fb635c…   url=https://example.com/      frame 11-982F70…
+> :26.954  APPLY-NOW readback_enabled=1                                       frame 11-982F70…
+> :26.961  CONTEXT-CREATED with NO pending key  url=https://example.com/?x=1  frame 11-5C4B43…
+> ```
+>
+> 1. **Delivery works and the Supplement takes the key.** `readback_enabled=1` is a genuine read-back
+>    of `FarblingEnabled()` from the target `ExecutionContext`, not an echo of the argument. C1, the
+>    C2 transport, and C3 are all sound.
+> 2. **The key is always ONE DOCUMENT LATE.** The new document's context is created *before* the key
+>    arrives; the key lands on the **outgoing** document, which is then discarded.
+> 3. ⛔ **Per-frame caching cannot bridge it.** Frame tokens change per document
+>    (`11-982F70…` → `11-5C4B43…` → `11-20DEEE…`) and `frame_debug_str_` is built in the constructor,
+>    so **each document gets a new `CefFrameImpl`**. A `pending_farble_key_` member therefore lives on
+>    an object the next document never sees. The `f429ba1e8` fix was *structurally* incapable of
+>    working — this is not a tuning problem.
+>
+> ⇒ **Any browser-side PUSH sent pre-commit is wrong by construction.** The correct design is the one
+> §FB-1 already specified and that was never implemented: **the renderer PULLS the key at
+> `OnContextCreated`** — the only moment that is both after the right document exists and before page
+> script runs.
+>
+> Suggested shape that adds **no public CEF API** (so no `CEF_API_HASH` churn): have the browser side
+> of libcef intercept the existing `hodos_farble_key` message and cache `{origin → key, enabled}`,
+> then add a fork-internal `[Sync]` method on `cef.mojom`'s `BrowserFrame` that the renderer calls
+> from `OnContextCreated`, keyed by the document's origin.
+>
+> ⚠️ **PRE-EXISTING PRODUCTION BUG (not introduced by C2).** The legacy `fingerprint_seed` IPC is sent
+> from the same `OnBeforeBrowse` site and lands the same way, so **the shipped JS farbling has very
+> likely been running on its URL-hash fallback rather than real per-domain seeds.** Do not copy the
+> legacy pattern — it inherits the defect. Deserves its own ticket.
+>
+> ⚠️ **The acceptance harness was itself defective** — see `farbling_probe.py`. It created tabs with
+> CDP `PUT /json/new`, and those targets never reach `OnBeforeBrowse`, so they never receive a key at
+> all: **it failed against builds where the browser was demonstrably sending the key.** Fixed
+> 2026-08-07 to drive an existing CEF tab via `Page.navigate`.
+
+<details><summary>Superseded: the earlier (partial) C2 diagnosis, kept because the mechanism is real</summary>
 
 > **C2 delivered the key to the wrong document, so farbling never ran.** Everything compiled, staged
 > and looked green for two days. Caught only by the behavioural half of `farbling_probe.py`.
@@ -175,6 +220,11 @@ Highest fingerprint value first. All paths are `third_party/blink/renderer/...`.
 > **The legacy `fingerprint_seed` path had this right all along** — its renderer handler caches by URL
 > and applies at `OnContextCreated`. Reuse-first would have found this: C2 invented a delivery
 > mechanism where a working one was sitting beside it.
+>
+> *(Later correction: the legacy path is **also** delivered too late; it merely hides it behind a
+> URL-hash fallback seed. See the proven root cause above — do not copy it.)*
+
+</details>
 >
 > ⚠️ **FB-1 also specified a lazy `[Sync]` pull on first farbled API call** ("the push alone races the
 > first inline script"). That half is **still not implemented**. The push fix above addresses the
