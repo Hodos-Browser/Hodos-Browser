@@ -559,6 +559,100 @@ Two macOS verification tricks worth keeping:
   > **UTF-16**, so `grep` finds nothing until you strip NULs (`tr -d '\0' < build.log | grep …`);
   > and PowerShell reports the child's *stderr* as `NativeCommandError` records, which look like
   > failures and are not — `*>&1` merges them into the stream. Neither affects the build.
+  >
+  > ⛔ **The `.ps1` wrapper has TWO MORE traps of its own. Both cost a "green" no-op run on
+  > 2026-08-07, and both are silent in exactly the same way as the original bug.**
+  >
+  > 1. **QUOTE THE WRAPPER PATH, or use forward slashes.** From the Bash tool,
+  >    `-File C:\cef\cef150\run_build_pull.ps1` has its backslashes eaten by the shell before
+  >    PowerShell ever sees them; PowerShell then reports
+  >    `The argument 'C:cefcef150run_build_pull.ps1' ... does not exist`, and the surrounding
+  >    pipeline still exits **0**. Use `-File 'C:/cef/cef150/run_build_pull.ps1'` (quoted, forward
+  >    slashes). The bare-backslash form appears in older session notes — it is wrong from bash.
+  > 2. **`Start-Process -RedirectStandardInput 'NUL'` throws `FileNotFoundException`.** `NUL` is a
+  >    device, not a file, and `Start-Process` insists on a real path. Redirecting stdin at all is
+  >    worth doing — `build_hodos_cef.bat` ends in `pause`, which can block forever with the build
+  >    already finished — so create a zero-byte file (`C:\cef\cef150\empty_stdin.txt`) and point at
+  >    that instead.
+  >
+  > **The common failure signature for all of these: exit 0, and a log file that is empty or a few
+  > dozen bytes.** Before believing a fast build, check `ls -l` on the log. A real build log is
+  > megabytes; a 72-byte log means nothing ran.
+
+- ⛔ **`siso` HIDES COMPILE ERRORS when it detects an agent environment.** Discovered 2026-08-07.
+  The build log ends with:
+
+  ```
+  ........Detected AI agent env. Prepending --quiet --batch=false --heartbeat_period=30s
+          to improve latency and reduce context pollution.
+  The build has finished with an error.
+  ```
+
+  — and **that is all you get**. `grep -i error` over the whole build log returns the summary line
+  and nothing else: no file, no line, no diagnostic. The build genuinely failed; the reason is simply
+  not in the log you were tailing.
+
+  **Where the error actually is** (all under `chromium/src/out/Release_GN_x64/`):
+
+  | File | Contents |
+  |------|----------|
+  | `siso_output` | **the real compiler diagnostics** — `grep -E "error" siso_output` |
+  | `.siso_failed_targets` | JSON naming the failed `.obj`, e.g. `{"failed":["obj/cef/libcef_static/frame_impl.obj"]}` — the fastest "which file" answer |
+  | `siso_failed_commands.bat` | the exact failing command lines, re-runnable by hand |
+
+  Do **not** conclude "green build, mysterious failure" from the main log alone, and do not go looking
+  for a patch/checkout problem — check these three first. They pinpointed a one-line type error in
+  seconds after the top-level log offered nothing.
+
+- ⛔ **A killed build looks EXACTLY like a compile error. Launch CEF builds DETACHED.**
+  Any harness that caps how long a command may run (an agent's background-task timeout, a CI step
+  timeout, an SSH session dropping) will kill `automate-git.py` mid-compile. What it leaves behind
+  reads as a genuine failure:
+
+  ```
+  FAILED: … "./obj/cef/libcef_static/browser_info_manager.obj" CXX …
+  err: exit=1
+  ```
+
+  **The tell is that there is no `error:` line anywhere** — not in the build log, not in
+  `siso_output`, and `.siso_failed_targets` is empty or absent. `err: exit=1` with zero diagnostics
+  means the compiler was *terminated*, not that it rejected the code. Do not go debugging your patch.
+  Re-run; siso resumes from the existing objects.
+
+  Launch so nothing upstream can kill it:
+
+  ```bash
+  powershell -NoProfile -Command "Start-Process -FilePath 'powershell' \
+    -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','C:/cef/cef150/run_build_x.ps1' \
+    -WindowStyle Hidden"
+  ```
+
+  That returns immediately and the build outlives the caller; watch
+  `build_x.err.log` for the `BUILD_EXIT=` line the wrapper appends. A full build is hours and even an
+  incremental libcef relink is well over 10 minutes, so this is the normal case, not the exception.
+
+- ⚠️ **Adding ONE method to `cef.mojom`'s `BrowserFrame` obligates TWO classes, not one.**
+  `CefBrowserFrame` is the obvious implementor (`libcef/browser/browser_frame.h`), but
+  **`CefFrameHostImpl` also derives from `cef::mojom::BrowserFrame`**
+  (`class CefFrameHostImpl : public CefFrame, public cef::mojom::BrowserFrame`) so it can receive
+  calls forwarded from `CefBrowserFrame`. Miss it and the error is reported in a *third*,
+  unrelated-looking file:
+
+  ```
+  cef/libcef/browser/browser_info.cc(184,30): error: allocating an object of
+      abstract class type 'CefFrameHostImpl'
+  ```
+
+  — i.e. it points at the allocation site, not the missing override. Before adding a mojom method,
+  enumerate implementors with
+  `grep -rn "public cef::mojom::BrowserFrame\|CefFrameServiceBase<cef::mojom::BrowserFrame>" libcef/ tests/`.
+  The same applies to `RenderFrame` and any other interface in that file.
+
+- **`GURL::host()` returns `std::string_view` on Chromium 150, not `const std::string&`.**
+  `const std::string h = url.host();` therefore does **not** compile (`std::string`'s `string_view`
+  constructor is `explicit`, so copy-initialisation is not viable). Use `const std::string h(url.host());`
+  — or keep the `string_view` if you never need an owning copy. A silent porting trap for any code
+  moved from an older Chromium.
 
 - **Toolchain measured on this host (2026-08-03):** MSVC **14.44.35207** (VS2022 BuildTools 17.14),
   Windows SDK **10.0.26100** + 10.0.22621, Python 3.10.11 on PATH (depot_tools supplies its own;

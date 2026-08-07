@@ -7605,9 +7605,9 @@ bool SimpleHandler::OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
                 msg->GetArgumentList()->SetString(0, navUrl);
                 frame->SendProcessMessage(PID_RENDERER, msg);
 
-                // C2: tell the renderer explicitly that this navigation is NOT farbled.
-                // Sending enabled=false rather than staying silent matters: silence is
-                // indistinguishable from "the key has not arrived yet", and we want the
+                // C2: record explicitly that this navigation is NOT farbled. Filing
+                // enabled=false rather than staying silent matters: silence is
+                // indistinguishable from "nothing has been computed yet", and we want the
                 // exempt case to be a decided native pass-through, not an accident.
                 std::array<uint8_t, 32> exemptKey{};
                 if (FarblingPolicy::DomainKeyForUrl(navUrl, exemptKey)) {
@@ -7615,6 +7615,8 @@ bool SimpleHandler::OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
                         CefProcessMessage::Create("hodos_farble_key");
                     fmsg->GetArgumentList()->SetString(0, FarblingPolicy::EncodeHex(exemptKey));
                     fmsg->GetArgumentList()->SetBool(1, false);
+                    fmsg->GetArgumentList()->SetString(
+                        2, FarblingPolicy::RegistrableDomainFromUrl(navUrl));
                     frame->SendProcessMessage(PID_RENDERER, fmsg);
                 }
             } else {
@@ -7625,17 +7627,28 @@ bool SimpleHandler::OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
                 msg->GetArgumentList()->SetString(1, navUrl);
                 frame->SendProcessMessage(PID_RENDERER, msg);
 
-                // C2: also deliver the NATIVE farbling key. Sent alongside the legacy
-                // seed IPC on purpose -- the JS path above still owns canvas until C3
-                // lands, and TD-3 forbids retiring the old chain until this one is
-                // proven delivering. Nothing reads this key yet, so there is no
-                // double-farbling window.
+                // C2: also record the NATIVE farbling key. Filed alongside the legacy
+                // seed IPC on purpose -- the JS path above still owns audio/WebGL until
+                // C4/C5 land, and TD-3 forbids retiring the old chain until this one is
+                // proven delivering.
+                //
+                // ⚠️ This "SendProcessMessage" does NOT reach the renderer. libcef's
+                // browser side intercepts "hodos_farble_key" in
+                // CefFrameHostImpl::SendProcessMessage and files it in
+                // hodos::FarblingRegistry; the renderer then PULLS it at
+                // OnContextCreated. That indirection is the fix for the delivery bug --
+                // a push from here is pre-commit, so it lands on the outgoing document.
+                // Arg 2 is load-bearing: it is the registrable domain the registry files
+                // under, and libcef must not re-derive it (its PSL reduction and
+                // FarblingPolicy's could disagree, and the lookup would miss).
                 std::array<uint8_t, 32> farbleKey{};
                 if (FarblingPolicy::DomainKeyForUrl(navUrl, farbleKey)) {
                     CefRefPtr<CefProcessMessage> fmsg =
                         CefProcessMessage::Create("hodos_farble_key");
                     fmsg->GetArgumentList()->SetString(0, FarblingPolicy::EncodeHex(farbleKey));
                     fmsg->GetArgumentList()->SetBool(1, true);
+                    fmsg->GetArgumentList()->SetString(
+                        2, FarblingPolicy::RegistrableDomainFromUrl(navUrl));
                     frame->SendProcessMessage(PID_RENDERER, fmsg);
                 }
             }

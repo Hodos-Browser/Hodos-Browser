@@ -155,7 +155,97 @@ Highest fingerprint value first. All paths are `third_party/blink/renderer/...`.
 >
 > Per-vector PRNG **streams** (canvas / webgl-readPixels / audio) so a site reading several vectors cannot correlate them back toward the seed. Perturbation matches the outgoing JS exactly (red-channel LSB on ~3% of pixels; ~1.0±2e-7 audio multiplier) so already-enrolled users keep their fingerprint across the migration. The small-canvas gate stays at the **call site** — only the caller knows the surface dimensions.
 
-### C2 — Seed/enabled delivery `[dep C1]` — ⛔ **STILL BROKEN. A PUSH CAN NEVER WORK. Needs FB-1's pull.**
+### C2 — Seed/enabled delivery `[dep C1]` — ✅ **FIXED AND BEHAVIOURALLY PROVEN 2026-08-07, fork `116b7fd8b`.**
+
+> ## ✅✅ PROVEN BY MEASUREMENT — native farbling runs, and it is per-profile keyed
+>
+> `farbling_probe.py --port 9322 --expect-native-canvas`: **all expectations met**, including the
+> cross-page behavioural comparison that had **never** passed before (C3's farbling path had never
+> once been observed to run).
+>
+> **The probe alone is NOT sufficient**, and this is the important part: the shipped constant-seed bug
+> would have **passed** every assertion in it. "Farbled differs from exempt" only proves *some*
+> perturbation happens, not that it is keyed to anything. The decisive test is a **profile-seed
+> rotation**, done by editing `profileSeed` in `<profile>/fingerprint_settings.json` and restarting:
+>
+> | | seed A `5f64f039…` | seed B `1111…` | seed A again | verdict |
+> |---|---|---|---|---|
+> | exempt `getImageData` | `53225ec8` | `53225ec8` | `53225ec8` | unchanged — true native pass-through |
+> | exempt `toDataURL` | `3e1873d6` | `3e1873d6` | `3e1873d6` | unchanged |
+> | large-canvas CONTROL | `0cdc9b48` | `0cdc9b48` | `0cdc9b48` | unchanged — comparison is sound |
+> | **farbled `getImageData`** | `0e4e6251` | **`d9532c84`** | **`0e4e6251`** | **tracks the seed** |
+> | **farbled `toDataURL`** | `397e1b7f` | **`f85bda59`** | **`397e1b7f`** | **tracks the seed** |
+>
+> Two contracts fall out of one experiment, and both are §11 acceptance criteria:
+> 1. **Per-user unlinkability** — the farbled value changes when the profile seed changes. This is the
+>    assertion the shipped bug fails, and the only one that proves two users look different.
+> 2. **Determinism / no login breakage** — restoring seed A reproduced its hashes **exactly**, so the
+>    same profile + site is stable across restarts. That is the whole reason this migration chose a
+>    persistent per-profile seed over Brave's per-session one.
+>
+> Because the exempt values and the large-canvas control were **unchanged** across all three runs, the
+> farbled deltas are attributable to the seed and not to page-render variance or measurement noise.
+>
+> ⚠️ **Anyone re-verifying must rotate the seed.** A same-profile run is not evidence; it is exactly
+> what was green for two days while nothing worked.
+
+> ## ✅ The fix: FB-1's renderer-side `[Sync]` pull (replaces the push entirely)
+>
+> Landed as fork commit `116b7fd8b` — **no Chromium patches, no public CEF API, no `CEF_API_HASH`
+> churn.** Everything is fork-internal libcef code plus one shell argument.
+>
+> | Piece | Where |
+> |---|---|
+> | Shell still sends per navigation, now with **arg 2 = registrable domain** | `simple_handler.cpp :: OnBeforeBrowse` (both branches) |
+> | Browser **intercepts** `hodos_farble_key` and files it — never goes on the wire | `libcef/browser/frame_host_impl.cc :: CefFrameHostImpl::SendProcessMessage` |
+> | Registry `{registrable domain → key, enabled}`, longest-dot-suffix lookup by host | **NEW** `libcef/browser/hodos_farbling_registry.{h,cc}` |
+> | Fork-internal `[Sync] GetHodosFarblingKey(host) => (key_hex, enabled)` | `libcef/common/mojom/cef.mojom :: interface BrowserFrame` |
+> | Browser-side handler (answers from browser state only — safe before `FrameAttachedAck`) | `libcef/browser/browser_frame.cc :: CefBrowserFrame::GetHodosFarblingKey` |
+> | Renderer **pulls** at context creation | `libcef/renderer/frame_impl.cc :: CefFrameImpl::MaybeApplyHodosFarblingKey`, called from `OnContextCreated` |
+>
+> **Why the pre-commit send stops being a bug:** it is no longer a delivery, it is a **cache fill**.
+> Pre-commit is now *early enough* instead of *too late*, and the browser holds the entry regardless of
+> which renderer process the document lands in — which is also the cross-process failure that broke the
+> legacy seed path.
+>
+> **Why `[Sync]` is not a convenience.** Both push directions are excluded, and both were measured:
+> a pre-commit push reaches the outgoing document; a post-commit push is queued by
+> `SendToBrowserFrame` until the `FrameAttached` ack round-trip completes, which is strictly *after*
+> `OnContextCreated`, so it loses to the first inline script. `OnContextCreated` is the only instant
+> that is both after the right document exists and before page script runs.
+>
+> **Why libcef must not re-derive eTLD+1.** `FarblingPolicy::RegistrableDomain` is a deliberately
+> hand-rolled reduction (see its header for why it must not be merged with the cookie helper). If the
+> browser side reduced independently — e.g. with `net::registry_controlled_domains` — the two could
+> disagree and *every* lookup would miss, failing closed and silently. The shell therefore sends the
+> domain it used, and the registry only ever does suffix matching on a string it was given.
+>
+> **Scope + costs:**
+> - **Main frame + http/https only**, matching what the shell sends ⇒ one sync round-trip per
+>   top-level document, not one per subframe. Subframes/workers are P4e.
+> - `pending_farble_key_` and `HandleHodosFarblingKey` are **deleted**; a comment in `frame_impl.h`
+>   marks the spot so a per-frame cache is not reintroduced (it cannot work — new `CefFrameImpl` per
+>   document).
+> - **Single-active-profile assumption**, inherited from `FarblingPolicy::InitializeForProfile` which
+>   already caches one seed per browser process. Documented as a tripwire in the registry header.
+>
+> ⚠️ **KNOWN LIMITATION, not a regression:** a **cross-site redirect** (`bit.ly` → `example.com`)
+> leaves the registry holding only the pre-redirect site, so the landing page finds no entry and
+> **fails closed — unfarbled**. Same-site host changes (`example.com` → `www.example.com`) *are*
+> covered, because entries are keyed by registrable domain rather than origin. Closing the cross-site
+> case needs a second fill from the shell's redirect hook; **tracked as a follow-up, not done here.**
+>
+> ✅ **CEF BUILD GREEN 2026-08-07** — `BUILD_EXIT=0`, distrib
+> `cef_binary_150.0.0-HEAD.3567+g116b7fd+chromium-150.0.7871.187_windows64_minimal`,
+> `CEF_COMMIT_HASH 116b7fd8bba50ebf8e6cf2f240744fd4ce9fd282` (= the pin, so the artifact provably
+> carries this change). Took 3 attempts; **two real compile errors, both in the plumbing, neither in
+> the design** — see the runbook for both, they are M150 porting traps that will recur:
+> `GURL::host()` now returns `std::string_view`, and adding one `cef.mojom` `BrowserFrame` method
+> obligates **two** implementors (`CefFrameHostImpl` derives from it as well as `CefBrowserFrame`).
+>
+> ✅ **Behaviourally verified** — see the seed-rotation table at the top of this section. The
+> `--expect-native-canvas` gate passes AND the per-profile assertion passes, which the probe does not
+> cover on its own.
 
 > ## ⭐ ROOT CAUSE PROVEN 2026-08-07 by an instrumented build — read this before touching C2
 >
@@ -215,6 +305,12 @@ Highest fingerprint value first. All paths are `third_party/blink/renderer/...`.
 > **Both** the legacy seed and the C2 key fail for the **same** root reason (pre-commit send reaching
 > the wrong renderer process/document), so the renderer-side pull fixes both at once. This needs its
 > own ticket regardless, because it is live in production today while P4d is several phases away.
+>
+> 🎫 **Ticket opened: `development-docs/TICKET_farbling_constant_seed_shipped.md`.** Confirmed in every
+> released build from `v0.3.0-beta.1` to `v0.3.0-beta.29` (current public Latest) — farbling has never
+> worked. ⚠️ **The pull does NOT reach shipped users**: releases are M136, the pull is CEF-150 fork
+> code. The release line needs the separate ~5-line **fail-closed** fix (drop the `std::hash(url)`
+> fallback, inject nothing when no seed arrives). Owner decision pending in that ticket.
 >
 > 💡 Related, found the same day: **renderer-process logging is dead.** `Logger::Initialize` is only
 > called in the browser process, so every `LOG_*_RENDER` call is a silent no-op and `[RENDER]` has

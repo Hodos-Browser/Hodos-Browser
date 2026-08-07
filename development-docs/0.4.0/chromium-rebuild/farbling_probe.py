@@ -28,6 +28,20 @@ PORTS
     Dev Default profile = 9322, release Default profile = 9222 (cef_browser_shell.cpp
     adds +100 under HODOS_DEV). Confirm the owning PID before trusting a CDP port —
     an installed build may hold 9222 while you think you are driving the dev build.
+
+    ⚠️ OBSERVED 2026-08-07, not hypothetical: on the dev machine the developer's own
+    INSTALLED browser was running and holding 9222, while ~8 HodosBrowser.exe
+    processes ran from %LOCALAPPDATA%\HodosBrowser. Probing 9222 there would have
+    driven the real browser, with a real wallet attached, and reported its results as
+    the dev build's. Always check first:
+
+        netstat -ano | grep -E ":9222|:9322" | grep LISTENING
+        powershell -NoProfile -Command "Get-CimInstance Win32_Process \
+            -Filter \"ProcessId=<pid>\" | Select ExecutablePath"
+
+    The dev build's path contains `build\bin\Release`. Anything under %LOCALAPPDATA%
+    is the installed product — do not drive it, and never kill by image name, since
+    both share the image name HodosBrowser.exe.
 """
 
 import argparse
