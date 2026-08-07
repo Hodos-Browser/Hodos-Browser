@@ -604,6 +604,36 @@ Two macOS verification tricks worth keeping:
   for a patch/checkout problem — check these three first. They pinpointed a one-line type error in
   seconds after the top-level log offered nothing.
 
+- ⛔⛔ **A BUILD DETACHES THE FORK'S HEAD, so every commit you make AFTER a build silently leaves
+  the branch behind.** This is the known "automate-git leaves DETACHED HEAD" trap, but the sharp edge
+  is worse than "push pushes nothing" — **`git checkout hodos/7871` later REVERTS your working tree**,
+  because the branch never moved. Observed 2026-08-07:
+
+  ```
+  dd4da3989 HEAD@{5}: commit: C2 ...              <- committed ON the branch
+  dd4da3989 HEAD@{4}: checkout: moving from hodos/7871 to dd4da3989   <- automate-git DETACHED here
+  3b1acaf97 HEAD@{3}: commit (amend): C2 ...      <- these three amends
+  2fff6384d HEAD@{2}: commit (amend): C2 ...         all advanced a DETACHED HEAD
+  116b7fd8b HEAD@{1}: commit (amend): C2 ...         while hodos/7871 stayed at dd4da3989
+  ```
+
+  Three rounds of compile fixes existed only as detached commits. `git log origin/hodos/7871..hodos/7871`
+  still reported "1 commit ahead" and looked healthy, because it compares the *branch*, which was stale.
+
+  **Check after every build, not just before every commit:**
+  ```bash
+  git -C C:/cef/cef150/cef rev-parse --abbrev-ref HEAD   # "HEAD" means DETACHED
+  git -C C:/cef/cef150/cef log --oneline -1 hodos/7871   # must equal the SHA you built
+  ```
+  **Recovery is lossless** if the tree is clean — the commits are in the reflog, so do NOT reset first:
+  ```bash
+  git checkout --detach <built-sha>     # brings the working tree back to the good content
+  git branch -f hodos/7871 HEAD         # move the branch to it
+  git checkout hodos/7871               # reattach
+  ```
+  Then assert `branch tip == CEF_COMMIT_HASH` of the distrib you just built. If they differ, the pin
+  in the build scripts points at content nobody can reproduce.
+
 - ⛔ **A killed build looks EXACTLY like a compile error. Launch CEF builds DETACHED.**
   Any harness that caps how long a command may run (an agent's background-task timeout, a CI step
   timeout, an SSH session dropping) will kill `automate-git.py` mid-compile. What it leaves behind
