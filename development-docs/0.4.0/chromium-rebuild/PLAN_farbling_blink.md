@@ -159,7 +159,27 @@ Highest fingerprint value first. All paths are `third_party/blink/renderer/...`.
 - **Shell (browser, `cef-native/`):** generate/store `profile_seed`; compute `domain_key`; decide `enabled` (= `!IsAuthDomain(top) && IsSiteEnabled(top)`); deliver at navigation commit + worker start. `#ifdef _WIN32` / `#elif __APPLE__` per Invariant #9; Mac creation paths in `cef_browser_shell_mac.mm`.
 - **Blink:** receive `{domain_key, enabled}` into `HodosSessionCache`.
 
-### C3 — Canvas 2D readback `[dep C1]`
+### C3 — Canvas 2D readback `[dep C1]` — ✅ **AUTHORED 2026-08-06, fork `f82b3aae0`, build owed**
+
+> Registered as `hodos_farble_canvas2d` (`condition: HODOS_FARBLING`). Hooks landed exactly as the
+> corrected funnel below prescribes; the JS canvas fragment was deleted in the **same** commit (I-4).
+> Applies forward to pristine source with no offsets, reverse-checks clean. **Not yet compiled** — the
+> shell build does not compile Blink, so nothing beyond "valid patch" is claimed until a CEF build runs.
+>
+> **One implementation constraint the plan did not state, and a rebase must not "optimise" away:** the
+> farbled snapshot on the encode path is a **COPY**. A snapshot can share pixels with the canvas's own
+> backing store, and `PerturbPixels` is deterministic — so perturbing that store in place means the next
+> read re-flips the same bits and *undoes* the farble, breaking the §11 intra-session-consistency
+> criterion. (This is also precisely what the outgoing JS did, via its `getImageData`→`putImageData`
+> round-trip.) `getImageData` needs no copy: its `ImageData` is freshly allocated.
+>
+> ⚠️ **`farbling_probe.py --expect-native-canvas` was NOT sufficient as an acceptance gate** and has
+> been extended. It asserted only that the three canvas methods report `[native code]` — true the moment
+> the JS fragment is deleted, whether or not any native farbling exists, so it could not have been "C2's
+> first behavioural proof" as planned. It now also draws a fixed pattern into a small canvas (inside the
+> `<65536px` gate) and a large one (outside it) and asserts the small hashes **differ** between exempt
+> and farbled pages while the large hashes **match** — the large canvas being the control that makes the
+> comparison sound — plus read-twice stability on both pages.
 - **⚠️ Funnel corrected against the real TARGET tree (7871 / Chromium 150, verified 2026-08-05).** `platform/graphics/static_bitmap_image.cc` is **NOT** the shared readback funnel on M150 — it is 118 lines and neither readback path routes through it. Do not patch it. The two real hook points are:
   - **`modules/canvas/canvas2d/base_rendering_context_2d.cc :: BaseRenderingContext2D::getImageDataInternal`** (`:353`) — the single funnel for **both** `getImageData` overloads (`:331`, `:341`) **and** `CanvasRenderingContext2D::getImageDataInternal` (`canvas_rendering_context_2d.cc:774`, which delegates up at `:786`). It is also the path an **OffscreenCanvas in a worker** takes — this one hook is what buys P4a's worker win. `GetTopExecutionContext()` is already in scope inside it.
   - **`core/html/canvas/html_canvas_element.cc :: HTMLCanvasElement::Snapshot`** (`:1270`) — the shared source for `ToDataURLInternal` (`:1312`) and `toBlob` (`:1423`). Prefer hooking the **two encode call sites** over `Snapshot` itself: `Snapshot` has a third caller (`:1896`) that is not a fingerprinting readback.

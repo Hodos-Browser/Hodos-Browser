@@ -34,6 +34,9 @@ set -uo pipefail
 
 CEF_SRC=/c/cef/cef150/chromium/src/cef
 CHROMIUM_SRC=/c/cef/cef150/chromium/src
+# The checkout patches are AUTHORED in. CEF_SRC is a copy of it; comparing the two
+# is the only reliable stale-copy detector (see section 2).
+STANDALONE_CEF=${STANDALONE_CEF:-/c/cef/cef150/cef}
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASELINE="$SCRIPT_DIR/cef_patch_baseline_7871.txt"
 
@@ -218,6 +221,29 @@ if [ "$HODOS_FILES" -lt "$HODOS_MIN_PATCHES" ] || [ "${HODOS:-0}" -lt "$HODOS_MI
   echo "            Correct order: commit+push -> bump pin in BOTH scripts -> sync -> audit -> build."
 elif [ "$HODOS_FILES" -ne "${HODOS:-0}" ]; then
   note_warn "hodos_*.patch file count ($HODOS_FILES) != registered entry count (${HODOS:-0}) -- see section 1 for which."
+fi
+
+# ── STANDALONE-vs-IN-TREE COMPARISON — the real stale-copy detector ───────────
+# A presence FLOOR alone cannot catch the landing case: once one Hodos patch
+# exists, a copy that is stale by one NEW patch still clears any fixed floor.
+# The invariant that needs no hand-editing is that the in-tree copy's Hodos patch
+# set EQUALS the standalone checkout's -- the standalone tree being where patches
+# are authored, and the in-tree copy being what actually compiles.
+if [ -d "$STANDALONE_CEF/patch/patches" ]; then
+  SA_LIST=$(cd "$STANDALONE_CEF/patch/patches" && ls hodos_*.patch 2>/dev/null | sort | tr '\n' ' ')
+  IT_LIST=$(cd "$CEF_SRC/patch/patches" && ls hodos_*.patch 2>/dev/null | sort | tr '\n' ' ')
+  if [ "$SA_LIST" != "$IT_LIST" ]; then
+    note_fail "IN-TREE COPY IS STALE. Hodos patch sets differ:"
+    echo "            standalone ($STANDALONE_CEF): ${SA_LIST:-<none>}"
+    echo "            in-tree    ($CEF_SRC): ${IT_LIST:-<none>}"
+    echo "            The in-tree copy is what compiles. Re-sync with --force-cef-update"
+    echo "            (both build scripts pass it) before building, or you will ship a"
+    echo "            green build missing the patch you just authored."
+  else
+    echo "  standalone <-> in-tree Hodos patch sets MATCH (${IT_LIST:-<none>})"
+  fi
+else
+  note_warn "no standalone checkout at $STANDALONE_CEF -- cannot cross-check for a stale in-tree copy."
 fi
 
 if [ "${HODOS:-0}" -eq 0 ]; then

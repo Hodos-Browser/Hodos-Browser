@@ -358,9 +358,26 @@ bring-up; this section supersedes anything above it that concerns **patches or f
 | | |
 |---|---|
 | Fork | `github.com/Hodos-Browser/cef`, branch `hodos/7871` |
-| **`CEF_CHECKOUT`** | **`b911770b0`** (already set in both build scripts) |
-| Contents | C1 `HodosSessionCache` · C2 renderer half |
-| Registered patches | **115** = upstream 114 + `hodos_farble_session_cache` |
+| **`CEF_CHECKOUT`** | ~~`b911770b0`~~ → **`f82b3aae0`** (both build scripts updated 2026-08-06) |
+| Contents | C1 `HodosSessionCache` · C2 renderer half · **C3 canvas** |
+| Registered patches | upstream 114 + `hodos_farble_session_cache` + `hodos_farble_canvas2d` |
+
+> ### ⛔ STOP — `b911770b0` was never pushed. Do not try to build it.
+>
+> Found 2026-08-06: `refs/heads/hodos/7871` on the fork was still at **`7749aa3b6`**, three commits
+> behind the pin this document previously handed you. `371893b70`, `e9f3fee65` and `b911770b0` existed
+> **only in the Windows local checkout** — so the pin was unresolvable from a fresh clone, and the fork
+> remote still carried the temporary C2 probe that `e9f3fee65` removes. **If you attempted a fork build
+> against `b911770b0` and `automate-git` could not resolve the checkout, that is the cause — not your
+> setup.**
+>
+> Cause: P3 trap #4. `automate-git` leaves the standalone checkout on a **detached HEAD**, so commits
+> land off-branch and `git push origin hodos/7871` reports success while pushing nothing. Silent in
+> both directions — the local build keeps working because it reads the local checkout.
+>
+> Recovered by fast-forwarding the branch onto the commits (`7749aa3b6` was an ancestor, so no history
+> was rewritten). **After every commit in that checkout, run
+> `git log --oneline origin/hodos/7871..hodos/7871` and confirm it is empty once you have pushed.**
 
 ⛔ **`--force-cef-update` is now passed unconditionally by both scripts. Do not remove it.**
 `chromium/src/cef` is a COPY, refreshed only when `cef_checkout_changed`, which is computed from the
@@ -369,12 +386,17 @@ which moves HEAD to exactly the SHA you then pin — so `current == desired` and
 refreshes. This is the DEFAULT outcome of the normal workflow, not an edge case. `P3_TOOLCHAIN_PROOF.md`
 used to claim it "self-corrects"; that was wrong and is corrected in place.
 
-**Your one cheap detector:** the patcher's `N patches total` line in the build log. It must read
-**115**. If it reads 114, you built with zero Hodos patches and a fully green run.
+**Detector, updated 2026-08-06 — the drift audit now catches this, and it did not before.**
+`cef_patch_drift_audit.sh` compares the **standalone checkout's** `hodos_*.patch` set against the
+**in-tree copy's** and hard-fails on any difference. That is the invariant that needs no hand-editing:
+it caught the real C3 landing state on the first run. It also enforces a presence floor
+(`HODOS_MIN_PATCHES`, default 1) — but note the floor **alone** could not have caught C3, since a copy
+stale by exactly one new patch still clears any fixed floor. The comparison is the load-bearing check.
 
-⚠️ **The drift audit will NOT catch this** — it reads the in-tree copy (`CEF_SRC=…/chromium/src/cef`),
-so running it right after committing to the fork reports `Hodos entries : 0 / CLEAN`, which looks like
-success and means "your copy is stale". Correct order: **commit+push → bump pin → sync → audit → build**.
+The patcher's `N patches total` line in the build log remains a useful cross-check, and is still the
+cheapest tell in a raw log. **Do not gate on its value** — it changes on every landing.
+
+Correct order, unchanged: **commit+push → bump pin → sync → audit → build**.
 
 ### 2. Before your first fork build
 
@@ -536,9 +558,21 @@ documented"): both. It is in the runbook's config table, and the preflight is yo
 
 ### 5. Where Windows is
 
-P4a farbling: **BOT-1 ✅ · C1 ✅ · C2 ✅ (compiled + wired, behaviourally unverified) · C3 next.**
-Pin `b911770b0`. C2 is unverified because nothing reads the key until C3 — a `LOG()` probe was tried
-and dropped (inside Blink, `LOG(channel)` is WTF's macro, so `LOG(WARNING)` does not compile).
+P4a farbling: **BOT-1 ✅ · C1 ✅ · C2 ✅ (compiled + wired) · C3 authored, build owed.**
+Pin **`f82b3aae0`**. C3 (`hodos_farble_canvas2d`) applies forward to pristine source with no offsets
+and reverse-checks clean, and the JS canvas fragment was deleted in the same commit (atomic I-4). It
+has **not been compiled** — the shell build does not compile Blink, so nothing beyond "valid patch"
+is claimed until a CEF build runs.
+
+⚠️ **`farbling_probe.py --expect-native-canvas` alone does NOT prove farbling works.** As originally
+written it asserted only that `getImageData`/`toDataURL`/`toBlob` report `[native code]` — which
+becomes true the moment the JS fragment is deleted, whether or not any native farbling exists. The
+probe now also does a **behavioural** check: it draws a fixed pattern into a small canvas (inside the
+`<65536px` gate) and a large one (outside it), then asserts the small-canvas hashes **differ** between
+the exempt and farbled pages while the large-canvas hashes **match**. The large canvas is the control
+that makes the comparison sound — without it, any incidental rendering difference between the two
+pages would read as a farbling success. It also asserts each canvas hashes identically when read
+twice, which is what fails if farbling ever mutates the canvas instead of the readback.
 
 ⚠️ **Two compile-only defects in the C2 chain were caught only by a CEF build**, because the shell
 build does not compile `libcef`. If you are changing fork code, the shell building clean tells you

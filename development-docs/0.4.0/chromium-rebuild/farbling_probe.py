@@ -69,6 +69,43 @@ PROBE_JS = r"""
   var names = [];
   for (var i = 0; i < navigator.plugins.length; i++) names.push(navigator.plugins[i].name);
   function isNative(fn) { return fn.toString().indexOf('[native code]') !== -1; }
+
+  // --- Behavioural canvas probe (C3) --------------------------------------
+  // Nativeness alone proves only that the JS override is gone -- it would pass
+  // just as happily if we deleted the fragment and implemented no native
+  // farbling at all. These read actual pixels.
+  //
+  // TWO canvases, and the large one is the control that makes the comparison
+  // sound: it is deliberately OUTSIDE the <65536px small-canvas gate, so it is
+  // never farbled on any page. If the large hashes match across two pages while
+  // the small hashes differ, that difference IS farbling and not some incidental
+  // rendering difference between the two pages.
+  function draw(w, h) {
+    var c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    var x = c.getContext('2d');
+    x.textBaseline = 'top';
+    x.font = '14px "Arial"';
+    x.fillStyle = '#f60'; x.fillRect(0, 0, 100, 20);
+    x.fillStyle = '#069'; x.fillText('Hodos farbling probe', 2, 2);
+    x.strokeStyle = 'rgba(0,120,255,0.7)';
+    x.beginPath(); x.arc(40, 25, 18, 0, Math.PI * 2); x.stroke();
+    return c;
+  }
+  function fnv(s) {
+    var h = 2166136261 >>> 0;
+    for (var i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+    return ('0000000' + h.toString(16)).slice(-8);
+  }
+  function pixHash(c) {
+    var d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    var h = 2166136261 >>> 0;
+    for (var i = 0; i < d.length; i++) { h ^= d[i]; h = Math.imul(h, 16777619) >>> 0; }
+    return ('0000000' + h.toString(16)).slice(-8);
+  }
+  var small = draw(200, 50);     // 10,000 px -> inside the gate, farbled
+  var large = draw(400, 200);    // 80,000 px -> outside the gate, never farbled
+
   return JSON.stringify({
     host: location.host,
     webdriver: navigator.webdriver,
@@ -80,7 +117,18 @@ PROBE_JS = r"""
     toDataURL_native: isNative(HTMLCanvasElement.prototype.toDataURL),
     toBlob_native: isNative(HTMLCanvasElement.prototype.toBlob),
     getChannelData_native: typeof AudioBuffer !== 'undefined'
-        ? isNative(AudioBuffer.prototype.getChannelData) : null
+        ? isNative(AudioBuffer.prototype.getChannelData) : null,
+
+    // Behavioural. `_repeat` re-reads the SAME canvas: farbling is deterministic,
+    // so it must be byte-identical. An unstable fingerprint is itself a
+    // fingerprint, and it is also what a mutate-the-canvas implementation would
+    // produce (each read re-flipping the previous read's bits).
+    small_daturl_hash: fnv(small.toDataURL()),
+    small_daturl_hash_repeat: fnv(small.toDataURL()),
+    small_pixel_hash: pixHash(small),
+    small_pixel_hash_repeat: pixHash(small),
+    large_daturl_hash: fnv(large.toDataURL()),
+    large_pixel_hash: pixHash(large)
   });
 })()
 """
@@ -139,6 +187,8 @@ def main():
         if not ok:
             failures.append(label)
 
+    seen = {}
+
     for label, url, is_exempt in DEFAULT_TARGETS:
         print("=" * 78)
         print("%s  ->  %s" % (label, url))
@@ -148,6 +198,7 @@ def main():
             r = evaluate(tab["webSocketDebuggerUrl"], PROBE_JS)
         finally:
             close_tab(cdp, tab["id"])
+        seen["exempt" if is_exempt else "farbled"] = r
 
         # --- BOT-1 invariants: identical on exempt AND farbled pages, by construction.
         # A per-site farbling opt-out must never change the bot signature.
@@ -168,6 +219,43 @@ def main():
         for fn in ("getImageData_native", "toDataURL_native", "toBlob_native"):
             check("%s is [native code]" % fn.replace("_native", ""),
                   r[fn] is want_native, "%s%s" % (r[fn], note))
+
+        # --- Intra-session consistency. Always required, on every page: reading
+        # the same canvas twice must give byte-identical results. This is the
+        # assertion that fails if farbling ever mutates the canvas instead of the
+        # readback, because the second read would re-flip the first read's bits.
+        check("toDataURL stable across reads",
+              r["small_daturl_hash"] == r["small_daturl_hash_repeat"],
+              "%s vs %s" % (r["small_daturl_hash"], r["small_daturl_hash_repeat"]))
+        check("getImageData stable across reads",
+              r["small_pixel_hash"] == r["small_pixel_hash_repeat"],
+              "%s vs %s" % (r["small_pixel_hash"], r["small_pixel_hash_repeat"]))
+
+    # --- Cross-page behavioural proof (only meaningful once C3 has landed) -----
+    # This is what actually proves native farbling runs AND that C2's per-origin
+    # key reached the renderer. Nativeness above cannot show either.
+    print("=" * 78)
+    if args.expect_native_canvas and "exempt" in seen and "farbled" in seen:
+        e, f = seen["exempt"], seen["farbled"]
+        print("cross-page behavioural comparison (exempt vs farbled)")
+
+        # CONTROL FIRST. The large canvas is outside the small-canvas gate, so it
+        # is unfarbled on both pages. If it does NOT match, the two pages are not
+        # rendering comparably and no verdict below can be trusted -- so this is
+        # reported as its own failure rather than silently weakening the next one.
+        control_ok = e["large_pixel_hash"] == f["large_pixel_hash"]
+        check("CONTROL: >=65536px canvas identical on both pages", control_ok,
+              "%s vs %s%s" % (e["large_pixel_hash"], f["large_pixel_hash"],
+                              "" if control_ok else "  <- comparison INVALID, ignore verdicts below"))
+
+        check("farbled page differs from exempt (getImageData)",
+              e["small_pixel_hash"] != f["small_pixel_hash"],
+              "exempt=%s farbled=%s" % (e["small_pixel_hash"], f["small_pixel_hash"]))
+        check("farbled page differs from exempt (toDataURL)",
+              e["small_daturl_hash"] != f["small_daturl_hash"],
+              "exempt=%s farbled=%s" % (e["small_daturl_hash"], f["small_daturl_hash"]))
+    else:
+        print("cross-page behavioural comparison: SKIPPED (pre-C3; pass --expect-native-canvas)")
 
     print("=" * 78)
     if failures:

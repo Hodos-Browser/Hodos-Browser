@@ -45,15 +45,15 @@ REM satisfies the check and the pin still resolves. Done once, 2026-08-05.
 REM
 REM WARNING: changing CEF_CHECKOUT to a NEW commit makes automate-git delete
 REM chromium\src\cef -- which contains binary_distrib\. Move the tarballs out
-REM first (see P3_BASELINE_94c1726.md). Not triggered while the pin is 94c1726.
+REM first (see P3_BASELINE_94c1726.md). THIS IS TRIGGERED by the C3 pin bump.
 set CEF_URL=https://github.com/Hodos-Browser/cef.git
 
 REM Pin an exact FORK commit, not the moving hodos/7871 branch tip: a build must
 REM be reproducible, and patch content is part of the build. BUMP THIS every time
 REM a patch lands on hodos/7871, and record the new SHA in the fork's
-REM HODOS_PATCHES.md. Upstream content is unchanged -- b911770b0 is
+REM HODOS_PATCHES.md. Upstream content is unchanged -- f82b3aae0 is
 REM 94c1726 (upstream 7871 head) plus our patch commits.
-set CEF_CHECKOUT=b911770b0
+set CEF_CHECKOUT=f82b3aae0
 
 REM ⚠️ chromium\src\cef is a COPY of the standalone checkout, refreshed ONLY when
 REM the CEF checkout HASH changes (automate-git.py:1358-1360). If you manually

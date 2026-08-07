@@ -17,9 +17,13 @@
 //       native Chromium already emits the correct values and our overrides were themselves
 //       detectable. Details, evidence and the tripwire pointer are inline below.
 //
-// What remains in this script is farbling ONLY: Canvas, WebGL readPixels, WebAudio. Each of
-// those three fragments is deleted in the same commit its native Blink replacement lands
-// (P4a canvas, P4b WebGL, P4c audio — the atomic per-value teardown rule, I-4).
+// What remains in this script is farbling ONLY: WebGL readPixels and WebAudio. Each fragment
+// is deleted in the same commit its native Blink replacement lands (the atomic per-value
+// teardown rule, I-4).
+// NOTE: Canvas farbling REMOVED 2026-08-06 (P4a / C3) — now native in Blink. See the marker
+//       where it used to be, below, for why leaving it alongside the native patch would have
+//       CORRUPTED canvases rather than merely double-farbling them.
+// Remaining: WebGL readPixels (P4b), WebAudio (P4c).
 static const char* FINGERPRINT_PROTECTION_SCRIPT = R"JS(
 (function(seed) {
     'use strict';
@@ -35,47 +39,21 @@ static const char* FINGERPRINT_PROTECTION_SCRIPT = R"JS(
     }
     var rng = mulberry32(seed);
 
-    // === Canvas Farbling ===
-    // Subtle pixel noise on small canvases (fingerprinting probes).
-    // 3% of pixels get LSB flipped — imperceptible but changes the hash.
-    var _getImageData = CanvasRenderingContext2D.prototype.getImageData;
-    CanvasRenderingContext2D.prototype.getImageData = function() {
-        var data = _getImageData.apply(this, arguments);
-        if (data.width * data.height < 65536) {
-            for (var i = 0; i < data.data.length; i += 4) {
-                if (rng() < 0.03) {
-                    data.data[i] ^= 1;
-                }
-            }
-        }
-        return data;
-    };
-
-    var _toDataURL = HTMLCanvasElement.prototype.toDataURL;
-    HTMLCanvasElement.prototype.toDataURL = function() {
-        var canvas = this;
-        if (canvas.width * canvas.height < 65536) {
-            var ctx = canvas.getContext('2d');
-            if (ctx) {
-                var imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-                ctx.putImageData(imgData, 0, 0);
-            }
-        }
-        return _toDataURL.apply(this, arguments);
-    };
-
-    var _toBlob = HTMLCanvasElement.prototype.toBlob;
-    HTMLCanvasElement.prototype.toBlob = function(callback) {
-        var canvas = this;
-        if (canvas.width * canvas.height < 65536) {
-            var ctx = canvas.getContext('2d');
-            if (ctx) {
-                var imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-                ctx.putImageData(imgData, 0, 0);
-            }
-        }
-        return _toBlob.apply(this, arguments);
-    };
+    // === Canvas Farbling — DELETED 2026-08-06 (P4a / C3) ===
+    // Canvas is now farbled natively in Blink, at API-call time, inside
+    // BaseRenderingContext2D::getImageDataInternal and the two encode callers of
+    // HTMLCanvasElement::Snapshot (ToDataURLInternal, toBlob). Deleted in the SAME
+    // commit the native patch landed, per the atomic per-value teardown rule (I-4).
+    //
+    // Leaving both live would not merely double-perturb. The toDataURL/toBlob
+    // overrides here farbled by doing a getImageData -> putImageData ROUND-TRIP,
+    // so once native farbling is on they would read native-farbled pixels and
+    // write them back INTO the canvas -- mutating the source, not just the
+    // readback, and compounding fresh noise on every read until the image is
+    // destroyed. That is corruption, not double-farbling.
+    //
+    // WebGL readPixels and WebAudio below are deliberately still here: their
+    // native replacements land in P4b and P4c, and each goes out with its own.
 
     // === WebGL readPixels Farbling ===
     // Subtle pixel noise on WebGL readPixels (fingerprinting probes).
