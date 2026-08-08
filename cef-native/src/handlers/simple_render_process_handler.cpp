@@ -528,10 +528,41 @@ void SimpleRenderProcessHandler::OnContextCreated(
                 if (frame->IsMain()) {
                     s_domainSeeds.erase(it); // One-shot for main frame
                 }
-            } else {
-                // Fallback: use URL hash as seed
-                seed = static_cast<uint32_t>(std::hash<std::string>{}(url) & 0xFFFFFFFF);
             }
+            // FAIL CLOSED: no seed => seed stays 0 => nothing is injected below.
+            //
+            // ⚠️ DO NOT REINTRODUCE A FALLBACK SEED. This used to read
+            //     seed = std::hash<std::string>{}(url) & 0xFFFFFFFF;
+            // which looks like graceful degradation and is the opposite. std::hash is
+            // deterministic within a toolchain and unsalted, so that seed is a pure
+            // function of the URL: identical across launches, across profiles, and
+            // ACROSS USERS. Every Hodos user farbled a given URL identically, which is
+            // not "weaker farbling" -- it is a stable, precomputable perturbation sitting
+            // on top of the native values, i.e. a reliable browser-IDENTIFYING
+            // fingerprint. Stock Chromium would have been less identifying.
+            //
+            // Confirmed by measurement 2026-08-07, not inferred: across two restarts the
+            // browser computed a correctly session-derived seed each time (2030444654 ->
+            // 3258985367) while the farbled audio output stayed byte-identical
+            // (a10d2ba4), proving the renderer never received it. Shipped in every
+            // released build since 0b7288b. See
+            // development-docs/TICKET_farbling_constant_seed_shipped.md.
+            //
+            // Delivery is unreliable because the browser sends fingerprint_seed from
+            // OnBeforeBrowse (pre-commit), so for a cross-process navigation it lands in
+            // the OUTGOING renderer process and this map is empty in the incoming one.
+            // Repairing delivery is NOT possible at this layer -- the client API has no
+            // synchronous renderer->browser call -- so it is fixed in libcef instead, via
+            // a [Sync] pull at OnContextCreated (fork 116b7fd8b, PLAN_farbling_blink.md
+            // C2). That pull covers the NATIVE path only; this JS path stays fail-closed
+            // until C4/C5/C6 port audio/WebGL/navigator natively and it is retired.
+            //
+            // Consequence, deliberately accepted: when no seed arrives, the user gets NO
+            // JS farbling rather than constant farbling. That is strictly better -- it
+            // removes a tracking vector and takes away nothing that ever worked -- and it
+            // matches the fail-closed contract the native path already follows (see
+            // blink_glue.h :: SetHodosFarblingKey and HodosSessionCache: "a degenerate
+            // constant-seeded farble is a WORSE fingerprint than none").
         }
         if (seed != 0) {
             std::string script = FINGERPRINT_PROTECTION_SCRIPT;

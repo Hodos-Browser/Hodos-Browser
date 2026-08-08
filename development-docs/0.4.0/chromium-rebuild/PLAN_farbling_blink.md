@@ -70,6 +70,43 @@ class HodosSessionCache : public GarbageCollected<HodosSessionCache>,
 
 ## 4. Persistent per-profile seed wiring (the login fix + the C2 threat model)
 
+> ### 🔎 Brave research 2026-08-08 — our persistent-seed divergence is VINDICATED, with a citation
+>
+> Clean-room investigation (published writeups + issue **prose** only; `brave-core` source deliberately
+> not read, per M7). Three results that matter here:
+>
+> 1. **Brave is per-SESSION, we are persistent — and their choice demonstrably causes the exact
+>    breakage this section exists to prevent.** Documented: *"Each time you start Brave, a unique,
+>    random session token is created … regenerated when you restart Brave,"* then HMAC-256'd with the
+>    top-frame eTLD+1 ([privacy-updates/4](https://brave.com/privacy-updates/4-fingerprinting-defenses-2.0/),
+>    [wiki](https://github.com/brave/brave-browser/wiki/Fingerprinting-Protections)). And a public
+>    complaint reports precisely the predicted symptom: *"I have seen on a lot of sites send me a
+>    'login from new device' mail when using brave, where it would NEVER happen when using Firefox"*
+>    ([privacyguides discussion #7](https://github.com/orgs/privacyguides/discussions/7)) — with no
+>    Brave engineering response found. ⇒ **Keep the persistent per-profile seed. Do not "align with
+>    Brave" on this in a future review** — we would be importing a known, reported login regression.
+>    Our derivation is otherwise the same shape (session/profile secret ⊕ HMAC ⊕ eTLD+1).
+> 2. **Even a full fork shipped OUR bug class.** Brave issue
+>    [#49346](https://github.com/brave/brave-browser/issues/49346) (v1.82.x) reports plugin,
+>    hardwareConcurrency and speech-voice values **no longer changing between relaunches** — a
+>    de-facto constant where a per-session value was expected — triaged **P2 regression**. So the
+>    "farbling silently degenerates to a constant" failure is not a Hodos-specific mistake; it is
+>    endemic and it survives code review. ⇒ **The durable artifact is the TEST, not the fix.** The
+>    cross-session / seed-rotation assertion belongs in CI, because this class of bug is invisible to
+>    any same-session check. Brave states no position on constant-vs-native fallback anywhere public,
+>    so our fail-closed contract stands as **our own** call, not a borrowed one.
+> 3. **Subframe policy confirmed, worker cost confirmed.** Brave documents that third-party frames
+>    *"share the seed value of the top level, eTLD+1 domain"* — same policy as our §5 matrix. Workers
+>    needed a separate engineering pass ([#42427](https://github.com/brave/brave-browser/issues/42427),
+>    titled "follow up") and OOPIFs had historical inheritance gaps
+>    ([#12020](https://github.com/brave/brave-browser/issues/12020)). ⇒ P4e's scope is realistic, not
+>    conservative.
+>
+> ⛔ **What this research did NOT answer: the delivery mechanism (our actual blocker).** Which process
+> does the HMAC, whether the raw session secret ever enters a renderer, and what ordering guarantee
+> puts the value in place before first script — **none of it is published.** Do not spend more time
+> looking; the answer is not public. Our delivery design has to be settled on our own evidence.
+
 **Goal:** a fingerprint that is **stable across restarts** (so re-auth reads us as the same device — fixes login breakage) but **different per first-party site** (defeats cross-site tracking) and **different per profile**, with **no stable secret on any child command line** (C2 threat model — a cmdline value is visible to every local process via ProcessExplorer/`ps`).
 
 ```
@@ -157,34 +194,56 @@ Highest fingerprint value first. All paths are `third_party/blink/renderer/...`.
 
 ### C2 — Seed/enabled delivery `[dep C1]` — ✅ **FIXED AND BEHAVIOURALLY PROVEN 2026-08-07, fork `116b7fd8b`.**
 
-> ## ✅✅ PROVEN BY MEASUREMENT — native farbling runs, and it is per-profile keyed
+> ## ✅✅ PROVEN BY MEASUREMENT — farbling runs, per-profile keyed, reliable across launches
 >
-> `farbling_probe.py --port 9322 --expect-native-canvas`: **all expectations met**, including the
-> cross-page behavioural comparison that had **never** passed before (C3's farbling path had never
-> once been observed to run).
+> **6/6 across three fresh browser sessions**, with the browser-side registry reporting
+> `4 STORED, 0 misses` every time, and the farbled hash identical (`ee153adb`) across sessions
+> while the auth-exempt control stayed `b5534a54`. The cross-page behavioural comparison had
+> **never** passed before this (C3's farbling path had never once been observed to run).
 >
-> **The probe alone is NOT sufficient**, and this is the important part: the shipped constant-seed bug
-> would have **passed** every assertion in it. "Farbled differs from exempt" only proves *some*
-> perturbation happens, not that it is keyed to anything. The decisive test is a **profile-seed
-> rotation**, done by editing `profileSeed` in `<profile>/fingerprint_settings.json` and restarting:
+> ### ⛔⛔ THE TRAP THAT FAKED AN "INTERMITTENT PER-SESSION BUG" — cost hours, read this
 >
-> | | seed A `5f64f039…` | seed B `1111…` | seed A again | verdict |
-> |---|---|---|---|---|
-> | exempt `getImageData` | `53225ec8` | `53225ec8` | `53225ec8` | unchanged — true native pass-through |
-> | exempt `toDataURL` | `3e1873d6` | `3e1873d6` | `3e1873d6` | unchanged |
-> | large-canvas CONTROL | `0cdc9b48` | `0cdc9b48` | `0cdc9b48` | unchanged — comparison is sound |
-> | **farbled `getImageData`** | `0e4e6251` | **`d9532c84`** | **`0e4e6251`** | **tracks the seed** |
-> | **farbled `toDataURL`** | `397e1b7f` | **`f85bda59`** | **`397e1b7f`** | **tracks the seed** |
+> Farbling appeared to work in some launches and fail in all navigations of others (6/6 vs 0/5).
+> It looked exactly like a race in the `[Sync]` pull. **There was no bug. The harness was driving
+> the wrong BROWSER.**
 >
-> Two contracts fall out of one experiment, and both are §11 acceptance criteria:
-> 1. **Per-user unlinkability** — the farbled value changes when the profile seed changes. This is the
->    assertion the shipped bug fails, and the only one that proves two users look different.
-> 2. **Determinism / no login breakage** — restoring seed A reproduced its hashes **exactly**, so the
->    same profile + site is stable across restarts. That is the whole reason this migration chose a
->    persistent per-profile seed over Brave's per-session one.
+> Hodos's header and ~14 overlays are *separate CEF browsers* served from `127.0.0.1:5137`, and
+> **CDP reports every one of them as `type: "page"`.** A harness that picks "the first page target"
+> — or "the first target that is not 127.0.0.1:5137" — can land on the **tab-list overlay**
+> (`role: tablistpanel`). Overlays legitimately receive no farbling key, so the measurement read as
+> "farbling is broken", and which target CDP returned first varied per launch, so it read as
+> "intermittent". Confirmed from the shell log: `🌐 Resource request: https://example.com/
+> (role: tablistpanel)`.
 >
-> Because the exempt values and the large-canvas control were **unchanged** across all three runs, the
-> farbled deltas are attributable to the seed and not to page-render variance or measurement noise.
+> ⛔ **An `href` assertion does NOT catch this** — once the overlay has been navigated, its
+> `location.href` really is `https://example.com/`. Three separate harness defects have now produced
+> false farbling failures in this project:
+> 1. CDP `PUT /json/new` tabs bypass `OnBeforeBrowse`, so they never get a key (fails against a
+>    *correct* implementation);
+> 2. navigate-sleep-measure can read the *previous document* (invisible, because a fixed synthetic
+>    pattern makes both pages' native hashes identical);
+> 3. **wrong browser** (this one).
+>
+> **The fix, and the rule for any future harness:** identify browser chrome **once at startup, by
+> CDP target id** (every `127.0.0.1:5137` target except the `/newtab` one) and exclude those ids
+> forever; drive only the remaining target. Reference implementation is `canvas_check.py`, whose
+> header documents all three defects. **Never identify the tab as "not 127.0.0.1:5137"** — after the
+> first navigation an overlay does not match that either.
+>
+> ### The per-profile assertion (still required, and still not covered by the probe)
+>
+> `farbling_probe.py --expect-native-canvas` passing is necessary but **not sufficient**: the shipped
+> constant-seed bug would have passed every assertion in it. Rotate `profileSeed` in
+> `<profile>/fingerprint_settings.json` and restart:
+>
+> | | seed A | seed B | seed A again |
+> |---|---|---|---|
+> | exempt `getImageData` | `53225ec8` | `53225ec8` | `53225ec8` |
+> | large-canvas CONTROL | `0cdc9b48` | `0cdc9b48` | `0cdc9b48` |
+> | **farbled `getImageData`** | `0e4e6251` | **`d9532c84`** | **`0e4e6251`** |
+>
+> Exempt + control unchanged ⇒ the farbled delta is not render variance. Exact round-trip ⇒ **two §11
+> contracts from one experiment**: per-user unlinkability *and* determinism (no login breakage).
 >
 > ⚠️ **Anyone re-verifying must rotate the seed.** A same-profile run is not evidence; it is exactly
 > what was green for two days while nothing worked.
@@ -243,9 +302,10 @@ Highest fingerprint value first. All paths are `third_party/blink/renderer/...`.
 > `GURL::host()` now returns `std::string_view`, and adding one `cef.mojom` `BrowserFrame` method
 > obligates **two** implementors (`CefFrameHostImpl` derives from it as well as `CefBrowserFrame`).
 >
-> ✅ **Behaviourally verified** — see the seed-rotation table at the top of this section. The
-> `--expect-native-canvas` gate passes AND the per-profile assertion passes, which the probe does not
-> cover on its own.
+> ✅ **Behaviourally verified** — see the top of this section: 6/6 across three fresh launches with
+> `0` registry misses, plus the per-profile seed-rotation assertion the probe does not cover on its
+> own. ⚠️ Verify with a harness that drives the **tab**, not an overlay — that mistake faked an
+> "intermittent per-session" bug for hours.
 
 > ## ⭐ ROOT CAUSE PROVEN 2026-08-07 by an instrumented build — read this before touching C2
 >

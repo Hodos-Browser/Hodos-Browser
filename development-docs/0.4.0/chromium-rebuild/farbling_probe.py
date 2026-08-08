@@ -29,6 +29,23 @@ PORTS
     adds +100 under HODOS_DEV). Confirm the owning PID before trusting a CDP port —
     an installed build may hold 9222 while you think you are driving the dev build.
 
+    ⛔⛔ THIS HARNESS PICKS TARGETS BY URL AND CAN THEREFORE DRIVE AN OVERLAY, NOT THE TAB.
+    Hodos's header and ~14 overlays are separate CEF browsers on 127.0.0.1:5137, and CDP
+    reports every one as type:"page". On 2026-08-08 that made a WORKING implementation look
+    like an intermittent per-session bug for hours (it was driving role: tablistpanel, which
+    legitimately gets no farbling key). Asserting location.href does NOT catch it, because
+    the overlay really is at the URL you navigated it to.
+
+    ⇒ For farbling verdicts prefer **farbling_canvas_check.py**, which identifies browser
+      chrome once by CDP target id and excludes it. Its header documents all three harness
+      defects found in this project. This file is kept for the webdriver/plugins/native-code
+      assertions; treat its behavioural comparison as advisory until it is ported to the
+      same target selection.
+
+    ⚠️ AND ITS GREEN RESULT IS NOT SUFFICIENT ANYWAY: the shipped constant-seed bug would
+      pass every assertion here. Per-user unlinkability requires rotating profileSeed in
+      <profile>/fingerprint_settings.json across restarts -- see farbling_canvas_check.py.
+
     ⚠️ OBSERVED 2026-08-07, not hypothetical: on the dev machine the developer's own
     INSTALLED browser was running and holding 9222, while ~8 HodosBrowser.exe
     processes ran from %LOCALAPPDATA%\HodosBrowser. Probing 9222 there would have

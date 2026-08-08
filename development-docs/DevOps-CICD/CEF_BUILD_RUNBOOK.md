@@ -604,6 +604,34 @@ Two macOS verification tricks worth keeping:
   for a patch/checkout problem — check these three first. They pinpointed a one-line type error in
   seconds after the top-level log offered nothing.
 
+- ⛔⛔ **CDP REPORTS HODOS'S HEADER AND ALL ~14 OVERLAYS AS `type: "page"`. A harness that picks
+  "the first page target" will sometimes drive an OVERLAY instead of the tab.** This is not a
+  farbling-specific problem — it applies to **any** CDP-driven test of page behaviour in this browser,
+  so it belongs here rather than only in the farbling plan.
+
+  On 2026-08-08 it manufactured a convincing fake bug: a feature appeared to work on some launches and
+  fail on *every* navigation of others (6/6 vs 0/5), which read as a race. The harness was actually
+  driving the **tab-list overlay** (`role: tablistpanel`), which legitimately does not get the
+  page-content behaviour under test — and which target CDP returned first varied per launch, hence the
+  "intermittent" appearance. The tell is in `debug_output.log`:
+
+  ```
+  🌐 Resource request: https://example.com/ (role: tablistpanel)     <-- WRONG BROWSER
+  🌐 Resource request: https://example.com/ (role: tab_1)            <-- what you wanted
+  ```
+
+  ⛔ **Asserting `location.href` does NOT catch it.** Once the overlay has been navigated, its
+  `location.href` genuinely is the URL you asked for.
+
+  **The rule:** identify browser chrome **once, at startup, by CDP target id** — every
+  `127.0.0.1:5137` target *except* the `/newtab` one (that is the tab; the rest are the header and
+  overlays: `/tab-list`, `/menu`, `/wallet-panel`, `/downloads`, `/privacy-shield`, `/brc100-auth`,
+  `/profile-picker`, `/site-info`, `/bookmarks`, …) — then exclude those ids for the rest of the run.
+  **Never** identify the tab as "the target that is not `127.0.0.1:5137`": after the first navigation
+  an overlay does not match that either. Cross-check the `role:` in the shell log when a CDP result
+  surprises you. Also never create targets with `PUT /json/new` — those bypass `OnBeforeBrowse`
+  entirely, so they fail against correct code.
+
 - ⛔⛔ **A BUILD DETACHES THE FORK'S HEAD, so every commit you make AFTER a build silently leaves
   the branch behind.** This is the known "automate-git leaves DETACHED HEAD" trap, but the sharp edge
   is worse than "push pushes nothing" — **`git checkout hodos/7871` later REVERTS your working tree**,
