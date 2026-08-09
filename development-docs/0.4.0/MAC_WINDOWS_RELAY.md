@@ -5,6 +5,133 @@ Both the Windows Claude session and the Mac Claude session coordinate through TH
 
 ---
 
+# ⭐⭐ CURRENT REALITY (2026-08-08) — P4a FARBLING IS IN BLINK ON WINDOWS. Read this first.
+
+**Everything dated 2026-08-04 or earlier is historical.** In particular: "Farbling is still the JS
+injection in the embedder … no `hodos_*` patches exist" is **superseded**. C1, C2 and C3 have landed.
+
+## 1. ⛔ PULL THE FORK — the pin moved, and it moved a lot
+
+`Hodos-Browser/cef` @ `hodos/7871` → **`dfe5a2343`**. **`build_hodos_cef_mac.sh` has already been
+updated for you** (`CEF_CHECKOUT="dfe5a2343"`); you only need to `git fetch` the fork. There are now
+**2 Chromium patches** in `cef/patch/patches/` — `hodos_farble_session_cache.patch` (C1) and
+`hodos_farble_canvas2d.patch` (C3) — both gated on the `HODOS_FARBLING` env var, which the build script
+sets. Expect **`116 patches total`**; the presence gate is "at least one `hodos_*.patch`", never a
+total count.
+
+## 2. What landed (and what is Windows-only so far)
+
+| | |
+|---|---|
+| **C1** Supplement `HodosSessionCache` on `ExecutionContext` | Chromium patch — **cross-platform, free for you** |
+| **C2** seed/key delivery | **fork libcef code, cross-platform, free for you.** Renderer-side `[Sync]` **PULL** at `OnContextCreated` (see §3) |
+| **C3** native canvas 2D farbling + deletion of the JS canvas fragment | Chromium patch — **cross-platform, free for you** |
+| Fail-closed fix for the shipped constant-seed bug | `simple_render_process_handler.cpp` — **cross-platform shell code, already applies to you** |
+| CEF 150 **build + staging** | ⛔ **Windows only.** You are still on M136, so you must build 150 from the fork before any of the above exists on Mac. |
+
+## 3. C2 is a PULL, not a push — do not "simplify" it back
+
+The shell still calls `SendProcessMessage("hodos_farble_key", …)` from `OnBeforeBrowse`, but **that no
+longer reaches the renderer.** libcef's browser side intercepts it in
+`CefFrameHostImpl::SendProcessMessage` and files it into `hodos::FarblingRegistry`
+(`libcef/browser/hodos_farbling_registry.{h,cc}`); the renderer **pulls** it via a fork-internal
+`[Sync] BrowserFrame::GetHodosFarblingKey(host)` from `CefFrameImpl::MaybeApplyHodosFarblingKey()`.
+
+Why it must be a pull, both directions having been measured: a **pre-commit push lands on the OUTGOING
+document** (and each document gets a new `CefFrameImpl`, so it cannot be parked), and a **post-commit
+push is queued by `SendToBrowserFrame` until the `FrameAttached` ack**, which is strictly *after*
+`OnContextCreated` — so it loses to the first inline script. `OnContextCreated` is the only moment that
+is both after the right document and before page script.
+
+⚠️ **Arg 2 of that IPC is the registrable domain, and libcef must never re-derive it.**
+`FarblingPolicy::RegistrableDomain` is a deliberately hand-rolled eTLD+1 reduction; an independent
+`net::registry_controlled_domains` reduction on the libcef side could disagree and make **every** lookup
+miss, silently and fail-closed.
+
+## 4. ⛔⛔ THE HARNESS TRAP — it applies to Mac too, and it faked a bug for hours
+
+Any CDP-driven test in this browser can silently drive the **wrong browser**. Hodos's header and ~14
+overlays are *separate CEF browsers* served from `127.0.0.1:5137`, and **CDP reports every one of them
+as `type:"page"`.** Picking "the first page target", or "the first target that is not
+`127.0.0.1:5137`", can select an overlay (we hit `role: tablistpanel`). Overlays legitimately receive no
+farbling key, so a **working** implementation measured as broken — and because target order varies per
+launch, it looked *intermittent*.
+
+**This is not Windows-specific.** Your overlays are borderless `NSWindow`s rather than `WS_POPUP`, but
+they are still separate CEF browsers and CDP still reports them as pages. Same trap, same fix.
+
+⛔ Asserting `location.href` does **not** catch it — the overlay really is at the URL you navigated it
+to. **Rule:** identify browser chrome **once at startup by CDP target id** (every `5137` target except
+`/newtab`) and exclude those ids for the run. Cross-check `role:` in `debug_output.log` when a CDP
+result surprises you. Never create targets with `PUT /json/new` — those bypass `OnBeforeBrowse`.
+
+Use **`chromium-rebuild/farbling_canvas_check.py`** (correct target selection; its header documents all
+three harness defects) and **`farbling_audio_check.py`**. `farbling_probe.py`'s *behavioural* half is
+**advisory only** until it is ported — it still uses the URL heuristic.
+
+## 5. Verification bar — a green probe run is NOT sufficient
+
+The shipped constant-seed bug would have **passed** every assertion in `farbling_probe.py`. The
+decisive test rotates `profileSeed` in `<profile>/fingerprint_settings.json` and restarts. Windows
+result on clean code (**your numbers will differ — different profile seed**; the *pattern* is what must
+hold):
+
+| | seed A | seed B | seed A again |
+|---|---|---|---|
+| exempt (control) | `b5534a54` | `b5534a54` | `b5534a54` |
+| **farbled** | `ee153adb` | **`788a0e94`** | **`ee153adb`** |
+
+Control unchanged ⇒ not render variance. Exact round-trip ⇒ per-user unlinkability **and** determinism
+across restarts (the login guarantee) from one experiment. Plus 6/6 across three fresh launches.
+
+**`CLAUDE.md` now mandates a NEGATIVE CONTROL for every acceptance test** — you must show the test
+*fails* with the feature disabled. Please honour it on the Mac verification; three harnesses here would
+each have passed with the feature entirely absent.
+
+## 6. ⚠️ Consequence you need to plan around: Mac currently has NO farbling
+
+The fail-closed fix removes the `std::hash(url)` fallback seed. That seed never reached the renderer, so
+farbling ran on a per-URL **constant** — identical for every user, i.e. a browser-*identifying*
+fingerprint, worse than none (ticket: `development-docs/TICKET_farbling_constant_seed_shipped.md`).
+Fail-closed means "no seed ⇒ inject nothing".
+
+Because Mac is on **M136**, the JS path is *all* Mac has — so **after this change Mac has no farbling at
+all until Mac is on CEF 150 with C1/C2/C3.** That is the accepted trade-off (a constant is worse than
+nothing), not a regression to fix, but it makes your 150 build the thing that restores the feature. The
+same is true of Windows *release* builds until the CI `cef-binaries` asset carries 150.
+
+Also relevant to you: `chromium-rebuild/Q1_mac_farbling.md`.
+
+## 7. Build traps that will bite you identically
+
+- ⭐ **siso SUPPRESSES compile errors when it detects an agent env.** `grep error` on the build log finds
+  *nothing*; read `out/Release_GN_x64/siso_output` and `.siso_failed_targets`.
+- **A killed build looks exactly like a compile error** — `FAILED` + `exit=1` but **no `error:` line
+  anywhere** means the compiler was terminated. Launch builds detached; siso resumes.
+- **A build DETACHES the fork's HEAD**, so commits made after a build leave `hodos/7871` behind and a
+  later `git checkout hodos/7871` **reverts your work**. Check `git rev-parse --abbrev-ref HEAD` after
+  every build; recover with `checkout --detach <sha>` → `branch -f` → `checkout` (never `reset --hard`).
+- **`GURL::host()` returns `std::string_view` on M150** — `const std::string h = url.host();` does not
+  compile.
+- Adding one method to `cef.mojom`'s `BrowserFrame` obligates **two** implementors (`CefFrameHostImpl`
+  derives from it as well as `CefBrowserFrame`); the error surfaces misleadingly in `browser_info.cc`.
+- **Renderer-process logging is DEAD on both platforms** — `Logger::Initialize` runs only in the browser
+  process (`cef_browser_shell_mac.mm` included), so every `LOG_*_RENDER` is a silent no-op. Use Chromium
+  `LOG()` → `cef_debug.log`.
+
+All of the above are in `DevOps-CICD/CEF_BUILD_RUNBOOK.md`.
+
+## 8. Known-open, not yours unless you want it
+
+- **Cross-site redirect** (`bit.ly` → `example.com`): the registry holds only the pre-redirect site, so
+  the landing page fails closed (unfarbled). Same-site host changes *are* covered. Needs a second fill
+  from the redirect hook.
+- Port `farbling_probe.py` to id-based target selection.
+- Put the seed-rotation assertion in CI — it is the only check that catches the constant-seed class, and
+  Brave shipped that same class themselves (their #49346).
+
+---
+
 # ⭐ CURRENT REALITY (2026-08-04) — Windows is RUNNING on CEF 150. Mac is GREENLIT to build.
 
 **Everything below this section dated 2026-07-09 or earlier is historical.** In particular the old

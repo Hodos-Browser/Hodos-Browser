@@ -39,6 +39,22 @@ The kickoff is meant to be ~15–30 minutes of work, not a re-plan. Its job is c
 | **Standard** | After sprint completion | 15 min | Auth category + 2-3 video/media + 1-2 news |
 | **Thorough** | Before release/demo | 30-45 min | Full basket, all categories |
 
+### ⛔ NEGATIVE CONTROL — mandatory for every acceptance test
+
+**Every acceptance test must be demonstrated to FAIL when the feature it covers is disabled.** A test that has never been seen to fail has not been shown to test anything.
+
+Do it explicitly: turn the feature off (config toggle, stub the call, revert the patch), re-run the test, and confirm it goes red *for the right reason*. Only then does a green run mean something. State the negative control alongside the green result when reporting — "passes, and fails when X is disabled".
+
+**Why this is a hard rule and not advice.** The 0.4.0 farbling work produced **three** separate harnesses that would each have passed with the feature completely absent, and they cost days between them:
+
+1. a CDP harness created tabs via `PUT /json/new`, which bypass `OnBeforeBrowse` — so the feature could never engage, and the test failed against **correct** code;
+2. another asserted only that canvas methods report `[native code]`, which is true the instant the old JS is deleted, whether or not any replacement works;
+3. a third drove the wrong **browser** — Hodos's header and ~14 overlays are separate CEF browsers that CDP all reports as `type:"page"` — which faked an "intermittent per-session bug" in code that was fine.
+
+Each one looked rigorous. A negative control would have caught all three in minutes. Related: the shipped fingerprint bug survived in **every release since the feature was written**, because every check anyone ran was a same-session check that the bug passed — see `development-docs/TICKET_farbling_constant_seed_shipped.md`.
+
+Corollary for privacy/security features: also assert the test is measuring the intended **subject** (right process, right browser, right document), not just the intended value.
+
 **Cross-DPI (Windows):** Before any release/demo, and after any header/toolbar/overlay/layout change, run the DPI & resolution matrix — minimum cells #4/#6/#9 (125%/1366, 150%/1366, mixed-DPI). This catches "works on my machine" scaling bugs (e.g. clipped toolbar buttons on a 1366×768 / 150% laptop). See `development-docs/DevOps-CICD/DPI_RESOLUTION_TEST_MATRIX.md`.
 
 **Categories:** Authentication (x.com, google.com, github.com), Video/Media (youtube.com, twitch.tv), News/Content (nytimes.com, reddit.com), E-commerce (amazon.com), Productivity (docs.google.com), BSV (whatsonchain.com)
