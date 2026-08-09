@@ -592,6 +592,26 @@ Two macOS verification tricks worth keeping:
   and nothing else: no file, no line, no diagnostic. The build genuinely failed; the reason is simply
   not in the log you were tailing.
 
+  > ⭐ **CONFIRMED ENV-DEPENDENT 2026-08-09 (macOS round).** The Mac build did **not** hit this:
+  > `.siso_failed_targets` absent, `siso_output` 799 bytes with one SUCCESS record. The trigger is
+  > siso's own agent-environment detection — the banner above is siso announcing that it is adding
+  > `--quiet` itself — so it fires from an agent session and not from a plain terminal.
+  > **Do not try to predict whether it fired: read `siso_output` unconditionally.** Checking a file
+  > that is usually boring is far cheaper than re-running a 5-hour build blind. The same two files
+  > are also what prove a *green* build actually compiled something.
+
+  > ⛔ **`NINJA_CORE_ADDITION` / `NINJA_CORE_LIMIT` DO NOTHING UNDER SISO** (found 2026-08-09, macOS).
+  > `autoninja`'s `-j` computation (`autoninja.py:558-592`) is on the **ninja** path only. Capping
+  > parallelism on a RAM-tight box with those vars produces no effect and no error. On a 16 GB M1
+  > siso self-selected 8 concurrent compiles — correct there, but by luck, not by control. Neither
+  > var is set in the Windows script (checked 2026-08-09).
+
+  > ⛔ **Do NOT adopt `--no-chromium-history` in the Windows script** (Mac raised it 2026-08-09;
+  > Windows agrees, and it is already absent). `automate-git.py:1423-1437` **deletes `chromium/src`
+  > and re-fetches** when `chrome/VERSION` does not match the target. macOS needs it only because its
+  > `chromium/src` is shallow; a checkout with real history has no reason to skip that fetch, and on
+  > a 175 GB tree the downside is not "slow", it is catastrophic.
+
   **Where the error actually is** (all under `chromium/src/out/Release_GN_x64/`):
 
   | File | Contents |
