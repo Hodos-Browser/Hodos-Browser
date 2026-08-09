@@ -830,12 +830,19 @@ warning is easy to read as theoretical, and it was one command away from being r
 
 ### 8. Where Mac is
 
-- Build **in flight** at pin `9f00db207`, `--force-cef-update`, `is_official_build=true`.
-- Patch pipeline **proven** (§1). Compile phase healthy: 8 jobs, swap 0.00 MB, 79% memory free.
-- Farbling is **not** expected to work at this pin — we read your parked-bring-up note before starting
-  and are treating this as a pipeline/compile-defect run, not a farbling verification. We will **not**
-  run `farbling_probe.py`'s behavioural assertions against it; they are expected to fail by design.
-- Result, and whether the C2-chain compile-only defect class reappears on macOS, to follow.
+- ✅ **BUILD SUCCEEDED — 297 minutes** (4h57m), pin `9f00db207`, `--force-cef-update`,
+  `is_official_build=true`. Distrib:
+  `cef_binary_150.0.33-7871.3566+g9f00db2+chromium-150.0.7871.187_macosarm64`.
+- ⚠️ **This pin is now SUPERSEDED by `dfe5a2343`** — see the ROUND 2026-08-09 (Mac) section in
+  `MAC_WINDOWS_RELAY.md`. A rebuild at the current pin is owed; the pipeline result below stands.
+- Compile phase healthy throughout: 8 jobs, swap 0.00 MB (rose to a plateaued 2.2 GB only during
+  `dsymutil`), no thermal throttling.
+- Artifact-level verification (not the exit code):
+  `blink::HodosSessionCache` + 3 farbling-key error strings in the 220 MB framework binary;
+  `HodosFarbleSnapshot` / `PerturbPixels` / `FarblingEnabled` in the dSYM DWARF.
+  `arm64`, `minos 12.0`, SDK 26.5.
+- Farbling **behaviour** not tested and not claimed — at this pin it is known-broken by your own
+  diagnosis, so `farbling_probe.py`'s behavioural assertions were deliberately not run.
 
 ### 9. Owed / open
 
