@@ -682,3 +682,167 @@ twice, which is what fails if farbling ever mutates the canvas instead of the re
 ⚠️ **Two compile-only defects in the C2 chain were caught only by a CEF build**, because the shell
 build does not compile `libcef`. If you are changing fork code, the shell building clean tells you
 nothing about it.
+
+---
+
+## MAC → WINDOWS (2026-08-08) — fork build RUNNING; patch pipeline proven; 4 script blockers fixed; siso ≠ ninja
+
+**Headline: the Hodos fork CEF build is running on macOS for the first time, and the patch pipeline
+is proven.** Disk is no longer a constraint. Four separate blockers stopped the script before the
+compile phase; all four are fixed in `build_hodos_cef_mac.sh` and described below with the evidence,
+because three of them are latent for anyone else and one contradicts our shared guidance.
+
+### 1. ✅ The patch pipeline works on Mac — verified by presence, not by count
+
+```
+116 patches total (2 applied, 114 skipped, 0 failed)
+```
+
+114 upstream were already applied in the tree so they skipped; **the 2 Hodos patches applied clean**.
+Presence gate, per your standard:
+
+```
+patch/patches/hodos_farble_canvas2d.patch
+patch/patches/hodos_farble_session_cache.patch
+```
+
+Both registered in `patch.cfg` (lines 908, 926). Anchored `grep -c "^\s*'name'"` gives **116**, which
+agrees with the patcher. (Unanchored gives 117 — the header-comment trap, still live.)
+
+This is the first Mac evidence that `--force-cef-update` genuinely refreshes `chromium/src/cef` from
+the fork rather than reusing a stale upstream copy. Your P3 finding transfers to macOS unchanged.
+
+### 2. ⚠️ `automate-git.py` runs the build under **siso**, not ninja — our `-j` guidance is aimed at the wrong tool
+
+Observed process:
+
+```
+siso ninja --quiet --batch=false --heartbeat_period=30s --offline -C out/Release_GN_arm64 cefclient
+```
+
+This matters for three reasons:
+
+1. **`autoninja`'s `-j` logic never runs.** In `autoninja.py` the `-j` computation
+   (`autoninja.py:558-592`) is reached only for the ninja path; siso takes `_convert_ninja_j_to_siso_flags`
+   instead. So `NINJA_CORE_ADDITION` / `NINJA_CORE_LIMIT` — the levers we would reach for to cap
+   parallelism on a 16 GB box — **do not apply when siso drives the build.** Worth knowing before
+   anyone "fixes" a swapping build by exporting them and seeing no effect.
+2. **siso ran `--offline` and needed no RBE login.** Our shared note says "siso needs Google RBE login
+   — use ninja directly." That is **too strong**: with `--offline` it builds locally and fine. Suggest
+   softening rather than deleting, since the RBE failure is presumably real when *not* offline.
+3. **It self-selected 8 concurrent compiles**, which is exactly the figure measured as correct for
+   this 16 GB M1. Measured mid-build: 8 `clang++` processes, **swap 0.00 MB**, memory 79% free, no
+   thermal throttling. So on this box siso's default happens to be right — but by luck, not by our
+   control, and Windows should not assume the `-j` knobs are doing anything.
+
+siso also spawns **its own `caffeinate`**, independent of any wrapper we add.
+
+### 3. Four blockers that stopped the script before compiling (all fixed, all latent for you)
+
+| # | Blocker | Where | Fix |
+|---|---|---|---|
+| 1 | depot_tools on a **detached HEAD** → `git pull` fails → `set -e` kills the run ~3 s in | `build_hodos_cef_mac.sh` depot_tools step | Pull only when actually on a branch; otherwise fetch objects and leave HEAD on CEF's pin |
+| 2 | Disk-space preflight measured **`$HOME`**, not the tree's volume | same | Measure `$CEF_BASE_DIR` (walking up to the nearest existing ancestor, since it may not exist yet) |
+| 3 | `clang-format` absent from PATH | new preflight | Adopt the in-tree `buildtools/mac_arm64-format` copy automatically |
+| 4 | Bare `git fetch` in `chromium/src` **wedges** against a shallow checkout | `automate-git.py:1518-1520` | Pass `--no-chromium-history` |
+
+**#1 is your relay item 7 wearing a different hat.** You found `update_depot_tools` re-dirties
+depot_tools; on macOS the *script's own* `git pull` hits it first, because `automate-git.py` leaves
+depot_tools detached at the commit CEF pins. Note the second-order hazard: had that `git pull`
+*succeeded*, it would have moved depot_tools **off** the pin and the next pinned checkout would fail
+with "reference is not a tree". We also now pass `--no-depot-tools-update` (guard at
+`automate-git.py:1279-1285`), after verifying the precondition — depot_tools is at
+`f4fadaf6a5ba1bced9d3d9021060667b563bf583`, exactly `depot_tools_checkout` in
+`CHROMIUM_BUILD_COMPATIBILITY.txt`.
+
+**#2 is worth a look on Windows too.** Any preflight that measures the home volume silently checks the
+wrong disk the moment the tree moves to external storage. Ours also still warned at 100 GB against
+the runbook's measured 150 GB+; both corrected.
+
+**#3 is a design trap, not just a missing binary.** `clang-format` ships *inside* the checkout, so on a
+fresh machine it cannot exist yet — asserting it unconditionally (as the preflight we agreed on did)
+would make a first-ever build **unbootstrappable**. Implemented as: adopt the in-tree copy if present;
+hard-fail only if the checkout exists but the binary does not; warn (not fail) when there is no tree
+yet. Flagging because the version you approved would have had this edge.
+
+### 4. ⚠️ `--no-chromium-history` has a precondition that DELETES your tree if unmet
+
+We recovered the deleted `chromium/src/.git` (see §5) as a **shallow** repo. Against a shallow
+`chromium/src`, `automate-git.py`'s bare `git fetch` wedges hard: measured **18 minutes, zero bytes
+transferred, zero CPU**, both git processes parked in state `SN`, `.git` byte-identical across four
+samples. Network was healthy throughout (`chromium.googlesource.com` answering HTTP 200 in 1.5 s).
+
+`--no-chromium-history` skips that fetch entirely and pins the gclient URL to `@<version>`
+(`automate-git.py:1445`, `1510-1520`). **But read `automate-git.py:1423-1437` before using it:** if
+`chrome/VERSION` does not equal the target version, it `delete_directory(chromium_src_dir)` — it
+silently destroys the checkout and re-fetches. We verified `150.0.7871.187` on both sides first. The
+precondition is documented inline in the script so it does not get removed blind.
+
+### 5. Recovering a deleted `chromium/src/.git` — cheap, and `reset --hard` is a trap
+
+Full re-clone was not needed. What worked:
+
+```
+git init; git remote add origin https://chromium.googlesource.com/chromium/src.git
+git fetch --depth 1 --no-tags origin refs/tags/<ver>:refs/tags/<ver>
+git reset <sha>            # MIXED, not --hard
+```
+
+**~1.4 GB and a few minutes**, versus a full-history clone.
+
+⛔ **Do not `git reset --hard`.** A mixed reset revealed **442 modified files** — those are CEF's
+patches already applied to the Chromium tree. `--hard` would have silently reverted every one, leaving
+a tree that looks fine and builds green with the patches gone. The mixed reset is sufficient: it
+restores a real repo whose HEAD is correct and whose working tree correctly reads as "pinned tag +
+CEF patches", which is exactly the state a normal CEF checkout is in. `0` files showed as deleted,
+which is the check that the tree is complete.
+
+Caveat, in the interest of not overselling it: the shallow repo is what made `git fetch` wedge in §4.
+The recovery is cheap but it is **not** equivalent to a real checkout for anything that walks history.
+
+### 6. External drive — what actually mattered
+
+Your guidance was right and we followed it: **repointed `CEF_BASE_DIR`, did not symlink.** We made it
+env-overridable (`CEF_BASE_DIR="${CEF_BASE_DIR:-$HOME/cef}"`) rather than hardcoding a volume name, so
+the script stays generic.
+
+Additions from doing it:
+
+- **APFS case-**insensitive**, matching the boot volume** — as you specified. Verified before use that
+  the volume does symlinks, exec bits, permission preservation and hardlinks (the exFAT failure modes).
+- **`Owners: Disabled`** is the non-obvious one. macOS disables file ownership on external volumes by
+  default; it needs `sudo diskutil enableOwnership`. Not required for the build to start, but anyone
+  moving a tree to external storage should know the flag exists.
+- **Spotlight off** (`mdutil -i off`) — no sudo needed, as you flagged.
+- Interface speed was, as you said, the thing that matters: 708 MB/s write / 1104 MB/s read.
+- Moving 46 GB: use `ditto` (preserves hardlinks/ACLs/xattrs) and **copy → verify → delete**, never
+  `mv`. A cross-filesystem `mv` is copy-and-delete; a failure at 90% leaves nothing. Verified by exact
+  file count (1,080,882), exact symlink count (327), and checksums.
+- **APFS copy-on-write clones make a free rollback point**: `cp -Rc` cloned the whole 46 GB tree for
+  **~1 GB** in under 3 minutes. Cheap insurance before any risky tree surgery.
+
+### 7. ⚠️ Artifact that `automate-git` was about to delete
+
+The kept upstream distrib (`cef_binary_150.0.17+g94c1726+chromium-150.0.7871.187_macosarm64_minimal.zip`,
+218 MB) was sitting in `chromium/src/cef/binary_distrib/`, which `automate-git` deletes on a pin change
+— exactly the warning already in the script. Moved out and integrity-checked. Restating it because the
+warning is easy to read as theoretical, and it was one command away from being real.
+
+### 8. Where Mac is
+
+- Build **in flight** at pin `9f00db207`, `--force-cef-update`, `is_official_build=true`.
+- Patch pipeline **proven** (§1). Compile phase healthy: 8 jobs, swap 0.00 MB, 79% memory free.
+- Farbling is **not** expected to work at this pin — we read your parked-bring-up note before starting
+  and are treating this as a pipeline/compile-defect run, not a farbling verification. We will **not**
+  run `farbling_probe.py`'s behavioural assertions against it; they are expected to fail by design.
+- Result, and whether the C2-chain compile-only defect class reappears on macOS, to follow.
+
+### 9. Owed / open
+
+- Script changes above are **uncommitted pending a green build** — the build is the evidence.
+- Preflight action item from your 2026-08-06 note is **landed** (with the bootstrap caveat in §3).
+- Still owed from before, unchanged: C++20 `CMakeLists.txt` APPLE arm, stale `HistoryManager` TODO at
+  `cef_browser_shell_mac.mm:5600-5602`, smoke tests, staging into `cef-binaries/`.
+- Question for you: do you want `--no-chromium-history` in the **Windows** script too, or is that
+  purely a consequence of our shallow tree? We think it is ours alone and should not be copied
+  blindly — a Windows checkout with real history has no reason to skip that fetch.

@@ -46,7 +46,10 @@ set -euo pipefail
 # Give 7871 its OWN tree and depot_tools; do not reuse an M136 tree.
 # automate-git.py hard-checkouts depot_tools to the commit its branch pins, so a
 # shared depot_tools ends up pinned to whichever branch ran last.
-CEF_BASE_DIR="$HOME/cef"
+# Overridable so the tree can live on external storage: export CEF_BASE_DIR=/Volumes/<vol>/cef
+# REPOINT this rather than symlinking $HOME/cef -- gclient and automate-git.py resolve and rewrite
+# absolute paths, so a symlinked root leaks the real path back into the checkout's own config.
+CEF_BASE_DIR="${CEF_BASE_DIR:-$HOME/cef}"
 CEF_AUTOMATE_DIR="$CEF_BASE_DIR/automate"
 CEF_DEPOT_TOOLS_DIR="$CEF_BASE_DIR/cef150/depot_tools"
 CEF_CHROMIUM_DIR="$CEF_BASE_DIR/cef150"
@@ -196,15 +199,89 @@ if ! command -v git &>/dev/null; then
 fi
 echo "[OK] git: $(git --version)"
 
-# Check disk space (~100GB needed)
-AVAILABLE_GB=$(df -g "$HOME" 2>/dev/null | tail -1 | awk '{print $4}' || echo "0")
-# Fallback for systems where df -g doesn't work
-if [ "$AVAILABLE_GB" = "0" ]; then
-    AVAILABLE_GB=$(df -Pk "$HOME" | tail -1 | awk '{print int($4/1048576)}')
+# --------------------------------------------------
+# macOS toolchain preflight
+#
+# These three killed builds 40+ minutes in on 2026-08-05/06, which is the whole
+# reason they are asserted here rather than documented. See CEF_BUILD_RUNBOOK.md
+# section macOS.
+# --------------------------------------------------
+
+# SDK 26.x: SDK 15.x lacks kCGImageByteOrder32Host and fails deep in the compile.
+SDK_VERSION=$(xcrun --show-sdk-version 2>/dev/null || echo "none")
+if ! echo "$SDK_VERSION" | grep -q '^26\.'; then
+    log_error "macOS SDK $SDK_VERSION detected; 26.x required."
+    echo "SDK 15.x lacks kCGImageByteOrder32Host and fails partway through the build."
+    echo "Install with: xcodes install 26.5"
+    echo "Then select it: sudo xcode-select -s /Applications/Xcode-26.5.0.app"
+    exit 1
+fi
+echo "[OK] macOS SDK: $SDK_VERSION"
+
+# Metal toolchain: Xcode 26 unbundles it and it must be downloaded separately.
+# NOTE: `xcrun -f metal` succeeds even when the toolchain is absent -- it resolves
+# the shim, not the compiler. Only `metal --version` actually proves it is there.
+if ! xcrun metal --version >/dev/null 2>&1; then
+    log_error "Metal toolchain not installed (Xcode 26 unbundles it)."
+    echo "Install with: xcodebuild -downloadComponent MetalToolchain   (no sudo needed)"
+    echo "Do NOT trust 'xcrun -f metal' -- it succeeds even when the toolchain is missing."
+    exit 1
+fi
+echo "[OK] Metal toolchain: $(xcrun metal --version 2>&1 | head -1)"
+
+# clang-format must be on PATH for the patch/format steps.
+#
+# It ships INSIDE the checkout (buildtools/<platform>-format), so on a fresh
+# machine it cannot exist yet -- asserting it unconditionally would make a
+# first-ever build unbootstrappable. So: adopt the in-tree copy when the tree is
+# there, hard-fail only when the tree exists but the binary is missing, and warn
+# (not fail) when there is no tree yet, since the checkout will supply it.
+# Chromium's buildtools dirs are mac_arm64 / mac_x64 -- NOT the arm64 / x86_64
+# spelling ARCH_LABEL uses, so map rather than interpolate ARCH_LABEL directly.
+if [ "$ARCH_LABEL" = "arm64" ]; then
+    CLANG_FORMAT_DIR="$CEF_CHROMIUM_DIR/chromium/src/buildtools/mac_arm64-format"
+else
+    CLANG_FORMAT_DIR="$CEF_CHROMIUM_DIR/chromium/src/buildtools/mac_x64-format"
 fi
 
-if [ "$AVAILABLE_GB" -lt 100 ]; then
-    log_warn "Only ${AVAILABLE_GB}GB free disk space. 100GB+ recommended."
+if ! command -v clang-format >/dev/null 2>&1 && [ -x "$CLANG_FORMAT_DIR/clang-format" ]; then
+    export PATH="$CLANG_FORMAT_DIR:$PATH"
+    echo "[INFO] Added in-tree clang-format to PATH: $CLANG_FORMAT_DIR"
+fi
+
+if command -v clang-format >/dev/null 2>&1; then
+    echo "[OK] clang-format: $(command -v clang-format)"
+elif [ -d "$CEF_CHROMIUM_DIR/chromium/src" ]; then
+    log_error "clang-format not found, but the checkout exists at $CEF_CHROMIUM_DIR/chromium/src."
+    echo "Expected: $CLANG_FORMAT_DIR/clang-format"
+    echo "The tree may be incomplete -- re-run gclient sync / runhooks."
+    exit 1
+else
+    log_warn "clang-format not on PATH yet; no checkout exists, so the sync will supply it."
+    echo "Expected after checkout: $CLANG_FORMAT_DIR/clang-format"
+fi
+
+# Check disk space on the volume that will actually hold the tree.
+# CEF_BASE_DIR may not exist yet (it is created below), so measure the nearest
+# existing ancestor -- df on a nonexistent path reports nothing useful.
+DISK_CHECK_PATH="$CEF_BASE_DIR"
+while [ ! -d "$DISK_CHECK_PATH" ] && [ "$DISK_CHECK_PATH" != "/" ]; do
+    DISK_CHECK_PATH=$(dirname "$DISK_CHECK_PATH")
+done
+
+AVAILABLE_GB=$(df -g "$DISK_CHECK_PATH" 2>/dev/null | tail -1 | awk '{print $4}' || echo "0")
+# Fallback for systems where df -g doesn't work
+if [ "$AVAILABLE_GB" = "0" ]; then
+    AVAILABLE_GB=$(df -Pk "$DISK_CHECK_PATH" | tail -1 | awk '{print int($4/1048576)}')
+fi
+
+echo "[INFO] Disk check target: $DISK_CHECK_PATH (${AVAILABLE_GB}GB free)"
+
+# 150GB, not 100: measured on macOS 2026-08-06. out/Release_GN_arm64 alone was
+# 56GB for a NON-official build, and is_official_build=true adds ThinLTO objects
+# plus multi-GB dSYMs on top.
+if [ "$AVAILABLE_GB" -lt 150 ]; then
+    log_warn "Only ${AVAILABLE_GB}GB free on $DISK_CHECK_PATH. 150GB+ recommended."
     echo "The build may fail due to insufficient disk space."
     read -p "Continue anyway? (y/N) " -n 1 -r
     echo
@@ -248,7 +325,19 @@ log_info "Setting up depot_tools"
 if [ -d "$CEF_DEPOT_TOOLS_DIR/.git" ]; then
     echo "depot_tools already cloned. Updating..."
     cd "$CEF_DEPOT_TOOLS_DIR"
-    git pull --quiet
+    # automate-git.py hard-checkouts depot_tools to the commit CEF pins in
+    # cef/CHROMIUM_BUILD_COMPATIBILITY.txt, which leaves it on a DETACHED HEAD.
+    # `git pull` there fails with "You are not currently on a branch" and, under
+    # `set -e`, kills the build ~3 s in. Worse, if it DID succeed it would move
+    # depot_tools off the pin and the next pinned checkout would fail with
+    # "reference is not a tree". So: pull only when actually on a branch,
+    # otherwise fetch objects and leave HEAD where CEF pinned it.
+    if git symbolic-ref -q HEAD >/dev/null 2>&1; then
+        git pull --quiet
+    else
+        echo "  depot_tools is detached at pinned commit $(git rev-parse --short HEAD) - fetching objects only, NOT moving HEAD"
+        git fetch --quiet origin || true
+    fi
     # Recover a previously-shallow clone (see the FULL-clone note below).
     if [ -f "$CEF_DEPOT_TOOLS_DIR/.git/shallow" ]; then
         echo "depot_tools is a shallow clone - unshallowing..."
@@ -341,6 +430,31 @@ BUILD_START=$(date +%s)
 # self-corrects only if you never commit locally, which is not a real workflow.
 # The refresh is a directory copy (seconds), so it is always passed rather than
 # remembered.
+# --no-chromium-history: without it, automate-git.py runs a bare `git fetch` in
+# chromium/src (automate-git.py:1518-1520) to get local history for its own
+# calculations. Against a SHALLOW chromium/src that fetch wedges -- observed
+# 2026-08-08 on macOS: 18 min, zero bytes moved, zero CPU, both git processes
+# parked in state SN. This flag skips the fetch entirely and pins the gclient URL
+# to @<version> instead (line 1445).
+# PRECONDITION: chrome/VERSION must already equal the target, or automate-git
+# DELETES chromium/src and re-fetches (line 1423-1437). Verify with:
+#   cat "$CEF_CHROMIUM_DIR/chromium/src/chrome/VERSION"
+# against the chromium_checkout tag in cef/CHROMIUM_BUILD_COMPATIBILITY.txt.
+#
+# --no-depot-tools-update: automate-git.py runs `update_depot_tools` unguarded
+# (automate-git.py:1279-1285) unless this is passed. That moves depot_tools OFF
+# the commit CEF pins in CHROMIUM_BUILD_COMPATIBILITY.txt, so the next pinned
+# checkout dies with "reference is not a tree". Windows hit this and it killed
+# the build ~3 s in; the else-branch means macOS runs the same code path.
+# PRECONDITION: depot_tools must already BE at the pinned commit -- verify with
+#   git -C "$CEF_DEPOT_TOOLS_DIR" rev-parse HEAD
+# against depot_tools_checkout in cef/CHROMIUM_BUILD_COMPATIBILITY.txt.
+#
+# `set -e` is active (top of file), so a failing automate-git.py would abort the
+# script HERE and the whole result-reporting block below -- exit code, duration,
+# the common-issues list -- would never run. Suspend it across this one call so a
+# failed build still reports itself.
+set +e
 python3 "$AUTOMATE_SCRIPT" \
     --download-dir="$CEF_CHROMIUM_DIR" \
     --depot-tools-dir="$CEF_DEPOT_TOOLS_DIR" \
@@ -351,10 +465,13 @@ python3 "$AUTOMATE_SCRIPT" \
     --minimal-distrib \
     --client-distrib \
     --no-debug-build \
+    --no-depot-tools-update \
+    --no-chromium-history \
     --force-cef-update \
     --force-build
 
 BUILD_EXIT_CODE=$?
+set -e
 BUILD_END=$(date +%s)
 BUILD_DURATION=$(( (BUILD_END - BUILD_START) / 60 ))
 
