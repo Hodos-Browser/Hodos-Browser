@@ -194,6 +194,34 @@ There is no central macro header. **Each `.cpp` that logs `#define`s its own mac
 
 Use `LOG_INFO_*` for things you want to see during normal testing. Use `LOG_DEBUG_*` for high-frequency noise (e.g. every IPC message).
 
+### Child processes log to `cef_debug.log`, not `debug_output.log`
+
+`Logger::Initialize` is called **only in the browser process**, so `debug_output.log` carries
+`[MAIN]` and `[BROWSER]` lines only. Child processes (renderer, GPU, utility) route through an
+injected sink into **Chromium's** log — `<logdir>/cef_debug.log`, set by `settings.log_file`.
+
+> ⚠️ **Until 2026-08-09 they routed nowhere at all.** In a child, `initialized` stayed false and
+> `Logger::Log` fell through to `std::cout`, which only the browser process redirects into the log
+> file. Every `LOG_*_RENDER` call was a silent no-op and `[RENDER]` had appeared in
+> `debug_output.log` exactly **zero** times — which is why a total farbling failure went unreported
+> for the entire life of that feature. If you are looking for a renderer line and not finding it,
+> check `cef_debug.log` before concluding the code did not run.
+
+| | |
+|---|---|
+| Sink | `src/core/ChildProcessLogSink.cpp` → `hodos::InstallChildProcessLogSink()` |
+| Installed (Windows) | `cef_browser_shell.cpp :: RunWinMain`, gated on `--type=` being on the command line |
+| Installed (macOS) | `mac/process_helper_mac.mm :: main`, first statement |
+| DEBUG tier | Emitted **only** with `--hodos-render-verbose`, appended by `SimpleApp::OnBeforeChildProcessLaunch` for dev builds. INFO/WARNING/ERROR always emitted. |
+
+⛔ **Do not "simplify" this into a `Logger::Initialize` call in the child.** Renderers run
+**sandboxed at UNTRUSTED integrity** and cannot open a file under `%APPDATA%`; `Logger::Initialize`
+swallows the failed open, so it would look fixed and stay broken.
+⛔ **Do not switch the verbose gate to an environment variable.** A sandboxed child does not
+reliably inherit the environment — that assumption killed every renderer during the sandbox work.
+⛔ **Do not `#include` a CEF header in `Logger.cpp`.** It is compiled into the CEF-free
+`hodos_tests` target; that is why the sink is injected as a function pointer.
+
 ## Window & Process Architecture
 
 Every CEF browser instance runs in its **own renderer process**. The browser process (UI thread) orchestrates them via IPC.

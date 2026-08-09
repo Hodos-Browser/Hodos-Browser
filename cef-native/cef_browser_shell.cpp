@@ -36,6 +36,7 @@
 #include "include/handlers/simple_render_process_handler.h"
 #include "include/handlers/simple_app.h"
 #include "include/core/AppPaths.h"
+#include "include/core/ChildProcessLogSink.h"
 #include "include/core/WalletService.h"
 #include "include/core/PortConfig.h"
 #include "include/core/TabManager.h"
@@ -4495,6 +4496,17 @@ static int RunHodosMain(HINSTANCE hInstance, int nCmdShow, void* sandbox_info,
     // whole sandbox.
     const bool is_child_process =
         (wcsstr(::GetCommandLineW(), L"--type=") != nullptr);
+
+    // Give child processes a working log. They never call Logger::Initialize (and could
+    // not: renderers are sandboxed at UNTRUSTED integrity and cannot write %APPDATA%), so
+    // until this landed every LOG_*_RENDER call was a silent no-op and "[RENDER]" appeared
+    // in debug_output.log exactly zero times. The sink forwards to Chromium's logging,
+    // which is brokered across the sandbox and lands in cef_debug.log.
+    // Installed here — before CefExecuteProcess — so the earliest child-side logs are
+    // covered; the sink itself is not *invoked* until libcef is up.
+    if (is_child_process) {
+        hodos::InstallChildProcessLogSink();
+    }
 
     // Initialize COM for taskbar integration (AUMID, ITaskbarList3).
     // CoInitializeEx is reference-counted; CEF's later COM init is compatible.

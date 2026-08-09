@@ -151,17 +151,39 @@ it trades a privacy bug for the login-breakage bug this whole migration exists t
 - [ ] If yes: as its own patch build, or folded into the next scheduled beta?
 - [ ] Adjust user-facing Privacy Shield copy while farbling is inert?
 
-## 7. Side finding worth its own fix — renderer logging is dead
+## 7. Side finding worth its own fix — renderer logging is dead ✅ **FIXED 2026-08-09**
 
 `Logger::Initialize` is only ever called in the browser process (`cef_browser_shell.cpp`,
-`cef_browser_shell_mac.mm`). **Every `LOG_*_RENDER` call in the codebase is therefore a silent
-no-op**, and `[RENDER]` has never once appeared in `debug_output.log`. That is why a total farbling
-failure went unnoticed for the entire life of the feature: the one subsystem that would have reported
-it could not write.
+`cef_browser_shell_mac.mm`). **Every `LOG_*_RENDER` call in the codebase was therefore a silent
+no-op**, and `[RENDER]` had never once appeared in `debug_output.log` (measured: 0 occurrences).
+That is why a total farbling failure went unnoticed for the entire life of the feature: the one
+subsystem that would have reported it could not write.
 
-Until fixed, use Chromium's `LOG()` for renderer diagnostics — it lands in `cef_debug.log` via
-`settings.log_file`. This blinds every future renderer investigation and should be fixed
-independently of this ticket.
+**Fixed 2026-08-09.** A child process cannot simply call `Logger::Initialize` — renderers run
+**sandboxed at UNTRUSTED integrity** and have no write access to `%APPDATA%`, and
+`Logger::Initialize` swallows the failed open, so that "fix" would look right and stay broken.
+Instead `Logger` gained an injected sink (`Logger::SetSink`), and every child process installs one
+that forwards the formatted line to **Chromium's logging**, which is already brokered across the
+sandbox and lands in `cef_debug.log` via `settings.log_file`.
+
+- Sink: `cef-native/src/core/ChildProcessLogSink.cpp` (`hodos::InstallChildProcessLogSink`).
+- Installed in `RunWinMain` when `--type=` is on the command line (Windows) and at the top of
+  `mac/process_helper_mac.mm :: main` (macOS).
+- `Logger.cpp` stays **CEF-free** — it is compiled into the CEF-less unit-test target — which is
+  why the sink is a function pointer rather than an `#include`.
+- Verbosity: INFO/WARNING/ERROR always; the ~90 `LOG_DEBUG_RENDER` sites (documented as
+  "every IPC message" noise) only with `--hodos-render-verbose`, which
+  `OnBeforeChildProcessLaunch` appends for dev builds. **A switch, not an env var** — a sandboxed
+  child does not reliably inherit the environment.
+
+**Verified: 917 `[RENDER]` lines in `cef_debug.log`, up from 0. Negative control: with the sink
+install disabled and rebuilt, `[RENDER]` count is 0 while the browser process still writes 238
+lines to the same file** — so the log is live and it is specifically the renderer that goes silent.
+
+> Worth noting what the fix immediately revealed: the `🛡️ Injecting fingerprint protection` line
+> is **absent** on a farbled page, because the JS path is now fail-closed and injects nothing.
+> That is correct behaviour — and before this fix it was indistinguishable from the logging simply
+> not working, which is the whole reason §1's bug survived.
 
 ## 8. Acceptance test for whichever fix ships
 

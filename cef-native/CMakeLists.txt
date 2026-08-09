@@ -268,6 +268,7 @@ set(SOURCES
     src/core/NavigationHandler.cpp
     src/core/AddressHandler.cpp
     src/core/Logger.cpp
+    src/core/ChildProcessLogSink.cpp
     src/core/HistoryManager.cpp
     src/core/ProfileManager.cpp
     src/core/GoogleSuggestService.cpp
@@ -325,6 +326,9 @@ if(APPLE)
         src/core/AddressHandler.cpp
         src/core/WalletService_mac.cpp
         src/core/Logger.cpp
+        # The helper IS a child process, so it needs the sink or its LOG_*_RENDER calls
+        # stay the silent no-ops they have always been.
+        src/core/ChildProcessLogSink.cpp
         src/core/HistoryManager.cpp
         src/core/IdentityHandler.cpp
     )

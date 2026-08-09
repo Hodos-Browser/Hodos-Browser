@@ -18,6 +18,7 @@
 #include "../../include/core/Logger.h"
 #include "../../include/core/WindowManager.h"
 #include "../../include/core/LayoutHelpers.h"
+#include "../../include/core/PortConfig.h"
 #include <nlohmann/json.hpp>
 #include <filesystem>
 
@@ -66,6 +67,19 @@ void SimpleApp::OnBeforeChildProcessLaunch(CefRefPtr<CefCommandLine> command_lin
         if (ProfileManager::IsValidProfileId(profileId)) {
             command_line->AppendSwitchWithValue("profile", profileId);
         }
+    }
+
+    // Let child processes emit their DEBUG-tier logs in dev builds. There are ~90
+    // LOG_DEBUG_RENDER call sites against ~14 at INFO and above, and the DEBUG tier is
+    // documented as high-frequency noise ("every IPC message"), so it stays off for
+    // release builds; INFO/WARNING/ERROR are always emitted (ChildProcessLogSink.cpp).
+    //
+    // ⛔ A SWITCH, never an env var. A sandboxed child does not reliably inherit our
+    // environment — that exact assumption made EnforceDevSafeguard fail in every child
+    // and killed all 14 renderers during the sandbox work (cef-native/CLAUDE.md, S2).
+    if (command_line && hodos::IsDevEnv() &&
+        !command_line->HasSwitch("hodos-render-verbose")) {
+        command_line->AppendSwitch("hodos-render-verbose");
     }
 }
 

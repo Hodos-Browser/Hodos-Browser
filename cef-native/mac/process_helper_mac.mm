@@ -14,6 +14,7 @@
 #include "../include/handlers/simple_render_process_handler.h"
 #include "../include/core/HistoryManager.h"
 #include "../include/core/Logger.h"
+#include "../include/core/ChildProcessLogSink.h"
 #include "../include/core/AppPaths.h"
 
 // Minimal CefApp for helpers (only provides render process handler)
@@ -35,6 +36,13 @@ private:
 
 // Entry point function for helper processes
 int main(int argc, char* argv[]) {
+  // Give this helper a working log. Helpers never call Logger::Initialize, so until this
+  // landed every LOG_*_RENDER call here was a silent no-op — the same blindness that let
+  // a total farbling failure go unreported for the life of the feature. The sink forwards
+  // to Chromium's logging (settings.log_file), which works from a sandboxed child where
+  // opening the log file directly does not.
+  hodos::InstallChildProcessLogSink();
+
   // Load the CEF framework library at runtime
   CefScopedLibraryLoader library_loader;
   if (!library_loader.LoadInHelper()) {

@@ -15,7 +15,7 @@ All files are cross-platform (Windows + macOS) unless noted. Windows uses WinHTT
 
 ## Files
 
-Directory contains **32 `.cpp` files, 3 `.mm` files, and 1 local header (`DefaultTrackerList.h`)**. Windows-only sources are marked; the rest build on both platforms (see `cef-native/CMakeLists.txt` `SOURCES` lists).
+Directory contains **34 `.cpp` files, 3 `.mm` files, and 1 local header (`DefaultTrackerList.h`)** (counted 2026-08-09; the previous figure of 32 was already stale by one before `ChildProcessLogSink.cpp` was added). Windows-only sources are marked; the rest build on both platforms (see `cef-native/CMakeLists.txt` `SOURCES` lists).
 
 ### Wallet / BRC-100 / permission proxy
 
@@ -107,6 +107,7 @@ OnWalletCallSuccess
 | `QRScreenCapture.cpp` | **Windows.** OS-level screen-region capture + QR decode via `quirc` (follows the ghost-tab overlay pattern). `StartQRScreenCapture()`, `FinishQRScreenCapture(cancelled, selection)`. Feeds the wallet overlay's QR scan flow; the in-page scanner script is `include/core/QRScannerScript.h`. |
 | `SyncHttpClient.cpp` | Cross-platform synchronous HTTP client. Windows WinHTTP / macOS libcurl. Static methods: `Get(url, timeoutMs)`, `Get(url, headers, timeoutMs)`, `Post(url, body, contentType, timeoutMs)`, `Post(url, body, headers, timeoutMs)`, `Download(url, destPath, timeoutMs = 120000)` (streams to `<dest>.partial`, renames only on a complete 2xx — used for the ~95 MB installer), and `Request(method, url, body, headers, timeoutMs)` for verbs like `DELETE`. Returns `HttpResponse{statusCode, body, success}`. Supports external `https://` with redirect following. |
 | `GoogleSuggestService.cpp` | Omnibox search suggestions. Singleton. Google Suggest or DuckDuckGo `/ac/`, JSON array parsing, URL-encoded query, 5 s timeout. **Cross-platform** — WinHTTP on Windows, libcurl on macOS. |
+| `ChildProcessLogSink.cpp` | `hodos::InstallChildProcessLogSink()` — installs a `Logger` sink that forwards a **child** process's log lines into Chromium's logging (`cef_debug.log` via `settings.log_file`). Called from `RunWinMain` when `--type=` is present (Windows) and at the top of `mac/process_helper_mac.mm :: main` (macOS). The only file here that `#include`s `base/cef_logging.h` — `Logger.cpp` must stay CEF-free because the `hodos_tests` target compiles it. INFO/WARNING/ERROR always; DEBUG only with `--hodos-render-verbose` (appended by `OnBeforeChildProcessLaunch` for dev builds). |
 | `Logger.cpp` | Out-of-line storage + `Initialize()` / `Log()` / `Shutdown()` / `IsInitialized()` for the header-only `Logger` class (`include/core/Logger.h`). `LogLevel` = DEBUG 0 / INFO 1 / WARNING 2 / ERROR_LEVEL 3; `ProcessType` = MAIN 0 / RENDER 1 / BROWSER 2. Output format `[timestamp] [PROCESS] [LEVEL] message` to `debug_output.log`. |
 
 ### V8 handlers (render process)

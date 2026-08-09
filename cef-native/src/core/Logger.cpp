@@ -5,6 +5,7 @@ std::ofstream Logger::logFile;
 bool Logger::initialized = false;
 ProcessType Logger::currentProcess = ProcessType::MAIN;
 std::string Logger::logFilePath = "";
+Logger::LogSinkFn Logger::sink = nullptr;
 
 // Method implementations
 void Logger::Initialize(ProcessType process, const std::string& filePath) {
@@ -22,16 +23,28 @@ void Logger::Initialize(ProcessType process, const std::string& filePath) {
     }
 }
 
+void Logger::SetSink(LogSinkFn newSink) {
+    sink = newSink;
+}
+
 void Logger::Log(const std::string& message, int level, int process) {
     LogLevel logLevel = static_cast<LogLevel>(level);
     ProcessType processType = static_cast<ProcessType>(process);
 
+    std::string logEntry = "[" + GetTimestamp() + "] [" + GetProcessName(processType) + "] [" + GetLogLevelName(logLevel) + "] " + message;
+
     if (!initialized) {
-        std::cout << "[" << GetTimestamp() << "] [" << GetProcessName(processType) << "] [" << GetLogLevelName(logLevel) << "] " << message << std::endl;
+        // A child process lands here: it never calls Initialize() and, being sandboxed,
+        // could not open the log file if it tried. Hand the line to the installed sink
+        // (Chromium logging -> cef_debug.log). Without a sink this falls back to stdout,
+        // which is where every renderer log line used to go to die.
+        if (sink) {
+            sink(logEntry.c_str(), level);
+        } else {
+            std::cout << logEntry << std::endl;
+        }
         return;
     }
-
-    std::string logEntry = "[" + GetTimestamp() + "] [" + GetProcessName(processType) + "] [" + GetLogLevelName(logLevel) + "] " + message;
 
     if (logFile.is_open()) {
         logFile << logEntry << std::endl;
