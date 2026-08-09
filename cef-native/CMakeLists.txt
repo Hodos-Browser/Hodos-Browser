@@ -43,15 +43,16 @@ project(HodosBrowserShell)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-if(WIN32)
+if(WIN32 OR APPLE)
     # CEF 150 requires C++20 — this is not optional and not a style choice:
     #   * include/base/cef_scoped_refptr.h uses a `requires(std::convertible_to<...>)`
-    #     constraint, so the headers do not parse under /std:c++17 at all;
-    #   * the distribution's own cmake/cef_variables.cmake compiles with /std:c++20
-    #     (M136 used /std:c++17), so libcef_dll_wrapper.lib is a C++20 build and we
-    #     must match it.
-    # macOS still links the M136 distribution and therefore stays on C++17 until the
-    # Mac side takes the same engine bump.
+    #     constraint, so the headers do not parse under C++17 at all;
+    #   * the distribution's own cmake/cef_variables.cmake compiles with C++20
+    #     (M136 used C++17), so libcef_dll_wrapper is a C++20 build and we must
+    #     match it — mismatching the standard links cleanly and then corrupts
+    #     memory at runtime.
+    # macOS took the same engine bump on 2026-08-09 (CEF 150 at fork pin dfe5a2343
+    # staged into cef-binaries/), so it now shares this requirement.
     set(CMAKE_CXX_STANDARD 20)
 endif()
 
