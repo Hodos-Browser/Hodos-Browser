@@ -87,9 +87,21 @@ const PrivacySettings: React.FC = () => {
       </SettingsCard>
 
       <SettingsCard title="Fingerprinting">
+        {/*
+          Copy deliberately does NOT enumerate "Canvas, WebGL, Audio" or claim active
+          randomization, because on neither shipping line is that currently true:
+            - release builds (M136) farble nothing at all. The renderer never receives a
+              seed, and since the fail-closed fix it correctly injects nothing rather than
+              a URL-derived constant. See TICKET_farbling_constant_seed_shipped.md.
+            - 0.4.0 (CEF 150) farbles canvas natively (C3); audio, WebGL and navigator
+              stay uncovered until C4/C5/C6.
+          The toggle keeps working so the user's preference persists into the build that
+          restores coverage. TIGHTEN THIS COPY BACK UP when C4/C5/C6 land — an
+          under-claim outliving the gap is its own (smaller) accuracy bug.
+        */}
         <SettingRow
           label="Fingerprint protection"
-          description="Randomizes browser fingerprint (Canvas, WebGL, Audio) to prevent cross-site tracking"
+          description="Limits the identifying signals sites can read from this browser. Coverage is being expanded and does not yet include every signal."
           control={
             <Switch
               checked={settings.privacy.fingerprintProtection}

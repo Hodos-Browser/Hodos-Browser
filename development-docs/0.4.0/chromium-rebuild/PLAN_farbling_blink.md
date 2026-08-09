@@ -288,11 +288,34 @@ Highest fingerprint value first. All paths are `third_party/blink/renderer/...`.
 > - **Single-active-profile assumption**, inherited from `FarblingPolicy::InitializeForProfile` which
 >   already caches one seed per browser process. Documented as a tripwire in the registry header.
 >
-> ⚠️ **KNOWN LIMITATION, not a regression:** a **cross-site redirect** (`bit.ly` → `example.com`)
+> ~~⚠️ **KNOWN LIMITATION, not a regression:** a **cross-site redirect** (`bit.ly` → `example.com`)
 > leaves the registry holding only the pre-redirect site, so the landing page finds no entry and
-> **fails closed — unfarbled**. Same-site host changes (`example.com` → `www.example.com`) *are*
-> covered, because entries are keyed by registrable domain rather than origin. Closing the cross-site
-> case needs a second fill from the shell's redirect hook; **tracked as a follow-up, not done here.**
+> **fails closed — unfarbled**. Closing the cross-site case needs a second fill from the shell's
+> redirect hook; tracked as a follow-up, not done here.~~
+>
+> ✅ **REFUTED BY MEASUREMENT 2026-08-09 — there is no cross-site redirect gap, and no follow-up
+> is needed.** The limitation above was reasoned from the shape of the code, never measured. It is
+> wrong: `SimpleHandler::OnBeforeBrowse` takes an `is_redirect` parameter it deliberately does not
+> branch on, and CEF re-fires it on a server redirect, so the `hodos_farble_key` message is sent
+> **again** for the landing URL and the registry gets its entry before the landing document's
+> `OnContextCreated` pulls.
+>
+> Experiment — reach one landing document two ways and compare, `youtu.be` → `www.youtube.com`
+> being a genuine cross-eTLD+1 redirect:
+>
+> | | small canvas (farbled) | large canvas (control) |
+> |---|---|---|
+> | via redirect | `21212854` | `0cdc9b48` |
+> | direct navigation | `21212854` | `0cdc9b48` |
+>
+> ⭐ **With its own negative control**, because identical hashes would *also* be what you'd see if
+> **neither** page were farbled. Re-run with farbling disabled for `youtube.com` via the per-site
+> opt-out: both arrivals became **`53225ec8`** — which is exactly the native value the auth-exempt
+> control page yields — proving `21212854` was a genuinely farbled value and that the experiment
+> is sensitive to the feature being off. Same-site host changes remain covered, as documented,
+> because entries are keyed by registrable domain.
+>
+> Harness: `scratchpad/redirect_probe.py` pattern, id-based target selection.
 >
 > ✅ **CEF BUILD GREEN 2026-08-07** — `BUILD_EXIT=0`, distrib
 > `cef_binary_150.0.0-HEAD.3567+g116b7fd+chromium-150.0.7871.187_windows64_minimal`,

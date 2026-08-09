@@ -55,6 +55,8 @@ Each one looked rigorous. A negative control would have caught all three in minu
 
 Corollary for privacy/security features: also assert the test is measuring the intended **subject** (right process, right browser, right document), not just the intended value.
 
+**Farbling has a standing release gate** built on exactly this rule: `development-docs/DevOps-CICD/FARBLING_RELEASE_GATE.md`. `promote.yml` blocks without a seed-rotation result, and the harness (`development-docs/0.4.0/chromium-rebuild/farbling_seed_rotation_check.py`) ships its own `--negative-control` mode that inverts the exit code. It lives on the build host rather than in CI because the `cef-binaries` asset CI pulls has no farbling patches — a hosted job would go red against correct code, which is defect #4 of the family above.
+
 **Cross-DPI (Windows):** Before any release/demo, and after any header/toolbar/overlay/layout change, run the DPI & resolution matrix — minimum cells #4/#6/#9 (125%/1366, 150%/1366, mixed-DPI). This catches "works on my machine" scaling bugs (e.g. clipped toolbar buttons on a 1366×768 / 150% laptop). See `development-docs/DevOps-CICD/DPI_RESOLUTION_TEST_MATRIX.md`.
 
 **Categories:** Authentication (x.com, google.com, github.com), Video/Media (youtube.com, twitch.tv), News/Content (nytimes.com, reddit.com), E-commerce (amazon.com), Productivity (docs.google.com), BSV (whatsonchain.com)

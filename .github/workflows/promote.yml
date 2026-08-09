@@ -48,6 +48,14 @@ on:
         description: 'EMERGENCY ONLY: reason to promote WITHOUT AV seeding. Skips the seeding gate; the reason is logged loudly and written to the run summary.'
         required: false
         type: string
+      farbling_rotation_token:
+        description: 'The FARBLING-ROTATION-v1 line printed by development-docs/0.4.0/chromium-rebuild/farbling_seed_rotation_check.py, run on the build host against THIS build. Required unless farbling_gate_waiver is set. The gate re-derives every verdict from the hashes — it does not trust the token''s own verdict= field.'
+        required: false
+        type: string
+      farbling_gate_waiver:
+        description: 'Reason to promote WITHOUT the farbling seed-rotation gate. Expected for any M136 build, where farbling is inert by construction and the rotation cannot pass. Logged loudly and written to the run summary.'
+        required: false
+        type: string
       dry_run:
         description: 'REHEARSAL: run every check (incl. the AV seeding gate) against the real draft bytes, then STOP before the flip. Nothing is published, the website is not touched. Use this to prove the gate behaves before depending on it.'
         required: false
@@ -349,6 +357,143 @@ jobs:
             echo ""
             echo "Paste into \`development-docs/DevOps-CICD/BUILD_AND_RELEASE.md\` §2.5.2."
             echo "_Phase 2 of \`AV_SEEDING_GATE_PLAN.md\` will append this automatically._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # =====================================================================
+      # FARBLING SEED-ROTATION GATE
+      #
+      # WHY THIS IS A PROMOTE GATE AND NOT A CI JOB. A hosted runner cannot
+      # produce this result. The build job pulls `cef-binaries-windows-150.zip`
+      # from a `cef-binaries` release that does not exist on the development
+      # repo at all, and the org repo's copy predates the C2/C3 farbling
+      # patches — so a hosted job would compile against binaries with no
+      # farbling and go red against correct code. That is defect #4 of a family
+      # that has already cost this project days. The measurement therefore runs
+      # on the build host, and the result is carried here.
+      #
+      # WHY IT EXISTS AT ALL. Fingerprint farbling shipped broken in EVERY
+      # release from beta.1 to beta.29 — the renderer never received its seed
+      # and fell back to a URL hash, making the "randomised" fingerprint a
+      # per-URL constant identical across all users, i.e. a browser-identifying
+      # tag rather than a defence. It survived because the bug is invisible to
+      # any single-session check, and every check anyone ran was single-session.
+      # Brave shipped the same class themselves (#49346). The durable artifact
+      # is this cross-session test, so it gets a gate.
+      #
+      # ⭐ UNLIKE THE DEFENDER ATTESTATION ABOVE, THIS IS VERIFIED, NOT TRUSTED.
+      # The token carries the raw hashes and the engine string, and the steps
+      # below re-derive all four contracts from them. `verdict=` is ignored on
+      # purpose: a token that says PASS but whose hashes say otherwise fails.
+      # =====================================================================
+      - name: Farbling gate — waiver check
+        if: env.ALREADY_PUBLIC != 'true'
+        env:
+          WAIVER: ${{ inputs.farbling_gate_waiver }}
+        run: |
+          set -euo pipefail
+          if [ -n "${WAIVER//[[:space:]]/}" ]; then
+            echo "FARBLING_GATE_WAIVED=true" >> "$GITHUB_ENV"
+            echo "::warning::Farbling seed-rotation gate WAIVED for ${TAG} — reason: ${WAIVER}"
+            {
+              echo "### ⚠️ Farbling seed-rotation gate WAIVED"
+              echo ""
+              echo "**Tag:** \`${TAG}\`"
+              echo "**Reason:** ${WAIVER}"
+              echo ""
+              echo "Promoted **without** proving per-user fingerprint unlinkability. Expected on"
+              echo "any M136 build, where farbling is inert by construction and the fail-closed"
+              echo "path is the intended behaviour — see"
+              echo "\`development-docs/TICKET_farbling_constant_seed_shipped.md\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "FARBLING_GATE_WAIVED=false" >> "$GITHUB_ENV"
+          fi
+
+      - name: Farbling gate — re-derive the seed-rotation verdict
+        if: env.ALREADY_PUBLIC != 'true' && env.FARBLING_GATE_WAIVED != 'true'
+        env:
+          TOKEN: ${{ inputs.farbling_rotation_token }}
+        run: |
+          set -euo pipefail
+          T="${TOKEN}"
+          if [ -z "${T//[[:space:]]/}" ]; then
+            echo "::error::No farbling rotation token provided — per-user fingerprint unlinkability has not been proven for this build."
+            echo "::error::On the build host, with the dev stack running:"
+            echo "::error::  python development-docs/0.4.0/chromium-rebuild/farbling_seed_rotation_check.py --exe <build>/HodosBrowser.exe --profile-dir <profile> --port 9322 --dev"
+            echo "::error::then paste the FARBLING-ROTATION-v1 line it prints."
+            echo "::error::Waiver: re-run with farbling_gate_waiver set to a reason (expected for M136 builds)."
+            exit 1
+          fi
+
+          case "$T" in
+            FARBLING-ROTATION-v1\ *) ;;
+            *) echo "::error::Not a FARBLING-ROTATION-v1 token: ${T}"; exit 1 ;;
+          esac
+
+          field() { printf '%s' "$T" | grep -oE "(^| )$1=[^ ]+" | head -n1 | cut -d= -f2- ; }
+          ENGINE=$(field engine)
+          EXEMPT=$(field exempt)
+          LARGE=$(field large)
+          FARBLED=$(field farbled)
+          [ -n "$ENGINE" ] && [ -n "$EXEMPT" ] && [ -n "$LARGE" ] && [ -n "$FARBLED" ] \
+            || { echo "::error::Token is missing one of engine/exempt/large/farbled: ${T}"; exit 1; }
+
+          # Bind the result to an engine that can actually farble. On M136 the patches
+          # do not exist, so a rotation "result" from one is meaningless — and without
+          # this check a token pasted from the wrong build would look identical.
+          MAJOR=$(printf '%s' "$ENGINE" | grep -oE '[0-9]+' | head -n1 || true)
+          if [ -z "$MAJOR" ] || [ "$MAJOR" -lt 150 ]; then
+            echo "::error::Token reports engine '${ENGINE}'. Native farbling requires the CEF 150 fork; a rotation result from an older engine proves nothing."
+            echo "::error::If this really is an M136 build, use farbling_gate_waiver instead."
+            exit 1
+          fi
+
+          split() { printf '%s' "$1" | tr '/' ' ' ; }
+          read -r EX_A EX_B EX_C <<< "$(split "$EXEMPT")"
+          read -r LG_A LG_B LG_C <<< "$(split "$LARGE")"
+          read -r FA_A FA_B FA_C <<< "$(split "$FARBLED")"
+          for v in "$EX_A" "$EX_B" "$EX_C" "$LG_A" "$LG_B" "$LG_C" "$FA_A" "$FA_B" "$FA_C"; do
+            printf '%s' "$v" | grep -qE '^[0-9a-f]{8}$' \
+              || { echo "::error::'${v}' is not an 8-hex-digit hash — token malformed."; exit 1; }
+          done
+
+          fail=0
+          # CONTROL 1 — the auth-exempt page is never farbled, so it must not move.
+          # If it does, the runs are not comparable and nothing below means anything.
+          if [ "$EX_A" != "$EX_B" ] || [ "$EX_B" != "$EX_C" ]; then
+            echo "::error::CONTROL FAILED: auth-exempt hash moved across runs (${EXEMPT}). The measurements are not comparable."
+            fail=1
+          fi
+          # CONTROL 2 — the >=65536px canvas is outside the farbling gate.
+          if [ "$LG_A" != "$LG_B" ] || [ "$LG_B" != "$LG_C" ]; then
+            echo "::error::CONTROL FAILED: large-canvas hash moved across runs (${LARGE}). Rendering differed between runs; the farbled delta cannot be attributed to the seed."
+            fail=1
+          fi
+          # THE assertion the shipped bug fails, and the only one that catches its class.
+          if [ "$FA_A" = "$FA_B" ]; then
+            echo "::error::UNLINKABILITY FAILED: rotating profileSeed did not change the farbled value (${FA_A}). The fingerprint does not depend on the seed — that is the constant-seed class. DO NOT PROMOTE."
+            fail=1
+          fi
+          # Determinism across restarts — the login guarantee.
+          if [ "$FA_A" != "$FA_C" ]; then
+            echo "::error::DETERMINISM FAILED: restoring seed A gave ${FA_C}, not ${FA_A}. The fingerprint is unstable across restarts, which reads to sites as a new device on every launch."
+            fail=1
+          fi
+          [ "$fail" -eq 0 ] || exit 1
+
+          echo "farbling seed-rotation verdict re-derived and holds (engine ${ENGINE})"
+          {
+            echo "### ✅ Farbling seed-rotation gate"
+            echo ""
+            echo "| | seed A | seed B | seed A again |"
+            echo "|---|---|---|---|"
+            echo "| exempt (control) | \`${EX_A}\` | \`${EX_B}\` | \`${EX_C}\` |"
+            echo "| large canvas (control) | \`${LG_A}\` | \`${LG_B}\` | \`${LG_C}\` |"
+            echo "| **farbled** | \`${FA_A}\` | **\`${FA_B}\`** | **\`${FA_C}\`** |"
+            echo ""
+            echo "Engine \`${ENGINE}\`. Controls held still, seed B changed the fingerprint,"
+            echo "and seed A round-tripped exactly — per-user unlinkability **and** determinism"
+            echo "across restarts, from one experiment."
           } >> "$GITHUB_STEP_SUMMARY"
 
       # Point of no return — assets become public + Latest. Skipped in recovery mode

@@ -213,7 +213,10 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain, showCou
             <Typography sx={{ fontSize: '0.85rem', color: '#f0f0f0' }}>
               Fingerprint shield
             </Typography>
-            <InfoTip tip="Randomizes your browser fingerprint to prevent cross-site tracking. Disable for sites that break with fingerprinting on." />
+            {/* See the note in settings/PrivacySettings.tsx: this must not claim active
+                randomization while coverage is partial (release = none, 0.4.0 = canvas
+                only). Tighten back up when C4/C5/C6 land. */}
+            <InfoTip tip="Limits the identifying signals sites can read from this page. Coverage is being expanded and does not yet include every signal. Turn off for sites that misbehave with it on." />
           </Box>
           {!globalFingerprintEnabled ? (
             <Typography sx={{ fontSize: '0.7rem', color: '#9ca3af', fontStyle: 'italic' }}>
