@@ -1,9 +1,49 @@
 #!/usr/bin/env python3
-r"""q2_farbling_adblock_check.py — the statically-decidable half of Q2 §4 (T5, T6, T8).
+r"""q2_farbling_adblock_check.py — Q2 §4 rows T1, T2, T5, T6, T7, T8.
 
-Three of the eight Q2 rows can be settled without a human watching a video. The other five
-(T1 blocked-count, T2 scriptlet/cosmetic injection, T3 YouTube response filter, T4
-CreepJS, T7 auth-domain + adblock) need real page loads and are recorded separately.
+Six of the eight Q2 rows are settled here. The other two are not, and deliberately so:
+
+  * **T3** (YouTube `AdblockResponseFilter` `adPlacements` rename) needs a human watching
+    for a pre-roll — "no ad played" is not something this rig can honestly assert.
+  * **T4** (CreepJS worker column == window column) is **KNOWN RED**: all workers *and* all
+    cross-site iframes are unfarbled, both measured. P4e is deferred, so this is an accepted
+    gap to record, not a failure to chase.
+
+## T1 / T7 — the request is CANCELLED, not merely classified
+
+Probed with a `no-cors` fetch. A normal cross-origin fetch fails on CORS whether or not the
+request was blocked, so it would report "blocked" for the wrong reason; in `no-cors` a
+request that goes through resolves to an opaque response and only a *cancelled* one rejects.
+T7 runs the same probe from an auth-exempt origin, showing the farbling exemption does not
+disable adblock.
+
+⚠️ Two traps this row hit, both of which faked a product bug:
+  1. **`AdblockCache` memoises verdicts per URL** and clears only on the *browser's* toggle /
+     filter update / site toggle — **not** on the engine's HTTP `/toggle`. Without a fresh
+     nonce per probe, the negative control re-reads a cached "blocked" and reports that
+     disabling adblock changed nothing.
+  2. A **cross-origin benign control is cancelled by CSP `connect-src`** on a strict origin
+     like github.com. It must be same-origin. A 404 still *resolves*, so a missing path
+     cannot fake a cancellation.
+
+## T2 — cosmetic CSS / scriptlet injection, per MECHANISM
+
+cnn.com and youtube.com are not two samples of one thing. They exercise different mechanisms
+and each is the other's control:
+
+    cnn.com      generichide=False, 465 selectors, 0 scriptlet bytes  -> CSS path
+    youtube.com  generichide=True,  0 selectors, ~34 KB scriptlet      -> scriptlet path
+
+So YouTube must get **no** cosmetic CSS. Judging it by the CSS path measures the wrong
+mechanism and reports a false failure.
+
+⚠️ Two more traps, both measured rather than anticipated:
+  1. **Read our `<style id="hodos-cosmetic-css">` by id, never "any stylesheet containing an
+     ad selector".** On cnn.com the site's own 2 MB stylesheet contains `.zone__ads` while
+     our injected 717-byte block does not — the loose check returns a PASS attributable to
+     the *site's* CSS.
+  2. **Poll; do not read once.** `measure()` returns as soon as the host appears in the URL,
+     which on a heavy site is `readyState:"loading"` with zero stylesheets attached.
 
 ## T6 — the `[native code]` gate. Q2 calls this "the single most valuable Q2 assertion".
 
@@ -441,6 +481,141 @@ def run_t1t7(args):
     return ok
 
 
+# ---- T2 ---------------------------------------------------------------------------------
+
+COSMETIC_JS_TMPL = r"""
+(async function () {
+  // ⚠️ POLL, do not read once. `measure()` returns as soon as the host appears in the URL,
+  // which on a heavy site is readyState:"loading" with ZERO stylesheets attached — the
+  // cosmetic CSS has not been injected yet and a single read reports a confident absence.
+  // ⚠️ Must stay comfortably UNDER measure()'s 25 s inner Runtime.evaluate window. A poll
+  // that outlasts it never returns a value, so measure() retries and the row finally dies
+  // on its outer timeout — which reads as "the page would not load" rather than "the
+  // element never appeared". That is the wrong diagnosis for the absent-by-design case.
+  var deadline = Date.now() + 18000;
+  var el = null, txt = '';
+  while (Date.now() < deadline) {
+    el = document.getElementById('hodos-cosmetic-css');
+    txt = el ? (el.textContent || '') : '';
+    if (txt.length > 0) break;
+    await new Promise(function (r) { setTimeout(r, 500); });
+  }
+
+  // ⛔ Read OUR element by id, never "any stylesheet containing an ad selector". Measured
+  // on cnn.com: the site's own 2 MB stylesheet contains `.zone__ads` while our injected
+  // 717-byte block does not — so the loose version returns a PASS that is actually
+  // attributable to the SITE's CSS, not ours.
+  var wanted = %s;                       // every selector the engine returned for this host
+  var matched = null;
+  for (var i = 0; i < wanted.length; i++) {
+    if (txt.indexOf(wanted[i]) >= 0) { matched = wanted[i]; break; }
+  }
+  return JSON.stringify({
+    href: location.href,
+    readyState: document.readyState,
+    present: !!el,
+    length: txt.length,
+    matchedSelector: matched,
+    // Control: a selector the engine never returned must NOT appear, or "contains a
+    // selector" degenerates into "contains anything".
+    hasFabricated: txt.indexOf('.hodos-fabricated-selector-xyzzy') >= 0
+  });
+})()
+"""
+
+
+def cosmetic_resources(url):
+    import urllib.request
+    body = json.dumps({"url": url}).encode()
+    req = urllib.request.Request("http://127.0.0.1:%d/cosmetic-resources" % ADBLOCK_PORT,
+                                 data=body, headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=15) as fh:
+        return json.loads(fh.read().decode())
+
+
+def run_t2(args):
+    """T2 — cosmetic CSS / scriptlet injection still fires after the FP teardown.
+
+    ⚠️ The two sites below are NOT two samples of one thing; they exercise DIFFERENT
+    mechanisms, and each is the other's control:
+
+        cnn.com      generichide=False, 465 selectors, 0 scriptlet bytes -> CSS path
+        youtube.com  generichide=True,  0 selectors, ~34 KB scriptlet     -> scriptlet path
+
+    So YouTube must get **no** cosmetic CSS. Judging YouTube by the CSS path would measure
+    the wrong mechanism and report a false failure — a trap this project has already hit.
+    """
+    from farbling_seed_rotation_check import (kill_browser_by_path, launch_browser,
+                                              measure, snapshot_targets, wait_for_cdp)
+    from farbling_cross_profile_check import cdp_port_for
+
+    print("\n### T2 — cosmetic CSS / scriptlet injection, per-mechanism\n")
+
+    try:
+        cnn = cosmetic_resources("https://www.cnn.com/")
+        yt = cosmetic_resources("https://www.youtube.com/")
+    except OSError as exc:
+        print("    engine unreachable (%s)" % exc)
+        return False
+
+    sels = cnn.get("hideSelectors", [])
+    if not sels:
+        print("    *** the engine returned no selectors for cnn.com to key on")
+        return False
+    print("    engine: cnn.com     generichide=%s selectors=%d scriptlet=%dB"
+          % (cnn.get("generichide"), len(cnn.get("hideSelectors", [])),
+             len(cnn.get("injectedScript", ""))))
+    print("    engine: youtube.com generichide=%s selectors=%d scriptlet=%dB"
+          % (yt.get("generichide"), len(yt.get("hideSelectors", [])),
+             len(yt.get("injectedScript", ""))))
+    print("    keying on ANY of the %d selectors the engine returned" % len(sels))
+
+    port = cdp_port_for(args.profile, args.dev)
+    kill_browser_by_path(args.exe)
+    for attempt in range(1, 4):
+        if attempt > 1:
+            kill_browser_by_path(args.exe)
+        launch_browser(args.exe, args.dev, args.profile)
+        if wait_for_cdp(port):
+            break
+    else:
+        raise SystemExit("CDP %d never came up" % port)
+    excluded = snapshot_targets(port, settle=args.settle)
+
+    js = COSMETIC_JS_TMPL % json.dumps(sels)
+    ok = True
+    try:
+        v = measure(port, excluded, "https://www.cnn.com/", "cnn.com",
+                    timeout=args.timeout, js=js)
+        good = (v["present"] and v["length"] > 0 and v["matchedSelector"]
+                and not v["hasFabricated"])
+        print("\n    cnn.com (CSS path)      style#hodos-cosmetic-css present=%s len=%d "
+              "matched=%r fabricated=%s  %s"
+              % (v["present"], v["length"], v["matchedSelector"], v["hasFabricated"],
+                 "OK" if good else "*** FAIL"))
+        if not good:
+            ok = False
+
+        v2 = measure(port, excluded, "https://www.youtube.com/", "youtube.com",
+                     timeout=args.timeout, js=js)
+        # generichide=True => the CSS path is deliberately NOT used here.
+        good2 = (not v2["present"]) or v2["length"] == 0
+        print("    youtube.com (scriptlet) style#hodos-cosmetic-css present=%s len=%d  %s"
+              % (v2["present"], v2["length"],
+                 "OK — generichide=True, so no CSS is correct"
+                 if good2 else "*** CSS was injected despite generichide=True"))
+        if not good2:
+            ok = False
+    finally:
+        kill_browser_by_path(args.exe)
+
+    print("\n    ⚠️ This proves the browser selects and applies the RIGHT MECHANISM per site,")
+    print("       and that the CSS it injects is the engine's. It does NOT prove an ad was")
+    print("       removed — 'no pre-roll plays' is the human observation, and is T3.")
+    print("\n  T2: %s" % ("PASS" if ok else "FAIL"))
+    return ok
+
+
 def main():
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -467,6 +642,7 @@ def main():
     if args.exe:
         results["T6"] = run_t6(args)
         results["T1/T7"] = run_t1t7(args)
+        results["T2"] = run_t2(args)
     else:
         print("\n### T6, T1/T7 skipped (no --exe)")
 
@@ -474,7 +650,6 @@ def main():
     for k in sorted(results):
         print("  %s  %s" % (k, "PASS" if results[k] else "FAIL"))
     print("\n  NOT COVERED by this script (need a human watching a video):")
-    print("    T2 scriptlet + cosmetic injection fires after FP teardown")
     print("    T3 YouTube AdblockResponseFilter adPlacements rename")
     print("    T4 CreepJS worker column == window column  ⛔ KNOWN RED — all workers AND")
     print("       all cross-site iframes are unfarbled (P4e deferred, both MEASURED);")
