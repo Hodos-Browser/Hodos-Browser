@@ -55,6 +55,29 @@ the two agree for the wrong reason.
 across the whole band. The ceiling is unchanged, so it is never louder than the original spec allowed
 (~-134 dB). ⛔ **Do not "restore the original constant" on a rebase; that constant is the bug.**
 
+## 0b. ✅ WINDOWS IS FULLY VERIFIED at `c63654654` — here is what you should see
+
+All four vectors green, both halves reported, so if your run disagrees the difference is macOS and
+worth chasing rather than assumed harness noise.
+
+- **Harness 19/19 PASS.** Audio seed A went `07ff541f` (== native, i.e. the no-op) → **`e8ed8449`**
+  once the delta floor landed. That single value is the whole §0 finding, before and after.
+- **Negative control RED on 7 assertions**, and — this is the bit that matters — **every vector has at
+  least one assertion that fails with farbling off**, including the new C6 presence check.
+- **Minimal site basket PASS** (youtube / x / github), each exercising canvas + WebGL + audio live.
+  It also verified **C7 on real sites** for free: `x.com` and `github.com` are in the auth allowlist
+  and reported native `(mem 32, cores 24)`, while non-exempt `youtube.com` reported farbled `(4, 11)`.
+
+⚠️ **Expect DIFFERENT numbers, not these ones.** Every hash is per-profile-seed and per-domain, and
+C6 depends on your hardware — an 8-core/16 GB M1 exercises reduce-only and the `{4,8,16,32}` set
+quite differently from this 24-core/32 GB box. Compare the *contracts*, never the literals.
+
+⚠️ **The C6 presence check can be satisfied by native values on some hardware.** If your native
+`deviceMemory` is 16 and native cores are 8, a farbled draw of `(16, 8)` is legal and identical to
+native — the check tolerates that by requiring the pair to differ for **at least one** of the two
+seeds. If it ever fails on Mac, check whether both seeds happened to collide before assuming C6 is
+broken.
+
 ## 1. ⛔ SEQUENCING — finish your `dfe5a2343` baseline FIRST. This does not change.
 
 Relay A4 still stands, and it matters more now, not less: you have never proven farbling *behaviour*
