@@ -117,6 +117,10 @@ This matches the outline's §3d default ("OUT of beta.1 unless the free componen
 
 **Precondition:** P5 of the outline (codecs/DRM verify) — a working target-CEF build exists on the build host.
 
+> ⚠️ **Read the 2026-08-10 re-run below before citing the robustness ladder in this section.**
+> The `SW_SECURE_DECODE = NO` row does **not** reproduce on `c63654654`, and is most likely a probe
+> artifact (audio has no such tier). The *verdict* — defer VMP — is unaffected.
+
 ### ✅ Spike-1 RESULTS — steps 0, 3 and 4 executed 2026-08-05 on CEF 150 (sandbox ON)
 
 **Verdict: the VMP thesis is CONFIRMED, and the two cheap escape hatches are both closed.**
@@ -147,6 +151,44 @@ HW_SECURE_ALL        NO       -            NotSupportedError
 > **Strictly speaking:** the *final* confirmation is a license-server refusal on a real Amazon title (step 5). But the robustness-tier evidence above is stronger than what §1 originally had, and it is now hard to construct a story where Amazon works while `SW_SECURE_DECODE` is unavailable. Treat **R2** ("VMP may gate even L3") as partially observed: we do get *a* working L3 tier, just the unattested one.
 
 **Recommendation unchanged and now better-supported: DEFER Amazon-movie DRM out of beta.1.** The free path was genuinely tested and genuinely does not fix it.
+
+### ⚠️ Spike-1 RE-RUN on `c63654654` (Windows, 2026-08-10) — the ladder result above does NOT reproduce
+
+Re-run on the current build with `chromium-rebuild/drm_check.py` (steps 3+4, re-runnable, with
+`--bitmovin` for the one free licence-server data point). **The conclusion survives. The evidence
+cited for it does not.**
+
+| | 2026-08-05 (`94c1726`) | 2026-08-10 (`c63654654`) |
+|---|---|---|
+| CDM on disk | 4.10.3050.0, per profile | **same**, 21.6 MB, per profile |
+| VMP `.sig` beside the exe | none | **none** |
+| `(unspecified)` / `SW_SECURE_CRYPTO` | granted | granted |
+| **`SW_SECURE_DECODE`** | **refused** | **🚨 GRANTED**, and `getConfiguration()` negotiates it back as `SW_SECURE_DECODE` |
+| `HW_SECURE_*` | refused | refused |
+| **`distinctiveIdentifier: required`** | *not tested* | **REFUSED** ← this is where the wall actually is |
+| Bitmovin Widevine demo (real licence server) | not run | **plays: +2,893,374 B decoded, `currentTime` +4.02 s, `mediaKeys` attached** |
+
+**Most likely explanation, and it is a probe artifact, not a build change.** Audio has no
+`SW_SECURE_DECODE` tier, so a probe that sets the *same* robustness string on both the video and
+audio capabilities produces an invalid configuration and gets `NotSupportedError` — for a reason
+that has nothing to do with attestation. Measured directly: video-only `SW_SECURE_DECODE` is
+**granted**; video+audio `SW_SECURE_DECODE` is **refused**. The 08-05 run's exact configuration is
+not recorded in this doc, so this cannot be settled from the record — **whoever re-runs it next
+should treat the 08-05 ladder row as unverified**, not as a baseline to explain a delta against.
+
+**What this changes, and what it does not:**
+
+- ✅ **Unchanged: defer DRM-2 (VMP) out of beta.1.** The refusal at `distinctiveIdentifier: required`
+  is the attestation gap, and premium services require a distinctive identifier. No flag, config or
+  build change reaches it.
+- ❌ **Stop citing "capped at SW_SECURE_CRYPTO / SW_SECURE_DECODE refused"** as the reason — on this
+  build it is false, and an owner reading it would conclude we are one robustness tier lower than we
+  are. §7's results table above and any doc repeating it need this correction applied.
+- 🆕 **An unattested L3 CDM does get a real licence and does decrypt** — Bitmovin's demo plays. So
+  "our CDM cannot do DRM at all" is wrong; the accurate statement is "it cannot do DRM that requires
+  a distinctive identifier or hardware robustness."
+- Steps 5–6 (Amazon primary title, Netflix, Spotify, Brave comparison) still need real accounts and
+  remain **owner-gated**.
 
 ### Spike-1 — Free component-updater CDM test (~1 hr, $0) — DO THIS
 **Goal:** confirm the CDM loads on the target build and enumerate exactly which DRM sites work vs break, and *classify* each failure (EME-resolve vs license-refused).

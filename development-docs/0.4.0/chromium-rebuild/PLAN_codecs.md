@@ -49,7 +49,8 @@ The four flags above are stable, but the *milestones between M136 and TARGET* (M
 | **VP9** (`vp09…`) | `probably` | free codec, always in Chromium | none | **GATE** |
 | **AV1** (`av01…`) | `probably` | free codec; `dav1d` SW decoder (`enable_dav1d_decoder`, defaults true) bundled in **all** Chromium builds — not gated on `is_official_build` | none (already present on M136) | **assert decode presence** |
 | **HEVC / H.265** (`hev1…`/`hvc1…`) | *see note* | `enable_hevc_parser_and_hw_decoder = proprietary_codecs && (is_win \|\| is_apple \|\| …)` and `enable_platform_hevc = proprietary_codecs && (…)` — **both default-ON when `proprietary_codecs=true`** | **CARRY-FORWARD (not a bump change):** these flags have defaulted on since ~M107 (2022), so our **existing M136 build already inherits** HEVC platform/hardware decode via `proprietary_codecs=true`. TARGET simply carries it forward, no extra flag. It is **hardware/OS-decoder only** (no software fallback shipped). | **SMOKE-ONLY, non-gating** (see §3.1) |
-| **Dolby (AC-3/EAC-3/AC-4), Dolby Vision** | `""` | separate `enable_platform_ac3_eac3_audio` / Dolby flags, licensing-gated | not enabling | **OUT** (record explicitly) |
+| **Dolby audio (AC-3/EAC-3/AC-4)** | `""` | `enable_platform_ac3_eac3_audio` / `..._ac4_audio`, both **0** in our build | none | **OUT** (record explicitly) — and it is the Layer-A/B **negative control**, §6.4 |
+| **Dolby Vision** | `""` at runtime | ⚠️ `enable_platform_dolby_vision = proprietary_codecs && (is_cast_media_device \|\| is_win)` — so it is **inherited-ON at build time**, exactly like HEVC, and has been since M136 | **corrects this doc, not the build** — see the tracker's "`enable_platform_dolby_vision=true` is NOT a bump regression" | **recorded, non-gating.** Measured 2026-08-10: the buildflag is 1 but `canPlayType('dvh1.05.07')` returns `""`, because clear Dolby Vision stays off behind the runtime feature `kAllowClearDolbyVisionInMseWhenPlatformEncryptedDvEnabled`. So it is inherited-on in the binary and invisible to sites. ⛔ Do NOT "fix" it with an override during a bump. |
 
 ### 3.1 HEVC — the one real decision this doc surfaces
 
@@ -117,15 +118,50 @@ A `""` on any **[GATE]** row = codec build regressed → **block the bump**, re-
 ### 6.3 Acceptance criteria (maps to outline §7 "Codecs / media")
 
 - [x] Layer-A: all **[GATE]** rows return `'probably'`; AV1 decode presence asserted (`'probably'`).
-      **Windows PASS** (re-confirmed 2026-08-05 with the sandbox ON). macOS owed.
+      **Windows PASS** (2026-08-05 with the sandbox ON; **re-run 2026-08-10 on the farbling build
+      `c63654654`** — see below). macOS owed.
 - [x] Layer-B **(Windows, 2026-08-05)** — every GATE codec proven to *really decode*: H.264 + AAC
       (x.com, twitch.tv), MP3 (direct `decodeAudioData`), VP9/AV1 (youtube.com). reddit (reCAPTCHA),
       linkedin (not signed in) and soundcloud (no media element on `/discover`) were **blocked by
       site access, not decode**, and are each redundant with a passing row. Full evidence table:
       `../../DevOps-CICD/CEF_VERSION_UPDATE_TRACKER.md` § "Codec Layer-B".
+- [x] **Both layers re-run 2026-08-10 on the CEF 150 farbling build** (`c63654654`,
+      `150.0.40-7871.3573+gc636546`, engine `Chrome/150.0.7871.187`) — **PASS**, 6/6 GATE+present
+      rows, MP3/AAC/H.264 decode receipts from local `data:` assets, youtube/x/twitch all decoding.
+      The 08-05 run was against `94c1726`, the **pre-patch** 150 baseline, so this is the first
+      codec result on the binary that actually ships the farbling patch set.
 - [ ] Layer-B on **macOS** — still owed (§6.3 requires both OSes).
 - [x] HEVC result **recorded** (per test machine) but **not gating**; Dolby explicitly out.
       Windows host (i9-12950HX): `probably`.
+
+### 6.4 The harness — `codec_check.py`, and the control that lets it go red
+
+Both layers are now one script, `chromium-rebuild/codec_check.py`, which reuses
+`farbling_seed_rotation_check.py`'s CDP machinery (chrome-target exclusion by id, kill-by-path,
+explicit `--profile`) rather than re-solving the subject problem that killed three farbling
+harnesses. `--layer a|b|both`, `--attach` to measure a running browser.
+
+**A negative control is mandatory (CLAUDE.md Testing Standards) and the honest one — an
+`ffmpeg_branding=Chromium` build — is a 10–12 hour rebuild.** What runs on every invocation
+instead is a set of codecs this build genuinely does not ship, measured by the same probe on the
+same page:
+
+| Layer | Control | Expected | Why it is a real control |
+|---|---|---|---|
+| A | `ac-3`, `ec-3`, `nope.1` via `canPlayType` | `""` | `ENABLE_PLATFORM_AC3_EAC3_AUDIO = 0`. Bounds "the probe says `probably` to everything". |
+| B | an **AC-3-in-MP4** asset built by the same ffmpeg from the same tone as the AAC row | must **not** decode | Same element, same counters, same page — the only difference is a decoder that was not compiled in. Result: `NotSupportedError`, counters flat. |
+
+Neither control proves the FFmpeg decoders were *compiled in* — the build-flag artifacts do that
+(§7 step 3) and Layer B proves they *run*. Report all three together; no one of them is sufficient.
+
+⚠️ Two traps found building this, both of which produce a red that is not a codec failure:
+**(1)** Chrome's autoplay policy blocks a muted `<audio>` element but allows a muted `<video>` one,
+so audio-only assets are played through a `<video>` element and `Runtime.evaluate` is called with
+`userGesture: true`. **(2)** Navigating the tab straight at an `.mp4` URL does not produce an inline
+player here — Hodos's `CefDownloadHandler` claims it and the page ends up with no media element.
+Remote media is therefore attached to an element on the probe page, and the assets are **local**:
+this row first pointed at Google's public `gtv-videos-bucket` sample, which began answering **403**
+mid-sprint. A remote asset in a release gate is a row that rots, and it rots as a false RED.
 
 > **Method note worth keeping.** `canPlayType` is a *capability string* — it can say `probably` for a
 > codec that never decodes a byte. Layer-B's pass criterion is therefore

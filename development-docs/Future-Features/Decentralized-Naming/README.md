@@ -28,7 +28,7 @@ Decentralized-Naming/
 **We have a strong lean toward OpNS as the naming primitive** — and a posture of **"engage, prototype, and watch."** Full analysis in `OPNS_REVIEW.md`; the short version:
 
 - **OpNS** (David Case / @shruggr / b-open-io) is the strongest on-chain, human-readable, self-sovereign, *payable* naming primitive that exists on BSV today. Its name-mint **uniqueness is enforced by Bitcoin Script / consensus via an sCrypt covenant** — a *stronger* guarantee than our own Open Paymail design — and it delivers human-readable **names**, filling the exact gap the Xanaverse review left open (Xanaverse gives unique *numbers*, not names).
-- **But it is essentially pre-adoption**: near-zero names registered, a centralized closed-source paid miner (~0.25 BSV / ~$3 flat per name), no expiry, and squatting economics that are currently capital-bound rather than compute-bound. So it is a promising *primitive*, not a shipped *naming layer* we can depend on yet.
+- **But the ecosystem around it is thin**: a centralized closed-source paid miner (~0.25 BSV / ~$3 flat per name), no expiry, and squatting economics that are currently capital-bound rather than compute-bound. So it is a promising *primitive*, not a shipped *naming layer* we can depend on yet. ⚠️ **CORRECTED 2026-08-05, re-verified 2026-08-10** — this bullet previously read "near-zero names registered," which was **wrong**: `bitcoin`, `satoshi`, `shruggr`, `matt` are registered and all 37 legal first characters are claimed. The open question is *organic adoption vs operator pre-mine*, which cuts against depending on it at least as hard. See `OPNS_REVIEW.md` § "Correction: adoption".
 
 **What "engage, prototype, watch" means concretely:**
 

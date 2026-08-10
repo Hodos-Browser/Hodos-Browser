@@ -17,11 +17,11 @@ OpNS is **the strongest on-chain, human-readable, self-sovereign, *payable* nami
 
 **But** the real-world state tempers everything downstream of that:
 - Registration today runs through a **centralized, closed-source paid miner** (`mine.shruggr.cloud`), flat **0.25 BSV (~$3)** per name regardless of length. `[LIVE]`
-- **Adoption is essentially zero** — even `shruggr`, `1sat`, `bitcoin`, `satoshi` are unclaimed in the live mine tree. `[LIVE]`
+- ~~**Adoption is essentially zero** — even `shruggr`, `1sat`, `bitcoin`, `satoshi` are unclaimed in the live mine tree.~~ ⚠️ **RETRACTED 2026-08-05, re-verified 2026-08-10.** Wrong — an artifact of probing the mining-cursor endpoint instead of the registry. `bitcoin`, `satoshi`, `shruggr`, `matt` are all **registered**; all 37 first characters are claimed. See § "Correction: adoption". `[LIVE]`
 - The marketed "fair-mint PoW anti-squatting" is, in practice, **capital-bound not compute-bound** (buy names at $3 each in a loop). `[INFERRED]`
 - Ownership/identity resolution *after* the mint reverts to ordinary indexer-convention trust (ORDFS).
 
-**Verdict:** genuinely well-architected primitive; **essentially pre-adoption**. Posture → **engage, prototype (read-only), and watch** (detail in `README.md`). Don't build our own; don't depend on OpNS as a shipped naming layer yet.
+**Verdict:** genuinely well-architected primitive; **the name tree is substantially claimed, but the surrounding ecosystem is pre-adoption** *(revised 2026-08-05 — the original "essentially pre-adoption" read conflated the two and was wrong on the first)*. Posture → **engage, prototype (read-only), and watch** (detail in `README.md`). Don't build our own; don't depend on OpNS as a shipped naming layer yet — the reasons are the **centralized paid miner, unresolved economics, and unverified pre-mine question**, not a lack of registrations.
 
 ---
 
@@ -51,7 +51,7 @@ hash = SHA256d( prevPow(32) || char(1) || nonce(32) )
 valid iff top DIFFICULTY bits of reversed(hash) == 0
 ```
 
-- `DIFFICULTY = 22` — **hard-coded constant**, not scaled by name length or demand. ≈ 4.19M hashes/char average — sub-second on a laptop. PoW cost is **linear** in name length.
+- `DIFFICULTY = 22` — ~~**hard-coded constant**~~ ⚠️ **CORRECTED 2026-08-05: this is a *constructor prop*, not a contract constant** — the `22` lives in the indexer/SDK and describes the live deployment only. See § "Correction: contract parameters". Not scaled by name length or demand. ≈ 4.19M hashes/char average — sub-second on a laptop. PoW cost is **linear** in name length.
 - `prevPow` chains each char's proof to the entire prior mining history of that tree path, so you can't precompute.
 - **PoW is the anti-squatting / rate-limiter, NOT the uniqueness mechanism.** Its only job is to make it "impossible to instantly claim the entire domain space" `[SPEC]`. The spec frames it as re-introducing Bitcoin-style fair-mint energy cost (which BSV's near-zero fees otherwise remove — the "unfair pre-mint" problem it cites for BSV21 tokens).
 
@@ -173,7 +173,7 @@ Via **Zooko's Triangle** (decentralized / secure / human-readable — historical
 | **ORDnet `.web3`** | ❌ name layer (centralized DB) | ❌ | ✅ | content on-chain, *name* off-chain |
 | **ENS** (Ethereum) | ✅ (smart-contract) | ✅ | ✅ | money claims names; annual rent |
 | **Xanaverse UserRegistry** | ✅ | ✅ (SMT covenant) | ❌ (numbers) | identity-number, not names |
-| **OpNS** | ✅ | ✅ (covenant, *at mint*) | ✅ | **all three at mint** — but centralized paid miner + pre-adoption today |
+| **OpNS** | ✅ | ✅ (covenant, *at mint*) | ✅ | **all three at mint** — but centralized paid miner; tree substantially claimed, ecosystem still thin *(corrected 2026-08-05)* |
 
 OpNS is the one that plausibly gets all three of Zooko's corners at the mint layer — its weaknesses are *operational/economic* (miner centralization, squatting economics, adoption), not *architectural*.
 
@@ -182,9 +182,9 @@ OpNS is the one that plausibly gets all three of Zooko's corners at the mint lay
 ## Recommendation for Hodos
 
 1. **Don't build our own name registry.** OpNS is the right architectural bet and it's shruggr's — we're aligned.
-2. **Don't depend on it as a shipped naming layer yet** — it isn't one (near-zero adoption, centralized paid miner, unresolved economics).
+2. **Don't depend on it as a shipped naming layer yet** — it isn't one (centralized closed-source paid miner, unresolved squatting/expiry economics, and the **unverified organic-adoption-vs-operator-pre-mine question**). *(Corrected 2026-08-05: "near-zero adoption" was the original reason given here and it was factually wrong — the tree is substantially claimed.)*
 3. **Engage + prototype (read-only) + watch** (see `README.md` for the posture, and `../../Sigma-BRC121-Sprint/phase-3-ordinals/` for the ordinals-adjacent check):
-   - **Cheap, reversible first step:** prototype **read-only OpNS resolution** in Hodos's send form / omnibox (name → `opns.idKey` → BRC-29 address). Low lift, dogfoods the primitive, gives a concrete artifact to discuss with shruggr — without betting on adoption that isn't there.
+   - **Cheap, reversible first step:** prototype **read-only OpNS resolution** in Hodos's send form / omnibox (name → `opns.idKey` → BRC-29 address). Low lift, dogfoods the primitive, gives a concrete artifact to discuss with shruggr — without betting on an ecosystem that hasn't formed yet. *(Note: read-only resolution is more useful than the original draft assumed, precisely because real names are already registered.)*
    - **Open design decision for the planning phase (do NOT hardcode now):** resolve via shruggr's **hosted `1sat.app` overlay**, or **independently** via JungleBus / our own / other **federated-overlay** endpoints? The overlay + registrar are open-source / self-hostable, so the independent path is open — but avoiding a single-hosted-endpoint dependency needs its own research. Tracked in `../../Sigma-BRC121-Sprint/phase-3-ordinals/README.md`. (Note: `@1sat.app` = paymail domain; `1sat.name` = registrar UI.)
    - The open questions here (capital-bound squatting, no expiry, resale-binding resolver policy, centralized miner, canonical-genesis convention) **are literally our README's "how does the ecosystem converge on a naming solution" questions.** We're positioned as a *design partner*, not just a consumer.
 4. **Possible OpNS × Xanaverse synthesis** (worth raising with both shruggr and Calhoun, since both are aligned builders): they're **complementary primitives that bind to the same BRC-100 identity key** —

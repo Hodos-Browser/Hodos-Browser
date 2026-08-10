@@ -223,6 +223,54 @@ purposes (reddit + linkedin = H.264, already proven twice; soundcloud = MP3/AAC,
 **Still owed:** the same Layer-B run on **macOS** (§6.3 requires both OSes) — tracked in
 `0.4.0/MAC_WINDOWS_RELAY.md`.
 
+#### ✅ P5 CODEC RE-VERIFY on the farbling build — Windows, 2026-08-10
+
+The run above was against **`94c1726`**, the pre-patch 150 baseline. P5 asks for the codec gate on
+the binary that ships, so both layers were re-run against the current staged build:
+
+| | |
+|---|---|
+| Fork pin | **`c63654654`** (C1+C2+C3+C4+C5+C6) |
+| `CEF_VERSION` | `150.0.40-7871.3573+gc636546+chromium-150.0.7871.187` |
+| Engine (CDP) | `Chrome/150.0.7871.187` |
+| Harness | `0.4.0/chromium-rebuild/codec_check.py` (both layers, one script) |
+| Subject | shell log confirms `example.com` served to **`role=tab_1`** — a tab, not one of the ~14 overlays |
+
+**Step 1–3 (resolved args, not script input).** `gn args --list` needs the VS env, so the evidence
+taken was the **generated artifact the compiler actually consumed**, which is strictly better:
+`out/Release_GN_x64/gen/media/media_buildflags.h` has `USE_PROPRIETARY_CODECS() (1)`,
+`ENABLE_PLATFORM_HEVC() (1)`, `ENABLE_HEVC_PARSER_AND_HW_DECODER() (1)`, `ENABLE_DAV1D_DECODER() (1)`,
+`ENABLE_AV1_DECODER() (1)`, `ENABLE_PLATFORM_AC3_EAC3_AUDIO() (0)`, `ENABLE_PLATFORM_AC4_AUDIO() (0)`.
+`ffmpeg_branding` is not a buildflag, so its receipt is the compiled config path in the generated
+ninja: **`third_party/ffmpeg/chromium/config/Chrome/win/x64`**. The coupling guard still exists at
+`media/BUILD.gn:85-89`.
+
+**Layer A — 6/6, all controls red-capable:**
+
+| Row | Result | |
+|---|---|---|
+| H.264 baseline `avc1.42E01E` | `probably` | GATE ✅ |
+| H.264 High `avc1.640028` | `probably` | GATE ✅ |
+| AAC-LC `mp4a.40.2` | `probably` | GATE ✅ |
+| MP3 `audio/mpeg` | `probably` | GATE ✅ |
+| VP9 `vp09.00.10.08` | `probably` | GATE ✅ |
+| AV1 `av01.0.05M.08` | `probably` | presence ✅ |
+| HEVC `hvc1.1.6.L93.B0` | `probably` | recorded, non-gating (this host has a decoder) |
+| **Dolby Vision `dvh1.05.07`** | **`""`** | recorded — buildflag is **1** (inherited via `is_win`), runtime feature keeps it invisible to sites. Closes the loop on the "not a bump regression" entry above: inherited-on **and** user-invisible. |
+| AC-3 / E-AC-3 / bogus | `""` / `""` / `""` | **CONTROL** — proves the probe can report absence |
+
+**Layer B — decode receipts:** MP3 `+3,135 B`, AAC `+3,005 B`, H.264 `+394 B` (local `data:` assets,
+`currentTime +1.000s` each); youtube `video +165,161 B / audio +46,584 B`, x.com `+255,975 / +49,207`,
+twitch `+1,408,702 / +62,945`, all with `currentTime` advancing ~3 s.
+
+**⛔ Negative control (Layer B):** an **AC-3-in-MP4** asset, built by the same ffmpeg from the same
+tone as the passing AAC asset, played through the same element and read from the same counters →
+`NotSupportedError`, counters flat. Same probe, same page, one absent decoder. So Layer B has been
+demonstrated to go red.
+
+Token: `CODEC-GATE-v1 engine=Chrome/150.0.7871.187 H.264_baseline=probably H.264_High=probably
+AAC-LC=probably MP3=probably VP9=probably AV1=probably HEVC/H.265=probably Dolby_Vision=empty`
+
 **Failures survived (all documented in `CEF_BUILD_RUNBOOK.md` Lessons):** shallow `depot_tools`;
 stale `automate-git.py`; `rd`/`STATUS_DLL_INIT_FAILED` aborting gclient on an empty temp dir; HTTP
 429; `core.autocrlf`; the autocrlf follow-on; `update_depot_tools.bat` re-dirtying the pin; and a

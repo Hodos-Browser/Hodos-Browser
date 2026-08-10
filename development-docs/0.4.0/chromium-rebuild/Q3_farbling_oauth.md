@@ -101,6 +101,60 @@ Brave keys farbling to the **top-level (first-party) origin**: all frames in a p
 - **Non-exempt top-frame that embeds Turnstile (e.g. a random site):** parent **and** the Turnstile iframe are farbled with the **same top-frame seed** → internally consistent. **Consistency is *necessary* but its *sufficiency* is unverified.** The only primary evidence we have (the `FingerprintProtection.h :: IsAuthDomain` webcompat comment, `:221-230`, + `brave/brave-browser#45608`) establishes that *inconsistency is rejected* — NOT that a consistent-but-implausible farbled fingerprint always passes (e.g. the random WebGL vendor/renderer strings outline §3c flags as "more unique than the truth" could still be scored as a bot). So: consistent farbling *removes the known parent/child failure mode*, but the widget-host trim must be proven live, not assumed.
 - **Therefore the widget-host allowlist entries *may* no longer be load-bearing** — but trimming is **gated on a live pass/fail (OQ2), and reverts (re-adds the widget host) on any failure.**
 
+> ### 📌 2026-08-10 — what Brave actually does, and what it means for our list (owner question)
+>
+> Owner asked whether moving farbling into Blink removes the need for an exempt list at all, and
+> objected — correctly — that *"enumerating site by site does not seem good, there are too many to
+> test and they can change at any time."* Researched against Brave's published material:
+>
+> **1. Brave did NOT eliminate the list. They productised it.** Brave ships a **Webcompat Exceptions
+> Manager** backed by a **remote list service** (`webcompat_exceptions_service`, brave-browser #37074),
+> which "allows us to disable individual fingerprinting protections for specific websites." Live
+> examples: **language** farbling disabled for Albertsons-banner sites (#55271), **screen**
+> fingerprinting disabled for "a number of websites" that detect unusual screen dimensions (#43555).
+> Brave is the most aggressive mainstream implementation of this technique and it still needs a list.
+>
+> **2. Two properties of Brave's list are the actual answer to the owner's objection**, and ours has
+> neither today:
+> - **Per-FEATURE, not per-site-wholesale.** Brave turns off *language* farbling, or *screen*
+>   farbling, on a site — not all protection. Our `IsAuthDomain` is all-or-nothing: one entry drops
+>   canvas + WebGL + audio + navigator together, so every entry costs far more privacy than it needs
+>   to.
+> - **Remotely updatable, not compiled in.** Brave's exceptions arrive as a component and update
+>   without a browser release. Ours is a `static const char* authDomains[]` in a header — **a site
+>   that changes its bot-detection next week needs a full release to unbreak.** That is the real
+>   force of "they can change at any time," and it is an architecture problem, not a list-length one.
+> - ⭐ **We already own the delivery mechanism.** The adblock engine downloads and hot-reloads filter
+>   lists every 6 hours and already ships `hodos-unbreak.txt`. Moving the exemption list onto that
+>   channel is reuse, not new infrastructure.
+>
+> **3. Brave sunset Strict mode for exactly the failure we are trying to avoid** — it "frequently
+> causes certain websites to function incorrectly or not at all", <0.5% of users enabled it, and
+> (the sharp bit) **users who chose it stood out and became *easier* to fingerprint.** A protection
+> level nobody can browse with is not a privacy win.
+>
+> **4. Plausibility is a design constraint, not a switch.** Brave's stated rule is to return values
+> that "have the *shape* of expected values, to minimize web compatibility issues" — small
+> perturbations, deterministic per session+eTLD+1. This is the same reasoning behind our FB-2 decision
+> to **drop** WebGL vendor/renderer randomization (a random GPU string is *more* unique than the truth)
+> and behind C6's `deviceMemory ∈ {4,8,16,32}` / reduce-only `hardwareConcurrency`. Keep it.
+>
+> **5. Sessions are not fingerprints — and we measured this.** Logins ride cookies/JWTs, which
+> farbling never touches. The 2026-08-10 cross-session test rotated the profile seed and YouTube
+> **stayed logged in**. So the exempt list is **not** what keeps users logged in; it protects the
+> *login moment* and *fraud scoring* (Turnstile, reCAPTCHA, DataDome) and risk engines that force
+> re-verification. Framing it as "exempt or users log in every time" overstates what it does.
+>
+> **Recommended direction (not yet actioned, owner-gated):** keep a list, but (a) make it
+> **per-vector** so an entry costs one vector rather than all four, and (b) move it onto the
+> **adblock filter-list channel** so it updates without a release. Then trimming is a data question
+> we can answer continuously instead of a site-by-site audit we have to finish before shipping.
+> Open counter-evidence to keep in view: academic work attacking randomization-based defenses argues
+> **uniform** outputs are more robust than randomized ones — that is the Tor Browser position, and it
+> is the strategic alternative to farbling, not a tweak to it.
+>
+> Sources: brave.com/privacy-updates/4-fingerprinting-defenses-2.0, brave.com/privacy-updates/28-sunsetting-strict-fingerprinting-mode, github.com/brave/brave-browser wiki "Fingerprinting Protections", issues #37074, #39924, #43555, #55271.
+
 ### 2.6 OAuth-specific contexts (the doc's namesake flows)
 Because the decision is **top-frame keyed** (§2.5), the three common OAuth surfaces fall out cleanly — stated explicitly so nobody mis-plumbs them:
 

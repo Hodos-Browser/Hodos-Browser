@@ -387,19 +387,20 @@ Concrete, testable gate items — **all green on both Windows and macOS** before
 - [ ] **Org-migration sequencing recorded (tie to `ORG_IDENTITY_SIGNING_MIGRATION.md`, sequenced BEFORE the P7 prod build):** EITHER **(A)** the Apple individual→org migration landed first (**conditional on confirmed Team-ID preservation**) so beta.1 is the first org-signed build and the N-1(individual)→N(org) apply test proves no forced reinstall (do NOT rotate EdDSA the same step) — one test covers both the CEF-bump manifest risk and the signer risk; **OR (B) explicitly record that beta.1 stays on the pre-migration (individual) identity and the migration is deferred past beta.1**, whose own N-1→N apply test is that later release's gate. **If Team-ID preservation is NOT confirmed, (A) is off the table → (B).**
 
 **Codecs / media (P5/P6)**
-- [ ] `canPlayType` → `'probably'` for H.264 (`avc1.42E01E`), H.264 High (`avc1.640028`), AAC (`mp4a.40.2`), MP3, VP9; **AV1 decode presence asserted.**
-- [ ] HEVC = **inherited hardware-only, per-machine, non-gating** (CQ-1); Dolby out-of-scope.
-- [ ] Real playback smoke: YouTube, x.com (video + animated-GIF-as-MP4), Reddit, Twitch, LinkedIn, an audio site.
+- [x] **Windows** — `canPlayType` → `'probably'` for H.264 (`avc1.42E01E`), H.264 High (`avc1.640028`), AAC (`mp4a.40.2`), MP3, VP9; **AV1 decode presence asserted.** Re-run 2026-08-10 on the farbling build `c63654654` (the 08-05 run was the pre-patch baseline `94c1726`). Harness `chromium-rebuild/codec_check.py`. **[ ] macOS owed.**
+- [x] HEVC = **inherited hardware-only, per-machine, non-gating** (CQ-1): `probably` on this host. **Dolby corrected, not out-of-scope**: Dolby *audio* is off (`ENABLE_PLATFORM_AC3_EAC3_AUDIO=0`), but **Dolby Vision's buildflag is inherited-ON** via `proprietary_codecs && is_win` — and has been since M136 — while `canPlayType('dvh1…')` still returns `""` behind its runtime feature. Inherited, recorded, non-gating; do **not** add an override during the bump.
+- [x] **Windows** real playback smoke, proven by decoded-byte counters climbing: YouTube (VP9/AV1+audio), x.com (H.264+AAC), Twitch (live H.264/AAC), plus local `data:` MP3 / AAC / H.264 decode receipts. Reddit + LinkedIn remain access-blocked and are redundant with passing rows. **[ ] macOS owed.**
+- [x] **The codec gate has been demonstrated to go red**: an AC-3-in-MP4 asset built from the same tone as the passing AAC asset fails to decode through the same element and counters (`ENABLE_PLATFORM_AC3_EAC3_AUDIO=0`), and `ac-3`/`ec-3`/bogus return `""` from the same `canPlayType` probe.
 
 **Farbling — B1 acceptance (P4/P6)**
 - [ ] CreepJS zero "lies" (`.toString()` → `[native code]`); **worker column == window column** incl. **service-worker, shared-worker, OffscreenCanvas-in-worker** (purpose-built harness — I2).
 - [ ] **Intra-session consistency** (same read twice → identical perturbation).
-- [ ] **Cross-profile difference** (same site, two profiles → different values).
+- [x] **Cross-profile difference** (same site, two profiles → different values). **Windows 2026-08-10**, `farbling_cross_profile_check.py`: canvas/WebGL/audio all differ across `Default` vs `Profile_1` with all five controls holding still; negative control (same seed in both) collapses every value to identical. **[ ] macOS owed.**
 - [ ] **Cross-site iframe difference** (third-party origin under two first-parties → different values; first-party keying + P4e).
-- [ ] **Cross-session login test** (create account → restart → revisit → logins do NOT break — persistent per-profile seed).
+- [x] **Cross-session login test** (create account → restart → revisit → logins do NOT break — persistent per-profile seed). **Windows 2026-08-10**: YouTube session survived a real restart on a farbled origin with a byte-identical fingerprint; negative control (seed rotated between phases) moved all three values. ⛔ Note the trap it dodged: the dev profile's other logins (x.com, github.com) are **auth-exempt and therefore unfarbled**, so the obvious run of this test would have passed vacuously — `farbling_cross_session_login_check.py` parses `IsAuthDomain` at runtime and refuses such a target. **[ ] macOS owed.**
 - [ ] Navigator values in valid set (deviceMemory ∈ {4,8,16,32}; hardwareConcurrency ≤ real cores); **WebGL vendor/renderer decision (drop — recommended — or common-GPU-string map incl. Mac ANGLE) applied per FB-2**.
 - [ ] **C7 OAuth/auth-domain exemption verified** — Q3 T2 native-value equality (SOLE proof of a live exemption) + pre-approved sites logging in; per-site toggle (T7) + global toggle (T8) survive.
-- [ ] **No persistent seed on any renderer command line** — ProcessExplorer/`ps` (C2 threat model).
+- [x] **No persistent seed on any renderer command line** — ProcessExplorer/`ps` (C2 threat model). **Windows 2026-08-10**, `farbling_cmdline_seed_check.py`: live `Win32_Process.CommandLine` for all 16 build-dir processes, searched for the seed (hex + base64), both derived domain keys and any whole-value 32+ char hex — zero hits, with a positive control proving the scan can read renderer command lines (it aborts as BLIND otherwise) and a self-test proving the detector still catches a planted leak. **[ ] macOS owed (`ps -ww -o args`).**
 - [ ] `navigator.webdriver=false` + `window.chrome` stub survived JS-block deletion (BOT-1).
 - [ ] **Stability soak + crash-rate gate** — no elevated renderer crashes vs the 136 baseline (or current-public-M136 telemetry if P2a smoked).
 - [ ] **Canvas/WebGL performance-regression gate** — readback within budget vs baseline.
@@ -407,7 +408,8 @@ Concrete, testable gate items — **all green on both Windows and macOS** before
 - [ ] **Escape hatch proven:** a `HODOS_FARBLING`-unset build ships farbling-disabled (window == worker == stock fingerprint).
 
 **DRM (P5)**
-- [ ] Component-updater Widevine CDM auto-download tested + **loads**; **VMP-`.sig`-required-for-L3 question answered (I6)**; Amazon result documented (plays free at L3 → in; SD-capped/refused/needs-VMP → DRM-2 deferred, with cost + broken-site list). Brave-parity error compared.
+- [x] **Windows, on `c63654654` (2026-08-10)** — Component-updater Widevine CDM auto-download tested + **loads** (4.10.3050.0, per profile); no VMP `.sig` beside the executable. **I6 answered:** a `.sig` is **not** required for L3 — the unattested CDM gets a real licence from a real licence server and decrypts (Bitmovin demo: +2,893,374 B decoded). ⚠️ **The wall is `distinctiveIdentifier: required`, not a `SW_SECURE_DECODE` cap** — software `SW_SECURE_DECODE` *is* granted here, contradicting the 08-05 ladder row, which does not reproduce and looks like a probe artifact (audio has no such tier). See `Q4_widevine_amazon_drm.md` §7 re-run. Harness: `chromium-rebuild/drm_check.py`. **[ ] macOS owed.**
+- [ ] Amazon result documented (plays free at L3 → in; SD-capped/refused/needs-VMP → DRM-2 deferred, with cost + broken-site list). Brave-parity error compared. **Owner-gated: needs a real Prime/Netflix/Spotify account.** D2's default (defer DRM-2) is unaffected by the correction above — the identifier gap is still unreachable without VMP.
 
 **Regression / parity (P6)**
 - [ ] Standard site basket (Thorough): Auth, Video/Media, News, E-commerce, Productivity, BSV — both OS.

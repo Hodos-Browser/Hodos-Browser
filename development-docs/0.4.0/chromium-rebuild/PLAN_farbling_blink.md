@@ -551,11 +551,61 @@ Run on **both** Windows and macOS, with adblock ON (Q2 co-existence):
 - [ ] **CreepJS: zero "lies"** on canvas/WebGL/audio (`.toString()` returns `[native code]` — proves native, below JS). This is the single most valuable assertion (Q2 T6).
 - [ ] **worker column == window column** for canvas/WebGL/audio — including **service-worker, shared-worker, and OffscreenCanvas-in-worker**, not just CreepJS's dedicated-worker column (I2 / §5). P4a satisfies dedicated; P4e satisfies OOP. **CreepJS only exercises the dedicated-worker column, so the OOP cases need a purpose-built harness** — a **P4e deliverable**: a small test page that, inside each worker type (dedicated, shared, service), builds a fingerprint via `OffscreenCanvas` + a WebGL context readback + an OfflineAudioContext render, posts the values back to the page, and asserts they **equal the window-context values** for the same profile+domain. Service workers have no DOM, so the harness must construct the readback from `OffscreenCanvas`/WebGL, not `<canvas>`. Without this harness the row is a checkbox no one can check.
 - [ ] **Intra-session consistency:** same read twice in one session+domain → **identical** perturbation (load-bearing for site correctness).
-- [ ] **Cross-profile difference:** same site in two profiles → different farbled values.
+- [x] **Cross-profile difference:** same site in two profiles → different farbled values.
+      ✅ **Windows 2026-08-10** (`c63654654`), harness `chromium-rebuild/farbling_cross_profile_check.py`.
+      `Default` vs `Profile_1`, independently CSPRNG-seeded, both on `example.com`:
+      canvas `0e4e6251` vs `4e5a3154`, WebGL `7da64265` vs `db9131b4`, audio `e8ed8449` vs `7cac00dc`,
+      while **all five controls held still** (exempt canvas/WebGL/audio + both outside-the-gate
+      readbacks). **Negative control:** copying profile A's seed into profile B collapsed *every*
+      farbled value to A's exactly — including navigator `(32,10)` — so the difference is entirely
+      seed-derived and the harness does go red. macOS owed.
+      ⚠️ Trap this cost a run: **the CDP port is derived from the profile id**
+      (`cef_browser_shell.cpp`: `Default`→9222, `Profile_<N>`→9222+N, +100 under `HODOS_DEV`), so the
+      second profile is on a *different port* and a single-port harness reports "the browser failed
+      to start" three times. Mirrored in the harness as `cdp_port_for()`.
 - [ ] **Cross-site iframe:** a third-party origin embedded in two different first parties → **different** values (first-party/top-frame keying works — I4). Because a cross-site iframe is **out-of-process** (default site isolation), this requires the browser to deliver the *top-frame* key to the subframe process — satisfied by **P4e**, not P4a; verify only after P4e lands.
-- [ ] **Cross-session login test (THE important one):** create an account → restart browser → revisit → appears as the **same device**, logins do **not** break (persistent per-profile seed working).
+- [x] **Cross-session login test (THE important one):** create an account → restart browser → revisit → appears as the **same device**, logins do **not** break (persistent per-profile seed working).
+      ✅ **Windows 2026-08-10** (`c63654654`) — target **`www.youtube.com/feed/history`**, a farbled
+      (non-exempt) origin with a real Google session. Logged in before the restart, **still logged in
+      after** a real kill-and-relaunch, and the farbled fingerprint came back **byte-identical**
+      (canvas `21212854`, WebGL `b32263b5`, audio `228f5d27` — same three values both phases).
+      **Negative control:** rotating the profile seed between the phases moved all three
+      (`8ce62979` / `4c62b8d5` / `175fa176`), so the harness does go red when the seed stops being
+      persistent. **Positive control** on the login detector: soundcloud read as logged out in both
+      runs, so "logged in" is a discriminated answer, not the detector's only output.
+      ⚠️ **Recorded honestly:** with the seed rotated YouTube *stayed* logged in — it does not bind
+      its session to a canvas fingerprint. So this run proves the **persistence guarantee holds**;
+      it does not itself demonstrate that a rotating seed breaks logins. The guarantee matters for
+      sites that *do* bind, which is why the row is about determinism, not about YouTube.
+      Harness: `chromium-rebuild/farbling_cross_session_login_check.py` (Windows, 2026-08-10).
+      ⛔ **The vacuous-pass finding, which is the reason this row is not already green:** the only
+      logins in the dev profile are **x.com and github.com**, and *both are on
+      `FingerprintProtection::IsAuthDomain`'s allowlist* — i.e. not farbled at all. Testing there
+      would have produced a confident green about a page nothing farbles. The harness therefore
+      parses the allowlist out of `FingerprintProtection.h` **at runtime** (never copied, so it
+      cannot drift) and **refuses** an exempt target; verified refusing both x.com and github.com.
+      Probed for a session on non-exempt sites — soundcloud, reddit, handcash, alltrails, gitbook —
+      all logged out, so there is nothing to carry across a restart yet. The harness also carries a
+      positive control on the login detector (a known-logged-out URL must read as logged out) and a
+      negative control that rotates the seed between the two phases and asserts the "fingerprint
+      survived the restart" half goes RED. **Needs: one hand-made login on any non-exempt site.**
+      Note the *mechanism* this row protects — an identical fingerprint across a real restart — is
+      already proven by the seed-rotation harness's exact A→B→A round trip.
 - [ ] Navigator values within the **standard valid set** (deviceMemory in the desktop set or dropped; hardwareConcurrency ≤ real cores); WebGL vendor/renderer decision applied per §7 — **either "drop" (Mac GPU-string entries then NOT required and must not block this gate) OR "common-string map" (then Mac ANGLE entries required, FB-6)**. Read the checkbox against whichever FB-2 decision was taken.
-- [ ] **No stable secret on any renderer command line** (C2 threat model): verify via ProcessExplorer/`ps` that no per-profile secret appears on a child cmdline.
+- [x] **No stable secret on any renderer command line** (C2 threat model): verify via ProcessExplorer/`ps` that no per-profile secret appears on a child cmdline.
+      ✅ **Windows 2026-08-10** (`c63654654`), harness `chromium-rebuild/farbling_cmdline_seed_check.py`
+      — reads the **live** `Win32_Process.CommandLine` of all 16 processes under the build directory,
+      after visiting a farbled and an exempt origin so a domain key actually exists to leak. Searched:
+      the profile seed (hex both cases + base64), the derived `HMAC-SHA256(seed, eTLD+1)` for both
+      origins, and any switch whose whole value is a 32+ char hex string. **Zero hits.**
+      **Positive control** (the point of the exercise — `Win32_Process.CommandLine` returns *empty*
+      for processes the caller cannot open, so a blind scan reports a triumphant clean sweep having
+      read nothing): 16/16 command lines readable, `--type=renderer` seen, `--profile=` seen; the run
+      aborts as **BLIND** rather than passing if any of those fail. **Detector self-test** (`--self-test`)
+      plants the real seed and the real domain key into a synthetic process table and asserts both are
+      caught while the genuine `--gpu-preferences` blob is not — that blob was a false positive from
+      the first, looser regex (its base64 contains a 32-char run of `A`/`B`, which are hex digits),
+      and tightening a detector without re-proving it detects is how a check becomes decorative.
 - [ ] OAuth/auth-domain exemption (C7) verified: pre-approved sites un-farbled and logging in (Q3); user per-site toggle still works.
 - [ ] **Stability soak + renderer-crash-rate** not elevated vs the 136 baseline; **canvas/WebGL readback perf** within budget.
 - [x] **BOT-1 bot signals (✅ met 2026-08-05, ahead of P4a; re-assert every release via `farbling_probe.py`):** on **both** an auth-exempt page and a farbled page — `navigator.webdriver === false`, `webdriver` is **NOT** an own property of `navigator`, `webdriver` **IS** a `Navigator.prototype` accessor (native shape), and `navigator.plugins` equals the spec'd 5-entry list exactly with `filename == "internal-pdf-viewer"`. Identical on both page classes is the point: a per-site farbling opt-out must not change the bot signature.
