@@ -58,9 +58,16 @@ file was read.
 """
 
 import argparse
+import json
 import os
 import re
 import sys
+import time
+
+# 31302 release / 31402 under HODOS_DEV — never hardcode one; PortConfig.h is the source.
+ADBLOCK_PORT_RELEASE = 31302
+ADBLOCK_PORT_DEV = 31402
+ADBLOCK_PORT = ADBLOCK_PORT_DEV
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -292,6 +299,148 @@ def run_t6(args):
     return ok
 
 
+# ---- T1 / T7 ---------------------------------------------------------------------------
+
+# Chosen by asking the engine, not by assuming: see run_t1t7's engine pre-check, which
+# refuses to proceed unless the engine agrees these two are classified oppositely.
+BLOCKED_URL = "https://www.google-analytics.com/analytics.js"
+
+FETCH_JS_TMPL = r"""
+(async function () {
+  async function probe(u) {
+    // no-cors on purpose: a normal cross-origin fetch fails on CORS whether or not the
+    // request was blocked, which would make every row look "blocked" for the wrong reason.
+    // In no-cors mode a request that goes through resolves to an opaque response, and only
+    // a CANCELLED request rejects — so this distinguishes adblock from CORS.
+    // A 404 still RESOLVES; only network-level cancellation rejects. That is what makes the
+    // same-origin benign control below safe even where the path does not exist.
+    try { await fetch(u, {mode: 'no-cors', cache: 'no-store'}); return 'through'; }
+    catch (e) { return 'cancelled'; }
+  }
+  // ⛔ Cache-buster, and it is load-bearing rather than hygiene. AdblockCache memoises the
+  // verdict per URL and clears only on the BROWSER's toggle / filter update / site toggle —
+  // NOT on the engine's HTTP /toggle. Without a unique URL per probe, the negative control
+  // re-reads a cached "blocked" and reports that disabling adblock changed nothing, which
+  // looks like a product bug and is not one. The nonce changes the cache key while still
+  // matching the same filter rule (verified against POST /check).
+  var nonce = '%s';
+  // Same-origin benign control: immune to the page's CSP connect-src, which on a strict
+  // origin like github.com cancels a cross-origin fetch for reasons unrelated to adblock —
+  // the defect this control originally had.
+  var benign = location.origin + '/favicon.ico?hodos=' + nonce;
+  return JSON.stringify({
+    href: location.href,
+    blocked: await probe(%s + '?hodos=' + nonce),
+    benign:  await probe(benign)
+  });
+})()
+"""
+
+
+def engine_check(url, source):
+    import urllib.request
+    body = json.dumps({"url": url, "sourceUrl": source,
+                       "resourceType": "script"}).encode()
+    req = urllib.request.Request("http://127.0.0.1:%d/check" % ADBLOCK_PORT, data=body,
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=10) as fh:
+        return json.loads(fh.read().decode())
+
+
+def engine_toggle(enabled):
+    import urllib.request
+    body = json.dumps({"enabled": enabled}).encode()
+    req = urllib.request.Request("http://127.0.0.1:%d/toggle" % ADBLOCK_PORT, data=body,
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=10) as fh:
+        return json.loads(fh.read().decode())
+
+
+def run_t1t7(args):
+    """T1 — a blocked request is actually CANCELLED in the browser, not merely classified.
+    T7 — the same holds on an auth-EXEMPT origin, i.e. the farbling exemption does not
+    accidentally disable adblock (they are independent systems)."""
+    from farbling_seed_rotation_check import (kill_browser_by_path, launch_browser,
+                                              measure, snapshot_targets, wait_for_cdp)
+    from farbling_cross_profile_check import cdp_port_for
+
+    print("\n### T1 / T7 — adblock cancels in the browser, on farbled AND exempt origins\n")
+
+    # Engine pre-check. If the engine does not classify these two oppositely, the browser
+    # rows below cannot mean anything, and picking URLs by assumption is how a gate ends up
+    # asserting nothing.
+    nonce = "%d" % int(time.time())
+    try:
+        b = engine_check(BLOCKED_URL + "?hodos=" + nonce, "https://example.com/")
+        n = engine_check("https://example.com/favicon.ico?hodos=" + nonce,
+                         "https://example.com/")
+    except OSError as exc:
+        print("    engine unreachable on :%d (%s) — is the adblock engine running?"
+              % (ADBLOCK_PORT, exc))
+        return False
+    print("    engine says blocked=%s for the nonce'd tracker URL" % b.get("blocked"))
+    print("    engine says blocked=%s for the same-origin control" % n.get("blocked"))
+    if not b.get("blocked") or n.get("blocked"):
+        print("    *** the engine does not classify these two oppositely; the browser rows "
+              "would prove nothing. Pick different URLs.")
+        return False
+
+    js = FETCH_JS_TMPL % (nonce, json.dumps(BLOCKED_URL))
+    port = cdp_port_for(args.profile, args.dev)
+    kill_browser_by_path(args.exe)
+    for attempt in range(1, 4):
+        if attempt > 1:
+            kill_browser_by_path(args.exe)
+        launch_browser(args.exe, args.dev, args.profile)
+        if wait_for_cdp(port):
+            break
+    else:
+        raise SystemExit("CDP %d never came up" % port)
+    excluded = snapshot_targets(port, settle=args.settle)
+
+    ok = True
+    rows = {}
+    try:
+        for label, host in (("farbled origin (T1)", "example.com"),
+                            ("auth-EXEMPT origin (T7)", "github.com")):
+            v = measure(port, excluded, "https://%s/" % host, host,
+                        timeout=args.timeout, js=js)
+            rows[label] = v
+            good = (v["blocked"] == "cancelled" and v["benign"] == "through")
+            print("    %-26s blocked-url=%-9s benign-url=%-8s %s"
+                  % (label, v["blocked"], v["benign"], "OK" if good else "*** FAIL"))
+            if not good:
+                ok = False
+
+        # ⛔ NEGATIVE CONTROL: turn the feature off and require the same probe to go red.
+        print("\n    negative control — disabling the engine globally via POST /toggle")
+        engine_toggle(False)
+        time.sleep(2)
+        # A FRESH nonce, or this probe re-reads the "blocked" verdict the run above just
+        # put in AdblockCache and the control silently tests nothing.
+        js2 = FETCH_JS_TMPL % ("%d" % (int(time.time()) + 1), json.dumps(BLOCKED_URL))
+        v = measure(port, excluded, "https://example.com/", "example.com",
+                    timeout=args.timeout, js=js2)
+        ctrl_ok = (v["blocked"] == "through")
+        print("    %-26s blocked-url=%-9s %s"
+              % ("adblock OFF", v["blocked"],
+                 "OK — it goes through when the feature is off"
+                 if ctrl_ok else "*** the URL was cancelled with adblock DISABLED, so the "
+                                 "cancellation above was never attributable to adblock"))
+        if not ctrl_ok:
+            ok = False
+    finally:
+        try:
+            engine_toggle(True)
+            print("    engine re-enabled")
+        except OSError:
+            print("    *** WARNING: could not re-enable the engine — do it manually")
+        kill_browser_by_path(args.exe)
+
+    print("\n  T1/T7: %s" % ("PASS" if ok else "FAIL"))
+    return ok
+
+
 def main():
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -311,22 +460,25 @@ def main():
     ap.add_argument("--timeout", type=float, default=90.0)
     args = ap.parse_args()
 
+    global ADBLOCK_PORT
+    ADBLOCK_PORT = ADBLOCK_PORT_DEV if args.dev else ADBLOCK_PORT_RELEASE
+
     results = {"T8": run_t8(args.repo), "T5": run_t5(args.repo, args.adblock_data)}
     if args.exe:
         results["T6"] = run_t6(args)
+        results["T1/T7"] = run_t1t7(args)
     else:
-        print("\n### T6 skipped (no --exe)")
+        print("\n### T6, T1/T7 skipped (no --exe)")
 
     print("\n================ Q2 SUMMARY ================")
     for k in sorted(results):
         print("  %s  %s" % (k, "PASS" if results[k] else "FAIL"))
-    print("\n  NOT COVERED by this script (need real page loads / a human):")
-    print("    T1 adblock blocked-count increments")
+    print("\n  NOT COVERED by this script (need a human watching a video):")
     print("    T2 scriptlet + cosmetic injection fires after FP teardown")
     print("    T3 YouTube AdblockResponseFilter adPlacements rename")
-    print("    T4 CreepJS worker column == window column  ⛔ KNOWN RED — all workers are")
-    print("       unfarbled (P4e deferred); record as an accepted gap, do not chase")
-    print("    T7 auth-domain exemption with adblock active")
+    print("    T4 CreepJS worker column == window column  ⛔ KNOWN RED — all workers AND")
+    print("       all cross-site iframes are unfarbled (P4e deferred, both MEASURED);")
+    print("       record as an accepted gap, do not chase")
     return 0 if all(results.values()) else 1
 
 
