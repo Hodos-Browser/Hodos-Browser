@@ -103,6 +103,11 @@ Brave keys farbling to the **top-level (first-party) origin**: all frames in a p
 
 > ### 📌 2026-08-10 — what Brave actually does, and what it means for our list (owner question)
 >
+> ➡️ **Full research + phased recommendation + risk table: `EXCEPTIONS_DESIGN_REVIEW.md`.** The two
+> facts that decide it: Brave's exception list is **public** (`brave/adblock-lists` →
+> `brave-lists/webcompat-exceptions.json`) and contains **~20 entries** — against our 37, each of
+> which is 4× blunter. The "too many sites to enumerate" fear is empirically wrong.
+>
 > Owner asked whether moving farbling into Blink removes the need for an exempt list at all, and
 > objected — correctly — that *"enumerating site by site does not seem good, there are too many to
 > test and they can change at any time."* Researched against Brave's published material:
