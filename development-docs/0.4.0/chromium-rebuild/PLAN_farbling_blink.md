@@ -150,6 +150,42 @@ The original (A) assumed we would have to extend `blink::mojom::CommitNavigation
 
 The Supplement covers any `ExecutionContext` **once the `domain_key` reaches that context's process.** In-process contexts inherit it; **out-of-process ones — OOP workers *and* cross-site iframes under default site isolation — need explicit cross-process delivery.**
 
+> ## ⛔⛔ MEASURED 2026-08-10 — **ALL** workers are unfarbled, in-process included. The table below is aspirational, not current.
+>
+> The "in-process contexts inherit it for free" reasoning is **wrong in practice at `c63654654`**, and
+> this was confirmed by measurement on macOS after being reasoned from the code on Windows — so it is
+> not a platform artifact.
+>
+> **Why:** the only key-install path is `CefFrameImpl::MaybeApplyHodosFarblingKey()` →
+> `blink_glue::SetHodosFarblingKey(WebLocalFrame*)` → `local_frame->DomWindow()` →
+> `HodosSessionCache::From(*window)`. That takes a **`LocalDOMWindow`**. There is no worker-start hook
+> anywhere in `libcef/`. A `DedicatedWorkerGlobalScope` is a *different* `ExecutionContext`, gets a
+> fresh key-less Supplement, and **fails closed to native** — which the header states outright:
+> *"FAIL-CLOSED BY CONSTRUCTION. A freshly created cache has no key, and with no key
+> `FarblingEnabled()` is false."*
+>
+> **Measurement** (`chromium-rebuild/farbling_worker_probe.py`, macOS, one document on `example.com`,
+> in-process dedicated worker via a same-origin blob URL):
+>
+> | example.com | main thread | dedicated worker |
+> |---|---|---|
+> | farbling **on** | canvas `48922b8f`, cores 5, mem 8 | canvas `2fad2e1a`, cores **8**, mem **16** |
+> | farbling **off** (control) | canvas `2fad2e1a`, cores 8, mem 16 | canvas `2fad2e1a`, cores 8, mem 16 |
+>
+> The worker returns byte-identical **native** values while the main thread of the same document is
+> farbled; with farbling off, main and worker agree — which is what makes the difference attributable
+> to farbling rather than to the two code paths differing.
+>
+> ⛔ **Therefore: describe the gap as "window and same-site frames only; ALL workers unfarbled,
+> in-process included" — NOT "OOP workers pending".** P4e is larger than this plan says. The owner's
+> decision to defer it (2026-08-09) stands; only its described size changes.
+>
+> ⚠️ Two traps in probing this, both of which yield a confident wrong answer: an **auth-exempt origin
+> cannot be the control** (github.com's CSP blocks `blob:` workers, so the worker never starts and the
+> control silently yields nothing — use the *same* origin with the per-site opt-out applied), and
+> **both sides must use `OffscreenCanvas` and draw no text** (different canvas objects and worker font
+> fallback would otherwise make a main-vs-worker difference ambiguous).
+
 | Context | Process | Key delivery | Effort |
 |---|---|---|---|
 | `LocalDOMWindow` — main frame + **same-site** iframes | same renderer | navigation-commit delivery (§4) | Base (P4a) |
@@ -549,7 +585,7 @@ Our patch targets are **high-churn Blink files** — `base_rendering_context_2d.
 
 Run on **both** Windows and macOS, with adblock ON (Q2 co-existence):
 - [ ] **CreepJS: zero "lies"** on canvas/WebGL/audio (`.toString()` returns `[native code]` — proves native, below JS). This is the single most valuable assertion (Q2 T6).
-- [ ] **worker column == window column** for canvas/WebGL/audio — including **service-worker, shared-worker, and OffscreenCanvas-in-worker**, not just CreepJS's dedicated-worker column (I2 / §5). P4a satisfies dedicated; P4e satisfies OOP. **CreepJS only exercises the dedicated-worker column, so the OOP cases need a purpose-built harness** — a **P4e deliverable**: a small test page that, inside each worker type (dedicated, shared, service), builds a fingerprint via `OffscreenCanvas` + a WebGL context readback + an OfflineAudioContext render, posts the values back to the page, and asserts they **equal the window-context values** for the same profile+domain. Service workers have no DOM, so the harness must construct the readback from `OffscreenCanvas`/WebGL, not `<canvas>`. Without this harness the row is a checkbox no one can check.
+- [ ] **worker column == window column** for canvas/WebGL/audio — including **service-worker, shared-worker, and OffscreenCanvas-in-worker**, not just CreepJS's dedicated-worker column (I2 / §5). ⛔ **RED, and wider than this row assumed — measured 2026-08-10: NO worker is farbled, in-process dedicated workers included** (§5 box). The claim "P4a satisfies dedicated; P4e satisfies OOP" is **false**; P4a satisfies neither. Deferred by owner decision, logged as a known gap. **CreepJS only exercises the dedicated-worker column, so the OOP cases need a purpose-built harness** — a **P4e deliverable**: a small test page that, inside each worker type (dedicated, shared, service), builds a fingerprint via `OffscreenCanvas` + a WebGL context readback + an OfflineAudioContext render, posts the values back to the page, and asserts they **equal the window-context values** for the same profile+domain. Service workers have no DOM, so the harness must construct the readback from `OffscreenCanvas`/WebGL, not `<canvas>`. Without this harness the row is a checkbox no one can check.
 - [ ] **Intra-session consistency:** same read twice in one session+domain → **identical** perturbation (load-bearing for site correctness).
 - [x] **Cross-profile difference:** same site in two profiles → different farbled values.
       ✅ **Windows 2026-08-10** (`c63654654`), harness `chromium-rebuild/farbling_cross_profile_check.py`.

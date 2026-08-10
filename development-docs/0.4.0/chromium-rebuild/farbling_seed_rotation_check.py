@@ -65,9 +65,9 @@ This script refuses to touch any process outside the directory of `--exe`.
 All four native vectors, measured in one page visit so they share the same three restarts:
 
     canvas  getImageData          C3   fork dfe5a2343+
-    webgl   readPixels            C4   fork 843a6450b+
-    audio   getChannelData        C5   fork 843a6450b+
-    navigator deviceMemory/cores  C6   fork 843a6450b+
+    webgl   readPixels            C4   fork c63654654+
+    audio   getChannelData        C5   fork c63654654+
+    navigator deviceMemory/cores  C6   fork c63654654+
 
 ⚠️ Only meaningful against a build whose CEF actually carries those patches. Against an
 older binary farbling is absent and this correctly reports RED — check `CEF_VERSION`
@@ -234,6 +234,15 @@ def set_profile_seed(profile_dir, seed_hex):
 
 
 def set_site_enabled(profile_dir, domain, enabled):
+    """⚠️ The per-site value is an OBJECT, `{"enabled": false}` — not a bare `false`.
+
+    A bare boolean is silently ignored by the loader and farbling stays ON. The direction
+    is safe (it fails towards more protection, not less) but it costs a confusing probe
+    run, because the harness then measures a farbled page while believing it disabled the
+    feature — i.e. a negative control that quietly isn't one. Anyone hand-editing
+    fingerprint_settings.json will reach for the bare boolean first. (Reported by the Mac
+    session, 2026-08-10.)
+    """
     doc = read_settings(profile_dir)
     sites = doc.get("siteSettings")
     if not isinstance(sites, dict):
