@@ -8322,6 +8322,56 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
             return true; // Consume the event
         }
 
+        // Reload: F5, Ctrl+R (soft) and Ctrl+Shift+R (hard, cache-bypassing).
+        //
+        // None of these existed before 2026-08-10. The consequences were not cosmetic:
+        //   * F5 was never consumed, so it fell through to the OS and hit the window
+        //     manager instead of the page;
+        //   * `ReloadIgnoreCache` appeared NOWHERE in this codebase, so hard reload did
+        //     not exist by key or by button — which made PaidContentCache's documented
+        //     escape hatch ("Hard-reload bypasses via Cache-Control: no-cache",
+        //     CLAUDE.md) unreachable. A paid page could not be re-fetched at all.
+        //
+        // Resolve the target the same way the `navigate_reload` IPC does (active tab of
+        // the owning window) rather than reloading `browser`: the shortcut can fire while
+        // the header or an overlay holds focus, and reloading THOSE would reload browser
+        // chrome instead of the page the user is looking at.
+        {
+            bool isCtrl = false;
+#ifdef __APPLE__
+            isCtrl = (event.modifiers & EVENTFLAG_COMMAND_DOWN) != 0;
+#else
+            isCtrl = (event.modifiers & EVENTFLAG_CONTROL_DOWN) != 0;
+#endif
+            const bool isShift = (event.modifiers & EVENTFLAG_SHIFT_DOWN) != 0;
+            const bool f5 = (event.windows_key_code == 116);          // VK_F5
+            const bool ctrlR = (isCtrl && event.windows_key_code == 'R');
+
+            if (f5 || ctrlR) {
+                // Ctrl+Shift+R, or Shift+F5, bypass the cache — matching Chrome.
+                const bool ignoreCache = isShift;
+
+                BrowserWindow* rl_win = GetOwnerWindow();
+                int rl_wid = rl_win ? rl_win->window_id : 0;
+                Tab* active_tab = TabManager::GetInstance().GetActiveTabForWindow(rl_wid);
+                if (active_tab && active_tab->browser) {
+                    if (ignoreCache) {
+                        active_tab->browser->ReloadIgnoreCache();
+                    } else {
+                        active_tab->browser->Reload();
+                    }
+                    LOG_DEBUG_BROWSER(std::string("🔄 Keyboard reload (") +
+                                      (ignoreCache ? "ignore-cache" : "soft") +
+                                      ") on tab " + std::to_string(active_tab->id) +
+                                      " (window " + std::to_string(rl_wid) + ")");
+                } else {
+                    LOG_WARNING_BROWSER("⚠️ No active tab for keyboard reload in window " +
+                                        std::to_string(rl_wid));
+                }
+                return true;  // Consume, so F5 never reaches the OS again
+            }
+        }
+
         // Ctrl+F / Cmd+F - Find in Page (tab browsers only)
         if (event.windows_key_code == 'F' && role_.find("tab_") == 0) {
 #ifdef __APPLE__

@@ -436,7 +436,7 @@ Concrete, testable gate items — **all green on both Windows and macOS** before
 - [ ] Adblock still works incl. YouTube `CefResponseFilter` ad-strip + cosmetic/scriptlet (Q2).
 - [ ] **FedCM** ("Sign in with Google" account chooser) works — `CefPermissionHandler` FedCM coverage audited (§3g).
 - [ ] **macOS minos guard GREEN** (every exe/helper/Rust-bin `minos ≥` framework minos) + manual relaunch-after-update on a machine at/near the 12.0 floor; **Big-Sur-strand announced in release notes**.
-- [ ] Wallet send/receive + CWI shim intact (BRC-121 test site).
+- [~] Wallet send/receive + CWI shim intact (BRC-121 test site). **Windows 2026-08-10, owner-driven.** ✅ **GREEN:** the **GOLD PILL** fires on a real auto-approved payment *and* correctly does **not** fire on a cached reload (`PaidContentCache HIT`) — both halves of the safeguard, the cached-reload leg being the negative control that shows the badge tracks payments rather than page loads; balance and receive address correct; BRC-100 identity-key send/receive worked. ⛔ **BLOCKED on an owner decision, not on a test:** BRC-121 **re-mints a new payment on every retry** and `"NOT broadcasting (funds preserved)"` does **not** preserve funds once the signed BEEF has been handed to the payee — 6 mints for one article, 4 of them on chain, 4,600 sats for content never delivered. Full evidence + options: `development-docs/TICKET_brc121_remint_on_retry.md`. **Deferred by owner 2026-08-10 to stay on sprint.** ⚠️ Latency on that run was **not ours** — Cloudflare reported `cfOrigin;dur` of 10,295 ms / 19,939 ms while our payment leg was 58 ms.
 
 ---
 

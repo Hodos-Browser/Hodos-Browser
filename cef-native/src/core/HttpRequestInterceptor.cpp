@@ -4581,6 +4581,20 @@ void Async402HTTPClient::OnRequestComplete(CefRefPtr<CefURLRequest> request) {
         statusText = resp->GetStatusText().ToString();
         resp->GetHeaderMap(headers);
     }
+
+    // status == 0 means no HTTP response was ever received, and on its own it is
+    // undiagnosable: a connection reset, a DNS failure and a timeout all log identically.
+    // That ambiguity cost a real triage on 2026-08-10, when five paid retries against a
+    // slow origin (Cloudflare reported cfOrigin;dur up to 19,939 ms) all reported a bare
+    // status=0 and nothing in the log could say why. CefURLRequest carries the reason —
+    // surface it, because this is the money path and the failure mode determines whether
+    // the correct response is "retry", "back off" or "stop paying".
+    if (status == 0) {
+        LOG_WARNING_HTTP("🌐 Async402: no HTTP response — CefURLRequest error=" +
+                         std::to_string(static_cast<int>(request->GetRequestError())) +
+                         " (see cef_errorcode_t; ERR_TIMED_OUT=-7, ERR_CONNECTION_CLOSED=-100, "
+                         "ERR_CONNECTION_RESET=-101, ERR_ABORTED=-3)");
+    }
     std::string body;
     {
         std::lock_guard<std::mutex> lock(mutex_);
