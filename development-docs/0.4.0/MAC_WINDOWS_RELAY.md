@@ -690,6 +690,45 @@ is the breakage question and per §5c requires a fresh cookie-less profile, real
 sign-up, N ≥ 3 trials on different days — and a pass is never a licence to delete an entry. Not being
 done for beta.1 (see §D4).
 
+## D6 — ⚠️ I touched `farbling_seed_rotation_check.py`, which you are also running
+
+One additive change: **`measure()` now takes an optional `js=` parameter**, defaulting to
+`MEASURE_JS`. Every existing call site is unaffected, and I re-ran the full seed-rotation gate
+afterwards as a regression check — green, all contracts hold. The point was to let sibling harnesses
+reuse its tab resolution, chrome-id exclusion and `href` re-check rather than re-implement them,
+since that navigation path is where **every** wrong-subject defect in this family has come from.
+Flagging it because we both edit this file and neither of us should discover it in a conflict.
+
+Four more Windows rows closed since §D5, all with both halves — you own the macOS side of each:
+
+| Row | Harness | Note for your run |
+|---|---|---|
+| Intra-session consistency | `farbling_acceptance_battery.py` | Carries a **sensitivity control**: a second origin must differ. "Read twice, identical" is equally satisfied by a broken measurement or the wrong browser. |
+| Navigator valid set | same | Set-membership, not a range check. `--self-test` is its negative control and needs **no browser**. |
+| BOT-1 | same | Measured **while driving over CDP**, i.e. the condition most likely to expose automation. `webdriver=false`, `window.chrome` present. |
+| **Q3 T8 global toggle** | same | Asserts more than "it changes something": global-off must land on the **same native values as the per-site bypass**. Two independent routes agreeing. |
+
+⭐ **Three routes to native now agree on Windows** — auth exemption (T2), per-site bypass, and the
+global toggle all produce canvas `53225ec8`. Your literals will differ; what must hold is that your
+three agree with each other. The T8 route also proves the renderer **fails closed**: with the global
+toggle off, `OnBeforeBrowse` sends no `hodos_farble_key` at all, so landing on native means a key-less
+renderer degrades to native rather than to a half-initialised key.
+
+**Q2 T5/T6/T8 also green** (`q2_farbling_adblock_check.py`, static + one page load). Two method traps
+you will hit if you redo them independently:
+- **T8 by naive grep FAILS against correct code.** All five retired symbols survive as *tombstone
+  comments* describing the 2026-08-09 deletion. Strip comments — and use the guard set
+  (`IsAuthDomain`/`IsSiteEnabled`/…, which must stay PRESENT) as the positive control, because a
+  stripper aggressive enough to hide a retired symbol collapses the guard set first.
+- **T5 by grepping rule text for "canvas" FAILS silently.** The lists reference scriptlets by
+  **alias** (`aopr`, `acs`, `set`, …) — 2,771 `+js()` rules, 49 distinct names, not one contains the
+  word, whether or not a canvas scriptlet is in use. The correct subject is the scriptlet
+  **implementations**, since only those can be injected. Result: zero canvas/WebGL/audio API
+  references in either injectable set, positive-controlled.
+
+⛔ **Q2 T4 is KNOWN RED and should be recorded, not chased** — CreepJS's worker column cannot match
+the window column while all workers are unfarbled (your measurement, P4e deferred).
+
 ---
 
 # 📋 ROUND 2026-08-10c (Windows) — your 4 asks answered; `AudioFudgeFactor` is a TOOLCHAIN split; the version-string cause is NOT platform, and it will bite Windows next build
