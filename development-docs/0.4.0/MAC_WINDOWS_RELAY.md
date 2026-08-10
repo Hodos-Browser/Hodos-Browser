@@ -186,8 +186,69 @@ capability request) and `VMP_SIGNING_SPIKE.md`, which starts the Google licensin
 our own claim that castLabs cannot sign a CEF browser — true of their free Electron build only.
 
 **Windows is not blocked.** Next up is owner-gated: either the exception-list Phase 1 measurement or
-P6. **macOS still owes Codec Layer-B** (`codec_check.py` will do it), and that is on the beta.1
-checklist for both platforms.
+P6.
+
+---
+
+# §C — What we're asking macOS to do, ordered by value
+
+**You are not blocked, and three of these are ready right now.** Nothing here depends on the
+exception-list work, which is Windows-led, owner-gated, and deliberately not handed to you yet (see
+§C5).
+
+1. **⭐ Codec Layer-A + Layer-B on macOS — the highest-value item, and the only P5 row left on either
+   platform.** `chromium-rebuild/codec_check.py`, `--exe` pointed at the app binary inside the
+   bundle. It reuses the rotation harness's CDP machinery, so target selection, kill-by-path and the
+   explicit `--profile` all come for free; the only Windows-specific inheritance is the kill/launch
+   helper, which may need a `pkill`/`open` arm on your side (it already branches on
+   `sys.platform`, so check rather than assume). Layer A GATE rows must be `probably`
+   (H.264 baseline + High, AAC, MP3, VP9), AV1 present, HEVC record-only. **Report the AC-3 negative
+   control result alongside the green one** — if AC-3 ever decodes, Layer B is measuring nothing.
+   This closes `PLAN_codecs.md` §6.3, which has said "macOS owed" since 08-05.
+
+2. **Cross-session login row on macOS** — `farbling_cross_session_login_check.py`, both halves.
+   ⚠️ **Check your profile's logins first.** Ours were x.com and github.com, both **auth-exempt**, so
+   the obvious run would have passed while farbling nothing; the harness now parses `IsAuthDomain`
+   out of the header at runtime and refuses such a target. `www.youtube.com` is a good one — sign-in
+   routes through exempt `accounts.google.com` but the session lands on a farbled origin. Expect the
+   negative control to move the **fingerprint**, not to log you out; YouTube does not bind its
+   session to a canvas hash.
+
+3. **Port the renderer-cmdline seed check to `ps`** — `farbling_cmdline_seed_check.py` is
+   Windows-only today (`Win32_Process`) and exits with a clear message on other platforms.
+   `ps -ww -o args` is the equivalent. ⛔ **Keep the positive control when you port it**: the whole
+   point is that a scan which cannot read child command lines reports a triumphant "no seed anywhere"
+   having read nothing — the same false-negative family as `strings` on your dSYM. It must assert it
+   can see `--type=renderer` and exit **BLIND** rather than PASS if it cannot. `--self-test` plants
+   the real seed and domain key into a synthetic table to prove the detector still detects; keep that
+   too.
+
+4. **Cross-profile difference — BLOCKED on a Mac-side decision, please make it.**
+   `farbling_cross_profile_check.py` needs two profiles with CDP on both, but
+   `cef_browser_shell_mac.mm:5417` gives `remote_debugging_port = 0` to **any profile that is not
+   `Default`**, so the second profile has no CDP at all. Windows derives `9222 + N` instead. Either
+   lift the restriction locally for the test, or tell us and we will make the harness's
+   `cdp_port_for()` platform-aware. **Not a code change to ship** — just to run the test.
+
+5. **Exception-list work: please DON'T start.** Owner asked whether native farbling lets us shrink or
+   drop `IsAuthDomain`. Research + an adversarial review landed on Windows
+   (`EXCEPTIONS_DESIGN_REVIEW.md` §5c). Two findings that concern you: **per-vector exceptions would
+   cost a full CEF rebuild on both platforms** plus permanent patch-set growth (the decision is a
+   single `SetBool` → `bool enabled` in `hodos_farbling_registry.h`, so a bitmask touches 8 libcef
+   files and all 5 patches), and the plan now requires a user-facing breakage-report path **before**
+   anything is trimmed. It is owner-gated and the measurement half is Windows shell-only. **We will
+   hand you a scoped task once the shape is settled** — starting now would be building against a
+   design that just changed twice.
+
+6. **Your own leftovers, unchanged and still yours:** the stale `HistoryManager` TODO and the
+   relative-`log_file` mute-engine bug, both in `cef_browser_shell_mac.mm`.
+
+**And the thing neither of us should lose sight of:** both platforms being green does not put a single
+byte in front of a user. Release builds are still M136, so the gating item for beta.1 is the CI
+`cef-binaries` asset carrying 150 (`FARBLING_RELEASE_GATE.md` §3) — not anything in C1–C7. On macOS
+that failure is **silent**: there is no bootstrap gate, so a release build against the M136 asset just
+succeeds and ships a browser with no farbling at all, indistinguishable from a working one without
+running the seed-rotation gate.
 
 ---
 
