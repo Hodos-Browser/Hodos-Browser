@@ -10,7 +10,7 @@
 
 ## 1. Where we actually are
 
-> **STATUS 2026-08-10 — the batch is landed and measured on Windows.** Table refreshed below;
+> **STATUS 2026-08-10 — the batch is landed and measured on BOTH platforms.** Table refreshed below;
 > the plan text that follows is kept as the record of how it was sequenced.
 
 | Unit | What it covers | State |
@@ -18,31 +18,48 @@
 | **C1** Supplement on `ExecutionContext` | the foundation every other C-step hangs off | ✅ landed, compiled both platforms |
 | **C2** key delivery | browser→renderer `[Sync]` pull at `OnContextCreated` | ✅ landed, behaviourally proven on Windows |
 | **C3** Canvas 2D | `getImageData` / `toDataURL` / `toBlob` | ✅ landed, proven on Windows (seed-rotation gate) |
-| **C4** WebGL `readPixels` | one hook in `ReadPixelsHelper` | ✅ landed `743e5f322`, **behaviourally proven** on Windows |
-| **C5** WebAudio | `getChannelData`, `getFloatFrequencyData` | ✅ landed `743e5f322`; the ±2e-7 delta was found to be a **no-op below float32 resolution** and floored at `2^-23` in `c63654654` |
-| **C6** Navigator | `deviceMemory`, `hardwareConcurrency` | ✅ landed `743e5f322`, **behaviourally proven** on Windows |
+| **C4** WebGL `readPixels` | one hook in `ReadPixelsHelper` | ✅ landed `743e5f322`, **behaviourally proven on Windows AND macOS** (macOS 2026-08-10, incl. under `--in-process-gpu`) |
+| **C5** WebAudio | `getChannelData`, `getFloatFrequencyData` | ✅ landed `743e5f322`; the ±2e-7 delta was found to be a **no-op below float32 resolution** and floored at `2^-23` in `c63654654`. **Proven on Windows AND macOS** at the floored pin |
+| **C6** Navigator | `deviceMemory`, `hardwareConcurrency` | ✅ landed `743e5f322`, **behaviourally proven on Windows AND macOS** (no seed collision on the 8-core macOS box) |
 | **C7** auth-domain exemption at source | move `IsAuthDomain` + per-site toggle into the `enabled` bit | ✅ **no fork change needed** — `OnBeforeBrowse` already collapses all three inputs into C2's `enabled` bit, which is what Q3 §2.1 specifies. Only the teardown remained |
 | **Teardown** | delete the dead JS fragments, retire `FingerprintScript.h` | ✅ done — `FingerprintScript.h` deleted, both seed caches and both IPC names removed, orphan sweep clean, Privacy Shield control preserved |
-| **P4e** | OOP shared/service workers + cross-site iframes | ⏸️ **DEFERRED past beta.1 (owner decision 2026-08-09)**, logged as a known gap — and **wider than this plan assumed**: see the note below |
+| **P4e** | ~~OOP shared/service workers~~ **ALL workers** + cross-site iframes | ⏸️ **DEFERRED past beta.1 (owner decision 2026-08-09)**, logged as a known gap — and **wider than this plan assumed**: see the note below |
 
-> ### ⚠️ P4e is larger than "OOP workers + cross-site iframes"
+> ### ⛔ P4e is larger than "OOP workers + cross-site iframes" — MEASURED 2026-08-10
 >
 > §8 and the C3 patch comment both claim P4a closed the window-vs-worker canvas mismatch. The hook is
 > in the right place, but the **key never reaches a worker**: the only install site is
 > `blink_glue::SetHodosFarblingKey(blink::WebLocalFrame*, …)`, called from
 > `CefFrameImpl::MaybeApplyHodosFarblingKey` at `CefFrameImpl::OnContextCreated` — **frame contexts
 > only**. A `DedicatedWorkerGlobalScope` is a different `ExecutionContext`, gets a fresh key-less
-> Supplement, and fails closed to native.
+> Supplement, and fails closed to native. `HodosSessionCache`'s own header states the consequence:
+> *"FAIL-CLOSED BY CONSTRUCTION. A freshly created cache has no key, and with no key
+> `FarblingEnabled()` is false."*
 >
-> If that reading holds, **in-process workers are unfarbled too**, so §11's worker row is red for a
-> reason unrelated to OOP. Recorded as **reasoned from the code, not yet measured** — the owner
-> declined a dedicated worker harness for now, so this stays a logged gap rather than a claim.
+> **No longer a reading — measured on macOS 2026-08-10** with
+> `chromium-rebuild/farbling_worker_probe.py`. One `example.com` document, in-process dedicated
+> worker via a same-origin blob URL:
+>
+> | example.com | main thread | dedicated worker |
+> |---|---|---|
+> | farbling **on** | canvas `48922b8f`, cores 5, mem 8 | canvas `2fad2e1a`, cores **8**, mem **16** |
+> | farbling **off** (control) | canvas `2fad2e1a`, cores 8, mem 16 | canvas `2fad2e1a`, cores 8, mem 16 |
+>
+> The worker returns byte-identical **native** values on all three vectors while the main thread of
+> the same document is farbled.
+>
+> **Therefore: in-process workers are unfarbled too**, and §11's worker row is red for a reason
+> unrelated to OOP. The deferral stands, but log the gap as **"window + same-site frames only; ALL
+> workers unfarbled, in-process included"** — not "OOP workers pending". Scoping P4e as an
+> OOP-only job would under-estimate it: it needs a worker-start key-delivery path, which is a
+> different mechanism from the frame `OnContextCreated` pull.
 
 ~~**Today, WebGL / audio / navigator are farbled by nothing at all.**~~ **Superseded 2026-08-10.**
 All four values are now farbled natively on Windows dev, and the JS path that nominally owned them is
-deleted. **macOS is off M136** as of 2026-08-09 (CEF 150 at `dfe5a2343` staged, gate green with its
-negative control) — but Mac has **not** yet taken the C4/C5/C6 batch, so on macOS canvas is farbled
-and WebGL/audio/navigator are not, until it builds `c63654654`.
+deleted. **macOS is off M136** as of 2026-08-09, and **took the C4/C5/C6 batch on 2026-08-10**: CEF
+150 at `c63654654` built, artifact-verified and staged into `cef-binaries/`, seed-rotation gate
+**19/19 PASS** with its negative control **RED on 7** (every vector represented), and the Minimal site
+basket green. So all four values are now farbled natively on **both** dev platforms.
 
 **Release builds are still M136**, so none of this reaches users yet; that remains gated on the CI
 `cef-binaries` asset carrying 150 (`FARBLING_RELEASE_GATE.md` §3).
@@ -118,9 +135,22 @@ Then grep-sweep for orphaned symbols (Q2 T8).
 ### Step 4 — Acceptance, Windows
 Per-value gates in §4, then the full §11 acceptance rows, then the standard site basket.
 
-### Step 5 — Mac takes the batch
+### Step 5 — Mac takes the batch ✅ DONE 2026-08-10
 One build at the batched commit, then the same gates. Mac already has the baseline from Step 0, so a
 failure here is attributable to the batch rather than to the platform.
+
+**Outcome:** built at `c63654654` in 38 min (958 siso steps), all gates green — see
+`MAC_WINDOWS_RELAY.md` ROUND 2026-08-10 (Mac) for the full report. Three things that round produced
+which are not confined to macOS:
+
+1. **`AudioFudgeFactor` does NOT discriminate C5** — it is in the `dfe5a2343` baseline debug info too,
+   because C5 added its *callers*, not the function. Use `PerturbAudioSamples` /
+   `FarbleDeviceMemory` / `FarbleHardwareConcurrency`, each of which goes 0 → N across the pins.
+2. **Extending a patch that CREATES files fails to reapply on a warm tree.** `chromium/src/cef` is
+   refreshed on a pin change but `chromium/src` is not reverted, so `hodos_farble_session_cache`
+   (an add-file patch) hits `already exists in working directory`. Revert the created files and the
+   `build.gni` hunk, then re-run the patcher.
+3. **Workers measured unfarbled** — see the P4e note in §1.
 
 ### Step 6 — Decide P4e *(owner call, recommend DEFER)*
 P4e covers out-of-process shared/service workers and cross-site iframes. It is a genuinely separate
