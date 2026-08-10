@@ -594,7 +594,18 @@ Run on **both** Windows and macOS, with adblock ON (Q2 co-existence):
       while **all five controls held still** (exempt canvas/WebGL/audio + both outside-the-gate
       readbacks). **Negative control:** copying profile A's seed into profile B collapsed *every*
       farbled value to A's exactly — including navigator `(32,10)` — so the difference is entirely
-      seed-derived and the harness does go red. macOS owed.
+      seed-derived and the harness does go red.
+      ✅ **macOS 2026-08-10** (`c63654654`, engine `Chrome/150.0.7871.187`, M1) — same harness,
+      `Default` vs `Profile_1` on `example.com`: canvas `6a0803ed` vs `09044b7c`, WebGL `b3801d95`
+      vs `788dd684`, audio `0b2f0de8` vs `7b0cce80`, all five controls held still, subject
+      `role=tab_1` on both profiles. **Negative control:** seeding B with A's seed collapsed every
+      farbled value to A's exactly (`6a0803ed`/`b3801d95`/`0b2f0de8`). **Both platforms now green.**
+      ⛔ **macOS needed a LOCAL, since-reverted shell change to run at all**, because
+      `cef_browser_shell_mac.mm:5417` gives `remote_debugging_port = 0` to **any** non-`Default`
+      profile — so profile B has no CDP whatsoever and no harness-side port rule can conjure one.
+      The lift mirrored the Windows derivation (`9222 + N`); it was reverted and the revert verified
+      (`Remote debugging port: 0`). **Shipping that parity change is an open owner call** — see
+      `MAC_WINDOWS_RELAY.md` ROUND 2026-08-10e §E5, which recommends deferring it past beta.1.
       ⚠️ Trap this cost a run: **the CDP port is derived from the profile id**
       (`cef_browser_shell.cpp`: `Default`→9222, `Profile_<N>`→9222+N, +100 under `HODOS_DEV`), so the
       second profile is on a *different port* and a single-port harness reports "the browser failed
@@ -627,6 +638,24 @@ Run on **both** Windows and macOS, with adblock ON (Q2 co-existence):
       survived the restart" half goes RED. **Needs: one hand-made login on any non-exempt site.**
       Note the *mechanism* this row protects — an identical fingerprint across a real restart — is
       already proven by the seed-rotation harness's exact A→B→A round trip.
+      ✅ **macOS 2026-08-10** (`c63654654`, engine `Chrome/150.0.7871.187`) — same target
+      `www.youtube.com/feed/history`, same harness, after a hand-made login. Logged in before the
+      restart, **still logged in after**, farbled fingerprint **byte-identical** across the restart:
+      canvas `107a40ac`, WebGL `d2eaf074`, audio `4ef547d6` in both phases. **Negative control:**
+      rotating the profile seed moved all three (`8559f468` / `f7441654` / `9f07d103`). **Positive
+      control** on the detector: soundcloud read as logged out. Seed restoration verified afterwards.
+      **Both platforms now green.**
+      ⚠️ macOS reproduced Windows' honest caveat exactly: with the seed rotated YouTube **stayed
+      logged in**. The control moves the *fingerprint*, not the session — expecting a logout would
+      read a correct run as a broken control.
+      ⛔ **The vacuous-pass trap was confirmed on macOS too, and it was worse:** this dev profile had
+      **no login on any farbled origin at all** — youtube held only visitor cookies
+      (`VISITOR_INFO1_LIVE`/`YSC`, no `SID`/`SAPISID`), x.com was a guest session (`guest_id`, no
+      `auth_token`), twitch was logged out, and the one real session (`github.com`) is **auth-exempt**.
+      The runtime `IsAuthDomain` guard is the only thing distinguishing a meaningful green here from
+      a meaningless one — **never downgrade it to a warning, and never let it carry a copied list.**
+      ⚠️ Also note `--negative-control` **requires the login too** (it runs the phase-1 login probe
+      before rotating), so it cannot be used to smoke-test the rig on a fresh profile.
 - [ ] Navigator values within the **standard valid set** (deviceMemory in the desktop set or dropped; hardwareConcurrency ≤ real cores); WebGL vendor/renderer decision applied per §7 — **either "drop" (Mac GPU-string entries then NOT required and must not block this gate) OR "common-string map" (then Mac ANGLE entries required, FB-6)**. Read the checkbox against whichever FB-2 decision was taken.
 - [x] **No stable secret on any renderer command line** (C2 threat model): verify via ProcessExplorer/`ps` that no per-profile secret appears on a child cmdline.
       ✅ **Windows 2026-08-10** (`c63654654`), harness `chromium-rebuild/farbling_cmdline_seed_check.py`
@@ -642,6 +671,20 @@ Run on **both** Windows and macOS, with adblock ON (Q2 co-existence):
       caught while the genuine `--gpu-preferences` blob is not — that blob was a false positive from
       the first, looser regex (its base64 contains a 32-char run of `A`/`B`, which are hex digits),
       and tightening a detector without re-proving it detects is how a check becomes decorative.
+      ✅ **macOS 2026-08-10** (`c63654654`) — same harness, ported to `ps -ww -o pid=,args=`.
+      **Zero hits** across 7 processes; positive controls all green (7/7 readable, `--type=renderer`
+      seen, `--profile=` seen). **Both platforms now green.**
+      ⛔ **The BLIND path was proven to fire, not assumed:** run with `--attach` against a killed
+      browser it exits **1** with `BLIND`, never a triumphant "no seed anywhere".
+      ⭐ **macOS needed one control Windows does not have.** The `--type=renderer` / `--profile=`
+      controls both sit near the **front** of a command line, so they stay green on an argv that was
+      **truncated** before its end — and a seed after the cut would be silently unfindable. So
+      `assert_not_truncated()` spawns a throwaway process with a 64 KB argv ending in a sentinel and
+      demands the sentinel back, exiting **BLIND** if it does not come. Bounded empirically first:
+      `ps -ww` returns a complete argv at 1 KB / 5 KB / 20 KB / 60 KB / 120 KB / **250 KB**, against
+      a longest real Hodos command line of **1420 chars** (~178× margin). No-op on Windows, where
+      `Win32_Process.CommandLine` has no comparable measured cap — **an open question back to
+      Windows** (`MAC_WINDOWS_RELAY.md` ROUND 2026-08-10d §7 Q2).
 - [ ] OAuth/auth-domain exemption (C7) verified: pre-approved sites un-farbled and logging in (Q3); user per-site toggle still works.
 - [ ] **Stability soak + renderer-crash-rate** not elevated vs the 136 baseline; **canvas/WebGL readback perf** within budget.
 - [x] **BOT-1 bot signals (✅ met 2026-08-05, ahead of P4a; re-assert every release via `farbling_probe.py`):** on **both** an auth-exempt page and a farbled page — `navigator.webdriver === false`, `webdriver` is **NOT** an own property of `navigator`, `webdriver` **IS** a `Navigator.prototype` accessor (native shape), and `navigator.plugins` equals the spec'd 5-entry list exactly with `filename == "internal-pdf-viewer"`. Identical on both page classes is the point: a per-site farbling opt-out must not change the bot signature.
