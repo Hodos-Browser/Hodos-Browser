@@ -70,4 +70,17 @@ export HODOS_MAC_DEV_FLAGS=1
 echo "Launching HodosBrowser (DEV MODE)..."
 # Absolute path (not ./...) so the process argv is path-scoped and the pkill above
 # can distinguish this dev bundle from the installed /Applications app.
-"$DEV_BUNDLE/Contents/MacOS/HodosBrowser"
+#
+# --profile= is passed explicitly so the startup picker never appears. Two reasons,
+# and the second is the load-bearing one:
+#   1. an unattended build+run otherwise blocks forever on the picker;
+#   2. CDP only binds for the profile literally named "Default" --
+#      cef_browser_shell_mac.mm :: main does
+#          settings.remote_debugging_port = (profileId == "Default") ? 9222 : 0;
+#      then +100 under HODOS_DEV, giving 9322. Any other profile (and the picker,
+#      which has not resolved one yet) leaves the port at 0, so CDP never binds and
+#      every harness phase reads as "the browser failed to start" rather than "you
+#      have a dialog open".
+# Override with HODOS_DEV_PROFILE=<id>, but note that a non-Default profile has no
+# CDP port and therefore cannot be driven by the farbling harnesses.
+"$DEV_BUNDLE/Contents/MacOS/HodosBrowser" --profile="${HODOS_DEV_PROFILE:-Default}"

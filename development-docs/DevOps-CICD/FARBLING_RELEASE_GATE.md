@@ -183,8 +183,15 @@ before the flip.
   > simulated at 100% of non-zero samples moving across the whole band, ceiling unchanged
   > so it is never louder than the original spec allowed (~-134 dB). The harness assertion
   > needed **no** change: it was right and the product was wrong.
-- **When macOS builds CEF 150.** Mac is still M136, so Mac has no farbling at all and its
-  promotions must use the waiver.
+- ~~**When macOS builds CEF 150.**~~ **DONE 2026-08-09.** Mac is off M136: CEF 150 at fork pin
+  `dfe5a2343` is staged into `cef-binaries/`, and this gate **passes on macOS with its negative
+  control red** — `engine=Chrome/150.0.7871.187`, farbled `6a0803ed`/`b3551928`/`6a0803ed` against a
+  stable exempt `a4f83858`. **Mac promotions no longer use the waiver**; they carry a real token like
+  Windows. Running it on Mac has two platform gotchas: export `HODOS_MAC_DEV_FLAGS=1` yourself (the
+  harness sets only `HODOS_DEV`, and ad-hoc signed dev builds crash without `--in-process-gpu`), and
+  CDP binds **only** for the profile literally named `Default`
+  (`cef_browser_shell_mac.mm :: main` → `remote_debugging_port = (profileId=="Default") ? 9222 : 0`,
+  `+100` under dev = 9322), so no other profile can be driven.
 - **If the fork is rebased**, re-run before promoting. The gate binds to the engine major
   version, not the fork commit, so a rebase within 150 will not be caught automatically.
 

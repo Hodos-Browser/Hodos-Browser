@@ -592,13 +592,32 @@ Two macOS verification tricks worth keeping:
   and nothing else: no file, no line, no diagnostic. The build genuinely failed; the reason is simply
   not in the log you were tailing.
 
-  > ⭐ **CONFIRMED ENV-DEPENDENT 2026-08-09 (macOS round).** The Mac build did **not** hit this:
-  > `.siso_failed_targets` absent, `siso_output` 799 bytes with one SUCCESS record. The trigger is
-  > siso's own agent-environment detection — the banner above is siso announcing that it is adding
-  > `--quiet` itself — so it fires from an agent session and not from a plain terminal.
-  > **Do not try to predict whether it fired: read `siso_output` unconditionally.** Checking a file
-  > that is usually boring is far cheaper than re-running a 5-hour build blind. The same two files
-  > are also what prove a *green* build actually compiled something.
+  > ⛔ **CORRECTED 2026-08-10 — this is NOT env-dependent, and `siso_output` size proves nothing.**
+  > An earlier version of this note claimed the banner "fires from an agent session and not from a
+  > plain terminal", and that a 799-byte `siso_output` was "what proves a green build actually
+  > compiled something". **Both halves were wrong, and both fail in the direction that condemns a
+  > good build or blesses an unverified one.**
+  >
+  > * **The banner fires everywhere.** Mac found it in *both* their build logs; Windows then found it
+  >   in **all three** of its C4/C5/C6 builds. Suppression was armed every time — it simply had
+  >   nothing to hide when nothing failed to compile. Never reason "my terminal escapes it".
+  > * **`siso_output` captures step STDOUT, not a compilation receipt.** The 799 bytes was a single
+  >   `ibtool` nib-compile SUCCESS record. A clean incremental build legitimately produces a **0-byte**
+  >   `siso_output` — Windows' C5-fix rebuild did exactly that while being fully green.
+  > * ⚠️ **siso ROTATES these files.** `siso_output.0` is the **previous** run. Windows confirmed the
+  >   trap directly: the 577-byte file it had cited became `siso_output.0` after the next build, while
+  >   the current `siso_output` was 0 bytes. Reading a stale `.0` as current is a live footgun.
+  >
+  > **Use these instead** (all under the out-dir), which are positive signals rather than vibes:
+  >
+  > | Signal | Green means |
+  > |---|---|
+  > | `.siso_failed_targets` | **absent** |
+  > | `siso_result.json` | exactly `{}` |
+  > | `siso_metrics.json` | **nonzero step records** — 740 on Windows' incremental, 738 on Mac's |
+  >
+  > `siso_output` remains the place to read *diagnostics when something failed*; it is just not
+  > evidence of success. Read it unconditionally on failure, and never infer success from its size.
 
   > ⛔ **`NINJA_CORE_ADDITION` / `NINJA_CORE_LIMIT` DO NOTHING UNDER SISO** (found 2026-08-09, macOS).
   > `autoninja`'s `-j` computation (`autoninja.py:558-592`) is on the **ninja** path only. Capping
@@ -619,6 +638,18 @@ Two macOS verification tricks worth keeping:
   | `siso_output` | **the real compiler diagnostics** — `grep -E "error" siso_output` |
   | `.siso_failed_targets` | JSON naming the failed `.obj`, e.g. `{"failed":["obj/cef/libcef_static/frame_impl.obj"]}` — the fastest "which file" answer |
   | `siso_failed_commands.bat` | the exact failing command lines, re-runnable by hand |
+
+  > ⛔ **`strings(1)` IS A FALSE-NEGATIVE GENERATOR ON LARGE SYMBOL FILES** (Mac, 2026-08-09).
+  > cctools `strings` gives up past ~4 GB: on a 7.2 GB dSYM it printed **zero lines and exited 0**,
+  > which reads exactly like "the symbol is absent, the build is bad". Mac's first C3 scan came back
+  > empty for `HodosSessionCache` — a symbol they had *just* confirmed present in the framework binary.
+  >
+  > Use a raw byte grep, which has no size limit: `LC_ALL=C grep -a -o -E "Sym1|Sym2" "$FILE"`.
+  > Windows is already exposed: `libcef.dll.pdb` is **4.9 GB**.
+  >
+  > ⭐ **And always run a POSITIVE CONTROL before believing any absence** — grep for a symbol you know
+  > is there. An absence from a tool that silently gave up is indistinguishable from a real absence,
+  > which is the same "the test cannot fail" defect class as a missing negative control.
 
   Do **not** conclude "green build, mysterious failure" from the main log alone, and do not go looking
   for a patch/checkout problem — check these three first. They pinpointed a one-line type error in

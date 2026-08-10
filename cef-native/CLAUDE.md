@@ -8,15 +8,18 @@ C++ browser shell using Chromium Embedded Framework. Provides process isolation 
 
 ## CEF / Chromium Version Pin
 
-This directory is the owning doc for the engine pin. **The two platforms are mid-bump and are not on the same engine.** Always read the pin from the `cef_version.h` of the distribution the build actually points at — never quote it from memory.
+This directory is the owning doc for the engine pin. **Both platforms are on CEF 150 as of 2026-08-09 — but on DIFFERENT fork commits**, so they are not byte-identical and a behaviour difference between them is a real possibility, not necessarily a platform bug. Always read the pin from the `cef_version.h` of the distribution the build actually points at — never quote it from memory.
 
 | | Windows | macOS |
 |---|---|---|
-| Distribution | staged `cef-binaries/` (**CEF 150**) | staged `cef-binaries/` (**M136**) |
-| `CEF_VERSION` | `150.0.17+g94c1726+chromium-150.0.7871.187` | `136.1.7+g15882fe+chromium-136.0.7103.114` |
-| `CHROME_VERSION` | 150.0.7871.187 | 136.0.7103.114 |
-| Model | **bootstrap** (see below) | linked executable |
-| C++ standard | **20** (required by 150) | 17 |
+| Distribution | staged `cef-binaries/` (**CEF 150**) | staged `cef-binaries/` (**CEF 150**) |
+| `CEF_VERSION` | `150.0.40-7871.3573+gc636546+chromium-150.0.7871.187` | `150.0.38-7871.3571+gdfe5a23+chromium-150.0.7871.187` |
+| `CHROME_VERSION` | 150.0.7871.187 | 150.0.7871.187 |
+| Fork pin | `c63654654` — C1+C2+C3 **plus C4 WebGL, C5 WebAudio (with the delta floor), C6 navigator** | `dfe5a2343` — C1+C2+C3 only; **no C4/C5/C6 yet** |
+| Model | **bootstrap** (see below) | linked executable (bootstrap is Windows-only — upstream #3928) |
+| C++ standard | **20** (required by 150) | **20** (required by 150) |
+
+⚠️ **The platforms are on different fork pins, and as of 2026-08-10 it is macOS that is behind.** Windows staged `c63654654`; Mac is still on `dfe5a2343`. Concretely: **canvas is farbled on both, but WebGL / WebAudio / navigator are farbled on Windows only** until Mac builds `c63654654`. A cross-platform farbling difference right now is expected, not a platform bug — check the pins before investigating one.
 
 **The 150 distribution was staged into `cef-binaries/` on 2026-08-04** (S0), so a Windows build now works on the default path and **`-DCEF_ROOT` is no longer needed**:
 
@@ -27,9 +30,23 @@ cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
 
 The M136 tree it replaced is archived whole at `C:\cef\cef150\m136_cef_binaries_FULL_backup`.
 
+**macOS took the same bump on 2026-08-09**, staging the `dfe5a2343` distribution built on this box.
+Its M136 tree is archived at `/Volumes/CEFBuild/artifacts/cef-binaries-M136-backup` (2587 files) and
+is also still downloadable as `cef-binaries-macos.tar.bz2` from the `cef-binaries` release — worth
+knowing, because `cef-binaries/` is gitignored and there is therefore **no `git` undo** for a staging
+mistake on either platform.
+
+> ⚠️ **macOS ignores `CEF_ROOT`.** The APPLE arm of `cef-native/CMakeLists.txt` hardcodes
+> `../cef-binaries` for the wrapper, framework and resource paths, so the Windows trick of pointing
+> `-DCEF_ROOT=<binary_distrib>` at a freshly-built distribution **in place** does not work there —
+> staging into `cef-binaries/` is mandatory on Mac. The wrapper is built from the distribution's own
+> top-level CMakeLists into `cef-binaries/build/libcef_dll_wrapper/libcef_dll_wrapper.a`.
+> Also: `mac_build_run.sh` only reconfigures when `build/Makefile` is absent, so after an engine bump
+> it must be run `--clean` or a stale `CMakeCache` silently keeps the old standard and paths.
+
 `CEF_ROOT` is a **cache variable** (default `../cef-binaries`). Configure fails fast with a named error if `${CEF_ROOT}/Release/bootstrap.exe` is missing — that is the tell for "this is a pre-150 distribution". Because it is *cached*, simply dropping the flag on an existing build directory keeps the old value; use `cmake -U CEF_ROOT -S . -B build` to force re-evaluation of the default.
 
-> ⚠️ **Staging is only half the job — CI does not use `cef-binaries/`.** It downloads `cef-binaries-windows.zip` from the release tagged `cef-binaries`, which lives on the **`Hodos-Browser/Hodos-Browser`** org repo, not on `origin` (`release.yml:113-128`; macOS `cef-binaries-macos.tar.bz2` at `release.yml:440`). Until that asset carries the 150 distribution, a release build compiles against M136 and dies at the `bootstrap.exe` gate.
+> ⚠️ **Staging is only half the job — CI does not use `cef-binaries/`.** It downloads `cef-binaries-windows.zip` from the release tagged `cef-binaries`, which lives on the **`Hodos-Browser/Hodos-Browser`** org repo, not on `origin` (`release.yml:113-128`; macOS `cef-binaries-macos.tar.bz2` at `release.yml:440`). Until that asset carries the 150 distribution, a release build compiles against M136 and dies at the `bootstrap.exe` gate. ⛔ **On macOS that failure is SILENT** — there is no bootstrap gate on Mac, so a release build against the M136 asset simply succeeds and ships a browser with **no farbling at all**, which is indistinguishable from a working one without running the seed-rotation gate. Staging `cef-binaries/` locally (2026-08-09) fixed dev on Mac, **not** CI; the `cef-binaries-macos.tar.bz2` asset is still M136.
 
 > ⛔ **Never merge-copy one distribution over another.** The wrapper probe checks `${CEF_ROOT}/libcef_dll/wrapper/build/Release` *before* `${CEF_ROOT}/build_wrapper/libcef_dll_wrapper/Release`. The 150 dist has no first-path directory, so an M136 wrapper left there survives the copy and **wins** — it links cleanly and then corrupts memory at runtime. Move the old tree away, then copy.
 
