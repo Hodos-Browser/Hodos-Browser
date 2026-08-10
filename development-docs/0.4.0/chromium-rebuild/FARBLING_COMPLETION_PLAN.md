@@ -10,22 +10,42 @@
 
 ## 1. Where we actually are
 
+> **STATUS 2026-08-10 — the batch is landed and measured on Windows.** Table refreshed below;
+> the plan text that follows is kept as the record of how it was sequenced.
+
 | Unit | What it covers | State |
 |---|---|---|
 | **C1** Supplement on `ExecutionContext` | the foundation every other C-step hangs off | ✅ landed, compiled both platforms |
 | **C2** key delivery | browser→renderer `[Sync]` pull at `OnContextCreated` | ✅ landed, behaviourally proven on Windows |
 | **C3** Canvas 2D | `getImageData` / `toDataURL` / `toBlob` | ✅ landed, proven on Windows (seed-rotation gate) |
-| **C4** WebGL `readPixels` | | ❌ not started |
-| **C5** WebAudio | `getChannelData`, `getFloatFrequencyData` | ❌ not started |
-| **C6** Navigator | `deviceMemory`, `hardwareConcurrency` | ❌ not started |
-| **C7** auth-domain exemption at source | move `IsAuthDomain` + per-site toggle into the `enabled` bit | ❌ not started |
-| **Teardown** | delete the dead JS fragments, retire `FingerprintScript.h` | ❌ not started |
-| **P4e** | OOP shared/service workers + cross-site iframes | ❌ not started, **candidate to defer** |
+| **C4** WebGL `readPixels` | one hook in `ReadPixelsHelper` | ✅ landed `743e5f322`, **behaviourally proven** on Windows |
+| **C5** WebAudio | `getChannelData`, `getFloatFrequencyData` | ✅ landed `743e5f322`; the ±2e-7 delta was found to be a **no-op below float32 resolution** and floored at `2^-23` in `c63654654` |
+| **C6** Navigator | `deviceMemory`, `hardwareConcurrency` | ✅ landed `743e5f322`, **behaviourally proven** on Windows |
+| **C7** auth-domain exemption at source | move `IsAuthDomain` + per-site toggle into the `enabled` bit | ✅ **no fork change needed** — `OnBeforeBrowse` already collapses all three inputs into C2's `enabled` bit, which is what Q3 §2.1 specifies. Only the teardown remained |
+| **Teardown** | delete the dead JS fragments, retire `FingerprintScript.h` | ✅ done — `FingerprintScript.h` deleted, both seed caches and both IPC names removed, orphan sweep clean, Privacy Shield control preserved |
+| **P4e** | OOP shared/service workers + cross-site iframes | ⏸️ **DEFERRED past beta.1 (owner decision 2026-08-09)**, logged as a known gap — and **wider than this plan assumed**: see the note below |
 
-**Today, WebGL / audio / navigator are farbled by nothing at all.** The old JS path still nominally
-owns them, but it is fail-closed and never injects (no seed reaches it), so those three are simply
-unprotected on every platform. Canvas is the only value actually being farbled, and only on Windows,
-and only in dev — release builds and macOS are still M136.
+> ### ⚠️ P4e is larger than "OOP workers + cross-site iframes"
+>
+> §8 and the C3 patch comment both claim P4a closed the window-vs-worker canvas mismatch. The hook is
+> in the right place, but the **key never reaches a worker**: the only install site is
+> `blink_glue::SetHodosFarblingKey(blink::WebLocalFrame*, …)`, called from
+> `CefFrameImpl::MaybeApplyHodosFarblingKey` at `CefFrameImpl::OnContextCreated` — **frame contexts
+> only**. A `DedicatedWorkerGlobalScope` is a different `ExecutionContext`, gets a fresh key-less
+> Supplement, and fails closed to native.
+>
+> If that reading holds, **in-process workers are unfarbled too**, so §11's worker row is red for a
+> reason unrelated to OOP. Recorded as **reasoned from the code, not yet measured** — the owner
+> declined a dedicated worker harness for now, so this stays a logged gap rather than a claim.
+
+~~**Today, WebGL / audio / navigator are farbled by nothing at all.**~~ **Superseded 2026-08-10.**
+All four values are now farbled natively on Windows dev, and the JS path that nominally owned them is
+deleted. **macOS is off M136** as of 2026-08-09 (CEF 150 at `dfe5a2343` staged, gate green with its
+negative control) — but Mac has **not** yet taken the C4/C5/C6 batch, so on macOS canvas is farbled
+and WebGL/audio/navigator are not, until it builds `c63654654`.
+
+**Release builds are still M136**, so none of this reaches users yet; that remains gated on the CI
+`cef-binaries` asset carrying 150 (`FARBLING_RELEASE_GATE.md` §3).
 
 ---
 
@@ -133,9 +153,12 @@ green build.
 | deviceMemory / hardwareConcurrency | value ∈ allowed set; cores **≤** real cores | same |
 | all of the above | **seed rotation A→B→A** (`farbling_seed_rotation_check.py`) | `--negative-control` |
 
-`farbling_audio_check.py` currently asserts the *fail-closed* state (farbled == exempt). **Its
-assertion inverts the moment C5 lands** — update it in the same commit, or it will fail against
-correct code and become harness defect #5.
+~~`farbling_audio_check.py` currently asserts the *fail-closed* state...~~ **RESOLVED 2026-08-10 by
+DELETING it, not inverting it.** Two defects made it unusable as a gate: it selected its target as
+"first page target that is not 127.0.0.1:5137" (harness defect #3 verbatim — an overlay satisfies
+that after its first navigation), and it never exited non-zero, so it could not gate anything. Its
+subject — the injected JS surface — no longer exists after the teardown. Audio and WebGL are now
+covered by `farbling_seed_rotation_check.py`, which drives a verified tab and has a negative control.
 
 ⛔ **Every one of these must be demonstrated to fail with the feature off** (`CLAUDE.md` → Testing
 Standards). Three harnesses in this project would have passed with farbling entirely absent, and two
@@ -168,6 +191,6 @@ matched something.
   toggle still works.
 - Seed-rotation gate green **with its negative control** on both platforms.
 - Per-value Layer-B gates green, each shown to fail with farbling off.
-- `farbling_audio_check.py` updated for the post-C5 expectation.
+- ~~`farbling_audio_check.py` updated~~ — **deleted**; its coverage moved into `farbling_seed_rotation_check.py`.
 - Standard site basket (Minimal at minimum) green on both platforms.
 - P4e explicitly **decided** — shipped or logged as a known gap with owner sign-off.

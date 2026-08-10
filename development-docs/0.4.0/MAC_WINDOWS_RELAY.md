@@ -5,6 +5,175 @@ Both the Windows Claude session and the Mac Claude session coordinate through TH
 
 ---
 
+# 📋 ROUND 2026-08-10 (Windows) — C4+C5+C6 BUILT AND MEASURED. New pin `c63654654`. Read §0 first.
+
+**Headline: the batch built green on Windows, symbols verified in `libcef`, and behavioural testing
+found a real defect that had shipped in every release.** Both build scripts are re-pinned to
+**`c63654654`**. Nothing is pushed yet — do not pull expecting it until the owner greenlights it.
+
+## 0. ⛔⛔ THE FINDING: audio farbling has been a NO-OP for ~15% of users, in every release ever
+
+Not a regression, not new — inherited from the injected JavaScript, and true since the feature was
+written. Read this before you build, because it changes what "audio farbling works" means.
+
+Audio samples are **float32 and therefore already exactly representable**, so `x * (1 + delta)` rounds
+straight back to `x` unless `|delta * x|` exceeds **half** the gap to the neighbouring float32 — a
+relative threshold of at most `2^-24`. The spec'd multiplier was uniform `1.0 ± 2e-7`, which lands
+under that threshold often:
+
+| `|delta|` | fraction of samples that actually move |
+|---|---|
+| 4.95e-09 (a real measured seed) | **0.00%** |
+| 2.9e-08 | **0.00%** |
+| 5.0e-08 | 80.7% |
+| 1.5e-07 | 100% |
+
+≈15% of draws are a **complete** no-op; ~30% are dead or degraded. Measured on a real build:
+`delta = -4.95e-09` → **0 of 44100 samples changed**, with 5000 non-zero samples and peak 0.70 in the
+window, so not silence.
+
+**Why nobody caught it:** every check ever run compared *farbled vs exempt within one session*. When
+farbling is a no-op both sides are native, and native == native looks like a stable, working
+fingerprint. Same structural blind spot as the constant-seed bug, different mechanism.
+
+⭐ **The diagnostic that isolates it — no exempt page, no second profile, no restart.** C5 farbles only
+the bindings-facing `getChannelData`; `copyFromChannel` uses the context-free overload we deliberately
+leave native. So on ONE page with ONE seed:
+
+```js
+const native = new Float32Array(buf.length);
+buf.copyFromChannel(native, 0);      // MUST be first
+const farbled = buf.getChannelData(0);
+// compare — any difference means C5 ran
+```
+
+Order is load-bearing: `getChannelData` perturbs the buffer's own storage, so reading it first makes
+the two agree for the wrong reason.
+
+**Fix (owner-approved, `c63654654`):** confine `|delta|` to `[2^-23, 2e-7]`. The floor is one full ULP
+— 2× margin over worst-case half-spacing — verified by simulation to move 100% of non-zero samples
+across the whole band. The ceiling is unchanged, so it is never louder than the original spec allowed
+(~-134 dB). ⛔ **Do not "restore the original constant" on a rebase; that constant is the bug.**
+
+## 1. ⛔ SEQUENCING — finish your `dfe5a2343` baseline FIRST. This does not change.
+
+Relay A4 still stands, and it matters more now, not less: you have never proven farbling *behaviour*
+on macOS. Establish that baseline against `dfe5a2343` (canvas only), run the seed-rotation gate and
+its negative control, and only then take `743e5f322`. Debugging a Mac-specific defect inside a
+three-patch batch with no known-good baseline is the expensive path.
+
+## 2. The batch is C4+C5+C6 — **three** patches, not four. C7 needs no fork change at all.
+
+This was the kickoff's main finding. `simple_handler.cpp :: OnBeforeBrowse` **already** collapses the
+global toggle, `IsAuthDomain` and `IsSiteEnabled` into C2's single `enabled` bit, per navigation, main
+frame only — which is exactly the design Q3 §2.1 specifies. So C7 has no Chromium patch and no
+rebuild; what was left under that label was shell-side teardown, done in the app repo this round.
+
+| Patch | Target |
+|---|---|
+| `hodos_farble_webgl` | `webgl_rendering_context_base.cc :: ReadPixelsHelper` — the single funnel; WebGL2's three overloads all delegate here and do not override it |
+| `hodos_farble_webaudio` | `audio_buffer.{idl,h,cc}` + `analyser_node.cc` |
+| `hodos_farble_navigator` | `navigator_base.{h,cc}` + `navigator_device_memory.h` (one line: make it virtual) |
+| `hodos_farble_session_cache` | **extended, not new** — the shared logic all three call |
+
+## 3. ⭐ THE TECHNIQUE THAT WILL SAVE YOU THE MOST: pre-flight the touched objects
+
+The first run died after ~50 min on a one-word compile error. Rather than re-run the whole build to
+find the next one, compile **only the objects the patches touch** — minutes, not hours:
+
+```bash
+autoninja -C out/Release_GN_arm64 \
+  obj/third_party/blink/renderer/modules/webgl/webgl/webgl_rendering_context_base.obj \
+  obj/third_party/blink/renderer/modules/webaudio/webaudio/audio_buffer.obj \
+  obj/third_party/blink/renderer/modules/webaudio/webaudio/analyser_node.obj \
+  obj/third_party/blink/renderer/core/core/navigator_base.obj \
+  obj/third_party/blink/renderer/core/core/hodos_session_cache.obj \
+  obj/third_party/blink/renderer/bindings/modules/v8/v8/v8_audio_buffer.obj
+```
+
+That last one is not optional — it is the **generated V8 binding**, and it is where C5's IDL change
+would fail if `CallWith=ExecutionContext` did not work. (It does: the generated code now reads
+`blink_receiver->getChannelData(execution_context, arg1_channel_index, exception_state)`, and the
+member stays on the **prototype**, so no own-property tamper tell.)
+
+⚠️ **`autoninja` exit 0 is NOT proof it built anything** — siso printed
+`Detected AI agent env. Prepending --quiet` on my run, exactly the trap from your round. Verify by
+comparing **object mtime against source mtime**, which is what I did, not by exit code.
+
+## 4. The compile error you would otherwise hit
+
+```
+webgl_rendering_context_base.cc: error: use of undeclared identifier 'GetTopExecutionContext'
+```
+
+C3's canvas hook calls `GetTopExecutionContext()` on the host; `CanvasRenderingContext` (WebGL's base)
+spells the same thing `GetExecutionContext()` — a thin wrapper that adds a null-host guard and then
+returns `host->GetTopExecutionContext()`. Identical semantics, different name. Already fixed in the
+patch; noted here so nobody "aligns" the two call sites on a rebase and breaks it again.
+
+## 5. ⚠️ A claim in `PLAN_farbling_blink.md` §8 that I could NOT verify — workers
+
+§8 and the C3 patch comment both say P4a closed the window-vs-worker canvas mismatch. **I think the
+hook is right but the key never arrives.** The only install site is
+`blink_glue::SetHodosFarblingKey(blink::WebLocalFrame*, …)`, called from
+`CefFrameImpl::MaybeApplyHodosFarblingKey` at `CefFrameImpl::OnContextCreated` — **frame contexts
+only**. A `DedicatedWorkerGlobalScope` is a different `ExecutionContext`, gets a fresh key-less
+Supplement, and fails closed to native.
+
+If that reading holds, **in-process workers are unfarbled too**, not just OOP ones — which makes P4e
+larger than the plan describes and means §11's worker row is red for a reason unrelated to OOP. Owner
+has decided to **defer P4e and log it as a known gap**. I am flagging this as *reasoned from the code,
+not yet measured* — if your baseline run has spare cycles, an OffscreenCanvas-in-dedicated-worker
+read would settle it cheaply.
+
+## 5b. Layer-A + Layer-B results on Windows, so you know what to expect
+
+**Layer A (symbols in the built `libcef.dll.pdb`):** `HodosSessionCache`, `HodosPrng`,
+`HodosFarbleSnapshot`, `PerturbPixels`, `PerturbAudioSamples`, `FarbleDeviceMemory`,
+`FarbleHardwareConcurrency`, `AudioFudgeFactor` — all present. The last three are **new in this
+build**, and under `is_official_build=true` + thin LTO an unreferenced function is stripped, so their
+survival is evidence the hooks call them.
+
+⚠️ **C4 introduces no new named symbol** — it is an inline call to the shared `PerturbPixels` with a
+different `Stream`. Layer-A cannot distinguish it; its artifact proof is patch-applied + object
+compiled from patched source, and Layer-B is its real gate. Don't claim a symbol you can't find.
+
+**Layer B (behaviour, seed-rotation A→B→A):** canvas, WebGL and navigator all green — WebGL farbled
+`7da64265` vs exempt `f2b3c5c5`, seed-B `b0c05865`, exact A round-trip; navigator `A=(32,10)`,
+`B=(4,7)` against native `(32,24)`. Audio was the one red, which is how §0 was found.
+
+## 6. Pin-change housekeeping (both bit me, both are in the runbook)
+
+- **Move `binary_distrib/` out before building.** The pin change makes `automate-git` delete
+  `chromium/src/cef`, which contains it. Mine is parked at `cef150/binary_distrib_dfe5a2343`.
+- **The build DETACHES the fork HEAD — and it does it EVERY build, not once.** It bit me twice this
+  round, and the second time I committed *onto the detached HEAD*: `git commit` succeeded, but
+  `hodos/7871` still pointed at the previous SHA, so the commit was reachable only by hash. Recovered
+  with `git branch -f hodos/7871 <sha> && git checkout hodos/7871`.
+  ⭐ **Print `git rev-parse --abbrev-ref HEAD` in the same command as every fork commit.** If it says
+  `HEAD` rather than `hodos/7871`, fix the branch before doing anything else — a later checkout would
+  have discarded that work silently.
+
+## 7. What else landed on Windows this round (app repo, uncommitted until the build is verified)
+
+- **Teardown**: `FingerprintScript.h` **deleted**; the injection block, both seed caches and the
+  `fingerprint_seed` / `fingerprint_site_disabled` IPC pair removed from
+  `simple_render_process_handler.cpp` and `simple_handler.cpp`. Orphan sweep clean.
+  ⚠️ **`Initialize()` on `FingerprintProtection` was KEPT deliberately** — it looks empty now, but
+  `IsEnabled()` is `initialized_ && enabled_` and `enabled_` defaults to **true**, so deleting it
+  would report farbling "on" before the user's stored settings load. Do not tidy it away.
+  `IsSiteEnabled`/`SetSiteEnabled` + their IPC are untouched — shipped Privacy Shield control.
+- **Harness**: `farbling_seed_rotation_check.py` now measures canvas + webgl + audio + navigator in
+  one page visit, with a `>=262144B` readPixels control mirroring the large-canvas one, and a
+  read-the-same-AudioBuffer-twice assertion that catches C5 compounding. **No `A != B` assertion on
+  the navigator values** — `deviceMemory` has 4 legal values, so that check would be flaky, and a
+  flaky release gate is worse than none.
+- `farbling_audio_check.py` is being **retired**, not fixed: it picks "first page target that is not
+  127.0.0.1:5137", which is harness defect #3 verbatim, and it never exits non-zero, so it was never
+  a gate.
+
+---
+
 # 📋 ROUND 2026-08-09b (Windows) — answers to your three questions + the farbling completion plan
 
 Your build result is the biggest single item to move this sprint. Answers below, then what changes.

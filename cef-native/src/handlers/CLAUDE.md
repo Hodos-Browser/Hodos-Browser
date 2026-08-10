@@ -1,11 +1,11 @@
 # CEF Handler Layer
 > CEF application lifecycle, browser-process IPC dispatch, render-process V8 injection, and off-screen overlay rendering.
 
-> Last Updated: 2026-08-03
+> Last Updated: 2026-08-09
 
 ## Overview
 
-This module contains the six C++/Objective-C++ source files that implement the CEF handler interfaces — the "brain" of the browser shell. `SimpleApp` manages CEF initialization and overlay window creation. `SimpleHandler` implements 12 CEF client interfaces and dispatches **169 IPC message types** from React to C++/Rust. `SimpleRenderProcessHandler` injects the `window.hodosBrowser` / `window.cefMessage` JavaScript APIs and routes **97 IPC response messages** back to React. `MyOverlayRenderHandler` provides platform-specific off-screen rendering for all overlay windows.
+This module contains the six C++/Objective-C++ source files that implement the CEF handler interfaces — the "brain" of the browser shell. `SimpleApp` manages CEF initialization and overlay window creation. `SimpleHandler` implements 12 CEF client interfaces and dispatches **169 IPC message types** from React to C++/Rust. `SimpleRenderProcessHandler` injects the `window.hodosBrowser` / `window.cefMessage` JavaScript APIs and routes **95 IPC response messages** back to React. `MyOverlayRenderHandler` provides platform-specific off-screen rendering for all overlay windows.
 
 All files are cross-platform (Windows + macOS) with `#ifdef _WIN32` / `#elif defined(__APPLE__)` conditionals, except the two `.mm` files which are macOS-only translation units. Headers live in `cef-native/include/handlers/`.
 
@@ -17,7 +17,7 @@ All files are cross-platform (Windows + macOS) with `#ifdef _WIN32` / `#elif def
 |------|-------|---------|
 | `simple_handler.cpp` | 9306 | **Largest file in the project.** Browser-process CEF client implementing 12 interfaces (CefClient, CefLifeSpanHandler, CefDisplayHandler, CefLoadHandler, CefRequestHandler, CefContextMenuHandler, CefDialogHandler, CefKeyboardHandler, CefPermissionHandler, CefDownloadHandler, CefFindHandler, CefJSDialogHandler). Central IPC dispatcher for 169 message types (`OnProcessMessageReceived`, lines 1897–7416). Handles tab creation, navigation, window chrome, overlay lifecycle, wallet operations, downloads, find-in-page, keyboard shortcuts, context menus, HTTP request interception (paid-content cache, ad blocking, cookie filtering, wallet routing), certificate error handling, bookmarks, cookie blocking, site permissions, profile management, browser import, QR scanning, and multi-window tab coordination. |
 | `simple_app.cpp` | 3356 | CEF application entry point (inherits `CefApp` + `CefBrowserProcessHandler` + `CefRenderProcessHandler`). Configures command-line switches, propagates the active profile to child processes, creates the header browser, restores multi-window sessions from `session.json` (v1 flat + v2 `windows[]` formats), and contains all **14 Windows overlay creation functions**. Everything from line 571 to EOF is inside a single `#ifdef _WIN32` block — macOS equivalents live in `cef_browser_shell_mac.mm`. |
-| `simple_render_process_handler.cpp` | 2340 | Render-process handler. Injects `window.hodosBrowser.*` and `window.cefMessage` V8 APIs in `OnContextCreated()`. Contains 5 V8 handler classes. Pre-caches and injects adblock scriptlets, fingerprint protection scripts, a `window.chrome` bot-detection stub, the wallet IPC bridge, and the `window.CWI`/`yours`/`panda` shim. Routes 97 IPC response messages from browser process back to JavaScript via `frame->ExecuteJavaScript()`. |
+| `simple_render_process_handler.cpp` | 2340 | Render-process handler. Injects `window.hodosBrowser.*` and `window.cefMessage` V8 APIs in `OnContextCreated()`. Contains 5 V8 handler classes. Pre-caches and injects adblock scriptlets, a `window.chrome` bot-detection stub, the wallet IPC bridge, and the `window.CWI`/`yours`/`panda` shim. Routes 95 IPC response messages from browser process back to JavaScript via `frame->ExecuteJavaScript()`. |
 | `my_overlay_render_handler.cpp` | 393 | Windows off-screen rendering for overlays. Uses GDI `CreateDIBSection` + `UpdateLayeredWindow` with per-pixel alpha blending. Dynamic bitmap reallocation on resize. Reports true per-monitor DPI via `GetDpiForWindow()`. Removes `WS_EX_TRANSPARENT` after first paint to enable mouse input. |
 | `my_overlay_render_handler.mm` | 384 | macOS off-screen rendering for overlays. Uses `CGImageCreate` + `CALayer.contents` with `dispatch_async` to main thread. Copies CEF buffer via `malloc` to prevent reuse ghosting. Disables Core Animation implicit transitions via `CATransaction`. Supports Retina via `NSScreen.backingScaleFactor`. Adds `DetachView()` (no Windows counterpart). |
 | `simple_handler_mac.mm` | 158 | macOS-only helper for `SimpleHandler::RunContextMenu`. CEF on macOS windowed rendering does not auto-present the `CefMenuModel` built in `OnBeforeContextMenu`, so this converts `CefMenuModel` → `NSMenu` and pops it up via AppKit. Without it, right-clicking a link navigates instead of opening the menu. Defines `HodosContextMenuTarget` (retains the `CefRunContextMenuCallback` until an item is picked or the menu is dismissed). |
@@ -38,7 +38,7 @@ Central browser-process handler. One instance per CEF browser (tabs, header, ove
 | `CefLifeSpanHandler` | `OnAfterCreated` (register with TabManager), `OnBeforeClose` (cleanup), `OnBeforePopup` (open links in new tab) |
 | `CefDisplayHandler` | `OnTitleChange`, `OnAddressChange`, `OnFaviconURLChange`, `OnFullscreenModeChange` |
 | `CefLoadHandler` | `OnLoadingStateChange`, `OnLoadError` (SSL/DNS error pages) |
-| `CefRequestHandler` | `OnBeforeBrowse` (scriptlet pre-cache, fingerprint seed IPC), `GetResourceRequestHandler` (paid-content cache, ad blocking, cookie filtering, wallet routing, DNT/GPC injection) |
+| `CefRequestHandler` | `OnBeforeBrowse` (scriptlet pre-cache, `hodos_farble_key` enabled-bit send), `GetResourceRequestHandler` (paid-content cache, ad blocking, cookie filtering, wallet routing, DNT/GPC injection) |
 | `CefContextMenuHandler` | `OnBeforeContextMenu`, `RunContextMenu`, `OnContextMenuCommand` — 20 custom `MENU_ID_USER_FIRST` items |
 | `CefDialogHandler` | `OnFileDialog` (sets `g_file_dialog_active` guard) |
 | `CefKeyboardHandler` | `OnPreKeyEvent` — see Keyboard Shortcuts below |
@@ -121,10 +121,10 @@ Runs in each renderer subprocess. Injects JavaScript APIs and routes IPC respons
 
 (`IdentityHandler` and the navigation/address handlers are bound here but declared in `src/core/` — see the Core Services doc.)
 
-**3 static caches (each with its own mutex):**
+**1 static cache (with its own mutex):**
 - `s_scriptCache` / `s_scriptCacheMutex` — URL → adblock scriptlet JS (one-shot, erased after injection)
-- `s_domainSeeds` / `s_seedMutex` — URL → fingerprint PRNG seed (one-shot for main frame)
-- `s_fingerprintDisabledUrls` / `s_fpDisabledMutex` — URLs where the user disabled per-site farbling
+
+The two fingerprint caches (`s_domainSeeds`/`s_seedMutex`, `s_fingerprintDisabledUrls`/`s_fpDisabledMutex`) were **deleted 2026-08-09** with the JS farbling path. ⛔ Do not reintroduce a renderer-side farbling cache: a per-URL map in this process is exactly what hid the shipped constant-seed bug, because a cross-process navigation left it empty in the *incoming* renderer while the browser happily computed a correct seed for the outgoing one.
 
 **Per-process HistoryManager init**: the constructor only initializes `HistoryManager` when it is a real renderer subprocess (`--type=renderer`), and binds to the profile from `--profile=`. Running it in the browser process used to pre-open `Default` and leak it into every profile.
 
@@ -173,7 +173,7 @@ Off-screen rendering for all overlay windows. One instance per overlay.
 
 ## IPC Message Categories — render process
 
-**97 message names** handled in `SimpleRenderProcessHandler::OnProcessMessageReceived()` (line 924 → EOF). Most are `*_response` / `*_error` replies to the browser-process messages above; the rest are pushes.
+**95 message names** handled in `SimpleRenderProcessHandler::OnProcessMessageReceived()` (line 924 → EOF). Most are `*_response` / `*_error` replies to the browser-process messages above; the rest are pushes.
 
 | Category | Messages | Count |
 |----------|----------|-------|
@@ -183,7 +183,7 @@ Off-screen rendering for all overlay windows. One instance per overlay.
 | Bookmarks | `bookmark_add_response`, `bookmark_get_response`, `bookmark_get_all_response`, `bookmark_get_all_tags_response`, `bookmark_is_bookmarked_response`, `bookmark_remove_response`, `bookmark_search_response`, `bookmark_update_response`, `bookmark_update_last_accessed_response`, `bookmark_folder_create/get_tree/list/remove/update_response` | 14 |
 | Cookies | `cookie_get_all_response`, `cookie_delete_response`, `cookie_delete_all_response`, `cookie_delete_domain_response`, `cookie_block_domain_response`, `cookie_unblock_domain_response`, `cookie_blocklist_response`, `cookie_allow_third_party_response`, `cookie_remove_third_party_allow_response`, `cookie_block_log_response`, `cookie_clear_block_log_response`, `cookie_blocked_count_response`, `cookie_reset_blocked_count_response`, `cookie_check_site_allowed_response`, `cache_clear_response`, `cache_get_size_response` | 16 |
 | Ad blocking | `adblock_blocked_count_response`, `adblock_reset_blocked_count_response`, `adblock_site_toggle_response`, `adblock_check_site_enabled_response`, `adblock_scriptlet_toggle_response`, `adblock_check_scriptlets_enabled_response`, `session_blocked_total_response` | 7 |
-| Cosmetic / fingerprint injection | `preload_cosmetic_script`, `inject_cosmetic_css`, `inject_cosmetic_script`, `fingerprint_seed`, `fingerprint_site_disabled`, `fingerprint_get_site_enabled_response` | 6 |
+| Cosmetic injection / fingerprint UI | `preload_cosmetic_script`, `inject_cosmetic_css`, `inject_cosmetic_script`, `fingerprint_get_site_enabled_response` | 4 |
 | Tabs / navigation / UI | `tab_list_response`, `recently_closed_response`, `most_visited_response`, `focus_address_bar`, `find_show`, `find_result`, `settings_response`, `profiles_result`, `site_permissions_response` | 9 |
 | Omnibox | `omnibox_query_update`, `omnibox_autocomplete_update`, `omnibox_select`, `google_suggest_response` | 4 |
 | Downloads | `download_state_update`, `download_folder_selected` | 2 |
@@ -191,7 +191,7 @@ Off-screen rendering for all overlay windows. One instance per overlay.
 | BRC-100 / payment | `brc100_auth_request`, **`payment_success_indicator`** | 2 |
 | Paid content cache | `paid_cache_clear_response`, `paid_cache_get_size_response` | 2 |
 | QR scanning | `qr_scan_result`, `qr_screen_capture_result`, `qr_screen_capture_starting` | 3 |
-| **Total** | | **97** |
+| **Total** | | **95** |
 
 > ⚠️ **`payment_success_indicator` drives the GOLD PILL** on the tab — the user's primary visual safeguard against silent payment abuse. It fires on every auto-approved payment. Never call it a "green dot"; never let a refactor drop this route.
 
@@ -238,7 +238,7 @@ window.CWI / window.yours / window.panda // CWI_SHIM_SCRIPT — external pages o
 Content injected into page contexts by `OnContextCreated()`, in order:
 
 1. **Adblock scriptlets** — pre-cached via `preload_cosmetic_script` IPC in `OnBeforeBrowse`, injected from `s_scriptCache`. One-shot per URL (erased after injection so subframe contexts don't re-inject). Skipped for `127.0.0.1` URLs.
-2. **Fingerprint protection** — seed pre-cached via `fingerprint_seed` IPC; `FINGERPRINT_PROTECTION_SCRIPT` patched with the seed and injected. Skips `127.0.0.1`, auth domains, and URLs in `s_fingerprintDisabledUrls` (per-site opt-out, pushed via `fingerprint_site_disabled`). Falls back to a URL hash if no seed arrived.
+2. ~~**Fingerprint protection**~~ — **REMOVED 2026-08-09.** Farbling is native in Blink (fork patches C1/C3/C4/C5/C6) and is applied at API-call time, so the renderer injects nothing and holds no farbling state. libcef pulls the per-origin key at `OnContextCreated` and installs it on `HodosSessionCache`; the shell's contribution is the single `enabled` bit it sends with `hodos_farble_key` from `OnBeforeBrowse`. ⛔ Do not re-add an injection step here — it cannot cover workers, it restores the `toString` tamper tell, and it would double-perturb what Blink already farbles.
 3. **`window.chrome` stub** — external pages only, injected independently of the fingerprint script so it works even with farbling disabled.
 4. **Wallet IPC bridge** (`WALLET_CALL_BRIDGE_SCRIPT`) — idempotent IIFE; internal pages + overlays always, external pages only when the CWI shim also qualifies.
 5. **CWI/yours/panda provider shim** (`CWI_SHIM_SCRIPT`) — external https main frames, injected *after* the bridge (the provider's methods call `window.__hodos_walletCall`).

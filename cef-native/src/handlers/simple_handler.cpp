@@ -7599,12 +7599,6 @@ bool SimpleHandler::OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
             if (!FingerprintProtection::GetInstance().IsEnabled() ||
                 FingerprintProtection::IsAuthDomain(navUrl) ||
                 !FingerprintProtection::GetInstance().IsSiteEnabled(domain)) {
-                // Send disable signal to renderer — skip fingerprint injection for this URL
-                CefRefPtr<CefProcessMessage> msg =
-                    CefProcessMessage::Create("fingerprint_site_disabled");
-                msg->GetArgumentList()->SetString(0, navUrl);
-                frame->SendProcessMessage(PID_RENDERER, msg);
-
                 // C2: record explicitly that this navigation is NOT farbled. Filing
                 // enabled=false rather than staying silent matters: silence is
                 // indistinguishable from "nothing has been computed yet", and we want the
@@ -7620,17 +7614,14 @@ bool SimpleHandler::OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
                     frame->SendProcessMessage(PID_RENDERER, fmsg);
                 }
             } else {
-                // Normal path: send seed for farbling
-                uint32_t seed = FingerprintProtection::GetInstance().GetDomainSeed(navUrl);
-                CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("fingerprint_seed");
-                msg->GetArgumentList()->SetInt(0, static_cast<int>(seed));
-                msg->GetArgumentList()->SetString(1, navUrl);
-                frame->SendProcessMessage(PID_RENDERER, msg);
-
-                // C2: also record the NATIVE farbling key. Filed alongside the legacy
-                // seed IPC on purpose -- the JS path above still owns audio/WebGL until
-                // C4/C5 land, and TD-3 forbids retiring the old chain until this one is
-                // proven delivering.
+                // Normal path: file the NATIVE farbling key.
+                //
+                // The legacy `fingerprint_seed` IPC that used to sit here is GONE
+                // (2026-08-09). It fed FINGERPRINT_PROTECTION_SCRIPT, whose last two
+                // vectors -- WebGL readPixels and WebAudio -- became native in C4/C5, so
+                // the script and its whole seed channel were retired in the same commit
+                // those patches landed (the I-4 atomic-swap rule: never leave a JS
+                // override wrapping an API that Blink is already farbling).
                 //
                 // ⚠️ This "SendProcessMessage" does NOT reach the renderer. libcef's
                 // browser side intercepts "hodos_farble_key" in

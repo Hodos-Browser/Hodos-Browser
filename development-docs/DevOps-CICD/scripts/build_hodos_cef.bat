@@ -53,7 +53,7 @@ REM be reproducible, and patch content is part of the build. BUMP THIS every tim
 REM a patch lands on hodos/7871, and record the new SHA in the fork's
 REM HODOS_PATCHES.md. Upstream content is unchanged -- dfe5a2343 is
 REM 94c1726 (upstream 7871 head) plus our patch commits.
-set CEF_CHECKOUT=dfe5a2343
+set CEF_CHECKOUT=c63654654
 
 REM ⚠️ chromium\src\cef is a COPY of the standalone checkout, refreshed ONLY when
 REM the CEF checkout HASH changes (automate-git.py:1358-1360). If you manually

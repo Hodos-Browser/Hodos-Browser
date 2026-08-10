@@ -16,7 +16,6 @@
 #include <map>
 
 #include "../../include/core/Logger.h"
-#include "../../include/core/FingerprintScript.h"
 #include "../../include/core/FingerprintProtection.h"
 #include "../../include/core/CWIShimScript.h"
 
@@ -30,14 +29,13 @@
 static std::mutex s_scriptCacheMutex;
 static std::unordered_map<std::string, std::string> s_scriptCache; // URL → scriptlet JS
 
-// Sprint 12c: Static cache for fingerprint seeds (URL → seed)
-static std::mutex s_seedMutex;
-static std::unordered_map<std::string, uint32_t> s_domainSeeds;
-
-// Per-site fingerprint disable tracking: URLs for which the browser process
-// has signalled that fingerprint protection should be skipped.
-static std::mutex s_fpDisabledMutex;
-static std::unordered_set<std::string> s_fingerprintDisabledUrls;
+// NOTE: the fingerprint seed cache (s_domainSeeds/s_seedMutex) and the per-site disable
+// set (s_fingerprintDisabledUrls/s_fpDisabledMutex) were DELETED 2026-08-09 along with
+// FINGERPRINT_PROTECTION_SCRIPT. Farbling is native in Blink now and the renderer holds
+// no farbling state at all: libcef pulls the per-origin key at OnContextCreated and hands
+// it to HodosSessionCache. Do not reintroduce a renderer-side cache here -- a per-URL map
+// in this process is exactly what made the shipped constant-seed bug invisible, because a
+// cross-process navigation left it empty in the incoming renderer.
 
 // Convenience macros for easier logging
 #define LOG_DEBUG_RENDER(msg) Logger::Log(msg, 0, 1)
@@ -498,85 +496,18 @@ void SimpleRenderProcessHandler::OnContextCreated(
         }
     }
 
-    // Sprint 12d: Inject fingerprint protection script for external pages
-    // Skip auth domains and per-site disabled URLs.
-    if (!url.empty() && url.find("127.0.0.1") == std::string::npos &&
-        url.find("localhost") == std::string::npos &&
-        !FingerprintProtection::IsAuthDomain(url)) {
-
-        // Check if the browser process sent a disable signal for this URL
-        bool fpDisabled = false;
-        {
-            std::lock_guard<std::mutex> lock(s_fpDisabledMutex);
-            auto disabledIt = s_fingerprintDisabledUrls.find(url);
-            if (disabledIt != s_fingerprintDisabledUrls.end()) {
-                fpDisabled = true;
-                if (frame->IsMain()) {
-                    s_fingerprintDisabledUrls.erase(disabledIt); // One-shot for main frame
-                }
-                LOG_DEBUG_RENDER("🛡️ Fingerprint injection skipped (site disabled) for " + url);
-            }
-        }
-
-        if (!fpDisabled) {
-        uint32_t seed = 0;
-        {
-            std::lock_guard<std::mutex> lock(s_seedMutex);
-            auto it = s_domainSeeds.find(url);
-            if (it != s_domainSeeds.end()) {
-                seed = it->second;
-                if (frame->IsMain()) {
-                    s_domainSeeds.erase(it); // One-shot for main frame
-                }
-            }
-            // FAIL CLOSED: no seed => seed stays 0 => nothing is injected below.
-            //
-            // ⚠️ DO NOT REINTRODUCE A FALLBACK SEED. This used to read
-            //     seed = std::hash<std::string>{}(url) & 0xFFFFFFFF;
-            // which looks like graceful degradation and is the opposite. std::hash is
-            // deterministic within a toolchain and unsalted, so that seed is a pure
-            // function of the URL: identical across launches, across profiles, and
-            // ACROSS USERS. Every Hodos user farbled a given URL identically, which is
-            // not "weaker farbling" -- it is a stable, precomputable perturbation sitting
-            // on top of the native values, i.e. a reliable browser-IDENTIFYING
-            // fingerprint. Stock Chromium would have been less identifying.
-            //
-            // Confirmed by measurement 2026-08-07, not inferred: across two restarts the
-            // browser computed a correctly session-derived seed each time (2030444654 ->
-            // 3258985367) while the farbled audio output stayed byte-identical
-            // (a10d2ba4), proving the renderer never received it. Shipped in every
-            // released build since 0b7288b. See
-            // development-docs/TICKET_farbling_constant_seed_shipped.md.
-            //
-            // Delivery is unreliable because the browser sends fingerprint_seed from
-            // OnBeforeBrowse (pre-commit), so for a cross-process navigation it lands in
-            // the OUTGOING renderer process and this map is empty in the incoming one.
-            // Repairing delivery is NOT possible at this layer -- the client API has no
-            // synchronous renderer->browser call -- so it is fixed in libcef instead, via
-            // a [Sync] pull at OnContextCreated (fork 116b7fd8b, PLAN_farbling_blink.md
-            // C2). That pull covers the NATIVE path only; this JS path stays fail-closed
-            // until C4/C5/C6 port audio/WebGL/navigator natively and it is retired.
-            //
-            // Consequence, deliberately accepted: when no seed arrives, the user gets NO
-            // JS farbling rather than constant farbling. That is strictly better -- it
-            // removes a tracking vector and takes away nothing that ever worked -- and it
-            // matches the fail-closed contract the native path already follows (see
-            // blink_glue.h :: SetHodosFarblingKey and HodosSessionCache: "a degenerate
-            // constant-seeded farble is a WORSE fingerprint than none").
-        }
-        if (seed != 0) {
-            std::string script = FINGERPRINT_PROTECTION_SCRIPT;
-            std::string seedStr = std::to_string(seed);
-            size_t pos = script.find("FINGERPRINT_SEED");
-            if (pos != std::string::npos) {
-                script.replace(pos, 16, seedStr);
-            }
-            LOG_DEBUG_RENDER("🛡️ Injecting fingerprint protection (seed=" + seedStr + ") for " + url);
-            frame->ExecuteJavaScript(script, url, 0);
-        }
-        } // end !fpDisabled
-    }
-
+    // Fingerprint farbling used to be INJECTED HERE as FINGERPRINT_PROTECTION_SCRIPT.
+    // Deleted 2026-08-09: canvas went native in C3, and WebGL readPixels + WebAudio in
+    // C4/C5, so nothing was left for the script to wrap. Navigator values are C6.
+    //
+    // Farbling now happens inside Blink at API-call time, which is why the patched methods
+    // report "[native code]" from toString() again -- the injected overrides were a
+    // prototype-tamper tell that bot detection reads, and removing them is a large part of
+    // why the migration was worth doing.
+    //
+    // ⛔ Do NOT re-add an injection here for a "quick" farbling fix. Injection cannot cover
+    // workers (OnContextCreated never fires for them), it re-introduces the toString tell,
+    // and a JS override wrapping an API Blink already farbles would double-perturb it.
     // Inject window.chrome stub on external pages so bot detection sees a real Chrome signal.
     // Injected separately from fingerprint script so it works even when FP protection is disabled.
     bool isExternalPage = !url.empty() &&
@@ -1158,32 +1089,16 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
             return true;
         }
 
-        // Sprint 12c: Cache fingerprint seed for injection in OnContextCreated
-        if (message_name == "fingerprint_seed") {
-            CefRefPtr<CefListValue> args = message->GetArgumentList();
-            uint32_t seed = static_cast<uint32_t>(args->GetInt(0));
-            std::string url = args->GetString(1).ToString();
-
-            if (!url.empty() && seed != 0) {
-                std::lock_guard<std::mutex> lock(s_seedMutex);
-                s_domainSeeds[url] = seed;
-                LOG_DEBUG_RENDER("🛡️ Cached fingerprint seed " + std::to_string(seed) + " for " + url);
-            }
-            return true;
-        }
-
-        // Per-site fingerprint disable: browser process signals this URL should
-        // skip fingerprint injection (auth domain or user-disabled site).
-        if (message_name == "fingerprint_site_disabled") {
-            CefRefPtr<CefListValue> args = message->GetArgumentList();
-            std::string url = args->GetString(0).ToString();
-            if (!url.empty()) {
-                std::lock_guard<std::mutex> lock(s_fpDisabledMutex);
-                s_fingerprintDisabledUrls.insert(url);
-                LOG_DEBUG_RENDER("🛡️ Fingerprint disabled for URL: " + url);
-            }
-            return true;
-        }
+        // The "fingerprint_seed" and "fingerprint_site_disabled" receivers were DELETED
+        // 2026-08-09 with the rest of the JS farbling path. Their senders in
+        // simple_handler.cpp :: OnBeforeBrowse went in the same commit, so no message with
+        // either name is emitted any more.
+        //
+        // Their replacement is not another IPC message: libcef intercepts
+        // "hodos_farble_key" browser-side, files it in hodos::FarblingRegistry, and the
+        // renderer PULLS it synchronously at OnContextCreated. A push could not work --
+        // pre-commit it reaches the OUTGOING document, and post-commit it is queued behind
+        // the FrameAttached ack, which lands after the first inline script has run.
 
         if (message_name == "inject_cosmetic_css") {
             CefRefPtr<CefListValue> args = message->GetArgumentList();

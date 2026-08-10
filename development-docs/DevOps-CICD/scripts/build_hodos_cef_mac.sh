@@ -60,7 +60,7 @@ CEF_BRANCH="7871"
 # patch lands on hodos/7871, and record the new SHA in the fork's
 # HODOS_PATCHES.md. Upstream content is unchanged -- dfe5a2343 is 94c1726
 # (upstream 7871 head) plus our patch commits.
-CEF_CHECKOUT="dfe5a2343"
+CEF_CHECKOUT="c63654654"
 
 # ⚠️ <tree>/chromium/src/cef is a COPY of the standalone checkout, refreshed ONLY
 # when the CEF checkout HASH changes (automate-git.py:1358-1360). If you manually

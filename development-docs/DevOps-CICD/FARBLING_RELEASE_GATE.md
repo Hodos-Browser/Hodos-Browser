@@ -123,9 +123,66 @@ before the flip.
 
 ## 6. When to tighten this
 
-- **When C4/C5/C6 land** (audio/WebGL/navigator ported natively), extend the harness beyond
-  canvas. Until then `farbling_audio_check.py` covers the legacy JS surface, which canvas
-  cannot test post-C3.
+- ✅ **DONE 2026-08-09 — the harness now covers all four vectors** (canvas, WebGL `readPixels`,
+  WebAudio, navigator), measured in one page visit so they share the same three restarts.
+  `farbling_audio_check.py` is **retired, not extended**: it selected its target as "first
+  page target that is not 127.0.0.1:5137" — harness defect #3 verbatim — and it never
+  exited non-zero, so it was never a gate.
+
+  > ### The negative control that came free, and what it caught
+  >
+  > The extended harness was run against the **`dfe5a2343`** build — C1/C2/C3 only, so
+  > WebGL/audio/navigator farbling was genuinely absent. That is a true feature-off state,
+  > and it can only be measured *before* a C4/C5/C6 build is staged. Result:
+  >
+  > | Vector | In binary? | Outcome |
+  > |---|---|---|
+  > | canvas | yes | all 5 assertions **PASS**, values reproducing §2's table exactly |
+  > | WebGL | no | both presence assertions **FAIL** (farbled == exempt, A == B) ✅ |
+  > | audio | no | both presence assertions **FAIL** ✅ |
+  > | navigator | no | **all four assertions PASSED — the gap** ⛔ |
+  >
+  > `deviceMemory` read 32, which is native on that machine *and* a legal farbled value;
+  > `hardwareConcurrency` read 24 == real, which reduce-only permits. So the C6 checks were
+  > plausibility checks that could not go red with the feature off — precisely the defect
+  > class this document exists to prevent, found in our own new harness by running it.
+  >
+  > Fixed by adding a **presence check**: the `(deviceMemory, hardwareConcurrency)` pair must
+  > differ from the native pair for at least one of the two seeds. False-failure odds are
+  > ~1 in 8,500 on a 24-core box (both values colliding with native, for both seeds), stated
+  > in the code so it is a judgeable trade-off rather than a surprise.
+  >
+  > **Lesson worth generalising:** an assertion that a value is *plausible* is not an
+  > assertion that the feature *ran*. Every vector needs at least one check that is false
+  > when the code is absent.
+
+  > ### ⛔ And then the green run found a second one: audio farbling was a no-op for ~15% of users
+  >
+  > With C4/C5/C6 in the binary, one assertion stayed red: `audio farbled != exempt`, for
+  > seed A only — while `audio seed A != seed B` **passed**, proving C5 was running. The
+  > cause is arithmetic, not delivery:
+  >
+  > Audio samples are float32 and therefore already exactly representable, so
+  > `x * (1 + delta)` rounds straight back to `x` unless `|delta * x|` exceeds **half** the
+  > gap to the neighbouring float32 — a relative threshold of at most `2^-24`. The spec'd
+  > multiplier was uniform `1.0 ± 2e-7`; `|delta| < ~3e-8` moves **0.00%** of samples.
+  > Measured: `delta = -4.95e-09` → **0 of 44100** samples changed, on a window with 5000
+  > non-zero samples and peak 0.70, so not silence.
+  >
+  > ≈15% of profile+domain pairs got a complete no-op; ~30% were dead or degraded. **The
+  > injected JavaScript had the identical hole**, so this shipped in every release the
+  > feature ever appeared in — invisible because every check compared farbled against
+  > exempt *within one session*, and when farbling is a no-op both sides are native.
+  >
+  > That is the same structural blind spot as the constant-seed bug, reached by a different
+  > mechanism: **comparing two things that are both wrong in the same way.** The durable
+  > defence is comparing against a known-native reference, which is what the
+  > `copyFromChannel`-vs-`getChannelData` differential does on a single page and seed.
+  >
+  > Fixed by flooring `|delta|` at `2^-23` (fork `c63654654`) — one full ULP, 2× margin,
+  > simulated at 100% of non-zero samples moving across the whole band, ceiling unchanged
+  > so it is never louder than the original spec allowed (~-134 dB). The harness assertion
+  > needed **no** change: it was right and the product was wrong.
 - **When macOS builds CEF 150.** Mac is still M136, so Mac has no farbling at all and its
   promotions must use the waiver.
 - **If the fork is rebased**, re-run before promoting. The gate binds to the engine major

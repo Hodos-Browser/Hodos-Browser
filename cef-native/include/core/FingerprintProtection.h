@@ -2,33 +2,36 @@
 
 #include <string>
 #include <cstdint>
-#include <array>
 #include <atomic>
 #include <mutex>
 #include <unordered_map>
-#include <random>
 #include <fstream>
 
 #include <nlohmann/json.hpp>
 
-#ifdef _WIN32
-#include <windows.h>
-#include <wincrypt.h>
-#pragma comment(lib, "advapi32.lib")
-#elif defined(__APPLE__)
-#include <Security/Security.h>
-#endif
+// No platform crypto include here any more: the per-session token this class used to
+// generate died with the JS injection path. The persistent per-profile seed that
+// replaced it is generated and owned by FarblingPolicy (BCryptGenRandom / SecRandomCopyBytes).
 
-/// FingerprintProtection — per-session, per-domain fingerprint farbling seed system.
+/// FingerprintProtection — the browser-process POLICY inputs to fingerprint farbling.
 ///
-/// On startup, generates a random 32-byte session token (memory-only, never persisted).
-/// For each domain, computes a deterministic seed via a simple hash so that:
-///   - Same domain within a session → same seed → consistent farbling
-///   - Different domains → different seeds
-///   - Different sessions → different seeds
+/// It no longer computes or delivers any seed. Farbling itself is native, inside Blink
+/// (fork patches C1/C3/C4/C5/C6), keyed by a persistent per-profile seed that
+/// `FarblingPolicy` owns and that libcef's registry delivers to the renderer. What is
+/// left here is the three POLICY inputs that `simple_handler.cpp :: OnBeforeBrowse`
+/// collapses into the single `enabled` bit it sends with `hodos_farble_key`:
 ///
-/// The seed is passed to the renderer process where it initializes a PRNG
-/// used by Canvas/WebGL/Navigator/Audio farbling overrides.
+///   1. the global on/off toggle       -- IsEnabled() / SetEnabled()
+///   2. the auth/OAuth allowlist       -- IsAuthDomain()          (host-precise)
+///   3. the user's per-site opt-out    -- IsSiteEnabled() / SetSiteEnabled()
+///
+/// The renderer never re-decides any of this, and never sees the allowlist.
+///
+/// ⚠️ Everything here is SHIPPED USER-FACING CONTROL. (2) and (3) are what keep logins
+/// working on auth sites and what the Privacy Shield toggle drives; do not delete them
+/// while tidying. The 2026-08-09 teardown removed the JS-injection half of this class
+/// (`GetDomainSeed`, the per-session token, the seed cache) because its consumer --
+/// FINGERPRINT_PROTECTION_SCRIPT -- is gone. The policy half stays.
 class FingerprintProtection {
 public:
     static FingerprintProtection& GetInstance() {
@@ -36,82 +39,16 @@ public:
         return instance;
     }
 
-    /// Initialize session token (called once at startup)
+    /// Marks startup configuration as complete. Called once, immediately before
+    /// LoadSiteSettings() + SetEnabled() at browser startup.
+    ///
+    /// ⚠️ Do NOT delete this as "empty" now that the session token is gone. IsEnabled()
+    /// is `initialized_ && enabled_`, and `enabled_` defaults to TRUE -- so without this
+    /// flag the class would report "farbling on" during the window before the user's
+    /// stored settings have been read. It is a startup-ordering gate, not a leftover.
     void Initialize() {
         std::lock_guard<std::mutex> lock(mutex_);
-        // Generate random session token
-#ifdef _WIN32
-        HCRYPTPROV hProv = 0;
-        if (CryptAcquireContextA(&hProv, nullptr, nullptr, PROV_RSA_FULL,
-                                  CRYPT_VERIFYCONTEXT | CRYPT_SILENT)) {
-            CryptGenRandom(hProv, (DWORD)sessionToken_.size(), sessionToken_.data());
-            CryptReleaseContext(hProv, 0);
-        } else {
-            // Fallback to mt19937
-            std::random_device rd;
-            std::mt19937_64 gen(rd());
-            std::uniform_int_distribution<unsigned int> dist(0, 255);
-            for (auto& byte : sessionToken_) {
-                byte = static_cast<uint8_t>(dist(gen));
-            }
-        }
-#elif defined(__APPLE__)
-        (void)SecRandomCopyBytes(kSecRandomDefault, sessionToken_.size(), sessionToken_.data());
-#else
-        std::random_device rd;
-        std::mt19937_64 gen(rd());
-        std::uniform_int_distribution<unsigned int> dist(0, 255);
-        for (auto& byte : sessionToken_) {
-            byte = static_cast<uint8_t>(dist(gen));
-        }
-#endif
         initialized_ = true;
-    }
-
-    /// Get per-domain seed for fingerprint farbling.
-    /// Computes a hash of the session token and the URL's HOST.
-    ///
-    /// NOTE: this is the bare host, NOT eTLD+1 — ExtractDomain() does no Public
-    /// Suffix List lookup, so a.example.com and b.example.com get DIFFERENT seeds.
-    /// (This docstring claimed eTLD+1 until 2026-08-05; it never did that.)
-    /// The Blink migration's C2 seed key DOES require a real registrable domain —
-    /// it must use a new PSL-backed helper, not this function.
-    uint32_t GetDomainSeed(const std::string& url) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!initialized_) return 0;
-
-        std::string domain = ExtractDomain(url);
-
-        // Check cache
-        auto it = seedCache_.find(domain);
-        if (it != seedCache_.end()) {
-            return it->second;
-        }
-
-        // Compute seed: simple hash combining session token + domain
-        uint32_t seed = 0;
-        // Mix in session token
-        for (size_t i = 0; i < sessionToken_.size(); i += 4) {
-            uint32_t chunk = 0;
-            for (size_t j = 0; j < 4 && (i + j) < sessionToken_.size(); j++) {
-                chunk |= static_cast<uint32_t>(sessionToken_[i + j]) << (j * 8);
-            }
-            seed ^= chunk;
-            seed = (seed << 13) | (seed >> 19);
-            seed *= 0x5bd1e995;
-        }
-        // Mix in domain
-        for (char c : domain) {
-            seed ^= static_cast<uint32_t>(c);
-            seed = (seed << 5) | (seed >> 27);
-            seed *= 0x1b873593;
-        }
-        seed ^= seed >> 16;
-        seed *= 0x85ebca6b;
-        seed ^= seed >> 13;
-
-        seedCache_[domain] = seed;
-        return seed;
     }
 
     /// Check if fingerprint protection is enabled
@@ -311,8 +248,6 @@ private:
     }
 
     std::mutex mutex_;
-    std::array<uint8_t, 32> sessionToken_{};
-    std::unordered_map<std::string, uint32_t> seedCache_;
     bool initialized_ = false;
     std::atomic<bool> enabled_{true};
 

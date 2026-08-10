@@ -60,10 +60,28 @@ Never `PUT /json/new` — those targets bypass OnBeforeBrowse and get no key at 
 production browser shares the image name `HodosBrowser.exe` and holds CDP 9222.
 This script refuses to touch any process outside the directory of `--exe`.
 
-⚠️ This measures the NATIVE canvas path (C3), which is what `profileSeed` feeds. It is
-therefore only meaningful against a build whose CEF carries the C2 registry + C3 patches
-(fork `dfe5a2343` or later). Against older binaries farbling is absent and this correctly
-reports RED — check `CEF_VERSION` before believing a failure.
+## Coverage
+
+All four native vectors, measured in one page visit so they share the same three restarts:
+
+    canvas  getImageData          C3   fork dfe5a2343+
+    webgl   readPixels            C4   fork 843a6450b+
+    audio   getChannelData        C5   fork 843a6450b+
+    navigator deviceMemory/cores  C6   fork 843a6450b+
+
+⚠️ Only meaningful against a build whose CEF actually carries those patches. Against an
+older binary farbling is absent and this correctly reports RED — check `CEF_VERSION`
+(printed as `engine=`) before believing a failure. Release builds and, until it rebuilds,
+macOS are still M136, where every one of these is inert by construction.
+
+⚠️ **The `FARBLING-ROTATION-v1` token deliberately still carries the canvas figures only.**
+`promote.yml` parses that exact shape and re-derives its verdict from it; widening the
+token is a release-gate change, not a harness change, and is left as an explicit follow-up.
+So this script asserts MORE than the promote gate checks — a green gate is not a substitute
+for reading this script's own output.
+
+⚠️ There is deliberately **no `A != B` assertion on the navigator values**. See the comment
+at that check: their ranges are far too small for it to be anything but flaky.
 """
 
 import argparse
@@ -92,11 +110,28 @@ FARBLED_URL = "https://example.com/"
 FARBLED_HOST = "example.com"
 
 
-# Two canvases. The large one is the CONTROL: at 400x200 = 80,000 px it is outside the
-# <65536px small-canvas gate, so it is never farbled on any page or any seed. If it ever
-# moves, the two measurements are not comparable and no verdict is trustworthy.
+# Every value C3/C4/C5/C6 farbles, measured in one page visit so all four ride the same
+# three browser restarts.
+#
+# Each vector carries its own IN-PAGE control wherever the implementation has a size gate,
+# because a control that sits outside the gate is never farbled on any page or any seed --
+# so if it ever moves, the two measurements are not comparable and no verdict below is
+# trustworthy:
+#
+#   canvas  small 200x50   = 10,000 px  -> inside  the <65536px gate -> farbled
+#           large 400x200  = 80,000 px  -> outside the gate          -> CONTROL
+#   webgl   small 32x32    =  4,096 B   -> inside  the <262144B gate -> farbled
+#           large 256x256  = 262,144 B  -> exactly ON the bound, so outside it -> CONTROL
+#
+# audio and navigator have no size gate, so their control is the cross-page one: the
+# auth-exempt origin, which is a true native pass-through.
 MEASURE_JS = r"""
-(function () {
+(async function () {
+  function fnv(bytes) {
+    var h = 2166136261 >>> 0;
+    for (var i = 0; i < bytes.length; i++) { h ^= bytes[i]; h = Math.imul(h, 16777619) >>> 0; }
+    return ('0000000' + (h >>> 0).toString(16)).slice(-8);
+  }
   function draw(w, h) {
     var c = document.createElement('canvas');
     c.width = w; c.height = h;
@@ -110,17 +145,57 @@ MEASURE_JS = r"""
     return c;
   }
   function pixHash(c) {
-    var d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-    var h = 2166136261 >>> 0;
-    for (var i = 0; i < d.length; i++) { h ^= d[i]; h = Math.imul(h, 16777619) >>> 0; }
-    return ('0000000' + h.toString(16)).slice(-8);
+    return fnv(c.getContext('2d').getImageData(0, 0, c.width, c.height).data);
   }
-  var small = draw(200, 50);    // 10,000 px  -> inside the gate, farbled
-  var large = draw(400, 200);   // 80,000 px  -> outside the gate, NEVER farbled (control)
+
+  // --- WebGL readPixels (C4) ---------------------------------------------------------
+  // A flat clear colour is enough: C4 perturbs the readback buffer, not the rendering, so
+  // the scene only has to be deterministic. Anything driver-dependent would add variance
+  // that the exempt/large controls would then have to absorb.
+  function glHash(size) {
+    try {
+      var c = document.createElement('canvas');
+      c.width = size; c.height = size;
+      var gl = c.getContext('webgl') || c.getContext('experimental-webgl');
+      if (!gl) { return 'ERR:nocontext'; }
+      gl.clearColor(0.25, 0.5, 0.75, 1.0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      var px = new Uint8Array(size * size * 4);
+      gl.readPixels(0, 0, size, size, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      return fnv(px);
+    } catch (e) { return 'ERR:' + e.message; }
+  }
+
+  // --- WebAudio (C5) -----------------------------------------------------------------
+  // The canonical fingerprint: a tone through a DynamicsCompressor, rendered offline and
+  // hashed. Slicing away the head skips the compressor's attack ramp, where tiny timing
+  // differences (not farbling) can move samples.
+  var audio = 'ERR';
+  var audioTwice = 'ERR';
+  try {
+    var ctx = new OfflineAudioContext(1, 44100, 44100);
+    var osc = ctx.createOscillator(); osc.type = 'triangle'; osc.frequency.value = 10000;
+    var comp = ctx.createDynamicsCompressor();
+    osc.connect(comp); comp.connect(ctx.destination); osc.start(0);
+    var buf = await ctx.startRendering();
+    audio = fnv(new Uint8Array(new Float32Array(buf.getChannelData(0).slice(4000, 9000)).buffer));
+    // Read the SAME buffer a second time. C5 perturbs the buffer's own storage, so a
+    // missing once-only guard would compound the factor and change this hash. This is the
+    // in-page assertion for that specific defect.
+    audioTwice = fnv(new Uint8Array(new Float32Array(buf.getChannelData(0).slice(4000, 9000)).buffer));
+  } catch (e) { audio = 'ERR:' + e.message; }
+
   return JSON.stringify({
     href: location.href,
-    small: pixHash(small),
-    large: pixHash(large)
+    small: pixHash(draw(200, 50)),
+    large: pixHash(draw(400, 200)),
+    glSmall: glHash(32),
+    glLarge: glHash(256),
+    audio: audio,
+    audioTwice: audioTwice,
+    deviceMemory: (typeof navigator.deviceMemory === 'number') ? navigator.deviceMemory : null,
+    cores: (typeof navigator.hardwareConcurrency === 'number')
+             ? navigator.hardwareConcurrency : null
   });
 })()
 """
@@ -376,9 +451,13 @@ def measure(port, chrome_ids, url, want_host, timeout=60):
                 continue
             ws = websocket.create_connection(t["webSocketDebuggerUrl"], timeout=25)
             try:
+                # awaitPromise: MEASURE_JS is async because the WebAudio vector renders an
+                # OfflineAudioContext. Without it the value comes back as an unresolved
+                # Promise and every measurement silently fails the "value" check below.
                 ws.send(json.dumps({"id": 2, "method": "Runtime.evaluate",
                                     "params": {"expression": MEASURE_JS,
-                                               "returnByValue": True}}))
+                                               "returnByValue": True,
+                                               "awaitPromise": True}}))
                 got, end = None, time.time() + 25
                 while time.time() < end:
                     m = json.loads(ws.recv())
@@ -468,8 +547,9 @@ def run_phase(label, seed_hex, args):
             raise SystemExit("measured the wrong browser; see the CDP trap in this "
                              "file's docstring")
 
-    print(f"    exempt  small={ex['small']}  large={ex['large']}")
-    print(f"    farbled small={fa['small']}  large={fa['large']}")
+    for who, v in (("exempt ", ex), ("farbled", fa)):
+        print(f"    {who} canvas={v['small']}/{v['large']}  webgl={v['glSmall']}/{v['glLarge']}"
+              f"  audio={v['audio']}  mem={v['deviceMemory']}  cores={v['cores']}")
     return {"exempt": ex, "farbled": fa, "engine": engine_version(args.port)}
 
 
@@ -562,6 +642,92 @@ def main():
         check("seed A round-trips exactly  (stable across restarts)",
               a1["farbled"]["small"] == a2["farbled"]["small"],
               "A=%s A'=%s" % (a1["farbled"]["small"], a2["farbled"]["small"]))
+
+        # ------------------------------------------------------------------------------
+        # C4 WebGL / C5 WebAudio / C6 Navigator
+        # ------------------------------------------------------------------------------
+        print("\nWEBGL readPixels (C4)")
+        gl_err = [p for p in (a1, b, a2)
+                  for v in (p["exempt"], p["farbled"])
+                  if str(v["glSmall"]).startswith("ERR")]
+        check("a WebGL context was actually obtained", not gl_err,
+              a1["farbled"]["glSmall"] if gl_err else "ok on all runs")
+        check(">=262144B readPixels identical everywhere (control)",
+              a1["farbled"]["glLarge"] == b["farbled"]["glLarge"]
+              == a2["farbled"]["glLarge"] == a1["exempt"]["glLarge"],
+              "%s / %s / %s (exempt %s)" % (a1["farbled"]["glLarge"], b["farbled"]["glLarge"],
+                                            a2["farbled"]["glLarge"], a1["exempt"]["glLarge"]))
+        check("webgl farbled != exempt", a1["farbled"]["glSmall"] != a1["exempt"]["glSmall"],
+              "farbled=%s exempt=%s" % (a1["farbled"]["glSmall"], a1["exempt"]["glSmall"]))
+        check("webgl seed A != seed B  (unlinkability)",
+              a1["farbled"]["glSmall"] != b["farbled"]["glSmall"],
+              "A=%s B=%s" % (a1["farbled"]["glSmall"], b["farbled"]["glSmall"]))
+        check("webgl seed A round-trips  (determinism)",
+              a1["farbled"]["glSmall"] == a2["farbled"]["glSmall"],
+              "A=%s A'=%s" % (a1["farbled"]["glSmall"], a2["farbled"]["glSmall"]))
+
+        print("\nWEBAUDIO (C5)")
+        check("audio rendered without error",
+              not str(a1["farbled"]["audio"]).startswith("ERR"), a1["farbled"]["audio"])
+        check("audio farbled != exempt", a1["farbled"]["audio"] != a1["exempt"]["audio"],
+              "farbled=%s exempt=%s" % (a1["farbled"]["audio"], a1["exempt"]["audio"]))
+        check("audio seed A != seed B  (unlinkability)",
+              a1["farbled"]["audio"] != b["farbled"]["audio"],
+              "A=%s B=%s" % (a1["farbled"]["audio"], b["farbled"]["audio"]))
+        check("audio seed A round-trips  (determinism)",
+              a1["farbled"]["audio"] == a2["farbled"]["audio"],
+              "A=%s A'=%s" % (a1["farbled"]["audio"], a2["farbled"]["audio"]))
+        # Reading the same AudioBuffer twice must give the same bytes. C5 perturbs the
+        # buffer's OWN storage with a deterministic factor, so a missing once-only guard
+        # multiplies by factor^n and this is the assertion that catches it.
+        check("same AudioBuffer read twice is identical  (no compounding)",
+              a1["farbled"]["audio"] == a1["farbled"]["audioTwice"],
+              "1st=%s 2nd=%s" % (a1["farbled"]["audio"], a1["farbled"]["audioTwice"]))
+
+        print("\nNAVIGATOR (C6)")
+        # ⚠️ NO 'A != B' ASSERTION HERE, deliberately. deviceMemory has 4 legal values and
+        # hardwareConcurrency has (real-1), so two different seeds collide often -- a 1-in-4
+        # chance for deviceMemory alone. An A!=B check on these would be FLAKY, and a flaky
+        # assertion in a release gate is worse than no assertion: it trains people to re-run
+        # until green. Unlinkability for these low-entropy values is carried by canvas,
+        # webgl and audio, which hash over enough bits for the check to be sound.
+        mem_f, mem_e = a1["farbled"]["deviceMemory"], a1["exempt"]["deviceMemory"]
+        # PRESENCE CHECK -- without this, C6 has no negative control.
+        #
+        # Measured 2026-08-09 against a binary that genuinely lacked C6: every other
+        # navigator assertion below still passed, because this machine's NATIVE values
+        # (deviceMemory 32, cores 24) are themselves a legal farbled answer -- 32 is in the
+        # allowed set and cores==real satisfies reduce-only. So they are plausibility
+        # checks, not evidence the feature ran.
+        #
+        # A single-value "farbled != native" check would be flaky (deviceMemory collides
+        # 1-in-4). Requiring only that the PAIR differs from native for AT LEAST ONE of the
+        # two seeds makes a false failure need mem AND cores to both land on their native
+        # value for both seed A and seed B: ~(1/4 * 1/23)^2 ~= 1 in 8,500 runs on a 24-core
+        # box, and rarer on machines with more cores. Quantified here so a future reader can
+        # judge it rather than rediscover it.
+        native_pair = (a1["exempt"]["deviceMemory"], a1["exempt"]["cores"])
+        check("navigator farbling is active at all (pair != native for some seed)",
+              (a1["farbled"]["deviceMemory"], a1["farbled"]["cores"]) != native_pair
+              or (b["farbled"]["deviceMemory"], b["farbled"]["cores"]) != native_pair,
+              "A=%s B=%s native=%s"
+              % ((a1["farbled"]["deviceMemory"], a1["farbled"]["cores"]),
+                 (b["farbled"]["deviceMemory"], b["farbled"]["cores"]), native_pair))
+        check("deviceMemory in the desktop set {4,8,16,32}", mem_f in (4, 8, 16, 32),
+              "farbled=%s (native on this machine=%s)" % (mem_f, mem_e))
+        check("deviceMemory deterministic across restarts",
+              mem_f == a2["farbled"]["deviceMemory"],
+              "A=%s A'=%s" % (mem_f, a2["farbled"]["deviceMemory"]))
+        # The exempt page is a native pass-through, so it reports this machine's REAL core
+        # count -- which is what makes reduce-only checkable at all from inside the page.
+        cores_f, cores_real = a1["farbled"]["cores"], a1["exempt"]["cores"]
+        check("hardwareConcurrency REDUCE-ONLY (<= real, >= 2)",
+              isinstance(cores_f, int) and isinstance(cores_real, int)
+              and 2 <= cores_f <= cores_real,
+              "farbled=%s real=%s" % (cores_f, cores_real))
+        check("hardwareConcurrency deterministic across restarts",
+              cores_f == a2["farbled"]["cores"],
+              "A=%s A'=%s" % (cores_f, a2["farbled"]["cores"]))
     finally:
         print("\nrestoring original fingerprint_settings.json ...")
         # Browser down first, or its shutdown write races the restore. verify=False so a
