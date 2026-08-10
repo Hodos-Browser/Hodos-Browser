@@ -39,14 +39,25 @@ If any of those fail the run exits non-zero with "BLIND", and no absence claim i
   * a catch-all regex for any 32- or 64-char hex run, so an unexpected encoding of some
     other long-lived secret is still caught
 
-## Usage
+## Usage — Windows and macOS (ported 2026-08-10)
 
+    # Windows (Win32_Process)
     python farbling_cmdline_seed_check.py \
         --exe "C:\...\cef-native\build\bin\Release\HodosBrowser.exe" \
         --data-root "%APPDATA%\HodosBrowserDev" --profile Default --dev
 
+    # macOS (ps -ww -o pid=,args=)
+    python3 farbling_cmdline_seed_check.py \
+        --exe "$HOME/Hodos-Browser/cef-native/build/bin/HodosBrowser.app/Contents/MacOS/HodosBrowser" \
+        --data-root "$HOME/Library/Application Support/HodosBrowserDev" \
+        --profile Default --dev
+
 Add `--attach` to inspect a browser that is already running (it must have visited a
 farbled page, or no key has been derived yet).
+
+⛔ On macOS export `HODOS_MAC_DEV_FLAGS=1` yourself; `--dev` sets only `HODOS_DEV`.
+
+`--self-test` runs the planted-leak proof on either platform and touches no browser.
 """
 
 import argparse
@@ -58,6 +69,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -66,6 +78,8 @@ from farbling_seed_rotation_check import (  # noqa: E402
     EXEMPT_URL,
     FARBLED_HOST,
     FARBLED_URL,
+    _posix_procs_under,
+    _posix_scope_dir,
     kill_browser_by_path,
     launch_browser,
     measure,
@@ -89,7 +103,40 @@ WHOLE_HEX_VALUE = re.compile(r"^[0-9a-fA-F]{32,}$")
 
 
 def process_table(exe_path):
-    """Every process running out of the build directory, with its full command line."""
+    """Every process running out of the build directory, with its full command line.
+
+    ## macOS arm (`ps -ww -o pid=,args=`), and the three ways it could lie
+
+    Ported 2026-08-10. `ps -ww` is the documented equivalent of `Win32_Process.CommandLine`,
+    but "equivalent" had to be *measured*, because every failure mode here is a silent
+    false PASS -- this script's output is an ABSENCE claim, and an instrument that reads
+    nothing reports the same clean absence as a browser that leaks nothing.
+
+    1. **Truncation.** If `ps` capped argv, a seed appended near the end would be invisible
+       and the run would go green. Measured on this box: `ps -ww` returned the complete
+       argv, tail sentinel intact, at 1 KB / 5 KB / 20 KB / 60 KB / 120 KB / **250 KB**.
+       The longest real Hodos command line here is a renderer at **1420 chars**, i.e. ~178x
+       margin. `assert_not_truncated()` below re-checks that margin at runtime rather than
+       trusting this paragraph.
+    2. **argv hidden for other users' processes.** macOS returns only the executable path,
+       with no arguments, for processes the caller does not own -- the exact analogue of
+       `Win32_Process.CommandLine` returning empty without the right privileges. Caught by
+       the existing `--type=renderer` / `--profile=` positive controls, which measurement
+       confirms are both present on a real macOS renderer line.
+    3. **Self-match.** `_posix_procs_under` matches argv[0]'s PREFIX, not a substring of the
+       whole line, so this scanner (and the shell that launched it) cannot match itself even
+       though its own command line contains the build path. That trap has already fired once
+       in this project -- `pgrep -f "automate-git.py"` matched the watcher and reported a
+       finished build as still running.
+
+    ⛔ The one thing NOT ported is the Windows `ExecutablePath` semantics: on macOS the scope
+    is the `.app` bundle root, not `dirname(exe)`. See `_posix_scope_dir` -- `dirname(exe)`
+    is `Contents/MacOS`, which contains the browser process and NONE of the five helpers,
+    so it would have scanned 1 process instead of 8 and still called it a pass.
+    """
+    if sys.platform != "win32":
+        return [{"pid": pid, "cmd": cmd}
+                for pid, cmd in _posix_procs_under(_posix_scope_dir(exe_path))]
     target_dir = os.path.dirname(os.path.abspath(exe_path))
     ps = (
         "$d = '%s'; "
@@ -166,6 +213,58 @@ def self_test(seed_hex):
     return 0 if (ok and clean) else 1
 
 
+def assert_not_truncated():
+    """Prove, at runtime, that this platform's process table returns a COMPLETE argv.
+
+    A truncating `ps` is the one macOS failure mode the `--type=renderer` / `--profile=`
+    positive controls cannot catch: both of those switches sit near the FRONT of the line,
+    so they would still be visible on an argv that had been cut off well before its end --
+    and a seed appended after the cut would be silently unfindable. The controls would say
+    "instrument working", the scan would say "no seed", and both would be wrong.
+
+    So: launch a throwaway process whose argv is far longer than any real browser command
+    line and which ends in a known sentinel, then require the sentinel back. This measures
+    the actual limit on the actual box instead of trusting a number in a comment.
+
+    Returns (ok, detail). Never raises -- a control that cannot run must degrade to BLIND,
+    not to an exception that a caller might catch and ignore.
+    """
+    if sys.platform == "win32":
+        return True, "not applicable (Win32_Process returns the full CommandLine)"
+    pad = 64000                       # ~45x the longest real Hodos command line measured
+    sentinel = "ZcmdlineProbeZ"
+    arg = "--pad=" + ("A" * pad) + sentinel
+    proc = None
+    try:
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(20)", arg],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.time() + 10
+        seen = ""
+        while time.time() < deadline:
+            time.sleep(0.4)
+            r = subprocess.run(["ps", "-ww", "-o", "args=", "-p", str(proc.pid)],
+                               capture_output=True, text=True, check=False)
+            seen = r.stdout.strip()
+            if seen:
+                break
+        if not seen:
+            return False, "the probe process never appeared in ps"
+        if not seen.endswith(sentinel):
+            return False, ("ps TRUNCATED a %d-char argv to %d chars -- a secret past the "
+                           "cut would be invisible and this scan would report a false "
+                           "'no seed found'" % (len(arg), len(seen)))
+        return True, ("ps returned a %d-char argv intact (sentinel recovered)" % len(seen))
+    except OSError as e:
+        return False, "could not run the truncation probe: %s" % e
+    finally:
+        if proc is not None:
+            try:
+                proc.kill()
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+
+
 def domain_key_hex(seed_hex, registrable_domain):
     """Mirrors FarblingPolicy.cpp :: ComputeDomainKey --
     HMAC-SHA256(key = profile seed BYTES, msg = registrable domain)."""
@@ -191,9 +290,6 @@ def main():
     ap.add_argument("--self-test", action="store_true",
                     help="prove the detector still catches a planted leak, then exit")
     args = ap.parse_args()
-
-    if sys.platform != "win32" and not args.self_test:
-        return fail("Windows-only (Win32_Process). On macOS use `ps -ww -o args`.")
 
     pdir = os.path.join(args.data_root, args.profile)
 
@@ -244,15 +340,22 @@ def main():
     with_cmd = [p for p in procs if p["cmd"].strip()]
     saw_renderer = any("--type=renderer" in p["cmd"] for p in procs)
     saw_profile = any("--profile=" in p["cmd"] for p in procs)
+    longest = max((len(p["cmd"]) for p in procs), default=0)
+    intact, trunc_detail = assert_not_truncated()
     print("   command lines readable : %d/%d" % (len(with_cmd), len(procs)))
     print("   saw --type=renderer    : %s" % saw_renderer)
     print("   saw --profile=         : %s" % saw_profile)
+    print("   longest command line   : %d chars" % longest)
+    print("   argv not truncated     : %s (%s)" % (intact, trunc_detail))
     if len(procs) < 2 or not with_cmd or not saw_renderer or not saw_profile:
         return fail("BLIND -- the scan could not read real child command lines, so its "
                     "'no seed found' would be an artefact of reading nothing. Re-run "
                     "with the browser up, from an account that can open the child "
                     "processes.")
-    print("   positive control OK: this scan can read renderer command lines.")
+    if not intact:
+        return fail("BLIND -- %s. A seed past the truncation point would be unfindable, "
+                    "so no absence claim is made." % trunc_detail)
+    print("   positive control OK: this scan can read COMPLETE renderer command lines.")
 
     # ---- the actual search -----------------------------------------------------------
     hits = scan(procs, needles)

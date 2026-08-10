@@ -119,7 +119,7 @@ A `""` on any **[GATE]** row = codec build regressed → **block the bump**, re-
 
 - [x] Layer-A: all **[GATE]** rows return `'probably'`; AV1 decode presence asserted (`'probably'`).
       **Windows PASS** (2026-08-05 with the sandbox ON; **re-run 2026-08-10 on the farbling build
-      `c63654654`** — see below). macOS owed.
+      `c63654654`** — see below). **macOS PASS 2026-08-10** — see the macOS row below.
 - [x] Layer-B **(Windows, 2026-08-05)** — every GATE codec proven to *really decode*: H.264 + AAC
       (x.com, twitch.tv), MP3 (direct `decodeAudioData`), VP9/AV1 (youtube.com). reddit (reCAPTCHA),
       linkedin (not signed in) and soundcloud (no media element on `/discover`) were **blocked by
@@ -130,9 +130,28 @@ A `""` on any **[GATE]** row = codec build regressed → **block the bump**, re-
       rows, MP3/AAC/H.264 decode receipts from local `data:` assets, youtube/x/twitch all decoding.
       The 08-05 run was against `94c1726`, the **pre-patch** 150 baseline, so this is the first
       codec result on the binary that actually ships the farbling patch set.
-- [ ] Layer-B on **macOS** — still owed (§6.3 requires both OSes).
+- [x] **Layer-A + Layer-B on macOS — PASS, 2026-08-10.** Closes the last open row in this doc, which
+      had said "macOS owed" since 08-05. Same binary generation as the Windows re-run: fork pin
+      `c63654654`, engine `Chrome/150.0.7871.187`, arm64 (M1), `HodosBrowser.app`.
+      **6/6 GATE+present rows `probably`** (H.264 baseline, H.264 High, AAC-LC, MP3, VP9, AV1).
+      Layer-B decode receipts: MP3 `+3135 B` audio, AAC `+3118 B` audio, H.264 `+394 B` video (all
+      local `data:` assets), `currentTime +1.000s` on each; **youtube.com** `+158063 B` video /
+      `+51564 B` audio at 854x480, **twitch.tv** `+1161860 B` video / `+63174 B` audio at 1280x720,
+      both `readyState=4`. **x.com recorded BLOCKED** — "no media element on the page" (logged-out
+      home timeline serves none). That is site access, not decode, and it is redundant with
+      twitch.tv, which decodes the same H.264+AAC pair. Subject assertion held: the shell log
+      confirms `example.com` was served to `role=tab_1`, not to an overlay.
+      ⛔ **Negative controls, all four, reported with the green result** — Layer-A `ac-3`, `ec-3` and
+      the bogus `nope.1` each returned `""`, and the **Layer-B AC-3-in-MP4 decode control refused to
+      decode at all** (`play()` rejected, `NotSupportedError: Failed to load because no supported
+      source was found`). So the probe discriminates on macOS and the decode receipts above are
+      receipts. Full transcript in `MAC_WINDOWS_RELAY.md` ROUND 2026-08-10d (Mac) §1.
 - [x] HEVC result **recorded** (per test machine) but **not gating**; Dolby explicitly out.
-      Windows host (i9-12950HX): `probably`.
+      Windows host (i9-12950HX): `probably`. **macOS host (Apple M1): `probably`** — consistent with
+      §3.1's "inherited-on, hardware/OS-decoder only", VideoToolbox supplying the decoder here.
+      **Dolby Vision on macOS: `""`**, matching Windows, i.e. inherited-on in the binary and
+      invisible to sites. Two machines, two toolchains, same answer on both rows — so §3.1's
+      "leave it inherited, smoke-only, non-gating" needs no revision for the Mac.
 
 ### 6.4 The harness — `codec_check.py`, and the control that lets it go red
 

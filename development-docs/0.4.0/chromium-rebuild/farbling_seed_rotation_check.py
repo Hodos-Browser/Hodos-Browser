@@ -85,9 +85,11 @@ at that check: their ranges are far too small for it to be anything but flaky.
 """
 
 import argparse
+import ctypes
 import json
 import os
 import secrets
+import signal
 import subprocess
 import sys
 import time
@@ -265,13 +267,127 @@ def _ps_quote(s):
     return "'" + s.replace("'", "''") + "'"
 
 
+def _exe_path_for_pid(pid):
+    """The kernel's real executable path for `pid`, or "" if it cannot be determined.
+
+    ⛔⛔ THIS EXISTS BECAUSE argv[0] IS NOT A PATH YOU CAN TRUST, and matching on it
+    reproduced the exact failure this module's tripwire was written to catch.
+
+    Measured 2026-08-10: three browser processes launched as `./HodosBrowser.app/Contents/
+    MacOS/HodosBrowser` (from a shell sitting in `build/bin`) carry a RELATIVE argv[0].
+    A prefix test against the absolute bundle path does not match them, so the scan saw
+    only the helpers -- whose argv[0] Chromium does set absolutely. `kill_browser_by_path`
+    then killed helpers while three browser processes stayed alive and immediately
+    respawned them, so the kill never converged; and `count_browser_procs` would have
+    reported 0 the moment only browser processes remained.
+
+    That is the constant-seed signature verbatim: a "successful" kill, a relaunch absorbed
+    by the surviving instance, and CDP still serving the ORIGINAL process with the ORIGINAL
+    seed. `launch_browser` happens to pass an absolute path, which is why the harness's own
+    runs were unaffected -- i.e. the bug was invisible to exactly the code path we exercise
+    most, and only a hand-launched browser exposed it.
+
+    `proc_pidpath` (libproc) reports what the kernel actually executed, independent of
+    argv[0], the caller's cwd, and any symlink in the launch path.
+    """
+    global _LIBPROC
+    if _LIBPROC is None:
+        try:
+            _LIBPROC = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        except OSError:
+            _LIBPROC = False
+    if _LIBPROC is False:
+        return ""
+    buf = ctypes.create_string_buffer(4096)
+    n = _LIBPROC.proc_pidpath(ctypes.c_int(pid), buf, ctypes.c_uint32(len(buf)))
+    if n <= 0:
+        return ""
+    return buf.value.decode("utf-8", "replace")
+
+
+_LIBPROC = None
+
+
+def _posix_scope_dir(exe_path):
+    """The directory that plays the role Windows' `dirname(exe)` plays.
+
+    ⛔ NOT `dirname(exe)` on macOS, and this cost a wrong result before it was caught by
+    the counter's own positive control. Windows' exe is `build/bin/Release/HodosBrowser.exe`
+    and every child process lives in that same flat directory. macOS's is buried at
+    `build/bin/HodosBrowser.app/Contents/MacOS/HodosBrowser`, while the CEF helpers live at
+    `build/bin/HodosBrowser.app/Contents/Frameworks/HodosBrowser Helper.app/Contents/MacOS/`.
+    So `dirname(exe)` scopes to the ONE main process and misses all five helpers; measured
+    here it counted 1 of 6.
+
+    The `.app` bundle root is the correct analogue: it covers browser + renderers +
+    utilities, and nothing else. It stays PATH-scoped, so the installed production browser
+    in /Applications is still never a target — which is the whole point of kill-by-path.
+    """
+    p = os.path.abspath(exe_path)
+    marker = ".app" + os.sep + "Contents" + os.sep + "MacOS" + os.sep
+    i = p.find(marker)
+    if i != -1:
+        return p[:i + len(".app")]
+    return os.path.dirname(p)
+
+
+def _posix_procs_under(target_dir):
+    """[(pid, argv_string)] for every process whose argv[0] sits under target_dir.
+
+    ⛔⛔ This replaced `pgrep -fc <exe>`, which was silently broken on macOS and is the
+    reason this docstring is long. THREE separate defects, each individually fatal:
+
+      1. **BSD `pgrep` has no `-c`.** macOS `pgrep` accepts only [-Lfilnoqvx]. The call
+         exited rc=2 with an EMPTY stdout and the usage text on stderr, so
+         `int(r.stdout.strip() or 0)` evaluated to **0 — always, unconditionally**,
+         whether 0 or 600 browsers were running. `count_browser_procs` was a constant
+         function. That meant `kill_browser_by_path(verify=True)` ALWAYS believed the
+         kill succeeded, disarming the exact tripwire whose docstring below explains it
+         is "not optional paranoia". Same false-negative family as `strings` on the
+         >4 GB dSYM: the tool read nothing and reported the all-clear.
+      2. **It matched the wrong set.** The full exe path matches ONLY the main process.
+         Measured on macOS at this pin: 6 processes run under `build/bin` (1 browser,
+         3 `--type=renderer`, 2 `--type=utility`) and `pkill -f <exe>` matched **1**.
+         Windows matches `ExecutablePath.StartsWith(<dirname of exe>)`, i.e. all of them.
+         Matching argv[0]'s prefix against the DIRECTORY restores parity — CEF helpers
+         live at `<bin>/HodosBrowser.app/Contents/Frameworks/...`, under the same dir.
+      3. **`pgrep -f` takes an extended REGEX, not a literal.** Every `.` in the path is
+         a wildcard and `[`/`]` in a user or build directory would be a character class.
+         Substring-matching argv[0] in Python removes that class of bug entirely.
+
+    Raises rather than returning 0 if `ps` itself fails — "I could not look" must never be
+    reportable as "nothing is running".
+    """
+    r = subprocess.run(["ps", "-ax", "-ww", "-o", "pid=,args="],
+                       capture_output=True, text=True, check=False)
+    lines = [l for l in r.stdout.splitlines() if l.strip()]
+    if r.returncode != 0 or not lines:
+        raise SystemExit(
+            "ps failed (rc=%s, %d lines): cannot enumerate processes, so a kill cannot "
+            "be verified and an attach cannot be counted. Refusing to report 0.\n%s"
+            % (r.returncode, len(lines), r.stderr[:300]))
+    prefix = target_dir.rstrip(os.sep) + os.sep
+    out = []
+    for line in lines:
+        pid, _, args = line.strip().partition(" ")
+        try:
+            pid = int(pid)
+        except ValueError:
+            continue
+        exe = _exe_path_for_pid(pid)
+        # Match the KERNEL's executable path, falling back to argv[0] only when libproc
+        # cannot answer (e.g. the process died between ps and here).
+        probe = exe if exe else args
+        if probe.startswith(prefix):
+            out.append((pid, args))
+    return out
+
+
 def count_browser_procs(exe_path):
     """How many processes are running out of the directory of exe_path."""
     target_dir = os.path.dirname(os.path.abspath(exe_path))
     if sys.platform != "win32":
-        r = subprocess.run(["pgrep", "-fc", os.path.abspath(exe_path)],
-                           capture_output=True, text=True, check=False)
-        return int(r.stdout.strip() or 0)
+        return len(_posix_procs_under(_posix_scope_dir(exe_path)))
     ps = (
         f"$d = {_ps_quote(target_dir)}; "
         "@(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and "
@@ -306,7 +422,31 @@ def kill_browser_by_path(exe_path, verify=True):
     """
     target_dir = os.path.dirname(os.path.abspath(exe_path))
     if sys.platform != "win32":
-        subprocess.run(["pkill", "-f", os.path.abspath(exe_path)], check=False)
+        # SIGKILL every process under the bundle, helpers included. `pkill -f <exe>`
+        # reached only the browser process; see _posix_procs_under for why that and the
+        # count it was verified with were both wrong.
+        #
+        # ⛔ ORDER AND REPETITION ARE BOTH LOAD-BEARING, and the `verify` tripwire below
+        # caught their absence on the first run of this port: a flat one-pass kill left
+        # 2 processes alive. Chromium's browser process RESTARTS a helper that dies, so
+        # killing helpers while the browser still lives just spawns replacements. Kill the
+        # browser process (no `--type=`) FIRST so nothing is left to respawn anything, then
+        # re-enumerate and repeat -- a process that appeared between the enumeration and
+        # the kill is invisible to a single pass, and on macOS that race is routine, not
+        # theoretical.
+        scope = _posix_scope_dir(exe_path)
+        for _round in range(5):
+            procs = _posix_procs_under(scope)
+            if not procs:
+                break
+            # Browser process first (it is the one with no --type= switch).
+            procs.sort(key=lambda pa: ("--type=" in pa[1], pa[0]))
+            for pid, _args in procs:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            time.sleep(1.0)
     else:
         ps = (
             f"$d = {_ps_quote(target_dir)}; "
@@ -321,8 +461,13 @@ def kill_browser_by_path(exe_path, verify=True):
     if verify:
         left = count_browser_procs(exe_path)
         if left != 0:
+            # Report the scope actually searched. On macOS that is the .app bundle root,
+            # NOT dirname(exe) -- printing the latter sent the first triage of this very
+            # failure looking in Contents/MacOS, which holds one of the eight processes.
+            scope_desc = (target_dir if sys.platform == "win32"
+                          else _posix_scope_dir(exe_path))
             raise SystemExit(
-                f"kill-by-path left {left} process(es) running under {target_dir}. "
+                f"kill-by-path left {left} process(es) running under {scope_desc}. "
                 "Every measurement after this would come from the OLD process with the "
                 "OLD seed and the harness would fake a constant-seed failure. Aborting.")
 
