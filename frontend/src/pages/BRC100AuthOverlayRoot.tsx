@@ -224,19 +224,38 @@ const InfoIcon: React.FC<{ tooltip?: string; style?: React.CSSProperties }> = ({
 // The SVG already contains the "Hodos Wallet" wordmark, so no separate
 // text label is rendered. Sits ABOVE the existing favicon + domain row so
 // the hierarchy is "Hodos Wallet → talking about → [site]".
+const attributionHeaderStyle: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  paddingBottom: '14px',
+  marginBottom: '16px',
+  borderBottom: `1px solid ${COLORS.borderLight}`,
+};
+
 const HodosWalletHeader: React.FC = () => (
-  <div
-    style={{
-      display: 'flex',
-      alignItems: 'center',
-      paddingBottom: '14px',
-      marginBottom: '16px',
-      borderBottom: `1px solid ${COLORS.borderLight}`,
-    }}
-  >
+  <div style={attributionHeaderStyle}>
     <img
       src="/Hodos_Gold_Wallet_Icon.svg"
       alt="Hodos Wallet"
+      height={36}
+      style={{ display: 'block', flexShrink: 0, width: 'auto' }}
+    />
+  </div>
+);
+
+// Same attribution header, browser wordmark. Used by the prompts where the actor
+// really is the BROWSER, not the wallet — the site-permission prompt (camera, mic,
+// location, notifications, clipboard) asks for a Chromium capability and has nothing
+// to do with the wallet, so branding it "Hodos Wallet" misattributes who is asking.
+//
+// ⚠️ Do NOT "unify" these two into one header. The wallet icon on wallet prompts is
+// load-bearing (principle #1 above): it is how the user tells the wallet apart from
+// the site. Picking the right one per prompt IS the feature.
+const HodosBrowserHeader: React.FC = () => (
+  <div style={attributionHeaderStyle}>
+    <img
+      src="/Hodos_Gold_Browser_Icon.svg"
+      alt="Hodos Browser"
       height={36}
       style={{ display: 'block', flexShrink: 0, width: 'auto' }}
     />
@@ -1299,7 +1318,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     return (
       <div style={overlayBackdrop}>
         <div style={cardStyle}>
-          <HodosWalletHeader />
+          <HodosBrowserHeader />
           <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '20px' }}>
             {!faviconError ? (
               <img
