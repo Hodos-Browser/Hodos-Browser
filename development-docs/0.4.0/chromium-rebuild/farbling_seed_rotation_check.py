@@ -587,8 +587,17 @@ def resolve_tab(port, excluded_ids):
         % (len(cands), ", ".join(t.get("url", "?")[:60] for t in cands)))
 
 
-def measure(port, chrome_ids, url, want_host, timeout=60):
-    """Navigate the real tab and read back both canvas hashes."""
+def measure(port, chrome_ids, url, want_host, timeout=60, js=None):
+    """Navigate the real tab and read back both canvas hashes.
+
+    `js` lets a sibling harness reuse this navigation + subject-assertion path with a
+    different probe (see farbling_acceptance_battery.py) instead of re-implementing the
+    tab resolution, the chrome-id exclusion and the href re-check — which is where the
+    wrong-subject defects in this family have always come from. It must be an expression
+    returning a JSON string with an `href` field, and it may be async. Defaults to
+    MEASURE_JS, so every existing caller is unaffected."""
+    if js is None:
+        js = MEASURE_JS
     t = resolve_tab(port, chrome_ids)
     ws = websocket.create_connection(t["webSocketDebuggerUrl"], timeout=30)
     try:
@@ -609,7 +618,7 @@ def measure(port, chrome_ids, url, want_host, timeout=60):
                 # OfflineAudioContext. Without it the value comes back as an unresolved
                 # Promise and every measurement silently fails the "value" check below.
                 ws.send(json.dumps({"id": 2, "method": "Runtime.evaluate",
-                                    "params": {"expression": MEASURE_JS,
+                                    "params": {"expression": js,
                                                "returnByValue": True,
                                                "awaitPromise": True}}))
                 got, end = None, time.time() + 25
