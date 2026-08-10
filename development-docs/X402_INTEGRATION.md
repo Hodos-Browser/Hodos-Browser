@@ -1,7 +1,7 @@
 # x402 Integration — what we have, what's missing, what it costs
 
-> **Created:** 2026-08-07
-> **Status:** Research complete. Not scheduled. No code written.
+> **Created:** 2026-08-07 · **Updated:** 2026-08-08 (governance verified §7; freshness rule under revision §4a; **facilitator code read at head `9808154` §4c**; Cloudflare §6a)
+> **Status:** Research complete. Not scheduled. No code written. **Item 7 of §3 is now explicitly blocked on spec — do not "fix" it.**
 > **Context:** [x402-foundation/x402 PR #2890](https://github.com/x402-foundation/x402/pull/2890) — `feat(bsv): add exact scheme support for BSV`, by sirdeggen (Deggen), **open**, 43 files / +4,362 lines.
 > **TL;DR:** We already ship the hard part. x402 support is a **serialization adapter**, not new crypto.
 
@@ -87,7 +87,7 @@ Client side only. Settlement (`internalizeAction`) is the *recipient's* wallet �
 | 4 | **Enforce strict amount equality** — x402 requires *exactly* `amount` sats; BRC-121 tolerates overpayment | `pay_402` | **M — behavioural change, verify first** |
 | 5 | Refuse non-`bsv:*` and ambiguous `bip122:*` networks; refuse `asset != "BSV"` | interceptor | S |
 | 6 | Parse `SettlementResponse` (`success`, `payer`, `transaction`, `network`, `errorReason`) for UI/activity-log | interceptor + frontend | S |
-| 7 | Reconcile the payment-reuse cache with the freshness window (see §4) | `pay_402` | **M — real bug risk** |
+| 7 | Reconcile the payment-reuse cache with the freshness window (see §4) | `pay_402` | ⏸️ **BLOCKED on spec — do not fix yet.** The rule is under active revision; see §4a |
 
 Everything reusable stays reused: the permission engine gate (`dispatch_payment`), the gold-pill IPC, `PaidContentCache`, the modal flow, activity logging.
 
@@ -104,12 +104,70 @@ Everything reusable stays reused: the permission engine gate (`dispatch_payment`
 
 That leaves **~5 seconds** to absorb network RTT to the facilitator **plus clock skew between our clock and theirs**. Internet clock skew alone routinely exceeds that. A reused payment at 24s age against a verifier running 4s fast is rejected as stale — and it would present as intermittent, hard-to-reproduce 402 loops.
 
-Options, in preference order:
-1. **Drop the reuse TTL well below the window** for x402 requests (e.g. 10s), keeping 25s for plain BRC-121.
-2. Mint fresh per request when the challenge is x402-shaped.
-3. Derive the TTL from the challenge — but the spec exposes `maxTimeoutSeconds` (a *settlement* budget), not the verify window, so this isn't directly available.
+### 4a. ⏸️ Status: DO NOT FIX YET — the spec rule itself is under revision (2026-08-08)
 
-Raised as spec feedback on PR #2890 (2026-08-07) — the spec is currently **silent** on whether a client may reuse a payload at all within the window, and a conforming client could reasonably do either.
+**This collision exists only under x402.** Plain BRC-121 specifies no freshness window at all, so `PAY402_REUSE_TTL_MS = 25_000` is not a live bug in what we ship today. Tuning it now would mean tuning against a rule that is actively being challenged on the PR.
+
+Raised as spec feedback on PR #2890 (2026-08-07). **`andyrowe` (bsv.cx, an independent live `exact`-on-BSV implementer on the plain-P2PKH addressing variant) replied 45 min later with a stronger reframe**, and the two positions have converged:
+
+> `derivationSuffix` is being asked to do double duty — **anti-replay and freshness** — and the clock-skew squeeze is the symptom.
+
+### 4b. What `derivationPrefix` / `derivationSuffix` actually are — and why the double duty is the bug
+
+Neither field exists to carry time. Both exist to **derive a one-time key**. BRC-29 never pays to a fixed reusable address; for each payment the sender and recipient independently derive a fresh key from a shared invoice number:
+
+```
+2-3241645161d8-{derivationPrefix} {derivationSuffix}
+ │      │                    └─ keyID: two base64 strings joined by a space
+ │      └─ protocol ID (BRC-29 payments)
+ └─ security level
+```
+
+| Field | Real job | Encoding |
+|---|---|---|
+| `derivationPrefix` | **Uniqueness** — fresh randomness ⇒ fresh key ⇒ no on-chain linkage between payments (this is where the privacy comes from) | base64(8 random bytes) |
+| `derivationSuffix` | **More keyID string.** Being a timestamp is convention, not a derivation requirement | base64(utf8(decimal Unix ms)) |
+
+Both are transmitted with the payment because the recipient needs them to re-derive the spending key — **without them the output is unspendable.** x402 then gave the suffix a *second* job: the verifier decodes it and checks it against its own clock. That second job is what forces two machines to agree on the time in order to move money, and it is the source of every failure mode in §4.
+
+### 4c. ✅ Verified against the implementation (2026-08-08) — `facilitator/scheme.ts`
+
+Read at head `9808154` (`bsv-blockchain/x402` @ `feat/bsv-exact-scheme`), path `typescript/packages/mechanisms/bsv/src/exact/facilitator/scheme.ts`. Three findings; two of them **correct earlier text in this doc**.
+
+**① ⚠️ CORRECTION — `isMerge` is NOT a replay signal on its own.** An earlier draft of this section said "txid-dedup + `isMerge` catch resubmission." That is imprecise. The code requires a **conjunction**:
+
+```ts
+const newlyInternalized = typeof result.satoshis === "number" && result.satoshis > 0;
+if (result.isMerge && !newlyInternalized) {
+  return this.failure(network, payer, "duplicate_settlement");
+}
+```
+
+with an explanatory comment: *"`isMerge` alone is not a replay: self-payments (same wallet creates and internalizes) report `isMerge: true` with newly internalized satoshis on first settle."* The distinction is correct and load-bearing — **do not restate it the loose way.**
+
+**② ⭐ The dedup cache already outlives the freshness window by ~20×.** This is the strongest evidence that the timestamp is not bounding replay state:
+
+```ts
+const SETTLEMENT_CACHE_TTL_FLOOR_MS = 600_000;   // 10 minutes
+const ttl = Math.max(SETTLEMENT_CACHE_TTL_FLOOR_MS, windowMs);
+```
+
+The spec prose ("dedup record covering at least `paymentWindow + maxTimeoutSeconds`") reads as though a longer freshness window would force proportionally longer retention — **the implementation disproves that.** A hard 10-minute floor holds txids while the window rejects payloads at 30s. A more generous freshness rule costs *nothing extra* in retention up to that floor.
+
+**③ The asymmetry andyrowe asked for partly exists already** — it just doesn't reach `/verify`:
+
+```ts
+if (age < -this.paymentWindowMs) reject                    // future: paymentWindow only
+if (age > this.paymentWindowMs + settleBudgetMs) reject     // past: paymentWindow + settle budget
+```
+
+Per the spec, the past-side extension applies **at settlement**. Our 25s reuse TTL bites at **`/verify`**, where it's a flat 30s. *(Not fully verified: the callers of `checkTimestamp` were not read, so "settleBudgetMs is 0 at verify" comes from spec prose, not call sites.)*
+
+**Revised ask — smaller and harder to refuse than a new field:** extend the existing past-side allowance to `/verify`, and state explicitly that a client MAY reuse a payload within the window. Given the 10-minute dedup floor, reuse is safe — a replayed payload is caught by txid whether it is 2s or 200s old. A server-issued absolute `expiresAt` (one clock, payer skew drops out) remains the cleaner long-term shape, but it is no longer the minimum viable fix.
+
+⚠️ **Caveat andyrowe raised himself:** bsv.cx pins amount *and* output at issuance because it uses server-issued single-use invoices. In the BRC-29 flow the **payer** generates prefix/suffix, so the output isn't known until minting. Doesn't block the proposal — the two jobs still separate — but it is the open question on the thread.
+
+**Bottom line: hold the code.** If either the past-side extension or `expiresAt` lands, the collision disappears and §4's human-in-the-loop concern below stops being live. Keep the mapping current.
 
 ### Related: human-in-the-loop timing
 
@@ -136,19 +194,62 @@ Our permission modal can sit open a long time (modal timeout is 600s). **We are 
 
 **Nobody ships x402-on-BSV yet** — PR #2890 is the reference implementation and it is unmerged. First mover is available.
 
-Two structural advantages we have over the mobile browser, both stemming from embedding the engine rather than wrapping a WebView:
+### 6a. Cloudflare entered the demand side (2026-08-04) — why open question #3 is about demand, not the merge
+
+Cloudflare announced [Cloudflare Wallets + cloudflare.pay](https://blog.cloudflare.com/wallets/) ([press release](https://www.cloudflare.com/press/press-releases/2026/cloudflare-gives-ai-agents-an-identity-and-a-wallet/)). **Live today: handle reservation only**; wallets, on/off-ramp and Virtual Wallets are "in the coming months," and the seller-side **Monetization Gateway is waitlist/preview**.
+
+- **Custody: UNDISCLOSED.** Not stated in the blog or press release. Do not repeat "custodial" as fact — though account-linked balances plus geographic on/off-ramps strongly imply hosted custody (*inference, unverified*).
+- **Chains for the wallet: undisclosed.** But [Cloudflare's x402 docs](https://developers.cloudflare.com/agents/x402/) cover Base, Ethereum, Polygon, Optimism, Arbitrum, Avalanche, Solana, Aptos, Stellar, Sui — **USDC settlement**, and *"`https://x402.org/facilitator` is the public facilitator operated by Coinbase and is used in all Cloudflare examples."*
+- **No public wallet API** for third-party integration today.
+
+**Why this matters to us more than the PR does.** x402 is asset-agnostic in spec and highly concentrated in practice (USDC / Base / Coinbase facilitator). BSV appears **nowhere** in [docs.x402.org's supported networks](https://docs.x402.org/core-concepts/network-and-token-support). If Cloudflare becomes how sites turn on 402, the accepted-asset list is effectively set upstream of us — and our payment path never fires, not for protocol reasons but because **no merchant advertises `bsv:mainnet`**. The threat is demand-side aggregation, not the wallet product.
+
+Where Cloudflare does *not* compete: they shipped no browser, and their model is agent-first and custody-hosted. Our differentiators — user-present consent, the gold pill, the per-domain permission engine, non-custodial keys in-process — are orthogonal to it. For headless/server-side agents, however, a browser wallet is largely redundant in their model.
+
+### 6b. Structural advantages over the mobile browser
+
+Both stem from embedding the engine rather than wrapping a WebView:
 1. **We read 402 response headers natively.** Its own docs note WebView native navigations don't expose response headers, so it **re-fetches the URL** to read them — a duplicate request per 402.
 2. **Persistent paid-content cache.** Ours is SQLite-backed with `Cache-Control` TTL and a 500 MB LRU; its is 30 minutes in memory, injected via `document.write()`.
 
 ---
 
-## 7. Open questions
+## 7. Governance — resolved 2026-08-08
 
-1. Does PR #2890 merge, and in what shape? It's a chain integration into a foundation repo where BSV is a newcomer.
-2. Does the freshness window get clarified (reuse allowed or mint-fresh)?
-3. Do we implement the adapter speculatively, or wait for merge? **Lean: wait for merge, but keep the mapping current** — the cost of waiting is low because we already have every field.
+**Both circulating claims are true; they describe different layers.** Verified at primary sources:
+
+- **2026-04-02** — [Linux Foundation announces it will launch the x402 Foundation](https://www.linuxfoundation.org/press/linux-foundation-is-launching-the-x402-foundation-and-welcoming-the-contribution-of-the-x402-protocol). Protocol described as "initially developed by **Coinbase, Cloudflare, and Stripe**."
+- **2026-07-14** — [Operational launch](https://www.linuxfoundation.org/press/linux-foundation-announces-operational-launch-of-x402-foundation-to-standardize-internet-native-payments-for-ai-agents-and-applications). Coinbase formally transfers the protocol. 40 member orgs.
+
+⚠️ **The LF supplies a neutral legal/organizational home. It did NOT change who decides.** [`TSC.md`](https://raw.githubusercontent.com/x402-foundation/x402/main/TSC.md) lists exactly three organizations on the Technical Steering Committee:
+
+| Org | Representative |
+|---|---|
+| Coinbase, Inc. | Erik Reppel |
+| Cloudflare, Inc. | Rohin Lohe |
+| Stripe, Inc. | Steve Kaliski |
+
+`CONTRIBUTING.md`: *"Merging contributions is at the discretion of the x402 Foundation team, based on the risk of the contribution and the quality of implementation."*
+
+**BSV Association is an Associate Member** — the lowest of three tiers, with Cardano Foundation, Casper, Japan Contents Blockchain Initiative, OMA3. Premier members include Circle (USDC issuer), Solana Foundation, Stellar Development Foundation, Ripple, Monad, plus Coinbase/Cloudflare/Stripe. **Do not assume LF governance implies outsider-neutral merit review** — that inference does not hold.
+
+### ⚠️ Contribution process — PR #2890 does not match it
+
+`CONTRIBUTING.md` mandates a **three-PR workflow** for a new chain: spec PR first → **merged** → reference implementation in a single SDK → additional SDKs. PR #2890 is one 43-file, +4,362-line PR carrying spec + implementation + examples + 103 tests together. As of 2026-08-08: **31 comments, 0 review comments, 0 reviews, no requested reviewers, `mergeable_state: unstable`**, three weeks open.
+
+CONTRIBUTING also warns that contributions *"that show clear signs of unreviewed AI output... may be closed without detailed review."* The PR discloses AI assistance (correctly), but paired with a monolithic diff that is a risk factor. Most thread comments are content-free ecosystem cheerleading — **never add to that; only implementer-grade technical comments help** (see [[project_x402_brc121_ecosystem_2026_08_07]]).
+
+**The §4a freshness fix is the natural small spec-only PR** that would fit the documented workflow.
+
+---
+
+## 8. Open questions
+
+1. Does PR #2890 merge, and in what shape? Structural mismatch with the 3-PR workflow (§7) is the leading explanation for the silence.
+2. Does the freshness rule adopt server-issued `expiresAt` (§4a)? **This is the live one** — it determines whether item 7 in §3 is work at all.
+3. Do we implement the adapter speculatively, or wait for merge? **Lean: wait — but the reason matters.** Nothing upstream *gates* us: Hodos is a C++/Rust client that doesn't consume the TS SDK, so we could emit a conforming `PAYMENT-SIGNATURE` today. **The real gate is demand — no server advertises `bsv:mainnet`.** A merge alone won't unblock us; a paying server would.
 4. Should we propose header-name alignment to BRC-121 itself, or let x402 supersede it? Probably the latter.
-5. Governance: the x402 Foundation's relationship to the Linux Foundation (claimed by BSVA 2026-08-07) is **unverified** and materially affects how likely a BSV chain integration is to be judged on merit.
+5. ~~Governance~~ — **resolved, see §7.**
 
 ---
 
