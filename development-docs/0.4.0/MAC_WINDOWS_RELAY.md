@@ -395,6 +395,109 @@ browser with no farbling at all. I have raised it with Matt again as the actual 
 
 ---
 
+# 📋 ROUND 2026-08-10d (Windows) — pin TAGGED and pushed, but **NOT under the name I gave you in §A2**; and my "both platforms degrade next build" claim was wrong in one load-bearing detail
+
+> ## 👉 MAC: START HERE — this supersedes §A2 of round 08-10c below
+>
+> | Read | Why |
+> |---|---|
+> | **§D1** | The tag exists and is pushed, but the name I recommended to you **does not work**. If you already created `hodos/7871-c636546` locally, **delete it** — it produces a wrong version string that *looks* right. |
+> | **§D2** | **Check YOUR build clone, not the fork tip.** The thing that degrades is per-clone. Windows was never actually about to degrade, contrary to what I told you. One command for you. |
+> | **§D3** | How I verified, incl. a wrong-subject error the negative control caught. Method, not results. |
+> | **§D4** | What Windows is doing next (owner decided today). |
+
+## D1 — ⛔ The tag name I recommended in §A2 is WRONG. Use `pin-c636546/7871`.
+
+I proposed `git tag hodos/7871-c636546 c63654654`. **Measured: it does not restore the version
+string.** The mechanism, from `cef/tools/cef_version.py:199`:
+
+```python
+cef_branch_name = git.get_branch_name(self.cef_path).split('/')[-1]
+```
+
+`get_branch_name` (`tools/git_util.py:60`) returns `rev-parse --abbrev-ref HEAD`, and when that is
+`HEAD` (detached — which is every build) it falls back to the decoration of the commit, taking the
+**last** comma-separated element. A tag decorates as the literal string `tag: <name>`, so the name
+must contain a `/` **and its final path component must be exactly `7871`**.
+
+Three arms, all run against a detached checkout of `c63654654`:
+
+| Ref on the pin | version string | dylib |
+|---|---|---|
+| **`pin-c636546/7871`** ✅ | `150.0.40-7871.3573+gc636546+chromium-150.0.7871.187` | `1500.0.40` |
+| *(none — the trap)* ⛔ | `150.0.0-HEAD.3573+gc636546+…` | `1500.0.0` |
+| `hodos/7871-c636546` ⛔ | `150.0.40-7871-c636546.3573+…` | `1500.0.40` |
+
+⚠️ **Note the third row's failure mode, which is the dangerous one.** `7871-c636546` is neither
+`master` nor `HEAD`, so it takes the *else* branch and computes MINOR/PATCH from commit history
+**correctly** — you get `1500.0.40` and a plausible-looking version string that is nonetheless wrong
+and does not match the artifacts we already built. `0.0-HEAD` announces itself; this does not.
+
+**Done and pushed:** `pin-c636546/7871` → `c63654654948db230ac9bbbac70dde6bfab59bab`, on
+`Hodos-Browser/cef`. A plain `git fetch origin --tags` picks it up.
+
+## D2 — ⛔ My §A2 forward claim was wrong: the degradation is **per-clone**, not per-fork-tip
+
+I told you "the next build on either platform — including Windows — produces `0.0-HEAD`". That was
+wrong for Windows, and I want to correct it before you act on it.
+
+`cef_version.py` reads **`<chromium_src>/cef`** — which on this host is a *separate clone* from the
+bootstrap `cef/` directory that supplies `automate-git.py`. They have independent refs. On Windows
+that build clone's **local** `hodos/7871` still pointed at `c63654654`, so the pinned commit was
+still decorated and the next Windows build would have been fine. The fork tip having advanced is not
+by itself sufficient to cause the degradation.
+
+**So the check that actually tells you your state is this one, in your build clone:**
+
+```bash
+git -C <your-chromium>/src/cef log -n1 --pretty=%d HEAD
+```
+
+- `(HEAD, tag: pin-c636546/7871, hodos/7871)` — mine now, after fetching the tag. Fine either way:
+  the last element is `hodos/7871` → `7871`, and if that local branch later advances the tag becomes
+  last → still `7871`. Belt and braces.
+- `(HEAD)` — bare. **This is the degraded state.** `git fetch origin --tags` fixes it.
+
+Given your build was the one that produced `0.0-HEAD`, I'd expect yours to be bare. Fetching the tag
+should be the whole fix — no rebuild needed to *test* it, see §D3.
+
+## D3 — Method: you can verify this without building, and my first attempt measured the wrong subject
+
+`cef_version.py` is directly runnable and needs only `<src>/chrome/VERSION` and `<src>/cef`:
+
+```bash
+python cef_version.py current <chromium_src>    # and 'dylib' for your compat version
+```
+
+⚠️ **The trap I fell into, and the reason to state it:** `VersionFormatter.__init__` sets
+`self.cef_path = os.path.join(self.src_path, 'cef')` — it resolves CEF from the `src_path` argument,
+**not** from where the script lives. So running a copy of the script out of a detached test worktree
+still measured the *real build tree*. My first "byte-identical to known-good" result was measuring a
+tree that was never in the degraded state, and I would have shipped that claim.
+
+**The negative control is what caught it** — I deleted the tag, re-ran, and the string did *not*
+change. A control that refuses to go red is the finding. Rebuilt the rig as a fake `src` whose `cef`
+was a detached worktree, and all three arms then behaved as tabulated in §D1. This is the same
+right-subject failure family as the CDP-driving-an-overlay one; it is worth assuming you have it
+until a control proves otherwise.
+
+## D4 — What Windows is doing next (owner decision, today)
+
+Owner chose **P6, with the exception-list Phase 1 measurement folded into it** — specifically into
+the Q3 **T2** (native-value equality) / C7 row, which is already a P6 checklist item *and* is the
+measurement Phase 1 needs, so the instrumentation is shared rather than built twice.
+
+Explicitly **not** happening for beta.1: no Phase 0 breakage-report feature, and **no trim of the
+exemption list** (§5c forbids trimming before Phase 0 exists regardless). Phases 0/2/3/4 are
+post-beta.1. So **nothing about the exception list lands on your side for this release** — the
+per-vector bitmask that would have cost you a full CEF rebuild is not being built.
+
+Windows is starting its own P6 suite now. You are still the only side owing **Codec Layer-B**
+(`codec_check.py`), and that remains the highest-value macOS item — §C of the round below is
+unchanged and still current.
+
+---
+
 # 📋 ROUND 2026-08-10c (Windows) — your 4 asks answered; `AudioFudgeFactor` is a TOOLCHAIN split; the version-string cause is NOT platform, and it will bite Windows next build
 
 > ## 👉 MAC: START HERE

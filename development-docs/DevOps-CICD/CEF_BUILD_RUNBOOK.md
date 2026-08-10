@@ -465,6 +465,59 @@ checkout's** Hodos patch set against the **in-tree copy's**, since a copy stale 
 patch still clears any fixed floor. The patcher's `N patches total` line stays useful as a cross-check
 and as the cheapest stale-copy tell in a raw build log; it is not the gate.
 
+### From the 2026-08-10 pin tagging — `CEF_VERSION` silently degrades when the pinned commit loses its decoration
+
+**Symptom.** A build at a pinned CEF commit emits `150.0.0-HEAD.<n>+…` instead of
+`150.0.40-7871.<n>+…`, and on macOS the dylib compatibility version drops `1500.0.40` → `1500.0.0`.
+Artifacts built either side of the change must not be mixed.
+
+**Cause.** `cef/tools/cef_version.py :: get_version_string` derives the branch field as
+`git.get_branch_name(cef_path).split('/')[-1]`. `get_branch_name` (`tools/git_util.py`) returns
+`rev-parse --abbrev-ref HEAD`, and because **every build runs on a detached HEAD**, that is the
+literal `HEAD`; it then falls back to the commit's *decoration*, taking the **last** comma-separated
+element. Once the branch ref advances past the pinned commit, the pin decorates as bare `(HEAD)` and
+MINOR/PATCH collapse to `0`.
+
+**Fix — tag the pin, but the name is constrained.** The decoration for a tag is the literal string
+`tag: <name>`, so the tag name must contain a `/` **and its last path component must be exactly the
+branch number**. Verified against a detached checkout of `c63654654`:
+
+| Ref on the pin | version string | dylib |
+|---|---|---|
+| **`pin-c636546/7871`** ✅ | `150.0.40-7871.3573+gc636546+chromium-150.0.7871.187` | `1500.0.40` |
+| *(none)* ⛔ | `150.0.0-HEAD.3573+…` | `1500.0.0` |
+| `hodos/7871-c636546` ⛔ | `150.0.40-7871-c636546.3573+…` | `1500.0.40` |
+
+⛔ **The third row is the one to guard against.** `7871-c636546` is neither `master` nor `HEAD`, so
+MINOR/PATCH are still computed correctly from commit history — the result is a *plausible-looking*
+version string that is nonetheless wrong. `0.0-HEAD` announces itself; this does not.
+
+**It is per-clone, not per-fork-tip.** `cef_version.py` reads `<chromium_src>/cef`, which is a
+separate clone from the bootstrap `cef/` directory that supplies `automate-git.py`; they have
+independent refs. The fork tip advancing is **not** sufficient to cause the degradation — what
+matters is the decoration in the build clone. Diagnose with:
+
+```bash
+git -C <chromium_src>/cef log -n1 --pretty=%d HEAD   # bare "(HEAD)" == degraded
+git -C <chromium_src>/cef fetch origin --tags        # the whole fix, no rebuild needed
+```
+
+**Verify without building.** `cef_version.py` is directly runnable and needs only
+`<src>/chrome/VERSION` and `<src>/cef`:
+
+```bash
+python cef_version.py current <chromium_src>
+python cef_version.py dylib   <chromium_src>
+```
+
+⚠️ **Wrong-subject trap when testing this.** `VersionFormatter.__init__` sets
+`self.cef_path = os.path.join(self.src_path, 'cef')` — it resolves CEF from the `src_path`
+**argument**, not from where the script file lives. Running a copy of the script out of a detached
+test worktree still measures the real build tree, which was never in the degraded state. The tell was
+the negative control **refusing to go red**: deleting the tag did not change the output. To test
+properly, build a fake `src` directory whose `cef` is the detached worktree and whose `chrome/VERSION`
+is copied from the real tree.
+
 ### From the 2026-08-05 macOS CEF 150 build (Xcode 26 / Tahoe)
 
 A full CEF 150 macOS ARM64 build completed green: **57,901 ninja targets, 0 failures, ~4 h 30 m**.
