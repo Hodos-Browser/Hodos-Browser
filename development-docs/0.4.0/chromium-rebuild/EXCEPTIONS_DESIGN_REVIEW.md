@@ -9,6 +9,11 @@ good but what are the risks?"*
 
 Companion to `Q3_farbling_oauth.md` §2.5 (which carries the summary) and `Q2_farbling_adblock.md`.
 
+> ## 📖 READ ORDER
+> §0 the four answers → §5 the first-draft plan → **§5b the adversarial review, which overturns two
+> of its steps** → **§5c the revised plan, which is the one to execute.**
+> ⚠️ Do not implement §5. It is kept only so the reasoning is auditable.
+
 ---
 
 ## 0. The four answers, up front
@@ -131,6 +136,148 @@ this makes the automatic exemptions *visible*, which is a privacy feature in its
   randomization was right: a random GPU string is more unique than the truth. Brave's own rule is to
   return values with "the *shape* of expected values."
 - ⛔ Don't confuse this with logins. See §6.
+
+## 5b. ⚔️ ADVERSARIAL REVIEW of §5 — six attacks, four sustained
+
+Run 2026-08-10 against the plan immediately above, before any of it was implemented. **Four attacks
+landed, and two of them reorder the plan.** The revised plan is §5c; §5 is left standing so the
+reasoning is auditable.
+
+---
+
+### A1 — "Phase 2 is the biggest win per hour of work" is **WRONG**. It is the most expensive phase. ✅ SUSTAINED
+
+Per-vector exceptions are not a shell change. The on/off decision is delivered as a **single boolean**
+(`simple_handler.cpp:7611/7640`, `fmsg->GetArgumentList()->SetBool(1, …)`), stored as
+`bool enabled` in `libcef/browser/hodos_farbling_registry.h:87`, and read by each patched Blink call
+site. Turning that bit into a per-vector bitmask touches, verified by grep in the fork at
+`c63654654`:
+
+| Layer | Files |
+|---|---|
+| Shell (cheap) | `simple_handler.cpp` — the two `SetBool` sites |
+| **libcef (fork)** | `hodos_farbling_registry.{h,cc}`, `browser_frame.{h,cc}`, `frame_host_impl.cc`, `blink_glue.{h,cc}`, `frame_impl.cc` |
+| **Blink patches (fork)** | `hodos_farble_session_cache.patch` (the Supplement must carry the mask) + **all four** of `hodos_farble_canvas2d/webgl/webaudio/navigator.patch`, each to test its own bit |
+
+⇒ **a full CEF rebuild (~5 h Windows), a full Mac rebuild, and a permanently larger patch set to
+rebase on every Chromium bump.** Calling that "the biggest privacy win per hour" was flatly wrong.
+
+**Consequence — and this is the useful part:** if Phase 1 shows most of the 37 entries can be
+*deleted*, then a **short all-or-nothing list is fine** and per-vector may never be worth building.
+Trimming 37 → 6 with the existing single bit is a **larger** privacy gain than making 37 entries
+surgical, and it costs a shell rebuild instead of two engine rebuilds. **Per-vector is contingent on
+Phase 1's result, not a foregone conclusion.**
+
+---
+
+### A2 — Phase 1 cannot prove what the plan needs it to prove. The evidence is **asymmetric**. ✅ SUSTAINED — most important finding
+
+Bot-detection verdicts are **not a function of the fingerprint alone.** Cloudflare, DataDome and
+friends score IP reputation, ASN, account age, cookie history and behaviour, then apply a rolling
+risk model. So a Phase-1 pass on **this machine, this IP, and accounts that have been logged in for
+months** is close to the easiest possible case, and generalises poorly to the case that actually
+matters: a brand-new user, on a residential IP, creating an account for the first time.
+
+    A FAILURE is conclusive  — the entry is load-bearing, keep it.
+    A PASS is weak evidence  — it does not license removal.
+
+The plan as written treats a pass as a licence to delete. It is not. Left uncorrected, Phase 1 would
+have produced a confident trim that breaks for exactly the users we never tested: new ones.
+
+**Required corrections** (folded into §5c):
+- test in a **fresh profile with no cookies**, not the logged-in one — the sign-in flow is the subject,
+  not the signed-in session;
+- test **sign-in**, and where possible **sign-up**, not "does the page load";
+- **N ≥ 3 trials per site**, on different days, because these verdicts are stochastic;
+- ⚠️ **record it as evidence-for-keeping, never as proof-of-safe-removal**, and trim only entries with
+  a positive rationale beyond "it passed once here."
+
+---
+
+### A3 — A privacy browser has **no feedback channel** for privacy-caused breakage. Phase 4 is a prerequisite, not a finish. ✅ SUSTAINED
+
+We deliberately ship no telemetry. So if trimming the list breaks a site for a real user, **we find out
+never.** The failure is silent, it is attributed to "Hodos is broken", and the user leaves. Every
+other browser doing this has a signal we do not: Brave's ~20 entries each cite a **public bug report**
+— that list exists because users could tell them.
+
+Phases 1–3 are all "change the exemptions and hope." That is not a testable procedure, which is the
+standard this project holds everything else to.
+
+**Correction:** the in-product **"this site is broken" report** moves from Phase 4 (polish) to
+**Phase 0 (prerequisite)**. Minimum viable version: one click, sends **hostname + which vectors were
+active + browser version**, nothing else, with explicit consent and a visible preview of the payload.
+Without it, we should not trim at all.
+
+---
+
+### A4 — Hosting the list in our GitHub repo makes a **repo compromise equal to a privacy kill-switch**. ✅ SUSTAINED (does not block, but changes the design)
+
+The owner's proposal — maintain the list in our GitHub repo, fetched by installed browsers — is the
+right host, and it is how the adblock lists already work. But the threat model is not the same:
+
+- A bad **ad-filter** rule shows an ad. A bad **exception** rule turns off fingerprinting protection —
+  silently, with no user-visible symptom, for every installed browser, within one fetch interval.
+- Anyone with push access, a leaked PAT, or a compromised Action can do it. **No code review gate
+  applies to a data file**, which is exactly what makes data files convenient.
+
+**Required, if we do this:**
+1. **Detached signature over the list, verified in the client, with a key that is NOT a GitHub
+   credential** — so repo write access alone is insufficient. (We already sign releases; reuse the
+   discipline, not the same key.)
+2. **Monotonic version counter**, rejected if it goes backwards — otherwise an attacker replays an
+   older, broader list.
+3. **Structural cap:** the schema can express `(host, vectors)` **and nothing else**. No wildcard-all,
+   no global disable, no regex. If "off everywhere" cannot be spelled, it cannot be pushed.
+4. **Fail CLOSED**: fetch failure, signature failure or version regression ⇒ fall back to the
+   compiled-in list, i.e. farble everything. Never fail open.
+5. **Size/entry cap**, rejecting an implausibly large list.
+6. ⚠️ **Privacy note to state honestly:** a fetch from a *first-party* Hodos URL is a check-in that
+   reveals installed-base size and per-user IP/timing to us and to the host. The adblock lists already
+   fetch from third-party origins, so the *marginal* exposure is small — but "we don't phone home" is
+   no longer strictly true, and the privacy policy must say so.
+
+---
+
+### A5 — "Phase 1 is cheap" ⇒ verify it is really shell-only. ✅ CONFIRMED, attack fails
+
+`IsAuthDomain` is a static list in `cef-native/include/core/FingerprintProtection.h`, consumed by
+`simple_handler.cpp :: OnBeforeBrowse` to compute the single `enabled` bit. Emptying it is a **shell
+rebuild only** (minutes). No CEF rebuild, no patch change. Attack does not land — but note the
+experimental build **must never be staged or shipped**; do it on a branch and keep it off
+`cef-binaries/`.
+
+---
+
+### A6 — Priority: does any of this belong before 0.4.0-beta.1? ⚠️ PARTIALLY SUSTAINED
+
+P6 (test) and P7 (prod build) are the release path; this is not on it. Phases 2–4 are **post-beta.1**
+and should be stated as such so they cannot silently absorb release time.
+
+**But Phase 1 has a release-relevant output:** it tells us whether the shipped exemption list is
+larger than it needs to be, which is a **privacy claim we are about to make in a release**. It is a
+few hours, it is shell-only, and it can run in parallel with the macOS work that currently gates P6.
+Keep Phase 1 now; defer the rest.
+
+---
+
+## 5c. REVISED PLAN — after the adversarial review
+
+| # | Step | Cost | Gate to proceed |
+|---|---|---|---|
+| **0** | **Breakage-report path** — one click, sends hostname + active vectors + version, explicit consent, visible payload | frontend + a small endpoint | ⛔ **Nothing may be trimmed before this exists** (A3) |
+| **1** | **Measure which entries are still load-bearing.** Empty `IsAuthDomain`, rebuild **shell only**, on a branch never staged. **Fresh profile, no cookies. Test sign-IN and sign-UP. N ≥ 3 trials.** Q3 T2 (native-value equality) proves an exemption is live. | hours | Failures are conclusive; passes are **not** a licence to delete (A2) |
+| **2** | **Trim conservatively** using the single existing bit. Delete only entries with a positive rationale; keep anything that failed once. Each surviving entry cites its evidence + date, Brave-style. | shell rebuild | If 37 → single digits, **stop here** — the win is banked and per-vector may be unnecessary (A1) |
+| **3** | **Per-vector — ONLY if step 2 leaves a long list.** Bitmask through 8 fork files + 5 patches, full CEF rebuild on both platforms, permanent patch-set growth. | ~5 h build ×2 platforms + rebase cost forever | Explicit owner sign-off on the build cost |
+| **4** | **Remote list — ONLY if churn is observed.** Our GitHub repo is the right host. Detached signature (non-GitHub key), monotonic version, `(host, vectors)`-only schema, fail-closed, size cap, privacy-policy update. | moderate | Observed churn, not anticipated churn (A4) |
+| **5** | **Surface it in Privacy Shield** — "this site is exempted from X because Y", with the report button from step 0. | frontend | — |
+
+**The two changes that matter:** the report path moved to the front and became mandatory, and
+per-vector moved to the back and became conditional. Both because the cheap thing (delete entries)
+turns out to be worth more than the expensive thing (make entries surgical), and because trimming
+without a feedback channel is not a testable procedure.
+
+---
 
 ## 6. Logins are cookies, not fingerprints — and we measured it
 
