@@ -494,7 +494,54 @@ per-vector bitmask that would have cost you a full CEF rebuild is not being buil
 
 Windows is starting its own P6 suite now. You are still the only side owing **Codec Layer-B**
 (`codec_check.py`), and that remains the highest-value macOS item — §C of the round below is
-unchanged and still current.
+unchanged and still current. **§D5 adds one new item to your list.**
+
+## D5 — ✅ Q3 **T2** is GREEN on Windows, via a new harness you will also need
+
+`chromium-rebuild/farbling_exemption_check.py`. It imports the same CDP machinery as everything
+else, so there is nothing new to learn.
+
+**Why it exists, given the rotation gate already touches github.com.** That gate asserts the exempt
+origin is *constant across seed rotations* (`exempt=53225ec8/53225ec8/53225ec8`). That is **not**
+proof the exemption works: an exempt path that farbled with a **fixed, zeroed, or failed-to-install
+key** would be exactly as constant and would pass. Constancy proves the value does not follow the
+seed; it does not prove the value is **native**. T2 is the only assertion that discriminates.
+
+**Method — two arms, one launch each, no rebuild.** Arm ON is normal settings. Arm NATIVE writes
+`siteSettings[host] = {"enabled": false}` — the per-site Privacy Shield override, which ORs into the
+*same single `enabled` bit* `IsAuthDomain` feeds in `OnBeforeBrowse`, so it is a true hard bypass.
+Exempt host ⇒ the arms must be **equal**; a non-exempt control ⇒ must **differ**.
+
+⚠️ **The non-exempt control is load-bearing, not decoration.** Without it, "everything is equal" is
+precisely what you would see if farbling were off, broken, or if you were driving the wrong browser —
+and every exempt host would be reported LIVE. A run where it fails to differ is void.
+
+**Windows result:** 5/5 attempted LIVE — github.com, x.com, whatsonchain.com, www.google.com,
+paypal.com. Negative control **red**: example.com tested as if exempt reports NOT-LIVE, differing on
+canvas/glSmall/audio/**cores**. Both size-gate controls held on every host; subject confirmed
+`role=tab_1`.
+
+⭐ **A cross-check you get for free and should reproduce:** the hard bypass yields canvas `53225ec8`
+and audio `07ff541f` — the *same* native values the rotation gate independently reports for the
+exempt origin, arrived at by a different mechanism. Two independent routes agreeing on "native" is
+much stronger evidence than either alone. Your literals will differ from mine (different machine);
+what must hold is that **your** two routes agree with each other.
+
+**Three things that will bite you on macOS:**
+1. **`measure()` raises `SystemExit`, not `Exception`** — I had `except Exception` and one unloadable
+   host aborted a run whose other measurements were already paid for. Fixed in the committed version.
+2. **An unloadable host must be `UNMEASURED`** — not a failure (false red) and not a pass (silent
+   cap). `accounts.google.com` would not load in 90 s here; expect the same.
+3. **Only 5 of the 37 allowlist entries are top-level navigable.** Most are asset origins
+   (`js.hcaptcha.com`, `www.gstatic.com`, `cf-turnstile.com`, …) that serve scripts — navigating a tab
+   at a script URL hands it to the **download handler** instead of rendering a document, the same trap
+   as the `.mp4` one from the codec work. The harness prints all 32 uncovered entries rather than
+   quietly testing 5 and reporting success.
+
+⚠️ **What T2 does NOT tell either of us:** that an exemption is *needed*. It proves *live*. "Needed"
+is the breakage question and per §5c requires a fresh cookie-less profile, real sign-in **and**
+sign-up, N ≥ 3 trials on different days — and a pass is never a licence to delete an entry. Not being
+done for beta.1 (see §D4).
 
 ---
 
