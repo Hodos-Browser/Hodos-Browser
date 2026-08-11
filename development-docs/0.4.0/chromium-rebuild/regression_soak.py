@@ -6,15 +6,22 @@ They are the same rotation of sites. Pass 1 runs the full per-site assertions an
 **soak**. Doing it as one process avoids two harnesses fighting over one browser — and
 `kill_browser_by_path` kills every dev process, so two concurrent drivers cannot coexist.
 
-## ⚠️ Renderer crashes are detected by PROBING, not by reading the log
+## Renderer crashes: TWO independent detectors, and both are needed
 
-There is **no `OnRenderProcessTerminated` handler anywhere in this codebase**, so a renderer
-crash writes nothing to `debug_output.log`. A soak that grepped the log for crashes would
-report a confident zero forever — the exact false-green shape this project keeps hitting.
+1. **Probe** — every page is probed with JavaScript after it loads. A dead renderer cannot
+   answer, so a probe that returns nothing is a crash signal. The probe is deliberately
+   trivial so it fails *only* when the renderer genuinely cannot respond. ⚠️ On its own it
+   **cannot tell "crashed" from "slow"**, and a renderer that dies and is retried
+   successfully leaves no trace in it at all.
+2. **Log** (`--log`) — `SimpleHandler::OnRenderProcessTerminated`, added 2026-08-11, records
+   `PROCESS_CRASHED` / `PROCESS_OOM` / … with a redacted origin. This names the cause and
+   survives a successful retry. Only bytes appended *after* the run starts are read, so a
+   1 GB historical log costs nothing and old crashes cannot be counted as new.
 
-Instead every page is probed with JavaScript after it loads. A dead renderer cannot answer,
-so a probe that fails to return a value is the crash signal. That is why the probe is
-deliberately trivial: it must fail only when the renderer is genuinely unable to respond.
+> Until 2026-08-11 detector 2 did not exist — the callback was unimplemented, so a crash
+> wrote **nothing** anywhere and a log-grepping soak would have reported a confident zero
+> forever. If `--log` is omitted, this rig falls back to detector 1 alone and says so; read
+> that as "no evidence of crashes", **not** as "no crashes".
 
 ## ⚠️ What "PASS" means here, and what it does not
 
@@ -22,7 +29,11 @@ The roadmap asks for a crash rate **versus the M136 baseline**. We cannot produc
 number: the M136 build is not installed here and we ship **no telemetry**, so there is no
 baseline to subtract. What this rig produces is an **absolute** figure — failures per N page
 loads on this build. Reporting it as a delta against 136 would be inventing the comparison.
-Stated here so nobody quotes it as one.
+
+`--baseline <report.json>` diffs against a **previous 150 run** instead, which is the
+comparison we can actually make. It compares per-site pass/fail and crash counts, and
+deliberately **not** text lengths: sites redesign, and a nytimes layout change is not a
+build regression.
 
 ## Per-site assertions (pass 1)
 
@@ -145,8 +156,63 @@ def shoot(port, excluded, path):
         pass
 
 
+def log_size(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return None
+
+
+def crashes_since(path, offset):
+    """Renderer-crash lines appended to the log since `offset`.
+
+    A SECOND, INDEPENDENT detector, added once `OnRenderProcessTerminated` started logging
+    (2026-08-11). The probe-based detector below cannot tell "the renderer died" apart from
+    "the page was slow" — it only knows nothing answered. This one names the cause
+    (PROCESS_CRASHED / PROCESS_OOM / …) and survives the probe succeeding on a retry.
+
+    Reads only the bytes appended after the run started, so a 97 MB historical log costs
+    nothing and old crashes cannot be counted as new ones."""
+    if offset is None:
+        return None
+    out = []
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(offset)
+            blob = fh.read()
+    except OSError:
+        return None
+    for line in blob.replace(b"\x00", b"").decode("utf-8", "replace").splitlines():
+        if "RENDERER TERMINATED" in line:
+            out.append(line.strip()[:220])
+    return out
+
+
 def boot(args):
     port = cdp_port_for(args.profile, args.dev)
+    if args.baseline:
+        try:
+            with open(args.baseline, "r", encoding="utf-8") as fh:
+                base = json.load(fh)
+        except (OSError, ValueError) as exc:
+            print("\n⚠️  baseline unreadable (%s) — no comparison made" % exc)
+        else:
+            print("\nDIFF vs BASELINE (%s):" % args.baseline)
+            b_ok = {b["host"] + "|" + b["category"]: b["ok"] for b in base.get("basket", [])}
+            n_ok = {b["host"] + "|" + b["category"]: b["ok"] for b in basket}
+            drift = [k for k in sorted(set(b_ok) | set(n_ok)) if b_ok.get(k) != n_ok.get(k)]
+            print("  per-site pass/fail: %s"
+                  % ("unchanged" if not drift else "CHANGED -> " + ", ".join(drift)))
+            bc = base.get("crashes")
+            nc = crash_lines
+            if bc is None or nc is None:
+                print("  crashes: not comparable (one side has no log detector)")
+            else:
+                print("  crashes: baseline %d -> now %d%s"
+                      % (len(bc), len(nc), "  ⚠️ REGRESSION" if len(nc) > len(bc) else ""))
+            print("  ⚠️ Text lengths are deliberately NOT compared: sites redesign, and a "
+                  "layout change is not a build regression.")
+
     kill_browser_by_path(args.exe)
     for attempt in range(1, 4):
         if attempt > 1:
@@ -176,10 +242,20 @@ def main():
     ap.add_argument("--passes", type=int, default=12,
                     help="pass 1 is the regression basket; the rest are the soak")
     ap.add_argument("--out", default=None, help="directory for screenshots + report")
+    ap.add_argument("--log", default=None,
+                    help="debug_output.log — enables the independent crash detector")
+    ap.add_argument("--baseline", default=None,
+                    help="a previous report.json to diff against")
     args = ap.parse_args()
 
     out = args.out or os.path.join(os.path.dirname(os.path.abspath(__file__)), "soak_out")
     os.makedirs(out, exist_ok=True)
+
+    # Record the log offset BEFORE the first launch, so only crashes from this run count.
+    log_offset = log_size(args.log) if args.log else None
+    if args.log and log_offset is None:
+        print("⚠️  --log path unreadable; the independent crash detector is OFF and this run "
+              "relies on probing alone", flush=True)
 
     port, excluded = boot(args)
     eng = engine_version(port)
@@ -255,8 +331,21 @@ def main():
     print("  ⚠️ ABSOLUTE figure only. There is no M136 baseline on this machine and we ship")
     print("     no telemetry, so this is NOT a delta against 136 — do not quote it as one.")
 
+    crash_lines = crashes_since(args.log, log_offset) if args.log else None
+    print("\nRENDERER CRASHES (independent detector):")
+    if crash_lines is None:
+        print("  UNAVAILABLE — no --log given, or the file could not be read. The probe")
+        print("  detector alone cannot tell a crash from a slow page; treat 0 probe")
+        print("  failures as 'no evidence of crashes', NOT as 'no crashes'.")
+    else:
+        print("  %d renderer termination(s) logged during this run" % len(crash_lines))
+        for ln in crash_lines[:10]:
+            print("    " + ln)
+
     report = {"engine": eng, "passes": args.passes, "loads": loads,
-              "basket": basket, "failures": failures}
+              "basket": basket, "failures": failures,
+              "crashes": crash_lines,
+              "crash_detector": "log" if crash_lines is not None else "probe-only"}
     with open(os.path.join(out, "report.json"), "w", encoding="utf-8") as fh:
         json.dump(report, fh, indent=2)
     print("\nreport -> %s" % os.path.join(out, "report.json"))

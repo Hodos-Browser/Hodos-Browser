@@ -15,6 +15,7 @@ This folder is the **permanent, canonical home** for Hodos Browser's Process & P
 | `CEF_BUILD_RUNBOOK.md` | Tier-1 custom Chromium/CEF source-build runbook | **Current** — linchpin for the next CEF rebuild sprint |
 | `CEF_VERSION_UPDATE_TRACKER.md` | Institutional-memory log for CEF bumps (toolchain, minos floor, FedCM) | **Current** — CEF 136 baseline; rebuild-target version TBD in the sprint |
 | `DEPENDENCY_VERIFICATION.md` | Timeless per-CEF-bump dependency-verification procedure | **Current** |
+| `BASELINE_CEF150.md` | The recorded CEF-150 reference the *next* build diffs against — and, explicitly, which signals must **not** be baselined | **Current** — established 2026-08-11 (Windows); macOS owed |
 | `ORG_IDENTITY_SIGNING_MIGRATION.md` | Signing-identity migration gate (Win done CN=Marston; macOS individual→org still pending BEFORE first public signed 0.4.0) | **Active gate** |
 
 ### Auto-update (silent — SHIPPED + PROVEN LIVE)
