@@ -5414,7 +5414,32 @@ int main(int argc, char* argv[]) {
 
         // Remote debugging port: 9222 for Default profile, disabled for others
         // (avoids port conflict when multiple instances run simultaneously)
-        settings.remote_debugging_port = (profileId == "Default") ? 9222 : 0;
+        //
+        // ⛔ PICKER MODE GETS NO PORT. `ResolveStartup` returns `coherentDefault()` — i.e. the
+        // literal string "Default" — for the picker as well as for a real Default launch
+        // (`ProfileManager.h`, the `existingIds.size() > 1 && pickerEnabled` arm), so a bare
+        // `profileId == "Default"` test is TRUE in picker mode and bound CDP there. Measured
+        // 2026-08-11 before this guard: a no-`--profile` launch logged
+        // `Using profile: Default [picker mode]` followed by `Remote debugging port: 9322`,
+        // and `http://127.0.0.1:5137/profile-picker?mode=window` was live on CDP.
+        // Windows has guarded this since its own port block was written
+        // (`cef_browser_shell.cpp`, `if (g_picker_mode) ... = 0;`); macOS had not.
+        //
+        // Why it is worth a guard, stated from what was actually measured here:
+        //   * the picker is a chooser UI the user never asked to be debuggable, and an open CDP
+        //     port is a full-control surface to any local process for as long as it is open;
+        //   * the picker HOLDS 9222/9322 for its whole lifetime, so a launch racing it reads as
+        //     "the browser failed to start" — a symptom both platforms have chased once.
+        // ⚠️ Deliberately NOT claimed: the Windows comment's `navigator.webdriver` rationale.
+        // Measured on the picker page here with the port bound, `navigator.webdriver` is
+        // **false** — CefSettings.remote_debugging_port does not trip the wire that forwarding
+        // `--remote-debugging-port` on the command line does. The guard is still right; that
+        // particular justification is Windows-specific and unverified on macOS.
+        if (g_picker_mode) {
+            settings.remote_debugging_port = 0;
+        } else {
+            settings.remote_debugging_port = (profileId == "Default") ? 9222 : 0;
+        }
         if (hodos::IsDevEnv() && settings.remote_debugging_port != 0)
             settings.remote_debugging_port += 100;
 
