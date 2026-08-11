@@ -69,17 +69,27 @@ except ImportError:
 # CLAUDE.md Testing Standards, Thorough tier. `expect` is the host the tab must actually
 # land on — several of these redirect, and asserting the requested host would fail for a
 # reason that has nothing to do with the build.
+#
+# The 4th field is a per-site text floor. It exists for ONE measured reason: google.com's
+# homepage renders 147 characters of innerText — deliberately, since it is a logo, a search
+# box and a footer — and it did so on all 14 passes of the 2026-08-10 soak, identically.
+# The screenshot shows a perfectly rendered, signed-in page.
+#
+# ⚠️ This is NOT the global floor being lowered to make a row go green. Dropping the floor
+# for every site would weaken nine working assertions to accommodate one sparse page. The
+# override keeps real discriminating power on that row too: a blank or broken google.com
+# renders ~0 characters and still fails against a floor of 100.
 BASKET = [
-    ("Auth",         "https://x.com/",                  "x.com"),
-    ("Auth",         "https://www.google.com/",         "google.com"),
-    ("Auth",         "https://github.com/",             "github.com"),
-    ("Video/Media",  "https://www.youtube.com/",        "youtube.com"),
-    ("Video/Media",  "https://www.twitch.tv/",          "twitch.tv"),
-    ("News",         "https://www.nytimes.com/",        "nytimes.com"),
-    ("News",         "https://www.reddit.com/",         "reddit.com"),
-    ("E-commerce",   "https://www.amazon.com/",         "amazon.com"),
-    ("Productivity", "https://docs.google.com/",        "google.com"),
-    ("BSV",          "https://whatsonchain.com/",       "whatsonchain.com"),
+    ("Auth",         "https://x.com/",                  "x.com",           None),
+    ("Auth",         "https://www.google.com/",         "google.com",      100),
+    ("Auth",         "https://github.com/",             "github.com",      None),
+    ("Video/Media",  "https://www.youtube.com/",        "youtube.com",     None),
+    ("Video/Media",  "https://www.twitch.tv/",          "twitch.tv",       None),
+    ("News",         "https://www.nytimes.com/",        "nytimes.com",     None),
+    ("News",         "https://www.reddit.com/",         "reddit.com",      None),
+    ("E-commerce",   "https://www.amazon.com/",         "amazon.com",      None),
+    ("Productivity", "https://docs.google.com/",        "google.com",      None),
+    ("BSV",          "https://whatsonchain.com/",       "whatsonchain.com", None),
 ]
 
 # Trivial on purpose: it must fail ONLY when the renderer genuinely cannot answer.
@@ -182,7 +192,7 @@ def main():
 
     for p in range(1, args.passes + 1):
         print("\n===== pass %d/%d =====" % (p, args.passes), flush=True)
-        for cat, url, host in BASKET:
+        for cat, url, host, floor in BASKET:
             loads += 1
             why = None
             v = None
@@ -195,8 +205,9 @@ def main():
             if v is not None:
                 if v["isErrorPage"]:
                     why = "browser error page"
-                elif v["textLen"] < MIN_TEXT:
-                    why = "rendered only %d chars (blank/interstitial?)" % v["textLen"]
+                elif v["textLen"] < (floor or MIN_TEXT):
+                    why = ("rendered only %d chars, floor %d (blank/interstitial?)"
+                           % (v["textLen"], floor or MIN_TEXT))
                 elif not v["title"]:
                     why = "empty document.title"
 

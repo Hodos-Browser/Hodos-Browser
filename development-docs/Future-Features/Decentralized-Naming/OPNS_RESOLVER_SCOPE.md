@@ -3,7 +3,7 @@
 **Created:** 2026-08-10
 **Status:** scoped, not started. Sprint-deferred.
 **Related:** `OPNS_REVIEW.md` (protocol teardown), `README.md` (naming posture),
-`Marston Enterprises/Standards/BRCs/drafts/opns-identity-resolution.md` (the BRC this validates)
+`Marston Enterprises/Standards/BRCs/drafts/consensus-unique-name-tokens.md` (the BRC this validates)
 
 > **Why this exists now:** the BRC draft's weakest point under adversarial review is that we
 > specify a resolution algorithm we have not run. Phase 0 below removes that objection in days, not
