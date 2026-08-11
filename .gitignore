@@ -74,4 +74,4 @@ docs/
 startup_log.txt
 Usersarchb*
 __pycache__/
-development-docs/0.4.0/chromium-rebuild/soak_out/
+development-docs/0.4.0/chromium-rebuild/soak_out*/
