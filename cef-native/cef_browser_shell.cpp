@@ -4927,16 +4927,35 @@ static int RunHodosMain(HINSTANCE hInstance, int nCmdShow, void* sandbox_info,
     // is within [1024, 65535] (cef/libcef/common/chrome/chrome_main_delegate_cef.cc).
     //
     // So do NOT: pass --remote-debugging-pipe, pass --enable-automation, or "simplify" the
-    // disable path into literally forwarding port 0 on the command line. Any of those flips
-    // navigator.webdriver to true browser-wide, which reads as a bot to Cloudflare Turnstile
-    // and friends — including on whatsonchain.com, which is in our own regression basket and
-    // has already cost us a debugging cycle once (see simple_app.cpp's HODOS_MAC_DEV_FLAGS
-    // gate, added for exactly this class of bug).
+    // disable path into literally forwarding port 0 on the command line.
+    //
+    // ⛔ CORRECTED 2026-08-11 — MEASURE BEFORE REPEATING THE OLD CLAIM. This comment used to
+    // assert that binding a debug port "flips navigator.webdriver to true browser-wide, which
+    // reads as a bot to Cloudflare Turnstile and friends — including on whatsonchain.com".
+    // **That is false for the path we actually take**, measured independently on both
+    // platforms with the port bound and CDP live:
+    //
+    //   Windows  example.com -> navigator.webdriver === false
+    //            whatsonchain.com -> false   (the very site the old text named)
+    //   macOS    picker page and /newtab -> false
+    //
+    // The mechanism: Chromium derives `navigator.webdriver` from the `--enable-automation` /
+    // `--remote-debugging-port` COMMAND-LINE switches. We set `CefSettings.remote_debugging_
+    // port`, which CEF applies internally and which does not trip the same wire. The old text
+    // conflated the two paths — the "do NOT" list above is still prudent because the SWITCH
+    // path is untested by us, but it must not be read as a statement about this binding.
+    //
+    // ⚠️ Consequence worth carrying: any reasoning of the form "CDP is bound ⇒ webdriver ⇒
+    // Turnstile sees a bot" rests on an unverified premise. BOT-1 asserts webdriver === false
+    // directly (farbling_acceptance_battery.py) rather than inferring it from this.
+    //
+    // The guard below is still correct — a debug port has no business being open on the
+    // profile picker, and closing it frees the port — just not for the reason once given.
     //
     // This comment replaces the JS `navigator.webdriver = false` override that used to live
     // inside FINGERPRINT_PROTECTION_SCRIPT (BOT-1, 2026-08-05). That override was redundant
     // — native is already false — and defining the property on the navigator instance was
-    // itself a prototype-tamper tell. The guarantee now comes from not tripping this wire.
+    // itself a prototype-tamper tell.
     if (g_picker_mode) {
         settings.remote_debugging_port = 0;
     } else if (profileId == "Default") {
