@@ -965,6 +965,83 @@ static std::string certUrlEncode(const std::string& value) {
     return encoded;
 }
 
+namespace {
+
+/// scheme://host from a URL — no path, no query, no fragment, no credentials.
+///
+/// ⚠️ Deliberately lossy, and the loss is the point. A crash log that carried full URLs
+/// would be a browsing-history file sitting on disk: query strings routinely hold search
+/// terms, session tokens and document ids. `scheme://host` is enough to reproduce a
+/// site-specific renderer crash and is the most this should ever record by default.
+/// If you are chasing a crash that needs the path, raise it deliberately and temporarily —
+/// do not widen the default.
+std::string RedactedOriginForCrashLog(const std::string& url) {
+    if (url.empty()) return "(none)";
+    const size_t scheme_end = url.find("://");
+    if (scheme_end == std::string::npos) {
+        // about:blank, chrome-error://, data:, blob: — no host to speak of, and the scheme
+        // itself is the useful signal.
+        const size_t colon = url.find(':');
+        return colon == std::string::npos ? "(opaque)" : url.substr(0, colon) + ":(opaque)";
+    }
+    const size_t host_start = scheme_end + 3;
+    size_t host_end = url.find_first_of("/?#", host_start);
+    if (host_end == std::string::npos) host_end = url.size();
+
+    std::string host = url.substr(host_start, host_end - host_start);
+    // Strip any userinfo — credentials must never reach a log.
+    const size_t at = host.find('@');
+    if (at != std::string::npos) host = host.substr(at + 1);
+
+    return url.substr(0, host_start) + host;
+}
+
+const char* TerminationStatusName(cef_termination_status_t status) {
+    switch (status) {
+        case TS_ABNORMAL_TERMINATION: return "ABNORMAL_TERMINATION";
+        case TS_PROCESS_WAS_KILLED:   return "PROCESS_WAS_KILLED";
+        case TS_PROCESS_CRASHED:      return "PROCESS_CRASHED";
+        case TS_PROCESS_OOM:          return "PROCESS_OOM";
+        case TS_LAUNCH_FAILED:        return "LAUNCH_FAILED";
+        case TS_INTEGRITY_FAILURE:    return "INTEGRITY_FAILURE";
+        default:                      return "UNKNOWN";
+    }
+}
+
+}  // namespace
+
+void SimpleHandler::OnRenderProcessTerminated(CefRefPtr<CefBrowser> browser,
+                                              TerminationStatus status,
+                                              int error_code,
+                                              const CefString& error_string) {
+    // Added 2026-08-11. Until then this callback was not implemented, so a renderer death
+    // produced NO record of any kind — the stability soak had to infer crashes by probing
+    // (a probe cannot tell "crashed" apart from "slow"), and a user crash report had
+    // nothing to point at. Browser-process UI thread; keep it cheap and non-throwing.
+    std::string origin = "(none)";
+    if (browser && browser->GetMainFrame()) {
+        origin = RedactedOriginForCrashLog(browser->GetMainFrame()->GetURL().ToString());
+    }
+
+    const std::string detail =
+        std::string("💥 RENDERER TERMINATED status=") + TerminationStatusName(status) +
+        " error_code=" + std::to_string(error_code) +
+        " error='" + error_string.ToString() + "'" +
+        " role=" + (role_.empty() ? std::string("(unset)") : role_) +
+        " origin=" + origin;
+
+    // OOM and a launch failure are not the same class of problem as a crash, but all of
+    // them are worth a WARNING at minimum: every one of them means the user just lost a
+    // page. Logged at ERROR for the genuinely abnormal ones so they surface in a filtered
+    // read of the log.
+    if (status == TS_PROCESS_CRASHED || status == TS_PROCESS_OOM ||
+        status == TS_INTEGRITY_FAILURE || status == TS_LAUNCH_FAILED) {
+        LOG_ERROR_BROWSER(detail);
+    } else {
+        LOG_WARNING_BROWSER(detail);
+    }
+}
+
 bool SimpleHandler::OnCertificateError(CefRefPtr<CefBrowser> browser,
                                        cef_errorcode_t cert_error,
                                        const CefString& request_url,

@@ -190,6 +190,16 @@ public:
                             CefRefPtr<CefSSLInfo> ssl_info,
                             CefRefPtr<CefCallback> callback) override;
 
+    // CefRequestHandler — renderer death. Before 2026-08-11 this was not implemented at
+    // all, so a renderer crash left NO trace anywhere: nothing in debug_output.log, and
+    // nothing for a user bug report to point at. It also meant the stability soak could
+    // only detect crashes by probing, which cannot distinguish "crashed" from "slow".
+    // Logs locally only — we ship no telemetry and this does not change that.
+    void OnRenderProcessTerminated(CefRefPtr<CefBrowser> browser,
+                                   TerminationStatus status,
+                                   int error_code,
+                                   const CefString& error_string) override;
+
     void SetRenderHandler(CefRefPtr<CefRenderHandler> handler);
     CefRefPtr<CefRenderHandler> GetRenderHandler() override;
 
