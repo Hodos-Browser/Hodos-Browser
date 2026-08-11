@@ -177,9 +177,20 @@ def self_test(real_cores):
     # And a positive control: a legitimate reading must be ACCEPTED, or the validators
     # reject everything and their rejections above mean nothing.
     print()
+    # ⛔ DERIVE the farbled core count from the real one — do not hardcode it. This fixture
+    # read `11`, which is plausible on the 24-core Windows box it was written on and
+    # IMPOSSIBLE on an 8-core M1, where the validator correctly rejected it and took the
+    # whole self-test red (macOS, 2026-08-11). The validator was right and the fixture was
+    # wrong: a positive control that only holds on the author's hardware is a positive
+    # control that fails on somebody else's correct code.
+    # `real_cores - 3` floored at 2 stays inside the reduce-only contract on any machine
+    # (5 on an 8-core, 21 on a 24-core) while still differing from the real count, so it
+    # exercises "farbled" rather than "native".
+    farbled_cores = max(2, real_cores - 3)
     pos = [
         ("navigator", check_navigator(32, real_cores, real_cores), "native-looking values"),
-        ("navigator", check_navigator(4, 11, real_cores), "a plausible farbled pair"),
+        ("navigator", check_navigator(4, farbled_cores, real_cores),
+         "a plausible farbled pair (cores=%d, real=%d)" % (farbled_cores, real_cores)),
         ("bot1", check_bot1({"webdriver": False, "hasChrome": True,
                              "getImageDataNative": True, "readPixelsNative": True}),
          "a clean browser"),
