@@ -89,6 +89,9 @@ A **smoke test** is a quick, shallow "did we fundamentally break it" check acros
 - *(2026-06-16)* The "CI gate exists" claims in BUILD_AND_RELEASE/`UNIT_TESTING` (now `TEST_PLAN.md`) were fiction — there is no `ci.yml`. Build it; don't trust the doc.
 - *(2026-08-04)* **The census drifted the *other* way and nobody noticed for two months.** The C++ row said "39 in 2 files"; the tree actually had **139 in 8**. Undercounting is not harmless — it makes the layer look more neglected than it is and mis-aims effort. The 2026-06-16 lesson ("trust source counts") applies to *our own* doc, so the census needs a re-count on every touch, not a re-read.
 - *(2026-08-04)* **Testability is decided when you choose where a function lives, not when you sit down to test it.** `escapeJsonForJs` is unit-tested (15 cases) only because the F6 audit *extracted* it to `JsStringEscape.h`, away from CEF. `jsonToV8` is the same kind of pure logic but lives in `IdentityHandler.cpp`, which drags in `cef_v8.h` + `WalletService` — so it is **not** reachable from `hodos_tests` without linking CEF into the test target. That is why an int64 truncation bug (`CreateInt` is int32; Chromium-epoch µs timestamps overflow it) sat there undetected. **Extract-then-test is the pattern that works for our C++.** See §14.
+- *(2026-08-11)* **Five harnesses in one sprint were wrong in the direction of a FALSE VERDICT.** Not five problems — three root causes, with three countermeasures. Written up as §15, because it is structural rather than a single lesson.
+- *(2026-08-11)* **We are good at negative controls and inconsistent at POSITIVE ones.** Three of those five failures were instruments that could not have detected anything at all; a negative control would not have caught them, because a blind detector fails "correctly" when the feature is off too. Both controls, every time.
+- *(2026-08-11)* **§8's secret-in-logs gate does not cover the leak we actually found.** It greps *source* for secret-shaped literals near log sinks — it cannot see `LOG_DEBUG("Resource request: " + url)` where the **runtime value** carries a token or a search term. The 1.2 GB production `debug_output.log` is exactly that shape. Source-shape gates and runtime-content leaks are different problems; see `../TICKET_debug_log_unfiltered_in_production.md`.
 - *(add new lessons as the workflow lands…)*
 
 ---
@@ -272,3 +275,62 @@ defaults to off in release, and drop `--remote-allow-origins=*` from production 
 > **Update 2026-08-04:** owner-approved in principle. Design + open questions:
 > `development-docs/0.4.0/DEVTOOLS_SECURITY_DESIGN.md`. Key correction: closing the port does NOT
 > disable DevTools — all four entry points use in-process `ShowDevTools()`.
+
+---
+
+## 15. Harness discipline — why five instruments gave false verdicts, and the three rules that stop it (added 2026-08-11)
+
+During the 0.4.0 farbling/P6 work, **five separate test harnesses reported a wrong verdict**, every
+one of them in the dangerous direction: either a green result from an instrument that could not
+fail, or a red result against code that was correct. They look like five unrelated bugs. They are
+**three root causes**.
+
+### 15.1 The three causes
+
+| Cause | What it looks like | Instances |
+|---|---|---|
+| **Timing** — read once, before the subject was ready | a confident measurement of a page that had not rendered | cosmetic CSS read at `readyState:"loading"`; x.com and youtube.com measured on their **SPA splash screens** and reported as 0 characters |
+| **Attribution** — measured the wrong document / tree / element | the value is real, but it belongs to something else | CDP driving one of the ~14 **overlays** instead of a tab; `cef_version.py` resolving `cef_path` from its *argument*, so a test worktree still measured the real build tree; cnn.com's own 2 MB stylesheet containing `.zone__ads` while ours did not; screenshot filenames colliding so the **failing** row's review image was overwritten by a passing one |
+| **Blind detector** — the instrument could not fail | a clean run and a broken instrument are indistinguishable | `grep -c … \|\| echo 0` printing *both* values so every row read `0`; a cached adblock verdict re-read after the engine was disabled; retired symbols surviving as **comment tombstones**, so a naive grep fails against *correct* code |
+
+### 15.2 The three rules
+
+1. **Never read once — poll with a deadline.** Both timing failures die here. Where the shared
+   harness module owns navigation, the poll belongs *there*, so nobody re-implements read-once.
+   ⚠️ The poll must fit inside the caller's own timeout, or the row dies looking like "the page
+   would not load" rather than "the thing never appeared" — the wrong diagnosis for an
+   absent-by-design case.
+2. **Assert the subject explicitly.** Right role (`tab_…`, not an overlay), right `href`, right
+   file identity (**md5 of a prefix, not size** — two different 5.2 GB PDBs were byte-identically
+   *sized*). If a harness cannot name what it measured, it has not measured it.
+3. **Carry BOTH controls, and observe them.**
+   - **Negative** — turn the feature off; the test must go **red**, and you must have *seen* it.
+   - **Positive** — prove the instrument can see anything at all: a symbol you know is present, a
+     row you know should match, a planted value the detector must catch.
+
+   We have been reliable at the first and inconsistent at the second. **Three of the five failures
+   were missing a positive control**, and a negative control cannot catch a blind detector —
+   a blind detector fails "correctly" when the feature is off, too.
+
+### 15.3 Two corollaries worth their own line
+
+- **A uniform result across every row is broken until proven otherwise.** Every-row-identical is
+  far more often a broken instrument than a real finding.
+- **Where it is cheap, emit an artifact a human can adjudicate.** Screenshots settled three
+  separate arguments in one afternoon — including one where every automated assertion agreed the
+  site was broken and the image showed it rendering perfectly.
+
+### 15.4 Where this is already enforced
+
+Not aspiration — these are live and can be copied:
+
+| Mechanism | Where |
+|---|---|
+| `--self-test` / `--negative-control` modes that need no browser | `farbling_acceptance_battery.py`, `farbling_cmdline_seed_check.py`, `farbling_seed_rotation_check.py` |
+| Positive control beside every count | `q2_farbling_adblock_check.py` (T5 scans, T8 guard set) |
+| Null-effect control that voids the run if it drifts | `farbling_perf_check.py` (ops above the farbling size gate) |
+| Subject assertion on the driven browser | shared `measure()` — chrome-id exclusion + `href` re-check + `role=tab_` from the log |
+| Two independent detectors for one signal | `regression_soak.py` — probe **and** `OnRenderProcessTerminated` log |
+
+See also `BASELINE_CEF150.md`, which records what may and may not be baselined for the same
+reason: a baseline built on unstable signals produces false alarms until everyone ignores it.

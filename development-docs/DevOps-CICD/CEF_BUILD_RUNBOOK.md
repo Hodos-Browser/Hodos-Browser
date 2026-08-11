@@ -465,6 +465,42 @@ checkout's** Hodos patch set against the **in-tree copy's**, since a copy stale 
 patch still clears any fixed floor. The patcher's `N patches total` line stays useful as a cross-check
 and as the cheapest stale-copy tell in a raw build log; it is not the gate.
 
+### From the 2026-08-10/11 farbling batch — five verification traps, all of which produce a CONFIDENT WRONG ANSWER
+
+Grouped because they share one shape: **the instrument reported success while measuring nothing.**
+None of these is exotic; each cost real time.
+
+- ⛔ **`nohup … &` inside an already-backgrounded shell double-backgrounds.** The task reports
+  **exit 0** while the real build is still running, so a "finished, green" build is neither.
+  **Verify by artifact mtime vs source mtime**, never by exit code. The same applies to any
+  long-running job launched this way — the launcher's exit status describes the launcher.
+
+- ⛔ **`strings(1)` returns 0 lines and exit 0 past ~4 GB.** On symbol files that size — our PDB is
+  4.9 GB, the macOS dSYM 7.2 GB — it is a **false-negative generator**: every symbol query answers
+  "absent". Use `LC_ALL=C grep -a`, and **always with a positive control** (a symbol you know is
+  present) so an empty result is distinguishable from an unread file.
+
+- ⛔ **File SIZE equality is not file identity.** Two different PDBs from different fork commits
+  were **byte-identically sized** (5,247,451,136 each) because of PDB page allocation. Confirm
+  distinctness by `md5` of a prefix and by mtime before believing any A/B symbol comparison.
+
+- ⛔ **A symbol is evidence only against a baseline you have CHECKED — and the check is
+  per-toolchain.** `AudioFudgeFactor` is absent from the Windows `dfe5a2343` PDB (so it
+  discriminates there) but **present** in the macOS baseline dSYM (so it does not). MSVC + thin LTO
+  drops the uncalled function; DWARF keeps the declaration. A cross-platform symbol claim needs both
+  baselines, not one.
+
+- ⛔ **The patcher's "N applied" counter carries no information.** In one week it read
+  `0 applied / 119 skipped / 0 failed` on a healthy Windows build, `3 applied / 115 skipped /
+  1 failed` on a broken macOS one, and `1 applied / 118 skipped / 0 failed` on the fixed one —
+  four distinct readings, none of which meant "the patches are in the binary". **The invariant is
+  `0 failed` PLUS presence in the built artifact.** Related: an **add-file patch cannot reapply over
+  its own output** on a warm tree, and `chromium/src` is *not* reverted on a pin change.
+
+- ⚠️ **A uniform result across every row should be assumed broken before it is believed.** A sweep
+  that printed `0` for every symbol turned out to be `grep -c … || echo 0` emitting *both* grep's
+  own `0` and the fallback. It looked like a clean, consistent answer.
+
 ### From the 2026-08-10 pin tagging — `CEF_VERSION` silently degrades when the pinned commit loses its decoration
 
 **Symptom.** A build at a pinned CEF commit emits `150.0.0-HEAD.<n>+…` instead of

@@ -103,15 +103,40 @@ The shell links `libcef_dll_wrapper.lib`, which CMake does **not** build for you
 | repo | `${CEF_ROOT}/libcef_dll/wrapper/build/Release` | we built the wrapper ourselves (the recipe below) |
 | dist | `${CEF_ROOT}/build_wrapper/libcef_dll_wrapper/Release` | an official or self-built `binary_distrib` ships one prebuilt |
 
-The CEF 150 distribution ships a prebuilt wrapper, so Step 0 is a no-op there — but check that it was built with the same settings the app uses (`USE_SANDBOX=ON`, `/MT`, `/std:c++20`, no explicit `CEF_API_VERSION`). A wrapper built with a different C++ standard or API version will link and then corrupt memory at runtime.
+> ⛔ **CORRECTED 2026-08-11 — the two claims that used to sit here were both wrong for 150, and
+> both are build-blocking.** This section said "the CEF 150 distribution ships a prebuilt wrapper,
+> so Step 0 is a no-op" and then gave a recipe rooted at `libcef_dll/wrapper/`. Verified against
+> the staged distribution:
+>
+> * **`cef-binaries/libcef_dll/wrapper/CMakeLists.txt` does not exist** in the 150 distribution, so
+>   the old recipe (`cd libcef_dll/wrapper && cmake ..`) cannot run at all — the **repo** layout in
+>   the table above is unreachable on 150.
+> * The wrapper `.lib` present under `build_wrapper/` was **built by us**, not shipped:
+>   `build_wrapper/` is a CMake build tree (it contains `CMakeCache.txt` and `.vcxproj` files) and
+>   its `.lib` is timestamped **66 seconds after** `Release/libcef.dll` was staged.
+>
+> So Step 0 is **required** on 150, and it is built from the distribution's **top-level**
+> `CMakeLists.txt`, not from `libcef_dll/wrapper/`.
 
-```powershell
-cd cef-binaries/libcef_dll/wrapper
-mkdir build; cd build
-cmake ..
-cmake --build . --config Release
-# produces: cef-binaries/libcef_dll/wrapper/build/Release/libcef_dll_wrapper.lib
+Build it from the distribution root, into `build_wrapper/` (the **dist** layout above):
+
+```bash
+# from the repo root, with the 150 distribution staged into cef-binaries/
+MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
+  cmake -S cef-binaries -B cef-binaries/build_wrapper \
+        -G "Visual Studio 17 2022" -A x64 \
+        -DUSE_SANDBOX=ON -DCEF_RUNTIME_LIBRARY_FLAG=/MT
+cmake --build cef-binaries/build_wrapper --config Release --target libcef_dll_wrapper
+# produces: cef-binaries/build_wrapper/libcef_dll_wrapper/Release/libcef_dll_wrapper.lib
 ```
+
+⚠️ **`MSYS_NO_PATHCONV=1` is not optional under Git Bash / MSYS2.** MSYS rewrites the `/MT` value
+into a path — `-DCEF_RUNTIME_LIBRARY_FLAG=/MT` arrives as `C:/Program Files/Git/MT` and the wrapper
+build dies with C1083. From `cmd.exe` or PowerShell the prefix is unnecessary.
+
+⚠️ **The settings must match what the app links with** (`USE_SANDBOX=ON`, `/MT`, `/std:c++20`, no
+explicit `CEF_API_VERSION`). A wrapper built with a different C++ standard or API version links
+cleanly and then corrupts memory at runtime — the failure appears nowhere near the cause.
 
 On macOS the wrapper is built via the top-level CEF CMakeLists instead, and is expected at `cef-binaries/build/libcef_dll_wrapper/`.
 
