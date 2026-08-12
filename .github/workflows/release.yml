@@ -708,7 +708,7 @@ jobs:
           ENTITLEMENTS="cef-native/mac/entitlements.plist"
           # Fix Windows CRLF line endings that break codesign plist parsing
           sed -i '' 's/\r$//' "$ENTITLEMENTS"
-          IDENTITY="Developer ID Application: Matthew Archbold"
+          IDENTITY="Developer ID Application: Marston Enterprises LLC (R2LGGG6FTM)"
           CODESIGN="codesign --force --timestamp --options runtime --sign"
 
           # 0. Strip ALL existing signatures (CMake applies ad-hoc sigs during build)
@@ -885,7 +885,7 @@ jobs:
           rm -rf dmg-staging
 
           # Sign the DMG too
-          codesign --force --sign "Developer ID Application: Matthew Archbold" "dist/HodosBrowser-${VERSION}.dmg"
+          codesign --force --sign "Developer ID Application: Marston Enterprises LLC (R2LGGG6FTM)" "dist/HodosBrowser-${VERSION}.dmg"
 
       # Notarize and staple the DMG itself so Gatekeeper validates the
       # entire distribution offline. Without this, quarantine on the

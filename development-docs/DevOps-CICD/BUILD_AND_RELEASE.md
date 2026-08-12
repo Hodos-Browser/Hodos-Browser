@@ -669,22 +669,38 @@ Hodos.app/
 
 > **Important:** `codesign --deep` can miss nested frameworks. Explicitly sign `Chromium Embedded Framework.framework` before signing the outer `.app` bundle.
 
-> **Signing identity (verify against `release.yml`).** CI signs with
-> **`Developer ID Application: Matthew Archbold`** (a personal Apple Developer account), **not** an org
-> identity. ⚠️ **This SHOULD migrate to the org identity ("Marston Enterprises") before GA** — see
-> `AUTO_UPDATE.md` and the master plan **PIPE-IDENTITY** item. The snippet below shows the structure
-> (sign nested framework before the outer `.app`); use the real identity above.
+> **Signing identity (verify against `release.yml`).** ✅ **MIGRATED 2026-08-12.** CI now signs with
+> **`Developer ID Application: Marston Enterprises LLC (R2LGGG6FTM)`** — the organization identity.
+>
+> The Apple account conversion (individual → Marston Enterprises LLC) had been completed weeks
+> earlier, but **that alone changed nothing**: a conversion does not re-issue certificates, so CI kept
+> signing under the personal name. Evidence at the time — `MACOS_CERT_BASE64` last updated
+> 2026-03-24, and the shipped `v0.3.0-beta.29` DMG carried `Developer ID Application: Matthew
+> Archbold`. A new Developer ID Application certificate was issued and the secrets replaced
+> 2026-08-12.
+>
+> ⭐ **Team ID is UNCHANGED: `R2LGGG6FTM`** — confirmed by extracting it from the shipped beta.29
+> DMG and comparing against the new certificate, rather than trusting the documentation that a
+> conversion preserves it. That is what makes the swap safe: macOS keys update continuity on Team
+> ID, so installs signed under the old CN accept updates signed under the new one **without a forced
+> reinstall** — the single biggest reinstall-forcer we track.
+>
+> ⚠️ The CSR does **not** have to be generated on a Mac. Apple's docs assume Keychain Access, but a
+> CSR is a standard PKCS#10 file — this one was produced with OpenSSL on Windows. Use
+> `MSYS_NO_PATHCONV=1` under Git Bash or the `/emailAddress=…` subject is rewritten into a path.
+>
+> The snippet below shows the structure (sign nested framework before the outer `.app`).
 
 ```bash
 # Sign CEF framework first
 codesign --force --options runtime \
-  --sign "Developer ID Application: Matthew Archbold" \
+  --sign "Developer ID Application: Marston Enterprises LLC (R2LGGG6FTM)" \
   "Hodos.app/Contents/Frameworks/Chromium Embedded Framework.framework"
 
 # Then sign the app bundle
 codesign --force --deep --options runtime \
   --entitlements macos/entitlements.plist \
-  --sign "Developer ID Application: Matthew Archbold" \
+  --sign "Developer ID Application: Marston Enterprises LLC (R2LGGG6FTM)" \
   Hodos.app
 ```
 
