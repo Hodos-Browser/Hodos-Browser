@@ -647,94 +647,82 @@ private:
         CosmeticResult result;
         if (response.empty() || response.size() >= 512 * 1024) return result;  // sanity limit
 
-        // {"hideSelectors":["sel1","sel2"],"injectedScript":"…","generichide":false}
-        auto selStart = response.find("\"hideSelectors\":");
-        if (selStart != std::string::npos) {
-            auto arrStart = response.find('[', selStart);
-            auto arrEnd = response.find(']', arrStart);
-            if (arrStart != std::string::npos && arrEnd != std::string::npos) {
-                std::string arrStr = response.substr(arrStart + 1, arrEnd - arrStart - 1);
+        // ⛔ FIXED 2026-08-12 — this used to scan the JSON by hand and it was BROKEN, on both
+        // platforms, for as long as it existed. It located the selector array's end with
+        // `response.find(']', arrStart)` — the FIRST ']' — but adblock cosmetic selectors are
+        // overwhelmingly ATTRIBUTE selectors, so the first ']' sits inside selector #1:
+        //
+        //     ["a[href^=\"https://go.xlivrdr.com\"]", "[href=\"//…\"]", …
+        //                                          ^ scan stopped here
+        //
+        // The truncated fragment then had no unescaped closing quote, the string scan broke out,
+        // and `cssSelectors` came back EMPTY. Measured on cnn.com: the engine returns 465
+        // selectors in 18.7 KB and phase 1 logged `css=0` on Windows AND macOS.
+        //
+        // It went unnoticed because phase 2 (the class/id query in `fetchHiddenIdsFromBackend`)
+        // silently covered for it — and *that* parser happened to use `rfind(']')`, the LAST one,
+        // so it was accidentally correct. Q2 T2 asserts the injected <style> exists, which phase 2
+        // satisfies, so the test passed on both platforms with phase 1 dead.
+        //
+        // Now parsed with nlohmann, which was ALREADY included and already used elsewhere in this
+        // very file. Hand-rolling a JSON scanner next to a linked JSON parser was the real defect;
+        // the ']' bug was just how it surfaced.
+        try {
+            const auto j = nlohmann::json::parse(response);
+            if (!j.is_object()) return result;
+
+            if (auto it = j.find("hideSelectors"); it != j.end() && it->is_array()) {
                 std::string selectors;
-                size_t pos = 0;
-                while (pos < arrStr.size()) {
-                    auto qStart = arrStr.find('"', pos);
-                    if (qStart == std::string::npos) break;
-                    auto qEnd = arrStr.find('"', qStart + 1);
-                    while (qEnd != std::string::npos && qEnd > 0 && arrStr[qEnd - 1] == '\\') {
-                        qEnd = arrStr.find('"', qEnd + 1);
-                    }
-                    if (qEnd == std::string::npos) break;
-                    std::string sel = arrStr.substr(qStart + 1, qEnd - qStart - 1);
-                    if (!sel.empty()) {
-                        if (!selectors.empty()) selectors += ", ";
-                        selectors += sel;
-                    }
-                    pos = qEnd + 1;
+                for (const auto& sel : *it) {
+                    if (!sel.is_string()) continue;
+                    const std::string s = sel.get<std::string>();
+                    if (s.empty()) continue;
+                    if (!selectors.empty()) selectors += ", ";
+                    selectors += s;
                 }
                 result.cssSelectors = selectors;
             }
-        }
 
-        auto scriptStart = response.find("\"injectedScript\":\"");
-        if (scriptStart != std::string::npos) {
-            size_t valStart = scriptStart + 18;  // past  "injectedScript":"
-            size_t valEnd = valStart;
-            while (valEnd < response.size()) {
-                if (response[valEnd] == '"' && valEnd > 0 && response[valEnd - 1] != '\\') break;
-                valEnd++;
+            if (auto it = j.find("injectedScript"); it != j.end() && it->is_string()) {
+                result.injectedScript = it->get<std::string>();
             }
-            if (valEnd < response.size()) {
-                const std::string raw = response.substr(valStart, valEnd - valStart);
-                std::string unescaped;
-                unescaped.reserve(raw.size());
-                for (size_t i = 0; i < raw.size(); i++) {
-                    if (raw[i] == '\\' && i + 1 < raw.size()) {
-                        switch (raw[i + 1]) {
-                            case 'n':  unescaped += '\n'; i++; break;
-                            case 'r':  unescaped += '\r'; i++; break;
-                            case 't':  unescaped += '\t'; i++; break;
-                            case '"':  unescaped += '"';  i++; break;
-                            case '\\': unescaped += '\\'; i++; break;
-                            default:   unescaped += raw[i]; break;
-                        }
-                    } else {
-                        unescaped += raw[i];
-                    }
-                }
-                result.injectedScript = unescaped;
-            }
-        }
 
-        result.generichide = (response.find("\"generichide\":true") != std::string::npos);
+            if (auto it = j.find("generichide"); it != j.end() && it->is_boolean()) {
+                result.generichide = it->get<bool>();
+            }
+        } catch (const std::exception&) {
+            // Malformed body → no cosmetics for this page. Never throw into the IO/background
+            // path; degrading to "no cosmetics" is the same failure mode as the engine being down.
+            return CosmeticResult{};
+        }
         return result;
     }
 
     /// {"selectors":["sel1","sel2"]} → "sel1, sel2"
+    ///
+    /// Also converted to nlohmann 2026-08-12. Its hand-rolled version was **accidentally**
+    /// correct — it used `rfind(']')`, the LAST bracket, which happens to be the array end
+    /// only because this response has exactly one array and nothing after it. Add a field
+    /// after `selectors` and it breaks the same way `ParseCosmeticResponse` did. Two
+    /// hand-rolled scanners, one already proven wrong; neither is worth keeping next to a
+    /// linked JSON parser.
     static std::string ParseHiddenIdsResponse(const std::string& response) {
         std::string selectors;
         if (response.empty() || response.size() >= 512 * 1024) return selectors;
-
-        auto arrStart = response.find('[');
-        auto arrEnd = response.rfind(']');
-        if (arrStart == std::string::npos || arrEnd == std::string::npos || arrEnd <= arrStart) {
-            return selectors;
-        }
-        std::string arrStr = response.substr(arrStart + 1, arrEnd - arrStart - 1);
-        size_t pos = 0;
-        while (pos < arrStr.size()) {
-            auto qStart = arrStr.find('"', pos);
-            if (qStart == std::string::npos) break;
-            auto qEnd = arrStr.find('"', qStart + 1);
-            while (qEnd != std::string::npos && qEnd > 0 && arrStr[qEnd - 1] == '\\') {
-                qEnd = arrStr.find('"', qEnd + 1);
-            }
-            if (qEnd == std::string::npos) break;
-            std::string sel = arrStr.substr(qStart + 1, qEnd - qStart - 1);
-            if (!sel.empty()) {
+        try {
+            const auto j = nlohmann::json::parse(response);
+            if (!j.is_object()) return selectors;
+            auto it = j.find("selectors");
+            if (it == j.end() || !it->is_array()) return selectors;
+            for (const auto& sel : *it) {
+                if (!sel.is_string()) continue;
+                const std::string s = sel.get<std::string>();
+                if (s.empty()) continue;
                 if (!selectors.empty()) selectors += ", ";
-                selectors += sel;
+                selectors += s;
             }
-            pos = qEnd + 1;
+        } catch (const std::exception&) {
+            return std::string();
         }
         return selectors;
     }
