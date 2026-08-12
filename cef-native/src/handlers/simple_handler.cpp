@@ -1353,7 +1353,25 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
             InjectHodosBrowserAPI(browser);
 
             // Cosmetic filtering: fetch CSS selectors + scriptlets and inject into tab (Sprint 8e)
-#ifdef _WIN32
+            //
+            // ⛔ The `#ifdef _WIN32` that used to wrap this block was removed 2026-08-12, for the
+            // same reason it was removed from the OnBeforeBrowse pre-cache path below (~line 7615):
+            // the adblock engine runs on both platforms and there is nothing Windows-specific in
+            // here — it is CEF calls and std::string.
+            //
+            // Why it mattered, and why fixing AdblockCache.h alone was not enough: `fetchCosmetic
+            // FromBackend` was a `return {}` stub on macOS until 2026-08-12, so Windows implemented
+            // the libcurl transport. That revived the *scriptlet* path, because the pre-cache call
+            // site below had already been de-guarded — measured immediately: "OnBeforeBrowse:
+            // pre-caching scriptlets for https://www.youtube.com/ (34283 chars)", a line that had
+            // never appeared in this log before. But **this** call site was still Windows-only, so
+            // the CSS half stayed dead and Q2 T2 still failed: `style#hodos-cosmetic-css` absent,
+            // `Cosmetic P1` logged 0 times.
+            //
+            // ⚠️ TWO GATES, ONE FEATURE. The transport fix and this guard are in different files,
+            // and fixing either alone leaves a half-working feature that looks like the other half
+            // is broken. If a future platform gap appears here, check BOTH layers before concluding
+            // the transport is at fault.
             {
                 CefRefPtr<CefFrame> mainFrame = browser->GetMainFrame();
                 if (mainFrame && mainFrame->IsValid()) {
@@ -1433,7 +1451,6 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
                     LOG_INFO_BROWSER("🎨 Cosmetic skip: mainFrame null or invalid for tab " + role_);
                 }
             }
-#endif
         }
 
         // Overlay-specific logic
