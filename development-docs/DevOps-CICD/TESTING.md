@@ -282,18 +282,33 @@ defaults to off in release, and drop `--remote-allow-origins=*` from production 
 
 During the 0.4.0 farbling/P6 work, **five separate test harnesses reported a wrong verdict**, every
 one of them in the dangerous direction: either a green result from an instrument that could not
-fail, or a red result against code that was correct. They look like five unrelated bugs. They are
-**three root causes**.
+fail, or a red result against code that was correct. They look like unrelated bugs. They are
+**four root causes** — the fourth added 2026-08-12 by the macOS session, from the other side of
+the platform boundary.
 
-### 15.1 The three causes
+### 15.1 The causes
 
 | Cause | What it looks like | Instances |
 |---|---|---|
 | **Timing** — read once, before the subject was ready | a confident measurement of a page that had not rendered | cosmetic CSS read at `readyState:"loading"`; x.com and youtube.com measured on their **SPA splash screens** and reported as 0 characters |
 | **Attribution** — measured the wrong document / tree / element | the value is real, but it belongs to something else | CDP driving one of the ~14 **overlays** instead of a tab; `cef_version.py` resolving `cef_path` from its *argument*, so a test worktree still measured the real build tree; cnn.com's own 2 MB stylesheet containing `.zone__ads` while ours did not; screenshot filenames colliding so the **failing** row's review image was overwritten by a passing one |
 | **Blind detector** — the instrument could not fail | a clean run and a broken instrument are indistinguishable | `grep -c … \|\| echo 0` printing *both* values so every row read `0`; a cached adblock verdict re-read after the engine was disabled; retired symbols surviving as **comment tombstones**, so a naive grep fails against *correct* code |
+| **Machine assumption** *(added 2026-08-12, found by the macOS session)* — the test encodes a property of the author's box | passes for the author, fails on someone else's **correct** code | a `--self-test` positive control hardcoding `11` cores — plausible on a 24-core Windows box, **impossible** on an 8-core M1, so the validator correctly rejected it and took the whole self-test red *before touching a browser*; `AudioFudgeFactor` treated as a universal symbol when it discriminates only under MSVC; `pgrep -fc` written against one platform's flags |
 
-### 15.2 The three rules
+> ⚠️ **The fourth cause is not a variant of the third.** In the blind-detector cases the instrument
+> was broken. Here the detector worked **perfectly** — it correctly rejected an impossible input, and
+> the *fixture* was wrong. Which means the usual reflex ("the check is too strict, loosen it") is
+> exactly backwards: the check was right. Three separate instances this sprint, all on the
+> Windows↔macOS boundary. **Derive fixtures from the environment (`os.cpu_count()`, the real
+> allowlist, the actual pin) rather than pasting in a value that was true where you wrote it.**
+>
+> A related trap from the same session, worth one line because "nothing happened" is the most
+> misleading possible result: **check the artifact contains the code before testing the code.** A
+> keyboard shortcut was reported non-functional against a binary built 5 minutes *before* the commit
+> that added it. Grep the built artifact for a string from the change, with a nonsense-symbol
+> negative control on the search.
+
+### 15.2 The rules
 
 1. **Never read once — poll with a deadline.** Both timing failures die here. Where the shared
    harness module owns navigation, the poll belongs *there*, so nobody re-implements read-once.

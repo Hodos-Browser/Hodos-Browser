@@ -632,6 +632,134 @@ private:
         return blocked;
     }
 
+    // ── Response parsing — platform-free, shared by BOTH transports ──────────────────
+    //
+    // Extracted 2026-08-12 while implementing the macOS arm. It had been inline inside the
+    // WinHTTP path, which meant the macOS implementation would have had to duplicate ~70
+    // lines of hand-rolled JSON scanning — and two copies of a parser drift. Only the
+    // TRANSPORT differs between platforms (WinHTTP vs libcurl via SyncHttpClient); the
+    // bytes coming back are identical, so the parsing must be too.
+    //
+    // Also makes the parser reachable from `hodos_tests` without CEF or a network stack
+    // (TESTING.md §14: extract-then-test is the pattern that works for our C++).
+
+    static CosmeticResult ParseCosmeticResponse(const std::string& response) {
+        CosmeticResult result;
+        if (response.empty() || response.size() >= 512 * 1024) return result;  // sanity limit
+
+        // {"hideSelectors":["sel1","sel2"],"injectedScript":"…","generichide":false}
+        auto selStart = response.find("\"hideSelectors\":");
+        if (selStart != std::string::npos) {
+            auto arrStart = response.find('[', selStart);
+            auto arrEnd = response.find(']', arrStart);
+            if (arrStart != std::string::npos && arrEnd != std::string::npos) {
+                std::string arrStr = response.substr(arrStart + 1, arrEnd - arrStart - 1);
+                std::string selectors;
+                size_t pos = 0;
+                while (pos < arrStr.size()) {
+                    auto qStart = arrStr.find('"', pos);
+                    if (qStart == std::string::npos) break;
+                    auto qEnd = arrStr.find('"', qStart + 1);
+                    while (qEnd != std::string::npos && qEnd > 0 && arrStr[qEnd - 1] == '\\') {
+                        qEnd = arrStr.find('"', qEnd + 1);
+                    }
+                    if (qEnd == std::string::npos) break;
+                    std::string sel = arrStr.substr(qStart + 1, qEnd - qStart - 1);
+                    if (!sel.empty()) {
+                        if (!selectors.empty()) selectors += ", ";
+                        selectors += sel;
+                    }
+                    pos = qEnd + 1;
+                }
+                result.cssSelectors = selectors;
+            }
+        }
+
+        auto scriptStart = response.find("\"injectedScript\":\"");
+        if (scriptStart != std::string::npos) {
+            size_t valStart = scriptStart + 18;  // past  "injectedScript":"
+            size_t valEnd = valStart;
+            while (valEnd < response.size()) {
+                if (response[valEnd] == '"' && valEnd > 0 && response[valEnd - 1] != '\\') break;
+                valEnd++;
+            }
+            if (valEnd < response.size()) {
+                const std::string raw = response.substr(valStart, valEnd - valStart);
+                std::string unescaped;
+                unescaped.reserve(raw.size());
+                for (size_t i = 0; i < raw.size(); i++) {
+                    if (raw[i] == '\\' && i + 1 < raw.size()) {
+                        switch (raw[i + 1]) {
+                            case 'n':  unescaped += '\n'; i++; break;
+                            case 'r':  unescaped += '\r'; i++; break;
+                            case 't':  unescaped += '\t'; i++; break;
+                            case '"':  unescaped += '"';  i++; break;
+                            case '\\': unescaped += '\\'; i++; break;
+                            default:   unescaped += raw[i]; break;
+                        }
+                    } else {
+                        unescaped += raw[i];
+                    }
+                }
+                result.injectedScript = unescaped;
+            }
+        }
+
+        result.generichide = (response.find("\"generichide\":true") != std::string::npos);
+        return result;
+    }
+
+    /// {"selectors":["sel1","sel2"]} → "sel1, sel2"
+    static std::string ParseHiddenIdsResponse(const std::string& response) {
+        std::string selectors;
+        if (response.empty() || response.size() >= 512 * 1024) return selectors;
+
+        auto arrStart = response.find('[');
+        auto arrEnd = response.rfind(']');
+        if (arrStart == std::string::npos || arrEnd == std::string::npos || arrEnd <= arrStart) {
+            return selectors;
+        }
+        std::string arrStr = response.substr(arrStart + 1, arrEnd - arrStart - 1);
+        size_t pos = 0;
+        while (pos < arrStr.size()) {
+            auto qStart = arrStr.find('"', pos);
+            if (qStart == std::string::npos) break;
+            auto qEnd = arrStr.find('"', qStart + 1);
+            while (qEnd != std::string::npos && qEnd > 0 && arrStr[qEnd - 1] == '\\') {
+                qEnd = arrStr.find('"', qEnd + 1);
+            }
+            if (qEnd == std::string::npos) break;
+            std::string sel = arrStr.substr(qStart + 1, qEnd - qStart - 1);
+            if (!sel.empty()) {
+                if (!selectors.empty()) selectors += ", ";
+                selectors += sel;
+            }
+            pos = qEnd + 1;
+        }
+        return selectors;
+    }
+
+    /// Body for POST /cosmetic-hidden-ids — shared so the two transports cannot disagree
+    /// about the wire format either.
+    static std::string BuildHiddenIdsBody(const std::string& url,
+                                          const std::vector<std::string>& classes,
+                                          const std::vector<std::string>& ids) {
+        std::string body = "{\"url\":\"";
+        body += escapeJson(url);
+        body += "\",\"classes\":[";
+        for (size_t i = 0; i < classes.size(); i++) {
+            if (i > 0) body += ",";
+            body += "\"" + escapeJson(classes[i]) + "\"";
+        }
+        body += "],\"ids\":[";
+        for (size_t i = 0; i < ids.size(); i++) {
+            if (i > 0) body += ",";
+            body += "\"" + escapeJson(ids[i]) + "\"";
+        }
+        body += "]}";
+        return body;
+    }
+
 #ifdef _WIN32
 
     // Sync WinHTTP POST to localhost:31302/cosmetic-resources
@@ -693,75 +821,8 @@ private:
                     }
                 } while (dwSize > 0);
 
-                if (response.size() < 512 * 1024) { // Sanity limit: 512KB
-                    // Parse hideSelectors array → join into CSS selector string
-                    // Response: {"hideSelectors":["sel1","sel2"],"injectedScript":"...","generichide":false}
-                    auto selStart = response.find("\"hideSelectors\":");
-                    if (selStart != std::string::npos) {
-                        auto arrStart = response.find('[', selStart);
-                        auto arrEnd = response.find(']', arrStart);
-                        if (arrStart != std::string::npos && arrEnd != std::string::npos) {
-                            std::string arrStr = response.substr(arrStart + 1, arrEnd - arrStart - 1);
-                            // Parse quoted strings from array
-                            std::string selectors;
-                            size_t pos = 0;
-                            while (pos < arrStr.size()) {
-                                auto qStart = arrStr.find('"', pos);
-                                if (qStart == std::string::npos) break;
-                                auto qEnd = arrStr.find('"', qStart + 1);
-                                // Handle escaped quotes
-                                while (qEnd != std::string::npos && arrStr[qEnd - 1] == '\\') {
-                                    qEnd = arrStr.find('"', qEnd + 1);
-                                }
-                                if (qEnd == std::string::npos) break;
-                                std::string sel = arrStr.substr(qStart + 1, qEnd - qStart - 1);
-                                if (!sel.empty()) {
-                                    if (!selectors.empty()) selectors += ", ";
-                                    selectors += sel;
-                                }
-                                pos = qEnd + 1;
-                            }
-                            result.cssSelectors = selectors;
-                        }
-                    }
-
-                    // Parse injectedScript string
-                    auto scriptStart = response.find("\"injectedScript\":\"");
-                    if (scriptStart != std::string::npos) {
-                        size_t valStart = scriptStart + 18; // past "injectedScript":"
-                        // Find unescaped closing quote
-                        size_t valEnd = valStart;
-                        while (valEnd < response.size()) {
-                            if (response[valEnd] == '"' && response[valEnd - 1] != '\\') break;
-                            valEnd++;
-                        }
-                        if (valEnd < response.size()) {
-                            result.injectedScript = response.substr(valStart, valEnd - valStart);
-                            // Unescape JSON string escapes
-                            std::string& s = result.injectedScript;
-                            std::string unescaped;
-                            unescaped.reserve(s.size());
-                            for (size_t i = 0; i < s.size(); i++) {
-                                if (s[i] == '\\' && i + 1 < s.size()) {
-                                    switch (s[i + 1]) {
-                                        case 'n': unescaped += '\n'; i++; break;
-                                        case 'r': unescaped += '\r'; i++; break;
-                                        case 't': unescaped += '\t'; i++; break;
-                                        case '"': unescaped += '"'; i++; break;
-                                        case '\\': unescaped += '\\'; i++; break;
-                                        default: unescaped += s[i]; break;
-                                    }
-                                } else {
-                                    unescaped += s[i];
-                                }
-                            }
-                            result.injectedScript = unescaped;
-                        }
-                    }
-
-                    // Parse generichide boolean
-                    result.generichide = (response.find("\"generichide\":true") != std::string::npos);
-                }
+                // Parsing is shared with the macOS arm — see ParseCosmeticResponse above.
+                result = ParseCosmeticResponse(response);
             }
         }
 
@@ -800,24 +861,8 @@ private:
             return "";
         }
 
-        // Build JSON body: {"url":"...","classes":["c1","c2"],"ids":["i1","i2"]}
-        std::string body = "{\"url\":\"";
-        body += escapeJson(url);
-        body += "\",\"classes\":[";
-        for (size_t i = 0; i < classes.size(); i++) {
-            if (i > 0) body += ",";
-            body += "\"";
-            body += escapeJson(classes[i]);
-            body += "\"";
-        }
-        body += "],\"ids\":[";
-        for (size_t i = 0; i < ids.size(); i++) {
-            if (i > 0) body += ",";
-            body += "\"";
-            body += escapeJson(ids[i]);
-            body += "\"";
-        }
-        body += "]}";
+        // Wire format shared with the macOS arm — see BuildHiddenIdsBody above.
+        const std::string body = BuildHiddenIdsBody(url, classes, ids);
 
         LPCWSTR contentType = L"Content-Type: application/json";
         BOOL ok = WinHttpSendRequest(hRequest, contentType, -1L,
@@ -842,30 +887,7 @@ private:
                     }
                 } while (dwSize > 0);
 
-                if (response.size() < 512 * 1024) {
-                    // Parse selectors array: {"selectors":["sel1","sel2"]}
-                    auto arrStart = response.find('[');
-                    auto arrEnd = response.rfind(']');
-                    if (arrStart != std::string::npos && arrEnd != std::string::npos && arrEnd > arrStart) {
-                        std::string arrStr = response.substr(arrStart + 1, arrEnd - arrStart - 1);
-                        size_t pos = 0;
-                        while (pos < arrStr.size()) {
-                            auto qStart = arrStr.find('"', pos);
-                            if (qStart == std::string::npos) break;
-                            auto qEnd = arrStr.find('"', qStart + 1);
-                            while (qEnd != std::string::npos && arrStr[qEnd - 1] == '\\') {
-                                qEnd = arrStr.find('"', qEnd + 1);
-                            }
-                            if (qEnd == std::string::npos) break;
-                            std::string sel = arrStr.substr(qStart + 1, qEnd - qStart - 1);
-                            if (!sel.empty()) {
-                                if (!selectors.empty()) selectors += ", ";
-                                selectors += sel;
-                            }
-                            pos = qEnd + 1;
-                        }
-                    }
-                }
+                selectors = ParseHiddenIdsResponse(response);
             }
         }
 
@@ -876,11 +898,46 @@ private:
     }
 
 #elif defined(__APPLE__)
-    // macOS stub — TODO: implement with SyncHttpClient (libcurl)
-    CosmeticResult fetchCosmeticFromBackend(const std::string& url, bool skipScriptlets = false) { return {}; }
+
+    // Implemented 2026-08-12. These were `return {}` stubs since the feature was written,
+    // which meant macOS had **network blocking only**: no element hiding, and — the half
+    // that actually matters — **no scriptlet injection**. YouTube is served by scriptlet +
+    // response filter with `generichide: true`, so on macOS only the response-filter half
+    // was ever live. Discovered by the Mac session running Q2 T2 (2026-08-11); it is not a
+    // regression, it was never implemented.
+    //
+    // Transport is `SyncHttpClient` (libcurl on macOS) — the same client `/check` above has
+    // used cross-platform all along, so this arm is not introducing a new HTTP path. All
+    // parsing and body-building is the SHARED code above, so the two platforms cannot drift.
+    //
+    // Timeouts match the WinHTTP arm's intent: these run on a background/IO path and a slow
+    // engine must degrade to "no cosmetics", never to a hung page.
+
+    CosmeticResult fetchCosmeticFromBackend(const std::string& url, bool skipScriptlets = false) {
+        std::string body = "{\"url\":\"";
+        body += escapeJson(url);
+        body += "\"";
+        if (skipScriptlets) {
+            body += ",\"skip_scriptlets\":true";
+        }
+        body += "}";
+
+        auto resp = SyncHttpClient::Post(hodos::AdblockUrl("/cosmetic-resources"),
+                                         body, "application/json", 3000);
+        if (!resp.success || resp.statusCode != 200) return {};
+        return ParseCosmeticResponse(resp.body);
+    }
+
     std::string fetchHiddenIdsFromBackend(const std::string& url,
                                           const std::vector<std::string>& classes,
-                                          const std::vector<std::string>& ids) { return ""; }
+                                          const std::vector<std::string>& ids) {
+        const std::string body = BuildHiddenIdsBody(url, classes, ids);
+        auto resp = SyncHttpClient::Post(hodos::AdblockUrl("/cosmetic-hidden-ids"),
+                                         body, "application/json", 3000);
+        if (!resp.success || resp.statusCode != 200) return "";
+        return ParseHiddenIdsResponse(resp.body);
+    }
+
 #else
     CosmeticResult fetchCosmeticFromBackend(const std::string& url, bool skipScriptlets = false) { return {}; }
     std::string fetchHiddenIdsFromBackend(const std::string& url,
