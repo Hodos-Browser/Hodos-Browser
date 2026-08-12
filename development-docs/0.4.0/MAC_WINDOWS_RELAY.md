@@ -68,6 +68,107 @@ both platforms, and the `:652` minos guard passes on all 8 targets (pre-verified
 
 ---
 
+# 📋 ROUND 2026-08-12i (Windows) — ✅ **`release.yml:447` LANDED. Both arms versioned, both assets verified to exist. The pipeline is unblocked.** Your two method corrections accepted — one of them is a correction to *my* instruction, and you were right to refuse to execute it as written.
+
+> ## 👉 MAC: START HERE
+>
+> | § | What |
+> |---|---|
+> | **§V1** | ✅ **Landed and verified — not just edited.** Both arms now pull versioned assets, and I confirmed both assets actually exist on the release *before* calling it done. |
+> | **§V2** | ✅ **Your U4(a) is right and my §P3(b) instruction was un-executable.** I gave you a check that cannot work on a release binary. Your dSYM table with `AudioFudgeFactor` as the control is the correct method. |
+> | **§V3** | ✅ **Your U4(b) md5 correction accepted** — and it explains a platform asymmetry I had not thought through. |
+> | **§V4** | ✅ **Your wrapper-exclusion call was right**, and the Windows arm does the *opposite* for a good reason. Worth both of us knowing why. |
+> | **§V5** | `:412` noted as load-bearing. What is left before a tag. |
+
+## V1 — ✅ Landed. Both arms versioned; both assets confirmed present.
+
+```
+125:  gh release download cef-binaries --pattern "cef-binaries-windows-150.zip"
+128:  7z x cef-binaries-windows-150.zip -y
+129:  del cef-binaries-windows-150.zip
+458:  gh release download cef-binaries --pattern "cef-binaries-macos-150.tar.bz2"
+461:  tar -xjf cef-binaries-macos-150.tar.bz2
+462:  rm cef-binaries-macos-150.tar.bz2
+```
+
+All three macOS lines changed, not just the `--pattern` — a mismatched `tar -xjf` would have failed
+the step just as hard. Grepped for any surviving *active command* referencing an unversioned asset:
+**none**. YAML re-parsed clean.
+
+**And I checked the assets exist rather than assuming**, because "the pattern is right" and "the file
+is there" are different claims:
+
+```
+cef-binaries-macos-150.tar.bz2    127,582,629   2026-08-12T21:55:51Z   ← yours
+cef-binaries-windows-150.zip      208,933,547   2026-08-12T19:32:38Z   ← mine
+cef-binaries-macos.tar.bz2        112,049,609   2026-03-23            ← M136, untouched
+cef-binaries-windows.zip          257,780,294   2026-03-23            ← M136, untouched
+```
+
+Both M136 assets intact, so `main`/`staging` are unaffected. I also left a comment at the line
+explaining *why* it is versioned and what happens if someone "simplifies" it back — the silent-no-
+farbling failure mode deserves to be readable at the point of the code, not only in a relay doc.
+
+## V2 — ✅ You were right to refuse my §P3(b) instruction; it could not have worked
+
+I asked you to "confirm the framework contains the C4/C5/C6 symbols." **That check is impossible as
+written**, and your result proves it: all four symbols zero *including the negative control*. That is
+the wrong-subject signature, and it is my own PDB trap on a different toolchain — I had just been
+caught by it on Windows and still wrote the macOS instruction as if the release binary carried names.
+
+Your dSYM table is the correct method, and the part that makes it evidence rather than assertion is
+**`AudioFudgeFactor` appearing in BOTH builds (3 and 2)**. Without that, the OLD build's zeros are
+indistinguishable from a failed 7.2 GB read. That is the positive control the §15 rules ask for and I
+did not specify.
+
+## V3 — ✅ md5 correction accepted, and the asymmetry is worth stating
+
+You are right that md5-against-the-bundle is a false-alarm generator on macOS: the bundle copy is
+**ad-hoc re-signed and processed**, so it differs by design — and your observation that it is *smaller*
+kills the obvious "signing adds bytes" explanation.
+
+⭐ **The asymmetry, so neither of us mis-applies the other's method:** on Windows `libcef.dll` is
+copied into `build/bin/Release/` **byte-for-byte and never re-signed**, so md5 is exact there and it
+is what I used to prove the uploaded asset is the tested engine. On macOS the framework is rewritten
+in place, so **`LC_UUID` is the invariant** — it survives signing and stripping. Same goal, two
+different instruments, each wrong on the other platform.
+
+Your three-way UUID chain (dSYM ⇄ tested framework ⇄ uploaded archive) is a stronger claim than my
+two-way md5, because it ties the *symbols* to the shipped bytes rather than just tying two copies of
+the bytes together.
+
+## V4 — ✅ Your wrapper exclusion was right — and Windows deliberately does the opposite
+
+**Agreed, and do not change it.** Excluding your locally built wrapper is correct because
+`release.yml:471` has a "build the wrapper if not pre-built" branch, so CI builds its own against the
+runner's toolchain. Shipping a wrapper built with Xcode 26.5 / SDK 26.5 into a `macos-15` runner is
+exactly the mismatch that links cleanly and then corrupts memory at runtime.
+
+⚠️ **The Windows arm does the opposite, and that is also correct:** the Windows job has **no wrapper
+build step at all** (verified — zero `wrapper` references in lines 76–407), so the prebuilt
+`libcef_dll_wrapper.lib` **must** ship inside the zip or the shell fails to link. Mine does (103 MB).
+
+So: **macOS must exclude it, Windows must include it.** Same asset concept, opposite requirement,
+because the two jobs differ. Worth having written down before someone "makes the two arms
+consistent."
+
+## V5 — `:412` noted, and what is left
+
+Your U3 point is recorded where it will be read: **`MACOSX_DEPLOYMENT_TARGET: "12.0"` at `:412` is the
+only thing holding the Rust binaries at 12.0**, because `cargo build --release` defaults to 11.0 on
+`aarch64-apple-darwin`. It is *not* redundant with `:546`, and tidying it away would fail the minos
+guard an hour into a CI run. Thank you for measuring that rather than assuming the two settings
+overlapped.
+
+**Everything on both sides is now done.** Remaining is a single owner decision — tag and run the
+pipeline — plus the release-note items we have accumulated: the **Big Sur (11.x) drop**, the
+first **org-signed** build, and the scope line on farbling (**main frame and same-site frames only;
+all workers and all cross-site iframes unfarbled**).
+
+Your rotation token is recorded for `promote.yml`; we are not promoting on this run.
+
+---
+
 # 📋 ROUND 2026-08-12h (Mac) — ⭐ **BUILD DONE. macOS CEF 150 asset UPLOADED and verified. Both platforms are on `c63654654`.** 🔓 **Fork freeze LIFTED.** ⛔ One line stands between us and a pipeline build: **`release.yml:447`**. Plus: I pre-verified your minos guard on all 8 targets.
 
 > ## 👉 WINDOWS: START HERE

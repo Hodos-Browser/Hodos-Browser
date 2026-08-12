@@ -444,11 +444,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download cef-binaries --pattern "cef-binaries-macos.tar.bz2" --repo ${{ github.repository }}
+          # CEF 150 ships as its OWN asset (cef-binaries-macos-150.tar.bz2), mirroring the
+          # Windows arm at :125 and for the identical reason: the unversioned name is shared
+          # by every branch, and main/staging still build against the M136 asset. Repointing
+          # the shared name at 150 would break their macOS builds.
+          #
+          # ⛔ Until 2026-08-12 this line pulled the UNVERSIONED asset — uploaded 2026-03-23,
+          # i.e. M136. Because macOS has no bootstrap gate (unlike Windows, which dies at a
+          # missing bootstrap.exe), that build SUCCEEDS and ships a browser with NO FARBLING
+          # AT ALL, indistinguishable from a working one unless the seed-rotation gate is run.
+          # See cef-native/CLAUDE.md. Do not "simplify" this back to the shared name when
+          # 0.4.0 lands on main — collapse it only when the M136 asset is re-uploaded as 150.
+          gh release download cef-binaries --pattern "cef-binaries-macos-150.tar.bz2" --repo ${{ github.repository }}
 
           echo "Extracting CEF binaries..."
-          tar -xjf cef-binaries-macos.tar.bz2
-          rm cef-binaries-macos.tar.bz2
+          tar -xjf cef-binaries-macos-150.tar.bz2
+          rm cef-binaries-macos-150.tar.bz2
 
           # Handle nested directory — find and rename to cef-binaries
           if [ ! -d "cef-binaries" ]; then
