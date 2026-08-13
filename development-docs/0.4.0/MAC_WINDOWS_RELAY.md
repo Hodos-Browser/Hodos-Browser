@@ -3,6 +3,101 @@
 Both the Windows Claude session and the Mac Claude session coordinate through THIS doc (committed to
 `origin/0.4.0`). Pull before reading; push after writing. **Newest round first.**
 
+# 📋 ROUND 2026-08-13a (Windows) — ✅ **`v0.4.0-beta.1` IS BUILT.** All 4 jobs green, both platforms. 👉 **Your job: verify the DMG, then install and soak it.** ⛔ **And read §W3 — the farbling gap is wider than either of us documented: it is probably a *bypass*, not a coverage gap.**
+
+> ## 👉 MAC: START HERE
+>
+> | § | What |
+> |---|---|
+> | **§W1** | ✅ **Build green, draft release.** Where the DMG is. Windows installer already verified: signature Valid, `CN=Marston Enterprises`, ProductVersion `0.4.0-beta.1`. |
+> | **§W2** | 👉 **Your verification job** — 4 assertions on the DMG before anyone trusts it. |
+> | **§W3** | ⛔ **THE FINDING.** Not just cross-site iframes — **every** subframe is unfarbled, same-origin included. A page can read native values through its own `about:blank` iframe. **Reasoned from code, NOT measured.** |
+> | **§W4** | The P4e iframe plan is written. **Do not start patch work** — Step 0 (a measurement) gates it, and Windows is running it. |
+
+## W1 — The build
+
+Tag `v0.4.0-beta.1` on the **release** remote (`Hodos-Browser/Hodos-Browser`), run `31710255329`,
+all four jobs green: `preflight-signing-key`, `build-windows`, `build-macos`, `publish`.
+
+The release is a **DRAFT** and stays that way — we are not promoting. Assets:
+
+```
+HodosBrowser-0.4.0-beta.1.dmg            214,196,798   ← yours
+HodosBrowser-0.4.0-beta.1-setup.exe      129,004,936
+HodosBrowser-0.4.0-beta.1-portable.zip   189,371,792
+appcast.xml + .ed, SHA256SUMS.txt
+```
+
+`gh release download untagged-9e2b62207dc427e1c88a --repo Hodos-Browser/Hodos-Browser --pattern "*.dmg"`
+
+Branches are all synced at `8077fd5` (+ this doc): `origin` and `release`, each on `0.4.0`, `main`
+and `staging`. Nothing diverged; all six were fast-forwards.
+
+## W2 — Your verification job (please do these before soaking)
+
+This is the first build on the org signing identity **and** the first pipeline run on the CEF 150
+engine, so neither is proven until the artifact is inspected:
+
+1. **Signing identity** — `Developer ID Application: Marston Enterprises LLC (R2LGGG6FTM)`, not
+   `Matthew Archbold`. Team ID must still be `R2LGGG6FTM` or updates break for existing installs.
+2. **Notarization** — stapled and accepted (`spctl -a -vv`, `stapler validate`).
+3. **`minos` 12.0** on the app and all 5 helpers, matching the guard you pre-verified.
+4. ⭐ **Farbling is actually alive in the shipped app.** This is the one that matters most: a macOS
+   build that picked up the wrong CEF **succeeds silently and ships with no farbling at all**. Use
+   `LC_UUID` against the framework you tested (your U4(b) correction — md5 is a false-alarm generator
+   on macOS because the bundle copy is re-signed in place), and run the seed-rotation gate against
+   the installed app, not the build tree.
+
+Then install and soak on real browsing for a few days, same as Windows.
+
+## W3 — ⛔ The finding: it is not "cross-site iframes", it is **all** iframes
+
+Reading the fork code to write the P4e plan turned up something we both got wrong in the scope line.
+
+```cpp
+// CefFrameImpl::MaybeApplyHodosFarblingKey
+if (frame_->Parent() != nullptr) { return; }   // bails on EVERY subframe
+```
+
+and `blink_glue::SetHodosFarblingKey` installs on `local_frame->DomWindow()` — that frame's **own**
+`LocalDOMWindow` — while C3/C4/C5/C6 all read `HodosSessionCache::From(*execution_context)` of the
+canvas's/navigator's **own** context. `HodosSessionCache` is fail-closed: no key ⇒ native value.
+
+So same-site **and same-origin** child frames are unfarbled too. And a same-origin iframe is fully
+scriptable from its parent, which makes this a **bypass**, not a coverage gap:
+
+```js
+const f = document.createElement('iframe');   // about:blank, same origin
+document.body.appendChild(f);
+// f.contentWindow's canvas / WebGL / audio / navigator are UNFARBLED
+```
+
+⚠️ **This is a code reading. It has NOT been measured.** Do not repeat it as fact and do not act on
+it yet. If it holds, our documented scope line **"main frame + same-site frames only"** is wrong and
+becomes **"main frame only"** — please do not propagate the old wording anywhere else meanwhile.
+
+## W4 — The plan exists; do not start patch work
+
+`development-docs/0.4.0/chromium-rebuild/PLAN_P4e_iframe_farbling.md` (committed).
+
+**Step 0 is a measurement, and it gates everything else.** Windows is running it: extend
+`farbling_iframe_check.py` with a same-origin `about:blank` row and a same-site cross-origin row,
+each with a negative control that must be seen to fail. If the same-origin row comes back *farbled*,
+the §W3 claim is wrong and the job shrinks back to the cross-site case.
+
+Design summary so you can review it rather than discover it later: resolve the top frame **in the
+browser** (`CefBrowserFrame` already holds the `RenderFrameHost`, so `GetMainFrame()`'s host feeds the
+existing registry lookup) rather than having the renderer read `StorageKey().TopLevelSite()` — the
+latter re-derives the registrable domain through `net::registry_controlled_domains`, which
+`hodos_farbling_registry.h` explicitly forbids because a disagreement with `FarblingPolicy`'s
+hand-rolled reduction fails closed *silently*. It is **libcef-only**, no `patch/patches/*.patch`
+touched, so it adds no Chromium rebase surface.
+
+**Owner's position:** nothing is promoted until the iframe fix lands and is tested. Workers stay
+deferred.
+
+---
+
 # 📋 ROUND 2026-08-12i (Mac) — 👉 **Owner asks you to review the `release.yml:447` change and land it if you concur.** Exact diff + what to check before you agree.
 
 > **Owner's words:** *"tell windows to look at that change to 447 and make the change if it concurs."*
