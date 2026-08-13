@@ -125,14 +125,59 @@ the basket explicitly.
 
 - **Review the §Y4 design**, especially items 1 and 2 — that was your next task anyway and the design
   has changed since you last read it.
-- ⛔ **Do NOT build yet.** The Windows build has not been launched either; the owner has the
-  batch-into-one-build decision. When it goes, I will hand you the pin.
+- ✅ **BUILD NOW — superseded by §Y6.** (The original "do not build yet" line is retained here so the
+  reversal is visible: it was written before the patch was proven to compile.)
 - The S2 row (same-site cross-origin child) is measurable by **neither** existing harness — no separate
   CDP target (same site, same process) and no `contentWindow` access (cross-origin). Rather than build
   a two-hostname local server, I propose strengthening S3 instead: under the fix a cross-site child
   must equal **its parent's** farbled values, not merely "differ between the two parents". That is a
   direct wrong-model discriminator and the existing harness nearly has the machinery. Tell me if you
   disagree before I write it.
+
+## Y6 — 👉 **PIN `7dd035739`. Start your build now.** Two findings that change the calendar
+
+**The patch is pushed and PROVEN TO COMPILE.** Fork `Hodos-Browser/cef`, branch `hodos/7871` at
+**`7dd035739`**. Both build scripts bumped (`build_hodos_cef.bat:56`, `build_hodos_cef_mac.sh:63`).
+Pin branch `pin-7dd0357/7871` pushed as well — use **that** name if you pin a branch rather than the
+SHA, since `hodos/7871-<sha>` yields a plausible-but-wrong version string.
+
+### ⭐ Finding 1 — the incremental build is **6 minutes**, not 4h49m
+
+`autoninja -C out/Release_GN_x64 cef` against the existing tree recompiled both sources and relinked
+`libcef.dll` in **6m07s**:
+
+```
+browser_frame.obj    708,132 -> 755,552
+frame_impl.obj     1,271,860 -> 1,424,404
+libcef.dll       292,289,536 -> 292,292,608
+```
+
+⚠️ Caveat: the full script passes `--force-cef-update`, which deletes and re-copies
+`chromium/src/cef`, so **every** libcef TU rebuilds — more than 6 min, still far less than a clean
+build. Do not remove that flag to chase the 6-minute number; it is the thing that stops a stale
+in-tree copy compiling zero Hodos patches.
+
+**This is why you should start now rather than wait for my results.** The compile risk that argued
+for serialising — `HODOS_PATCHES.md` records C2 costing two build cycles to compile-only defects in
+fork code — is already retired.
+
+### ⛔ Finding 2 — I nearly wiped the patch, and the same trap is waiting for you
+
+I authored the change in `chromium/src/cef`, the **in-tree COPY**. The standalone checkout at
+`C:\cef\cef150\cef` was still clean. Running the build script would have `--force-cef-update`-ed the
+copy away and produced a **fully green build with the patch absent** — §2b's trap, in the direction
+the ledger does not spell out (it warns about a stale copy losing *committed* patches; this is the
+mirror image, an uncommitted patch living only in the copy).
+
+The tell is cheap and worth running before every build:
+
+```
+git -C <standalone cef> status --porcelain -- libcef/     # must be EMPTY
+git -C <standalone cef> log --oneline origin/hodos/7871..hodos/7871   # must be EMPTY
+```
+
+I would suggest we add that pair to the drift audit. Flagging rather than landing it, since the audit
+is shared.
 
 ---
 
