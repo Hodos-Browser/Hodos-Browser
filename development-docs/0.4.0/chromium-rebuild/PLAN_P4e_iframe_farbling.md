@@ -10,6 +10,63 @@
 
 ---
 
+## 0. ⚠️ REVISION 2026-08-13b — read this before the sections below
+
+Step 0 is **closed** and an adversarial review of the design moved four things. Where this section
+disagrees with §2–§7, **this section wins**; the originals are left intact as the reasoning trail.
+
+| # | Change | Status |
+|---|---|---|
+| **R1** | §2's bypass claim is **CONFIRMED BY MEASUREMENT** — Mac `f910e19`, reproduced independently on Windows 2026-08-13. Shipped scope is **MAIN FRAME ONLY**. | closed |
+| **R2** | ⛔ **A SECOND BYPASS OF THE SAME CLASS: `window.open()`.** A popup **is** a top frame with a committed URL of `about:blank`, so §4's D1 resolution misses and it fails closed to native — measured native on all five fields. The iframe-only fix would have shipped as "bypass closed" with this live. **Fix: walk the opener chain in `ResolveTopFrameHost`.** The opener relationship is exactly the exploitable set, because the bypass needs a *scriptable* handle; a `noopener` popup is unreadable by anyone and correctly gets no key. | in the patch |
+| **R3** | **D4's memo is a SAFETY mechanism, not an optimisation**, so "add it only if perf demands" is wrong. A subframe's `OnContextCreated` fires *inside the parent's JS call stack*, so without a memo `for (i<10000) appendChild(iframe)` becomes 10,000 blocking round-trips the page controls. Ships in the same build. Invalidation is **explicit** — `kRenderDocument` defaults to `all-frames` on Chromium 150 (so tokens do change per document), but that is a `FeatureParam` default, not an invariant. | in the patch |
+| **R4** | ⛔ **§6 T5 named the wrong instrument.** `farbling_perf_check.py` measures µs per `getImageData`/`readPixels` **call**; D4's cost is a blocking IPC at **frame creation**. It cannot see it. Replaced by `farbling_iframe_perf_check.py`. | done |
+
+**D1 resolves `GetOutermostMainFrame()`, not `GetMainFrame()`** (owner decision 2026-08-13): the
+latter stops at inner pages, so a fenced frame's children would key on the fenced root instead of what
+the user sees in the omnibox.
+
+**D3's renderer-side gate as written is not implementable** — a cross-process subframe's renderer
+cannot know whether the top frame is a committed HTTP(S) document. Actual shape: the main-frame URL
+gate stays exactly as it was (so our ~15 internal-UI overlays still cost zero IPCs at startup, per the
+~2 s startup budget), plus an `Opener()` clause for R2; subframes consult the memo and otherwise pull,
+and the **browser** decides. Note also that §4 D3's ⚠️ preferring to keep the initial empty document
+out of scope is **wrong**: an `about:blank` iframe that is never navigated *is* the initial empty
+document and *is* the bypass frame.
+
+### Measured perf baseline — the number D4 was worried about
+
+Recorded on the pre-change engine (it cannot be re-measured afterwards; today subframes make no
+browser call at all, so this is the floor). `p4e_iframe_perf_baseline.json`:
+
+```
+N=1    3.30 ms   3300 us/frame        N=50   139.10 ms   2782 us/frame
+N=10  30.10 ms   3010 us/frame        N=200  632.50 ms   3163 us/frame
+```
+
+⭐ Iframe creation already costs **~3.1 ms/frame**, so a ~150 µs sync IPC is ~5%, and ~0% with the
+memo. §8's "the one change that could hurt every user" is now bounded by measurement rather than
+argument.
+
+### Two things to write down rather than discover
+
+- **D5's residual** (needs an owner line in the release notes): a third-party frame on an auth-exempt
+  top frame inherits `enabled=false` and sees native values. Correct and required — Turnstile on a
+  login page — but it is a residual bypass.
+- **A functional regression surface §6 never named:** third-party widgets in iframes on **non-exempt**
+  sites (Stripe, reCAPTCHA, Turnstile, 3-D Secure) are native today and become farbled. Put them in
+  the regression basket explicitly.
+
+### §3's S2 row is measurable by neither harness
+
+A same-site cross-origin child has no separate CDP target (same site ⇒ same process) and no
+`contentWindow` access (cross-origin). Rather than stand up a two-hostname local server, strengthen
+**S3**: under the fix a cross-site child must equal **its parent's** farbled values, not merely
+"differ between the two parents" — a direct discriminator for the §8 wrong-model outcome, which the
+current S3 assertion would pass.
+
+---
+
 ## 1. Why this is not just a third-party-tracker gap
 
 Brave — the implementation our design is modeled on — applies its fingerprinting defenses **in both
