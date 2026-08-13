@@ -10,20 +10,38 @@ C2 implements by keying on the registrable domain of the **main-frame** navigati
 There are three distinguishable outcomes, and only one of them is "working". A bare
 "A != B" assertion cannot tell the other two apart, and the difference matters:
 
-    iframe_A != iframe_B                      -> FIRST-PARTY KEYING LIVE      (the contract)
-    iframe_A == iframe_B == native_X          -> iframe UNFARBLED             (a coverage gap)
-    iframe_A == iframe_B == farbled_X         -> keyed on the IFRAME's origin (wrong model)
+    iframe_A == its own parent's farbled value -> FIRST-PARTY KEYING LIVE      (the contract)
+    iframe_A == iframe_B == native_X           -> iframe UNFARBLED             (a coverage gap)
+    iframe_A == iframe_B == farbled_X          -> keyed on the IFRAME's origin (wrong model)
 
 The second and third are both "equal", and a harness that only checked for difference would
 report them identically — while they call for completely different responses. So this script
 measures a native baseline and a top-level farbled baseline for the third-party origin and
 names which of the three it found.
 
-⚠️ **The gap outcome is a live possibility, not a hypothetical.** `OnBeforeBrowse` sends
-`hodos_farble_key` only `if (frame->IsMain() ...)`, so the key goes to the main frame's
-renderer. A cross-site iframe is an **OOPIF in a different renderer process**, which would
-therefore never receive it and would fail closed to native — the same shape as the
-already-measured worker gap, and the reason the roadmap ties this row to **P4e**.
+## ⛔ 2026-08-13 — "iframe_A != iframe_B" was NOT strong enough, and has been replaced
+
+The pass condition used to be simply that the third party got different values under the two
+parents. **The wrong model satisfies that too:** a build keying on the *iframe's own origin*
+also produces two different values under two different parents, because the key varies per
+iframe instance. So the loose form went green on precisely the model P4e exists to avoid, and
+it could not separate outcome 1 from outcome 3.
+
+The row now asserts the thing it actually means: **each cross-site iframe carries ITS OWN
+PARENT'S farbled values.** Each parent is therefore also measured as a top-level page, in the
+same session so the profile seed is identical.
+
+Two guards come with it (relay §Z1), because `child == parent` is trivially true when both
+are broken the same way:
+  * each parent's top-level measurement must itself differ from native — otherwise nothing
+    is farbled and the match is vacuous;
+  * the two parents must differ from each other — otherwise the assertion cannot discriminate.
+
+⚠️ **The gap outcome was the measured reality until P4e.** The renderer bailed on every
+subframe (`if (frame_->Parent() != nullptr) return;`), so no subframe ever received a key and
+all of them failed closed to native. Post-P4e the key is delivered via
+`CefBrowserFrame::ResolveTopFrameHost`, and seeing the gap outcome again is a **regression**,
+not a known limitation.
 
 ## Subject
 
@@ -240,6 +258,15 @@ def main():
         show("iframe under %s (again)" % PARENT_A, a2)
         b1 = measure_iframe(port, excl, PARENT_B, timeout=args.timeout)
         show("iframe under %s" % PARENT_B, b1)
+
+        # The S3 STRENGTHENING (relay 2026-08-13c §Y5 / §Z1). Each parent measured as a
+        # TOP-LEVEL page in this same session, so its first-party key is the same one its
+        # iframes should be receiving. Same boot on purpose -- a different launch could
+        # carry a different profile seed and the comparison would be meaningless.
+        pa_top = measure(port, excl, "https://%s/" % PARENT_A, PARENT_A, timeout=args.timeout)
+        show("top-level %s" % PARENT_A, pa_top)
+        pb_top = measure(port, excl, "https://%s/" % PARENT_B, PARENT_B, timeout=args.timeout)
+        show("top-level %s" % PARENT_B, pb_top)
     finally:
         kill_browser_by_path(args.exe)
         if backup and os.path.exists(backup):
@@ -251,7 +278,8 @@ def main():
     ok = True
 
     broken = [f for f in GATE_CONTROLS
-              if len({x.get(f) for x in (top_farbled, top_native, a1, a2, b1)}) != 1]
+              if len({x.get(f) for x in (top_farbled, top_native, a1, a2, b1,
+                                         pa_top, pb_top)}) != 1]
     if broken:
         print("  *** SIZE-GATE CONTROL MOVED (%s) — nothing below is comparable."
               % ",".join(broken))
@@ -272,26 +300,71 @@ def main():
         return 1
 
     print()
-    if not same(a1, b1):
-        print("  VERDICT: FIRST-PARTY KEYING LIVE — the third party gets different values "
-              "under the two parents. Row PASSES.")
+
+    # ⛔ "a1 != b1" IS NOT SUFFICIENT, and was the row's assertion until 2026-08-13.
+    # A build that keys on the IFRAME'S OWN ORIGIN also yields different values under the
+    # two parents, so the loose form goes green on precisely the model we do not want --
+    # it cannot separate outcome 1 from outcome 3. The direct test of first-party keying
+    # is that the child carries ITS PARENT'S value.
+    #
+    # ⚠️ Paired with an "actually farbled" guard, per relay §Z1: if a future regression
+    # made parent and child BOTH fail closed to native, `child == parent` would be
+    # trivially true and the row would go green with farbling entirely dead. Native
+    # values are machine-wide -- they do not depend on the host -- so top_native is a
+    # valid native baseline for every host measured here.
+    # The guard applies to the PARENTS, not the children. A child equal to native is the
+    # informative coverage-gap outcome reported below -- swallowing it here would delete
+    # the diagnosis this harness exists to make. What must hold is that the reference
+    # values are genuinely farbled, otherwise "child == parent" proves nothing.
+    dead = [n for n, v in (("top-level " + PARENT_A, pa_top),
+                           ("top-level " + PARENT_B, pb_top))
+            if same(v, top_native)]
+    if dead:
+        print("  *** REFERENCE NOT FARBLED: %s equal(s) the native baseline, so a"
+              % ", ".join(dead))
+        print("      'child == parent' match would be trivially true. No verdict.")
+        return 1
+
+    if same(pa_top, pb_top):
+        print("  *** THE TWO PARENTS PRODUCED THE SAME FARBLED VALUES, so 'child carries its")
+        print("      own parent's key' cannot distinguish them. No verdict.")
+        return 1
+    print("  the two first parties are keyed differently (reference)  OK")
+
+    matches_own_parent = same(a1, pa_top) and same(b1, pb_top)
+
+    if matches_own_parent:
+        print("  VERDICT: FIRST-PARTY KEYING LIVE — each cross-site iframe carries ITS OWN")
+        print("           PARENT'S farbled values (a1==%s-top, b1==%s-top), and the two"
+              % (PARENT_A, PARENT_B))
+        print("           parents differ. Row PASSES on the strong assertion.")
+        if same(a1, b1):
+            print("  *** ...but a1 == b1, which contradicts first-party keying. Both parents")
+            print("      resolving to one key would do this. Investigate before trusting.")
+            ok = False
     elif same(a1, top_native):
         print("  VERDICT: CROSS-SITE IFRAME IS UNFARBLED (equals the native baseline).")
-        print("           This is a COVERAGE GAP, not a keying bug: OnBeforeBrowse sends")
-        print("           hodos_farble_key only for the main frame, and a cross-site iframe")
-        print("           is an OOPIF in another renderer, so it never receives one and")
-        print("           fails closed to native. Same shape as the measured worker gap.")
-        print("           -> tied to P4e, which is DEFERRED. Record as a known gap.")
+        print("           A COVERAGE GAP, not a keying bug: the renderer bailed on every")
+        print("           subframe, so it never received a key and failed closed to native.")
+        print("           This is the EXPECTED PRE-P4e RESULT. Post-P4e it is a REGRESSION —")
+        print("           the key is delivered by CefBrowserFrame::ResolveTopFrameHost, so")
+        print("           seeing it again means the subframe path is not reaching that.")
         ok = False
     elif same(a1, top_farbled):
         print("  VERDICT: KEYED ON THE IFRAME'S OWN ORIGIN, not the top frame. This is a")
         print("           real keying BUG, not a coverage gap: a third-party tracker would")
         print("           get the SAME value across every site that embeds it, which is")
         print("           precisely the cross-site linkage farbling exists to prevent.")
+        print("           ⚠️ NOTE this outcome also satisfies the OLD 'a1 != b1' assertion,")
+        print("           which is exactly why that form was replaced.")
         ok = False
     else:
-        print("  VERDICT: iframe values match under both parents but equal NEITHER baseline.")
-        print("           Unexplained — do not interpret; investigate before relying on it.")
+        print("  VERDICT: each iframe is farbled, but NOT with its own parent's key.")
+        print("             a1 == %s-top ? %s" % (PARENT_A, same(a1, pa_top)))
+        print("             b1 == %s-top ? %s" % (PARENT_B, same(b1, pb_top)))
+        print("           A partial match points at one path resolving the top frame and the")
+        print("           other not — check the opener walk and the memo key before anything")
+        print("           else. Do not interpret as a pass.")
         ok = False
 
     return 0 if ok else 1
