@@ -90,6 +90,7 @@ AWAY_URL = "https://example.org/"   # for the bfcache round trip
 REALMS = [
     ("r6_popup_url",   "R6  popup navigated to a real URL",      "dom", "KEYED"),
     ("r8_nested",      "R8  nested worker (worker -> worker)",   "oc",  "UNKEYED"),
+    ("t3_iframe_worker", "T3  worker created INSIDE a subframe", "oc",  "UNKEYED"),
     ("r11_worklet",    "R11 AudioWorklet global scope",          "oc",  "UNKEYED"),
     ("r13_sandbox",    "R13 sandboxed iframe (opaque origin)",   "dom", "KEYED"),
     ("r14_docwrite",   "R14 document.write document",            "dom", "KEYED"),
@@ -104,13 +105,14 @@ REALMS = [
 # comparison meant to isolate farbling.
 # ---------------------------------------------------------------------------------------
 OC_PROBE = r"""
-(function () {
+(async function () {
   var FNV = function (b) {
     var h = 2166136261 >>> 0;
     for (var i = 0; i < b.length; i++) { h ^= (b[i] & 255); h = Math.imul(h, 16777619) >>> 0; }
     return ('0000000' + (h >>> 0).toString(16)).slice(-8);
   };
-  var out = { canvas: null, cores: null, mem: null, err: null, has: {} };
+  var out = { canvas: null, gl: null, blob: null, cores: null, mem: null,
+              err: null, has: {} };
   out.has.OffscreenCanvas = (typeof OffscreenCanvas !== 'undefined');
   out.has.navigator = (typeof navigator !== 'undefined');
   try {
@@ -126,6 +128,31 @@ OC_PROBE = r"""
       x.strokeStyle = 'rgba(0,0,0,0.8)'; x.lineWidth = 3;
       x.beginPath(); x.arc(40, 25, 18, 0, Math.PI * 2); x.stroke();
       out.canvas = FNV(x.getImageData(0, 0, 200, 50).data);
+
+      // T6-worker: convertToBlob is reachable HERE too, and a worker is the realm
+      // where it cannot fall back to HTMLCanvasElement's hooked encoders -- there is
+      // no HTMLCanvasElement in a worker at all.
+      try {
+        var blob = await c.convertToBlob();
+        out.blob = FNV(new Uint8Array(await blob.arrayBuffer()));
+      } catch (e) { out.blob = 'ERR:' + String(e && e.message || e); }
+
+      // T10: WebGL readPixels via OffscreenCanvas. The C4 hook reads the
+      // ExecutionContext, so this should turn green the moment a worker gets a key --
+      // "should" being why it is measured rather than asserted.
+      try {
+        var gc = new OffscreenCanvas(120, 60);
+        var gl = gc.getContext('webgl2') || gc.getContext('webgl');
+        if (gl) {
+          gl.clearColor(0.25, 0.5, 0.75, 1.0); gl.clear(gl.COLOR_BUFFER_BIT);
+          gl.enable(gl.SCISSOR_TEST); gl.scissor(10, 10, 40, 20);
+          gl.clearColor(0.9, 0.1, 0.4, 1.0); gl.clear(gl.COLOR_BUFFER_BIT);
+          gl.disable(gl.SCISSOR_TEST);
+          var px = new Uint8Array(120 * 60 * 4);
+          gl.readPixels(0, 0, 120, 60, gl.RGBA, gl.UNSIGNED_BYTE, px);
+          out.gl = FNV(px);
+        } else { out.gl = 'ERR:nocontext'; }
+      } catch (e) { out.gl = 'ERR:' + String(e && e.message || e); }
     }
     if (out.has.navigator) {
       out.cores = (typeof navigator.hardwareConcurrency === 'number')
@@ -156,8 +183,8 @@ REALM_JS = r"""
   // ---- references, both probes, in THIS realm and THIS arm --------------------------
   // Everything below is compared against these and never against the other arm's other
   // probe. Taken first so a later realm that hangs cannot cost us the baseline.
-  try { out.refDom = (0, eval)(DOM); } catch (e) { out.refDomErr = String(e); }
-  try { out.refOc = (0, eval)(OC); } catch (e) { out.refOcErr = String(e); }
+  try { out.refDom = await (0, eval)(DOM); } catch (e) { out.refDomErr = String(e); }
+  try { out.refOc = await (0, eval)(OC); } catch (e) { out.refOcErr = String(e); }
 
   // ---- capabilities ------------------------------------------------------------------
   out.caps.fencedFrame = (typeof HTMLFencedFrameElement !== 'undefined');
@@ -195,8 +222,13 @@ REALM_JS = r"""
 
   // ---- R8: nested worker (document -> worker A -> worker B) ---------------------------
   try {
-    var inner = 'self.onmessage=function(ev){var f=eval("("+ev.data+")");' +
-                'self.postMessage(f);};';
+    // The probe is async (convertToBlob is promise-valued), so the worker must RESOLVE
+    // it before posting. Posting the promise itself would structured-clone-fail and the
+    // realm would report UNREACHABLE for a harness bug rather than a farbling result.
+    var inner = 'self.onmessage=function(ev){' +
+                'Promise.resolve(eval("("+ev.data+")")).then(function(v){' +
+                'self.postMessage(v);},function(e){' +
+                'self.postMessage({err:String(e&&e.message||e),has:{}});});};';
     var outer = 'self.onmessage=function(ev){' +
       'var iu=URL.createObjectURL(new Blob([ev.data.inner],{type:"text/javascript"}));' +
       'var w2=new Worker(iu);' +          // <-- the NESTED worker; this is the realm
@@ -223,9 +255,11 @@ REALM_JS = r"""
   try {
     var wsrc =
       'class P extends AudioWorkletProcessor {' +
-      '  constructor(){ super(); var r; try { r = (0,eval)(' + JSON.stringify(OC) + '); }' +
-      '  catch(e){ r = {err:String(e&&e.message||e), has:{}}; }' +
-      '  this.port.postMessage(r); }' +
+      '  constructor(){ super(); var self_ = this;' +
+      '  try { Promise.resolve((0,eval)(' + JSON.stringify(OC) + '))' +
+      '    .then(function(v){ self_.port.postMessage(v); },' +
+      '          function(e){ self_.port.postMessage({err:String(e&&e.message||e),has:{}}); }); }' +
+      '  catch(e){ this.port.postMessage({err:String(e&&e.message||e), has:{}}); } }' +
       '  process(){ return false; } }' +
       'registerProcessor("hodos-probe", P);';
     var wu = URL.createObjectURL(new Blob([wsrc], { type: 'text/javascript' }));
@@ -242,6 +276,43 @@ REALM_JS = r"""
     try { actx.close(); } catch (e) {}
     if (wv) { put('r11_worklet', wv); } else { put('r11_worklet', null, 'no message from worklet'); }
   } catch (e) { put('r11_worklet', null, e); }
+
+  // ---- T3: a worker created INSIDE a same-origin subframe -------------------------------
+  // ⭐ The case most likely to be subtly wrong, and the reason it gets its own row.
+  //
+  // The worker's key comes from whichever ExecutionContext called `new Worker()`. Here
+  // that is the IFRAME's window, not the top frame's. Post-P4e the iframe holds the TOP
+  // frame's key, so the worker must come out equal to the TOP frame's farbled value. If
+  // instead someone ever keys a subframe on its own origin, this row is where it shows up
+  // -- and a same-origin iframe would still LOOK right on every other test, because its
+  // own origin and the top frame's are identical. It is caught here only because the
+  // assertion is "== the top frame's farbled value", not "!= native".
+  try {
+    var wf2 = document.createElement('iframe');
+    document.body.appendChild(wf2);            // about:blank, same origin, scriptable
+    var childWin = wf2.contentWindow;
+    var iv = await childWin.eval(
+      '(' + (function (src) {
+        return new Promise(function (resolve) {
+          var done = false;
+          var fin = function (v) { if (!done) { done = true; resolve(v); } };
+          setTimeout(function () { fin({ err: 'timeout', has: {} }); }, 20000);
+          try {
+            var u = URL.createObjectURL(new Blob([
+              'self.onmessage=function(ev){Promise.resolve(eval("("+ev.data+")")).then(' +
+              'function(v){self.postMessage(v);},' +
+              'function(e){self.postMessage({err:String(e&&e.message||e),has:{}});});};'
+            ], { type: 'text/javascript' }));
+            var w = new Worker(u);             // <-- created BY THE IFRAME
+            w.onmessage = function (ev) { fin(ev.data); };
+            w.onerror = function (ev) { fin({ err: 'workererror: ' + (ev && ev.message), has: {} }); };
+            w.postMessage(src);
+          } catch (e) { fin({ err: String(e && e.message || e), has: {} }); }
+        });
+      }).toString() + ')(' + JSON.stringify(OC) + ')');
+    put('t3_iframe_worker', iv);
+    wf2.remove();
+  } catch (e) { put('t3_iframe_worker', null, e); }
 
   // ---- R11b: PaintWorklet global scope -------------------------------------------------
   // ⛔ A PaintWorkletGlobalScope has NO port, NO postMessage and NO fetch, so it cannot
@@ -662,6 +733,37 @@ def main():
         elif state not in ("KEYED",):
             unresolved.append((label, state, detail))
     print("\n    (* = measurement disagrees with the documented prior)")
+
+    # Per-vector detail for the OffscreenCanvas realms. `canvas` above is the headline,
+    # but a worker reaches THREE surfaces and they are hooked in three different patches
+    # -- reporting only the 2D one would let a keyed worker hide an unhooked encoder.
+    print("\n  WORKER-REACHABLE VECTORS (against the same-arm 'oc' reference)")
+    print("    %-40s %-10s %-10s %s" % ("realm", "canvas2d", "webgl", "convertToBlob"))
+    print("    " + "-" * 84)
+    for key, label, kind, _ in REALMS:
+        if kind != "oc":
+            continue
+        fv = (farbled["realms"].get(key) or {}).get("value")
+        if not fv:
+            continue
+        cells = []
+        for field in ("canvas", "gl", "blob"):
+            got = fv.get(field)
+            fref = (fo or {}).get(field)
+            nref = (co or {}).get(field)
+            if got is None:
+                cells.append("n/a")
+            elif isinstance(got, str) and got.startswith("ERR:"):
+                cells.append("ERR")
+            elif fref == nref:
+                cells.append("void")     # reference itself not farbled; nothing to say
+            elif got == fref:
+                cells.append("KEYED")
+            elif got == nref:
+                cells.append("native")
+            else:
+                cells.append("?%s" % str(got)[:6])
+        print("    %-40s %-10s %-10s %s" % (label, cells[0], cells[1], cells[2]))
 
     pw = caps.get("paintWorkletHas") or {}
     pwc = farbled.get("paintworklet") or {}

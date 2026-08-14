@@ -340,7 +340,7 @@ sufficient to hold the claim at row 1.
 | E3 | Hook `OffscreenCanvas.convertToBlob` | **yes** — and it is *not* gated behind E2: it is reachable in the **main frame** today | Phase 1 |
 | E4 | Verify `getByte*` audio paths; hook if unfarbled | yes | ✅ **verified** — all three ⛔ (§B). Hook in Phase 1 |
 | E5 | Measure R6, R8, R11–R15 → move each out of ❓ | yes for any page-scriptable one | ✅ **DONE** except **R12** (§A.6, owner gate) |
-| E6 | Owner decision on R9/R10 (defer vs implement) | no — ⏸️ is a valid end state | **owner** |
+| E6 | Owner decision on R9/R10 (defer vs implement) | no — ⏸️ is a valid end state | ✅ **SIGNED 2026-08-14** — both deferred (§F) |
 | E7 | Owner decision on WebGL renderer/vendor strings | no | **owner** |
 | E8 | Release-note wording, all three §D.1 residuals | yes | drafting |
 | E9 | T6 regression basket + soak, both platforms | yes | Phase 3 |
@@ -359,8 +359,8 @@ A deferral is valid only with a signature and a date. An unsigned row is ⛔, no
 
 | Realm / vector | Deferred? | Owner | Date | Rationale |
 |---|---|---|---|---|
-| R9 shared workers | pending | — | — | keying genuinely ambiguous |
-| R10 service workers | pending | — | — | no top frame; cross-site trap in §A.3 |
+| R9 shared workers | **⏸️ DEFERRED** | owner | **2026-08-14** | Keying is genuinely ambiguous — many documents under *different* top frames may connect to one worker, and "which top frame's key" has no correct answer. Needs cross-process machinery, unlike dedicated workers. **Reachable same-origin only**, so narrower than R7 was. Revisit when a keying model exists, not before. |
+| R10 service workers | **⏸️ DEFERRED** | owner | **2026-08-14** | No top frame at all, and outlives every document. ⛔ The natural fix — keying on the SW's own origin — is *wrong*: a third-party iframe can register a SW for its own origin and would then be handed a **stable cross-site** fingerprint, which is exactly the model rejected for iframes (§A.3). **Reachable same-origin only.** |
 | R3 same-site cross-origin iframe | **accepted as documented gap** | both sessions | 2026-08-13 | unmeasurable without a two-host server; R4 covers the model |
 | **R12 fenced frame** | pending | — | — | container **exists** in this build (§A.6); needs a Shared-Storage / Protected-Audience fixture to mint a config. Not embedder-scriptable, so not a page bypass |
 | B.1 non-farbled vectors | pending | — | — | scope boundary |

@@ -165,6 +165,32 @@ broken uniform −1 shift described in §1. So those two rows must additionally 
 the farbled array is **not** a constant offset of the native array — otherwise the exact
 defect this design exists to avoid would pass its own acceptance test.
 
+### 5.1 — T11's baseline, recorded BEFORE the build
+
+T11 says the main frame is unchanged except `convertToBlob`. That is only checkable against
+numbers taken beforehand, and afterwards it is too late — so here they are, measured on
+`7dd0357` / `Chrome/150.0.7871.187`, profile seed `5f64f039…`, host `example.com`:
+
+| Vector | native | farbled |
+|---|---|---|
+| `getImageData` | `4b351e23` | `1c051e0e` |
+| `toDataURL` | `f97ae288` | `4822baea` |
+| `toBlob` | `92a26986` | `a1fb54de` |
+| `readPixels` | `00dea785` | `9d838219` |
+| `getChannelData` | `dc700148` | `48e9a242` |
+| `getFloatFrequencyData` | `fbac0bce` | `773233f8` |
+| `hardwareConcurrency` | `24` | `10` |
+| `convertToBlob` | `92a26986` | `92a26986` ⛔ **must change** |
+
+⚠️ **Every farbled value in this table must be IDENTICAL after the build**, `convertToBlob`
+excepted. The C3 patch was edited (the shared helper moved out of an anonymous namespace),
+and a pure code move that alters a single hash is not a code move — it is a regression in
+the one vector users are already enrolled on. This table is what turns "I only moved the
+function" from an assertion into a check.
+
+⚠️ Note `toBlob` and `convertToBlob` share the native value `92a26986`. That is the point:
+they encode the same image, and before P4f only one of them was perturbed.
+
 ---
 
 ## 6. Owner gates outstanding (none block this patch)

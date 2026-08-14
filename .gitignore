@@ -76,3 +76,5 @@ Usersarchb*
 __pycache__/
 development-docs/0.4.0/chromium-rebuild/soak_out*/
 development-docs/0.4.0/chromium-rebuild/baseline_150/*.png
+# harness run sidecar: two-arm state carried between invocations, not a result
+development-docs/0.4.0/chromium-rebuild/.farbling_worker_probe_state.json

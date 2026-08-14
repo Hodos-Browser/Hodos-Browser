@@ -48,6 +48,7 @@ Exit 2 = the run is void (a control failed, or a vector was noisy/degenerate/err
 """
 
 import argparse
+import base64
 import json
 import os
 import sys
@@ -171,10 +172,19 @@ PROBE_JS = r"""
     return FNV(new Uint8Array(buf));
   };
 
+  // Raw bytes, base64, for the vectors that need more than a hash comparison --
+  // see SHIFT_ROWS host-side. Kept off every other vector so the payload stays small.
+  var b64 = function (bytes) {
+    var s = '';
+    for (var i = 0; i < bytes.length; i++) { s += String.fromCharCode(bytes[i] & 255); }
+    return btoa(s);
+  };
+
   var out = {};
-  var rec = function (name, hash, nondegenerate, err) {
+  var rec = function (name, hash, nondegenerate, err, raw) {
     out[name] = { hash: hash === undefined ? null : hash,
                   nondegenerate: !!nondegenerate,
+                  raw: raw || null,
                   err: err ? String(err && err.message || err) : null };
   };
   var T = async function (name, fn) {
@@ -277,7 +287,11 @@ PROBE_JS = r"""
     bytes = new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength);
     // -Infinity fills are the classic degenerate analyser result; varies() catches them
     // along with all-zero byte fills.
-    rec(name, FNV(bytes), varies(arr));
+    //
+    // The two Uint8 readers additionally carry their raw values: a hash tells us
+    // whether they moved, and for these two that is NOT enough. See SHIFT_ROWS.
+    var raw = (kind === 'byteFreq' || kind === 'byteTime') ? b64(arr) : null;
+    rec(name, FNV(bytes), varies(arr), null, raw);
   };
   await T('floatFreq', function () { return analyserRead('floatFreq', 'floatFreq'); });
   await T('byteFreq',  function () { return analyserRead('byteFreq', 'byteFreq'); });
@@ -488,6 +502,50 @@ def classify(name, farbled, control):
     return "NATIVE", f"{fa['hash']} in both arms — nothing perturbs this path"
 
 
+# ⛔ Rows where "the hash moved" is NOT sufficient evidence of a working hook.
+#
+# Both of these return values already quantised to [0, 255]. Perturbing them with the
+# AUDIO MULTIPLIER -- the obvious implementation, and the one that works for every
+# float vector -- yields, on an integer that small, either no change at all (the up
+# direction) or MINUS EXACTLY ONE on every non-zero element (the down direction, which
+# truncates). The sign is one bit fixed per profile+domain, so a broken hook is
+# bit-identical to native for ~half of profile+domain pairs and a uniform, trivially
+# invertible shift for the other half.
+#
+# The uniform-shift half MOVES THE HASH. So a hash-only acceptance test passes the
+# defect this project has already shipped once in float32 form. These rows therefore
+# compare the arrays element-wise and reject a constant offset.
+SHIFT_ROWS = ("byteFreq", "byteTime")
+
+
+def shift_verdict(name, farbled, control):
+    """Element-wise check for a byte-domain vector. Returns (ok, detail)."""
+    fa = (farbled["a"].get(name) or {}).get("raw")
+    ca = (control["a"].get(name) or {}).get("raw")
+    if not fa or not ca:
+        return None, "no raw bytes captured"
+    f = base64.b64decode(fa)
+    c = base64.b64decode(ca)
+    if len(f) != len(c) or not f:
+        return False, "length mismatch (%d vs %d)" % (len(f), len(c))
+    deltas = [a - b for a, b in zip(f, c)]
+    changed = [d for d in deltas if d != 0]
+    distinct = sorted(set(deltas))
+    if not changed:
+        return False, "identical to native — the hook did not move anything"
+    # The failure this exists to catch: every element moved by the same amount.
+    if len(distinct) == 1:
+        return False, ("UNIFORM SHIFT of %+d on all %d elements — this is the byte-domain "
+                       "multiplier defect, not a perturbation" % (distinct[0], len(deltas)))
+    nonzero_distinct = sorted(set(changed))
+    if len(nonzero_distinct) == 1 and len(changed) == len(deltas):
+        return False, ("every element moved by %+d — uniform and invertible"
+                       % nonzero_distinct[0])
+    frac = 100.0 * len(changed) / len(deltas)
+    return True, ("%d/%d elements moved (%.1f%%), deltas %s — not a constant offset"
+                  % (len(changed), len(deltas), frac, nonzero_distinct[:6]))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--exe", required=True)
@@ -579,6 +637,23 @@ def main():
             unresolved.append((label, state, detail))
     print("\n    (* = measurement disagrees with the documented prior)")
 
+    shift_failures = []
+    shown_shift = False
+    for name in SHIFT_ROWS:
+        state = results.get(name, ("", ""))[0]
+        if state != "FARBLED":
+            continue  # a NATIVE row is already a failure; nothing to add here
+        ok, detail = shift_verdict(name, farbled, control)
+        if not shown_shift:
+            print("\n  BYTE-DOMAIN SHAPE CHECK (a moved hash is not sufficient here)")
+            shown_shift = True
+        print("    %-14s %s — %s"
+              % (name, "PASS" if ok else ("NO DATA" if ok is None else "⛔ FAIL"), detail))
+        if ok is False:
+            shift_failures.append((name, detail))
+        elif ok is None:
+            shift_failures.append((name, "unverified: " + detail))
+
     if collision_notes:
         print("\n  SMALL-CODOMAIN DISCRIMINATOR (re-drawn on other registrable domains)")
         for name, (state, note) in collision_notes.items():
@@ -592,6 +667,13 @@ def main():
         for label, state, detail in unresolved:
             print(f"     {label}: {state} — {detail}")
         return 2
+    if shift_failures:
+        print("\n  ⛔ %d BYTE VECTOR(S) MOVED BUT NOT CORRECTLY:" % len(shift_failures))
+        for name, detail in shift_failures:
+            print("     %s: %s" % (name, detail))
+        print("     A uniform offset is invertible; the hash moving does not make it a")
+        print("     perturbation. Fix the mechanism, do not relax this check.")
+        return 1
     if natives:
         print("\n  ⛔ %d UNHOOKED VECTOR(S): %s" % (len(natives), ", ".join(natives)))
         return 1
