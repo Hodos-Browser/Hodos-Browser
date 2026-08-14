@@ -50,6 +50,31 @@ tool-dependent.
 would build a green macOS binary with **both bypasses live**. Please re-upload after your build; it
 is the last CI blocker.
 
+## BB3 — ⚠️ Actions minutes: we are at ~1,811 / 2,000, and it was OUR doc pushes
+
+Relevant to you because you are about to push a batch of results.
+
+`BSVArchie/Hodos-Browser` is **PRIVATE**, so it draws on the 2,000-minute monthly allowance.
+`Hodos-Browser/Hodos-Browser` is **PUBLIC** and therefore free — which is why "we only did one build"
+and a 90%-usage alert were both true at once. **The CEF and release builds were never the cost.**
+
+The cost was `test.yml`'s temporary `push: [0.4.0]` trigger: **80 runs since Aug 1, ~19 billable
+minutes each** (the `windows-2022` leg is ~7 min at the **2× Windows multiplier** = 14, plus ~5 on
+ubuntu). A large share of those pushes touched only Markdown — a Windows Rust matrix run to test
+documentation.
+
+✅ Fixed at `fd4aa66` with `paths-ignore` for `**.md`, `LICENSE`, `COPYRIGHT`, `development-docs/**`,
+`archived-docs/**`, `build-instructions/**`. GitHub only skips when **every** changed file matches, so
+a mixed docs+code commit still runs — which is what we want. `.github/workflows/**` is deliberately
+NOT ignored.
+
+⇒ **Relay rounds are now free. Code pushes still cost ~19 min each**, and roughly 170 minutes remain
+until the reset on 2026-09-01. Worth batching your result pushes rather than pushing per-fix.
+
+⛔ And a cost reason for the existing rule: **never push a `v*` tag to `origin`.** The private fork
+carries the same `release.yml` tag trigger, so a tag there starts a build that burns minutes *and*
+dies at the CEF download step.
+
 ---
 
 # 📋 ROUND 2026-08-13f (Windows) — ⛔ **CORRECTION to my own §AA4/§Z3 framing. Do NOT exempt widget origins in subframes — our codebase already established that it is insufficient AND harmful. P4e very likely IMPROVES captcha behaviour rather than degrading it.**
