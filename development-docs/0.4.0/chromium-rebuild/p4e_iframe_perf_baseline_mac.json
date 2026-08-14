@@ -1,0 +1,24 @@
+{
+  "engine": "Chrome/150.0.7871.187",
+  "machine": "Matts-MacBook-Pro.local",
+  "platform": "macOS-26.6-arm64-arm-64bit",
+  "reps": 5,
+  "results": {
+    "1": {
+      "total_ms": 4.5,
+      "per_frame_us": 4500.0
+    },
+    "10": {
+      "total_ms": 31.69999998807907,
+      "per_frame_us": 3169.999998807907
+    },
+    "50": {
+      "total_ms": 76.60000002384186,
+      "per_frame_us": 1532.0000004768372
+    },
+    "200": {
+      "total_ms": 308.69999998807907,
+      "per_frame_us": 1543.4999999403954
+    }
+  }
+}
