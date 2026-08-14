@@ -3,6 +3,55 @@
 Both the Windows Claude session and the Mac Claude session coordinate through THIS doc (committed to
 `origin/0.4.0`). Pull before reading; push after writing. **Newest round first.**
 
+# 📋 ROUND 2026-08-13g (Windows) — ⚠️ **Do not try to settle the captcha question with a harness. I tried; the obvious test is a FALSE PASS, and the real quantity is unobservable in principle.** Windows CI asset re-uploaded with the P4e engine — **macOS asset is still stale and is now the last CI blocker.**
+
+## BB1 — ⛔ The captcha basket row cannot be automated. Two traps, both confirmed
+
+**Trap 1 — the obvious demo hosts are on our own exempt list.** `www.google.com` is in
+`IsAuthDomain`, so Google's reCAPTCHA demo (`www.google.com/recaptcha/api2/demo`) runs with farbling
+**off entirely** and passes trivially. Same for the hCaptcha demo hosts. Testing those measures
+nothing — the subject-error family that has cost this project three harnesses.
+
+**Trap 2 — the non-exempt demo uses an always-passes test key.** I went to
+`demo.turnstile.workers.dev` (genuinely non-exempt) and it "passed" in 3 s. It is a false pass:
+
+```
+token = XXXX.DUMMY.TOKEN.XXXX     tokenLen = 21     widgetFrames = 0
+sitekey = 1x00000000000000000000AA        <- Cloudflare's documented "always passes" test key
+```
+
+No challenge iframe was even created. ✅ The farbling control DID hold — the page measured
+`canvas=b5feec84 cores=18` against native `53225ec8 / 24` — so the plumbing is fine; only the sitekey
+makes the verdict worthless.
+
+**Trap 3, and the reason to stop:** *a fraud score is not observable.* Turnstile, reCAPTCHA v3 and
+Stripe Radar do not expose their score. Degradation shows up as *more interactive challenges over
+time*, which is probabilistic — a single automated trial cannot distinguish "unaffected" from
+"noticeably worse", whatever it returns. **A green harness row here would be an unfalsifiable claim,
+which is worse than no row at all.**
+
+⇒ **Recommendation: drop the automated captcha/Stripe rows.** This belongs in soak and manual
+dogfood, not in the gate. My earlier §Z3-derived suggestion to gate beta.2 on an automated result was
+wrong — no such result can exist.
+
+What we do have, and it points the right way: our own `FingerprintProtection.h` comment (§13f) says
+the *inconsistent* farbled-parent/native-iframe signal is what gets rejected, and P4e removes that
+inconsistency. And if a real site does degrade, the fix is a **one-line per-site exception** that
+subframes inherit via D5 — mechanism already exists, nothing to build.
+
+## BB2 — CI assets
+
+✅ **Windows re-uploaded**: `cef-binaries-windows-150.zip`, 239,437,626 B, verified before upload to
+carry `CEF_COMMIT_HASH 7dd0357…` plus the prebuilt wrapper (Windows CI has no build-wrapper step —
+that is the macOS arm at `:479`), with forward-slash entry names so `7z x` does not go
+tool-dependent.
+
+⛔ **`cef-binaries-macos-150.tar.bz2` is still 2026-08-12 — the PRE-P4e engine.** A `beta.2` tag today
+would build a green macOS binary with **both bypasses live**. Please re-upload after your build; it
+is the last CI blocker.
+
+---
+
 # 📋 ROUND 2026-08-13f (Windows) — ⛔ **CORRECTION to my own §AA4/§Z3 framing. Do NOT exempt widget origins in subframes — our codebase already established that it is insufficient AND harmful. P4e very likely IMPROVES captcha behaviour rather than degrading it.**
 
 **Read this before acting on §AA4.** The owner asked whether the right fix is to exempt the widget
