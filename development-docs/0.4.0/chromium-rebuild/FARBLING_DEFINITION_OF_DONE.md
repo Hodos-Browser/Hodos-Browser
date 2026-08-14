@@ -50,16 +50,18 @@ here", never "the perturbation failed".
 | R3 | Same-site cross-origin iframe | ❓ | **UNKNOWN** | — see §A.1 | — |
 | R4 | Cross-site iframe (OOPIF) | ✅ | MEASURED | `farbling_iframe_check.py` (strong S3) | reference-not-farbled guard |
 | R5 | Popup `window.open()` (origin-inheriting) | ✅ | MEASURED both OS | `farbling_subframe_check.py --vector popup` | ran RED pre-fix (exit 2) |
-| R6 | Popup navigated to a real URL | ✅ | CODE-READ | it is a top frame ⇒ R1 path | — owed |
+| R6 | Popup navigated to a real URL | ✅ | **MEASURED** (was CODE-READ) | `farbling_realm_matrix.py` | both arms VOID with farbling off |
 | R7 | **Dedicated worker** | ⛔ | **MEASURED on the shipping engine** (E1 closed 2026-08-14) | `farbling_worker_probe.py --auto` | control arm (opt-out) collapses main==worker; see A.4 |
-| R8 | Nested worker (worker → worker) | ❓ | UNKNOWN | — | — |
+| R8 | Nested worker (worker → worker) | ⛔ | **MEASURED** (was ❓) | `farbling_realm_matrix.py` | all realms VOID with farbling off |
 | R9 | Shared worker | ⛔ | CODE-READ | no install point exists | — |
 | R10 | Service worker | ⛔ | CODE-READ | no install point exists | — |
-| R11 | AudioWorklet / PaintWorklet / other worklets | ❓ | UNKNOWN | — | — |
-| R12 | Fenced frame | ❓ | UNKNOWN | `GetOutermostMainFrame()` should escape it | — |
-| R13 | Sandboxed iframe (opaque origin) | ❓ | UNKNOWN | gets top-frame key by construction | — |
-| R14 | `javascript:` / `document.write` document | ❓ | UNKNOWN | — | — |
-| R15 | Prerendered / bfcached page | ❓ | UNKNOWN | — | — |
+| R11a | **AudioWorklet** global scope | ✅ **no §B surface exists here** | **MEASURED** (was ❓) | `farbling_realm_matrix.py` — worklet reports `OffscreenCanvas=false, navigator=false` over its own `port` | page-side control proves the channel |
+| R11b | **PaintWorklet** global scope | ✅ **no §B surface exists here** | **MEASURED** (was ❓) | same, via the CDP console channel — see A.5 | page-side control line |
+| R12 | Fenced frame | ❓ | **UNKNOWN — and the container EXISTS** | see A.6 — **owner gate** | — |
+| R13 | Sandboxed iframe (opaque origin) | ✅ | **MEASURED** (was ❓) | `farbling_realm_matrix.py` — child == top frame's farbled value | VOID with farbling off |
+| R14a | `document.write` document | ✅ | **MEASURED** (was ❓) | `farbling_realm_matrix.py` | VOID with farbling off |
+| R14b | `javascript:` URL document | ✅ | **MEASURED** (was ❓) | `farbling_realm_matrix.py` | VOID with farbling off |
+| R15 | bfcache-restored page | ✅ | **MEASURED** (was ❓) | `farbling_realm_matrix.py` — and bfcache is **proven to have engaged**, see A.5 | VOID with farbling off |
 | R16 | Hodos internal UI (header, ~15 overlays) | ✅ **never farbled, by design** | MEASURED | localhost skip in `MaybeApplyHodosFarblingKey` | startup cost gate |
 
 ### A.1 — R3 is deliberately untestable by both existing harnesses
@@ -120,6 +122,78 @@ why this probe reports three vectors and not one.
 Both assertions were themselves shown to fire — engines differing, engine unreadable,
 opt-out missing, and farbled-arm-opted-out each refuse to render a verdict, while a clean
 pair passes through. They can only ever refuse, never turn a red into a green.
+
+### A.5 — E5 closed: how the remaining ❓ realms were settled, and the two instruments that lied
+
+All measured 2026-08-14 on `Chrome/150.0.7871.187` by **`farbling_realm_matrix.py`**.
+Every realm is judged **two-sidedly** — it must equal the top frame's *farbled* value to
+pass, not merely differ from native. The one-sided version would let a realm keyed on its
+**own** origin through, which is precisely the wrong-model outcome the design rejects.
+Realms are compared only against a reference taken **with the same probe in the same arm**,
+because a DOM-canvas hash and an `OffscreenCanvas` hash differ for ordinary reasons.
+
+Negative control: `--negative-control` runs both arms with farbling off, and all **7/7**
+realms then report VOID (the top-frame reference stops differing, so no realm can be
+judged) — the rig is shown to report the feature's absence.
+
+```
+references   dom: farbled=e865bafb  native=2fad2e1a
+R6  popup on a real URL     KEYED      e865bafb == top frame's farbled value
+R8  nested worker           UNKEYED    2fad2e1a == native
+R13 sandboxed iframe        KEYED      e865bafb
+R14a document.write         KEYED      e865bafb
+R14b javascript: URL        KEYED      e865bafb
+R15 bfcache restore         KEYED      e865bafb
+```
+
+⛔ **R15 needed a control or it would have been trivially green.** "Navigate away, come
+back, still farbled" is *also* satisfied by an ordinary reload, which takes the plain
+main-frame path and proves nothing about bfcache. The harness stamps
+`window.__hodos_bfcache_marker` before leaving and requires it to **survive** the back
+navigation — the same `LocalDOMWindow` being restored is what makes it a bfcache test at
+all. If the marker is lost the run reports "bfcache did NOT engage", which is a failure to
+*test*, not a failure of farbling.
+
+⛔ **Two instruments produced confident wrong answers and were caught by their own
+controls.** Both are worth naming because both looked fine:
+
+1. **`addModule()` rejection (PaintWorklet).** The probe asked each capability question as
+   "throw unless the API exists" and read the promise's fate. It reported
+   `OffscreenCanvas`, `navigator` **and `document`** all present in a
+   `PaintWorkletGlobalScope` — and `document` cannot be true there, which is the tell. A
+   forced-failure arm (a module body that *always* throws) confirmed it: **`addModule()`
+   resolved anyway**, so the observable had no negative direction and every answer it gave
+   was unfalsifiable. Discarded entirely.
+2. **The replacement had to carry its own control too.** `PaintWorkletGlobalScope` has no
+   `port`, no `postMessage` and no `fetch`, so the capability answer is captured over
+   CDP's console channel. But "no line arrived from the worklet" is indistinguishable from
+   "console is not forwarded out of that realm", so the page logs the same shape first.
+   With that control green, the worklet's own line reads `OffscreenCanvas=false,
+   navigator=false, document=false`.
+
+⇒ **R11 is not a gap in either half.** Neither worklet scope can read a §B surface at all,
+so there is nothing there to key. That is a stronger result than "unkeyed", and it is
+measured rather than assumed.
+
+### A.6 — ⚠️ R12 stays ❓, and the container is REAL — owner gate
+
+`HTMLFencedFrameElement`, `FencedFrameConfig`, `navigator.runAdAuction`,
+`window.sharedStorage` and `sharedStorage.selectURL` are **all present in this build**. So
+this is a live container, not an absent one, and per §G.3 it may not be called done,
+deferred, or shipped around on my say-so.
+
+Two things bound how much it matters:
+
+- A fenced frame is **not scriptable by its embedder** — that is its entire purpose. So it
+  is **not a page bypass** in the way R7 is. It is a tracker-visibility question, in the
+  same class as R4.
+- The P4e design already intends to cover it: D1 resolves `GetOutermostMainFrame()`
+  precisely *because* `GetMainFrame()` stops at inner pages and would key a fenced frame's
+  children on the fenced root rather than on what the user sees in the omnibox.
+
+Measuring it needs a config minted through Shared Storage / Protected Audience, which a
+plain local page cannot produce. **Owner decision required:** stand up that fixture, or
+accept R12 as a documented gap in the manner of R3 (§F).
 
 ### A.3 — why R9/R10 are genuinely harder (and not the same job)
 
@@ -215,12 +289,25 @@ Tie the wording to the coverage, so the claim cannot drift from reality.
 
 | Coverage | Permitted claim |
 |---|---|
-| Any realm ⛔ or ❓ that is **page-scriptable** | ❌ **No fingerprinting claim of any kind.** The protection is bypassable by the page it protects. |
-| All page-scriptable realms ✅; shared/service workers ⏸️ | "Fingerprint protection on pages and their frames. Background service workers are not yet covered." |
+| Any realm ⛔ or ❓ that is **page-scriptable**, **or any §B vector unhooked in a ✅ realm** | ❌ **No fingerprinting claim of any kind.** The protection is bypassable by the page it protects. |
+| All page-scriptable realms ✅ **and** every §B vector hooked in them; shared/service workers ⏸️ | "Fingerprint protection on pages and their frames. Background service workers are not yet covered." |
 | Every realm ✅ | "Fingerprint protection across all execution contexts." |
 
-**Today we are on row 1** — R7 dedicated workers is open and page-scriptable, so **beta.2 must
-not carry a fingerprinting claim.**
+⛔ **Row 1's condition was amended 2026-08-14, because as originally written the ladder
+could not see the gap we actually found.** It spoke only of *realms*. But
+`OffscreenCanvas.convertToBlob` is unhooked **and reachable on the main thread** — i.e.
+inside R1, a realm marked ✅. So a page needs no exotic container at all: three lines on
+the top-level document read out an unfarbled encoding of the same canvas that
+`getImageData` farbles. A realm-only ladder would have rated that as row 2. **A ✅ realm is
+only as covered as its least-covered vector.**
+
+**Today we are on row 1**, now for three independent reasons rather than one:
+
+1. **R7 dedicated workers** — ⛔ measured, page-scriptable.
+2. **R8 nested workers** — ⛔ measured, page-scriptable.
+3. **`OffscreenCanvas.convertToBlob`** — ⛔ measured, and reachable **in the main frame**.
+
+⇒ **beta.2 must not carry a fingerprinting claim.**
 
 ### D.1 — the three residuals any release note must state
 
@@ -231,26 +318,38 @@ not carry a fingerprinting claim.**
    party reads native values. ⚠️ **Unchanged from beta.1** — pre-P4e those frames were native
    too (unkeyed). Do not describe it as new; that would be inaccurate in the direction that
    costs the most trust.
-3. **Workers** — the only remaining unfarbled realm, and page-scriptable. This is the largest
-   residual and was **absent from the release-note ask entirely** until 2026-08-14.
+3. **Workers** — dedicated (R7) and nested (R8), both ⛔ **measured**, both page-scriptable.
+   This is the largest residual and was **absent from the release-note ask entirely** until
+   2026-08-14. Shared (R9) and service (R10) workers are separate and unsigned.
+4. ⚠️ **`OffscreenCanvas.convertToBlob`, in the main frame** — added 2026-08-14. Not a
+   worker-only issue and not a container issue: it is an unfarbled canvas readback on the
+   top-level document itself. **If the note claims canvas protection while this is open,
+   the claim is false on the most-cited vector in the feature.**
+
+⇒ the release-note ask is **four** residuals, not three. Each of 3 and 4 alone is
+sufficient to hold the claim at row 1.
 
 ---
 
 ## E. Ordered work list
 
-| # | Item | Blocks a claim? |
-|---|---|---|
-| E1 | Re-measure **R7** on the current engine → RED baseline | yes — no baseline, no meaningful green |
-| E2 | Implement **R7** dedicated-worker key inheritance (+ R8 free) | **yes** |
-| E3 | Hook `OffscreenCanvas.convertToBlob` | **yes** — E2 is incomplete without it |
-| E4 | Verify `getByte*` audio paths; hook if unfarbled | yes |
-| E5 | Measure R6, R8, R11–R15 → move each out of ❓ | yes for any page-scriptable one |
-| E6 | Owner decision on R9/R10 (defer vs implement) | no — ⏸️ is a valid end state |
-| E7 | Owner decision on WebGL renderer/vendor strings | no |
-| E8 | Release-note wording, all three §D.1 residuals | yes |
-| E9 | T6 regression basket + soak, both platforms | yes |
+| # | Item | Blocks a claim? | Status |
+|---|---|---|---|
+| E1 | Re-measure **R7** on the current engine → RED baseline | yes — no baseline, no meaningful green | ✅ **DONE** 2026-08-14 (§A.4) |
+| E2 | Implement **R7** dedicated-worker key inheritance (+ R8) | **yes** | Phase 1 |
+| E3 | Hook `OffscreenCanvas.convertToBlob` | **yes** — and it is *not* gated behind E2: it is reachable in the **main frame** today | Phase 1 |
+| E4 | Verify `getByte*` audio paths; hook if unfarbled | yes | ✅ **verified** — all three ⛔ (§B). Hook in Phase 1 |
+| E5 | Measure R6, R8, R11–R15 → move each out of ❓ | yes for any page-scriptable one | ✅ **DONE** except **R12** (§A.6, owner gate) |
+| E6 | Owner decision on R9/R10 (defer vs implement) | no — ⏸️ is a valid end state | **owner** |
+| E7 | Owner decision on WebGL renderer/vendor strings | no | **owner** |
+| E8 | Release-note wording, all three §D.1 residuals | yes | drafting |
+| E9 | T6 regression basket + soak, both platforms | yes | Phase 3 |
+| **E10** | **Owner decision on R12** — build a Shared-Storage fixture, or sign it as a documented gap | no, if signed | **owner** (new) |
 
 **E2 + E3 + E4 are one Blink patch and one build cycle.** Batch them; the build dominates.
+E4 is **three** hooks, not one — `getByteFrequencyData`, `getFloatTimeDomainData` and
+`getByteTimeDomainData` each go straight to `AnalyserHandler` and each must be shown to
+move.
 
 ---
 
@@ -263,6 +362,7 @@ A deferral is valid only with a signature and a date. An unsigned row is ⛔, no
 | R9 shared workers | pending | — | — | keying genuinely ambiguous |
 | R10 service workers | pending | — | — | no top frame; cross-site trap in §A.3 |
 | R3 same-site cross-origin iframe | **accepted as documented gap** | both sessions | 2026-08-13 | unmeasurable without a two-host server; R4 covers the model |
+| **R12 fenced frame** | pending | — | — | container **exists** in this build (§A.6); needs a Shared-Storage / Protected-Audience fixture to mint a config. Not embedder-scriptable, so not a page bypass |
 | B.1 non-farbled vectors | pending | — | — | scope boundary |
 
 ---
