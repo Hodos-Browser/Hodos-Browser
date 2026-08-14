@@ -112,21 +112,35 @@ jobs:
       
       # Download CEF binaries from the cef-binaries release.
       #
-      # CEF 150 ships as its OWN asset (cef-binaries-windows-150.zip) rather than
-      # replacing cef-binaries-windows.zip, because that filename is shared by every
-      # branch and main/staging are still on the pre-bootstrap M136 CMakeLists. Pointing
-      # the shared name at 150 would break their Windows build (CEF 150 dropped
-      # cef_sandbox.lib -> LNK1181). When 0.4.0 lands on main, collapse this back to the
-      # unversioned name and re-upload the M136 asset as 150.
+      # CEF 150 ships as its OWN asset rather than replacing cef-binaries-windows.zip,
+      # because that filename is shared by every branch and main/staging are still on the
+      # pre-bootstrap M136 CMakeLists. Pointing the shared name at 150 would break their
+      # Windows build (CEF 150 dropped cef_sandbox.lib -> LNK1181). When 0.4.0 lands on
+      # main, collapse this back to the unversioned name and re-upload the M136 asset.
+      #
+      # ⛔ THE ASSET NAME CARRIES THE ENGINE VERSION AND FORK SHA
+      # (cef-binaries-windows-<cefver>-g<sha>.zip), and BOTH arms follow this convention.
+      # UPLOAD A NEW NAME PER ENGINE — never `--clobber` an existing one.
+      #
+      # Why this is a rule and not a preference: on 2026-08-14 the Windows asset was
+      # re-uploaded to the SAME name with the P4e engine, which made the pre-P4e engine
+      # unretrievable by name and left a past CI run's inputs unreconstructible from this
+      # file alone. It only bites the day someone bisects a CI failure across engines —
+      # which is exactly the day it is expensive. macOS adopted versioning first; Windows
+      # followed. Keep both arms in step.
+      #
+      # ⚠️ A stale asset here is a SILENT failure: CI downloads the wrong engine, builds
+      # green, and ships a browser missing the fix the release exists for. After landing a
+      # fork change, re-upload BOTH assets and bump BOTH patterns below before tagging.
       - name: Download CEF binaries
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download cef-binaries --pattern "cef-binaries-windows-150.zip" --repo ${{ github.repository }}
+          gh release download cef-binaries --pattern "cef-binaries-windows-150.0.42-g7dd0357.zip" --repo ${{ github.repository }}
 
           echo "Extracting CEF binaries..."
-          7z x cef-binaries-windows-150.zip -y
-          del cef-binaries-windows-150.zip
+          7z x cef-binaries-windows-150.0.42-g7dd0357.zip -y
+          del cef-binaries-windows-150.0.42-g7dd0357.zip
 
           if (Test-Path "cef-binaries") {
             echo "CEF binaries extracted successfully"
@@ -444,10 +458,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # CEF 150 ships as its OWN asset (cef-binaries-macos-150.tar.bz2), mirroring the
-          # Windows arm at :125 and for the identical reason: the unversioned name is shared
-          # by every branch, and main/staging still build against the M136 asset. Repointing
-          # the shared name at 150 would break their macOS builds.
+          # CEF 150 ships as its OWN asset, mirroring the Windows arm and for the identical
+          # reason: the unversioned name is shared by every branch, and main/staging still
+          # build against the M136 asset. Repointing the shared name at 150 would break
+          # their macOS builds.
+          #
+          # ⛔ The name carries the engine version and fork SHA
+          # (cef-binaries-macos-<cefver>-g<sha>.tar.bz2). Upload a NEW name per engine;
+          # never --clobber. See the fuller note on the Windows arm for why.
           #
           # ⛔ Until 2026-08-12 this line pulled the UNVERSIONED asset — uploaded 2026-03-23,
           # i.e. M136. Because macOS has no bootstrap gate (unlike Windows, which dies at a
@@ -455,11 +473,11 @@ jobs:
           # AT ALL, indistinguishable from a working one unless the seed-rotation gate is run.
           # See cef-native/CLAUDE.md. Do not "simplify" this back to the shared name when
           # 0.4.0 lands on main — collapse it only when the M136 asset is re-uploaded as 150.
-          gh release download cef-binaries --pattern "cef-binaries-macos-150.tar.bz2" --repo ${{ github.repository }}
+          gh release download cef-binaries --pattern "cef-binaries-macos-150.0.42-g7dd0357.tar.bz2" --repo ${{ github.repository }}
 
           echo "Extracting CEF binaries..."
-          tar -xjf cef-binaries-macos-150.tar.bz2
-          rm cef-binaries-macos-150.tar.bz2
+          tar -xjf cef-binaries-macos-150.0.42-g7dd0357.tar.bz2
+          rm cef-binaries-macos-150.0.42-g7dd0357.tar.bz2
 
           # Handle nested directory — find and rename to cef-binaries
           if [ ! -d "cef-binaries" ]; then
