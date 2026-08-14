@@ -26,8 +26,28 @@ on:
   # Temporary: run on push to the active sprint branch so the pipeline gets
   # continuous smoke feedback now (workflow_dispatch only shows in the UI for
   # workflows on the default branch). Remove once ci.yml (pull_request gate) lands.
+  #
+  # ⚠️ THIS TRIGGER IS EXPENSIVE AND THE COST IS NOT OBVIOUS. BSVArchie/Hodos-Browser
+  # is PRIVATE, so it draws on the 2,000-minute monthly allowance (the release repo
+  # Hodos-Browser/Hodos-Browser is PUBLIC and therefore free — do not confuse the two).
+  # Each run bills ~19 minutes: the windows-2022 leg is ~7 min at the 2x Windows
+  # multiplier = 14, plus ~5 on ubuntu. Measured 2026-08-14: 80 runs since Aug 1 had
+  # consumed ~1,811 of 2,000 minutes, and a large share of those were pushes that
+  # touched only Markdown — a Windows Rust matrix run to test documentation.
+  #
+  # paths-ignore fixes that. Note GitHub only skips when EVERY changed file matches,
+  # so a mixed docs+code commit still runs, which is the behaviour we want.
+  # LICENSE and COPYRIGHT are listed explicitly: they have no extension, so `**.md`
+  # does not cover them.
   push:
     branches: [0.4.0]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - 'COPYRIGHT'
+      - 'development-docs/**'
+      - 'archived-docs/**'
+      - 'build-instructions/**'
 
 permissions:
   contents: read
