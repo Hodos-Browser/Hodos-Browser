@@ -53,8 +53,8 @@ here", never "the perturbation failed".
 | R6 | Popup navigated to a real URL | ✅ | **MEASURED** (was CODE-READ) | `farbling_realm_matrix.py` | both arms VOID with farbling off |
 | R7 | **Dedicated worker** | ✅ **CLOSED by P4f** | **MEASURED** on `g9ccef04` | `farbling_worker_probe.py --auto` — exit **1 → 0**, same box, same command | control arm collapses main==worker; see A.4/A.7 |
 | R8 | Nested worker (worker → worker) | ✅ **CLOSED by P4f** | **MEASURED** on `g9ccef04` | `farbling_realm_matrix.py` — canvas2d, WebGL **and** convertToBlob all keyed | 8/8 realms VOID with farbling off |
-| R9 | Shared worker | ⛔ | CODE-READ | no install point exists | — |
-| R10 | Service worker | ⛔ | CODE-READ | no install point exists | — |
+| R9 | Shared worker | ⏸️ **owner-signed 2026-08-14** (§F) | CODE-READ | no install point exists; keying genuinely ambiguous | same-origin only |
+| R10 | Service worker | ⏸️ **owner-signed 2026-08-14** (§F) | CODE-READ | no install point exists; no top frame, cross-site trap §A.3 | same-origin only |
 | R11a | **AudioWorklet** global scope | ✅ **no §B surface exists here** | **MEASURED** (was ❓) | `farbling_realm_matrix.py` — worklet reports `OffscreenCanvas=false, navigator=false` over its own `port` | page-side control proves the channel |
 | R11b | **PaintWorklet** global scope | ✅ **no §B surface exists here** | **MEASURED** (was ❓) | same, via the CDP console channel — see A.5 | page-side control line |
 | R12 | Fenced frame | ❓ | **UNKNOWN — and the container EXISTS** | see A.6 — **owner gate** | — |
