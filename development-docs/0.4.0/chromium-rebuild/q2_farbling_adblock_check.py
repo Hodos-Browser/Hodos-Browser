@@ -651,9 +651,13 @@ def main():
         print("  %s  %s" % (k, "PASS" if results[k] else "FAIL"))
     print("\n  NOT COVERED by this script (need a human watching a video):")
     print("    T3 YouTube AdblockResponseFilter adPlacements rename")
-    print("    T4 CreepJS worker column == window column  ⛔ KNOWN RED — all workers AND")
-    print("       all cross-site iframes are unfarbled (P4e deferred, both MEASURED);")
-    print("       record as an accepted gap, do not chase")
+    print("    T4 CreepJS worker column == window column  ⛔ KNOWN RED — WORKERS are")
+    print("       unfarbled (MEASURED); record as an accepted gap, do not chase.")
+    print("       NOTE: the iframe half of this note is OBSOLETE as of P4e (fork pin")
+    print("       7dd035739, 2026-08-14). Frames are now farbled and keyed on the top")
+    print("       frame — same-origin about:blank iframes AND window.open popups proven")
+    print("       by farbling_subframe_check.py, cross-site by farbling_iframe_check.py")
+    print("       S3. Workers are the ONLY remaining unfarbled realm.")
     return 0 if all(results.values()) else 1
 
 
