@@ -332,7 +332,11 @@ def _posix_scope_dir(exe_path):
 
 
 def _posix_procs_under(target_dir):
-    """[(pid, argv_string)] for every process whose argv[0] sits under target_dir.
+    """[(pid, argv_string)] for every process belonging to the bundle at target_dir.
+
+    Membership is decided by the KERNEL's exec path first, and by argv[0]'s prefix only as
+    an additional catch for service children launched through a relative path via the
+    bundle (see the second match below). argv[0] never *removes* a match.
 
     ⛔⛔ This replaced `pgrep -fc <exe>`, which was silently broken on macOS and is the
     reason this docstring is long. THREE separate defects, each individually fatal:
@@ -379,6 +383,29 @@ def _posix_procs_under(target_dir):
         # cannot answer (e.g. the process died between ps and here).
         probe = exe if exe else args
         if probe.startswith(prefix):
+            out.append((pid, args))
+            continue
+        # ⛔ AND the kernel path alone MISSES the browser's own service children, which
+        # is how an orphan survives a kill and then breaks the NEXT boot.
+        #
+        # The shell launches the wallet and the adblock engine through a relative path
+        # that traverses the bundle:
+        #
+        #   argv[0] .../HodosBrowser.app/Contents/MacOS/../../../../../../rust-wallet/...
+        #   kernel  /Users/<u>/Hodos-Browser/rust-wallet/target/release/hodos-wallet
+        #
+        # so argv[0] sits under the bundle textually while proc_pidpath resolves OUTSIDE
+        # it. They are genuinely part of this bundle's process tree -- and they inherit
+        # the browser's CDP LISTENING SOCKET. Measured 2026-08-14: after a kill they held
+        # 127.0.0.1:9322 with the browser gone, the next launch could not bind it, and the
+        # harness died with "CDP <port> never came up" against perfectly good code.
+        #
+        # This is purely ADDITIVE -- the kernel path stays primary and decides first, so
+        # the 2026-08-10 finding (argv[0] is untrustworthy because a RELATIVE argv[0] makes
+        # a real process invisible) is not reintroduced: argv[0] here can only ADD matches,
+        # never remove one. It also cannot widen scope to the installed production browser,
+        # whose argv[0] starts with /Applications and matches no dev-bundle prefix.
+        if args.split(" ", 1)[0].startswith(prefix):
             out.append((pid, args))
     return out
 
