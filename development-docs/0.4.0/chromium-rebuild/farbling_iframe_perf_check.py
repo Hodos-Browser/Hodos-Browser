@@ -129,6 +129,47 @@ BUILD_JS = r"""
 })()
 """
 
+# P4f adds a second creation path with a farbling step on it: a dedicated worker now
+# reads its parent's key at GlobalScopeCreationParams time. That is a plain in-process
+# copy of 32 bytes with no browser round-trip, so it SHOULD be free -- which is exactly
+# the kind of claim this project has been burned by asserting instead of measuring.
+#
+# ⛔ Same baseline rule as the iframe vector: the pre-change engine can only be measured
+# ONCE. Take it with --save-baseline BEFORE swapping cef-binaries.
+#
+# The loop waits for each worker to REPLY, not merely to be constructed. `new Worker()`
+# returns immediately and the global scope is built asynchronously on another thread, so
+# timing only the constructor would measure the enqueue and none of the work -- a flat
+# line that cannot see a regression, which is this file's whole cautionary tale in its
+# other half.
+WORKER_JS = r"""
+(async function () {
+  var N = %(n)d;
+  var src = 'self.onmessage=function(){self.postMessage(1);};';
+  var url = URL.createObjectURL(new Blob([src], {type: 'text/javascript'}));
+  var made = [], sink = 0;
+  var t0 = performance.now();
+  for (var i = 0; i < N; i++) {
+    var w = new Worker(url);
+    made.push(w);
+    sink += await new Promise(function (res) {
+      var done = false;
+      var fin = function (v) { if (!done) { done = true; res(v); } };
+      setTimeout(function () { fin(0); }, 10000);
+      w.onmessage = function () { fin(1); };
+      w.onerror = function () { fin(0); };
+      w.postMessage(0);
+    });
+  }
+  var t1 = performance.now();
+  for (var j = 0; j < made.length; j++) { try { made[j].terminate(); } catch (e) {} }
+  URL.revokeObjectURL(url);
+  // `sink` is the number of workers that actually REPLIED. A run where workers failed to
+  // start would otherwise look beautifully fast; the host asserts sink == n.
+  return JSON.stringify({n: N, ms: t1 - t0, sink: sink});
+})()
+"""
+
 
 def boot(args):
     port = cdp_port_for(args.profile, args.dev)
@@ -173,12 +214,13 @@ class Cdp:
         self.ws = websocket.create_connection(ws_url, timeout=timeout)
         self._id = 1000
 
-    def evaluate(self, expression):
+    def evaluate(self, expression, await_promise=False):
         self._id += 1
         want = self._id
         self.ws.send(json.dumps({"id": want, "method": "Runtime.evaluate",
                                  "params": {"expression": expression,
-                                            "returnByValue": True}}))
+                                            "returnByValue": True,
+                                            "awaitPromise": await_promise}}))
         # Drain unsolicited events until our own reply arrives.
         while True:
             msg = json.loads(self.ws.recv())
@@ -192,16 +234,26 @@ class Cdp:
             pass
 
 
-def run_one(cdp, n):
-    got = cdp.evaluate(BUILD_JS % {"n": n})
+VECTOR_JS = {"iframe": BUILD_JS, "worker": WORKER_JS}
+
+
+def run_one(cdp, n, vector="iframe"):
+    got = cdp.evaluate(VECTOR_JS[vector] % {"n": n},
+                       await_promise=(vector == "worker"))
     res = (got or {}).get("result", {}).get("result", {})
     if "value" not in res:
-        raise SystemExit("iframe-build probe returned nothing for N=%d: %s"
-                         % (n, json.dumps(got)[:300]))
-    return json.loads(res["value"])
+        raise SystemExit("%s-build probe returned nothing for N=%d: %s"
+                         % (vector, n, json.dumps(got)[:300]))
+    val = json.loads(res["value"])
+    # The worker vector's sink counts workers that actually REPLIED. A run where they
+    # failed to start would otherwise be reported as impressively fast.
+    if vector == "worker" and val.get("sink") != n:
+        raise SystemExit("worker probe: only %s/%s workers replied — the measurement is "
+                         "of failures, not of worker startup" % (val.get("sink"), n))
+    return val
 
 
-def measure(port, excluded, sweep, reps):
+def measure(port, excluded, sweep, reps, vector="iframe"):
     tab = goto_host(port, excluded)
     cdp = Cdp(tab["webSocketDebuggerUrl"])
     out = {}
@@ -209,11 +261,11 @@ def measure(port, excluded, sweep, reps):
         # One discarded warm-up per run: the first iframe in a fresh renderer pays lazy
         # initialisation that has nothing to do with farbling, and folding it into N=1
         # would inflate the very number the whole comparison pivots on.
-        run_one(cdp, 1)
+        run_one(cdp, 1, vector)
         for n in sweep:
             samples = []
             for _ in range(reps):
-                samples.append(run_one(cdp, n)["ms"])
+                samples.append(run_one(cdp, n, vector)["ms"])
                 time.sleep(0.3)
             ms = statistics.median(samples)
             out[n] = {"total_ms": ms, "per_frame_us": (ms * 1000.0) / n,
@@ -241,6 +293,9 @@ def main():
     ap.add_argument("--settle", type=float, default=8.0)
     ap.add_argument("--reps", type=int, default=5)
     ap.add_argument("--sweep", default=",".join(str(n) for n in DEFAULT_SWEEP))
+    ap.add_argument("--vector", choices=("iframe", "worker"), default="iframe",
+                    help="iframe = P4e frame-creation cost; worker = P4f worker-start "
+                         "cost. Baselines are per-vector and NOT interchangeable.")
     ap.add_argument("--save-baseline", help="write results here (do this BEFORE rebuilding)")
     ap.add_argument("--baseline", help="compare against a previously saved baseline")
     ap.add_argument("--max-delta-us", type=float, default=50.0,
@@ -256,8 +311,9 @@ def main():
     try:
         eng = engine_version(port)
         excluded = snapshot_targets(port)
-        print("=== iframe-creation cost on %s (engine %s) ===" % (HOST, eng))
-        results = measure(port, excluded, sweep, args.reps)
+        print("=== %s-creation cost on %s (engine %s) ==="
+              % (args.vector, HOST, eng))
+        results = measure(port, excluded, sweep, args.reps, args.vector)
     finally:
         kill_browser_by_path(args.exe)
 
@@ -295,6 +351,12 @@ def main():
             base = json.load(fh)
         print("\nBASELINE COMPARISON  (baseline engine %s, this engine %s)"
               % (base.get("engine", "?"), eng))
+        base_vector = base.get("vector", "iframe")
+        if base_vector != args.vector:
+            print("  REFUSED — baseline is for the %r vector, this run is %r. Frame "
+                  "creation and worker startup are different costs and their floors are "
+                  "not interchangeable." % (base_vector, args.vector))
+            return 2
         if base.get("machine") != platform.node():
             print("    ⚠️ baseline was recorded on %r, this is %r — cross-machine"
                   % (base.get("machine"), platform.node()))
@@ -356,6 +418,11 @@ def main():
     if args.save_baseline:
         payload = {
             "engine": eng,
+            # ⛔ Tag the vector. Without it an iframe baseline and a worker baseline are
+            # indistinguishable JSON, and comparing a worker run against an iframe floor
+            # would produce a confident number about nothing. The comparison path asserts
+            # this matches before it reports a delta.
+            "vector": args.vector,
             "machine": platform.node(),
             "platform": platform.platform(),
             "reps": args.reps,

@@ -1,0 +1,21 @@
+{
+  "engine": "Chrome/150.0.7871.187",
+  "machine": "Archbold",
+  "platform": "Windows-10-10.0.26200-SP0",
+  "reps": 3,
+  "results": {
+    "1": {
+      "total_ms": 25.099999994039536,
+      "per_frame_us": 25099.999994039536
+    },
+    "10": {
+      "total_ms": 56.19999998807907,
+      "per_frame_us": 5619.999998807907
+    },
+    "50": {
+      "total_ms": 280.09999999403954,
+      "per_frame_us": 5601.999999880791
+    }
+  },
+  "vector": "worker"
+}
