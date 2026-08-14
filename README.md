@@ -156,6 +156,8 @@ HodosBrowser/
 
 ## License
 
-MIT — see [`LICENSE`](./LICENSE).
+MIT — see [`LICENSE`](./LICENSE). The code is open source. Three notices sit alongside the grant rather than inside it, so that `LICENSE` stays the unmodified MIT text and is detected as such:
 
-Third-party components are not relicensed by that grant: Chromium and the Chromium Embedded Framework carry their own terms, as do the bundled adblock filter lists and the disconnect.me entity list. See [`COPYRIGHT`](./COPYRIGHT).
+- [`TRADEMARK.md`](./TRADEMARK.md) — "Hodos", "Hodos Browser", and the logo are trademarks of Marston Enterprises. MIT grants rights to the code, not to the name or branding. Forks must rename and rebrand. Same approach as Firefox and Brave.
+- [`NOTICE.md`](./NOTICE.md) — this build includes a **1000-satoshi service fee** to a Marston Enterprises address on every outgoing transaction (backup-token transactions excepted), which funds development. Forks must either redirect it or disclose it.
+- [`COPYRIGHT`](./COPYRIGHT) — third-party components are not relicensed by the MIT grant: Chromium and the Chromium Embedded Framework carry their own terms, as do the bundled adblock filter lists and the disconnect.me entity list.

@@ -4,6 +4,16 @@ HodosBrowser is released as open source under the MIT License. The full grant,
 including the warranty disclaimer, is in the LICENSE file at the root of this
 repository — LICENSE is authoritative for all licensing questions.
 
+Two notices accompany that grant and are kept in separate files so that LICENSE
+remains the unmodified MIT text:
+
+  - TRADEMARK.md — "Hodos", "Hodos Browser", and the Hodos logo are trademarks
+    of Marston Enterprises. The MIT grant covers the code, not the name or
+    branding; forks must rename and rebrand.
+  - NOTICE.md — this Software, as distributed by Marston Enterprises, includes
+    a 1000-satoshi service fee on every outgoing transaction (backup-token
+    transactions excepted). Forks must redirect or disclose it.
+
 Third-party components carry their own licenses and are NOT relicensed by the
 grant above. In particular, the Chromium Embedded Framework and Chromium itself
 are governed by their own terms, and the bundled filter lists and the
