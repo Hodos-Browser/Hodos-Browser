@@ -51,7 +51,7 @@ here", never "the perturbation failed".
 | R4 | Cross-site iframe (OOPIF) | ✅ | MEASURED | `farbling_iframe_check.py` (strong S3) | reference-not-farbled guard |
 | R5 | Popup `window.open()` (origin-inheriting) | ✅ | MEASURED both OS | `farbling_subframe_check.py --vector popup` | ran RED pre-fix (exit 2) |
 | R6 | Popup navigated to a real URL | ✅ | CODE-READ | it is a top frame ⇒ R1 path | — owed |
-| R7 | **Dedicated worker** | ⛔ | MEASURED (pre-P4e) | `farbling_worker_probe.py` | **re-measure on current engine** |
+| R7 | **Dedicated worker** | ⛔ | **MEASURED on the shipping engine** (E1 closed 2026-08-14) | `farbling_worker_probe.py --auto` | control arm (opt-out) collapses main==worker; see A.4 |
 | R8 | Nested worker (worker → worker) | ❓ | UNKNOWN | — | — |
 | R9 | Shared worker | ⛔ | CODE-READ | no install point exists | — |
 | R10 | Service worker | ⛔ | CODE-READ | no install point exists | — |
@@ -84,6 +84,43 @@ perf question, no keying ambiguity. Nested workers (R8) inherit transitively for
 this is a **Blink patch** and joins the per-bump maintenance budget. That is the real cost, and
 it is the only reason this is not trivially free.
 
+### A.4 — E1 closed: R7's RED baseline on the engine we actually ship
+
+The prior R7 measurement was macOS, fork `c63654654` — two engines and one OS away from
+what ships. Re-measured **2026-08-14, Windows, `Chrome/150.0.7871.187` (fork `7dd0357`)**:
+
+```
+FARBLED arm   main   canvas=e865bafb  cores=10  mem=32
+              worker canvas=2fad2e1a  cores=24  mem=32   <- NATIVE
+CONTROL arm   main   canvas=2fad2e1a  cores=24  mem=32
+              worker canvas=2fad2e1a  cores=24  mem=32
+```
+
+All four controls green: both arms on the same engine; the opt-out verified **off disk**
+in each arm; farbling-off collapses main==worker (so the two `OffscreenCanvas` paths do
+render identically and a difference really does mean farbling); and the main thread is
+demonstrably farbled (`2fad2e1a → e865bafb`). `cores` carries the finding independently of
+canvas (`10` on the main thread vs the native `24` in the worker).
+
+⚠️ `mem` is `32` everywhere here — that is the §B.2 draw collision, not evidence. It is
+why this probe reports three vectors and not one.
+
+**Two subject assertions were added to the probe before this run, and neither is optional:**
+
+1. **Engine.** The owner's *installed* browser holds CDP **9222** while a `--dev` build
+   holds **9322**. The port was a bare int with no engine check, so one wrong flag would
+   have measured the shipped pre-P4e engine and produced a RED that says nothing about the
+   build under test — the same defect class as the harness that drove an overlay.
+2. **The opt-out actually landed.** The control arm's entire meaning is "farbling is off
+   here". A silently-failed settings edit (the natural hand-edit, a bare `false` instead of
+   `{"enabled": false}`, is ignored) makes *both* arms farbled runs, in which `main ==
+   worker` holds for the ordinary reason and the probe prints a confident verdict about
+   nothing.
+
+Both assertions were themselves shown to fire — engines differing, engine unreadable,
+opt-out missing, and farbled-arm-opted-out each refuse to render a verdict, while a clean
+pair passes through. They can only ever refuse, never turn a red into a green.
+
 ### A.3 — why R9/R10 are genuinely harder (and not the same job)
 
 - **R9 shared worker:** many documents under *different* top frames may connect to one worker.
@@ -99,19 +136,50 @@ Both are reachable **same-origin only**, so the bypass is narrower than R7's.
 
 ## B. Vector coverage — which surfaces are actually perturbed
 
+**Every row below was re-measured on 2026-08-14** against engine `Chrome/150.0.7871.187`
+(fork `7dd0357`, Windows) by **`farbling_vector_matrix.py`** — one browser session, each
+vector judged on its own evidence. Negative control: `--negative-control` runs both arms
+with farbling off, and the run's own positive control then reports `NATIVE`, i.e. the rig
+demonstrably reports the feature's *absence* rather than its presence. **No row in this
+table is a code read any more.**
+
 | Vector | Hook | Covered | Evidence | Gap |
 |---|---|---|---|---|
 | Canvas 2D `getImageData` | `BaseRenderingContext2D::getImageDataInternal` | ✅ | MEASURED | — (shared base ⇒ OffscreenCanvas too) |
 | Canvas `toDataURL` | `HTMLCanvasElement::ToDataURLInternal` | ✅ | MEASURED | — |
-| Canvas `toBlob` | `HTMLCanvasElement::toBlob` | ✅ | CODE-READ | test owed |
-| **`OffscreenCanvas.convertToBlob`** | — | ⛔ | CODE-READ | **unhooked.** `HTMLCanvasElement` does not exist in workers, so a worker can encode an unfarbled image even once R7 lands. Brave's published API list names this same endpoint. |
+| Canvas `toBlob` | `HTMLCanvasElement::toBlob` | ✅ | **MEASURED** (was CODE-READ) | — `92a26986` native → `a1fb54de` farbled |
+| **`OffscreenCanvas.convertToBlob`** | — | ⛔ | **MEASURED** (was CODE-READ) | **unhooked, confirmed.** `92a26986` in *both* arms — byte-identical to `toBlob`'s **native** output, so the two endpoints encode the same image and only `toBlob` is perturbed. Reachable **on the main thread today**, so this is not gated behind R7. |
 | WebGL `readPixels` (WebGL1 + 2) | `WebGLRenderingContextBase::ReadPixelsHelper` | ✅ | MEASURED | — |
 | WebAudio `AudioBuffer.getChannelData` | `AudioBuffer::getChannelData` | ✅ | MEASURED | bindings overload only, deliberately |
-| WebAudio `AnalyserNode.getFloatFrequencyData` | `AnalyserNode` | ✅ | MEASURED | — |
-| **`AnalyserNode.getByteFrequencyData`** | — | ❓ | CODE-READ | **suspected unhooked** — Blink converts from FFT magnitudes directly rather than calling the hooked float path. **Verify before claiming audio coverage.** |
-| **`AnalyserNode.getFloat/ByteTimeDomainData`** | — | ❓ | CODE-READ | same suspicion |
-| `navigator.deviceMemory` | `NavigatorBase` | ✅ | MEASURED | shared base ⇒ `WorkerNavigator` too |
-| `navigator.hardwareConcurrency` | `NavigatorBase` | ✅ | MEASURED | reduce-only, floored at 2 |
+| WebAudio `AnalyserNode.getFloatFrequencyData` | `AnalyserNode::getFloatFrequencyData` | ✅ | MEASURED | — |
+| **`AnalyserNode.getByteFrequencyData`** | — | ⛔ | **MEASURED** (was ❓) | **unhooked, confirmed.** `b680346b` in both arms |
+| **`AnalyserNode.getFloatTimeDomainData`** | — | ⛔ | **MEASURED** (was ❓) | **unhooked, confirmed.** `f522dfc7` in both arms |
+| **`AnalyserNode.getByteTimeDomainData`** | — | ⛔ | **MEASURED** (was ❓) | **unhooked, confirmed.** `57085a52` in both arms |
+| `navigator.deviceMemory` | `NavigatorBase` | ✅ | MEASURED | shared base ⇒ `WorkerNavigator` too. ⚠️ see B.2 |
+| `navigator.hardwareConcurrency` | `NavigatorBase` | ✅ | MEASURED | reduce-only, floored at 2 (`24 → 10`) |
+
+⛔ The three analyser rows are **one gap, not three**: `getByteFrequencyData` and both
+time-domain readers each go straight to `AnalyserHandler` and never touch the hooked float
+path. They are listed separately because §G.2 forbids deferring a group, and because a fix
+must be shown to move each one.
+
+### B.2 — ⛔ the small-codomain trap: `deviceMemory` measured NATIVE and was **not** a bug
+
+The first run of `farbling_vector_matrix.py` reported `navigator.deviceMemory` as an
+**unhooked vector**. It is not. `FarbleDeviceMemory` *draws* from `{4, 8, 16, 32}`, this
+machine's native value is `32`, and the draw for `example.com` came out `32` — so a fully
+live hook produced farbled == native. One domain in four does this.
+
+The discriminator, now permanent in the harness: re-draw the scalar on **other registrable
+domains** (the key is `HMAC(seed, registrable_domain)`), which resolved it immediately —
+`example.net=16`, `example.org=8`, `iana.org=32`. Agreement on one domain is a coin flip;
+agreement on four is 1 in 256.
+
+⚠️ **This is the §D "green while broken" attack question firing in the opposite
+direction** — a *false ⛔* that would have sent a whole build after a bug that does not
+exist. Hash-valued vectors cannot do this (codomain 2^32); only small-codomain scalars
+need the control, and only they carry it. **Any future scalar vector must ship the same
+discriminator.**
 
 ### B.1 — deliberately NOT farbled (scope boundary, not an oversight)
 
