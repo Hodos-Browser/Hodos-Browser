@@ -51,8 +51,8 @@ here", never "the perturbation failed".
 | R4 | Cross-site iframe (OOPIF) | ✅ | MEASURED | `farbling_iframe_check.py` (strong S3) | reference-not-farbled guard |
 | R5 | Popup `window.open()` (origin-inheriting) | ✅ | MEASURED both OS | `farbling_subframe_check.py --vector popup` | ran RED pre-fix (exit 2) |
 | R6 | Popup navigated to a real URL | ✅ | **MEASURED** (was CODE-READ) | `farbling_realm_matrix.py` | both arms VOID with farbling off |
-| R7 | **Dedicated worker** | ⛔ | **MEASURED on the shipping engine** (E1 closed 2026-08-14) | `farbling_worker_probe.py --auto` | control arm (opt-out) collapses main==worker; see A.4 |
-| R8 | Nested worker (worker → worker) | ⛔ | **MEASURED** (was ❓) | `farbling_realm_matrix.py` | all realms VOID with farbling off |
+| R7 | **Dedicated worker** | ✅ **CLOSED by P4f** | **MEASURED** on `g9ccef04` | `farbling_worker_probe.py --auto` — exit **1 → 0**, same box, same command | control arm collapses main==worker; see A.4/A.7 |
+| R8 | Nested worker (worker → worker) | ✅ **CLOSED by P4f** | **MEASURED** on `g9ccef04` | `farbling_realm_matrix.py` — canvas2d, WebGL **and** convertToBlob all keyed | 8/8 realms VOID with farbling off |
 | R9 | Shared worker | ⛔ | CODE-READ | no install point exists | — |
 | R10 | Service worker | ⛔ | CODE-READ | no install point exists | — |
 | R11a | **AudioWorklet** global scope | ✅ **no §B surface exists here** | **MEASURED** (was ❓) | `farbling_realm_matrix.py` — worklet reports `OffscreenCanvas=false, navigator=false` over its own `port` | page-side control proves the channel |
@@ -175,6 +175,61 @@ controls.** Both are worth naming because both looked fine:
 so there is nothing there to key. That is a stronger result than "unkeyed", and it is
 measured rather than assumed.
 
+### A.7 — P4f: R7 and R8 CLOSED, measured red → green on one box
+
+Built at fork `9ccef044f` (`CEF 150.0.43-7871.3576+g9ccef04`, Chromium unchanged at
+`150.0.7871.187`), 2026-08-14.
+
+⛔ **The Chromium version does NOT identify this engine.** `7dd0357` and `9ccef04` are both
+Chromium `150.0.7871.187`, so `engine_version()` — which every harness uses as its subject
+assertion — proves only that two *arms* are the same build. It cannot prove *which* build,
+and a run against a stale binary would report the pre-fix engine string and look entirely
+correct. The chain that does identify it, verified by artifact:
+
+- `cef-binaries/include/cef_version.h` → `150.0.43-7871.3576+g9ccef04`
+- `cef-native/build/bin/Release/libcef.dll` **md5-identical** to the distribution's
+  (`8c761ddc87d3461dabb7e03087975d8f`) ⇒ the app provably loads the P4f engine.
+
+A `cef_version()` helper now exists in `farbling_seed_rotation_check.py` for this reason.
+
+```
+R7  farbled arm   main   canvas=e865bafb cores=10     worker canvas=e865bafb cores=10  ✅
+    control arm   main   canvas=2fad2e1a cores=24     worker canvas=2fad2e1a cores=24
+    -> farbling_worker_probe.py --auto: exit 1 BEFORE, exit 0 AFTER. Same box, same command.
+
+R8  nested worker      canvas KEYED  webgl KEYED  convertToBlob KEYED
+T3  worker in a subframe canvas KEYED  webgl KEYED  convertToBlob KEYED
+```
+
+⭐ **T3 is the row that would have caught the wrong keying model.** A worker created *inside*
+a subframe takes its key from the **iframe's** window, not the top frame's. It must still come
+out equal to the **top frame's** farbled value. A same-origin subframe keyed on its own origin
+would look correct on every other test in the suite — the two origins are identical — and is
+caught here only because the assertion is `== the top frame's farbled value` rather than
+`!= native`.
+
+**T11 — nothing else moved.** All seven pre-existing main-frame values are byte-identical to
+the baseline recorded before the build (`PLAN_P4f…` §5.1), with `convertToBlob` the only
+change. That matters because C3 was edited: `HodosFarbleSnapshot` moved out of an anonymous
+namespace so `convertToBlob` could share one definition. A pure code move that alters a single
+hash is not a code move — it is a regression on the vector users are already enrolled on.
+
+**T12 — worker-start perf: no detectable regression, and the honest caveat.** Marginal cost
+`-407.5 µs` against the pre-build baseline. ⚠️ But the first budget was **50 µs, inherited
+from the iframe vector, and it is ~6× below this instrument's noise floor**: eight runs of the
+identical command spanned `-236.7 … +1289.8 µs` (sd ≈ 520 µs). Inflating the budget until it
+passed would have been a treadmill — every fresh sample widened the estimate. The fix was to
+the *instrument*: the marginal metric now runs N=10→N=50 instead of N=1→N=50, so both ends are
+multi-worker and per-worker fixed costs cancel. Post-fix runs straddle zero
+(`+155, −325, −310 µs`). **Read the gate for what it is:** at this resolution it excludes a
+gross regression only. P4f's worker-side addition is a 32-byte memcpy, six orders of magnitude
+below the floor, so PASS here never means "measured to cost nothing".
+
+**Other gates on the same build:** rotation **PASS** (A→B→A round trip
+`0e4e6251/16ac1f08/0e4e6251`) with its negative control RED on 7 assertions; battery **7/7**;
+auth exemption **PASS** 5/6 attempted with the non-exempt control differing; both matrix
+harnesses' negative controls green (8/8 realms VOID; positive control NATIVE).
+
 ### A.6 — ⚠️ R12 stays ❓, and the container is REAL — owner gate
 
 `HTMLFencedFrameElement`, `FencedFrameConfig`, `navigator.runAdAuction`,
@@ -222,13 +277,13 @@ table is a code read any more.**
 | Canvas 2D `getImageData` | `BaseRenderingContext2D::getImageDataInternal` | ✅ | MEASURED | — (shared base ⇒ OffscreenCanvas too) |
 | Canvas `toDataURL` | `HTMLCanvasElement::ToDataURLInternal` | ✅ | MEASURED | — |
 | Canvas `toBlob` | `HTMLCanvasElement::toBlob` | ✅ | **MEASURED** (was CODE-READ) | — `92a26986` native → `a1fb54de` farbled |
-| **`OffscreenCanvas.convertToBlob`** | — | ⛔ | **MEASURED** (was CODE-READ) | **unhooked, confirmed.** `92a26986` in *both* arms — byte-identical to `toBlob`'s **native** output, so the two endpoints encode the same image and only `toBlob` is perturbed. Reachable **on the main thread today**, so this is not gated behind R7. |
+| **`OffscreenCanvas.convertToBlob`** | `OffscreenCanvas::convertToBlob` (P4f) | ✅ **CLOSED by P4f** | **MEASURED** | `92a26986` native → `a1fb54de` farbled — i.e. now **equal to `toBlob`'s farbled value**, which is the right answer: same image, same perturbation, same encoder. Green in the **main frame and in a worker**. |
 | WebGL `readPixels` (WebGL1 + 2) | `WebGLRenderingContextBase::ReadPixelsHelper` | ✅ | MEASURED | — |
 | WebAudio `AudioBuffer.getChannelData` | `AudioBuffer::getChannelData` | ✅ | MEASURED | bindings overload only, deliberately |
 | WebAudio `AnalyserNode.getFloatFrequencyData` | `AnalyserNode::getFloatFrequencyData` | ✅ | MEASURED | — |
-| **`AnalyserNode.getByteFrequencyData`** | — | ⛔ | **MEASURED** (was ❓) | **unhooked, confirmed.** `b680346b` in both arms |
-| **`AnalyserNode.getFloatTimeDomainData`** | — | ⛔ | **MEASURED** (was ❓) | **unhooked, confirmed.** `f522dfc7` in both arms |
-| **`AnalyserNode.getByteTimeDomainData`** | — | ⛔ | **MEASURED** (was ❓) | **unhooked, confirmed.** `57085a52` in both arms |
+| **`AnalyserNode.getByteFrequencyData`** | `AnalyserNode` + `PerturbBytes` (P4f) | ✅ **CLOSED by P4f** | **MEASURED** | `b680346b` → `d266f578`; **39/1024 elements moved (3.8%), deltas ∈ {−1,+1}** — see B.3 |
+| **`AnalyserNode.getFloatTimeDomainData`** | `AnalyserNode` + `PerturbAudioSamples` (P4f) | ✅ **CLOSED by P4f** | **MEASURED** | `f522dfc7` → `919d4979` (float path — the multiplier is correct *here*) |
+| **`AnalyserNode.getByteTimeDomainData`** | `AnalyserNode` + `PerturbBytes` (P4f) | ✅ **CLOSED by P4f** | **MEASURED** | `57085a52` → `000947b2`; **60/2048 moved (2.9%), deltas ∈ {−1,+1}** — see B.3 |
 | `navigator.deviceMemory` | `NavigatorBase` | ✅ | MEASURED | shared base ⇒ `WorkerNavigator` too. ⚠️ see B.2 |
 | `navigator.hardwareConcurrency` | `NavigatorBase` | ✅ | MEASURED | reduce-only, floored at 2 (`24 → 10`) |
 
@@ -254,6 +309,34 @@ direction** — a *false ⛔* that would have sent a whole build after a bug tha
 exist. Hash-valued vectors cannot do this (codomain 2^32); only small-codomain scalars
 need the control, and only they carry it. **Any future scalar vector must ship the same
 discriminator.**
+
+### B.3 — ⛔ the byte analyser paths needed a DIFFERENT mechanism, and the obvious one is broken
+
+`getByteFrequencyData` and `getByteTimeDomainData` return values already quantised to
+`[0, 255]`. The audio multiplier `x * (1 ± δ)`, `δ ∈ [2⁻²³, 2e-7]`, on an integer that small:
+
+```
+b * (1 + δ)  ->  NEVER moves the byte   (b would have to exceed 5,000,000)
+b * (1 - δ)  ->  ALWAYS drops it by 1   (the store truncates toward zero)
+```
+
+and the sign is **one bit, fixed per profile+domain for the whole session**. So hooking these
+the way `getFloatFrequencyData` is hooked — the obvious fix, and the one that works for every
+float vector — produces a coin flip between **bit-identical to native** (~50% of
+profile+domain pairs, no protection at all) and **every non-zero byte minus exactly one**
+(~50%, a uniform structure-preserving shift a fingerprinter inverts with a subtraction).
+
+⚠️ **That is the C5 float32 defect one type-width along** — the one that shipped in every
+release the feature ever appeared in — and it would have been reintroduced *by copying C5's
+own fix*. They therefore use `HodosSessionCache::PerturbBytes`: a keyed low-bit flip on ~3% of
+entries, the same construction `PerturbPixels` uses on the other quantised surface we farble,
+with a separate `Stream` each. `getFloatTimeDomainData` is float32 and keeps the multiplier.
+
+⛔ **And the acceptance test needed an extra assertion, or the defect would have passed it.**
+The uniform −1 shift *moves the hash*, so "farbled ≠ native" is satisfied by the broken
+version. `farbling_vector_matrix.py` compares the two arrays **element-wise** and rejects a
+constant offset. Measured on the fix: `39/1024` and `60/2048` elements moved, deltas ∈ {−1,+1}
+— the low-bit-flip signature, not a shift.
 
 ### B.1 — deliberately NOT farbled (scope boundary, not an oversight)
 
@@ -301,13 +384,20 @@ the top-level document read out an unfarbled encoding of the same canvas that
 `getImageData` farbles. A realm-only ladder would have rated that as row 2. **A ✅ realm is
 only as covered as its least-covered vector.**
 
-**Today we are on row 1**, now for three independent reasons rather than one:
+**As of 2026-08-14 (P4f, fork `g9ccef04`) we are on ROW 2.** All three reasons that held us
+on row 1 are measured closed:
 
-1. **R7 dedicated workers** — ⛔ measured, page-scriptable.
-2. **R8 nested workers** — ⛔ measured, page-scriptable.
-3. **`OffscreenCanvas.convertToBlob`** — ⛔ measured, and reachable **in the main frame**.
+1. ~~R7 dedicated workers~~ — ✅ keyed (§A.7)
+2. ~~R8 nested workers~~ — ✅ keyed, plus T3 (worker inside a subframe) ✅
+3. ~~`OffscreenCanvas.convertToBlob`~~ — ✅ farbled, main frame **and** worker
 
-⇒ **beta.2 must not carry a fingerprinting claim.**
+and every §B vector is now measured FARBLED, so the amended row-1 clause is satisfied too.
+
+⇒ **beta.2 MAY claim:** *"Fingerprint protection on pages and their frames. Background
+service workers are not yet covered."*
+
+⚠️ **Row 3 is not available and will not be soon.** R9/R10 are owner-signed ⏸️ (§F) and R12 is
+still ❓. Wording draft: `RELEASE_NOTE_farbling_draft.md`, **owner approval required**.
 
 ### D.1 — the three residuals any release note must state
 
@@ -336,14 +426,14 @@ sufficient to hold the claim at row 1.
 | # | Item | Blocks a claim? | Status |
 |---|---|---|---|
 | E1 | Re-measure **R7** on the current engine → RED baseline | yes — no baseline, no meaningful green | ✅ **DONE** 2026-08-14 (§A.4) |
-| E2 | Implement **R7** dedicated-worker key inheritance (+ R8) | **yes** | Phase 1 |
-| E3 | Hook `OffscreenCanvas.convertToBlob` | **yes** — and it is *not* gated behind E2: it is reachable in the **main frame** today | Phase 1 |
-| E4 | Verify `getByte*` audio paths; hook if unfarbled | yes | ✅ **verified** — all three ⛔ (§B). Hook in Phase 1 |
+| E2 | Implement **R7** dedicated-worker key inheritance (+ R8) | **yes** | ✅ **DONE** — fork `9ccef04` (§A.7) |
+| E3 | Hook `OffscreenCanvas.convertToBlob` | **yes** | ✅ **DONE** — green in main frame **and** worker |
+| E4 | Verify `getByte*` audio paths; hook if unfarbled | yes | ✅ **DONE** — all three hooked, two mechanisms (§B.3) |
 | E5 | Measure R6, R8, R11–R15 → move each out of ❓ | yes for any page-scriptable one | ✅ **DONE** except **R12** (§A.6, owner gate) |
 | E6 | Owner decision on R9/R10 (defer vs implement) | no — ⏸️ is a valid end state | ✅ **SIGNED 2026-08-14** — both deferred (§F) |
 | E7 | Owner decision on WebGL renderer/vendor strings | no | **owner** |
-| E8 | Release-note wording, all three §D.1 residuals | yes | drafting |
-| E9 | T6 regression basket + soak, both platforms | yes | Phase 3 |
+| E8 | Release-note wording, **four** §D.1 residuals | yes | ✅ **drafted** — `RELEASE_NOTE_farbling_draft.md`, **owner approval owed** |
+| E9 | T6 regression basket + soak, both platforms | yes | Windows gates green (§A.7); **macOS owed** |
 | **E10** | **Owner decision on R12** — build a Shared-Storage fixture, or sign it as a documented gap | no, if signed | **owner** (new) |
 
 **E2 + E3 + E4 are one Blink patch and one build cycle.** Batch them; the build dominates.

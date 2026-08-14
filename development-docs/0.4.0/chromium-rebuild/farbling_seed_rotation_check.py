@@ -540,8 +540,43 @@ def wait_for_cdp(port, timeout=90):
 # CDP target selection — id-based, chrome excluded once at startup
 # --------------------------------------------------------------------------------------
 
+def cef_version(binaries_root=None):
+    """The CEF version string, read from the HEADERS the app was built against.
+
+    ⛔ WHY THIS EXISTS, and why engine_version() is not a substitute.
+
+    engine_version() reports the CHROMIUM version over CDP. Two different Hodos engines
+    can carry the SAME Chromium version -- P4e (7dd0357) and P4f (9ccef04) are both
+    Chromium 150.0.7871.187, differing only in our Blink patches. So engine_version()
+    proves two arms are the same build; it CANNOT prove which build that is, and a
+    post-fix run against a stale binary would report the pre-fix engine string and look
+    entirely correct.
+
+    CEF_VERSION does distinguish them (`+g7dd0357` vs `+g9ccef04`), so a harness that
+    needs to assert WHICH engine it measured reads this. It is a build-artifact check,
+    not a runtime one -- pair it with an mtime/size check on the libcef the app actually
+    loaded if you need the full chain.
+    """
+    if binaries_root is None:
+        here = os.path.dirname(os.path.abspath(__file__))
+        binaries_root = os.path.abspath(
+            os.path.join(here, "..", "..", "..", "cef-binaries"))
+    path = os.path.join(binaries_root, "include", "cef_version.h")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("#define CEF_VERSION "):
+                    return line.split('"')[1]
+    except OSError:
+        pass
+    return "unknown"
+
+
 def engine_version(port):
     """The engine string CDP reports, e.g. 'Chrome/150.0.7871.187'.
+
+    ⚠️ This is the CHROMIUM version and it does NOT identify our engine -- see
+    cef_version() above. Do not use it alone to assert you measured a rebuilt binary.
 
     Carried into the attestation token so the release gate can reject a result produced
     against the wrong engine. On M136 the farbling patches do not exist at all, so a

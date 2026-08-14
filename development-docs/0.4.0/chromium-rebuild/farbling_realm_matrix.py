@@ -212,7 +212,7 @@ REALM_JS = r"""
       }
       if (!ok) { put('r6_popup_url', null, 'popup never committed the r6 URL'); }
       else {
-        var v = w.eval(DOM);
+        var v = await w.eval(DOM);   // async probe -> MUST await, or we store a Promise
         v.href = w.location.href;      // subject assertion, checked host-side
         put('r6_popup_url', v);
       }
@@ -374,8 +374,10 @@ REALM_JS = r"""
     var sf = document.createElement('iframe');
     sf.setAttribute('sandbox', 'allow-scripts');
     sf.srcdoc = '<script>window.addEventListener("message",function(ev){' +
-                'var r; try { r=(0,eval)(ev.data); } catch(e){ r={err:String(e)}; }' +
-                'ev.source.postMessage(JSON.stringify(r),"*");});' +
+                'try { Promise.resolve((0,eval)(ev.data)).then(function(r){' +
+                'ev.source.postMessage(JSON.stringify(r),"*");},function(e){' +
+                'ev.source.postMessage(JSON.stringify({err:String(e)}),"*");}); }' +
+                'catch(e){ ev.source.postMessage(JSON.stringify({err:String(e)}),"*"); }});' +
                 'parent.postMessage("ready","*");<\/script>';
     document.body.appendChild(sf);
     var sv = await new Promise(function (resolve) {
@@ -406,7 +408,7 @@ REALM_JS = r"""
     d.open();
     d.write('<!doctype html><html><body><p>hodos r14</p></body></html>');
     d.close();
-    var wv2 = wf.contentWindow.eval(DOM);
+    var wv2 = await wf.contentWindow.eval(DOM);
     wv2.href = wf.contentWindow.location.href;
     put('r14_docwrite', wv2);
     wf.remove();
@@ -418,7 +420,7 @@ REALM_JS = r"""
     jf.src = 'javascript:"<!doctype html><body>hodos r14b</body>"';
     document.body.appendChild(jf);
     await new Promise(function (r) { setTimeout(r, 800); });
-    var jv = jf.contentWindow.eval(DOM);
+    var jv = await jf.contentWindow.eval(DOM);
     jv.href = jf.contentWindow.location.href;
     put('r14_javascript', jv);
     jf.remove();
@@ -586,7 +588,7 @@ def run_r15(port, excluded, stamp):
         # NOT a failure of farbling -- a failure to test it. Report it as such.
         return None, ("bfcache did NOT engage (marker %r lost), so this would have "
                       "measured an ordinary reload" % info.get("marker"))
-    val = eval_in_tab(port, excluded, DOM_PROBE, await_promise=False)
+    val = eval_in_tab(port, excluded, DOM_PROBE, await_promise=True)
     return val, None
 
 
@@ -646,8 +648,23 @@ def classify(key, kind, farbled, control):
     if got is None:
         # A realm with no canvas API at all is a real answer about that realm, but it is
         # not "unkeyed" -- it is "cannot read this surface here".
-        has = fv.get("has") or {}
-        return "NO-SURFACE", ("realm has no OffscreenCanvas/navigator to read "
+        #
+        # ⛔ BUT ONLY IF THE PROBE ACTUALLY RAN. "The API is absent" and "my measurement
+        # never arrived" both surface as a missing hash, and treating them alike would
+        # turn every harness bug into a clean pass. The discriminator is the `has` map:
+        #   has.OffscreenCanvas == False  -> the probe ran and reported the API absent
+        #   has.OffscreenCanvas missing   -> nothing ran; `value` is a husk
+        # This is not hypothetical. Making the probe async broke exactly this: five DOM
+        # realms captured a Promise instead of a result and reported NO-SURFACE with an
+        # EMPTY has map, which would otherwise have read as "document.write documents
+        # have no canvas" -- an absurd conclusion the harness would have stated
+        # confidently. It was caught because `None` and `False` print differently.
+        has = fv.get("has")
+        if not has or "OffscreenCanvas" not in has:
+            return "PROBE-FAILED", ("no result reached the harness (has=%r, err=%r) -- "
+                                    "this is a measurement failure, NOT a finding about "
+                                    "the realm" % (has, fv.get("err")))
+        return "NO-SURFACE", ("MEASURED: realm exposes no readable surface "
                               "(OffscreenCanvas=%s navigator=%s)"
                               % (has.get("OffscreenCanvas"), has.get("navigator")))
     if got == farbled_ref:
@@ -730,7 +747,9 @@ def main():
         print("  %s %-40s %-13s %-9s %s" % (flag, label, state, expect, detail[:44]))
         if state == "UNKEYED":
             unkeyed.append(label)
-        elif state not in ("KEYED",):
+        elif state not in ("KEYED", "NO-SURFACE"):
+            # NO-SURFACE is a terminal ANSWER (measured: nothing readable lives here), so
+            # it is not "unresolved". PROBE-FAILED, NOISY and INVESTIGATE still are.
             unresolved.append((label, state, detail))
     print("\n    (* = measurement disagrees with the documented prior)")
 
