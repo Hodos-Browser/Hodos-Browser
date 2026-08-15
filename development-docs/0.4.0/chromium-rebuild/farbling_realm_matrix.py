@@ -68,6 +68,7 @@ except ImportError:
 
 from farbling_seed_rotation_check import (  # noqa: E402
     engine_version,
+    require_engine,
     kill_browser_by_path,
     launch_browser,
     set_site_enabled,
@@ -76,6 +77,7 @@ from farbling_seed_rotation_check import (  # noqa: E402
 from farbling_cross_profile_check import cdp_port_for, profile_dir  # noqa: E402
 from farbling_worker_probe import (  # noqa: E402
     optout_state,
+    page_targets,
     resolve_tab,
     snapshot_targets,
 )
@@ -561,6 +563,55 @@ def navigate(port, excluded, url, want, timeout=90):
     return False
 
 
+def go_back_and_diagnose(port, excluded, wait=25):
+    """history.back() on a PERSISTENT socket with Page.enable, capturing Chromium's own
+    account of why bfcache was or was not used.
+
+    ⛔ Why this is not decoration. R15's harness can only ever report "the marker was
+    lost", which is the symptom of a dozen different causes and is indistinguishable
+    from a harness bug. Chromium emits `Page.backForwardCacheNotUsed` carrying
+    `notRestoredExplanations` — the actual blocklist reasons. That turns "R15 is
+    untestable here" into "R15 is untestable here BECAUSE X", which is the difference
+    between an unmeasured cell and a measured platform finding.
+
+    ⚠️ Note one likely X: a CDP client attached to the page is itself a documented
+    bfcache blocker. If that is the reason, R15 is not measurable by ANY CDP harness on
+    this platform, and saying so is the honest result — not a pass, and not a defect.
+    """
+    t = resolve_tab(port, excluded)
+    reasons = []
+    try:
+        ws = websocket.create_connection(t["webSocketDebuggerUrl"], timeout=30)
+    except Exception as e:
+        return "could not open a socket to diagnose: %s" % e
+    try:
+        ws.send(json.dumps({"id": 300, "method": "Page.enable"}))
+        ws.send(json.dumps({"id": 301, "method": "Runtime.evaluate",
+                            "params": {"expression": "history.back()",
+                                       "returnByValue": True}}))
+        ws.settimeout(3)
+        end = time.time() + wait
+        while time.time() < end:
+            try:
+                m = json.loads(ws.recv())
+            except Exception:
+                continue
+            if m.get("method") == "Page.backForwardCacheNotUsed":
+                p = m.get("params", {})
+                expl = p.get("notRestoredExplanations") or []
+                for e in expl:
+                    reasons.append("%s/%s" % (e.get("type"), e.get("reason")))
+                if not expl:
+                    reasons.append("notUsed, no explanations given")
+                break
+    finally:
+        try:
+            ws.close()
+        except Exception:
+            pass
+    return ", ".join(reasons) if reasons else ""
+
+
 def run_r15(port, excluded, stamp):
     """example.com -> mark -> example.org -> history.back() -> read marker + probe."""
     if not navigate(port, excluded, URL, HOST):
@@ -568,7 +619,7 @@ def run_r15(port, excluded, stamp):
     eval_in_tab(port, excluded, BF_MARK_JS % stamp, await_promise=False)
     if not navigate(port, excluded, AWAY_URL, "example.org"):
         return None, "could not navigate away"
-    eval_in_tab(port, excluded, "history.back()", await_promise=False)
+    bf_reasons = go_back_and_diagnose(port, excluded)
     deadline = time.time() + 60
     while time.time() < deadline:
         time.sleep(1.5)
@@ -585,9 +636,12 @@ def run_r15(port, excluded, stamp):
     if HOST not in (info.get("href") or ""):
         return None, "wrong subject after back: %s" % info.get("href")
     if info.get("marker") != ("hodos-%s" % stamp):
-        # NOT a failure of farbling -- a failure to test it. Report it as such.
+        # NOT a failure of farbling -- a failure to test it. Report it as such, WITH the
+        # reason: "bfcache did not engage" is a dead end, "bfcache did not engage because
+        # X" is a finding. Chromium is willing to say which X.
         return None, ("bfcache did NOT engage (marker %r lost), so this would have "
-                      "measured an ordinary reload" % info.get("marker"))
+                      "measured an ordinary reload. Chromium's reason: %s"
+                      % (info.get("marker"), bf_reasons or "no explanation emitted"))
     val = eval_in_tab(port, excluded, DOM_PROBE, await_promise=True)
     return val, None
 
@@ -606,9 +660,51 @@ def boot(args, port, pdir, farbling_on):
     time.sleep(args.settle)
 
 
+def absorb_stray_targets(port, excluded, subject_id, label=""):
+    """Exclude every page target except the pinned subject tab.
+
+    ⛔ macOS keeps a closed popup's target ALIVE. Measured 2026-08-15: after the R6
+    popup calls window.close(), `w.closed` is true and the opener still sees it as
+    closed, but the CDP page target persists indefinitely (>15 s) and the browser
+    behind it still evaluates JS and renders. `resolve_tab` then sees two candidates
+    and the run dies with "ambiguous tab target" partway through the matrix.
+
+    Windows retires the target, which is why this harness ran there and not here.
+    Absorbing strays is the platform-independent fix: the subject is the tab we
+    pinned, and anything else a realm probe leaves behind is by definition not it.
+    """
+    strays = [t for t in page_targets(port)
+              if t["id"] not in excluded and t["id"] != subject_id]
+    if strays:
+        print("    absorbed %d stray target(s)%s: %s"
+              % (len(strays), (" after " + label) if label else "",
+                 ", ".join(t.get("url", "?")[:48] for t in strays)))
+        excluded |= {t["id"] for t in strays}
+    return excluded
+
+
 def arm(args, port, pdir, farbling_on, label):
     boot(args, port, pdir, farbling_on)
     excluded = snapshot_targets(port, args.settle)
+    # Pin the subject NOW, while resolve_tab is still unambiguous, so a realm that
+    # leaks a target cannot make us measure the wrong document later.
+    subject_id = resolve_tab(port, excluded)["id"]
+
+    # ⛔ R15 RUNS FIRST, AND THE ORDER IS LOAD-BEARING ON macOS.
+    #
+    # R15 needs bfcache to actually engage. macOS keeps a window.open() popup ALIVE after
+    # window.close() (see absorb_stray_targets), and a live popup is a related active
+    # content in the same browsing-context group -- which is a bfcache blocker. So running
+    # R6 first silently disqualified R15 from ever being measurable here.
+    #
+    # Measured 2026-08-15, one variable, same tab:
+    #     no popup opened      -> bfcache ENGAGED, no blockers
+    #     popup opened+closed  -> BLOCKED, Circumstantial/RelatedActiveContentsExist
+    #     + CDP target reaped  -> STILL BLOCKED (/json/close does not retire it)
+    # ⇒ this is not a bfcache defect and not a farbling result; it is an ordering
+    # constraint. Do NOT move R15 back below the realm probe to "group the realms".
+    r15val, r15err = run_r15(port, excluded, "a" if farbling_on else "b")
+
     if not navigate(port, excluded, URL, HOST):
         raise SystemExit("could not reach %s" % URL)
     expr = REALM_JS % {"oc": json.dumps(OC_PROBE), "dom": json.dumps(DOM_PROBE),
@@ -616,9 +712,10 @@ def arm(args, port, pdir, farbling_on, label):
     raw = eval_in_tab(port, excluded, expr, wait=180)
     if not raw:
         raise SystemExit("realm probe returned nothing")
+    # R5/R6 both open popups; on macOS their targets outlive window.close().
+    excluded = absorb_stray_targets(port, excluded, subject_id, "the realm probe")
     data = json.loads(raw)
     data["paintworklet"] = probe_paint_worklet(port, excluded)
-    r15val, r15err = run_r15(port, excluded, "a" if farbling_on else "b")
     data["realms"]["r15_bfcache"] = {"value": r15val, "err": r15err}
     data["engine"] = engine_version(port)
     data["optout"] = optout_state(pdir, HOST)
@@ -688,6 +785,11 @@ def main():
     ap.add_argument("--negative-control", action="store_true",
                     help="both arms farbling-OFF; the top-frame reference must then stop "
                          "differing and every realm verdict must become VOID.")
+    ap.add_argument("--expect-cef", default=None,
+                    help="REFUSE to run unless CEF_VERSION contains this (e.g. +g9ccef04). "
+                         "engine_version() cannot tell P4e from P4f — both are Chromium "
+                         "150.0.7871.187 — so this is the only subject assertion that "
+                         "identifies WHICH build was measured.")
     args = ap.parse_args()
 
     port = cdp_port_for(args.profile, args.dev)
@@ -695,6 +797,7 @@ def main():
     original = optout_state(pdir, HOST)
 
     print("== farbling realm matrix (§A) ==")
+    require_engine(args.exe, expect=args.expect_cef, label="realm matrix subject")
     if args.negative_control:
         print("  ⚠️ NEGATIVE CONTROL: both arms farbling-OFF; expecting VOID everywhere")
 

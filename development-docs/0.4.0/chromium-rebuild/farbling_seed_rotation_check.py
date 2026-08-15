@@ -572,6 +572,107 @@ def cef_version(binaries_root=None):
     return "unknown"
 
 
+def _macho_uuid(path):
+    """LC_UUID of a Mach-O, via dwarfdump. None if unreadable."""
+    try:
+        out = subprocess.run(["dwarfdump", "--uuid", path], capture_output=True,
+                             text=True, timeout=120)
+    except Exception:
+        return None
+    for line in out.stdout.splitlines():
+        if line.startswith("UUID:"):
+            return line.split()[1]
+    return None
+
+
+def _app_framework_binary(exe):
+    """<...>/HodosBrowser.app/Contents/MacOS/HodosBrowser -> the CEF framework it loads."""
+    if not exe:
+        return None
+    contents = os.path.dirname(os.path.dirname(os.path.abspath(exe)))
+    fw = os.path.join(contents, "Frameworks", "Chromium Embedded Framework.framework",
+                      "Chromium Embedded Framework")
+    return fw if os.path.exists(fw) else None
+
+
+def engine_identity(exe=None, binaries_root=None):
+    """WHICH engine is this, tied to the binary the app actually loads.
+
+    ⛔ cef_version() alone is NOT sufficient, and the reason is the very failure it
+    exists to prevent. It reads `cef-binaries/include/cef_version.h` -- a header in the
+    STAGING tree. Restage cef-binaries without refreshing the app bundle's framework
+    (the shell rebuild + helper copy is a separate step, and on this project it has been
+    forgotten before) and the header says P4f while the app still loads P4e. The check
+    then reports the engine you INTENDED and the run looks correct: a false green of
+    exactly the shape §FF2 warns about, produced by the guard against it.
+
+    So the assertion has two halves:
+      1. the staged header names the engine, and
+      2. the framework INSIDE THE APP BUNDLE is the same binary as the staged distrib.
+
+    ⛔ On macOS half 2 may NOT be md5. The bundle's copy is ad-hoc signed in place, so it
+    differs from the distrib by design -- measured 1.3 MB smaller on the P4e build. That
+    is Windows' method (md5 libcef.dll == md5 distrib) and it is invalid here. LC_UUID
+    survives signing and stripping and is the macOS equivalent; it is strictly stronger
+    than md5 because it also ties the dSYM in.
+    """
+    if binaries_root is None:
+        here = os.path.dirname(os.path.abspath(__file__))
+        binaries_root = os.path.abspath(
+            os.path.join(here, "..", "..", "..", "cef-binaries"))
+    info = {"cef_version": cef_version(binaries_root), "staged_uuid": None,
+            "app_uuid": None, "chain_ok": None, "why": ""}
+
+    staged = os.path.join(binaries_root, "Release",
+                          "Chromium Embedded Framework.framework",
+                          "Chromium Embedded Framework")
+    if sys.platform == "darwin":
+        info["staged_uuid"] = _macho_uuid(staged) if os.path.exists(staged) else None
+        appfw = _app_framework_binary(exe)
+        info["app_uuid"] = _macho_uuid(appfw) if appfw else None
+        if info["staged_uuid"] and info["app_uuid"]:
+            info["chain_ok"] = (info["staged_uuid"] == info["app_uuid"])
+            info["why"] = ("staged framework == app bundle framework (LC_UUID %s)"
+                           % info["app_uuid"] if info["chain_ok"] else
+                           "⛔ app bundle framework %s != staged %s -- the app is NOT "
+                           "running the staged engine; restage/rebuild before trusting "
+                           "any result" % (info["app_uuid"], info["staged_uuid"]))
+        else:
+            info["why"] = ("could not read both LC_UUIDs (staged=%s app=%s)"
+                           % (staged if os.path.exists(staged) else "MISSING",
+                              _app_framework_binary(exe) or "MISSING"))
+    else:
+        info["why"] = "non-darwin: use md5(app libcef.dll) == md5(distrib) per §FF2"
+    return info
+
+
+def require_engine(exe=None, binaries_root=None, expect=None, label="subject"):
+    """HARD REFUSAL on engine identity. Returns the identity dict, or exits non-zero.
+
+    Windows asked (§FF6.5) whether cef_version() should be a hard refusal in the shared
+    harnesses rather than a helper. It should. A subject assertion that cannot tell the
+    builds under test apart is not a subject assertion -- and after P4e/P4f, engine_version()
+    cannot, because both are Chromium 150.0.7871.187.
+
+    This can only ever REFUSE, never turn a red into a green.
+    """
+    info = engine_identity(exe, binaries_root)
+    print("    engine: CEF_VERSION=%s" % info["cef_version"])
+    if info["cef_version"] == "unknown":
+        raise SystemExit("%s REFUSED: cannot read CEF_VERSION -- the run cannot say "
+                         "WHICH engine it measured" % label)
+    if expect and expect not in info["cef_version"]:
+        raise SystemExit("%s REFUSED: CEF_VERSION %r does not contain expected %r"
+                         % (label, info["cef_version"], expect))
+    if sys.platform == "darwin":
+        if info["chain_ok"] is None:
+            raise SystemExit("%s REFUSED: %s" % (label, info["why"]))
+        if not info["chain_ok"]:
+            raise SystemExit("%s REFUSED: %s" % (label, info["why"]))
+        print("    engine: %s" % info["why"])
+    return info
+
+
 def engine_version(port):
     """The engine string CDP reports, e.g. 'Chrome/150.0.7871.187'.
 

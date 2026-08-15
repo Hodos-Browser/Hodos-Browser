@@ -71,6 +71,7 @@ except ImportError:
 
 from farbling_seed_rotation_check import (  # noqa: E402
     engine_version,
+    require_engine,
     kill_browser_by_path,
     launch_browser,
     read_settings,
@@ -557,6 +558,11 @@ def main():
                     help="run BOTH arms with farbling OFF. Every row must then come out "
                          "NATIVE and the positive control must FAIL — proving this "
                          "harness reports the feature's absence rather than its presence.")
+    ap.add_argument("--expect-cef", default=None,
+                    help="REFUSE to run unless CEF_VERSION contains this (e.g. +g9ccef04). "
+                         "engine_version() cannot tell P4e from P4f — both are Chromium "
+                         "150.0.7871.187 — so this is the only subject assertion that "
+                         "identifies WHICH build was measured.")
     args = ap.parse_args()
 
     port = cdp_port_for(args.profile, args.dev)
@@ -564,6 +570,7 @@ def main():
     original = optout_state(pdir, HOST)
 
     print("== farbling vector matrix (§B) ==")
+    require_engine(args.exe, expect=args.expect_cef, label="vector matrix subject")
     if args.negative_control:
         print("  ⚠️ NEGATIVE CONTROL: both arms farbling-OFF; expecting the run to go RED")
 

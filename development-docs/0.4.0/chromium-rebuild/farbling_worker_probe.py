@@ -109,6 +109,7 @@ except ImportError:
 # shape, the profile-derived CDP port).
 from farbling_seed_rotation_check import (  # noqa: E402
     engine_version,
+    require_engine,
     kill_browser_by_path,
     launch_browser,
     read_settings,
@@ -441,10 +442,20 @@ def main():
     ap.add_argument("--port", type=int, default=None,
                     help="default: derived from --profile/--dev (Default+dev = 9322)")
     ap.add_argument("--settle", type=float, default=6.0)
+    ap.add_argument("--expect-cef", default=None,
+                    help="REFUSE to run unless CEF_VERSION contains this (e.g. +g9ccef04). "
+                         "engine_version() cannot tell P4e from P4f — both are Chromium "
+                         "150.0.7871.187 — so this is the only subject assertion that "
+                         "identifies WHICH build was measured.")
     args = ap.parse_args()
 
     if not args.auto and not args.mode:
         ap.error("one of --mode or --auto is required")
+
+    if args.exe:
+        require_engine(args.exe, expect=args.expect_cef, label="worker probe subject")
+    elif args.expect_cef:
+        raise SystemExit("--expect-cef needs --exe to tie the header to the loaded binary")
 
     port = args.port if args.port is not None else cdp_port_for(args.profile, args.dev)
     pdir = profile_dir(args.data_root, args.profile) if args.data_root else None

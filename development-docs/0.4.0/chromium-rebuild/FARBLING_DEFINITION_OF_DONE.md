@@ -53,7 +53,7 @@ here", never "the perturbation failed".
 | R6 | Popup navigated to a real URL | ✅ | **MEASURED** (was CODE-READ) | `farbling_realm_matrix.py` | both arms VOID with farbling off |
 | R7 | **Dedicated worker** | ✅ **CLOSED by P4f** | **MEASURED** on `g9ccef04` | `farbling_worker_probe.py --auto` — exit **1 → 0**, same box, same command | control arm collapses main==worker; see A.4/A.7 |
 | R8 | Nested worker (worker → worker) | ✅ **CLOSED by P4f** | **MEASURED** on `g9ccef04` | `farbling_realm_matrix.py` — canvas2d, WebGL **and** convertToBlob all keyed | 8/8 realms VOID with farbling off |
-| R9 | Shared worker | ⏸️ **owner-signed 2026-08-14** (§F) | CODE-READ | no install point exists; keying genuinely ambiguous | same-origin only |
+| R9 | Shared worker | ⏸️ **owner-signed 2026-08-14** (§F) | **MEASURED 2026-08-15 macOS** (was CODE-READ) | `farbling_worker_residual_check.py` — shared worker reads **native** while the dedicated worker in the SAME document reads the farbled value | discriminator + `--negative-control`, see A.8 |
 | R10 | Service worker | ⏸️ **owner-signed 2026-08-14** (§F) | CODE-READ | no install point exists; no top frame, cross-site trap §A.3 | same-origin only |
 | R11a | **AudioWorklet** global scope | ✅ **no §B surface exists here** | **MEASURED** (was ❓) | `farbling_realm_matrix.py` — worklet reports `OffscreenCanvas=false, navigator=false` over its own `port` | page-side control proves the channel |
 | R11b | **PaintWorklet** global scope | ✅ **no §B surface exists here** | **MEASURED** (was ❓) | same, via the CDP console channel — see A.5 | page-side control line |
@@ -61,7 +61,7 @@ here", never "the perturbation failed".
 | R13 | Sandboxed iframe (opaque origin) | ✅ | **MEASURED** (was ❓) | `farbling_realm_matrix.py` — child == top frame's farbled value | VOID with farbling off |
 | R14a | `document.write` document | ✅ | **MEASURED** (was ❓) | `farbling_realm_matrix.py` | VOID with farbling off |
 | R14b | `javascript:` URL document | ✅ | **MEASURED** (was ❓) | `farbling_realm_matrix.py` | VOID with farbling off |
-| R15 | bfcache-restored page | ✅ | **MEASURED** (was ❓) | `farbling_realm_matrix.py` — and bfcache is **proven to have engaged**, see A.5 | VOID with farbling off |
+| R15 | bfcache-restored page | ✅ | **MEASURED both OS** | `farbling_realm_matrix.py` — bfcache **proven to have engaged**, see A.5; macOS needs the §A.9 ordering constraint | VOID with farbling off |
 | R16 | Hodos internal UI (header, ~15 overlays) | ✅ **never farbled, by design** | MEASURED | localhost skip in `MaybeApplyHodosFarblingKey` | startup cost gate |
 
 ### A.1 — R3 is deliberately untestable by both existing harnesses
@@ -230,6 +230,82 @@ below the floor, so PASS here never means "measured to cost nothing".
 auth exemption **PASS** 5/6 attempted with the non-exempt control differing; both matrix
 harnesses' negative controls green (8/8 realms VOID; positive control NATIVE).
 
+### A.8 — R9 is MEASURED now, not read — and residual #3 is accurate as written
+
+`farbling_worker_residual_check.py`, macOS, P4f `g9ccef04`, 2026-08-15. Residual #3 was
+queued for a **public privacy statement** on the strength of a code read — the exact
+position D5 was in before measurement found it materially wider than described.
+
+```
+farbled arm   main      canvas=48922b8f  cores=5  mem=8
+              dedicated canvas=48922b8f  cores=5  mem=8    <- KEYED (P4f)
+              shared    canvas=2fad2e1a  cores=8  mem=16   <- NATIVE
+control arm   main/dedicated/shared all 2fad2e1a  cores=8  mem=16
+```
+
+⛔ **"The shared worker reads native" is worthless on its own.** It is equally satisfied
+by a worker that never started, a probe that threw, a page that is not farbled, or a
+build with no farbling at all — the pre-P4f world, in which *every* worker read native.
+
+⭐ **The discriminator is the DEDICATED worker in the same document, same run, same
+probe.** It must come out FARBLED, and it does. That one arm kills every alternative
+reading at once: a probe that reads a farbled value out of one worker realm is a working
+probe, on a farbling build, in a farbled document. The shared worker's own
+`self.location.origin` is asserted separately, which kills "it never started".
+
+The negative control runs both arms farbling-off; the discriminator then correctly
+FAILS and the run reports itself void — the rig is shown to report the feature's absence.
+
+⚠️ **R10 service workers remain UNMEASURED, and a local fixture cannot fix it.** A service
+worker needs a same-origin script over a secure context. The only origin we can serve is
+localhost — and `MaybeApplyHodosFarblingKey` returns early for `127.0.0.1`, `localhost`
+and `[::1]` **unconditionally for main frames**, not just for the Hodos UI port. So a
+locally-served page is never farbled, its top-frame reference equals native, and every
+verdict under it is VOID by construction. The harness attaches to any live
+`service_worker` CDP target opportunistically and reports NOT MEASURED when there is
+none. **Not a pass.**
+
+### A.9 — ⛔ R15 on macOS: an ORDERING constraint, and the popup defect behind it
+
+R15 first came back `UNREACHABLE — bfcache did NOT engage` on macOS. That is a failure to
+*test*, not a failure of farbling, and it turned out to have a specific cause worth
+recording because it will recur.
+
+macOS **keeps a `window.open()` popup alive after `window.close()`**. `w.closed` reports
+`true` and the opener agrees, but the browser behind it still evaluates JS, reports
+`visibilityState: "visible"`, renders canvas, and **remains fully scriptable from the
+opener** (`w.eval('1+1')` → 2, `w.document.readyState` → `"complete"`). Windows retires
+that target; macOS does not.
+
+A live popup is a *related active content* in the same browsing-context group, which is a
+bfcache blocker. Since R6 opens a popup and used to run before R15, R15 was disqualified
+before it started. Controlled, one variable, same tab:
+
+```
+no popup opened        -> bfcache ENGAGED, no blockers
+popup opened + closed  -> BLOCKED: Circumstantial/RelatedActiveContentsExist
++ CDP target reaped    -> STILL BLOCKED (/json/close does not retire it)
+```
+
+⇒ **R15 now runs FIRST in `farbling_realm_matrix.py`**, and measures **KEYED** on macOS.
+Do not move it back below the realm probe to "group the realms"; the ordering is the test.
+
+⚠️ The popup itself was measured **KEYED** (`48922b8f` == the top frame's farbled value),
+so it is a covered realm and carries **no §D row-1 consequence**. It is a window-lifetime
+defect — a page can retain a live, scriptable, still-rendering document that reports
+itself closed — and belongs in a ticket, not in this table.
+
+### A.10 — §C-7 parity re-verified at P4f, all 15 ✅ cells
+
+macOS, `g9ccef04`, 2026-08-15. Every ✅ cell in §A and every row in §B measured on this
+box, with each harness's own negative control: R6/R8/T3/R11a/R11b/R13/R14a/R14b/R15 via
+`farbling_realm_matrix.py` (8/8 VOID under `--negative-control`), R2/R5 via
+`farbling_subframe_check.py --vector both`, R4 via the exemption/D5 pair, R7 via
+`farbling_worker_probe.py --auto`, R1 via the battery, R16 by the localhost skip.
+All 12 §B vectors FARBLED, positive control FARBLED and size-gate NATIVE.
+R12's five capabilities are present on macOS exactly as on Windows, so it stays ❓ on
+both. **No cell differs between platforms.**
+
 ### A.6 — ⚠️ R12 stays ❓, and the container is REAL — owner gate
 
 `HTMLFencedFrameElement`, `FencedFrameConfig`, `navigator.runAdAuction`,
@@ -361,7 +437,7 @@ explicit owner decision, not silence.
 | C-4 | **Fail-closed** — no key ⇒ native, never a constant | code invariant; the shipped constant-seed bug is why |
 | C-5 | **Exemption inheritance** — exempt top frame ⇒ every child native | `farbling_d5_residual_check.py` (MEASURED) |
 | C-6 | **No tamper tell** — patched methods still report `[native code]` | battery |
-| C-7 | **Windows / macOS parity** — every ✅ proven on both | both sessions, same pin |
+| C-7 | **Windows / macOS parity** — every ✅ proven on both | both sessions, same pin — **re-verified at P4f `g9ccef04` 2026-08-15, all 15 ✅ cells, see §A.10** |
 | C-8 | **Negative control** — every test shown to FAIL with the feature off | per-test, mandatory |
 
 ---
