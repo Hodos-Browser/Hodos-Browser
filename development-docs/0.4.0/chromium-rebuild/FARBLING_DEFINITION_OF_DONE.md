@@ -457,6 +457,50 @@ A deferral is valid only with a signature and a date. An unsigned row is ⛔, no
 
 ---
 
+## H. What is still open after beta.2 — the standing backlog
+
+> **Read this first if you are picking farbling up cold.** §A/§B are the *current state*;
+> this is the *remaining work*, in priority order, with what each one is actually worth.
+>
+> ⛔ **This section lives here on purpose, and a separate backlog file must not be created.**
+> Every item below is a cell in §A, §B or §F. A second file would restate them, drift from
+> them within one sprint, and re-create exactly the failure §0 describes — scope discovered
+> one measurement at a time because nobody could see the whole board. One home per fact.
+> When an item here closes, the §A/§B cell moves and the row is struck through here.
+
+| # | Item | Blocks a release claim? | Size | Why it is where it is |
+|---|---|---|---|---|
+| H1 | **R9 shared workers** | Blocks §D **row 3** only | Large | ⏸️ signed 2026-08-14. Needs cross-process machinery, and the keying question has no correct answer yet: many documents under *different* top frames can share one worker. Same-origin reachable only. |
+| H2 | **R10 service workers** | Blocks §D **row 3** only | Large | ⏸️ signed 2026-08-14. No top frame at all, outlives every document. ⛔ The natural fix (key on the SW's own origin) is *wrong* — see §A.3. Same-origin reachable only. |
+| H3 | **R12 fenced frames** | No | Small–Medium | ❓, container exists. **Not embedder-scriptable, so not a bypass** — same class as a cross-site iframe, which is already green. Needs a Shared Storage / Protected Audience fixture to mint a config. A short capped investigation (~2 h) should first check whether Chromium flags can mint one cheaply; if not, leave it. |
+| H4 | **WebGL `UNMASKED_RENDERER` / `VENDOR`** | No | Medium + risk | Owner-accepted boundary 2026-08-15. Revisit only as "report a *common, plausible* string so users blend", never as randomisation — a GPU name contradicted by the page's own benchmark is a **new** signal, the same trap that makes `hardwareConcurrency` reduce-only. Carries real site-breakage risk. |
+| H5 | **R3 same-site cross-origin iframe** | No | Small | ⏸️ accepted as a documented gap 2026-08-13. Needs a two-hostname local server. R4's strengthened assertion covers the keying model it was a proxy for. |
+| H6 | **Shrinking the `IsAuthDomain` allowlist** | No — but it is the only lever on the biggest residual | Owner call | 37 hostnames, and **every third party on them reads native values**. ⛔ Do NOT "fix" this by exempting only the main frame; that recreates the incoherence the exemption exists to prevent (§D.1). The lever is asking whether e.g. `amazon.com` still needs an entry. |
+| H7 | **§B.1 unfarbled vectors** | No | Varies | Screen dimensions · fonts · `enumerateDevices` · WebRTC IP · timezone · `navigator.language` · `navigator.plugins` · WebGPU · speech voices · UA/Client Hints. A deliberate boundary, listed so it stays deliberate. |
+
+### H.8 — maintenance the next Chromium bump will demand
+
+Not features; they are the running cost of what already shipped.
+
+- **The Blink patch set now carries per-bump rebase risk.** P4e's iframe half was libcef-only
+  (zero rebase surface); P4f is **Blink**, so `hodos_farble_worker_key`,
+  `hodos_farble_offscreen_canvas`, `hodos_farble_webaudio`, `hodos_farble_canvas2d` and
+  `hodos_farble_session_cache` all have to re-apply. They are exact-context, no-fuzz patches —
+  a mismatch fails the build loudly rather than mislanding, which is the behaviour we want.
+- ⛔ **Three landmines a rebase must not "tidy":** the C5 audio delta **floor** (removing it
+  silently disables audio farbling for ~15% of profile+domain pairs); `PerturbBytes` vs
+  `PerturbAudioSamples` (§B.3 — unifying them reintroduces the same defect in the byte
+  domain); and the single definition of `HodosFarbleSnapshot` (re-copying it splits subtle
+  reasoning across two files). All three are recorded in the fork's `HODOS_PATCHES.md`.
+- **`deviceMemory`'s tripwire:** if upstream removes `kUpdatedDeviceMemoryLimitsFor2026`, our
+  set `{4,8,16,32}` starts emitting values real Chrome cannot, i.e. it stops hiding us and
+  starts marking us. Re-read `approximated_device_memory.cc` on every bump.
+- **Harness subject assertions:** `engine_version()` reports **Chromium**, and two Hodos
+  engines can share one Chromium version (P4e and P4f both `150.0.7871.187`). Use
+  `cef_version()` when a harness must prove *which* engine it measured.
+
+---
+
 ## G. Process rules — so this does not happen a fourth time
 
 1. **Enumerate before implementing.** A new realm is added to §A *before* any code, with state ❓.
