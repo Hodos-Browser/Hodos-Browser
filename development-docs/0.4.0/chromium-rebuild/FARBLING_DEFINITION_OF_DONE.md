@@ -432,7 +432,7 @@ explicit owner decision, not silence.
 | # | Contract | Proven by |
 |---|---|---|
 | C-1 | **Determinism** — same site + same session ⇒ identical values (the login guarantee) | rotation gate A→B→**A** round trip |
-| C-2 | **Unlinkability** — different sites ⇒ different values | rotation gate; R4 strong assertion |
+| C-2 | **Unlinkability** — different sites ⇒ different values | rotation gate; R4 strong assertion. ⚠️ **HOLDS ONLY BETWEEN REGISTRABLE DOMAINS.** Measured 2026-08-15: two unrelated sites under a shared-hosting suffix our reduction does not know (`github.io`) get the **same key** — see §H11. |
 | C-3 | **Seed rotation** — new profile seed ⇒ all values change | `farbling_seed_rotation_check.py` (release gate) |
 | C-4 | **Fail-closed** — no key ⇒ native, never a constant | code invariant; the shipped constant-seed bug is why |
 | C-5 | **Exemption inheritance** — exempt top frame ⇒ every child native | `farbling_d5_residual_check.py` (MEASURED) |
@@ -556,7 +556,22 @@ A deferral is valid only with a signature and a date. An unsigned row is ⛔, no
 
 | H9 | **`regression_soak.py`'s exemption blind spot** | No — but it makes the basket weaker than it reads | Small | MEASURED 2026-08-15: **6 of its 10 sites are on the `IsAuthDomain` allowlist** (x.com, github.com, amazon.com, whatsonchain.com, google.com, docs.google.com), so they run with farbling **OFF**. A 10/10 pass is largely a test of the feature *disabled*. Add farbled sites, or label the exempt ones in its output so the number is read correctly. |
 | H10 | **Replace the Stripe widget target** | No | Small | `checkout.stripe.dev` renders zero iframes in **both** arms, so `farbling_widget_regression_check.py` reports NO-VERDICT for it. Turnstile covers the surface; a second, payment-shaped target would cover it better. ⛔ Do not "fix" it by relaxing the assertion — the both-arms control is what stopped it being reported as a farbling regression. |
-| H11 | **Shared-hosting registrable domains may share one key** | Unmeasured — **CODE-READ only** | Small to measure | `FarblingPolicy::RegistrableDomain`'s multi-label suffix table is **ccTLD-only** (`co.uk`, `com.au`, …). It has no `workers.dev`, `github.io`, `pages.dev`, `vercel.app`, `netlify.app`. If the reduction therefore collapses `a.github.io` and `b.github.io` to one registrable domain, those unrelated sites share a farbling key and could correlate a user across them — a **C-2 unlinkability** weakness. ⚠️ **Predates P4f** and is a hypothesis, not a finding: it needs a two-subdomain measurement before anyone acts on it. |
+| H11 | **Shared-hosting sites share one farbling key** | No for beta.2 — but it is a **measured C-2 violation** | Medium | ⛔ **CONFIRMED BY MEASUREMENT 2026-08-15** (`farbling_psl_linkability_check.py`): `squidfunk.github.io` and `microsoft.github.io` both read `51724237` — identical farbled values — while the separation control (`example.com` `e865bafb` vs `example.org` `ba3cdf3f`) and the native control both passed. `RegistrableDomain`'s multi-label suffix table is ccTLD-only, so every `*.github.io` (and almost certainly `*.workers.dev`, `*.pages.dev`, `*.vercel.app`, `*.netlify.app`, `*.blogspot.com`) collapses to one key. Two unrelated sites can therefore recognise the same visitor. ⚠️ **Predates P4f entirely** — it is a keying issue and would have been true of the first C2 build. See §H.12 for options. |
+
+### H.12 — H11: what to actually do about the shared-key finding
+
+Three options, and the cheap one is not the obvious one.
+
+| Option | Cost | Verdict |
+|---|---|---|
+| **A. Ship Chromium's real PSL** — call `net::registry_controlled_domains` | Small code, **large risk** | ⛔ **NO.** `hodos_farbling_registry.h` explicitly forbids the renderer re-deriving the registrable domain, because any disagreement with `FarblingPolicy`'s hand-rolled reduction **fails closed silently**. Two independent implementations of "registrable domain" is the bug, not the fix. If the PSL is adopted it must replace the hand-rolled reduction in **one** place, used by both sides. |
+| **B. Extend `MultiLabelSuffixes()` with the common hosting suffixes** | ~20 lines, low risk | ✅ **Recommended.** `github.io`, `workers.dev`, `pages.dev`, `vercel.app`, `netlify.app`, `blogspot.com`, `wordpress.com`, `herokuapp.com`, `web.app`, `firebaseapp.com`, `r2.dev`, `neocities.org`. Covers the overwhelming majority of affected traffic for a table edit, and stays inside the single existing implementation. ⚠️ It is a **blocklist, so it will always lag** the real PSL — worth saying out loud rather than pretending it is complete. |
+| **C. Do nothing, document it** | Free | Defensible for beta.2 (predates P4f, doesn't affect the main claim) but it leaves a measured C-2 violation undocumented in the product. If you take this, it belongs in the release note. |
+
+⚠️ **Whatever is chosen, changing the reduction CHANGES EVERY AFFECTED SITE'S KEY** — users
+enrolled on a `*.github.io` site would see their farbled values shift once. That is
+acceptable (the same was accepted for the C5 audio floor) but it is not free, and it argues
+for doing it **before** a wider release rather than after.
 
 ### H.8 — maintenance the next Chromium bump will demand
 
