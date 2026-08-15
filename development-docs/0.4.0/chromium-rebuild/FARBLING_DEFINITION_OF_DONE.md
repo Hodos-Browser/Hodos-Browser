@@ -478,6 +478,10 @@ A deferral is valid only with a signature and a date. An unsigned row is ⛔, no
 | H6 | **Shrinking the `IsAuthDomain` allowlist** | No — but it is the only lever on the biggest residual | Owner call | 37 hostnames, and **every third party on them reads native values**. ⛔ Do NOT "fix" this by exempting only the main frame; that recreates the incoherence the exemption exists to prevent (§D.1). The lever is asking whether e.g. `amazon.com` still needs an entry. |
 | H7 | **§B.1 unfarbled vectors** | No | Varies | Screen dimensions · fonts · `enumerateDevices` · WebRTC IP · timezone · `navigator.language` · `navigator.plugins` · WebGPU · speech voices · UA/Client Hints. A deliberate boundary, listed so it stays deliberate. |
 
+| H9 | **`regression_soak.py`'s exemption blind spot** | No — but it makes the basket weaker than it reads | Small | MEASURED 2026-08-15: **6 of its 10 sites are on the `IsAuthDomain` allowlist** (x.com, github.com, amazon.com, whatsonchain.com, google.com, docs.google.com), so they run with farbling **OFF**. A 10/10 pass is largely a test of the feature *disabled*. Add farbled sites, or label the exempt ones in its output so the number is read correctly. |
+| H10 | **Replace the Stripe widget target** | No | Small | `checkout.stripe.dev` renders zero iframes in **both** arms, so `farbling_widget_regression_check.py` reports NO-VERDICT for it. Turnstile covers the surface; a second, payment-shaped target would cover it better. ⛔ Do not "fix" it by relaxing the assertion — the both-arms control is what stopped it being reported as a farbling regression. |
+| H11 | **Shared-hosting registrable domains may share one key** | Unmeasured — **CODE-READ only** | Small to measure | `FarblingPolicy::RegistrableDomain`'s multi-label suffix table is **ccTLD-only** (`co.uk`, `com.au`, …). It has no `workers.dev`, `github.io`, `pages.dev`, `vercel.app`, `netlify.app`. If the reduction therefore collapses `a.github.io` and `b.github.io` to one registrable domain, those unrelated sites share a farbling key and could correlate a user across them — a **C-2 unlinkability** weakness. ⚠️ **Predates P4f** and is a hypothesis, not a finding: it needs a two-subdomain measurement before anyone acts on it. |
+
 ### H.8 — maintenance the next Chromium bump will demand
 
 Not features; they are the running cost of what already shipped.
@@ -495,6 +499,14 @@ Not features; they are the running cost of what already shipped.
 - **`deviceMemory`'s tripwire:** if upstream removes `kUpdatedDeviceMemoryLimitsFor2026`, our
   set `{4,8,16,32}` starts emitting values real Chrome cannot, i.e. it stops hiding us and
   starts marking us. Re-read `approximated_device_memory.cc` on every bump.
+- **Two different keys come off one URL, and confusing them is silent.** The per-site
+  Privacy Shield **opt-out is keyed on the full HOSTNAME** (`simple_handler.cpp` slices it
+  out of the nav URL and hands it to `IsSiteEnabled`), while the **farbling key is keyed on
+  the REGISTRABLE DOMAIN** (`HMAC(seed, RegistrableDomain(host))`). A harness that opts out
+  the registrable domain when the page is on a subdomain silently fails to disable
+  anything: both arms come out farbled, their hashes match, and the control reports "top
+  frame not farbled" — which points nowhere near the real cause. MEASURED 2026-08-15; it
+  cost two runs.
 - **Harness subject assertions:** `engine_version()` reports **Chromium**, and two Hodos
   engines can share one Chromium version (P4e and P4f both `150.0.7871.187`). Use
   `cef_version()` when a harness must prove *which* engine it measured.
