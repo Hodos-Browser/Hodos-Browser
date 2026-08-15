@@ -152,9 +152,63 @@ caught them was asking what would make the *instrument* produce a wrong answer.
    harnesses (§FF2), and whether the T12 budget should be per-platform — your box's noise floor
    is not mine, and 1000 µs was measured on this machine.
 
-**Owner-gated, not ours:** R12 fenced frames (container exists on Windows — confirm on macOS),
-WebGL `UNMASKED_RENDERER`/`VENDOR`, and the release-note wording
-(`RELEASE_NOTE_farbling_draft.md`, drafted, four residuals, approval owed).
+**Owner decisions, now MADE (2026-08-15):** R12 fenced frames → **left as a documented gap**,
+no fixture to be built now (see §H3). WebGL `UNMASKED_RENDERER`/`VENDOR` → **accepted as a
+documented boundary** (§H4). Release-note wording → approved in substance; final text in
+`RELEASE_NOTE_farbling_draft.md`. **The standing backlog is now `FARBLING_DEFINITION_OF_DONE.md`
+§H** — one home, not a separate file.
+
+## FF7 — 📦 THE CI ASSET SWAP: exact sequence, and who does what
+
+⛔ **Do not change `release.yml` until BOTH assets are uploaded.** The two platform arms fetch
+independently, so a half-done swap ships **Windows on P4f and macOS on P4e in the same
+release** — worker farbling on one platform and not the other, from one tag. That is a very
+expensive thing to notice later.
+
+**Current state is CONSISTENT and nothing is broken:** both arms point at the P4e-versioned
+assets and both exist. There is no outage to race.
+
+### Step 1 — Mac (you), after your build is green
+
+Upload, versioned, to the `cef-binaries` release on `Hodos-Browser/Hodos-Browser`:
+
+```
+cef-binaries-macos-150.0.43-g9ccef04.tar.bz2
+```
+
+⚠️ **New name, never overwrite the P4e asset.** Keeping `…-g7dd0357…` retrievable is what lets
+us bisect a CI failure across engines — your own §CC3 point, and the reason both arms are
+versioned now. Verify before AND after upload, as you did last time: `build/` excluded,
+`CEF_VERSION` re-read **out of the tarball**, md5 round-trip after download.
+
+Then reply on this doc with the exact filename + md5. **Do not edit `release.yml`.**
+
+### Step 2 — Windows (me), once your reply lands
+
+I upload `cef-binaries-windows-150.0.43-g9ccef04.zip` and change **all six lines in one
+commit** (three per arm — verified against the current file):
+
+```
+:139  gh release download cef-binaries --pattern "cef-binaries-windows-150.0.42-g7dd0357.zip"
+:142  7z x cef-binaries-windows-150.0.42-g7dd0357.zip -y
+:143  del cef-binaries-windows-150.0.42-g7dd0357.zip
+:476  gh release download cef-binaries --pattern "cef-binaries-macos-150.0.42-g7dd0357.tar.bz2"
+:479  tar -xjf cef-binaries-macos-150.0.42-g7dd0357.tar.bz2
+:480  rm cef-binaries-macos-150.0.42-g7dd0357.tar.bz2
+```
+
+→ all six become `…-150.0.43-g9ccef04…`. One commit, both arms, so no intermediate state
+exists in which the two platforms disagree.
+
+### Step 3 — both
+
+First CI build after the swap: check the engine string in **both** artifacts and confirm they
+match `150.0.43-7871.3576+g9ccef04`. ⛔ Per §FF2 the **Chromium** version is identical across
+P4e and P4f, so "Chrome/150.0.7871.187 in the log" proves nothing here — read `CEF_VERSION`.
+
+**Blocked on nothing else.** I am not idle while you build: I'm running the real-world
+regression basket on Windows (§FF8 next round), since P4f is the first build where iframes,
+workers and `convertToBlob` are all farbled and real sites are where that shows up.
 
 ---
 
