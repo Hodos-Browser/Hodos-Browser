@@ -69,6 +69,7 @@ from farbling_seed_rotation_check import (  # noqa: E402
     cef_version,
     kill_browser_by_path,
     launch_browser,
+    require_engine,
     set_site_enabled,
     wait_for_cdp,
 )
@@ -91,6 +92,55 @@ SHARED_SUFFIX_PAIRS = [
 # Genuinely distinct registrable domains: the separation control.
 CONTROL_A = ("https://example.com/", "example.com")
 CONTROL_B = ("https://example.org/", "example.org")
+
+# ---------------------------------------------------------------------------------------
+# ⛔ THE SHELL SUBJECT ASSERTION -- and why --expect-cef is NOT it for this check.
+#
+# H11 is an APP-SIDE fix (cef-native/src/core/FarblingPolicy.cpp). The engine is
+# unchanged across it: same fork pin, same CEF_VERSION, same framework LC_UUID. So
+# --expect-cef -- the correct subject assertion for every P4e/P4f harness, because those
+# DID change the engine -- cannot tell a fixed shell from an unfixed one here. Measured
+# on macOS 2026-08-16: the pre-fix and post-fix runs printed the identical engine string
+# `150.0.43-7871.3576+g9ccef04` and returned opposite verdicts.
+#
+# We still call require_engine() (it catches a stale app-bundle framework and keeps this
+# harness consistent with its siblings), but the discriminator for H11 is the SHELL
+# BINARY. The fix is literally a string table, so the suffixes are observable in the
+# linked image -- verify by CONTENT, never by a build exit code.
+SHELL_MARKERS = ["myshopify.com", "workers.dev", "vercel.app", "notion.site"]
+# A multi-label suffix that was in the table long before H11. If this is ABSENT the
+# instrument did not really read the binary, and the absence of the markers above would
+# be meaningless -- the classic "wrong subject looks like a missing feature" shape.
+SHELL_POSITIVE_CONTROL = "police.uk"
+
+
+def shell_carries_h11_fix(exe):
+    """Does the shell under test carry the shared-hosting suffix table?
+
+    Returns (verdict, detail) where verdict is True / False / None (= cannot tell).
+    Deliberately does NOT refuse on False: running this harness against a pre-fix build
+    is the legitimate way to capture the RED baseline. It refuses to GUESS, which is a
+    different thing.
+    """
+    try:
+        with open(exe, "rb") as fh:
+            blob = fh.read()
+    except OSError as exc:
+        return None, "could not read the shell binary (%s)" % exc
+    if SHELL_POSITIVE_CONTROL.encode() not in blob:
+        return None, ("positive control %r absent -- the scan did not genuinely read the "
+                      "binary, so it cannot report on the H11 markers either"
+                      % SHELL_POSITIVE_CONTROL)
+    found = [m for m in SHELL_MARKERS if m.encode() in blob]
+    if len(found) == len(SHELL_MARKERS):
+        return True, "all %d shared-hosting markers present" % len(SHELL_MARKERS)
+    if not found:
+        return False, ("none of the %d shared-hosting markers present (positive control "
+                       "%r found, so this is a real absence) -- PRE-FIX shell"
+                       % (len(SHELL_MARKERS), SHELL_POSITIVE_CONTROL))
+    return None, ("only %d of %d markers present (%s) -- partial table, not a state this "
+                  "build should ever be in" % (len(found), len(SHELL_MARKERS),
+                                               ", ".join(found)))
 
 
 def goto_and_measure(port, excluded, url, want_host, timeout=75):
@@ -142,6 +192,11 @@ def main():
     ap.add_argument("--profile", default="Default")
     ap.add_argument("--dev", action="store_true")
     ap.add_argument("--settle", type=float, default=8.0)
+    ap.add_argument("--expect-cef", default=None,
+                    help="refuse to run unless CEF_VERSION contains this "
+                         "(e.g. +g9ccef04). Catches a stale app-bundle framework; it "
+                         "canNOT tell a fixed shell from an unfixed one -- H11 is "
+                         "app-side and does not move the engine.")
     args = ap.parse_args()
 
     port = cdp_port_for(args.profile, args.dev)
@@ -153,6 +208,13 @@ def main():
 
     print("== shared-hosting key separation (§H11) ==")
     print("   engine %s" % cef_version())
+    # Hard refusal BEFORE a browser is launched. Only ever turns green into red.
+    require_engine(args.exe, expect=args.expect_cef, label="psl-linkability")
+    shell_ok, shell_why = shell_carries_h11_fix(args.exe)
+    print("   shell : %s -- %s"
+          % ({True: "H11 suffix table PRESENT",
+              False: "H11 suffix table ABSENT",
+              None: "H11 suffix table UNDETERMINED"}[shell_ok], shell_why))
 
     try:
         # --- farbled arm ---------------------------------------------------------------
@@ -220,6 +282,19 @@ def main():
         else:
             print("    ✅ %s — separated (%s=%s, %s=%s). Hypothesis refuted for this suffix."
                   % (suffix, h1, v1, h2, v2))
+
+    # ATTRIBUTION cross-check. A separated result is only evidence FOR THE H11 FIX if the
+    # shell under test actually contains it. Green against a pre-fix shell would mean the
+    # separation came from somewhere else entirely -- the harness would be measuring
+    # something other than what it claims, and reporting a pass either way.
+    if rc == 0 and shell_ok is False:
+        print("\n    ⛔ ATTRIBUTION FAILURE — the hosts separated, but the shell under")
+        print("       test does NOT carry the H11 suffix table. The pass cannot be")
+        print("       attributed to the fix, so it is not evidence that the fix works.")
+        print("       Find out what actually separated them before trusting this.")
+        return 2
+    if rc == 0 and shell_ok is None:
+        print("\n    ⚠️ the pass could not be attributed to the H11 fix: %s" % shell_why)
     return rc
 
 
