@@ -72,6 +72,9 @@ from farbling_seed_rotation_check import (  # noqa: E402
 from farbling_cross_profile_check import cdp_port_for, profile_dir  # noqa: E402
 from farbling_worker_probe import resolve_tab, snapshot_targets  # noqa: E402
 from farbling_iframe_check import _rpc  # noqa: E402
+# Reuse the parser the exemption gate already trusts (it reads all 37 entries) rather than
+# keeping a second, weaker regex here -- two parsers of one list is how they drift.
+from farbling_exemption_check import exempt_hosts  # noqa: E402
 
 # Each target is a NON-EXEMPT top frame embedding a third-party widget. Hosts are checked
 # against the live allowlist at runtime -- if one is ever added to IsAuthDomain this suite
@@ -101,9 +104,12 @@ TARGETS = [
         """,
     },
     {
-        "name": "Stripe checkout (payment element)",
-        "url": "https://checkout.stripe.dev/",
-        "host": "checkout.stripe.dev",
+        # MEASURED 2026-08-15: 8 iframes, js.stripe.com — a real payment element. Replaces
+        # checkout.stripe.dev, which renders ZERO iframes in both arms and could therefore
+        # only ever return NO-VERDICT.
+        "name": "Stripe payment element",
+        "url": "https://stripe-payments-demo.appspot.com/",
+        "host": "stripe-payments-demo.appspot.com",
         # Stripe renders its fields inside js.stripe.com iframes. "A payment iframe exists
         # and the page is past its skeleton" is the strongest thing observable without a
         # real card.
@@ -116,6 +122,47 @@ TARGETS = [
               return JSON.stringify({ok: stripe.length > 0,
                                      detail: stripe.length + ' stripe iframe(s) of '
                                              + fr.length,
+                                     frames: fr.length});
+            })()
+        """,
+    },
+    {
+        # MEASURED: 12 iframes across assets.braintreegateway.com, checkout.paypal.com and
+        # pay.google.com — three payment providers in one page, and the richest
+        # third-party-iframe target found. paypal.com itself IS auth-exempt, but the TOP
+        # frame here is not, which is what decides farbling.
+        "name": "Braintree drop-in (PayPal/GPay)",
+        "url": "https://braintree.github.io/braintree-web-drop-in/",
+        "host": "braintree.github.io",
+        "success_js": """
+            (function () {
+              var fr = Array.prototype.slice.call(document.querySelectorAll('iframe'));
+              var pay = fr.filter(function (f) {
+                var s = f.src || '';
+                return s.indexOf('braintree') !== -1 || s.indexOf('paypal') !== -1
+                       || s.indexOf('pay.google') !== -1;
+              });
+              return JSON.stringify({ok: pay.length > 0,
+                                     detail: pay.length + ' payment iframe(s) of ' + fr.length,
+                                     frames: fr.length});
+            })()
+        """,
+    },
+    {
+        # reCAPTCHA, i.e. a SECOND captcha vendor. Google's own demo sits on google.com,
+        # which is auth-exempt and therefore useless here; this third-party host is not.
+        "name": "reCAPTCHA (3rd-party host)",
+        "url": "https://patrickhlauke.github.io/recaptcha/",
+        "host": "patrickhlauke.github.io",
+        "success_js": """
+            (function () {
+              var fr = Array.prototype.slice.call(document.querySelectorAll('iframe'));
+              var rc = fr.filter(function (f) {
+                return (f.src || '').indexOf('recaptcha') !== -1
+                       || (f.src || '').indexOf('google.com') !== -1;
+              });
+              return JSON.stringify({ok: rc.length > 0,
+                                     detail: rc.length + ' recaptcha iframe(s) of ' + fr.length,
                                      frames: fr.length});
             })()
         """,
@@ -152,25 +199,6 @@ CANVAS_JS = r"""
 ALLOWLIST_HEADER = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "..", "..", "..", "cef-native", "include", "core", "FingerprintProtection.h")
-
-
-def allowlist_hosts():
-    """Parse IsAuthDomain's host literals. Used only to REFUSE a target that has become
-    exempt -- never to decide a verdict."""
-    hosts = set()
-    try:
-        with open(os.path.abspath(ALLOWLIST_HEADER), "r", encoding="utf-8") as fh:
-            body = fh.read()
-    except OSError:
-        return hosts
-    start = body.find("IsAuthDomain")
-    if start == -1:
-        return hosts
-    chunk = body[start:start + 6000]
-    import re
-    for m in re.finditer(r'"([a-z0-9][a-z0-9.\-]*\.[a-z]{2,})"', chunk):
-        hosts.add(m.group(1))
-    return hosts
 
 
 def evaluate(port, excluded, expr, wait=45):
@@ -223,7 +251,7 @@ def main():
 
     port = cdp_port_for(args.profile, args.dev)
     pdir = profile_dir(args.data_root, args.profile)
-    exempt = allowlist_hosts()
+    exempt = exempt_hosts()
 
     print("== third-party widget regression (farbled top frames) ==")
     print("   engine %s" % cef_version())

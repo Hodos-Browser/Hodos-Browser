@@ -96,6 +96,59 @@ TEST(FarblingPolicyRegistrableDomain, TwoUnrelatedSitesUnderOneSuffixStayDistinc
   EXPECT_EQ(b, "bob.co.uk");
 }
 
+// ---------------------------------------------------------------------------
+// Shared hosting. THIS IS A REGRESSION TEST FOR A MEASURED BUG, not a hypothetical.
+//
+// Before 2026-08-15 the suffix table was ccTLD-only, so every *.github.io reduced to
+// "github.io" and unrelated sites shared one farbling key. Measured in a real browser
+// (farbling_psl_linkability_check.py): squidfunk.github.io and microsoft.github.io both
+// returned canvas hash 51724237, while the separation control (example.com vs
+// example.org) correctly differed. That is a C-2 unlinkability violation.
+//
+// ⚠️ Deleting an entry below silently re-groups everyone on that platform. It will not
+// fail any other test, and the browser will look entirely healthy.
+TEST(FarblingPolicyRegistrableDomain, SharedHostingSitesGetDistinctKeys) {
+  // The exact pair that was measured sharing a key.
+  EXPECT_EQ(FarblingPolicy::RegistrableDomain("squidfunk.github.io"),
+            "squidfunk.github.io");
+  EXPECT_EQ(FarblingPolicy::RegistrableDomain("microsoft.github.io"),
+            "microsoft.github.io");
+  EXPECT_NE(FarblingPolicy::RegistrableDomain("squidfunk.github.io"),
+            FarblingPolicy::RegistrableDomain("microsoft.github.io"));
+
+  // A spread of the other platforms, one per shape.
+  EXPECT_EQ(FarblingPolicy::RegistrableDomain("demo.workers.dev"), "demo.workers.dev");
+  EXPECT_EQ(FarblingPolicy::RegistrableDomain("site.pages.dev"), "site.pages.dev");
+  EXPECT_EQ(FarblingPolicy::RegistrableDomain("app.vercel.app"), "app.vercel.app");
+  EXPECT_EQ(FarblingPolicy::RegistrableDomain("app.netlify.app"), "app.netlify.app");
+  EXPECT_EQ(FarblingPolicy::RegistrableDomain("blog.blogspot.com"), "blog.blogspot.com");
+  EXPECT_EQ(FarblingPolicy::RegistrableDomain("shop.myshopify.com"),
+            "shop.myshopify.com");
+
+  // Deeper subdomains still reduce to ONE label under the suffix -- the point is per
+  // customer separation, not preserving every label.
+  EXPECT_EQ(FarblingPolicy::RegistrableDomain("a.b.alice.github.io"),
+            "alice.github.io");
+}
+
+// The platform's own apex is not a customer site: with the host EQUAL to the suffix
+// there is no registrable domain to form, and the existing bare-suffix rule must return
+// it unchanged rather than inventing one.
+TEST(FarblingPolicyRegistrableDomain, SharedHostingApexIsReturnedUnchanged) {
+  EXPECT_EQ(FarblingPolicy::RegistrableDomain("github.io"), "github.io");
+  EXPECT_EQ(FarblingPolicy::RegistrableDomain("workers.dev"), "workers.dev");
+}
+
+// ⛔ The lookup only ever tests the LAST TWO labels, so a three-label entry in the table
+// can never match and would be dead weight that reads as coverage. (One such entry,
+// "s3.amazonaws.com", was written and removed for exactly this reason.) This pins the
+// behaviour so nobody adds another and believes it works.
+TEST(FarblingPolicyRegistrableDomain, ThreeLabelSuffixesAreNotSupported) {
+  // amazonaws.com is NOT in the table, so this falls through to the last-two rule.
+  EXPECT_EQ(FarblingPolicy::RegistrableDomain("bucket.s3.amazonaws.com"),
+            "amazonaws.com");
+}
+
 TEST(FarblingPolicyRegistrableDomain, BarePublicSuffixIsReturnedUnchanged) {
   // "co.uk" has no registrable domain; inventing one would be worse than passing through.
   EXPECT_EQ(FarblingPolicy::RegistrableDomain("co.uk"), "co.uk");

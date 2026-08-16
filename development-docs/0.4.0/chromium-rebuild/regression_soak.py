@@ -71,6 +71,12 @@ from farbling_seed_rotation_check import (  # noqa: E402
     wait_for_cdp,
 )
 from farbling_cross_profile_check import cdp_port_for  # noqa: E402
+# ⛔ Label which rows actually have farbling ON. Measured 2026-08-15: 6 of the original 10
+# basket sites are on the IsAuthDomain allowlist, so a bare "10/10 rendered" reads as a
+# strong result for a build whose feature was OFF on most of it — the "would this pass if
+# the feature were absent?" failure in a new place. Reuses the exemption gate's parser
+# rather than growing a second one.
+from farbling_exemption_check import exempt_hosts  # noqa: E402
 
 try:
     import websocket
@@ -101,6 +107,13 @@ BASKET = [
     ("E-commerce",   "https://www.amazon.com/",         "amazon.com",      None),
     ("Productivity", "https://docs.google.com/",        "google.com",      None),
     ("BSV",          "https://whatsonchain.com/",       "whatsonchain.com", None),
+    # Added 2026-08-15. The ten rows above are the STABILITY basket -- the most-used
+    # sites, where we need to know if the browser breaks. But 6 of them are auth-exempt,
+    # so they exercise farbling not at all. These two are NOT on the allowlist and are
+    # heavy in exactly what P4e/P4f changed: cnn.com carries a large third-party iframe
+    # load (subframe farbling), openstreetmap renders through canvas/WebGL.
+    ("News",         "https://www.cnn.com/",            "cnn.com",         None),
+    ("Maps/Canvas",  "https://www.openstreetmap.org/",  "openstreetmap.org", None),
 ]
 
 # Trivial on purpose: it must fail ONLY when the renderer genuinely cannot answer.
@@ -313,10 +326,35 @@ def main():
     print("\n================ RESULTS ================")
     print("\nREGRESSION BASKET (pass 1, Thorough tier):")
     basket_fail = [b for b in basket if not b["ok"]]
+    allow = exempt_hosts()
+
+    def _farbled(url):
+        """False when the navigated host is auth-exempt, i.e. farbling is OFF for it.
+
+        ⛔ Two things here were wrong on the first attempt and both over-marked EXEMPT:
+
+        1. Match the URL's ACTUAL hostname, not the basket's `host` field — that field is
+           an expected-substring ("google.com" for https://www.google.com/), and
+           www.google.com IS on the allowlist while bare google.com is NOT.
+        2. Subdomain matching is ONE-directional. `accounts.youtube.com` being exempt does
+           not make `youtube.com` exempt, but a symmetric test says it does — which is
+           exactly how youtube.com got labelled EXEMPT when the exemption gate had already
+           proven it is not on the list.
+        """
+        h = url.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
+        return not any(h == a or h.endswith("." + a) for a in allow)
+
     for b in basket:
-        print("  %-4s %-13s %-22s %s"
-              % ("ok" if b["ok"] else "FAIL", b["category"], b["host"], b["why"] or ""))
+        print("  %-4s %-13s %-22s %-8s %s"
+              % ("ok" if b["ok"] else "FAIL", b["category"], b["host"],
+                 "farbled" if _farbled(b["url"]) else "EXEMPT", b["why"] or ""))
+    n_farbled = sum(1 for b in basket if _farbled(b["url"]))
     print("  -> %d/%d sites rendered" % (len(basket) - len(basket_fail), len(basket)))
+    print("  -> %d/%d had farbling ON; the other %d are auth-exempt"
+          % (n_farbled, len(basket), len(basket) - n_farbled))
+    if n_farbled < len(basket):
+        print("     ⚠️ The EXEMPT rows exercise page stability, NOT farbling. Do not read")
+        print("        this score as coverage of the farbling code.")
     print("  screenshots in %s — a page can pass every assertion above and still look "
           "wrong; glance at them." % out)
 

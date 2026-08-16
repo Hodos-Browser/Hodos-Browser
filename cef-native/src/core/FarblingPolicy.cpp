@@ -114,6 +114,39 @@ const std::unordered_set<std::string>& MultiLabelSuffixes() {
       "co.no", "gov.se", "com.se", "org.se",
       // Generic / infrastructure that behave as public suffixes in practice
       "com.mm", "com.kh", "com.la", "com.np", "com.lk", "com.fj", "com.pg",
+      // ---------------------------------------------------------------------------
+      // SHARED HOSTING (added 2026-08-15, and this was a MEASURED bug, not a tidy-up).
+      //
+      // Every entry below hands each customer their own subdomain of one domain, so
+      // without them the reduction collapses UNRELATED SITES ONTO ONE KEY and those
+      // sites see identical farbled values -- i.e. either can recognise a visitor on
+      // the other. That is a direct C-2 unlinkability violation.
+      //
+      // MEASURED before the fix (farbling_psl_linkability_check.py):
+      //     squidfunk.github.io  ->  51724237
+      //     microsoft.github.io  ->  51724237   <- same key, unrelated owners
+      // with the separation control green (example.com != example.org), so the rig
+      // could demonstrably see a key difference and these two genuinely had none.
+      //
+      // ⚠️ This is a BLOCKLIST and will always lag the real Public Suffix List. It
+      // covers the platforms that host the overwhelming majority of affected traffic;
+      // it does not make the reduction correct in general. The header's standing advice
+      // applies -- ADD HERE rather than widening the fallback, and if the real PSL is
+      // ever adopted it must REPLACE this reduction in one place used by both the
+      // browser and the renderer. Two independent notions of "registrable domain" fail
+      // closed silently, which is why hodos_farbling_registry.h forbids the renderer
+      // deriving its own.
+      "github.io", "gitlab.io", "githubusercontent.com",
+      "workers.dev", "pages.dev", "r2.dev",
+      "vercel.app", "netlify.app", "netlify.com",
+      "herokuapp.com", "herokudns.com",
+      "web.app", "firebaseapp.com", "appspot.com",
+      "blogspot.com", "wordpress.com", "tumblr.com", "neocities.org",
+      "glitch.me", "repl.co", "replit.dev", "surge.sh", "onrender.com",
+      "azurewebsites.net", "cloudfront.net", "amplifyapp.com",
+      "elasticbeanstalk.com",
+      "myshopify.com", "squarespace.com", "webflow.io", "notion.site",
+      "readthedocs.io", "gitbook.io", "substack.com",
   };
   return kSuffixes;
 }
