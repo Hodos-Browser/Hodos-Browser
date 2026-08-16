@@ -1,6 +1,24 @@
-# Phase 3 — 1Sat Ordinals (Deferred)
+# 1Sat Ordinals + BSV21 — Sprint
 
-**Status:** Deferred to a later sprint.
+**Status:** Not started. Scoped and researched; ready to plan when picked up.
+
+> **Was `Sigma-BRC121-Sprint/phase-3-ordinals/`.** Split into its own sprint 2026-08-15 — it never
+> depended on the BRC-100 shim work beyond call routing, and it is large enough to stand alone. The
+> parent sprint is archived at `archived-docs/Sigma-BRC121-Sprint/`.
+
+## ⛔ Read before starting this sprint
+
+1. **`development-docs/BSV-Tokens/` — all seven documents.** Pre-existing research this sprint builds
+   on. **Per-file trust ratings are at the bottom of this document** ("Existing research to
+   evaluate") — two are marked do-not-trust and one must be redone from scratch. Read the ratings
+   before you read the docs.
+2. **The BRC-147 / BRC-150 decision immediately below** — it supersedes any design in BSV-Tokens that
+   predates 2026-08-05.
+3. **`development-docs/Future-Features/Decentralized-Naming/`** — OpNS names *are* 1-sat ordinals, so
+   naming shares this sprint's substrate. See "Naming & OpNS" below.
+
+Our own BRC draft on name resolution lives outside this repo, at
+`Marston Enterprises/Standards/BRCs/drafts/consensus-unique-name-tokens.md`.
 
 ---
 
@@ -99,4 +117,5 @@ Flagged so the design-decision phase actually researches them (do **not** hardco
 - `BSV21_PLAN_A_BACKEND.md` / `BSV21_PLAN_B_FRONTEND.md` — design decisions, **do not trust without re-review**
 - `BSV21_UX_DESIGN_OUTLINE.md` — **do not trust**, redo from scratch when Phase 3 activates
 
-When Phase 3 activates, extract trusted raw research into `research-extracted/` here. Folder will be moved into this sprint at that time.
+When this sprint activates, extract the trusted raw research into `research-extracted/` here, and
+consider moving the whole `BSV-Tokens/` folder in at that time.

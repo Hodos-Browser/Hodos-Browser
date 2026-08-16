@@ -1,5 +1,24 @@
 # Sigma Auth + BRC-121 Payments + Ecosystem Demo Sprint
 
+> # ⚠️ ARCHIVED 2026-08-15 — historical record, not current state
+>
+> Phases 0 through 2.6 are **done**. Three pieces were split out and live elsewhere; go there, not here:
+>
+> | Was | Now |
+> |---|---|
+> | `phase-3-ordinals/` | **`development-docs/1SatOrdinals-BSV21/`** — its own sprint |
+> | `phase-4-demos/` | **`demos/README.md`** (what to build) + **`Marston Enterprises/Hodos/Marketing/Videos/README.md`** (the video slate) |
+> | `phase-1.6-indexer-resilience/` | tracked in a **separate sprint** — the copy here is superseded |
+>
+> **The phase table below is stale and was never corrected.** It lists Phase 1 as "Ready" and 1.5 as
+> "Scoped"; `CHECKLIST.md` in this folder records Phase 1 as COMPLETE (shipped `0a73b98`, polished
+> `c11afbf`). Trust `CHECKLIST.md` and the git log over this file. The folder name was deliberately
+> kept so existing cross-references and commit messages still resolve.
+>
+> Still worth reading here: `YOURS_CWI_MIGRATION.md` (the 28-method `WalletInterface` reference),
+> `AUTO_APPROVE_RATIONALE.md` (talking points for the auto-approve demo video), `OPEN_QUESTIONS.md`,
+> and `phase-4-demos/README.md` for the original four-pillar demo narrative.
+
 Status: research complete; phase structure revised 2026-05-05; ready to pick up implementation after context clear + b-open-io plugin install.
 
 ## Sprint anchors (final)
