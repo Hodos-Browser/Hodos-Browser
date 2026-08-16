@@ -3,6 +3,9 @@
 # Triggers when you push a version tag (e.g., v1.0.0)
 # Builds installers for Windows (macOS coming later), signs them, publishes to GitHub Releases
 #
+# ALSO has a manual trigger (workflow_dispatch) that builds both platforms and
+# publishes NOTHING — see the `on:` block below.
+#
 # SETUP REQUIRED:
 #
 # 1. Upload CEF binaries to a GitHub Release:
@@ -31,6 +34,31 @@ on:
     tags:
       - 'v*'  # Triggers on v1.0.0, v2.1.3, etc.
 
+  # MANUAL VALIDATION RUN — builds both platforms and PUBLISHES NOTHING.
+  #
+  # What it is for: proving CI builds cleanly against a newly-swapped CEF asset
+  # (or any other change to this file) WITHOUT minting a release. The failure it
+  # insures against is discovering a broken engine/asset/toolchain during the
+  # release tag itself, when a red run costs a re-tag.
+  #
+  # ⛔ What it deliberately does NOT do: publish. The `publish` job is gated to
+  # `github.event_name == 'push'`, so no GitHub release — not even a draft — is
+  # created. See that job's comment, and BUILD_AND_RELEASE.md Step 3b
+  # ("manual validation run").
+  #
+  # ⛔ It only works on the RELEASE (org) repo. Both arms download the CEF asset
+  # with `--repo ${{ github.repository }}`, and the `cef-binaries` release does
+  # not exist on the dev fork — a dispatch there dies at the download step.
+  #
+  # Pattern copied from promote.yml (typed inputs, env-indirection into run
+  # bodies) rather than invented.
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Why this validation run — recorded in the run summary. e.g. "prove CI builds against the P4f CEF assets (g9ccef04) before tagging v0.4.0-beta.2"'
+        required: true
+        type: string
+
 # Don't let a re-pushed tag race itself (two runs both creating/editing the same
 # draft release). One build per tag at a time; never cancel an in-flight build.
 concurrency:
@@ -50,6 +78,30 @@ jobs:
   preflight-signing-key:
     runs-on: ubuntu-24.04
     steps:
+      # States, inside the run itself, that this is a validation exercise and what
+      # it will NOT do — so a green dispatch run can never be mistaken for a release
+      # (the same discipline as promote.yml's "Dry run — what did NOT happen").
+      # REASON goes through env, never interpolated into the script body.
+      - name: Announce manual validation run
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          REASON: ${{ inputs.reason }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## 🧪 Manual validation run — NOTHING WILL BE PUBLISHED"
+            echo ""
+            echo "**Reason:** ${REASON}"
+            echo "**Ref:** \`${{ github.ref_name }}\` — a BRANCH; this run has no tag."
+            echo "**Version:** \`0.0.0-ci.${{ github.run_number }}\`, build number \`0\`."
+            echo ""
+            echo "The \`publish\` job is gated to \`github.event_name == 'push'\`, so no GitHub"
+            echo "release — not even a draft — is created. The installer / portable zip / DMG"
+            echo "exist only as workflow artifacts, stamped with build number **0** so that every"
+            echo "real release outranks them at the updater's anti-rollback gate."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Manual validation run: ${REASON}"
+
       - name: Derive + assert the Ed25519 signing public key
         env:
           EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
@@ -83,33 +135,65 @@ jobs:
     # Do NOT bump to a newer image without re-validating the whole C++/CEF stack
     # on the new toolset — see DevOps-CICD/CEF_VERSION_UPDATE_TRACKER.md.
     runs-on: windows-2022
-    
+
+    env:
+      # ⛔ SINGLE DEFINITION of the CEF asset for this arm. The name carries the
+      # engine version and fork SHA, and the "Assert the CEF engine" step below
+      # re-derives its expectation FROM THIS STRING — so bumping the engine is one
+      # edit per arm, and a clobbered asset (name says one engine, bytes are
+      # another) fails the build instead of shipping silently.
+      CEF_ASSET: cef-binaries-windows-150.0.43-g9ccef04.zip
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
-      
-      # Get version from tag (strips 'v' prefix)
-      - name: Get version from tag
+
+      # Version + build number. TWO PATHS, deliberately separate:
+      #
+      #  push (a v* tag)   -> the real release formula, UNCHANGED.
+      #
+      #  workflow_dispatch -> a THROWAWAY validation build. github.ref_name is a
+      #        BRANCH here, not a tag, so the release formula must NOT run on it.
+      #        From branch "0.4.0" it yields version 0.4.0 with no -beta.N, hence
+      #        beta=99 and BUILD_NUMBER=40099 — EXACTLY what the eventual final
+      #        0.4.0 release produces. That integer is the Windows updater's
+      #        anti-rollback floor (cef_browser_shell.cpp: floor =
+      #        max(APP_BUILD_NUMBER, highWaterBuild); an update requires
+      #        signedBuild > floor), so a stray 40099 build would REFUSE the real
+      #        0.4.0 and every beta beneath it. A non-version branch name ("main")
+      #        crashes the parse at [int]$p[1] instead.
+      #        => hardcode both, and pick the build number in the SAFE direction:
+      #        0 is the only value that can never block a real update. It is in
+      #        contract — cef-native/CMakeLists.txt guards ^[0-9]+$ and its own
+      #        no-CI fallback uses "0".
+      - name: Resolve version + build number
         id: version
         shell: pwsh
         run: |
-          $version = "${{ github.ref_name }}" -replace '^v', ''
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $version = "0.0.0-ci.${{ github.run_number }}"
+            $buildNumber = 0
+            echo "MANUAL VALIDATION RUN — version $version, build number $buildNumber"
+            echo "Deliberately outranked by every real release; publishes nothing."
+          } else {
+            $version = "${{ github.ref_name }}" -replace '^v', ''
+            echo "Building version: $version"
+            # Globally-monotonic build number — MUST stay byte-identical to the
+            # build-macos "Resolve version + build number" formula and the appcast
+            # step (sparkle:version), because the Windows auto-updater's integer
+            # anti-rollback gate (commit 4) compares the feed's build-number
+            # against the value baked into this build via -DAPP_BUILD_NUMBER:
+            #   MAJOR*1000000 + MINOR*10000 + PATCH*100 + (beta N, or 99 for a final)
+            $core = $version.Split('-')[0]
+            $p = $core.Split('.')
+            $maj = [int]$p[0]; $min = [int]$p[1]; $pat = [int]$p[2]
+            if ($version -match '-beta\.([0-9]+)$') { $beta = [int]$Matches[1] } else { $beta = 99 }
+            $buildNumber = $maj * 1000000 + $min * 10000 + $pat * 100 + $beta
+          }
           echo "VERSION=$version" >> $env:GITHUB_OUTPUT
-          echo "Building version: $version"
-          # Globally-monotonic build number — MUST stay byte-identical to the
-          # build-macos "Get version from tag" formula and the appcast step
-          # (sparkle:version), because the Windows auto-updater's integer
-          # anti-rollback gate (commit 4) compares the feed's build-number
-          # against the value baked into this build via -DAPP_BUILD_NUMBER:
-          #   MAJOR*1000000 + MINOR*10000 + PATCH*100 + (beta N, or 99 for a final)
-          $core = $version.Split('-')[0]
-          $p = $core.Split('.')
-          $maj = [int]$p[0]; $min = [int]$p[1]; $pat = [int]$p[2]
-          if ($version -match '-beta\.([0-9]+)$') { $beta = [int]$Matches[1] } else { $beta = 99 }
-          $buildNumber = $maj * 1000000 + $min * 10000 + $pat * 100 + $beta
           echo "BUILD_NUMBER=$buildNumber" >> $env:GITHUB_OUTPUT
           echo "Build number: $buildNumber"
-      
+
       # Download CEF binaries from the cef-binaries release.
       #
       # CEF 150 ships as its OWN asset rather than replacing cef-binaries-windows.zip,
@@ -136,11 +220,19 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download cef-binaries --pattern "cef-binaries-windows-150.0.43-g9ccef04.zip" --repo ${{ github.repository }}
+          gh release download cef-binaries --pattern "$env:CEF_ASSET" --repo ${{ github.repository }}
+
+          # Record the exact bytes CI pulled. Not an assertion — the assertion is on
+          # CEF_VERSION below — but it puts a size + MD5 in the log that can be
+          # compared by hand against what the build host uploaded, which is the only
+          # way to catch "right name, wrong bytes" from the log alone.
+          $dl = Get-Item $env:CEF_ASSET
+          $md5 = (Get-FileHash $dl.FullName -Algorithm MD5).Hash.ToLower()
+          echo "downloaded $($dl.Name): $($dl.Length) bytes, md5 $md5"
 
           echo "Extracting CEF binaries..."
-          7z x cef-binaries-windows-150.0.43-g9ccef04.zip -y
-          del cef-binaries-windows-150.0.43-g9ccef04.zip
+          7z x "$env:CEF_ASSET" -y
+          del "$env:CEF_ASSET"
 
           if (Test-Path "cef-binaries") {
             echo "CEF binaries extracted successfully"
@@ -150,7 +242,50 @@ jobs:
             exit 1
           }
         shell: pwsh
-      
+
+      # ⛔ READ CEF_VERSION, NEVER THE CHROMIUM VERSION.
+      #
+      # Successive engines share a Chromium version: P4e (g7dd0357) and P4f
+      # (g9ccef04) are BOTH chromium-150.0.7871.187, so "Chrome/150.0.7871.187" in
+      # a log proves nothing about which engine was pulled. Only the CEF_VERSION
+      # string distinguishes them.
+      #
+      # This asserts the extracted artifact against the engine version + fork SHA
+      # in the ASSET FILENAME (env.CEF_ASSET), so it needs no separate constant to
+      # keep in sync — and it is exactly the check that catches a `--clobber`'d
+      # asset, where the name claims one engine and the bytes are another.
+      #
+      # Why it is worth a build step: a stale asset is a SILENT failure. CI builds
+      # green and ships a browser missing the fix the release exists for. On macOS
+      # there is not even a bootstrap gate to trip over it.
+      - name: Assert the CEF engine in the artifact (not the Chromium version)
+        shell: pwsh
+        run: |
+          if ($env:CEF_ASSET -notmatch '^cef-binaries-windows-(?<ver>[0-9][0-9.]*)-(?<sha>g[0-9a-f]+)\.zip$') {
+            echo "::error::CEF_ASSET '$env:CEF_ASSET' does not follow cef-binaries-windows-<cefver>-g<sha>.zip — cannot derive the expected engine"
+            exit 1
+          }
+          $expectVer = $Matches['ver']; $expectSha = $Matches['sha']
+
+          $hdr = "cef-binaries/include/cef_version.h"
+          if (-not (Test-Path $hdr)) { echo "::error::$hdr not found — the extracted tree is not a CEF distribution"; exit 1 }
+          $m = Select-String -Path $hdr -Pattern '^\s*#define\s+CEF_VERSION\s+"([^"]+)"' | Select-Object -First 1
+          if (-not $m) { echo "::error::no CEF_VERSION define found in $hdr"; exit 1 }
+          $cefVersion = $m.Matches[0].Groups[1].Value
+
+          echo "CEF_VERSION (read out of the artifact) = $cefVersion"
+          echo "asset name expects                     = $expectVer ... +$expectSha+"
+          $chrome = if ($cefVersion -match '\+chromium-([0-9.]+)') { $Matches[1] } else { "unknown" }
+          echo "Chromium version = $chrome  <- NOT a discriminator; successive engines share it"
+
+          $ok = $cefVersion.StartsWith("$expectVer-") -and $cefVersion.Contains("+$expectSha+")
+          if (-not $ok) {
+            echo "::error::ENGINE MISMATCH. The asset is named for CEF $expectVer / fork $expectSha, but the extracted cef_version.h says '$cefVersion'."
+            echo "::error::Either the release asset was re-uploaded under an existing name (never --clobber), or env.CEF_ASSET was bumped without re-uploading."
+            exit 1
+          }
+          echo "engine confirmed: CEF $expectVer, fork $expectSha"
+
       # Set up build tools
       # T3 Wave 3 (decision #8): msvc-dev-cmd@v1 runs on Node 20 and emits a
       # deprecation warning. We ACCEPT it — there is no Node-24 release, and
@@ -424,14 +559,31 @@ jobs:
     runs-on: macos-15
     env:
       MACOSX_DEPLOYMENT_TARGET: "12.0"
+      # ⛔ SINGLE DEFINITION of the CEF asset for this arm — see the Windows arm's
+      # note. The "Assert the CEF engine" step re-derives its expectation from it.
+      CEF_ASSET: cef-binaries-macos-150.0.43-g9ccef04.tar.bz2
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Get version from tag
+      # See the build-windows arm for the full rationale. Short version: on a
+      # workflow_dispatch, GITHUB_REF_NAME is a BRANCH, and running the release
+      # formula on it produces a build number that collides with a real release
+      # (0.4.0 -> 40099) and feeds an anti-rollback gate. Hardcode instead, and
+      # pick 0 — the only value that can never block a real update.
+      - name: Resolve version + build number
         id: version
         run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="0.0.0-ci.${{ github.run_number }}"
+            build_number=0
+            echo "MANUAL VALIDATION RUN — version $version, build number $build_number"
+            echo "Deliberately outranked by every real release; publishes nothing."
+            echo "VERSION=$version" >> $GITHUB_OUTPUT
+            echo "BUILD_NUMBER=$build_number" >> $GITHUB_OUTPUT
+            exit 0
+          fi
           version="${GITHUB_REF_NAME#v}"
           # Globally-monotonic macOS build number (-> CFBundleVersion). MUST strictly
           # increase across ALL releases — betas AND finals, across versions — or
@@ -473,11 +625,15 @@ jobs:
           # AT ALL, indistinguishable from a working one unless the seed-rotation gate is run.
           # See cef-native/CLAUDE.md. Do not "simplify" this back to the shared name when
           # 0.4.0 lands on main — collapse it only when the M136 asset is re-uploaded as 150.
-          gh release download cef-binaries --pattern "cef-binaries-macos-150.0.43-g9ccef04.tar.bz2" --repo ${{ github.repository }}
+          gh release download cef-binaries --pattern "$CEF_ASSET" --repo ${{ github.repository }}
+
+          # Record the exact bytes CI pulled (see the Windows arm's note): not an
+          # assertion, but it makes "right name, wrong bytes" visible from the log.
+          echo "downloaded $CEF_ASSET: $(stat -f%z "$CEF_ASSET") bytes, md5 $(md5 -q "$CEF_ASSET")"
 
           echo "Extracting CEF binaries..."
-          tar -xjf cef-binaries-macos-150.0.43-g9ccef04.tar.bz2
-          rm cef-binaries-macos-150.0.43-g9ccef04.tar.bz2
+          tar -xjf "$CEF_ASSET"
+          rm "$CEF_ASSET"
 
           # Handle nested directory — find and rename to cef-binaries
           if [ ! -d "cef-binaries" ]; then
@@ -493,6 +649,38 @@ jobs:
 
           echo "CEF binaries extracted:"
           ls cef-binaries/
+
+      # ⛔ READ CEF_VERSION, NEVER THE CHROMIUM VERSION — full rationale on the
+      # build-windows arm. Successive engines share a Chromium version, so
+      # "chromium-150.0.7871.187" in a log proves nothing about which engine CI
+      # pulled; only CEF_VERSION distinguishes P4e (g7dd0357) from P4f (g9ccef04).
+      # Expectation is derived from the asset filename, so there is no second
+      # constant to keep in sync, and a --clobber'd asset fails the build.
+      - name: Assert the CEF engine in the artifact (not the Chromium version)
+        run: |
+          set -euo pipefail
+          if [[ ! "$CEF_ASSET" =~ ^cef-binaries-macos-([0-9][0-9.]*)-(g[0-9a-f]+)\.tar\.bz2$ ]]; then
+            echo "::error::CEF_ASSET '$CEF_ASSET' does not follow cef-binaries-macos-<cefver>-g<sha>.tar.bz2 — cannot derive the expected engine"
+            exit 1
+          fi
+          expect_ver="${BASH_REMATCH[1]}"; expect_sha="${BASH_REMATCH[2]}"
+
+          hdr="cef-binaries/include/cef_version.h"
+          [ -f "$hdr" ] || { echo "::error::$hdr not found — the extracted tree is not a CEF distribution"; exit 1; }
+          cef_version=$(sed -nE 's/^[[:space:]]*#define[[:space:]]+CEF_VERSION[[:space:]]+"([^"]+)".*/\1/p' "$hdr" | head -n1)
+          [ -n "$cef_version" ] || { echo "::error::no CEF_VERSION define found in $hdr"; exit 1; }
+
+          echo "CEF_VERSION (read out of the artifact) = $cef_version"
+          echo "asset name expects                     = ${expect_ver} ... +${expect_sha}+"
+          echo "Chromium version = $(printf '%s' "$cef_version" | sed -nE 's/.*\+chromium-([0-9.]+).*/\1/p')  <- NOT a discriminator; successive engines share it"
+
+          case "$cef_version" in
+            "${expect_ver}-"*"+${expect_sha}+"*) echo "engine confirmed: CEF ${expect_ver}, fork ${expect_sha}" ;;
+            *)
+              echo "::error::ENGINE MISMATCH. The asset is named for CEF ${expect_ver} / fork ${expect_sha}, but the extracted cef_version.h says '${cef_version}'."
+              echo "::error::Either the release asset was re-uploaded under an existing name (never --clobber), or env.CEF_ASSET was bumped without re-uploading."
+              exit 1 ;;
+          esac
 
       # Build CEF wrapper if not pre-built
       - name: Build CEF wrapper
@@ -1060,6 +1248,17 @@ jobs:
   # PUBLISH RELEASE
   # ============================================================
   publish:
+    # ⛔ TAG PUSHES ONLY. A workflow_dispatch run is a build-validation exercise and
+    # must never mint a release — the "Create draft GitHub Release" step below runs
+    # softprops/action-gh-release, which on a branch ref would create a release named
+    # after the BRANCH. A de-risk run that quietly leaves a draft behind is worse
+    # than no run at all.
+    #
+    # Gated at JOB level, not per-step, on purpose: several steps here read
+    # $GITHUB_REF_NAME as a version (appcast generation, `gh release view`), which is
+    # a branch name on a dispatch. Skipping individual steps would leave those
+    # half-running against nonsense.
+    if: github.event_name == 'push'
     needs: [build-windows, build-macos]
     # Pinned (kill silent drift): the crypto-verify step needs openssl >= 3 (Ed25519
     # -rawin); don't let a floating image move it under us. ubuntu-24.04 ships openssl 3.x.
@@ -1093,7 +1292,7 @@ jobs:
           REPO_URL="https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}"
 
           # Globally-monotonic macOS build number (-> sparkle:version). MUST be computed
-          # identically to the build-macos "Get version from tag" step, which bakes the
+          # identically to the build-macos "Resolve version + build number" step, which bakes the
           # same number into CFBundleVersion — Sparkle 2 compares this appcast integer
           # against the installed CFBundleVersion. Scheme:
           #   MAJOR*1000000 + MINOR*10000 + PATCH*100 + (beta N, or 99 for a final)

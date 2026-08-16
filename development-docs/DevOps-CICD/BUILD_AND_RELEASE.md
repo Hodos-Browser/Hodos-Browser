@@ -1,7 +1,7 @@
 # Hodos Browser — Build & Release Guide
 
 **Created:** 2026-03-20
-**Last Updated:** 2026-07-09
+**Last Updated:** 2026-08-16
 **Purpose:** How to build installers, sign code, ship updates, and manage releases
 
 > **Single source of truth.** This file in `development-docs/` is the canonical build & release guide. Any out-of-tree copies (e.g. older `Marston Enterprises/Hodos/Hodos_CI_CD/` snapshots) are deprecated — edit only this one.
@@ -116,6 +116,82 @@ git push release vX.Y.Z-beta.N
 ```
 
 CI takes ~35 min (beta.6 = 19 min, beta.7 = ~28 min — varies). Monitor at: https://github.com/Hodos-Browser/Hodos-Browser/actions
+
+##### Step 3b (optional, recommended after any CEF/asset/toolchain change): manual validation run
+
+`release.yml` has a **second trigger** — `workflow_dispatch` — that builds **both platforms and
+publishes nothing**. Added 2026-08-16.
+
+**What it is for.** Proving CI builds cleanly against a change it has never exercised — most often a
+newly-swapped `cef-binaries-*` asset — *before* the release tag. Without it, the first CI run on a new
+engine is the release itself, and a failure there costs a re-tag. Run it whenever you have swapped a
+CEF asset, bumped a runner image, or changed `release.yml` in a way you cannot verify by reading.
+
+**How to run it.** Actions → **Release** → *Run workflow* → pick the branch → fill in **`reason`**
+(required; it is written to the run summary so the run explains itself later). Or:
+
+```bash
+gh workflow run release.yml --repo Hodos-Browser/Hodos-Browser --ref main \
+  -f reason="prove CI builds against the P4f CEF assets (g9ccef04) before tagging v0.4.0-beta.2"
+```
+
+**⛔ What it deliberately does NOT do: publish.** The `publish` job carries
+`if: github.event_name == 'push'`, so **no GitHub release is created — not even a draft.** The
+installers/DMG exist only as workflow artifacts. The gate is at *job* level on purpose: several steps
+in `publish` read `$GITHUB_REF_NAME` as a version (appcast generation, `gh release view`), and on a
+dispatch that is a **branch name**. Skipping individual steps would leave the rest running against
+nonsense. **Verify it, don't assume it** — after a dispatch run, confirm `publish` shows as *Skipped*
+in the job graph **and** diff `gh release list` from before the run. A de-risk run that quietly leaves
+a draft behind is worse than no run at all.
+
+**⛔ The build-number hazard, and how the dispatch path avoids it.** On a `workflow_dispatch`,
+`github.ref_name` is the **branch**, not a tag. Running the release formula on it is not merely untidy:
+
+- from branch `0.4.0` it yields version `0.4.0` with no `-beta.N`, so `beta = 99` and
+  `BUILD_NUMBER = 40099` — **exactly what the eventual final 0.4.0 release produces**;
+- that integer is the Windows updater's **anti-rollback floor** (`cef_browser_shell.cpp`:
+  `floor = max(APP_BUILD_NUMBER, highWaterBuild)`, and an update requires `signedBuild > floor`), so a
+  stray `40099` build on a machine would **refuse the real 0.4.0** (equal, not greater) and every beta
+  beneath it;
+- a non-version branch name (`main`) crashes the parse instead.
+
+So the dispatch path **never runs that formula**. It hardcodes `VERSION=0.0.0-ci.<run_number>` and
+`BUILD_NUMBER=0`:
+
+| | version | build number |
+|---|---|---|
+| tag push `v0.4.0-beta.2` | `0.4.0-beta.2` | `40002` |
+| tag push `v0.4.0` | `0.4.0` | `40099` |
+| **dispatch** (any branch) | `0.0.0-ci.<run>` | **`0`** |
+
+`0` is chosen deliberately in the **safe direction**: it is the only value that can never block a real
+update. (It is in contract — `cef-native/CMakeLists.txt` guards `^[0-9]+$` and its own no-CI fallback
+uses `"0"`.) `0.0.0-ci.<run>` is not a valid release tag shape, so `promote.yml`'s tag regex would
+reject it, and the artifacts land as `HodosBrowser-0.0.0-ci.42-setup.exe` — unmistakable for a release.
+
+**⛔ It only works on the `release` (org) repo.** Both build arms download with
+`--repo ${{ github.repository }}`, and the `cef-binaries` release **does not exist on the dev fork**
+(`gh release view cef-binaries --repo BSVArchie/Hodos-Browser` → *release not found*); the Azure
+Trusted Signing secrets live on the org repo too. A dispatch on `origin` dies at the download step —
+fast and cheap (<1 min), but pointless, and it burns the dev fork's metered Actions minutes. Note also
+that GitHub only offers `workflow_dispatch` for a workflow present on the repo's **default branch**
+(`main` on `release`), so the change must reach `release/main` — i.e. **Step 2 propagation happens
+before the validation run**, and the run then builds the exact tree the tag will be cut from.
+
+**The engine assertion (runs on BOTH triggers).** Each build arm now defines its CEF asset once, in a
+job-level `env.CEF_ASSET`, and asserts the extracted `cef-binaries/include/cef_version.h` against the
+engine version + fork SHA **in that filename**.
+
+> ⛔ **Read `CEF_VERSION`, never the Chromium version.** Successive engines share one: P4e
+> (`g7dd0357`) and P4f (`g9ccef04`) are **both** `chromium-150.0.7871.187`, so `Chrome/150.0.7871.187`
+> in a log proves nothing about which engine CI pulled. A stale asset is a **silent** failure — CI
+> builds green and ships a browser missing the fix the release exists for, and on macOS there is not
+> even a `bootstrap.exe` gate to trip over it.
+
+Because the expectation is derived from the asset *name*, bumping the engine stays a one-line edit per
+arm, and the check specifically catches a `--clobber`'d asset (name claims one engine, bytes are
+another). The download step also logs the asset's size and MD5 so "right name, wrong bytes" is visible
+from the log alone.
 
 #### Step 4: Get DSA signature from CI logs
 
