@@ -24,6 +24,19 @@ and OnContextCreated is exactly where the farbling pull happens. Without the eva
 loop can complete having triggered zero pulls and report a beautiful flat line. It is also
 precisely what the bypass does, so the measured path is the attacked path.
 
+## ⛔ A BASELINE BELONGS TO ONE MACHINE — put the machine in the filename
+
+Timings are hardware. A baseline recorded on one box says nothing about another, and the
+JSON's `machine`/`platform` fields plus the cross-machine guard already reflect that — but a
+file called `p4e_iframe_perf_baseline.json` sitting in a shared repo *looks* like a shared
+artifact, and macOS duly tried to compare against a Windows one (relay §GG7.1). Baselines are
+therefore named `<thing>_baseline_<platform>-<machine>.json`.
+
+⚠️ Consequence worth stating rather than discovering: **the iframe baseline was only ever
+recorded on Windows, and a macOS pre-P4e one can no longer be created** — that engine is gone.
+The iframe vector is therefore un-gated on macOS for good. Not a P4f blocker (P4f adds no
+frame-creation code), but it is a permanent hole, not a temporary one.
+
 ## ⛔ The pre-change baseline can only be taken ONCE
 
 Before P4e, subframes take an early return and make NO browser call at all, so today's
@@ -70,11 +83,11 @@ Usage:
 
     # BEFORE the rebuild -- do this first, it cannot be repeated
     python farbling_iframe_perf_check.py --exe ... --data-root ... --dev \
-        --save-baseline p4e_iframe_perf_baseline.json
+        --save-baseline p4e_iframe_perf_baseline_win-archbold.json
 
     # AFTER the rebuild
     python farbling_iframe_perf_check.py --exe ... --data-root ... --dev \
-        --baseline p4e_iframe_perf_baseline.json [--max-delta-us 50]
+        --baseline p4e_iframe_perf_baseline_win-archbold.json [--max-delta-us 50]
 """
 
 import argparse
@@ -466,8 +479,21 @@ def main():
             print("      baseline %8.1f us   now %8.1f us   delta %+8.1f us"
                   % (base_marginal, cur_marginal, delta))
             if delta <= args.max_delta_us:
-                print("    [PASS] marginal per-frame delta %+.1f us within budget %.1f us"
-                      % (delta, args.max_delta_us))
+                # Signed on purpose: this is a REGRESSION gate, so being faster is not a
+                # failure. But do not print a large negative delta as "within budget" --
+                # that reads as a measured improvement, and the patch cannot make worker
+                # startup faster. A big negative means the MACHINE moved (load, thermal,
+                # cache), which is information about the instrument, not about the code.
+                if delta < -args.max_delta_us:
+                    print("    [PASS] marginal per-frame delta %+.1f us — FASTER than "
+                          "baseline by more than the budget." % delta)
+                    print("           ⚠️ Not a speedup: this change cannot make worker "
+                          "startup faster. It means this box drifted between the two")
+                    print("           recordings, so treat the gate as excluding a GROSS "
+                          "regression only.")
+                else:
+                    print("    [PASS] marginal per-frame delta %+.1f us within budget %.1f us"
+                          % (delta, args.max_delta_us))
             else:
                 print("    [FAIL] marginal per-frame delta %+.1f us EXCEEDS budget %.1f us"
                       % (delta, args.max_delta_us))

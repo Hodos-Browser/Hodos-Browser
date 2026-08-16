@@ -150,7 +150,13 @@ The original (A) assumed we would have to extend `blink::mojom::CommitNavigation
 
 The Supplement covers any `ExecutionContext` **once the `domain_key` reaches that context's process.** In-process contexts inherit it; **out-of-process ones — OOP workers *and* cross-site iframes under default site isolation — need explicit cross-process delivery.**
 
-> ## ⛔⛔ MEASURED 2026-08-10 — **ALL** workers are unfarbled, in-process included. The table below is aspirational, not current.
+> ## ✅ SUPERSEDED 2026-08-15 by P4f — dedicated and nested workers ARE farbled.
+>
+> The 2026-08-10 banner here read "**ALL** workers are unfarbled, in-process included",
+> which was true then and is **false now**. `GlobalScopeCreationParams` carries the key to
+> `DedicatedWorkerGlobalScope`; measured R7 exit 1→0 and R8/T3 KEYED on both platforms.
+> **Still unfarbled: shared (R9) and service (R10) workers only**, owner-signed ⏸️.
+> Kept rather than deleted because the reasoning trail is why the fix was scoped correctly.
 >
 > The "in-process contexts inherit it for free" reasoning is **wrong in practice at `c63654654`**, and
 > this was confirmed by measurement on macOS after being reasoned from the code on Windows — so it is

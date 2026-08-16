@@ -48,6 +48,10 @@
 > The worker returns byte-identical **native** values on all three vectors while the main thread of
 > the same document is farbled.
 >
+> ⚠️ **SUPERSEDED 2026-08-15 by P4f: in-process workers are now FARBLED.** The paragraph
+> below is the 2026-08-10 finding and is kept as the reasoning trail that sized the fix
+> correctly — it is NOT current state. Only shared/service workers remain open.
+>
 > **Therefore: in-process workers are unfarbled too**, and §11's worker row is red for a reason
 > unrelated to OOP. The deferral stands, but log the gap as **"window + same-site frames only; ALL
 > workers unfarbled, in-process included"** — not "OOP workers pending". Scoping P4e as an

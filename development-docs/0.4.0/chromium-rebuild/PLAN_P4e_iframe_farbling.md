@@ -37,7 +37,7 @@ document and *is* the bypass frame.
 ### Measured perf baseline — the number D4 was worried about
 
 Recorded on the pre-change engine (it cannot be re-measured afterwards; today subframes make no
-browser call at all, so this is the floor). `p4e_iframe_perf_baseline.json`:
+browser call at all, so this is the floor). `p4e_iframe_perf_baseline_win-archbold.json`:
 
 ```
 N=1    3.30 ms   3300 us/frame        N=50   139.10 ms   2782 us/frame

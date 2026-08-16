@@ -5,9 +5,12 @@ Six of the eight Q2 rows are settled here. The other two are not, and deliberate
 
   * **T3** (YouTube `AdblockResponseFilter` `adPlacements` rename) needs a human watching
     for a pre-roll — "no ad played" is not something this rig can honestly assert.
-  * **T4** (CreepJS worker column == window column) is **KNOWN RED**: all workers *and* all
-    cross-site iframes are unfarbled, both measured. P4e is deferred, so this is an accepted
-    gap to record, not a failure to chase.
+  * **T4** (CreepJS worker column == window column). ⚠️ **UPDATED 2026-08-15 — this row used
+    to read "KNOWN RED, all workers and all cross-site iframes are unfarbled, an accepted gap
+    not a failure to chase". That is now WRONG IN THE DANGEROUS DIRECTION.** P4e closed the
+    iframe half and P4f closed dedicated + nested workers, so a worker/window mismatch here is
+    a **REGRESSION to chase**, not a known gap. Only SHARED and SERVICE workers remain
+    unfarbled (R9/R10, owner-signed ⏸️), and CreepJS's worker column does not exercise those.
 
 ## T1 / T7 — the request is CANCELLED, not merely classified
 
