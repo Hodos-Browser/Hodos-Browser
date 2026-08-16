@@ -362,14 +362,29 @@ jobs:
       # =====================================================================
       # FARBLING SEED-ROTATION GATE
       #
-      # WHY THIS IS A PROMOTE GATE AND NOT A CI JOB. A hosted runner cannot
-      # produce this result. The build job pulls `cef-binaries-windows-150.zip`
-      # from a `cef-binaries` release that does not exist on the development
-      # repo at all, and the org repo's copy predates the C2/C3 farbling
-      # patches — so a hosted job would compile against binaries with no
-      # farbling and go red against correct code. That is defect #4 of a family
-      # that has already cost this project days. The measurement therefore runs
-      # on the build host, and the result is carried here.
+      # WHY THIS IS A PROMOTE GATE AND NOT A CI JOB.
+      #
+      # ⚠️ CORRECTED 2026-08-15. This block used to say a hosted job "would
+      # compile against binaries with no farbling and go red against correct
+      # code", because the org repo's asset predated the C2/C3 patches. THAT
+      # PREMISE DIED when release.yml moved to the versioned P4f assets
+      # (cef-binaries-{windows,macos}-150.0.43-g9ccef04): both arms now build
+      # against binaries carrying the full C1-C6 + P4e + P4f patch set, so a
+      # hosted job would NOT be testing a farbling-free browser.
+      #
+      # The CONCLUSION still holds, for different and more durable reasons:
+      # this gate drives a real browser through profile edits and full
+      # RESTARTS, comparing farbled values across sessions. It needs a
+      # persistent profile directory, a GPU-backed renderer for the WebGL
+      # vector, and several minutes of browser lifecycle — none of which a
+      # hosted runner gives us cheaply or reliably. The measurement therefore
+      # runs on the build host, and the result is carried here.
+      #
+      # ⛔ Recorded rather than silently rewritten because a STALE RATIONALE is
+      # how this project has repeatedly talked itself into the wrong thing. If
+      # someone later reads the old reason, checks it, finds it false, and
+      # concludes the gate can move to CI, they would be right about the reason
+      # and wrong about the gate.
       #
       # WHY IT EXISTS AT ALL. Fingerprint farbling shipped broken in EVERY
       # release from beta.1 to beta.29 — the renderer never received its seed

@@ -136,11 +136,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download cef-binaries --pattern "cef-binaries-windows-150.0.42-g7dd0357.zip" --repo ${{ github.repository }}
+          gh release download cef-binaries --pattern "cef-binaries-windows-150.0.43-g9ccef04.zip" --repo ${{ github.repository }}
 
           echo "Extracting CEF binaries..."
-          7z x cef-binaries-windows-150.0.42-g7dd0357.zip -y
-          del cef-binaries-windows-150.0.42-g7dd0357.zip
+          7z x cef-binaries-windows-150.0.43-g9ccef04.zip -y
+          del cef-binaries-windows-150.0.43-g9ccef04.zip
 
           if (Test-Path "cef-binaries") {
             echo "CEF binaries extracted successfully"
@@ -473,11 +473,11 @@ jobs:
           # AT ALL, indistinguishable from a working one unless the seed-rotation gate is run.
           # See cef-native/CLAUDE.md. Do not "simplify" this back to the shared name when
           # 0.4.0 lands on main — collapse it only when the M136 asset is re-uploaded as 150.
-          gh release download cef-binaries --pattern "cef-binaries-macos-150.0.42-g7dd0357.tar.bz2" --repo ${{ github.repository }}
+          gh release download cef-binaries --pattern "cef-binaries-macos-150.0.43-g9ccef04.tar.bz2" --repo ${{ github.repository }}
 
           echo "Extracting CEF binaries..."
-          tar -xjf cef-binaries-macos-150.0.42-g7dd0357.tar.bz2
-          rm cef-binaries-macos-150.0.42-g7dd0357.tar.bz2
+          tar -xjf cef-binaries-macos-150.0.43-g9ccef04.tar.bz2
+          rm cef-binaries-macos-150.0.43-g9ccef04.tar.bz2
 
           # Handle nested directory — find and rename to cef-binaries
           if [ ! -d "cef-binaries" ]; then
