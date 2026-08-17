@@ -1,11 +1,17 @@
-# DRAFT — beta.2 release-note wording for fingerprint protection
+# beta.2 release-note wording for fingerprint protection
 
-> **Status: DRAFT, owner approval required.** This is user-facing product communication about
-> a privacy limitation, which is an owner line, not an engineering one (relay §DD4).
+> **Status: ✅ APPROVED by owner 2026-08-17. §D.1 is the selected wording; §D.2 does not apply.**
+> This is user-facing product communication about a privacy limitation, which is an owner
+> line, not an engineering one (relay §DD4).
 >
-> ⚠️ **Contingent on Phase 3.** The wording below assumes P4f goes green. If any P4f
-> acceptance row fails, we stay on §D **row 1** and *no fingerprinting claim of any kind may
-> be made* — §D.2 below is the wording for that case. **Pick one; do not blend them.**
+> **Why D.1 and not D.2:** P4f went green on **both** platforms — Windows §FF3, macOS §GG3, and
+> the full 17/17 suite re-run against the shipping macOS shell in §LL2 — so the §D ladder is on
+> **row 2** and the row-2 claim is permitted. §D.2 is retained below as the record of what would
+> have been said had P4f failed; it is **not** an alternative to choose from any more.
+>
+> ⛔ **The claim still follows the matrix.** If a cell moves after this approval, the sentence
+> moves with it and this document needs re-approval — approval is of *these* words against
+> *these* measurements, not a standing licence to claim fingerprint protection.
 
 ---
 
@@ -43,7 +49,7 @@ workers are not yet covered."*
 |---|---|---|---|
 | 1 | **Widgets on non-exempt sites are now farbled where they were native** — payment and captcha iframes (Stripe, reCAPTCHA, Turnstile, 3-D Secure) | P4e, MEASURED | It is a behaviour change users may notice as a site breaking. Not established as harmful — the incoherent farbled-parent/native-child combination that shipped *before* P4e is the configuration these scorers actually reject. |
 | 2 | **Exemption inheritance (D5)** — on all 37 `IsAuthDomain` hostnames, **every** embedded third party reads true native values | `farbling_d5_residual_check.py`, MEASURED (macOS) | The list includes x.com, facebook.com, amazon.com, github.com, paypal.com, chase.com, bankofamerica.com, wellsfargo.com — pages users are most likely to be logged into and which carry many third-party frames. |
-| 3 | **Shared and service workers are unfarbled** | CODE-READ; owner-signed deferral, §F, 2026-08-14 | Reachable **same-origin only**, so narrower than the dedicated-worker gap P4f closes — but it is the one remaining unfarbled realm and it must be named, not omitted. |
+| 3 | **Shared and service workers are unfarbled** | **Shared: MEASURED** — `worker_residual` gate, macOS §LL2 #09, Windows §II. **Service: UNMEASURED and not measurable locally** — §LL4. Owner-signed deferral, §F, 2026-08-14 | Reachable **same-origin only**, so narrower than the dedicated-worker gap P4f closes — but it is the one remaining unfarbled realm and it must be named, not omitted. |
 | 4 | **Fenced frames are unmeasured** | §A.6, UNKNOWN | The container exists in this build. Not embedder-scriptable, so it is a tracker-visibility question rather than a bypass — but ❓ is not ✅ and it may not be quietly omitted. |
 
 ### ⚠️ Residual 2 is NOT new, and saying it is would be the costly error
@@ -68,7 +74,12 @@ beta.1's fingerprint protection at all, they must not imply it was complete.
 
 ---
 
-## D.2 — wording IF P4f is NOT green (§D ladder row 1)
+## D.2 — ⛔ NOT APPLICABLE (P4f went green). Retained as the record of the row-1 wording
+
+> Kept rather than deleted so the ladder's row-1 language survives for the next feature that
+> lands on row 1. **Do not use it for beta.2, and do not blend it with §D.1.**
+
+### wording IF P4f is NOT green (§D ladder row 1)
 
 **Permitted claim: none.** Not "partial protection", not "protection on most surfaces",
 not a feature bullet with a caveat. Row 1 exists because a protection the page can switch
