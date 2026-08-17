@@ -151,6 +151,34 @@ Leads already in hand:
 `g_wallet_overlay_prevent_close`, `g_file_dialog_active`, and the four privacy-perimeter gates.
 Verification must include the **DPI & resolution matrix** cells #4/#6/#9.
 
+### WS1b — Logging & synchronous-I/O practices review · **NEW, promoted from an incident**
+
+Opened 2026-08-17 after the owner's installed **beta.1** went unresponsive — balances, the advanced
+wallet, local DB reads **and ordinary web pages** all stalled together, recovering only after a
+second restart. Two shipping defects were found while investigating; the incident's own cause is
+**not** established.
+
+- 🎫 **`TICKET_production_debug_logging_unbounded.md`** — `Logger` has **no level gate and no
+  rotation**, so production writes DEBUG forever: **1.58 GB** on the owner's machine since 2026-07-06,
+  containing **every URL visited, in plaintext**, surviving the user clearing their own history. On a
+  privacy browser.
+- 🎫 **`TICKET_stray_log_in_install_root.md`** — **44** raw `ofstream("debug_output.log")` writes
+  across 5 shipped files use a **relative path**, landing a log **inside `{app}`** — the one place
+  `cef-native/CLAUDE.md` forbids, because it already broke the silent-update backup hash once.
+  Confirmed live: 9,865 bytes in `%LOCALAPPDATA%\HodosBrowser\` from the fresh **beta.2** install.
+  `WalletService.cpp` is byte-identical between beta.1 and beta.2, so **both ship it**.
+
+**The wider review this earns** (the owner's framing): a general pass over logging and **synchronous
+I/O on the browser UI thread**. `getBalance` alone does 4 open/write/close cycles per call and a
+synchronous wallet HTTP request; the incident window logged **417 balance calls in 52 minutes** with
+uniform **2.0 s** gaps that look like a timeout rather than contention.
+
+⛔ **The incident cause remains OPEN and must be reproduced, not inferred.** Established: the price
+was fine throughout (`bsvPrice: 15.145`; the fallback chain is intact), and the failure was
+specifically `/wallet/balance` returning no balance from 15:18:02 onward. **Unexplained:** why
+*web pages* stalled too. One experiment settles it — stub `/wallet/balance` to hang and see whether
+page loads stall with it.
+
 ### WS2 — Window / instance / focus identity · items 5, 3
 
 `WindowManager` + Win32 shell integration. **Windows-only** — macOS Spaces is a different mechanism
