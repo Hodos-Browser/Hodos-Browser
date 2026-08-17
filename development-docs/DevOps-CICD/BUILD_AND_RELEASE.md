@@ -207,9 +207,25 @@ is briefly invisible by tag right after creation:
 | beta.1 | `14:57:49.99` | OK at `14:57:50.66` — **+0.67 s** |
 | beta.2 | `15:05:28.99` | **`release not found`** at `15:05:30.93` — **+1.94 s** |
 
-Identical code; beta.1 got lucky. beta.2's draft was complete and correct — all 8 assets `uploaded`
-and above their floors — and the same lookup succeeded minutes later. The step failed on the
-**lookup** and never evaluated a single assertion.
+Identical code. beta.2's draft was complete and correct — all 8 assets `uploaded` and above their
+floors — and the same lookup succeeded minutes later. The step failed on the **lookup** and never
+evaluated a single assertion.
+
+> ⚠️ **Do not read this as "bad luck" — beta.2 ran during a GitHub incident.** A **critical**
+> GitHub.com incident opened at **13:40:03 UTC on 2026-08-17**, and GitHub reported *"high error
+> rates around 20% for web experiences and api traffic"* with **API Requests** and **Actions** in
+> `major_outage`. beta.2's tag pushed ~14:38 and the failing lookup ran at 15:05:30 — **entirely
+> inside that window** — which is a far better explanation for why a step that had never failed in
+> ~30 prior releases failed now.
+>
+> The consequence for the retry: **~60 s of retry is sized for propagation lag, not for a platform
+> outage.** During a sustained multi-hour degradation it can still exhaust. That is acceptable — the
+> right response to a red release during a GitHub incident is to check the draft by hand and wait,
+> not to widen the retry until failures become invisible. Check
+> https://www.githubstatus.com/api/v2/status.json before diagnosing this step.
+>
+> ⭐ Recorded because this project's own rule is that a stale rationale is how we talk ourselves into
+> the wrong thing. "Different dice" was the first read and it is incomplete.
 
 Fixed by retrying the lookup for ~60 s. ⚠️ **The retry covers VISIBILITY only.** Every assertion
 after it stays fail-closed — a missing, not-fully-uploaded or undersized asset is still an immediate
