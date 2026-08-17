@@ -640,7 +640,7 @@ Submission IDs come from either the confirmation email or the portal's "submissi
 - Installer SHA-256: `a8a49877814a25fb685d2d39d4c9a7c6d176d5a6e8bf68204623173daf24b22d`
 - VirusTotal: submitted 2026-08-17 — <detections TBD> — https://www.virustotal.com/gui/file/a8a49877814a25fb685d2d39d4c9a7c6d176d5a6e8bf68204623173daf24b22d
   - ✅ Verified against `promote.yml`'s gate logic: URL shape accepted, embedded hash == installer hash. (The submitted URL carried a `?nocache=1` suffix; harmless — the gate extracts the first 64-hex run.)
-- MS Defender: submitted 2026-08-17, ID `<TBD — paste from the WDSI portal or confirmation email>`
+- MS Defender: submitted 2026-08-17 10:11:11 MT, ID `915366c4-f34a-4f78-a36e-b31863146afd` (status: **Submitted** — reconcile to Completed later). User opinion: *Incorrect detection*. ID read off the portal's submission-details page. ✅ Passes `promote.yml`'s UUID format gate.
   - Defender definition version on the submitting machine: `1.457.206.0` (engine `1.1.26070.7`, platform `4.18.26070.9`)
   - Submission text archived alongside this row; calls out the EOC/AOC rotation and cites beta.8's Completed submission `d055010c-cec0-4216-8eae-c04d10a6c5ce`
 - Norton: skipped (submit only on a real detection)
