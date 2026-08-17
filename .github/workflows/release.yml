@@ -300,7 +300,14 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          # Node 22, not 20. Node 20 reached END-OF-LIFE 2026-04-30 and had been
+          # pinned here ~4 months past it — invisible to a "latest version" check
+          # because 20 is still ubiquitous. For runtimes read the EOL schedule
+          # (nodejs/Release schedule.json), not the newest release number.
+          # 22 is maintained until 2027-04-30: the longest runway of the options
+          # that are not still moving. Build-time only — no Node ships in the
+          # installer; npm run build is `tsc -b && vite build`, emitting static assets.
+          node-version: '22'
       
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -701,7 +708,14 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          # Node 22, not 20. Node 20 reached END-OF-LIFE 2026-04-30 and had been
+          # pinned here ~4 months past it — invisible to a "latest version" check
+          # because 20 is still ubiquitous. For runtimes read the EOL schedule
+          # (nodejs/Release schedule.json), not the newest release number.
+          # 22 is maintained until 2027-04-30: the longest runway of the options
+          # that are not still moving. Build-time only — no Node ships in the
+          # installer; npm run build is `tsc -b && vite build`, emitting static assets.
+          node-version: '22'
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2

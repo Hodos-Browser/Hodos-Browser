@@ -13,8 +13,22 @@ name: ci
 
 on:
   pull_request:
+  # main ONLY, not [main, staging] (trimmed 2026-08-17 — Actions quota).
+  #
+  # Release propagation is a single command that pushes the SAME commit to both:
+  #   git push origin HEAD:staging HEAD:main
+  # With both branches listed that fired this workflow TWICE per propagation, for
+  # an identical tree — pure duplicate spend, and the dev fork's minutes are
+  # metered (the org's are free). main is the blessed release-candidate branch, so
+  # gating it is what actually matters; staging always carries the same commit by
+  # the time it matters.
+  #
+  # ⚠️ Consequence to accept knowingly: a push that lands on staging WITHOUT also
+  # landing on main is no longer gated here. Today nothing does that — Step 2 of
+  # BUILD_AND_RELEASE.md always pushes both together. If that flow ever changes,
+  # put staging back.
   push:
-    branches: [main, staging]
+    branches: [main]
 
 permissions:
   contents: read

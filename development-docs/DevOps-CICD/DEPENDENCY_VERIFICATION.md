@@ -81,7 +81,7 @@ Queried upstream directly rather than reasoning from the pin dates. **The postur
 | **SQLite** | `3.53.4` | `3.53.4` | ✅ current |
 | **nlohmann-json** | `3.12.0` | `3.12.0` | ✅ current |
 | **Rust** | `1.97.1` | `1.97.1` | ✅ current |
-| **Node** | **`20`** | `26.7.0` | 🚨 **END-OF-LIFE since 2026-04-30.** See below. |
+| **Node** | ~~`20`~~ → **`22`** | `26.7.0` | ✅ **FIXED 2026-08-17.** Was EOL since 2026-04-30; bumped to 22 (maintained to 2027-04-30). |
 | **Sparkle** (macOS updater) | `2.9.3` | `2.9.6` | ⚠️ 3 patches behind, on the **auto-update** path |
 | **WinSparkle** | `0.9.3` (tool) / `0.8.1` (shipped dll) | `0.9.4` | ⚠️ 1 patch behind, same path |
 | **Inno Setup** | `6.7.1` | `7.1.0` | ⏸️ **deliberate hold** — Chocolatey lags upstream and 7.x is a major compiler change; do not bump without re-validating `hodos-browser.iss` |
@@ -98,9 +98,12 @@ node-shaped appears in `hodos-browser.iss`). So the exposure is **build-toolchai
 vulnerability in the shipped browser. That is a real supply-chain concern for software that handles
 money — an EOL toolchain builds the UI that renders wallet state — but it is not a user-facing CVE.
 
-**Recommended:** move to **Node 22** (maintenance until 2027-04-30), not 24 or 26. 22 is the current
-LTS-track option with the longest runway that is not still moving; the frontend uses Vite + tsc,
-which are version-tolerant. Re-run the frontend build and diff the emitted bundle before accepting.
+✅ **DONE 2026-08-17 — bumped to Node 22** (maintained to 2027-04-30) on both build arms. Not 24 or
+26: 22 is the LTS-track option with the longest runway that is not still moving.
+
+⚠️ **Not yet exercised in CI** — the dev fork's Actions quota is exhausted and `release.yml` only
+runs Node on a tag build or a `workflow_dispatch` validation run. The frontend build was verified
+**locally** (see below). Treat the first CI frontend build after this as the real confirmation.
 
 #### ⚠️ Sparkle / WinSparkle are the ones that matter most per-patch
 
@@ -110,14 +113,36 @@ that auto-update must never brick an install. Being 3 patches behind on Sparkle 
 being a minor behind on a JSON header. Check each release note before bumping, and re-run
 `SILENT_UPDATE_TEST_PLAN.md`'s Stage 1 rigs afterwards.
 
-#### The one place a version relationship with the engine really exists
+#### The one place a version relationship with the engine really exists — ✅ CLOSED 2026-08-17
 
 The React bundle runs **inside** the shipped Chromium's V8, so its output must be syntax that engine
-supports. `frontend/package.json` declares **no `browserslist` and no `engines`**, and nothing ties
-the Vite build target to the CEF version. It is safe today only because Chromium 150 is far newer
-than anything Vite targets by default — safe **by accident, not by construction**. Declaring a
-`browserslist` pinned to the shipped Chromium would make it structural and would catch the reverse
-case (a dependency emitting syntax newer than our engine) at build time rather than as a blank page.
+supports. Nothing tied the Vite build target to the CEF version; it was safe only because Chromium
+150 is far newer than anything Vite targets by default — safe **by accident, not by construction**.
+
+Now bound in `frontend/vite.config.ts`:
+
+```ts
+build: { target: 'chrome150', ... }
+```
+
+⛔ **`build.target` is the load-bearing setting — NOT the `browserslist` field.** Verified before
+adding it: this project has **no** postcss, autoprefixer, lightningcss, babel or `plugin-legacy`, so
+**nothing currently reads `browserslist`**. It is added to `package.json` as declaration-of-intent
+(and so any future tool inherits the right target), but on its own it would have been decorative —
+the exact "a doc example is not evidence the code does it" trap this file warns about elsewhere.
+
+**Measured, not assumed** — full frontend build, same tree, target off vs on:
+
+| | total JS emitted |
+|---|---|
+| Vite default target | 1,052,119 bytes |
+| `target: 'chrome150'` | **1,040,689 bytes** |
+
+11,430 bytes smaller (1.09%), **every chunk shrank and every content hash changed** — esbuild stopped
+down-levelling syntax Chromium 150 supports natively. The setting is demonstrably live.
+
+⛔ **Bump `target` in lockstep with the CEF pin.** It now also catches the reverse case: a dependency
+emitting syntax *newer* than our engine fails at build time instead of surfacing as a blank overlay.
 
 #### Method — repeat this at every engine bump and quarterly
 
