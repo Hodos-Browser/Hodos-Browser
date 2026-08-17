@@ -33,16 +33,61 @@ Kept verbatim in substance so nothing is lost in the re-grouping below.
 
 Checked against the code before planning, so the phases are built on facts rather than the reported symptom.
 
-### ⚠️ #3 is NOT a missing version resource
+### ⭐ #3 SOLVED at the desk — one root cause, two symptoms, and the code already wants the right thing
 
-`cef-native/tools/stamp_win_resources.cpp` already sets `kFileDescription = "Hodos Browser"`, and the
-string **is present in the shipped beta.2 binary** (verified by extracting `HodosBrowser.exe` from the
-released portable zip and searching its UTF-16 resource data).
+**Clarified symptom (owner, 2026-08-17):** clicking the *pinned* taskbar icon reads **"Hodos Browser"**
+correctly. Right-clicking the **running** button reads **"HodosBrowser.exe"**. And launching creates a
+**separate taskbar button** instead of grouping with the pinned icon — which should only happen for a
+second/third *profile*.
 
-⇒ The taskbar name is therefore **not** coming from `FileDescription`. The likely source is the
-**AppUserModelID / jump-list identity**, which Windows takes from the shortcut or an explicitly-set
-AUMID. Investigation should start at the Inno `[Icons]` shortcut and whether we set an AUMID at all —
-**not** at the resource stamper.
+**Both symptoms are one cause: AppUserModelID identity mismatch.** Not the version resource —
+`kFileDescription` is already `"Hodos Browser"` and is present in the **shipped** beta.2 binary
+(verified by extracting the exe from the released portable zip).
+
+Two halves, both confirmed in the tree:
+
+**(a) Production single-profile never sets an AUMID.** `cef_browser_shell.cpp`:
+
+```cpp
+if (!g_picker_mode && (hodos::IsDevEnv() || ProfileManager::GetInstance().GetAllProfiles().size() > 1)) {
+    std::wstring aumid = hodos::IsDevEnv() ? L"HodosBrowser.Dev" : L"HodosBrowser";
+    if (profileId != "Default") aumid += L"." + pw;
+    SetCurrentProcessExplicitAppUserModelID(aumid.c_str());
+}
+```
+
+For the ordinary user — production, one profile — `IsDevEnv()` is false and `size() > 1` is false, so
+**the branch never runs**. The comment says so outright: *"prod keeps its existing
+(set-only-when-multi-profile) behavior."* That deliberately-preserved legacy behaviour **is the bug**.
+
+**(b) The shortcuts declare no AUMID at all.** `installer/hodos-browser.iss` `[Icons]`:
+
+```
+Name: "{group}\Hodos Browser"; Filename: "{app}\HodosBrowser.exe"
+Name: "{autodesktop}\Hodos Browser"; Filename: "{app}\HodosBrowser.exe"; Tasks: desktopicon
+```
+
+No `AppUserModelID:` parameter. Windows therefore derives the shortcut's identity from the target
+path, while the running process has either no explicit identity or a different derived one —
+especially fragile under the **bootstrap model**, where `HodosBrowser.exe` is CEF's `bootstrap.exe`
+loading `HodosBrowser.dll` and spawning children.
+
+⇒ Windows cannot match window → shortcut, so it makes a **new button** *(symptom b)*, and the
+unmatched button has no registered display name, so the jump list falls back to the **exe filename**
+*(symptom a)*.
+
+**Fix shape** — the per-profile suffix logic is already written and correct; only the gate and the
+shortcut side are wrong:
+
+1. Set the explicit AUMID **always in production**, not only when multi-profile.
+2. Add a matching `AppUserModelID:` to **both** Inno `[Icons]` entries. The two must be byte-identical
+   or the mismatch persists.
+3. Keep the per-profile suffix — that is exactly the owner's expected behaviour (one button normally,
+   extra buttons only for additional profiles), and it is how Chrome behaves.
+
+⚠️ **Verification must include the pinned case.** An existing pinned shortcut carries the *old*
+identity, so testing only a fresh install would hide a regression for current users. Test:
+fresh install, upgrade-over-existing, **and** a shortcut pinned before the change.
 
 ### ⚠️ #6's media plumbing is present, which makes the Mac failure more interesting
 
