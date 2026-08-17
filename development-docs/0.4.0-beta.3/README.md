@@ -102,10 +102,13 @@ Live list is `FARBLING_DEFINITION_OF_DONE.md` **§H**. The four that gate the re
 
 ### E. Housekeeping carried in
 
-- `cef-binaries-backup-g7dd0357/` and `cef-binaries-backup-gc636546/` are sitting untracked in the
-  working tree. Decide keep-or-delete deliberately — they are the only local copies of two engines.
-- `CEF_VERSION_UPDATE_TRACKER.md` and `cef-native/CLAUDE.md` still describe the **pre-P4f** pins
-  (`c636546` / `dfe5a23`) as current. Stale on the most consequential fact in the repo.
+- ✅ *(done 2026-08-17)* `.gitignore` widened to `/cef-binaries-backup-*/` — the old rule never
+  matched the SHA-suffixed dirs, so 1.3 GB sat untracked where `git add -A` could have caught it.
+- ⏳ **Still owed: keep-or-delete on the two backup dirs (1.3 GB).** `g7dd0357` (P4e) is redundant —
+  both platform binaries are on the release under versioned names. `gc636546` is **the only built
+  copy in existence** (see the pins ticket); its source is tagged, so the fallback is a ~5 h rebuild.
+- ✅ *(done 2026-08-17)* `CEF_VERSION_UPDATE_TRACKER.md` and `cef-native/CLAUDE.md` corrected — both
+  named pre-P4f pins as current, and the tracker additionally claimed "Current CEF version: 136".
 - The `MAC_WINDOWS_RELAY.md` is ~6,900 lines. It works, but rounds older than the P4 series are
   archaeology and could move to `0.4.0/archive/`.
 

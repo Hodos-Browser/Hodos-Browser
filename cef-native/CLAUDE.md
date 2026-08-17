@@ -8,18 +8,22 @@ C++ browser shell using Chromium Embedded Framework. Provides process isolation 
 
 ## CEF / Chromium Version Pin
 
-This directory is the owning doc for the engine pin. **Both platforms are on CEF 150 as of 2026-08-09 — but on DIFFERENT fork commits**, so they are not byte-identical and a behaviour difference between them is a real possibility, not necessarily a platform bug. Always read the pin from the `cef_version.h` of the distribution the build actually points at — never quote it from memory.
+This directory is the owning doc for the engine pin. Always read the pin from the `cef_version.h` of the distribution the build actually points at — never quote it from memory.
+
+> ⛔ **CORRECTED 2026-08-17.** This table named `c636546` (Windows) and `dfe5a23` (macOS) as the current pins, and warned that the platforms had diverged. **Both statements are two engines out of date** — P4e (`g7dd0357`) and then P4f (`g9ccef04`) landed after it was written, and **the platforms are now converged.** Verified against `cef-binaries/include/cef_version.h` and both arms of `release.yml`.
 
 | | Windows | macOS |
 |---|---|---|
 | Distribution | staged `cef-binaries/` (**CEF 150**) | staged `cef-binaries/` (**CEF 150**) |
-| `CEF_VERSION` | `150.0.40-7871.3573+gc636546+chromium-150.0.7871.187` | `150.0.38-7871.3571+gdfe5a23+chromium-150.0.7871.187` |
+| `CEF_VERSION` | `150.0.43-7871.3576+g9ccef04+chromium-150.0.7871.187` | **same** |
 | `CHROME_VERSION` | 150.0.7871.187 | 150.0.7871.187 |
-| Fork pin | `c63654654` — C1+C2+C3 **plus C4 WebGL, C5 WebAudio (with the delta floor), C6 navigator** | `dfe5a2343` — C1+C2+C3 only; **no C4/C5/C6 yet** |
+| Fork pin | `9ccef044f` ("P4f") — C1–C6 + P4e (iframes/popups) + P4f (workers, `convertToBlob`, 3 audio readers) | **same** |
 | Model | **bootstrap** (see below) | linked executable (bootstrap is Windows-only — upstream #3928) |
 | C++ standard | **20** (required by 150) | **20** (required by 150) |
 
-⚠️ **The platforms are on different fork pins, and as of 2026-08-10 it is macOS that is behind.** Windows staged `c63654654`; Mac is still on `dfe5a2343`. Concretely: **canvas is farbled on both, but WebGL / WebAudio / navigator are farbled on Windows only** until Mac builds `c63654654`. A cross-platform farbling difference right now is expected, not a platform bug — check the pins before investigating one.
+✅ **The platforms are CONVERGED on `9ccef044f`.** Both CI arms pull the same engine version and each **asserts it out of the artifact** before building (`release.yml`). A cross-platform farbling difference is therefore *no longer* explained by a pin mismatch — investigate it as a real platform difference.
+
+> ⛔ **`CHROME_VERSION` identifies nothing.** `c636546`, `g7dd0357` and `g9ccef04` all report `150.0.7871.187`. Use `CEF_VERSION` — specifically the `+g<sha>` fragment — whenever you need to know *which* engine you have. Anything in this repo that identifies an engine by its Chromium version is measuring the wrong thing; that is the subject of `development-docs/0.4.0-beta.3/TICKET_farbling_gate_engine_binding.md`.
 
 **The 150 distribution was staged into `cef-binaries/` on 2026-08-04** (S0), so a Windows build now works on the default path and **`-DCEF_ROOT` is no longer needed**:
 
