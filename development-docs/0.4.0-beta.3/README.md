@@ -91,7 +91,16 @@ Live list is `FARBLING_DEFINITION_OF_DONE.md` **§H**. The four that gate the re
   Named in the release note's "deliberately not randomised" list; if E7 goes the other way, the note
   changes with it.
 
-### D. Cross-platform
+### D. Dependencies
+
+- 🎫 **`TICKET_dependency_freshness_review.md`** — the pins are good and the policy is a **freeze at
+  the moment we took control** (every pin's comment says so), but nothing ever re-evaluates them:
+  no cadence, no advisory check, no record of why a version is acceptable. Also notes that macOS is
+  weaker by construction — `Brewfile` cannot pin versions, so "we pin our dependencies" is only true
+  on Windows. Answers the standing question: DEP-1 landed 2026-08-03, CEF 150 landed 2026-08-04, so
+  the dependency pass predates the engine bump and has not been revisited.
+
+### E. Cross-platform
 
 - **macOS is on the same engine but has fewer measured cells than Windows.** Keep the matrix honest
   about which platform each ✅ came from.
@@ -100,7 +109,7 @@ Live list is `FARBLING_DEFINITION_OF_DONE.md` **§H**. The four that gate the re
 - **A macOS pre-P4e iframe baseline can never be created** — that engine is gone. Permanent gap,
   already recorded; don't let someone re-open it as a task.
 
-### E. Housekeeping carried in
+### F. Housekeeping carried in
 
 - ✅ *(done 2026-08-17)* `.gitignore` widened to `/cef-binaries-backup-*/` — the old rule never
   matched the SHA-suffixed dirs, so 1.3 GB sat untracked where `git add -A` could have caught it.
