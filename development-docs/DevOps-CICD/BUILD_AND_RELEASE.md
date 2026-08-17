@@ -606,6 +606,8 @@ If we ever land back on `EOC CA 02` (the pre-regression CA) on a future release,
 - beta.15 — `AOC CA 03` (shipped 2026-05-07 with backup-fix bundle on top of beta.14's auto-update foundation)
 - beta.16–beta.27 — not separately cert-checked (silent-update saga iteration releases)
 - beta.28 — `EOC CA 03` (back on the March-2026 regression cohort; leaf thumbprint `63478F7FEDBB38C553A459E3AFCF29EBBD4F6A25`. Called out in the Defender submission.)
+- beta.29, v0.4.0-beta.1 — not separately cert-checked
+- **v0.4.0-beta.2 — `EOC CA 04`** (rotated off beta.28's `EOC CA 03`; leaf thumbprint `09D486F9F46A2F4B8B60CA834EE5885A4407F199`, leaf validity 2026-08-16 → **2026-08-19**). ⚠️ Note the leaf is valid for **three days** — Trusted Signing rotates leaves ~every 3 days, which is why the silent-updater signer gate compares the **Subject CN**, not the thumbprint (§ silent-update). It is also why file-vs-publisher reputation matters more to us than to most publishers.
 
 #### 2.5.2 Per-release submission tracking
 
@@ -632,6 +634,17 @@ Submission IDs come from either the confirmation email or the portal's "submissi
 - VirusTotal: submitted 2026-04-28 — https://www.virustotal.com/gui/file/a6d6fb341c11a36b8d6249f2ee5f5d0f05f918107d40f146d7ff75d795562524
 - MS Defender: submitted 2026-04-28 08:15 MT, ID `d055010c-cec0-4216-8eae-c04d10a6c5ce` — **Completed** (cleared by 2026-05-01). Confirmation email never arrived; status was readable directly on the portal's submission-history page.
 - Norton: skipped (not flagged in the wild; Norton portal expects a real detection name + alert ID, no benefit to preemptive submission)
+
+**v0.4.0-beta.2 submission record:**
+- Cert chain: `Microsoft ID Verified CS EOC CA 04`; leaf thumbprint `09D486F9F46A2F4B8B60CA834EE5885A4407F199` (leaf valid 2026-08-16 → 2026-08-19 — Trusted Signing rotates leaves ~every 3 days)
+- Installer SHA-256: `a8a49877814a25fb685d2d39d4c9a7c6d176d5a6e8bf68204623173daf24b22d`
+- VirusTotal: submitted 2026-08-17 — <detections TBD> — https://www.virustotal.com/gui/file/a8a49877814a25fb685d2d39d4c9a7c6d176d5a6e8bf68204623173daf24b22d
+  - ✅ Verified against `promote.yml`'s gate logic: URL shape accepted, embedded hash == installer hash. (The submitted URL carried a `?nocache=1` suffix; harmless — the gate extracts the first 64-hex run.)
+- MS Defender: submitted 2026-08-17, ID `<TBD — paste from the WDSI portal or confirmation email>`
+  - Defender definition version on the submitting machine: `1.457.206.0` (engine `1.1.26070.7`, platform `4.18.26070.9`)
+  - Submission text archived alongside this row; calls out the EOC/AOC rotation and cites beta.8's Completed submission `d055010c-cec0-4216-8eae-c04d10a6c5ce`
+- Norton: skipped (submit only on a real detection)
+- ⚠️ Built during a **critical GitHub incident** (2026-08-17T13:40Z onward). Artifacts verified unaffected — SHA256SUMS match, signatures verified with mutation self-test, both EdDSA sidecars verified.
 
 **beta.9 submission record:**
 - Cert chain: signed via `Microsoft ID Verified CS AOC CA 03` (third distinct intermediate in three releases)
