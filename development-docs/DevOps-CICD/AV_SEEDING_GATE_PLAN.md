@@ -1,7 +1,8 @@
 # AV Seeding Gate — design plan
 
-**Status:** **Phase 1 BUILT** (2026-08-03) — merged into `.github/workflows/promote.yml`,
-not yet exercised on a real promote. Phase 2 not started. **Created:** 2026-08-03.
+**Status:** **Phase 1 BUILT and now PROVEN IN CI** (rehearsed 2026-08-17 —
+`promote.yml` dry run `32050154040`, all gate steps green against the real
+`v0.4.0-beta.2` draft bytes). Phase 2 not started. **Created:** 2026-08-03.
 
 > **No secrets or accounts required.** An earlier revision of this plan called
 > VirusTotal's API to verify submission automatically. That was **withdrawn** —
@@ -259,7 +260,38 @@ did not happen so a green dry run is never mistaken for a completed promotion.
    Expect green, plus the §2.5.2 ledger row in the run summary.
 5. Then re-run with `dry_run` **unchecked** to promote for real.
 
-### Status: UNPROVEN in CI (decision 2026-08-03)
+### Status: ✅ PROVEN IN CI, 2026-08-17 (was UNPROVEN — history kept below)
+
+Rehearsed exactly as §4 prescribes: `dry_run` checked, against the draft we
+actually intended to promote (`v0.4.0-beta.2`), run **`32050154040`**.
+
+| Gate step | Result |
+|---|---|
+| AV seeding — waiver check | success |
+| AV seeding — VirusTotal report (hash-checked attestation) | success |
+| AV seeding — MS Defender submission (attested) | success |
+| AV seeding — emit §2.5.2 ledger row | success |
+| Farbling gate — re-derive the seed-rotation verdict | success |
+| Promote to live / website update / served-signature verify | **skipped** (dry run) |
+
+The two things local testing could not cover both held: inputs arrived intact
+(including a multi-line `expected_sha256sums`), and the `env` written by the
+waiver step **was** visible to the next step's `if:` condition — which was the
+specific plumbing risk this section named.
+
+⚠️ **What the rehearsal did NOT prove.** The VirusTotal half is hash-checked and
+therefore real; the **Defender half is attestation only** — a well-formed but
+fabricated UUID still passes, by design (the threat model is forgetting, not
+lying). And the flip itself has still never executed, because every run so far
+has been a dry run. Read a green rehearsal as "the gates work", not as "the
+promote path works end to end".
+
+⭐ The deferral rationale below turned out to be right in an unplanned way: the
+first real exercise landed during a **critical GitHub incident** (2026-08-17),
+and the gate behaved correctly throughout.
+
+<details><summary>Original 2026-08-03 decision, kept for the rationale</summary>
+
 
 The gate's logic is unit-tested (12 cases, §"Verification done at build time"),
 but **it has never run inside GitHub Actions.** What local testing cannot cover
@@ -279,6 +311,8 @@ just promotes the right build.
 Mitigated by the fail direction — a gate bug blocks the promote, it cannot
 publish something bad — and by `av_seeding_waiver` as the unblock. Anyone
 promoting should read §2.5.5 of `BUILD_AND_RELEASE.md` first.
+
+</details>
 
 ---
 

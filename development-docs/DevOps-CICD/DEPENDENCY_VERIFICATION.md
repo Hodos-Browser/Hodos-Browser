@@ -62,6 +62,13 @@ commit, or a build break is ambiguous between the two.
 - **vcpkg / Inno / Brew: NOT verifiable locally.** These only execute in the release workflow. Their
   first real exercise is the next release build — treat a failure there as *this* change, not as a
   CEF-bump symptom.
+  - ✅ **That exercise happened: `v0.4.0-beta.2`, 2026-08-17.** All three passed — vcpkg resolved the
+    manifest baseline, Inno 6.7.1 built the installer, and `brew bundle` provisioned the macOS
+    dependencies. Both platform builds went green. *(The run's `publish` job failed later, at the
+    draft-release lookup, for an unrelated GitHub-incident reason — see BUILD_AND_RELEASE.md
+    "Known CI flake". Nothing dependency-related.)*
+  - It was also exercised once more, earlier the same day and with no release attached, by the
+    `workflow_dispatch` validation run `31948482218` — which is what that trigger is for.
 
 ### Lessons
 - **A crate pin without a compiler pin is half a pin.** `adblock-engine` already had exact crate

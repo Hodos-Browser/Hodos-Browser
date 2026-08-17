@@ -59,8 +59,10 @@
 > 3. **FAIL the build unless each `minos` ≥ the framework's `minos`.**
 >
 > The *value* of the published minimum is set per-Chromium-bump, not per-release — see
-> `CEF_VERSION_UPDATE_TRACKER.md` → *"macOS Minimum Deployment Version."* **Current floor: macOS 11.0
-> (Big Sur)** for CEF 136 (10.15 "Catalina" was dropped by Chromium). Because CI runs on the newest
+> `CEF_VERSION_UPDATE_TRACKER.md` → *"macOS Minimum Deployment Version."* **Current floor: macOS 12.0
+> (Monterey)** for CEF 150 — set by `MACOSX_DEPLOYMENT_TARGET` and `-DCMAKE_OSX_DEPLOYMENT_TARGET`
+> in `release.yml`. *(Corrected 2026-08-17: this read "11.0 (Big Sur) for CEF 136", which the CEF 150
+> bump superseded on 2026-08-04.)* Because CI runs on the newest
 > macOS and cannot reproduce a sub-floor loader rejection, also do a **manual relaunch-after-update on
 > a real machine at/near the floor before `promote --latest`** (see Step 9).
 >
@@ -743,9 +745,16 @@ doc §3.
 the cert-chain line from §2.5.1 yourself.
 
 **`dry_run`** runs every check including this gate against the real draft bytes, then stops before
-the flip: nothing published, website untouched. Use it to rehearse. **Unproven as of 2026-08-03** —
-the gate's logic is unit-tested but has never run in CI; the first real exercise is scheduled for
-the next draft promote. If it misbehaves, `av_seeding_waiver` is the unblock.
+the flip: nothing published, website untouched. Use it to rehearse. **✅ Proven in CI 2026-08-17** —
+run `32050154040` against the `v0.4.0-beta.2` draft: every AV and farbling gate step green, every
+irreversible step (flip, website, served-signature verify) skipped, and afterwards beta.2 was still
+`Draft`, `v0.3.0-beta.29` still `Latest`, and the website still serving `0.3.0-beta.29`. (Was
+"unproven as of 2026-08-03".) If it misbehaves, `av_seeding_waiver` is the unblock.
+
+⚠️ **A green rehearsal means "the gates work", not "the promote path works end to end."** The flip,
+the website push and the served-`appcast.xml.ed` verification are *skipped* on a dry run and remain
+unexercised by it. Also: the VirusTotal half is hash-checked and therefore real, but the Defender
+half is **attestation only** — a well-formed fabricated UUID passes, deliberately.
 
 > **Ordering consequence:** seeding moved from *after* publish (old Step 8) to *during Phase B*.
 > Same submissions, earlier. The draft bytes and the published bytes are identical — that is what

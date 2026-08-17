@@ -1140,6 +1140,64 @@ Distributing proprietary codecs uses patented tech. Under ~100k installs: typica
 MPEG-LA/Via terms. Over 100k: royalties may apply (~$0.10–0.20/unit with caps). Add MPEG-LA
 attribution to the About page; consult legal if Hodos grows significantly.
 
+## Publishing the built distribution as a CI asset (2026-08-17)
+
+Building the engine is only half of shipping it — CI does **not** use your local `cef-binaries/`.
+It downloads a named asset from the `cef-binaries` release on the **org** repo. Get this wrong and
+the failure is silent: CI builds green against the wrong engine.
+
+### The naming rule
+
+```
+cef-binaries-windows-<cefver>-g<forksha>.zip
+cef-binaries-macos-<cefver>-g<forksha>.tar.bz2
+```
+
+⛔ **A NEW NAME PER ENGINE. Never `--clobber` an existing asset.** On 2026-08-14 the Windows asset
+was re-uploaded under the same name with a different engine, which made the previous engine
+unretrievable by name and left a past CI run's inputs unreconstructible. It only bites the day
+someone bisects a CI failure across engines — which is exactly the day it is expensive.
+
+The name is load-bearing, not decorative: `release.yml` now defines it once per arm as
+`env.CEF_ASSET` and **derives its engine assertion from it**, so a clobbered asset (name claims one
+engine, bytes are another) fails the build instead of shipping.
+
+### ⛔ Do not build the Windows zip with `Compress-Archive`
+
+`Compress-Archive` writes ZIP entry names with **backslashes**, which the ZIP spec does not permit.
+It produces an archive that looks perfect locally — correct size, opens fine in Explorer — and that
+`7z` on the CI runner extracts to a different shape, breaking the build for reasons that point
+nowhere near packaging.
+
+⚠️ It also defeats naive verification: a checker that splits entry names on `/` finds no directory
+separators and concludes there is a single clean top-level entry. That is how a 239 MB archive
+passed inspection on 2026-08-15 and had to be rebuilt.
+
+Build it with Python's `zipfile` instead, and assert the result:
+
+- exactly one top-level entry, `cef-binaries/`
+- **zero** backslashes anywhere in the entry names
+- expected file count (1689 for the P4f Windows distribution)
+- `testzip()` clean
+
+### Verify the uploaded asset before pointing CI at it
+
+⛔ **Read `CEF_VERSION` out of the archive, and again out of a fresh `gh release download`** — not
+out of your staged tree, which is not what CI will fetch. Confirm the md5 matches locally-vs-downloaded,
+and that the wrapper lib and `libcef.dll` are present.
+
+⛔ **Never identify the engine by its Chromium version.** Successive forks share it — P4e
+(`g7dd0357`) and P4f (`g9ccef04`) are both `chromium-150.0.7871.187`.
+
+### Order of operations
+
+1. Upload the new asset (new name).
+2. Verify it as above.
+3. **Only then** bump the `env.CEF_ASSET` line in `release.yml` — both arms, one commit. Changing
+   the reference before the asset exists 404s that arm.
+4. Prove it with a `workflow_dispatch` validation run (`BUILD_AND_RELEASE.md` Step 3b) before any
+   tag. That builds both platforms, asserts the engine out of both artifacts, and publishes nothing.
+
 ## Output file checklist (must be present after staging)
 `libcef.dll`, `chrome_elf.dll`, `d3dcompiler_47.dll`, `icudtl.dat`, `libEGL.dll`, `libGLESv2.dll`,
 `snapshot_blob.bin`, `v8_context_snapshot.bin`, `vk_swiftshader.dll`, `vk_swiftshader_icd.json`,

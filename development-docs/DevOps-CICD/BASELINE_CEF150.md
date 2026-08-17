@@ -16,10 +16,21 @@ diffing on it. What transfers between machines is the **shape** of each row, not
 
 | | |
 |---|---|
-| Engine | `Chrome/150.0.7871.187` |
+| Engine | `Chrome/150.0.7871.187` — ⛔ **not a discriminator**, see the note below |
 | `CEF_VERSION` | `150.0.40-7871.3573+gc636546+chromium-150.0.7871.187` |
 | Fork pin | `c63654654` on `Hodos-Browser/cef` (tag `pin-c636546/7871`) |
 | App | `origin/0.4.0` |
+
+> ⚠️ **This reference build is two engines old (noted 2026-08-17).** The pin has moved
+> `c63654654` → `g7dd0357` (P4e) → **`g9ccef04` (P4f)**, which is what ships in `v0.4.0-beta.2`.
+> The baseline is **still valid for its stated purpose** — it records which *literals* are stable
+> enough to baseline at all — but any absolute value here belongs to `c63654654` and must not be
+> compared against a P4f run.
+>
+> ⛔ **Note the `Chrome/150.0.7871.187` row.** All three of those forks report that same Chromium
+> version, so it identifies nothing. Read `CEF_VERSION` and the fork SHA when establishing which
+> engine produced a baseline. This is the trap that
+> `0.4.0-beta.3/TICKET_farbling_gate_engine_binding.md` exists to close in the release gate.
 
 ---
 

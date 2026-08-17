@@ -2,8 +2,34 @@
 
 Track features, fixes, and investigations to research when updating the CEF build.
 
+> ⛔ **CORRECTED 2026-08-17. This header said "Current CEF version: 136" and "Current macOS floor:
+> 11.0" — both were true when written and both were wrong by the time anyone read them, in the one
+> doc that is supposed to OWN this fact.** The CEF 150 bump shipped 2026-08-04 and the engine has
+> moved three times since. Verified against `.github/workflows/release.yml` and
+> `cef-binaries/include/cef_version.h`, not from memory.
+
+**Current CEF version:** **150** — engine **`150.0.43-7871.3576+g9ccef04+chromium-150.0.7871.187`**
+(fork `Hodos-Browser/cef`, pin `9ccef044f`, "P4f"), built from source with
+`proprietary_codecs=true ffmpeg_branding=Chrome`. Both CI arms pull it as
+`cef-binaries-{windows,macos}-150.0.43-g9ccef04.{zip,tar.bz2}` and **assert it out of the artifact**
+(`release.yml`, both build arms).
+
+**Current macOS floor:** **12.0 (Monterey)** — set by `MACOSX_DEPLOYMENT_TARGET` and
+`-DCMAKE_OSX_DEPLOYMENT_TARGET` in `release.yml`, and enforced per-build by the minos guard. The
+11.0 figure below belongs to CEF 136 and is history.
+
+> ⛔ **Read `CEF_VERSION`, never the Chromium version, when identifying which engine you have.**
+> P4e (`g7dd0357`) and P4f (`g9ccef04`) are **both** `chromium-150.0.7871.187`. `Chrome/150.0.7871.187`
+> in a log or a CDP `Browser.getVersion` proves two arms match; it never proves *which* build. Every
+> engine claim in this file dated before 2026-08-14 predates that distinction being enforced —
+> check the fork SHA before trusting one.
+
+<details><summary>Superseded header (CEF 136 era), kept so dated sections below still parse</summary>
+
 **Current CEF version:** 136 (built from source with `proprietary_codecs=true ffmpeg_branding=Chrome`)
 **Current macOS floor:** **11.0 (Big Sur)** — CEF 136 dropped 10.15 "Catalina"; published minimum must match (see *"macOS Minimum Deployment Version"* below). Re-check on every Chromium bump.
+
+</details>
 
 ---
 

@@ -3,6 +3,27 @@
 > **Owner decision, 2026-08-09:** the gate lives on the **build host**, not in GitHub-hosted
 > CI, and `promote.yml` blocks without its result. This doc is the procedure.
 
+> **Status, 2026-08-17.** ✅ The gate has now run for real: token produced against the P4f engine
+> (`150.0.43-7871.3576+g9ccef04`) on all four vectors with its negative control going RED, and
+> re-derived successfully by `promote.yml` in dry run **`32050154040`** — the gate's first-ever
+> execution in CI.
+>
+> ⛔ **But it has TWO known weaknesses. Read these before treating a green gate as proof.**
+>
+> 1. **The engine binding does not bind to our engine.** The token's `engine=` field carries the
+>    **Chromium** version (`Chrome/150.0.7871.187`), not `CEF_VERSION`, so the gate's `≥150` check
+>    admits *any* P4-era engine. A token measured on **P4e** — which has no worker farbling, no
+>    `convertToBlob` coverage and three unhooked audio readers — passes a **P4f** gate unchanged.
+>    Ticket: `0.4.0-beta.3/TICKET_farbling_gate_engine_binding.md`.
+> 2. **The gate measures a build that is not the build being promoted.** The token comes from a
+>    local **dev** build on the build host; what ships is the **CI-built, signed installer**. Same
+>    tree and same staged CEF, different bytes, and nothing detects a mismatch. This is inherent to
+>    running the measurement on the build host — a deliberate trade (§ below), but it must not be
+>    misread as "the promoted artifact was measured".
+>
+> ⚠️ Also note the token deliberately carries **canvas only**, so the gate re-derives one vector of
+> the four the harness measures. A green gate is not a substitute for reading the harness output.
+
 ---
 
 ## 1. What this gate is for
