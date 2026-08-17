@@ -70,6 +70,76 @@ commit, or a build break is ambiguous between the two.
   - It was also exercised once more, earlier the same day and with no release attached, by the
     `workflow_dispatch` validation run `31948482218` — which is what that trigger is for.
 
+### Freshness review — 2026-08-17 (the first one)
+
+Queried upstream directly rather than reasoning from the pin dates. **The posture is better than
+"we froze and forgot" suggested — most pins are current.** Two real items.
+
+| Dependency | Pinned | Latest upstream | Verdict |
+|---|---|---|---|
+| **OpenSSL** | `3.6.3` | `4.0.1` | ✅ **CURRENT.** `3.6.3` shipped **2026-06-09, the same day as 4.0.1** — 3.6 is an actively maintained branch getting simultaneous security releases, and we are on its newest patch. "A major behind" is the wrong reading. |
+| **SQLite** | `3.53.4` | `3.53.4` | ✅ current |
+| **nlohmann-json** | `3.12.0` | `3.12.0` | ✅ current |
+| **Rust** | `1.97.1` | `1.97.1` | ✅ current |
+| **Node** | **`20`** | `26.7.0` | 🚨 **END-OF-LIFE since 2026-04-30.** See below. |
+| **Sparkle** (macOS updater) | `2.9.3` | `2.9.6` | ⚠️ 3 patches behind, on the **auto-update** path |
+| **WinSparkle** | `0.9.3` (tool) / `0.8.1` (shipped dll) | `0.9.4` | ⚠️ 1 patch behind, same path |
+| **Inno Setup** | `6.7.1` | `7.1.0` | ⏸️ **deliberate hold** — Chocolatey lags upstream and 7.x is a major compiler change; do not bump without re-validating `hodos-browser.iss` |
+
+#### 🚨 Node 20 is end-of-life
+
+Node 20 reached EOL on **2026-04-30** (`nodejs/Release` schedule: maintenance from 2024-10-22, end
+2026-04-30). It has received no security patches since. `release.yml` pins `node-version: '20'` on
+both build arms.
+
+⚠️ **Scope it accurately before panicking:** Node is **build-time only**. `npm run build` is
+`tsc -b && vite build`, which emits static assets; no Node runtime ships in the installer (nothing
+node-shaped appears in `hodos-browser.iss`). So the exposure is **build-toolchain integrity**, not a
+vulnerability in the shipped browser. That is a real supply-chain concern for software that handles
+money — an EOL toolchain builds the UI that renders wallet state — but it is not a user-facing CVE.
+
+**Recommended:** move to **Node 22** (maintenance until 2027-04-30), not 24 or 26. 22 is the current
+LTS-track option with the longest runway that is not still moving; the frontend uses Vite + tsc,
+which are version-tolerant. Re-run the frontend build and diff the emitted bundle before accepting.
+
+#### ⚠️ Sparkle / WinSparkle are the ones that matter most per-patch
+
+These are the **auto-update** libraries. A defect there does not break a page — it breaks the
+mechanism by which every user receives every future fix, and this project's standing principle is
+that auto-update must never brick an install. Being 3 patches behind on Sparkle is a bigger deal than
+being a minor behind on a JSON header. Check each release note before bumping, and re-run
+`SILENT_UPDATE_TEST_PLAN.md`'s Stage 1 rigs afterwards.
+
+#### The one place a version relationship with the engine really exists
+
+The React bundle runs **inside** the shipped Chromium's V8, so its output must be syntax that engine
+supports. `frontend/package.json` declares **no `browserslist` and no `engines`**, and nothing ties
+the Vite build target to the CEF version. It is safe today only because Chromium 150 is far newer
+than anything Vite targets by default — safe **by accident, not by construction**. Declaring a
+`browserslist` pinned to the shipped Chromium would make it structural and would catch the reverse
+case (a dependency emitting syntax newer than our engine) at build time rather than as a blank page.
+
+#### Method — repeat this at every engine bump and quarterly
+
+```bash
+gh api repos/openssl/openssl/releases/latest      --jq .tag_name
+gh api repos/nlohmann/json/releases/latest        --jq .tag_name
+gh api repos/rust-lang/rust/releases/latest       --jq .tag_name
+gh api repos/sqlite/sqlite/tags                   --jq '.[0].name'
+gh api repos/sparkle-project/Sparkle/releases/latest --jq .tag_name
+gh api repos/vslavik/winsparkle/releases/latest   --jq .tag_name
+gh api repos/jrsoftware/issrc/releases/latest     --jq .tag_name
+curl -sS https://raw.githubusercontent.com/nodejs/Release/main/schedule.json   # EOL, not "latest"
+```
+
+⛔ **For runtimes, read the EOL schedule, not the latest version number.** Node 20 looked fine by
+"is it still widely used?" and was four months past end-of-life. `latest` tells you how far behind
+you are; **EOL tells you whether you are getting security fixes at all.**
+
+⛔ **And read the branch, not just the number.** OpenSSL `3.6.3` vs `4.0.1` looks alarming and is
+fine. A raw latest-vs-pinned diff will generate false alarms on any project with parallel maintained
+branches.
+
 ### Lessons
 - **A crate pin without a compiler pin is half a pin.** `adblock-engine` already had exact crate
   pins (`adblock = "=0.10.3"`, `rmp = "=0.8.14"`) chosen to hold an MSRV-sensitive graph together,
