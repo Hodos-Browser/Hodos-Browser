@@ -50,6 +50,15 @@ Nothing here is ordered by priority yet. The two 🎫 items have full tickets in
 
 ### B. Security items that already have approved designs and no implementation
 
+- 🎫 **`TICKET_appcast_missing_minimum_system_version.md`** — 🚨 **candidate blocker for promoting
+  0.4.0.** `generate-appcast.py` never emits `<sparkle:minimumSystemVersion>`, and the macOS floor
+  rose 11.0 → 12.0 with CEF 150. A Big Sur user on 0.3.x would be offered 0.4.0, Sparkle would
+  install it, and dyld would refuse a `minos=12.0` binary — bricking the install. Hasn't bitten only
+  because no 0.4.0 feed has ever been promoted.
+- 🎫 **`TICKET_engine_pins_are_branches_not_tags.md`** — the shipping engine's pin
+  (`pin-9ccef04/7871`) is a **branch**, not a tag, and points at the same commit as the working
+  branch. Minutes to fix. Also records that `c636546`'s built binary is unrecoverable from the
+  release (clobbered), making the local backup dir its only copy.
 - 🎫 **`TICKET_cdp_port_open_in_release.md`** — `DEVTOOLS_SECURITY_DESIGN.md` decision **D2**
   ("close the remote debugging port in release") was **owner-approved 2026-08-04 and never built**.
   Release builds still bind CDP on `9222`, which can drive the wallet and auth overlays. Loopback
