@@ -193,6 +193,37 @@ arm, and the check specifically catches a `--clobber`'d asset (name claims one e
 another). The download step also logs the asset's size and MD5 so "right name, wrong bytes" is visible
 from the log alone.
 
+##### Known CI flake, fixed 2026-08-17: "release not found" right after the draft is created
+
+If you see the `publish` job fail at **`Verify draft release is complete`** with `release not found`
+on a build from **before** this fix — the draft is probably fine. Check it before assuming a bad build.
+
+`gh release view <tag>` cannot use `GET /releases/tags/{tag}` for a **draft** (that endpoint excludes
+drafts), so it scans the release **list**, which is read-after-write eventually consistent. The draft
+is briefly invisible by tag right after creation:
+
+| release | draft finalized | lookup result |
+|---|---|---|
+| beta.1 | `14:57:49.99` | OK at `14:57:50.66` — **+0.67 s** |
+| beta.2 | `15:05:28.99` | **`release not found`** at `15:05:30.93` — **+1.94 s** |
+
+Identical code; beta.1 got lucky. beta.2's draft was complete and correct — all 8 assets `uploaded`
+and above their floors — and the same lookup succeeded minutes later. The step failed on the
+**lookup** and never evaluated a single assertion.
+
+Fixed by retrying the lookup for ~60 s. ⚠️ **The retry covers VISIBILITY only.** Every assertion
+after it stays fail-closed — a missing, not-fully-uploaded or undersized asset is still an immediate
+hard failure. Widening the retry to cover those would turn a genuine incomplete upload into a slow
+pass, which is the thing this step exists to catch.
+
+> The `Release ready at .../releases/tag/untagged-<id>` URL in the create step's log is **normal for
+> drafts** (GitHub binds the tag on publish) and is not a symptom of this.
+
+**If it happens anyway on a fixed build:** the draft is genuinely missing or untagged — do **not**
+re-run `publish` blind. A re-run of a tag build uses the workflow file *as of that tag*, so it will
+not pick up any later fix, and `softprops/action-gh-release` may create a second draft for the same
+tag, leaving `promote.yml` ambiguous. Verify the draft by hand first (`gh release view`), then decide.
+
 #### Step 4: Get DSA signature from CI logs
 
 After build completes, find the signature in the CI logs:

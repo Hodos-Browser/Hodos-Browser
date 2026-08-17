@@ -1498,7 +1498,41 @@ jobs:
           # steps are now fail-closed, but assert presence here too so a missing sidecar can
           # never reach a silent client.
           EXPECTED="HodosBrowser-${VERSION}-setup.exe HodosBrowser-${VERSION}-portable.zip HodosBrowser-${VERSION}.dmg appcast.xml appcast.xml.ed expected-new-manifest.json expected-new-manifest.json.ed SHA256SUMS.txt"
-          gh release view "${GITHUB_REF_NAME}" --repo "$REPO" --json assets > assets.json
+
+          # ⛔ RETRY THE LOOKUP — do not fail on the first miss.
+          #
+          # `gh release view <tag>` cannot use GET /releases/tags/{tag} for a DRAFT (that
+          # endpoint excludes drafts), so it scans the release LIST, which is read-after-write
+          # eventually consistent. The draft is therefore briefly invisible by tag right after
+          # the create step reports success.
+          #
+          # Measured, on two runs of identical code:
+          #   beta.1  draft finalized 14:57:49.99 -> lookup OK        14:57:50.66  (+0.67s)
+          #   beta.2  draft finalized 15:05:28.99 -> "release not found" 15:05:30.93  (+1.94s)
+          # Same code, different dice. beta.2's draft was complete and correct — all 8 assets
+          # uploaded and above their floors — and the identical lookup succeeded minutes later.
+          # The step failed on the LOOKUP and never evaluated a single assertion below.
+          #
+          # ⚠️ This is a retry on VISIBILITY only. Every assertion after it stays fail-closed:
+          # once the release is found, a missing / not-uploaded / undersized asset is still an
+          # immediate hard failure. Widening the retry to cover those would turn a real
+          # incomplete-upload into a slow pass, which is the bug this step exists to catch.
+          found=0
+          for i in $(seq 1 12); do
+            if gh release view "${GITHUB_REF_NAME}" --repo "$REPO" --json assets > assets.json 2>/dev/null; then
+              found=1
+              [ "$i" -gt 1 ] && echo "draft became visible by tag on attempt $i"
+              break
+            fi
+            echo "draft not yet visible by tag [$i/12] — GitHub's release list is eventually consistent for drafts; retrying in 5s"
+            sleep 5
+          done
+          if [ "$found" != "1" ]; then
+            echo "::error::draft release ${GITHUB_REF_NAME} still not visible by tag after ~60s."
+            echo "::error::The create step reported success, so this is no longer a propagation delay — check whether it left an UNTAGGED draft (the 'Release ready at .../releases/tag/untagged-...' URL in that step's log is normal for drafts, but the release must still carry tag_name=${GITHUB_REF_NAME})."
+            exit 1
+          fi
+
           echo "=== draft assets ==="; jq -r '.assets[] | "\(.name)\t\(.size)\t\(.state)"' assets.json
           for name in $EXPECTED; do
             size=$(jq -r --arg n "$name" '.assets[] | select(.name==$n) | .size' assets.json)
