@@ -27,6 +27,15 @@ changes whether the beta.2 draft is kept or deleted during cleanup.
 
 ---
 
+## 👉 The plan
+
+**`SPRINT_PLAN.md`** is the live plan: the seven reported items grouped into four workstreams
+(overlay/DPI · window identity · tab+peripherals · Chrome import), ordered, with the pre-flight
+findings that reshaped three of them and the Mac split. **`MAC_RELAY_BETA3.md`** is the Mac channel.
+
+⛔ **beta.2 will NOT be promoted** — it is a draft soak build. **beta.3 is the release users get**,
+which makes the appcast `minimumSystemVersion` fix a beta.3 **prerequisite**.
+
 ## Candidate work
 
 Nothing here is ordered by priority yet. The two 🎫 items have full tickets in this folder.

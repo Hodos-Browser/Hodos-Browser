@@ -6,6 +6,66 @@
 
 ---
 
+# 📋 ROUND 2026-08-17b (Windows) — 👉 **TWO MORE ASKS, both are INPUTS to the beta.3 design, not test-passes.** Plan is now in `SPRINT_PLAN.md`.
+
+beta.2 will **not** be promoted — it is kept as a draft soak build. **beta.3 is what users get.**
+
+Alongside §A2 (Sparkle) and §A4 (Big Sur), two things I need **before** designing, because either
+answer changes what we build rather than merely whether it passed.
+
+## B1 — 👉 Mic/camera on macOS: diagnose, don't just confirm it's broken
+
+Twitter Spaces did not work on Mac. Windows mic is reported working. From here I could establish
+that the obvious causes are **already handled**:
+
+- `cef-native/mac/entitlements.plist` has `com.apple.security.device.microphone` **and** `…device.camera`
+- `cef-native/Info.plist` has `NSMicrophoneUsageDescription` **and** `NSCameraUsageDescription`
+- `SimpleHandler::OnRequestMediaAccessPermission` **is implemented** and inspects the audio / video /
+  desktop-capture flags
+
+⛔ **My prime suspect, which only you can test:** `cef-native/mac/helper-Info.plist.in` has **neither
+usage string**, and on macOS capture runs in a **helper process**. If TCC attributes the request to
+the helper, it is denied against a bundle that never declared a purpose.
+
+Worth checking in this order:
+1. Does the TCC prompt appear **at all**? (`tccutil`/System Settings → Privacy → Microphone — is
+   Hodos listed?) A missing prompt and a denied prompt are different bugs.
+2. Console.app filtered on `tccd` while triggering a mic request — it names the **responsible
+   process**, which settles the helper theory outright.
+3. `getUserMedia` on a plain test page before blaming Twitter — Spaces is a heavy subject; confirm
+   the simple case first.
+
+👉 **Report the cause, not just "still broken."** If it is the helper plist, that is a one-line fix
+we make on this side; if it is something else, we design differently.
+
+## B2 — 👉 Do these two overlay symptoms reproduce on macOS?
+
+WS1 is the first workstream and the highest-value one. Two Windows symptoms:
+
+- **Dead zone below a modal.** Clicking just *below* an overlay does not close it; further below, or
+  left/right, does. Suspected: overlay window taller than the rendered React content, so the empty
+  strip still counts as "inside".
+- **Mouse offset after moving to a second monitor.** On the smaller screen the cursor is off inside
+  the **wallet overlay** — hovering a button does not highlight, slightly above it does. Correct
+  again on the primary screen. Suspected: per-monitor DPI not re-resolved for the monitor the OSR
+  overlay is on.
+
+⚠️ **I am not assuming these transfer.** macOS uses borderless `NSWindow` + paired NSEvent monitors
+(`InstallClickOutsideMonitor`) — there is **no `WH_MOUSE_LL`**, and no `WM_ACTIVATEAPP`. The
+mechanisms are structurally different.
+
+👉 **All I need is yes/no per symptom, on a two-display Mac with different scale factors.** If they
+do not reproduce, we fix Windows only and stop. If they do, we design one shared model instead of
+shipping a Windows-shaped fix and rediscovering the problem later.
+
+## B3 — What is NOT coming to you
+
+Items **3 (taskbar identity)** and **5 (virtual-desktop focus)** are Windows-only by nature — no
+macOS analogue. Tab context-menu parity gets built on Windows first and then ported. The Chrome-import
+macOS half (**Keychain**, not DPAPI — assume no symmetry) waits until WS4 starts.
+
+---
+
 # 📋 ROUND 2026-08-17 (Windows) — 👉 **ACTION FOR MAC: verify Sparkle 2.9.6 locally.** ⛔ **It ships on macOS, it is bumped, and NOTHING has run it.** 🚨 **Also: the macOS appcast advertises no minimum OS version, and our floor moved 11.0 → 12.0.**
 
 ## A1 — 👉 The ask, in order
