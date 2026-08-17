@@ -760,6 +760,37 @@ half is **attestation only** — a well-formed fabricated UUID passes, deliberat
 > Same submissions, earlier. The draft bytes and the published bytes are identical — that is what
 > `SHA256SUMS.txt` pinning proves.
 
+#### 2.5.6 ⛔ The appcast is SIGNED AT BUILD TIME. You cannot fix it at promote time.
+
+**Read this before deferring any appcast change to "just before we promote."** It is an easy and
+expensive mistake, because the appcast only *reaches users* at promote — so it feels like a
+promote-time artifact. It is not.
+
+| Stage | What happens to the appcast |
+|---|---|
+| **Tag build** (`release.yml`) | `generate-appcast.py` produces `appcast.xml`; the publish job signs it into **`appcast.xml.ed`** — Ed25519 over those exact bytes — and self-verifies before upload |
+| **Promote** (`promote.yml`) | copies **those exact bytes** to the website, then re-verifies the **served** `.ed` against the **served** `.xml`, fail-closed |
+| **Client** | the Windows silent updater verifies the same sidecar and **fail-closes** if it does not match |
+
+⇒ **Editing the appcast after the build invalidates its signature.** A hand-patched feed is rejected
+by `promote.yml`'s byte-stability guard, and if it somehow reached the website it would fail-close
+every Windows silent client — the whole fleet, not one user.
+
+**Therefore: any change to appcast CONTENT must land in the build that produces the feed you intend
+to promote.** There is no late window. The practical rule:
+
+- ✅ Land appcast changes in the next tag build. They ride along at zero marginal cost.
+- ⛔ Do **not** plan to "add it right before promoting."
+- ⚠️ If a defect is found in an already-built draft's appcast, the only honest fixes are **re-tag and
+  rebuild**, or **do not promote that build**. Re-tagging also invalidates its AV seeding, because
+  the installer hash changes and the VirusTotal report is hash-pinned — so the cost is a full
+  rebuild *plus* re-seeding, not just a rebuild.
+
+*(Written 2026-08-17, from the `minimumSystemVersion` finding — see
+`development-docs/0.4.0-beta.3/TICKET_appcast_missing_minimum_system_version.md`. That defect was
+caught while beta.2 was still an unpromoted draft, which is the only reason "fix it in the next
+build" was available.)*
+
 ### 2.6 Build Script
 
 ```powershell

@@ -109,6 +109,18 @@ Live list is `FARBLING_DEFINITION_OF_DONE.md` **§H**. The four that gate the re
 - **A macOS pre-P4e iframe baseline can never be created** — that engine is gone. Permanent gap,
   already recorded; don't let someone re-open it as a task.
 
+### F. CI health — found 2026-08-17, needs confirming
+
+- 🚨 **`test.yml` has not executed a single step since 2026-08-14.** Seven consecutive failures, all
+  with `steps=0` and `started_at == created_at`, with no code change across the success→failure
+  boundary. Signature of the **dev fork's Actions quota being exhausted** (2,000 min/month; the org's
+  are free). ⇒ no `cargo test`, no clippy, no secret-log gate, no `cargo audit`, no `npm audit` on
+  any commit — **including everything in beta.2**. Release builds were unaffected because they run
+  on the org repo. **Confirm via Settings → Billing → Actions before acting**; options are wait for
+  reset, raise the limit, or move the test lane to the org.
+- **The two audits that exist cannot fail a build** (`continue-on-error: true` *and* `|| true`), and
+  three dependency families have no advisory coverage at all. Detail in the dependency ticket.
+
 ### F. Housekeeping carried in
 
 - ✅ *(done 2026-08-17)* `.gitignore` widened to `/cef-binaries-backup-*/` — the old rule never

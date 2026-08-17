@@ -15,8 +15,43 @@ landed **2026-08-04**. Nothing has been re-reviewed since, and beta.2 shipped on
 That is *mostly* fine, for a reason worth writing down: **our dependencies and Chromium's are
 separate trees.** Chromium vendors its own crypto (BoringSSL), zlib, libpng and so on through its
 `DEPS`, resolved by `automate-git.py`. Our vcpkg OpenSSL / sqlite3 / nlohmann-json link into **our**
-shell and the Rust binaries — **not** into `libcef`. They do not have to match Chromium's versions
-and there is no compatibility relationship to maintain.
+shell and the Rust binaries — **not** into `libcef`. They do not have to match Chromium's versions.
+
+⚠️ **But "separate trees" is not the same as "no overlap", and an earlier phrasing of this overstated
+it.** The two copies live in the **same process**, so the question is not version-matching but
+**symbol/ABI coexistence**. Measured against the shipped `libcef.dll` (P4f):
+
+```
+total exported symbols : 247
+cef_* exports          : 240
+crypto/sqlite exports  : 1   -> sqlite3_dbdata_init
+```
+
+So CEF's export surface is almost entirely its own C API, and Chromium's BoringSSL/SQLite are
+statically linked *inside* `libcef.dll` rather than exported. Our OpenSSL and SQLite are statically
+linked into `HodosBrowser.dll` and the Rust binaries, and Windows resolves statically-linked symbols
+per-module, so the copies coexist without binding to each other.
+
+The honest summary: **the coexistence surface is real but measurably tiny (1 of 247 exports), and the
+relationship is ABI coexistence, not version matching.** Two consequences worth carrying:
+
+- ⛔ **Never link our shell against Chromium's crypto or SQLite**, and never assume a symbol resolved
+  at runtime came from our copy. `sqlite3_dbdata_init` is the one name where that assumption could
+  quietly be wrong.
+- **Re-measure this after every engine bump.** It is one script and it turns "no overlap" from an
+  assumption into a number. If a future CEF starts exporting more of its vendored libraries, this is
+  the check that notices.
+
+### The one place a real version relationship DOES exist: the frontend
+
+The React/Vite bundle runs **inside** the shipped Chromium's V8, so its output must be syntax the
+engine supports. Today that relationship is **entirely undeclared**: `frontend/package.json` has no
+`browserslist` and no `engines` field, and nothing ties the Vite build target to the CEF version.
+
+It is not biting because Chromium 150 is far newer than anything Vite targets by default — i.e. we
+are safe by accident, not by construction. Declaring a `browserslist` pinned to the shipped Chromium
+would make it safe by construction and would catch the reverse case (a dependency emitting syntax
+newer than our engine) at build time instead of as a blank page.
 
 What genuinely *must* track the engine is a short list, and all of it is already pinned and was
 validated green by the beta.2 build:
@@ -43,11 +78,56 @@ That is a **freeze at the moment we took control**. It is the right call for a b
 money — it converts silent drift into a reviewable diff, which is exactly what DEP-1 was for.
 
 ⛔ **But a freeze with no scheduled thaw is how you end up shipping a known-vulnerable OpenSSL
-without ever making a decision to.** There is currently:
+without ever making a decision to.**
+
+> ⚠️ **CORRECTED 2026-08-17, same day.** An earlier revision of this ticket said there was "no step
+> anywhere that checks the pinned versions against security advisories." **That was wrong** —
+> `.github/workflows/test.yml` runs **`cargo audit`** (both Rust workspaces) and **`npm audit
+> --audit-level=high`** (frontend). The corrected finding is narrower and more specific:
+
+| Dependency family | Advisory check | Can it fail the build? |
+|---|---|---|
+| Rust crates | `cargo audit`, both workspaces | ⛔ **No** — `continue-on-error: true` **and** `\|\| true` |
+| npm / frontend | `npm audit --audit-level=high` | ⛔ **No** — same double neutering |
+| **vcpkg C++ (OpenSSL, sqlite3, nlohmann-json)** | ⛔ **none** | — |
+| **Inno Setup, WinSparkle, Sparkle** | ⛔ **none** | — |
+| **Runner images** | ⛔ **none** | — |
+
+The workflow's own comment is honest about it: *"INFORMATIONAL — flip to blocking after a
+dependency-advisory triage chunk."* So the checks exist, cover 2 of 5 families, and are
+triple-neutered (`continue-on-error` + `|| true` + a `high` threshold). Nothing has ever been
+triaged off the back of them.
+
+🚨 **And right now they are not running at all — see the CI-minutes finding below.**
+
+What remains missing is therefore:
 
 - no cadence for re-reviewing the pinned set,
-- no step anywhere that checks the pinned versions against security advisories,
+- **no advisory coverage for the C++ / installer / updater / runner families at all**,
+- the two checks that exist cannot fail a build, so a critical advisory is a log line nobody reads,
 - no record of *why* a given version is acceptable beyond "it is what resolved that day".
+
+## 🚨 The audits have not run since 2026-08-14
+
+`test.yml` on the dev fork shows a clean break: **every run succeeded through 2026-08-14T20:31 and
+every run since has failed** — 2026-08-14T22:36 onward, seven consecutive failures at the time of
+writing.
+
+They are not test failures. Every job reports **`steps=0`** with `started_at == created_at`: nothing
+executed. **No code changed** in `rust-wallet`, `adblock-engine` or `frontend` between the last
+success and the first failure. That signature — instant failure, zero steps, on a **fork with
+metered Actions minutes** (the dev fork has a 2,000-minute monthly allowance; the org's are free) —
+points squarely at **the dev fork's Actions quota being exhausted**.
+
+⚠️ **Consequence: since 2026-08-14 no `cargo test`, no `clippy`, no secret-log gate (F8), no
+`cargo audit` and no `npm audit` has run on any commit — including everything that went into
+`v0.4.0-beta.2`.** The beta.2 *build* was green because release builds run on the **org** repo,
+whose minutes are free; only the dev fork's test lane is dark.
+
+⛔ **Confirm before acting** — billing needs the `user` scope this session does not have. Run
+`gh api users/BSVArchie/settings/billing/actions` with a token that has it, or read
+Settings → Billing → Actions. If it is quota, the options are: wait for the monthly reset, raise the
+spending limit, or move the test lane to the org repo where minutes are free.
 
 The pins are: `openssl 3.6.3`, `sqlite3 3.53.4`, `nlohmann-json 3.12.0` (vcpkg exact overrides),
 Rust `1.97.1` (both workspaces), Inno Setup `6.7.1`, Node `20`, WinSparkle `0.8.1` + `0.9.3`,
