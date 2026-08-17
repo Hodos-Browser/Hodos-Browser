@@ -82,8 +82,8 @@ Queried upstream directly rather than reasoning from the pin dates. **The postur
 | **nlohmann-json** | `3.12.0` | `3.12.0` | ✅ current |
 | **Rust** | `1.97.1` | `1.97.1` | ✅ current |
 | **Node** | ~~`20`~~ → **`22`** | `26.7.0` | ✅ **FIXED 2026-08-17.** Was EOL since 2026-04-30; bumped to 22 (maintained to 2027-04-30). |
-| **Sparkle** (macOS updater) | `2.9.3` | `2.9.6` | ⚠️ 3 patches behind, on the **auto-update** path |
-| **WinSparkle** | `0.9.3` (tool) / `0.8.1` (shipped dll) | `0.9.4` | ⚠️ 1 patch behind, same path |
+| **Sparkle** (macOS updater) | ~~`2.9.3`~~ → **`2.9.6`** | `2.9.6` | ✅ bumped 2026-08-17 — ⛔ **unverified on a real macOS build** |
+| **WinSparkle** | tool ~~`0.9.3`~~ → **`0.9.4`**; shipped dll `0.8.1` unchanged | `0.9.4` | ✅ bumped + round-trip verified 2026-08-17 |
 | **Inno Setup** | `6.7.1` | `7.1.0` | ⏸️ **deliberate hold** — Chocolatey lags upstream and 7.x is a major compiler change; do not bump without re-validating `hodos-browser.iss` |
 
 #### 🚨 Node 20 is end-of-life
@@ -105,7 +105,45 @@ money — an EOL toolchain builds the UI that renders wallet state — but it is
 runs Node on a tag build or a `workflow_dispatch` validation run. The frontend build was verified
 **locally** (see below). Treat the first CI frontend build after this as the real confirmation.
 
-#### ⚠️ Sparkle / WinSparkle are the ones that matter most per-patch
+#### Sparkle / WinSparkle — bumped 2026-08-17, and what that is and is NOT backed by
+
+⛔ **The Stage-1 update rigs cannot test either of these. Do not read a green rig as covering them.**
+Checked before running rather than after:
+
+| Rig | What it actually drives | Covers the bump? |
+|---|---|---|
+| `test-apply-forward.ps1` / `test-apply-rollback.ps1` | our **custom `hodos-update-helper.exe`** transaction | ❌ never touches WinSparkle |
+| `test-update-feed.ps1` | our **custom `UpdateStager`**, with throwaway test-seam keys | ❌ never invokes `winsparkle-tool` |
+| any Windows rig | — | ❌ **Sparkle is macOS-only** |
+
+They were also **not runnable** at the time: `hodos_tests.exe` does not exist (needs
+`-DHODOS_BUILD_TESTS=ON`), no rig build of the helper exists (needs `-DHODOS_UPDATE_TEST_SEAM=ON`),
+and ports **31301/31302/31401 were all listening** — the rigs abort on that by design, because
+rollback **POSTs `/shutdown`** and would take down a live wallet.
+
+**What the WinSparkle tool bump IS backed by** — a real functional round-trip against 0.9.4, using
+release.yml's exact call shapes:
+
+```
+generate-key -f      -> 44-byte key  (32-byte-seed format; SPARKLE_EDDSA_PRIVATE_KEY stays compatible)
+public-key   -f      -> derives pubkey   (the call release.yml self-checks against SUPublicEDKey)
+sign <file>  -f      -> signature
+verify               -> "Valid signature."
+```
+
+with negative controls, all three of which correctly **FAILED**: tampered payload, corrupted
+signature, wrong public key. Plus the archive-shape check that matters most — release.yml's EdDSA
+step **soft-skips** on a missing tool, so a wrong path would silently ship a **DSA-only feed** rather
+than fail the build.
+
+**What the Sparkle bump IS backed by** — a layout pre-flight only: `bin/sign_update`,
+`Sparkle.framework/Versions/{B,Current}` and `Versions/B/{Autoupdate,Updater.app,XPCServices}` all
+present and unchanged in 2.9.6, and `sign_update` still carries `--ed-key-file` and still emits
+`sparkle:edSignature`. ⛔ **It has not run on macOS.** The first macOS tag build is the real
+confirmation — watch the "EdDSA sign DMG" step, and do a real N−1 → N update on a Mac before
+promoting.
+
+#### ⚠️ Why these two matter more per-patch than their small deltas suggest
 
 These are the **auto-update** libraries. A defect there does not break a page — it breaks the
 mechanism by which every user receives every future fix, and this project's standing principle is

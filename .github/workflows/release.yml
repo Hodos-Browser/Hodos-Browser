@@ -366,9 +366,19 @@ jobs:
           # 0.8.1: the WinSparkle.dll currently shipped with the app (still DSA-verified)
           Invoke-WebRequest -Uri "https://github.com/vslavik/winsparkle/releases/download/v0.8.1/WinSparkle-0.8.1.zip" -OutFile "external\winsparkle\WinSparkle-0.8.1.zip"
           Expand-Archive "external\winsparkle\WinSparkle-0.8.1.zip" -DestinationPath "external\winsparkle"
-          # 0.9.3: only for bin\winsparkle-tool.exe (EdDSA signing in CI — dual-signed DSA->EdDSA transition)
-          Invoke-WebRequest -Uri "https://github.com/vslavik/winsparkle/releases/download/v0.9.3/WinSparkle-0.9.3.zip" -OutFile "external\winsparkle\WinSparkle-0.9.3.zip"
-          Expand-Archive "external\winsparkle\WinSparkle-0.9.3.zip" -DestinationPath "external\winsparkle"
+          # 0.9.4: only for bin\winsparkle-tool.exe (EdDSA signing in CI — dual-signed DSA->EdDSA transition).
+          # Bumped 0.9.3 -> 0.9.4 on 2026-08-17. ⛔ This is the SIGNING TOOL ONLY. The 0.8.1 above is
+          # the DLL we actually ship, and it stays: moving it changes the shipped client's
+          # verification scheme (DSA -> EdDSA), which is commit 3b's job, not a dependency bump.
+          # Pre-flight verified before bumping (the EdDSA step below SOFT-SKIPS on a missing tool,
+          # so a wrong path here would silently ship a DSA-only feed rather than fail):
+          #   - archive contains WinSparkle-0.9.4/bin/winsparkle-tool.exe at the expected path
+          #   - CLI still exposes public-key / sign, both still taking -f/--private-key-file
+          #   - generate-key emits a 44-byte (32-byte-seed) key, so SPARKLE_EDDSA_PRIVATE_KEY stays compatible
+          #   - sign -> verify round-trip passes, and FAILS on a tampered payload, a corrupted
+          #     signature and a wrong public key
+          Invoke-WebRequest -Uri "https://github.com/vslavik/winsparkle/releases/download/v0.9.4/WinSparkle-0.9.4.zip" -OutFile "external\winsparkle\WinSparkle-0.9.4.zip"
+          Expand-Archive "external\winsparkle\WinSparkle-0.9.4.zip" -DestinationPath "external\winsparkle"
 
       # Configure CMake (needed before build script)
       # -DHODOS_SILENT_AUTOUPDATE=ON: ships the Windows silent download→stage→apply path.
@@ -488,7 +498,7 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.VERSION }}"
           INSTALLER="dist/HodosBrowser-${VERSION}-setup.exe"
-          TOOL="external/winsparkle/WinSparkle-0.9.3/bin/winsparkle-tool.exe"
+          TOOL="external/winsparkle/WinSparkle-0.9.4/bin/winsparkle-tool.exe"
           EXPECTED_PUB="GVq3mpDl8eelsG0A5wqC5FBYZd3fy7U3we9iZ9+Tq3Q="
 
           # Soft-skip: warn, emit an empty signature, let the release proceed DSA-only.
@@ -496,7 +506,7 @@ jobs:
           soft_skip() { echo "::warning::EdDSA Windows signing skipped: $1 — shipping a DSA-only feed (fine while the client is 0.8.1)"; echo "EDDSA_SIGNATURE=" >> "$GITHUB_OUTPUT"; exit 0; }
 
           [ -n "$EDDSA_PRIVATE_KEY" ] || soft_skip "SPARKLE_EDDSA_PRIVATE_KEY not set"
-          [ -f "$TOOL" ] || soft_skip "winsparkle-tool not found at $TOOL (0.9.3 download failed?)"
+          [ -f "$TOOL" ] || soft_skip "winsparkle-tool not found at $TOOL (0.9.4 download failed?)"
 
           printf '%s' "$EDDSA_PRIVATE_KEY" > /tmp/ed25519_win.key
 
@@ -759,8 +769,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          echo "Downloading Sparkle 2.9.3..."
-          gh release download 2.9.3 --repo sparkle-project/Sparkle --pattern "Sparkle-*.tar.xz" --output Sparkle.tar.xz
+          # Sparkle 2.9.6 (bumped from 2.9.3 on 2026-08-17). ⚠️ Unlike WinSparkle above, this
+          # framework SHIPS — it is the macOS auto-update client. Pre-flight verified against the
+          # 2.9.6 tarball before bumping, because every path below is reached by literal name:
+          #   bin/sign_update, Sparkle.framework/Versions/{B,Current},
+          #   Versions/B/{Autoupdate,Updater.app,XPCServices} all present and unchanged in layout;
+          #   sign_update still carries --ed-key-file and still emits sparkle:edSignature.
+          # ⛔ NOT yet exercised on a real macOS build — no Windows rig can test a macOS framework.
+          # The first macOS tag build is the real confirmation; watch the "EdDSA sign DMG" step.
+          echo "Downloading Sparkle 2.9.6..."
+          gh release download 2.9.6 --repo sparkle-project/Sparkle --pattern "Sparkle-*.tar.xz" --output Sparkle.tar.xz
           mkdir -p sparkle-extract
           tar -xf Sparkle.tar.xz -C sparkle-extract
           ls -la sparkle-extract/
