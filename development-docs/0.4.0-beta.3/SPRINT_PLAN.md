@@ -220,6 +220,35 @@ ticket's §5.1 is right that the structural fix done naively would be a **regres
 ⛔ **W4 / W6 / W7 / W8 are beta.4**, driven by W3's instrumentation. Do not take the whole plan into
 beta.3 — it rewrites the routing predicate for every network request in the browser.
 
+### WS6 — QR scanner rejects `bsv:` payment URIs · **Phase 0.6**
+
+Filed 2026-08-18 from an owner report against a live payment page:
+`TICKET_qr_bsv_uri_scheme_rejected.md`. **Root-caused from the owner's own production log — the
+decoded payload was already in it.**
+
+The scanner is not broken. quirc read the code perfectly on the first attempt, three times:
+
+```
+QR payload: bsv:16cezrim1PR2DGuFivZr8kWUSan1LD6XFZ?amount=0.11828417&label=PaiyBit%20media
+```
+
+Our classifier then discarded it, because it tests `^bitcoin:` and this is `bsv:`. The address,
+amount and label are all shapes we already accept — only the four characters of the scheme were
+rejected. The DOM path failed identically, from the same rule spelled a second time.
+
+⭐ **Verdict on the owner's question: fix ours, do not ask PaiyBit to change.** There is no BRC
+mandating `bitcoin:` for BSV, `bsv:` is arguably the less ambiguous scheme on this chain, and we
+already declined to switch our *own* receive QRs to `bitcoin:` for compatibility reasons
+(`QR_SCAN_OVERVIEW.md` §Phase 3). Demanding conformity to an unwritten preference is the wrong move.
+
+⛔ **The rule is spelled four times and two of them hardcode `slice(8)`** — the byte length of
+`"bitcoin:"`. Widening only the regex there truncates the address, fails closed, and looks exactly
+like today's symptom while appearing fixed. Split on the first `:`, as the two C++ sites already do.
+
+⚠️ **A second, separate money-path question rides along:** BIP21 `amount` is in whole coins
+(`0.11828417` = BSV, not satoshis). Confirm what `TransactionForm` expects before calling this done,
+or the first successful scan pre-fills a send eight decimal places wrong.
+
 ### WS4 — Chrome import · item 4
 
 Standalone, research-heavy, security-sensitive. Scope against §2's wall **before** design.
@@ -227,7 +256,7 @@ Standalone, research-heavy, security-sensitive. Scope against §2's wall **befor
 
 ## 4. Order
 
-**WS1b(a) → WS5(a) → WS1 → WS1b(b) → WS2 → WS3 → WS5(b) → WS4.**
+**WS1b(a) → WS5(a) → WS6 → WS1 → WS1b(b) → WS2 → WS3 → WS5(b) → WS4.**
 
 ⭐ **Changed 2026-08-18 (second revision), after `TICKET_loopback_host_form_wallet_routing.md` was
 filed and verified.** WS1b splits and its first half stays at the front; WS5 splits and its first
@@ -237,6 +266,7 @@ half slots in behind it.
 |---|---|---|
 | **0 — WS1b(a)** | **Delete the 52 stray `{app}` log writes + A1/A2/A3** | 🚨 The mnemonic is written in plaintext into the install root (see the ticket's §0). Cheap — it is deleting debug scaffolding — and it is the one phase that also removes a key-material disclosure. ⚠️ Its *original* "silently aborts auto-update" rationale did **not** survive verification; corrected in place in the ticket, not deleted. |
 | **0.5 — WS5(a)** | Money path + trust boundary: `send_transaction` request context, `block_on_origin_mismatch`, the three `:5137` substring gates | 🚨 All three are **live, verified, and shipping**. `send_transaction` honours `sendMax` with no per-call approval and no payment cap. Small, Rust/C++, local, no dependency on the routing rewrite — so there is no reason for it to wait behind a multi-day workstream. |
+| **0.6 — WS6** | QR scanner: accept `bsv:` payment URIs | 🚨 A real BSV payment QR on a live site cannot be scanned. Root cause is four characters of a regex, already fully evidenced from the owner's production log — no investigation left. Smallest fix in the sprint, and it unblocks an actual payment. |
 | **1 — WS1** | Overlay input & DPI | Money-path correctness — cursor offset in the wallet overlay during a send. |
 | **2 — WS1b(b)** | Logger level gate, rotation, retention, sync-I/O review | The 1.58 GB plaintext-history problem. Serious but **not** self-blocking. |
 | **3 — WS2** | Window / instance / focus identity | #3 is solved at the desk (~1 day). #5 is an unbounded deep dive — take #3, defer #5. |

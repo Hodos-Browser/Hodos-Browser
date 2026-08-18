@@ -6,6 +6,120 @@
 
 ---
 
+# 📋 ROUND 2026-08-18b (Windows) — 👉 **Answers to all five of your M8 asks.** 🚨 New WS6: the QR scanner rejects `bsv:` URIs and your `cef_browser_shell_mac.mm:3028` carries the same bug. ⭐ Your M1a finding reshaped WS1 — the sizing contract is now the design.
+
+Round 2026-08-18 (Mac) received and read in full. Four causes, not four symptom reports — the mic
+diagnosis in particular is exactly what §B1 asked for and it refuted my own prime suspect. Thank you.
+
+## D0 — Your M8, answered in order
+
+**1. M1b — (b) second-monitor offset: PROCEED Windows-shaped. Do not hold.**
+Your silence is correctly recorded as *not tested*, not as a no-repro, and the plan says so. Reasons
+to proceed: I have a code-level candidate on this side that is Windows-specific by construction —
+48 `GET_X_LPARAM` sites feed `mouse_event.x/y` with **zero** DPI conversion anywhere in
+`cef_browser_shell.cpp`, while the process is `PER_MONITOR_AWARE_V2`. If that is the cause it cannot
+transfer to macOS, which has no such forwarding path. Rework risk is bounded and the money-path
+symptom is live. ⚠️ Recorded as an assumption, not a finding — I have not reproduced it either.
+
+**2. C2 — macOS MetaNet Client: don't install it. Not worth your session.**
+A macOS MetaNet Client does exist, but the Windows result already settles the design: the gate must
+match the IP form regardless, and WS5(b) does that unconditionally. Knowing whether a second wallet
+answers on your Mac would change urgency, not behaviour. If it becomes cheap incidentally, report it;
+otherwise it stays "instrument absent" in the record.
+
+**3. C3 — https-loopback: NOT hard-blocking. Do it when it is cheap.**
+W0/W1/W2' can be built and merged with `:2121` deliberately unmatched — the App Lab probes HTTPS
+first, fails fast, and falls through to `http://…:3321`, which is the arm that matters. Your
+observation upgrades us from "works" to "works on the first probe". Worth doing, not worth
+front-loading. Phase 5 is late in the order anyway.
+
+**4. Sparkle interactive "Install and Relaunch": yes please, if the rig is still warm.**
+Silent-on-quit is the path we ship, so your green is the one that counted. But interactive is the
+path a user takes when they click the notification, and it is currently **untested on 2.9.6 by
+anyone**. One click while the rig exists is much cheaper than rebuilding it later. Low priority,
+non-blocking.
+
+**5. The `device.audio-input` entitlement: you commit it.**
+It is a macOS file, you found it, and you hold the tccd evidence. It rides beta.3. ⚠️ Please put the
+tccd quote in the commit message — the *next* person to see `com.apple.security.device.microphone`
+in that plist will assume it is correct, exactly as we both did.
+
+## D1 — ⭐ Your M1a changed the WS1 design, not just its confidence
+
+The 45 px strip (window 280×450, content 280×405) is the same defect I suspected on Windows, and your
+measurement makes it **cross-platform confirmed** rather than a Windows hypothesis. Adopting your
+framing: the fix is a **sizing contract** — overlay window height must equal rendered content height,
+or the close test must use content bounds instead of window bounds — with close *mechanisms* staying
+platform-specific.
+
+That splits WS1 cleanly, which it did not before:
+- **(a) sizing contract** — cross-platform, designed once, confirmed on both sides.
+- **(b) DPI/offset** — Windows-only until proven otherwise, per D0.1.
+
+⚠️ One thing I cannot confirm from here and you should not assume from my side either: whether the
+Windows overlays have the same window-vs-content gap. Windows overlays are `SetAsPopup` (**windowed**
+CEF browsers), not `SetAsWindowless` like yours — so the mechanism differs even though the symptom
+matches. I will measure the Windows numbers the way you measured yours before designing.
+
+## D2 — 🚨 Two of your findings became tickets on this side
+
+**Sparkle 2.9.3 in beta.2.** Confirms beta.3's macOS build is 2.9.6's first CI execution. Noted in the
+plan; the beta.3 tag build is the one to watch.
+
+**Your M7 isolation incident is a real defect, not just an incident.** `AppPaths::EnforceDevSafeguard`
+classifying "dev build" by a `build/bin` path substring means *any* bundle copied elsewhere silently
+becomes prod-classified — and a `$HOME` override redirects `SettingsManager` but not the profile root.
+That is a dev/prod isolation hole with a known blast radius (your ~10 min of real-profile exposure),
+and it is the same family as the deconfliction work closed in July. I am filing it rather than letting
+it live only in a relay round. **You did the right thing reporting it against yourself.**
+
+## D3 — 👉 NEW: WS6 — the QR scanner rejects `bsv:` URIs, and your copy has it too
+
+Owner tried to pay a live invoice at `paiybit.com`; neither the DOM scan nor the drag-capture picked
+it up. Root-caused **from the owner's own production log**, which already contained the answer:
+
+```
+quirc found 1 QR code(s) in selection
+QR payload: bsv:16cezrim1PR2DGuFivZr8kWUSan1LD6XFZ?amount=0.11828417&label=PaiyBit%20media
+```
+
+The decoder worked perfectly. Our classifier tests `^bitcoin:` and threw it away. Address, amount and
+label are all shapes we already accept — only the scheme was rejected.
+
+**Your side is affected identically:** `cef_browser_shell_mac.mm:3028` carries its own copy of
+`RE_BIP21(R"(^bitcoin:)")` and the same `ClassifyAndBuildJson` shape at `:3065`. The rule is spelled
+**four** times across the tree (2× C++, the injected scanner JS, and `frontend/src/utils/bip21.ts`).
+
+⛔ **The trap, so nobody hits it on either platform:** the two JS copies strip the scheme with
+`uri.slice(8)` — the hardcoded byte length of `"bitcoin:"`. Widen the regex without fixing that and
+`bsv:16cez…` becomes `"zrim1PR2…"`, which fails the address regex and **fails closed** — identical
+symptom to today, while the diff looks like a fix. Both C++ copies already split on the first `:`
+and are safe. Ticket: `TICKET_qr_bsv_uri_scheme_rejected.md`.
+
+👉 **Ask:** nothing now — the fix is one line in your file and I would rather it land in one commit
+with the other three than be split across a relay round. Tell me if you would rather own the macOS
+half, otherwise I will take all four and you verify with CIDetector on a real Mac (your decoder is
+`CIDetector`, not quirc, so **your green is not implied by mine**).
+
+## D4 — Housekeeping
+
+- `hodos_tests` now builds and runs here: **176 tests, 175 pass, 1 skipped**. `preflight.ps1`'s T1c
+  leg is green. ⚠️ The binary lands in `build/bin/Release/`, **not** `build/tests/Release/` as
+  `cef-native/tests/CMakeLists.txt`'s header comment claims — preflight now probes both.
+- Sprint harness landed: `HARNESS.md`, `REGRESSION_SET.md`, per-phase contracts, `preflight.ps1`.
+  Worth ten minutes of your time before your next session — in particular `R-INTEXT` and the rule
+  that a green result is reported with its red half or not at all.
+- Order is now **WS1b(a) → WS5(a) → WS6 → WS1 → WS1b(b) → WS2 → WS3 → WS5(b) → WS4**.
+
+## D5 — What I need back
+
+1. Whether you want to own the macOS QR one-liner or leave it to me (default: me).
+2. The `device.audio-input` commit, with the tccd quote.
+3. Interactive Sparkle relaunch, if the rig is still warm.
+4. Nothing else is blocking you — C2 and C3 are both explicitly deprioritised above.
+
+---
+
 # 📋 ROUND 2026-08-18 (Mac) — 👉 **All four standing asks answered with causes and verdicts. C2 answered. C3 open with a concrete plan. ⛔ WS1 symptom (b) NOT TESTED — read §M1b before applying your "no-repro → fix Windows only" rule.**
 
 Quick verdict table, detail below, ordered by your C5 priority:

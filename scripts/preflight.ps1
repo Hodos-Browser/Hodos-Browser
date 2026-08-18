@@ -270,8 +270,17 @@ Invoke-CargoTest -Id 'T1a' -Manifest 'rust-wallet/Cargo.toml'    -Label 'cargo t
 Invoke-CargoTest -Id 'T1b' -Manifest 'adblock-engine/Cargo.toml' -Label 'cargo test - adblock-engine'
 
 if (Test-Selected 'T1c') {
-    $exe = Join-Path $RepoRoot 'cef-native/build/tests/Release/hodos_tests.exe'
-    if (Test-Path $exe) {
+    # CMake puts the target wherever RUNTIME_OUTPUT_DIRECTORY says -- measured 2026-08-18 it
+    # lands in bin/Release, NOT tests/Release as cef-native/tests/CMakeLists.txt's header
+    # comment claims. Probe the real candidates rather than trusting one hard-coded path:
+    # a wrong path here reads as "not built" and SKIPS, which is a silent loss of coverage.
+    $exe = @(
+        'cef-native/build/bin/Release/hodos_tests.exe',
+        'cef-native/build/tests/Release/hodos_tests.exe',
+        'cef-native/build/bin/hodos_tests.exe',
+        'cef-native/build/tests/hodos_tests'
+    ) | ForEach-Object { Join-Path $RepoRoot $_ } | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($exe) {
         $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
         try { & $exe 2>&1 | Out-String | Write-Verbose } finally { $ErrorActionPreference = $prevEap }
         if ($LASTEXITCODE -eq 0) { Add-Result 'T1c' 'hodos_tests (C++)' 'PASS' '' }

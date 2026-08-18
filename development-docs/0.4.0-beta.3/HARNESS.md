@@ -199,3 +199,28 @@ To close the two skips: build `hodos_tests` once
 (`cmake -S cef-native -B cef-native/build -DHODOS_BUILD_TESTS=ON`, then
 `cmake --build cef-native/build --config Release --target hodos_tests`) and pass `-Full` for the
 frontend leg. Until then, **record INCOMPLETE in the sign-off table — do not round it up.**
+
+### T1c closed — 2026-08-18
+
+`hodos_tests` now builds and runs: **176 tests, 175 passed, 1 skipped**
+(`UpdateStagerRig.StagesFromLocalFeed`). Build:
+
+```
+cmake --build cef-native/build --config Release --target hodos_tests
+```
+
+⚠️ Two traps found doing it, both worth keeping:
+
+1. **The binary lands in `cef-native/build/bin/Release/`, not `build/tests/Release/`** as
+   `cef-native/tests/CMakeLists.txt`'s own header comment states. Preflight now probes four candidate
+   paths — a hard-coded wrong path reads as "not built" and **SKIPS**, which is silent loss of
+   coverage wearing the costume of a clean run.
+2. **`cmake --build … | tail` discards the exit code** and a failed configure reported success. Any
+   build or test invocation whose result is piped must capture `$?` separately. This is the same
+   false-green family as the four in §9.
+
+Configuring a *fresh* build dir hits `nlohmann-json 3.12.0#2` missing from the local vcpkg registry
+(`VCPKG_MANIFEST_MODE=ON`). The existing `cef-native/build` has `VCPKG_MANIFEST_MODE=OFF` and already
+carries `HODOS_BUILD_TESTS=ON`, so it builds. ⇒ **Use the existing build dir**; a clean-machine
+bootstrap needs a vcpkg registry new enough for the pinned port-version — a real instance of the
+freeze-with-no-thaw problem in `TICKET_dependency_freshness_review.md`.
