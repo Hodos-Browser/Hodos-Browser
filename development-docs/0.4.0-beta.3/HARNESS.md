@@ -174,3 +174,28 @@ have produced a **false green**:
 3. **`,$hits` re-wrapped in `@()`** at the call sites nested the array, so every gate counted **1**.
    G1 read `1 violation` against a real 52 — and *passed*, as "below baseline".
 4. `cargo`'s stderr warnings became terminating errors under `EAP=Stop`, killing the run on a warning.
+
+### Baseline run — 2026-08-18, before any Phase 0 code
+
+```
+T0  G1  PASS  52 violations, at baseline   [Phase 0,    target 0]
+T0  G2  PASS   5 violations, at baseline   [Phase 0.5,  target 2]
+T0  G3  PASS   0 violations, at baseline   [ported,     target 0]
+T0  G4  PASS   0 violations, at baseline   [ported,     target 0]
+T0  G5  PASS  15 violations, at baseline   [Phase 0,    target 0]
+T1a     PASS  cargo test - rust-wallet
+T1b     PASS  cargo test - adblock-engine
+T1c  SKIPPED  hodos_tests - not built
+T1d  SKIPPED  frontend build - not requested
+
+PREFLIGHT: INCOMPLETE - 0 failed, 2 skipped.        exit 2
+```
+
+⭐ **This is the harness working, not failing.** Nothing is broken — two checks did not run, so the
+run is `INCOMPLETE` and exits `2`. A tool that had printed PASS here would be the same instrument
+that let a constant seed ship in every release.
+
+To close the two skips: build `hodos_tests` once
+(`cmake -S cef-native -B cef-native/build -DHODOS_BUILD_TESTS=ON`, then
+`cmake --build cef-native/build --config Release --target hodos_tests`) and pass `-Full` for the
+frontend leg. Until then, **record INCOMPLETE in the sign-off table — do not round it up.**
