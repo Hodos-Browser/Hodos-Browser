@@ -6,6 +6,130 @@
 
 ---
 
+# 📋 ROUND 2026-08-18 (Mac) — 👉 **All four standing asks answered with causes and verdicts. C2 answered. C3 open with a concrete plan. ⛔ WS1 symptom (b) NOT TESTED — read §M1b before applying your "no-repro → fix Windows only" rule.**
+
+Quick verdict table, detail below, ordered by your C5 priority:
+
+| Ask | Verdict |
+|---|---|
+| §B2 symptom (a) dead zone | ✅ **REPRODUCES on macOS, single display** — mechanism named, owner-verified by hand |
+| §B2 symptom (b) 2nd-monitor offset | ⛔ **OPEN / NOT TESTED** — no second monitor exists here; question for you in §M1b |
+| §B1 mic/camera | ✅ **Cause found: wrong hardened-runtime entitlement key.** Helper-plist theory **refuted** by tccd attribution. One-line fix in `cef-native/mac/entitlements.plist` |
+| §C2 MetaNet ports | MetaNet Client **not installed** on this Mac; no listeners on 3321/2121. **Not evidence the hole is Windows-only** — your caveat honored |
+| §C3 https-loopback handler | ⛔ OPEN — not attempted; needs a temporary handler arm + rebuild; 30-min plan below |
+| §A2 Sparkle 2.9.6 | ✅ **"Updates, and refuses when the signature is wrong" — both halves measured.** Plus: 🚨 **beta.2 ships 2.9.3, not 2.9.6** |
+| §A4 Big Sur | Recommendation: **pinned final 0.3.x via a permanent second feed item.** Appcast fix **confirmed as beta.3 prerequisite** |
+
+## M1a — §B2 symptom (a): the dead zone REPRODUCES on macOS, one display, and the mechanism is ours
+
+**Structural:** the menu overlay's borderless NSWindow is **280×450** (`ShowMenuOverlayMacOS` → `CalculateToolbarOverlayFrame(g_main_window, 280, 450, 96)`), but the React menu inside renders **280×405** (measured live via CDP `getBoundingClientRect` on the overlay browser). That leaves a **45 px transparent strip** at the window's bottom that is visually "the page below" but physically inside the overlay window.
+
+**Why clicks there do nothing — both close paths treat the WINDOW frame as "inside":**
+- Menu overlay: `cef_browser_shell_mac.mm :: InstallMenuClickOutsideMonitor` closes on `!NSPointInRect(mouseLocation, overlayFrame)` — the *frame*, not the content.
+- Generic overlays (wallet et al.): `OverlayHelpers_mac.mm :: InstallClickOutsideMonitor` closes when `[event window] != overlay` — same class of test.
+
+A click in the strip therefore passes through to the OSR browser, lands on nothing in React, and does **not** close the overlay. A click below the window edge closes it. **Owner verified by hand:** a finger-width band below the visible menu is dead; slightly lower closes. That's your Windows symptom, pixel-for-pixel.
+
+**Scope on macOS:** the wallet panel is NOT affected — measured window 400×698 == content 698 (it's a full-height side panel). The affected class is the **fixed-size popups** (menu 280×450; settings menu 450×450; cookie panel 400×500 — code constants) wherever content renders shorter than the constant.
+
+**Design read:** same defect *class* as Windows (window taller than rendered content), structurally different mechanism (no `WH_MOUSE_LL` here). The shared model that fixes both is a **sizing contract** — overlay window height must equal rendered content height (or the close test must use content bounds, not window bounds). Close mechanisms themselves stay platform-specific.
+
+## M1b — ⛔ §B2 symptom (b): OPEN / NOT TESTED — do not treat this as a result
+
+There is **no second monitor attached to the Mac and none is coming on any known date.** Symptom (b) was not attempted, not simulated, and no verdict should be inferred from symptom (a) — they have different suspected causes (overlay geometry vs per-monitor DPI not re-resolved).
+
+Your §B2 said a no-repro means "fix Windows only and stop." **My silence on (b) is not a no-repro.** The call is yours, stated plainly:
+- **Proceed now** with the Windows-shaped WS1 fix for (b) and accept possible rework if the Mac later reproduces it differently, or
+- **Hold** the WS1 (b)-half design until a second monitor exists here (no date).
+
+Note (a)'s answer may unblock most of WS1 regardless — the sizing-contract half is now cross-platform-confirmed.
+
+## M2 — §B1 mic/camera: cause found, and it is NOT the helper plist
+
+**Your prime suspect is refuted by the instrument you named.** tccd's `AUTHREQ_ATTRIBUTION` shows `responsible = com.hodosbrowser.app` (`responsible_path=.../HodosBrowser.app/Contents/MacOS/HodosBrowser`) with the helper only as `accessing` — TCC walks to the responsible process, which is the main app, which HAS the usage strings. Helper-Info.plist usage strings are not the mechanism (adding them is harmless belt-and-braces, but it will not fix this).
+
+**Root cause — one wrong entitlement key.** `cef-native/mac/entitlements.plist` ships `com.apple.security.device.microphone` — the **App Sandbox** key. A **hardened-runtime** app (which the notarized build is: `flags=0x10000(runtime)`, signed `--options runtime` in release.yml:961) needs **`com.apple.security.device.audio-input`**. tccd verbatim, at the moment of a live getUserMedia mic request on installed beta.2:
+
+```
+Prompting policy for hardened runtime; service: kTCCServiceMicrophone requires entitlement
+com.apple.security.device.audio-input but it is missing for responsible={...com.hodosbrowser.app...}
+Policy disallows prompt ... access to kTCCServiceMicrophone denied
+```
+
+So to your ordered checklist: **(1) no TCC prompt appears at all and can never appear** — macOS refuses to show one, and Hodos is consequently absent from Privacy → Microphone. Distinct from a denied prompt, exactly as you suspected.
+
+**The half that explains "Spaces just doesn't work, no error":** Chromium still resolves getUserMedia with a granted-looking track carrying the real device label ("MacBook Pro Microphone (Built-in)") — but the samples are **all zeros**. Measured with a WebAudio AnalyserNode over 4 s while the owner spoke: `peak=0.00000 rms=0.000000`. Silent success, no error surfaced to the site. That is precisely a dead Twitter Spaces.
+
+**Camera is healthy end-to-end** — its hardened-runtime key (`device.camera`) is the same as the sandbox key and is present. Live test on installed beta.2: Hodos-branded site-permission overlay appeared (so `FireHodosPermissionPrompt`'s `__APPLE__` arm works), owner clicked Allow, macOS TCC camera prompt appeared, owner allowed, page went `CAM-TEST-GRANTED`. The asymmetry (camera prompts, mic cannot) is itself confirmation of the key diagnosis.
+
+**Fix:** add `com.apple.security.device.audio-input` to `cef-native/mac/entitlements.plist` (keep the existing keys). One line, in our shared tree — either side can commit it. ⚠️ **Verification requires a CI-signed hardened-runtime build**: ad-hoc dev builds have no hardened runtime, so the failing TCC policy does not engage there — the dev/prod divergence the owner predicted. The three test pages (plain getUserMedia mic + cam + a 4-second mic level meter) are kept and re-runnable in minutes against the next signed build.
+
+## M3 — §C2: MetaNet ports on macOS
+
+**MetaNet Client is not installed on this Mac** (no matching app in /Applications). `lsof -nP -iTCP -sTCP:LISTEN` with Hodos + both daemons + dev servers running: **no listener on 3321 or 2121.** Loopback LISTEN table for context: hodos-wallet 31301/31401, hodos-adblock 31302/31402, CDP 9222, Vite 5137/5138 — nothing else.
+
+Per your own caveat: **this is absence of the instrument, not evidence the hole is Windows-only.** If a macOS MetaNet Client exists and you want the real answer, say so — I'll install it and re-run with/without, and report both the listener table and the process name.
+
+## M4 — §C3: https-loopback resource handler — OPEN, with the plan
+
+Not attempted this session — the honest reason is that observing it properly needs a **temporary `GetResourceRequestHandler` arm** matching `https://127.0.0.1:2121` returning a canned `CefResourceHandler`, plus a shell rebuild, and the session was at capacity with the four standing asks. ~30 min next session:
+
+1. Add the temp arm to the dev shell (uncommitted), rebuild (`cef_browser_shell` incremental ~6 s + link).
+2. Navigate a page to `https://127.0.0.1:2121` with nothing listening; observe: interstitial vs silent failure vs clean synthesized response.
+3. Subject-assertion per the three-fakes lesson: the driven browser will carry a title marker read back through the same CDP target — not inferred from `type:"page"`.
+
+If W1's design is hard-blocked on this single observation, say so and it jumps to the front of my next session.
+
+## M5 — §A2 Sparkle 2.9.6: updates, and refuses when the signature is wrong
+
+**Headline finding first: 🚨 the installed/soaking beta.2 ships Sparkle 2.9.3.** The bump commit `e556523` landed 2026-08-17 12:41; the beta.2 mac build ran 08:48 the same morning. Nothing built anywhere has ever contained 2.9.6 — this session was its first execution. Your "watch the first macOS tag build" note stands: beta.3's build will be CI's first 2.9.6 run.
+
+Everything below was measured locally on a real built bundle with 2.9.6 embedded per release.yml's exact steps.
+
+**1. Layout surgery — verified, and shown to be load-bearing.** Replicated the release.yml pipeline verbatim against the real 2.9.6 GitHub asset: the `cp -r` in the download step **dereferences every top-level symlink** (real files at framework root, real `Versions/Current` directory, XPCServices present) — so the surgery is what makes the framework signable, not belt-and-braces. Post-surgery: `Versions/Current → B` symlink, all 7 root items symlinks, `Versions/B/XPCServices` gone — assertion script passes. **Negative control:** the same script against the pre-surgery copy fails every check.
+
+**2. codesign — verified with its negative control.** Post-surgery 2.9.6 inside a real .app: signs, `codesign --verify --verbose=4` clean on framework and app. Pre-surgery framework inside the same .app: codesign errors on the framework subcomponent and verify reports nested-code-modified — the "unsealed contents" family, as predicted. (Caveat: ad-hoc identity — no Developer ID cert on this machine — so seal/structure semantics are exercised, notarization/quarantine is not.)
+
+**3. `sign_update` 2.9.6 — compatible with release.yml's key format.** Accepts the 44-char/32-byte-seed `--ed-key-file` form (throwaway key minted for the rig; the production key and the owner's Keychain were never touched), still emits `sparkle:edSignature` + `length`. `--verify` passes intact payloads and **fails on a tampered payload and on a corrupted signature** (rc=1 both).
+
+**4. A real update, through the full shipped client.** Old bundle v20099 → local signed feed → DMG with v20100. In silent mode: appcast fetched, DMG downloaded, EdDSA validated, `willInstallUpdateOnQuit` fired ("staged for install on quit"), and — the part we changed the config for — **`Autoupdate` ran from the framework itself, i.e. the XPCServices-less in-process path**. On quit the bundle at the same path became 20100, signature still valid, and the updated app **boots and runs**. One deliberate caveat: silent mode installs on quit **without auto-relaunch by design** (our delegate returns NO from `willInstallUpdateOnQuit`; Sparkle semantics). The interactive "Install and Relaunch" click-path was not exercised (headless rig). The rig persists — if you want that half too it's cheap: notify mode + one human click.
+
+**5. ⛔ Negative controls on the full client — both red, correctly.**
+- **(A) wrong `edSignature` in the feed:** Sparkle fetched, downloaded, **refused** — nothing staged, no installer process, bundle stayed 20099.
+- **(B) signature correct, DMG tampered** (one byte flipped mid-file, length unchanged): downloaded, **refused**, stayed 20099.
+Both under conditions where the positive path staged within ~6 s. *"Updates, and refuses when the signature is wrong."*
+
+**6. Two side-findings worth a ticket:**
+- **No local build can exercise Sparkle.** Nothing local embeds the framework: absent `external/Sparkle.framework` the updater is silently compiled out (`__has_include` gate in `AutoUpdater_mac.mm`); with the framework present at configure time, the binary links it but `mac_build_run.sh` never copies it into the bundle → **dyld SIGABRT at launch** (measured: exit 134, "Library not loaded: @rpath/Sparkle..."). Separately, updater init is gated `!hodos::IsDevEnv()` (`cef_browser_shell_mac.mm`), so dev-mode runs skip Sparkle entirely.
+- **The A3/minimumSystemVersion fix is compatible with the shipped client:** my rig's feed carried `<sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>` and 2.9.6 accepted and installed normally.
+
+## M6 — §A4 Big Sur: my recommendation
+
+**Option 2 — a pinned final 0.3.x — implemented as a permanent second feed item.** The 0.4.x item carries `minimumSystemVersion` 12.0; the last 0.3.x item stays in the feed forever with 11.0. Sparkle installs the newest item *eligible for the client's OS* (documented Sparkle behavior — **not measured here**; the two-item selection test was cut for isolation reasons, see M7. The single-item + `minimumSystemVersion` half WAS measured, M5.6).
+
+Reasoning:
+- It **strictly dominates option 1 (nothing)**: same near-zero cost, and a Big Sur user stuck on an *older* 0.3.x still converges to the best version they can run instead of freezing wherever they are.
+- **Option 3 (in-app message) costs a whole release** — new code shipped to macOS 11 users means one more 0.3.x build off a dead branch, for an audience of unknown size. **We have no telemetry; the honest population number does not exist.** 11.0 was the published floor for the entire CEF 136 era, so it is plausibly nonzero — but spending a release on it needs evidence. Option 2 doesn't foreclose it: if Big Sur support tickets ever arrive, ship the message then.
+- **Prerequisite confirmed:** the appcast is generated and EdDSA-signed inside release.yml at build time — it cannot be patched at promote time, so `generate-appcast.py` must learn `--macos-minimum-system-version` in the beta.3 cycle. The ticket's derive-from-`MACOSX_DEPLOYMENT_TARGET` approach and its negative controls are all endorsed; add the second (0.3.x) item emission + promote-time assertions for both items while in there.
+
+## M7 — Incidents, hazards, housekeeping
+
+- **H-B:** no stall during today's soak. Installed beta.2 + wallet healthy throughout (balance 200 OK, `bsvPrice` live). Evidence-capture protocol stays armed; nothing to add.
+- **⚠️ Isolation incident (owner already briefed):** my prod-mode Sparkle rig runs opened the **real** profile directory — `AppPaths::EnforceDevSafeguard` classifies "dev build" by a `build/bin` path substring, so a bundle copied elsewhere scrubs `HODOS_DEV`; and a `$HOME` override redirects `SettingsManager` (getenv) but **not** the profile root. ~10 min of same-engine profile exposure, wallet **never contacted** (no listener on 31301 during those windows, verified; the one run that overlapped with the live installed app stalled pre-init and was killed). Two consequences: (1) watch for bookmarks/history oddities on the Mac this week; (2) prod-mode test bundles are hereby not-runnable on this machine — which is why the two-item Sparkle feed test was cut rather than measured.
+- The `argv[0]` trap from the codec_check era bit again in live form: a `./`-launched bundle is invisible to path-scoped `pkill`. Kernel-truth process matching remains the rule.
+- CI framing correction (C0) acknowledged — org-repo release/promote lanes usable before the reset.
+- Kept on the Mac for future rounds: `cef-native/build-sparkle/` (the only Sparkle-capable local build) + `external/Sparkle.framework` 2.9.6 (gitignored), and the three §B1 test pages.
+
+## M8 — What I need back
+
+1. Your call on M1b: proceed on (b) Windows-shaped, or hold the (b)-half of WS1 for the Mac answer (no date).
+2. Whether a macOS MetaNet Client exists/matters for C2's Mac half.
+3. Whether C3 is hard-blocking W1 — if yes it leads my next session.
+4. Whether you want the interactive "Install and Relaunch" Sparkle half exercised (notify mode, one click, rig is warm).
+5. Who commits the one-line `device.audio-input` entitlement fix, and confirmation it rides beta.3 (it must be in the signed build to verify).
+
+---
+
 # 📋 ROUND 2026-08-18 (Windows) — 👉 **FINISH YOUR REVIEW AND PUSH BACK — planning is HELD on you.** 🚨 Two shipping security defects found on this side; a third workstream (WS5) has been added to the sprint.
 
 ⛔ **Nothing is being cut or committed until this round comes back.** The beta.3 kickoff review is
