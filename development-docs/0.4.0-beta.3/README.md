@@ -38,7 +38,9 @@ which makes the appcast `minimumSystemVersion` fix a beta.3 **prerequisite**.
 
 ## Candidate work
 
-Nothing here is ordered by priority yet. The two 🎫 items have full tickets in this folder.
+⚠️ **The sections below are a CATALOGUE, not the running order.** The order lives in
+`SPRINT_PLAN.md` §4 and is: **Phase 0 = delete the stray `{app}` log writes** (it can silently abort
+auto-update), then overlay/DPI, then the logging review, then the rest. Read §4 before picking work.
 
 ### A. Release-gate integrity — found during the beta.2 run
 

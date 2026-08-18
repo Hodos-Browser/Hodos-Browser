@@ -167,6 +167,51 @@ whether page loads stall too. That single experiment settles it.
    A rule this specific, already violated once and re-violated 44 times, needs enforcement rather
    than documentation.
 
+## Two adjacent defects this exposed — fold into the same phase
+
+Both are in the code path above, both are independent of our stray log, and both are cheap while
+someone is already in `UpdateFs.cpp`.
+
+### A1 — `Sha256FileW` omits `FILE_SHARE_WRITE`, so ANY writer in `{app}` aborts the update
+
+```cpp
+CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, …)
+```
+
+Removing our 44 writes fixes *our* instance of this. It does **not** fix the class: any file being
+written anywhere under `{app}` at walk time — an AV scanner's temp file, a crash dump, a
+partially-written CEF cache artifact, a future feature — aborts the entire silent apply, silently.
+
+⚠️ **This is a genuine judgement call, not an obvious bug.** Strictness here is defensible: hashing
+a file while it changes yields a hash that describes nothing, and a backup manifest that silently
+records a torn hash is arguably worse than refusing. **Decide deliberately** between:
+
+1. **Keep strict, but be specific** — distinguish "sharing violation" (`ERROR_SHARING_VIOLATION`)
+   from "genuinely unreadable" and report which. Today both collapse into `""`.
+2. **Add `FILE_SHARE_WRITE`** and accept possibly-torn hashes for files nobody promised are stable.
+3. **Exclude by policy** — skip known-volatile paths (`*.log`, `crashpad`, `.tmp`) from the backup
+   manifest the way `update\` is already excluded.
+
+⭐ Option 3 is closest to the existing design — the exclusion mechanism already exists and is already
+used for exactly this reason.
+
+### A2 — the abort is a `LOG_WARNING`, which is why nobody would ever know
+
+```cpp
+LOG_WARNING("Silent apply: cannot manifest {app} — abort"); return false;
+```
+
+An update that decides not to happen is not a warning-level event. It is the failure of the
+mechanism that delivers every future security fix, and it currently produces one line in a log
+nobody reads — in a build where, per
+`TICKET_production_debug_logging_unbounded.md`, that log is 1.58 GB of noise.
+
+⚠️ **Fixing only the log level is not enough** — nothing surfaces to the user or to us either way.
+Minimum bar: raise to `LOG_ERROR`, record the abort **and its reason** in the update state so a
+subsequent launch can see that the last apply refused and why, and make repeated aborts visible.
+⛔ Do not silently retry forever with no record; that is the current behaviour and it is why this
+defect could have run indefinitely.
+
 ## ⛔ Negative control
 
 - With the guard in place, deliberately add one `ofstream("foo.log")` and confirm the build **fails**.
@@ -180,4 +225,7 @@ whether page loads stall too. That single experiment settles it.
 - [ ] build guard rejects bare-filename `ofstream` in shipped code, **verified by making it fail**
 - [ ] `{app}` stays clean across a full session — measured
 - [ ] cleanup ships for existing installs
-- [ ] answered: does the signed-manifest check reject unknown files in `{app}`?
+- [x] ~~answered: does the signed-manifest check reject unknown files in `{app}`?~~ **No** — resolved
+      2026-08-18; the exposure is the backup walk, not the integrity gate (see above)
+- [ ] **A1** decided and implemented: `Sha256FileW` share-mode / exclusion policy
+- [ ] **A2**: abort raised above `LOG_WARNING`, reason recorded in update state, repeated aborts visible

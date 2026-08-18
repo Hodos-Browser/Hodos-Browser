@@ -30,14 +30,26 @@ before the first commit of feature code.
 
 ## ⛔ Hazards — handle each explicitly
 
-**H-A — two defects are SHIPPING, in beta.1 and beta.2 alike.**
-`TICKET_stray_log_in_install_root.md` (44 relative-path `ofstream` writes landing a log inside
-`{app}` — the condition that already broke silent-update hashing once) and
+**H-A — Phase 0 is a SHIPPING defect that can silently disable auto-update. Start there.**
+`TICKET_stray_log_in_install_root.md`: 44 relative-path `ofstream` writes land a log inside `{app}`,
+present in beta.1 **and** beta.2.
+
+✅ **The open question is ANSWERED (2026-08-18) — do not re-derive it.** The signed
+`expected-new-manifest.json` check does **NOT** reject unknown files; `VerifyTreeAgainstManifest`
+iterates only its own entries. **The exposure is the BACKUP walk**: `BuildManifestForTree` hashes
+every file in `{app}`, and `Sha256FileW` opens without `FILE_SHARE_WRITE`, so a file held open for
+writing makes it return `""` → `"Silent apply: cannot manifest {app} — abort"` → **the update
+silently does not happen**. Full chain with file:line is in the ticket.
+
+⇒ Phase 0 is: delete the 44 writes, route anything worth keeping through `Logger`, ship a cleanup for
+existing installs, add the build guard, **and** decide the two adjacent defects folded into that
+ticket (**A1** `Sha256FileW`'s share mode / exclusion policy; **A2** the abort being a `LOG_WARNING`
+nobody sees). ⚠️ A1 is a genuine judgement call with three options laid out — put it to the owner.
+
+**H-A2 — the other logging defect is Phase 2, not Phase 0.**
 `TICKET_production_debug_logging_unbounded.md` (no level gate, no rotation, 1.58 GB of plaintext
-browsing history). ⇒ Decide where these sit in the order. They are cheap and user-affecting.
-**Answer the open question in the first ticket before scoping it:** does the signed
-`expected-new-manifest.json` check *reject* unknown files in `{app}`, or only assert listed ones?
-That single answer moves it between "tidy-up" and "every silent update is at risk".
+browsing history) is serious but **not self-blocking**, so it sits after the money-path work. See
+SPRINT_PLAN §4 for the full ordering and its rationale.
 
 **H-B — the stall incident is UNSOLVED. Do not adopt a cause.**
 beta.1 stalled with balances, wallet, local DB **and web pages** failing together. Established:
@@ -58,8 +70,11 @@ local-first; anything needing a tag build queues behind the reset. Do not re-ena
 
 ## Decisions to put to the owner — do not settle these yourself
 
-1. **Where WS1b (logging/sync-IO) sits in the order** — it was promoted from an incident after the
-   original WS1→WS4 ordering was agreed, and it is a live shipping defect.
+1. ~~Where WS1b sits in the order~~ — **SETTLED 2026-08-18**: WS1b splits, and WS1b(a) (the stray
+   `{app}` log) is **Phase 0**, ahead of everything including the money-path bug, because an
+   auto-update that silently stops working is what prevents every other fix from reaching users.
+   WS1b(b) is Phase 2. See SPRINT_PLAN §4. **Still owed:** the **A1** share-mode decision inside
+   that ticket (three options, genuine trade-off).
 2. **WS4 Chrome-import scope**, against the encryption wall in SPRINT_PLAN §2: DPAPI + Chrome 127
    App-Bound Encryption make cross-machine cookie/password import effectively impossible. Is this
    "bookmarks + history + passwords-via-CSV, same machine, one button", or a full research pass?
@@ -83,8 +98,9 @@ local-first; anything needing a tag build queues behind the reset. Do not re-ena
 4. **Sequence the phases** with dependencies, and say which need Mac, which need CI (i.e. which
    queue behind the reset), and which are local-only.
 5. **Per-phase test plan**, each with its **negative control** — what must be seen to FAIL, and how.
-6. **Hand back a tight summary**: proposed order, open questions, assumptions, and the four owner
-   decisions. Then stop.
+6. **Hand back a tight summary**: proposed order, open questions, assumptions, and the **three
+   remaining owner decisions plus A1**. Then stop. ⚠️ Decision 1 is already settled — confirm you
+   agree with the Phase 0 ordering rather than re-opening it, or say why not.
 
 ## Hard rules
 

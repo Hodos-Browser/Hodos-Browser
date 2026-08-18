@@ -123,7 +123,7 @@ Chrome/Brave/Edge **bookmarks and history**. A Firefox stub exists and is never 
 
 The seven items are four pieces of work.
 
-### WS1 — Overlay input & DPI correctness · items 1, 2, 7 · **FIRST**
+### WS1 — Overlay input & DPI correctness · items 1, 2, 7 · **Phase 1** (was FIRST; see §4)
 
 All three are the same defect class: **the overlay's model of where things are ≠ where they are.**
 Overlay HWND geometry vs React fill, hit-testing, OSR mouse-coordinate translation, and the
@@ -151,7 +151,7 @@ Leads already in hand:
 `g_wallet_overlay_prevent_close`, `g_file_dialog_active`, and the four privacy-perimeter gates.
 Verification must include the **DPI & resolution matrix** cells #4/#6/#9.
 
-### WS1b — Logging & synchronous-I/O practices review · **NEW, promoted from an incident**
+### WS1b — Logging & synchronous-I/O practices review · **SPLIT: (a) is Phase 0, (b) is Phase 2**
 
 Opened 2026-08-17 after the owner's installed **beta.1** went unresponsive — balances, the advanced
 wallet, local DB reads **and ordinary web pages** all stalled together, recovering only after a
@@ -199,8 +199,25 @@ Standalone, research-heavy, security-sensitive. Scope against §2's wall **befor
 
 ## 4. Order
 
-**WS1 → WS2 → WS3 → WS4.** WS4 last because it is the item most able to balloon, and the only one
-whose value is undermined by an external constraint we do not control.
+**WS1b(a) → WS1 → WS1b(b) → WS2 → WS3 → WS4.**
+
+⭐ **Changed 2026-08-18, after the manifest question was answered.** WS1b splits, and its first half
+goes to the front:
+
+| Phase | What | Why here |
+|---|---|---|
+| **0 — WS1b(a)** | **Delete the 44 stray `{app}` log writes + ship a cleanup** | 🚨 It can **silently abort auto-update** — confirmed mechanism, shipping in beta.1 **and** beta.2. Cheap (delete debug scaffolding), and it is the one defect that can stop users receiving *every future fix*, including the rest of this sprint. |
+| **1 — WS1** | Overlay input & DPI | Money-path correctness — cursor offset in the wallet overlay during a send. |
+| **2 — WS1b(b)** | Logger level gate, rotation, retention, sync-I/O review | The 1.58 GB plaintext-history problem. Serious but **not** self-blocking, so it does not need to precede WS1. |
+| 3–5 | WS2 → WS3 → WS4 | Unchanged. WS4 last: most able to balloon, and its value is capped by a constraint we do not control. |
+
+**Why 0 is ahead of everything, including the money-path bug:** an auto-update that silently stops
+working is the defect that prevents all other fixes from reaching users. Every other item on this
+list is delivered *through* that mechanism.
+
+⚠️ **This ordering was recommended by the assistant and confirmed by the owner on 2026-08-18.** It is
+reversible — WS1b(a) is a deletion of debug scaffolding with a cleanup step, not an architectural
+change.
 
 ## 5. Mac tasking
 
