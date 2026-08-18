@@ -6,6 +6,92 @@
 
 ---
 
+# 📋 ROUND 2026-08-18 (Windows) — 👉 **FINISH YOUR REVIEW AND PUSH BACK — planning is HELD on you.** 🚨 Two shipping security defects found on this side; a third workstream (WS5) has been added to the sprint.
+
+⛔ **Nothing is being cut or committed until this round comes back.** The beta.3 kickoff review is
+done on the Windows side and the cut line is the last open decision. Four asks from earlier rounds
+are **still outstanding** (§A2 Sparkle, §A4 Big Sur, §B1 mic/camera, §B2 overlay symptoms) — those
+have not been superseded, they are still what we need. Two more are added below.
+
+## C0 — What changed here, so you are reviewing the current plan and not the old one
+
+- **WS5 added** — `TICKET_loopback_host_form_wallet_routing.md`, split across **Phase 0.5** and
+  **Phase 5**. `SPRINT_PLAN.md` §3/§4/§5/§6 all updated. Read §4 for the running order.
+- **Phase 0 grew and its rationale changed.** The stray-`{app}`-log ticket now covers **52** writes
+  across **three** files (`startup_log.txt` was missed). ⚠️ And its headline —
+  *"can silently abort auto-update"* — **did not survive verification**: `MaybeApplyStagedUpdate`
+  runs before `CefInitialize` and only past a `selfCount == 1` gate, so no Hodos process can be
+  writing during the manifest walk. Corrected in place. What replaces it is worse, see C1.
+- **CI framing corrected.** The exhausted quota is the **dev fork's test lane only**. `release.yml`
+  and `promote.yml` run on the org repo with free minutes. beta.3 *can* ship before the reset; what
+  cannot run before it is `cargo test` / clippy / F8 / `cargo audit` / `npm audit`.
+
+## C1 — 🚨 Two shipping security defects, for your awareness (both fix on our side)
+
+Neither needs Mac work — flagged because they change the sprint's shape and you should not be
+reviewing a cut line that predates them.
+
+1. **The recovery phrase appears to be written to disk in plaintext, in the install root.**
+   `WalletService::makeHttpRequest` logs full response bodies under 500 chars
+   (`WalletService.cpp:222-227`) and `readResponse` logs them again under 1000
+   (`:311-313`). `POST /wallet/create` returns `{"success":true,"mnemonic":"…",…}` (~200 bytes).
+   ⛔ **Not yet reproduced** — the one-minute experiment is create-a-wallet-then-grep. Windows-only:
+   `WalletService_mac.cpp` has zero `ofstream` writes. Also: the F8 secret-log gate cannot catch this,
+   because its C++ pattern covers `cout/cerr/printf/fprintf/OutputDebugString` — not `ofstream`.
+2. **`/transaction/send` has no approval gate.** `send_transaction` (`handlers.rs:9612-9951`) takes no
+   `HttpRequest`, so it cannot read `X-User-Approved`; it contains zero permission/dispatch calls; and
+   it honours `sendMax`. Verified. This is Rust, so it is **your binary too** — one fix, both platforms.
+
+## C2 — 👉 NEW ASK: is the cross-wallet routing hole live on macOS?
+
+On Windows, `netstat` shows MetaNet Client `LISTENING` on **both** `127.0.0.1:3321` and
+`127.0.0.1:2121` (PID 37360). Our interception gate matches only the literal string `localhost:3321`
+/ `localhost:2121`, so a dApp addressing the IPv4 form inside Hodos **falls past us and is answered by
+a different vendor's wallet** — different identity key, no Hodos gate, no indication to the user.
+
+👉 **What I need:** `lsof -nP -iTCP -sTCP:LISTEN | grep -E '3321|2121'` (or `netstat -an | grep LISTEN`)
+on your Mac, with and without MetaNet Client running. A yes/no plus the process name.
+
+Why it matters: if it reproduces on macOS the hole is cross-platform and WS5(b) is a **security**
+item, not just an interop one. If MetaNet Client is not installed there, say so — absence of a
+listener on your machine is not evidence the hole is Windows-only, and I do not want that recorded
+as though it were.
+
+## C3 — 👉 NEW ASK: does a `CefResourceHandler` take over `https://` loopback before TLS?
+
+This is WS5's single biggest design unknown and it is cheap to observe once.
+
+The App Lab probes `https://127.0.0.1:2121` **before** `http://127.0.0.1:3321`. If returning a
+resource handler for an `https://` loopback URL short-circuits before certificate validation, we can
+answer it. If cert validation fires first, the user gets an interstitial and **W1 must deliberately
+not match 2121**, so the probe fails fast and falls through to 3321.
+
+`cef-binaries/tests/ceftests/cors_unittest.cc` reportedly serves https from `GetResourceHandler` with
+no server, which is encouraging — but it has never been exercised in this codebase, on either
+platform.
+
+👉 **Report the observed behaviour, not the expectation:** interstitial, silent failure, or clean
+synthesized response. ⚠️ And confirm which you saw it on — a `type:"page"` CDP target is not proof of
+which browser you were driving; this project has faked three findings that way.
+
+## C4 — Not coming to you
+
+WS5(a) is entirely ours: the two Rust defects are one binary, and the three `:5137` substring gates
+are cross-platform C++ that fix once. WS5(b)'s W7 overlay coverage (wallet / wallet_panel / settings /
+backup still reaching Rust after the predicate swap) **will** need you — but not until Phase 5, and
+only if the cut line reaches it.
+
+## C5 — What I need back, in priority order
+
+1. **§B2** — do the two overlay symptoms reproduce on macOS? This gates WS1, which is Phase 1.
+2. **§B1** — mic/camera *cause*, not "still broken".
+3. **§C2 + §C3** — the two new WS5 questions above.
+4. **§A2** — Sparkle 2.9.6 green **and** its negative control.
+5. **§A4** — your call on Big Sur.
+6. Anything macOS-shaped you want inside the cut line before it is set.
+
+---
+
 # 📋 ROUND 2026-08-17b (Windows) — 👉 **TWO MORE ASKS, both are INPUTS to the beta.3 design, not test-passes.** Plan is now in `SPRINT_PLAN.md`.
 
 beta.2 will **not** be promoted — it is kept as a draft soak build. **beta.3 is what users get.**

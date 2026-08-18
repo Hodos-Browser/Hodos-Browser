@@ -192,6 +192,34 @@ bookmark) plus mic/camera. Menu work is cross-platform and uses the existing cus
 `MENU_ID_USER_FIRST` context-menu machinery. Mic/camera splits: Windows is reported working; **macOS
 is unverified and suspected** (see §2).
 
+### WS5 — Loopback routing & trust boundary · **SPLIT: (a) is Phase 0.5, (b) is Phase 5**
+
+Filed 2026-08-18 as `TICKET_loopback_host_form_wallet_routing.md`, opened by an external interop
+failure against the BRC App Lab. Verified against the tree the same day — verification log in that
+ticket's §13. **The ticket splits, and the halves belong in different places.**
+
+⭐ **The load-bearing insight, and it is counter-intuitive:** the C++ interception layer is not only a
+permission gate — it is the component that *marks traffic as untrusted*. `domain_trust_mw`
+(`rust-wallet/src/main.rs:65-75`, verified verbatim) treats a **missing** `X-Requesting-Domain` as an
+internal, fully-trusted call. So a gate that fails to match does not leave traffic *ungated*; it
+leaves it *trusted*. Every narrowing of a matcher in this area is a privilege change, and the
+ticket's §5.1 is right that the structural fix done naively would be a **regression**.
+
+- **(a) — Phase 0.5.** Three small, independent defects on or beside the money path, none depending
+  on the routing rewrite: `send_transaction` takes no request context (ticket §7.1); the CORS
+  backstop does not block on origin mismatch (§6.2); and three `:5137` substring gates admit any URL
+  merely *containing* the string (§7.3, escalated — see below). All Rust/C++, all local, no CI, no
+  Mac dependency for the fix itself.
+- **(b) — Phase 5.** The compatibility fix the ticket was opened for — W0 + W1 + W2' + W3: a parsed
+  `IsWalletOrigin()` predicate replacing the six-term substring gate, `/health` added to
+  `isWalletEndpoint`, and instrumentation. Also closes a live **cross-wallet routing hole**: verified
+  by `netstat` on this machine, MetaNet Client is `LISTENING` on `127.0.0.1:3321` **and** `:2121`
+  (PID 37360), so an App Lab request inside Hodos today falls past our gate and is answered by a
+  different vendor's wallet — different identity key, no Hodos gate, no indication to the user.
+
+⛔ **W4 / W6 / W7 / W8 are beta.4**, driven by W3's instrumentation. Do not take the whole plan into
+beta.3 — it rewrites the routing predicate for every network request in the browser.
+
 ### WS4 — Chrome import · item 4
 
 Standalone, research-heavy, security-sensitive. Scope against §2's wall **before** design.
@@ -199,25 +227,33 @@ Standalone, research-heavy, security-sensitive. Scope against §2's wall **befor
 
 ## 4. Order
 
-**WS1b(a) → WS1 → WS1b(b) → WS2 → WS3 → WS4.**
+**WS1b(a) → WS5(a) → WS1 → WS1b(b) → WS2 → WS3 → WS5(b) → WS4.**
 
-⭐ **Changed 2026-08-18, after the manifest question was answered.** WS1b splits, and its first half
-goes to the front:
+⭐ **Changed 2026-08-18 (second revision), after `TICKET_loopback_host_form_wallet_routing.md` was
+filed and verified.** WS1b splits and its first half stays at the front; WS5 splits and its first
+half slots in behind it.
 
 | Phase | What | Why here |
 |---|---|---|
-| **0 — WS1b(a)** | **Delete the 44 stray `{app}` log writes + A1/A2/A3 + ship a cleanup** | 🚨 It can **silently abort auto-update** — confirmed mechanism, shipping in beta.1 **and** beta.2. Cheap (delete debug scaffolding), and it is the one defect that can stop users receiving *every future fix*, including the rest of this sprint. |
+| **0 — WS1b(a)** | **Delete the 52 stray `{app}` log writes + A1/A2/A3** | 🚨 The mnemonic is written in plaintext into the install root (see the ticket's §0). Cheap — it is deleting debug scaffolding — and it is the one phase that also removes a key-material disclosure. ⚠️ Its *original* "silently aborts auto-update" rationale did **not** survive verification; corrected in place in the ticket, not deleted. |
+| **0.5 — WS5(a)** | Money path + trust boundary: `send_transaction` request context, `block_on_origin_mismatch`, the three `:5137` substring gates | 🚨 All three are **live, verified, and shipping**. `send_transaction` honours `sendMax` with no per-call approval and no payment cap. Small, Rust/C++, local, no dependency on the routing rewrite — so there is no reason for it to wait behind a multi-day workstream. |
 | **1 — WS1** | Overlay input & DPI | Money-path correctness — cursor offset in the wallet overlay during a send. |
-| **2 — WS1b(b)** | Logger level gate, rotation, retention, sync-I/O review | The 1.58 GB plaintext-history problem. Serious but **not** self-blocking, so it does not need to precede WS1. |
-| 3–5 | WS2 → WS3 → WS4 | Unchanged. WS4 last: most able to balloon, and its value is capped by a constraint we do not control. |
+| **2 — WS1b(b)** | Logger level gate, rotation, retention, sync-I/O review | The 1.58 GB plaintext-history problem. Serious but **not** self-blocking. |
+| **3 — WS2** | Window / instance / focus identity | #3 is solved at the desk (~1 day). #5 is an unbounded deep dive — take #3, defer #5. |
+| **4 — WS3** | Tab & peripheral parity | Menu work is cross-platform; mic/camera is Mac-blocked on B1. |
+| **5 — WS5(b)** | Loopback compatibility: W0 + W1 + W2' + W3 | Fixes the user-visible interop bug **and** closes the cross-wallet routing hole (MetaNet Client answering for us — verified live). Placed after the reported-defect work because it rewrites a predicate every request passes through. |
+| **6 — WS4** | Chrome import | Last: most able to balloon, and its value is capped by a constraint we do not control. **First candidate to cut.** |
 
-**Why 0 is ahead of everything, including the money-path bug:** an auto-update that silently stops
-working is the defect that prevents all other fixes from reaching users. Every other item on this
-list is delivered *through* that mechanism.
+**Why 0 and 0.5 lead.** Phase 0 removes a secret from disk; Phase 0.5 restores the approval gate to a
+fund-moving endpoint that currently has none. Both are small, both are independent of everything
+else, and neither is reversible-by-accident later.
 
-⚠️ **This ordering was recommended by the assistant and confirmed by the owner on 2026-08-18.** It is
-reversible — WS1b(a) is a deletion of debug scaffolding with a cleanup step, not an architectural
-change.
+⛔ **WS5's W4 / W6 / W7 / W8 are explicitly beta.4**, driven by W3's instrumentation. The routing
+rewrite is a two-release plan and must not be pulled forward whole.
+
+⚠️ **This ordering was recommended by the assistant and confirmed by the owner on 2026-08-18**, then
+extended the same day when WS5 arrived. It is reversible — 0 is a deletion, 0.5 is three small
+additive gates.
 
 ## 5. Mac tasking
 
@@ -230,9 +266,16 @@ deferring them buys rework.
 | **Now** | **Big Sur / `minimumSystemVersion` call** | Product decision with a macOS-shaped answer. |
 | **Now** | **Mic/camera diagnosis (#6)** | If it is the helper-plist/TCC theory, it changes **what we build**, not just what we test. |
 | **Now** | **Do WS1's symptoms reproduce on macOS?** (items 1, 7) | macOS uses borderless `NSWindow` + `InstallClickOutsideMonitor`, **no `WH_MOUSE_LL`**. Designing a Windows-shaped fix first risks a structurally wrong answer for Mac. One cheap question de-risks the workstream. |
+| **Now** | **WS5: is the cross-wallet routing hole live on macOS?** | Does MetaNet Client (or any wallet) listen on `127.0.0.1:3321` / `:2121` on the Mac? On Windows it does — verified — which means a dApp inside Hodos is being answered by another vendor's wallet. Changes how loudly we treat WS5(b). |
+| **Now** | **WS5: does a resource handler take over `https://` loopback pre-TLS on macOS?** | Ticket §8.1 / §11 open question. If TLS validation fires first, W1 must not match `:2121` and the design changes on both platforms. Cheap to observe once, expensive to discover late. |
+| Later | WS5(b) W7 overlay coverage | wallet / wallet_panel / settings / backup overlays must still reach Rust before and after the predicate swap. Ticket §8.6 — the plan had no macOS acceptance criteria at all. |
 | Later | Tab context menu port | Build once on Windows, then port. |
 | Later | Chrome-import macOS half (Keychain) | Parallel research once WS4 starts. |
 | **Never** | Items 3, 5 | Windows-only by nature. |
+
+⭐ **WS5(a) needs nothing from Mac.** `send_transaction` and the CORS backstop are Rust — one binary,
+both platforms. The three `:5137` gates are in cross-platform C++ and are equally wrong on macOS, so
+the fix lands once. Only WS5(b) has a macOS-shaped unknown.
 
 ## 6. Decisions owed
 
@@ -240,11 +283,16 @@ deferring them buys rework.
    research pass first?
 2. **Chrome-import UX** — auto-detect the local profile, folder-picker, or offer at first-run? (And
    whether importing live sessions into a wallet browser is acceptable at all.)
-3. **Cut line** — is all four workstreams in beta.3, or does WS4 slip?
+3. **Cut line** — with WS5 added, does WS4 slip out of beta.3 entirely?
 4. Big Sur users: nothing, a pinned final 0.3.x, or an in-app message?
+5. ⭐ **NEW — disclosure posture.** Phase 0 and Phase 0.5 are both *shipping* defects with a security
+   character: the recovery phrase written to disk, and a fund-moving endpoint with no approval gate.
+   Does anything need saying to existing users, or is fixing them in beta.3 sufficient? Not an
+   engineering call. *(Depends on Phase 0's reproduction result — see the ticket's §0.)*
 
 ## 7. Also in this sprint, already filed
 
 `TICKET_appcast_missing_minimum_system_version.md` (**now a beta.3 prerequisite**) ·
+`TICKET_loopback_host_form_wallet_routing.md` (**now WS5 — split across Phase 0.5 and Phase 5**) ·
 `TICKET_farbling_gate_engine_binding.md` · `TICKET_cdp_port_open_in_release.md` ·
 `TICKET_engine_pins_are_branches_not_tags.md` · `TICKET_dependency_freshness_review.md`
