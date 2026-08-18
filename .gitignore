@@ -26,6 +26,11 @@ dist-ssr
 # cef binaries
 /cef-binaries/
 /cef-native/build/
+# Any sibling build tree (build-tests, build-sparkle, build-t2, ...). The bare
+# `/cef-native/build/` rule matched only the exact name, so scratch configure dirs
+# showed up as untracked and were one `git add -A` away from being committed. Same
+# shape as the cef-binaries-backup-<sha> near-miss (2026-08-17).
+/cef-native/build-*/
 /cef-native/bin/
 *.bz2
 

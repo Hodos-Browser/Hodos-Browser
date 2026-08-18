@@ -1,5 +1,9 @@
 # Session kickoff prompt — open the beta.3 sprint
 
+> ⛔ **SUPERSEDED 2026-08-18 by `SESSION_PROMPT_beta3_execute.md`.** Kept as archaeology: several
+> premises below were **refuted** by the review this prompt asked for — most importantly the
+> "silently aborts auto-update" framing of Phase 0. **Do not start a session from this file.**
+
 > Paste everything between the rules into a fresh session.
 > **Current as of 2026-08-18.** Supersedes the 2026-08-17 draft.
 
