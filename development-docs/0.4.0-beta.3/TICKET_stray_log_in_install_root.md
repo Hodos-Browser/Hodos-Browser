@@ -1,7 +1,7 @@
 # TICKET — 44 raw `ofstream("debug_output.log")` writes land a log INSIDE `{app}`, the one place the silent updater forbids
 
 **Filed:** 2026-08-17, investigating the "everything bogged down" incident
-**Severity:** 🚨 **threatens the silent auto-update path** + bypasses every logging control
+**Severity:** 🚨 **can SILENTLY abort silent auto-update** (confirmed mechanism) + bypasses every logging control
 **Status:** OPEN — **beta.3, high**
 **Present in:** beta.1 **and beta.2** (`WalletService.cpp` is byte-identical between the two tags)
 
@@ -48,15 +48,72 @@ We already hit this once and moved the *Logger's* file out of `{app}`. **These 4
 never moved with it**, so the exact condition the rule forbids is back — and it is live in a shipped
 build.
 
-The silent updater verifies the installed tree against the **signed `expected-new-manifest.json`**
-(`release.yml` generates and Ed25519-signs it from the staged tree; the apply supervisor checks every
-installed `{app}` file's sha256 against it). A file that (a) is absent from the signed manifest,
-(b) appears inside `{app}` after install, and (c) **grows on every wallet call**, is precisely the
-kind of drift that check exists to catch.
+~~The silent updater verifies the installed tree against the signed `expected-new-manifest.json` …
+precisely the kind of drift that check exists to catch.~~
 
-⚠️ **Not yet proven to break an apply** — the manifest may only assert files it lists rather than
-rejecting unknown ones. **Determine which before closing**: if it rejects extras, every silent update
-is at risk; if it ignores them, this is "only" the backup-hash problem we already hit once.
+⚠️ **Struck 2026-08-18 — that reasoning was wrong, and the real mechanism is in the next section.**
+The signed-manifest check does **not** look for unknown files, so it is not what catches this. Kept
+struck rather than deleted because it is the obvious-but-incorrect read, and the next person to
+inspect this will arrive at it too.
+
+## ✅ RESOLVED 2026-08-18 — and the answer moves the risk, it does not remove it
+
+**Q: does the signed `expected-new-manifest.json` check reject unknown files in `{app}`?**
+**A: No.** `updatefs::VerifyTreeAgainstManifest` (`src/core/UpdateFs.cpp:145`) iterates **only over
+`m.entries`**, checking each listed file exists and its sha256 matches. It **never enumerates the
+directory**, so a file present in `{app}` but absent from the manifest is never examined. The
+post-install integrity gate is therefore **not** the exposure.
+
+⛔ **But the BACKUP side is, and it is worse — it is a silent abort of the whole update.**
+
+`cef_browser_shell.cpp:4302`, immediately before the `{app}` backup:
+
+```cpp
+if (!updatefs::BuildManifestForTree(appDirW, oldManifest, {L"update"})) {
+    LOG_WARNING("Silent apply: cannot manifest {app} — abort"); return false;
+}
+```
+
+`BuildManifestForTree` (`UpdateFs.cpp:118`) walks `{app}` **recursively**, excluding only `update\`,
+and hashes **every regular file**:
+
+```cpp
+const std::string sha = Sha256FileW(p.wstring());
+if (sha.empty()) return false;   // unreadable file => fail (don't ship a partial manifest)
+```
+
+And `Sha256FileW` (`UpdateFs.cpp:72`) opens with:
+
+```cpp
+CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, …)
+```
+
+⭐ **`FILE_SHARE_WRITE` is absent.** So hashing **fails on any file another process currently holds
+open for writing** — which is exactly what our 44 `ofstream(…, std::ios::app)` calls do, repeatedly:
+`getBalance` alone opens/writes/closes it **four times per call**, and the incident window recorded
+**417 balance calls in 52 minutes**.
+
+**The resulting chain:** stray log open for write → `Sha256FileW` returns `""` →
+`BuildManifestForTree` returns false → **`"Silent apply: cannot manifest {app} — abort"`** → the
+silent update **does not happen**.
+
+⚠️ **Failure mode: silent.** It is a `LOG_WARNING` and a `return false`. Nothing surfaces to the
+user. They simply stop receiving updates, with no error and no prompt — on the mechanism by which
+every future security fix reaches them. That is strictly worse than a loud verification failure, and
+it directly contradicts the standing principle that auto-update must never be silently broken.
+
+⭐ **This is precisely the history `cef-native/CLAUDE.md` records** — *"a log inside `{app}` broke the
+silent-update backup hash of the `{app}` tree"*. The Logger's file was moved out in response; **the
+44 raw writes were never moved with it**, so the same defect is live again.
+
+⚠️ **Timing-dependent, therefore intermittent — do not expect a clean repro.** The writes are
+short-lived, so whether the apply aborts depends on whether a write is in flight during the walk. An
+intermittent, silent failure to update is the hardest possible thing to notice in the field, which
+argues for fixing it rather than measuring how often it bites.
+
+**Second-order effects**, lower severity but real: the growing log is **copied into the rollback
+backup** (`CopyTreeRecursive(appDirW, rollbackW, {L"update"})`) and, on rollback, swapped back into
+`{app}` — restoring a stale log — and it inflates every backup.
 
 ## They also bypass every logging control
 
