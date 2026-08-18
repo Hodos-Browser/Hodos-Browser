@@ -159,6 +159,43 @@ of the four files the ticket names in its residual-risk list. But `P0-A4`'s SUBJ
 can only be judged on a **release-shaped** build. Residual risk, noted not swept: anyone passing
 `--hodos-render-verbose` to a *production* build would recreate `{app}\debug.log`.
 
+### 4d. Owed rows are beta.3 **RC gates**, not beta.4 carryover
+
+`P0-A4` and `P0-A5` both need an installed build. That is **not** extra work deferred to a later
+release: beta.3 must be built and installed before it ships, so both are exercised for free at the
+release candidate. Filing them as beta.4 would ship beta.3 with two of its own acceptance rows
+unchecked; filing them as RC gates costs nothing.
+
+| Row | Residual risk if it turns out wrong | Fix cost |
+|---|---|---|
+| `P0-A4` | `{app}\debug.log` is recreated — 351 bytes, three lines | one line |
+| `P0-A5` | a stale `debug_output.log` (~2 MB of balance history) survives an upgrade on existing machines | one line in the `.iss`, no code change |
+
+⭐ `P0-A5`'s risk is lower than it looks: `[InstallDelete]` was added in `6b6bfca` and **already
+shipped in beta.1 AND beta.2** — it is a twice-shipped Inno directive, not new code. Corroborating:
+the owner's beta.2 install stamped 15:47:24 and its `debug_output.log` opens with a fresh-session
+first line written *after* that, which is what a working `[InstallDelete]` looks like.
+
+### 4e. `R-UPDATE` — what is covered, and what is not
+
+Phase 0 modified `UpdateFs.cpp` and `UpdateApply.cpp`, so `R-UPDATE` is the one standing invariant
+this diff could plausibly break. The specific new hazard: A1 filters **two separate walks** — the
+backup manifest and the rollback copy. If they ever disagree, the manifest lists files the backup
+does not contain and `VerifyTreeAgainstManifest` fails *during a rollback*, after the new build has
+already been judged unhealthy. Covered by two T1 tests:
+
+- `BackupRoundTrip.ManifestAndCopyAgreeWithVolatileExclusion` — manifest → copy → verify round-trips,
+  and the manifest still covers all four real files (an empty manifest would also "verify").
+- `BackupRoundTrip.RedHalfMismatchedFiltersFailVerification` — the RED. Filtering the copy but not
+  the manifest **must** fail verification; filtering the manifest but not the copy passes, because a
+  superset is tolerated by design. That asymmetry is why both call sites pass the same flag.
+
+⬜ **Still owed: the real N−1 → N apply.** `scripts/test-apply-forward.ps1` /
+`test-apply-rollback.ps1` drive the real helper, but they **abort if any of 31301/31302/31401/31402
+is listening** and require a **rig build** (`HODOS_UPDATE_TEST_SEAM=ON`, documented *"Rig only —
+never ship"*). Both conditions mean a deliberate session, not an opportunistic one — and the ports
+are free anyway at the moment the RC is installed, so this pairs naturally with `P0-A4`/`P0-A5`.
+
 ## 5. Blast radius
 
 - `WalletService.cpp` (19 writes) — inside `makeHttpRequest`, `readResponse`, `createTransaction`,
@@ -230,6 +267,7 @@ can only be judged on a **release-shaped** build. Residual risk, noted not swept
 | preflight | **PASS** — exit 0, all of G1–G5 + T1a–T1d ran (`-Full`) | 2026-08-18 | assistant |
 | preflight -NegativeControl | **PASS** — all 5 gates seen to fail (`1>0`, `6>5`, `1>0`, `1>0`, `1>0`); probes cleaned up | 2026-08-18 | assistant |
 | `hodos_tests` | **181 tests, 180 passed, 1 skipped** (`UpdateStagerRig.StagesFromLocalFeed`, pre-existing). 5 new: 3 × A1, 2 × A2 | 2026-08-18 | assistant |
+| `R-UPDATE` T1 (manifest↔copy) | **PASS** — 2 new tests incl. the RED half; full suite **183 tests, 182 passed, 1 skipped** | 2026-08-18 | assistant |
 | live dev session (`P0-A1`/`P0-A2`) | **GREEN both halves** — stray files absent, events present in `logs\`; §4b | 2026-08-18 | assistant |
 | regression set (0 → 0.5) | ⬜ owed | | |
 | adversarial review | ⬜ owed | | |

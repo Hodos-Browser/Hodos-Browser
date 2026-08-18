@@ -296,8 +296,8 @@ TEST(VolatileArtifacts, ClassifiesLogsTmpAndCrashpadOnly) {
     EXPECT_FALSE(IsVolatileArtifact(L"resources.pak"));
     EXPECT_FALSE(IsVolatileArtifact(L"icudtl.dat"));
     EXPECT_FALSE(IsVolatileArtifact(L"v8_context_snapshot.bin"));
-    EXPECT_FALSE(IsVolatileArtifact(L"locales\en-US.pak"));
-    EXPECT_FALSE(IsVolatileArtifact(L"frontend\index.html"));
+    EXPECT_FALSE(IsVolatileArtifact(L"locales/en-US.pak"));
+    EXPECT_FALSE(IsVolatileArtifact(L"frontend/index.html"));
     EXPECT_FALSE(IsVolatileArtifact(L"update-state.json"));
     EXPECT_FALSE(IsVolatileArtifact(L"catalog.txt"));         // .txt is NOT blanket-excluded
 }
@@ -340,6 +340,65 @@ TEST(CopyTreeRecursive, StaleLogIsNotCarriedIntoTheBackup) {
     EXPECT_TRUE(Exists(dst2 / L"HodosBrowser.exe"));
     // A stale log must not be carried into the backup -- a rollback would restore it.
     EXPECT_FALSE(Exists(dst2 / L"debug_output.log"));
+}
+
+// R-UPDATE: the backup manifest and the rollback copy must agree
+//
+// THE risk P0-A1 introduced. The silent apply builds a manifest of {app} and copies
+// {app} to rollback\ -- two separate walks, now BOTH filtering volatile artifacts. If
+// they ever disagree about what to skip, the manifest describes files the backup does
+// not contain, and VerifyTreeAgainstManifest fails at exactly the worst moment: during
+// a rollback, after the new build has already been judged unhealthy.
+
+TEST(BackupRoundTrip, ManifestAndCopyAgreeWithVolatileExclusion) {
+    TempDir src, dst;
+    Write(src / L"HodosBrowser.exe", "exe");
+    Write(src / L"libcef.dll", "cef");
+    Write(src / L"locales/en-US.pak", "pak");
+    Write(src / L"frontend/index.html", "html");
+    Write(src / L"debug_output.log", "volatile");
+    Write(src / L"debug.log", "volatile");
+    Write(src / L"startup_log.txt", "volatile");
+    Write(src / L"update/pending/big.exe", "excluded-dir");
+
+    hodos::FileManifest m;
+    ASSERT_TRUE(BuildManifestForTree(src.dir.wstring(), m, {L"update"}, true));
+    ASSERT_TRUE(CopyTreeRecursive(src.dir.wstring(), dst.dir.wstring(), {L"update"}, true));
+
+    // Every manifest entry must exist in the COPY with a matching hash. This is the
+    // check the real rollback runs against rollback\.
+    VerifyResult r = VerifyTreeAgainstManifest(dst.dir.wstring(), m);
+    EXPECT_TRUE(r.ok);
+
+    // And the real files are actually covered -- an empty manifest would also "verify".
+    EXPECT_EQ(m.entries.count("hodosbrowser.exe"), 1u);
+    EXPECT_EQ(m.entries.count("libcef.dll"), 1u);
+    EXPECT_EQ(m.entries.count("locales/en-us.pak"), 1u);
+    EXPECT_EQ(m.entries.count("frontend/index.html"), 1u);
+    EXPECT_EQ(m.entries.size(), 4u);
+}
+
+TEST(BackupRoundTrip, RedHalfMismatchedFiltersFailVerification) {
+    // RED: filter the manifest but NOT the copy and it still verifies (the copy is a
+    // superset -- VerifyTreeAgainstManifest tolerates extras by design). Filter the
+    // COPY but not the manifest and verification MUST fail, because the manifest then
+    // lists volatile files the backup does not contain. That asymmetry is why both
+    // call sites in cef_browser_shell.cpp pass the same flag.
+    TempDir src, dstA, dstB;
+    Write(src / L"HodosBrowser.exe", "exe");
+    Write(src / L"debug_output.log", "volatile");
+
+    hodos::FileManifest filtered, unfiltered;
+    ASSERT_TRUE(BuildManifestForTree(src.dir.wstring(), filtered, {}, true));
+    ASSERT_TRUE(BuildManifestForTree(src.dir.wstring(), unfiltered, {}, false));
+    EXPECT_EQ(filtered.entries.size(), 1u);
+    EXPECT_EQ(unfiltered.entries.size(), 2u);
+
+    ASSERT_TRUE(CopyTreeRecursive(src.dir.wstring(), dstA.dir.wstring(), {}, false));
+    EXPECT_TRUE(VerifyTreeAgainstManifest(dstA.dir.wstring(), filtered).ok);   // superset: fine
+
+    ASSERT_TRUE(CopyTreeRecursive(src.dir.wstring(), dstB.dir.wstring(), {}, true));
+    EXPECT_FALSE(VerifyTreeAgainstManifest(dstB.dir.wstring(), unfiltered).ok); // subset: FAILS
 }
 
 // ---- CopyTreeRecursive ------------------------------------------------------

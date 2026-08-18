@@ -92,7 +92,7 @@ Auto-update must never force a reinstall and must never brick an install.
 
 | Phase boundary | Date | R-INTEXT | R-GOLD | R-CLOSE | R-PERIM | R-COUNT | R-UPDATE |
 |---|---|---|---|---|---|---|---|
-| 0 → 0.5 | | | | | | | |
+| 0 → 0.5 | 2026-08-18 | ⬜ deferred to P0.5 (its own subject) | ⬜ needs live app | ⬜ needs live app | ⬜ needs live app | 🟡 T1 covered (manifest↔copy round-trip + RED); real N−1→N apply owed at RC | |
 | 0.5 → 1 | | | | | | | |
 | 1 → 2 | | | | | | | |
 | 2 → 3 | | | | | | | |
