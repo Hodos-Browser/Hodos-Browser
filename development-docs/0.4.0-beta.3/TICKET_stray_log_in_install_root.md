@@ -311,6 +311,27 @@ resolution and child-process inheritance process-wide, which is a far bigger beh
 it appears. *(The update-helper does set CWD — `update-helper/main.cpp:99` — but that is a
 short-lived single-purpose process, not the browser.)*
 
+### ⚠️ CORRECTED 2026-08-18 by running it — "the only message" was true of PRODUCTION only
+
+Measured on the dev build after A3 landed. The pre-change dev `debug.log` (381 KB) had **three**
+sources, not one:
+
+| Source | Lines |
+|---|---|
+| `ChildProcessLogSink.cpp:57` | 1,452 |
+| `TabManager.cpp:33` | 404 |
+| `TabManager.cpp:34` | 210 |
+
+After A3: **TabManager 614 → 0** (the fix works), `ChildProcessLogSink` remains. Same defect class,
+one process over — `SimpleRenderProcessHandler`'s constructor logs before the *render* process has
+logging configured, so Chromium's `LOG()` falls back to `debug.log` in CWD.
+
+⭐ **It does not ship.** That arm is gated on `g_verbose`, set only by `--hodos-render-verbose`, which
+`SimpleApp::OnBeforeChildProcessLaunch` (`simple_app.cpp:91`) appends **only when `IsDevEnv()`** —
+which is exactly why the production file held 351 bytes of TabManager and nothing else. So the claim
+was right about production and too strong as written. Left unswept, per the note below; the
+consequence is that **A3's acceptance can only be judged on a release-shaped build.**
+
 ### Residual risk to note, not to sweep
 
 There are **41** raw `LOG()` calls across 4 files (`TabManager.cpp`, `simple_app.cpp`,
@@ -342,6 +363,7 @@ this ticket; note the hazard, and if a new message ever appears in `{app}\debug.
 - [x] **A2**: raised to `LOG_ERROR`, reason + consecutive count recorded in `update-state.json`,
       cleared once a backup succeeds. ⚠️ Recorded in **new** `lastAbortReason`/`lastAbortCount`
       fields, **not** `lastFailureBuild` — that one permanently blocks the build (contract §5a.2)
-- [ ] **A3**: `TabManager`'s raw `LOG(INFO)` removed (done); `debug.log` excluded from the backup (done);
+- [ ] **A3**: `TabManager`'s raw `LOG(INFO)` removed (**done** — measured 614 → 0 lines on a live dev
+      run); `debug.log` excluded from the backup (**done**, via `IsVolatileArtifact`);
       verified `{app}\debug.log` stops being recreated across several launches (it is
       ordering-dependent, so **one clean launch is not evidence** — check repeatedly)
