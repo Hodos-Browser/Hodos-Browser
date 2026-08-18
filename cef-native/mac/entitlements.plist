@@ -17,5 +17,12 @@
     <!-- Microphone access for websites (e.g. video calls, voice recording) -->
     <key>com.apple.security.device.microphone</key>
     <true/>
+    <!-- ⚠️ device.microphone above is the App SANDBOX key and does NOT satisfy the
+         hardened-runtime TCC policy. A hardened-runtime app (release.yml signs with
+         --options runtime) needs device.audio-input, or tccd refuses to even show the
+         mic prompt and Chromium delivers a silent all-zero track (beta.3 §B1 diagnosis,
+         2026-08-18). Keep BOTH keys: sandbox key is harmless, audio-input is load-bearing. -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
 </dict>
 </plist>
