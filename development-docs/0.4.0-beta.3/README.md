@@ -27,6 +27,23 @@ changes whether the beta.2 draft is kept or deleted during cleanup.
 
 ---
 
+## 🧪 The harness
+
+**`HARNESS.md`** is the standard every phase is held to: the phase-contract template, the
+four-column evidence table (GREEN / **RED** / **SUBJECT** / tier), the ratcheted static gates and
+their measured baselines (§9), the execution loop, and the adversarial-review posture.
+**`REGRESSION_SET.md`** is the standing set run at *every* phase boundary — including **`R-INTEXT`**,
+the internal-never-prompts / external-always-gates invariant.
+
+Per-phase contracts live in `phase-*/PHASE_CONTRACT.md`. Phase 0 and Phase 0.5 are written.
+
+```
+pwsh scripts/preflight.ps1                    # T0 static gates + T1 unit tests
+pwsh scripts/preflight.ps1 -NegativeControl   # prove every gate can actually fail
+```
+
+⛔ Exit `2` = INCOMPLETE (something was skipped, or nothing ran). **It is not a pass.**
+
 ## 👉 The plan
 
 **`SPRINT_PLAN.md`** is the live plan: the seven reported items grouped into four workstreams
@@ -39,8 +56,9 @@ which makes the appcast `minimumSystemVersion` fix a beta.3 **prerequisite**.
 ## Candidate work
 
 ⚠️ **The sections below are a CATALOGUE, not the running order.** The order lives in
-`SPRINT_PLAN.md` §4 and is: **Phase 0 = delete the stray `{app}` log writes** (it can silently abort
-auto-update), then overlay/DPI, then the logging review, then the rest. Read §4 before picking work.
+`SPRINT_PLAN.md` §4 and is: **Phase 0 = delete the stray `{app}` log writes** (the recovery phrase
+reaches disk through them), **Phase 0.5 = money path + trust boundary**, then overlay/DPI, then the
+logging review, then the rest. Read §4 before picking work.
 
 ### A. Release-gate integrity — found during the beta.2 run
 
