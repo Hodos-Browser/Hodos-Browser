@@ -212,6 +212,67 @@ subsequent launch can see that the last apply refused and why, and make repeated
 ⛔ Do not silently retry forever with no record; that is the current behaviour and it is why this
 defect could have run indefinitely.
 
+## A3 — the SECOND stray file, `{app}\debug.log`, is CEF's — investigated 2026-08-18
+
+⚠️ **Deleting the 44 writes does not remove this one.** `{app}` holds two volatile files:
+
+```
+debug_output.log   869,638 bytes   (ours — the 44 writes; growing on beta.2)
+debug.log              351 bytes   (CEF's default log name)
+```
+
+### What it is
+
+`debug.log` is Chromium's **default** log destination — used when `LOG()` is called before logging
+has been configured, written to the **current working directory**, which for a shortcut launch is
+`{app}`. We never call `SetCurrentDirectory` in the browser, so CWD is whatever the launcher gave us.
+
+**Its entire contents are one message:**
+
+```
+3 × "TabManager initialized"      ← src/core/TabManager.cpp:33, a raw LOG(INFO)
+```
+
+⭐ **It is ordering-dependent, not reliably early**: the same message appears **3×** in
+`{app}\debug.log` and **2×** in the correctly-configured `logs\cef_debug.log`. So `TabManager`'s
+singleton is sometimes constructed before `CefInitialize` and sometimes after. That intermittency is
+why it was never noticed.
+
+### ⛔ "Set the log path earlier" is NOT feasible
+
+`CefSettings.log_file` is applied **inside `CefInitialize`** (`cef_browser_shell.cpp:4631` sets it;
+`:5277` initialises). Chromium's `LOG()` lazily initialises logging on first use and defaults to
+`debug.log` in the CWD. **No public CEF API configures browser-process logging before
+`CefInitialize`** — `CefExecuteProcess` runs earlier but does not set it. So the window cannot be
+closed from the logging side.
+
+### ✅ The fix is to remove the thing that logs in the window
+
+1. ⭐ **Remove or re-route the `LOG(INFO)` in `TabManager::TabManager()`.** It is a singleton
+   breadcrumb of near-zero diagnostic value, and it is empirically the **only** message that ever
+   reaches `debug.log`. One line.
+2. **Keep `debug.log` in the backup exclusion** regardless — for installs that already carry the
+   file, and as belt-and-braces if another early logger ever appears.
+
+### ⛔ Considered and REJECTED: setting the process CWD
+
+One `SetCurrentDirectoryW(logDir)` at startup would neutralise `debug.log` **and** all 44 relative-path
+writes at once, and it is tempting for exactly that reason.
+
+**Rejected because it hides the defect instead of fixing it.** A future relative-path write would
+silently land in the log directory and nobody would ever learn it was wrong — whereas the **build
+guard** already in this ticket fails it loudly at compile time. It would also change relative-path
+resolution and child-process inheritance process-wide, which is a far bigger behavioural change than
+it appears. *(The update-helper does set CWD — `update-helper/main.cpp:99` — but that is a
+short-lived single-purpose process, not the browser.)*
+
+### Residual risk to note, not to sweep
+
+There are **41** raw `LOG()` calls across 4 files (`TabManager.cpp`, `simple_app.cpp`,
+`simple_handler.cpp`, `ChildProcessLogSink.cpp`). Only TabManager's fires pre-init **today** — but
+that is a property of current call ordering, not a guarantee. ⚠️ Do not sweep them all as part of
+this ticket; note the hazard, and if a new message ever appears in `{app}\debug.log`, this is why.
+
 ## ⛔ Negative control
 
 - With the guard in place, deliberately add one `ofstream("foo.log")` and confirm the build **fails**.
@@ -229,3 +290,6 @@ defect could have run indefinitely.
       2026-08-18; the exposure is the backup walk, not the integrity gate (see above)
 - [ ] **A1** decided and implemented: `Sha256FileW` share-mode / exclusion policy
 - [ ] **A2**: abort raised above `LOG_WARNING`, reason recorded in update state, repeated aborts visible
+- [ ] **A3**: `TabManager`'s raw `LOG(INFO)` removed/re-routed; `debug.log` excluded from the backup;
+      verified `{app}\debug.log` stops being recreated across several launches (it is
+      ordering-dependent, so **one clean launch is not evidence** — check repeatedly)

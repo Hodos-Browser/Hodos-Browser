@@ -206,7 +206,7 @@ goes to the front:
 
 | Phase | What | Why here |
 |---|---|---|
-| **0 — WS1b(a)** | **Delete the 44 stray `{app}` log writes + ship a cleanup** | 🚨 It can **silently abort auto-update** — confirmed mechanism, shipping in beta.1 **and** beta.2. Cheap (delete debug scaffolding), and it is the one defect that can stop users receiving *every future fix*, including the rest of this sprint. |
+| **0 — WS1b(a)** | **Delete the 44 stray `{app}` log writes + A1/A2/A3 + ship a cleanup** | 🚨 It can **silently abort auto-update** — confirmed mechanism, shipping in beta.1 **and** beta.2. Cheap (delete debug scaffolding), and it is the one defect that can stop users receiving *every future fix*, including the rest of this sprint. |
 | **1 — WS1** | Overlay input & DPI | Money-path correctness — cursor offset in the wallet overlay during a send. |
 | **2 — WS1b(b)** | Logger level gate, rotation, retention, sync-I/O review | The 1.58 GB plaintext-history problem. Serious but **not** self-blocking, so it does not need to precede WS1. |
 | 3–5 | WS2 → WS3 → WS4 | Unchanged. WS4 last: most able to balloon, and its value is capped by a constraint we do not control. |
