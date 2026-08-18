@@ -10,6 +10,7 @@
 #include "include/cef_request_context.h"
 #include <iostream>
 #include <fstream>
+#include <sstream>
 #include <cstdlib>
 
 #include "../../include/core/TabManager.h"
@@ -27,6 +28,15 @@
 #define LOG_INFO_APP(msg) Logger::Log(msg, 1, 2)
 #define LOG_WARNING_APP(msg) Logger::Log(msg, 2, 2)
 #define LOG_ERROR_APP(msg) Logger::Log(msg, 3, 2)
+
+// P0-A1: HWND / pointer values used to be streamed straight into a raw ofstream in
+// {app}. Logger takes a std::string, so give the file one place to format a handle
+// with the same representation operator<< produced.
+static std::string HwndStr(const void* h) {
+    std::ostringstream oss;
+    oss << h;
+    return oss.str();
+}
 
 #ifdef _WIN32
 // External global HWND declarations for shutdown cleanup
@@ -181,48 +191,24 @@ void SimpleApp::OnContextInitialized() {
 #ifdef _WIN32
     std::cout << "✅ OnContextInitialized CALLED (Windows)" << std::endl;
 
-    std::ofstream log("startup_log.txt", std::ios::app);
-    log << "\n========================================\n";
-    log << "🚀 OnContextInitialized entered\n";
-    log << "→ this pointer: " << this << "\n";
-    log << "→ member header_hwnd_: " << header_hwnd_ << "\n";
-    log << "→ global g_header_hwnd: " << g_header_hwnd << "\n";
-    log << "→ global g_hwnd: " << g_hwnd << "\n";
-    log << "→ IsWindow(g_header_hwnd): " << IsWindow(g_header_hwnd) << "\n";
-    log << "→ IsWindow(g_hwnd): " << IsWindow(g_hwnd) << "\n";
-    log << "→ Proceeding without guard (original 625af25 behavior)\n";
-    log << "========================================\n";
-    log.close();
+    LOG_INFO_APP("🚀 OnContextInitialized entered - g_header_hwnd=" + HwndStr(g_header_hwnd)
+                 + " (IsWindow=" + std::to_string(IsWindow(g_header_hwnd) ? 1 : 0) + ")"
+                 + " g_hwnd=" + HwndStr(g_hwnd)
+                 + " (IsWindow=" + std::to_string(IsWindow(g_hwnd) ? 1 : 0) + ")");
 
-    std::ofstream log_trace("startup_log.txt", std::ios::app);
-    log_trace << "🔍 Starting header browser setup...\n";
-    log_trace.flush();
-
-    // ───── header Browser Setup ─────
+    // ----- header Browser Setup -----
     RECT headerRect;
-    log_trace << "🔍 About to call GetClientRect on g_header_hwnd: " << g_header_hwnd << "\n";
-    log_trace.flush();
-
     GetClientRect(g_header_hwnd, &headerRect);
-
-    log_trace << "🔍 GetClientRect succeeded\n";
-    log_trace.close();
     int headerWidth = headerRect.right - headerRect.left;
     int headerHeight = headerRect.bottom - headerRect.top;
 
-    std::ofstream log2("startup_log.txt", std::ios::app);
-    log2 << "📊 Header setup:\n";
-    log2 << "→ g_header_hwnd: " << g_header_hwnd << "\n";
-    log2 << "→ IsWindow(g_header_hwnd): " << IsWindow(g_header_hwnd) << "\n";
-    log2 << "→ IsWindowVisible(g_header_hwnd): " << IsWindowVisible(g_header_hwnd) << "\n";
-    log2 << "→ headerRect: " << headerWidth << "x" << headerHeight << "\n";
+    LOG_DEBUG_APP("📊 Header setup: visible="
+                  + std::to_string(IsWindowVisible(g_header_hwnd) ? 1 : 0)
+                  + " rect=" + std::to_string(headerWidth) + "x" + std::to_string(headerHeight));
 
     CefWindowInfo header_window_info;
-    log2 << "🔍 Before SetAsChild - window_info has parent: " << (header_window_info.parent_window != nullptr) << "\n";
     header_window_info.SetAsChild(g_header_hwnd, CefRect(0, 0, headerWidth, headerHeight));
-    log2 << "🔍 After SetAsChild - window_info has parent: " << (header_window_info.parent_window != nullptr) << "\n";
-    log2 << "🔍 After SetAsChild - parent HWND: " << header_window_info.parent_window << "\n";
-    log2.close();
+    LOG_DEBUG_APP("🔍 After SetAsChild - parent HWND=" + HwndStr(header_window_info.parent_window));
 
     CefRefPtr<SimpleHandler> header_handler = new SimpleHandler("header");
     CefBrowserSettings header_settings;
@@ -246,13 +232,10 @@ void SimpleApp::OnContextInitialized() {
         );
         std::cout << "header browser created: " << (header_result ? "true" : "false") << std::endl;
 
-        std::ofstream log3("startup_log.txt", std::ios::app);
-        log3 << "✅ Header browser creation result: " << (header_result ? "success" : "failed") << "\n";
-        log3.close();
+        LOG_INFO_APP(std::string("✅ Header browser creation result: ")
+                     + (header_result ? "success" : "failed"));
     } catch (...) {
-        std::ofstream errLog("startup_log.txt", std::ios::app);
-        errLog << "❌ header browser creation threw an exception!\n";
-        errLog.close();
+        LOG_ERROR_APP("❌ header browser creation threw an exception!");
     }
 
     // Picker mode shows ONLY the chooser — no tabs, no session restore, no NTP.
@@ -267,12 +250,9 @@ void SimpleApp::OnContextInitialized() {
 
     LOG_INFO_APP("📑 Creating initial tab(s) with TabManager...");
 
-    std::ofstream log4("startup_log.txt", std::ios::app);
-    log4 << "📊 Tab setup:\n";
-    log4 << "→ g_hwnd: " << g_hwnd << "\n";
-    log4 << "→ IsWindow(g_hwnd): " << IsWindow(g_hwnd) << "\n";
-    log4 << "→ tabHeight: " << tabHeight << "\n";
-    log4.close();
+    LOG_DEBUG_APP("📊 Tab setup: g_hwnd=" + HwndStr(g_hwnd)
+                  + " IsWindow=" + std::to_string(IsWindow(g_hwnd) ? 1 : 0)
+                  + " tabHeight=" + std::to_string(tabHeight));
 
     // ── Session Restore Logic ──
     bool sessionRestored = false;
@@ -446,13 +426,9 @@ void SimpleApp::OnContextInitialized() {
 
             LOG_INFO_APP("✅ Initial NTP tab created: ID " + std::to_string(initial_tab_id));
 
-            std::ofstream log5("startup_log.txt", std::ios::app);
-            log5 << "✅ Initial tab creation result: ID = " << initial_tab_id << "\n";
-            log5.close();
+            LOG_INFO_APP("✅ Initial tab creation result: ID = " + std::to_string(initial_tab_id));
         } catch (...) {
-            std::ofstream errLog("startup_log.txt", std::ios::app);
-            errLog << "❌ Initial tab creation threw an exception!\n";
-            errLog.close();
+            LOG_ERROR_APP("❌ Initial tab creation threw an exception!");
             LOG(ERROR) << "Failed to create initial tab";
         }
     }
@@ -477,16 +453,12 @@ void SimpleApp::OnContextInitialized() {
 void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser) {
     if (!browser || !browser->GetMainFrame()) {
         std::cout << "❌ Cannot inject API - browser or frame not available" << std::endl;
-        std::ofstream debugLog("debug_output.log", std::ios::app);
-        debugLog << "❌ Cannot inject API - browser or frame not available" << std::endl;
-        debugLog.close();
+        LOG_ERROR_APP("❌ Cannot inject API - browser or frame not available");
         return;
     }
 
     std::cout << "🔧 Injecting hodosBrowser API into browser ID: " << browser->GetIdentifier() << std::endl;
-    std::ofstream debugLog1("debug_output.log", std::ios::app);
-    debugLog1 << "🔧 Injecting hodosBrowser API into browser ID: " << browser->GetIdentifier() << std::endl;
-    debugLog1.close();
+    LOG_DEBUG_APP("🔧 Injecting hodosBrowser API into browser ID: " + std::to_string(browser->GetIdentifier()));
 
     std::string jsCode = R"(
                  // Create hodosBrowser object using CEF's built-in V8 integration
@@ -592,9 +564,7 @@ void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser) {
     std::cout << "🔧 Injected hodosBrowser API into browser ID: " << browser->GetIdentifier() << std::endl;
 
     // Also log to file
-    std::ofstream debugLog2("debug_output.log", std::ios::app);
-    debugLog2 << "🔧 Injected hodosBrowser API into browser ID: " << browser->GetIdentifier() << std::endl;
-    debugLog2.close();
+    LOG_DEBUG_APP("🔧 Injected hodosBrowser API into browser ID: " + std::to_string(browser->GetIdentifier()));
 }
 
 #ifdef _WIN32
@@ -1012,9 +982,7 @@ void HideWalletOverlay() {
 #ifdef _WIN32
 void CreateBackupOverlayWithSeparateProcess(HINSTANCE hInstance) {
     std::cout << "💾 Creating backup overlay with separate process" << std::endl;
-    std::ofstream debugLog("debug_output.log", std::ios::app);
-    debugLog << "💾 Creating backup overlay with separate process" << std::endl;
-    debugLog.close();
+    LOG_DEBUG_APP("💾 Creating backup overlay with separate process");
 
     RECT mainRect;
     GetWindowRect(g_hwnd, &mainRect);
@@ -1031,9 +999,7 @@ void CreateBackupOverlayWithSeparateProcess(HINSTANCE hInstance) {
 
     if (!backup_hwnd) {
         std::cout << "❌ Failed to create backup overlay HWND. Error: " << GetLastError() << std::endl;
-        std::ofstream debugLog2("debug_output.log", std::ios::app);
-        debugLog2 << "❌ Failed to create backup overlay HWND. Error: " << GetLastError() << std::endl;
-        debugLog2.close();
+        LOG_ERROR_APP("❌ Failed to create backup overlay HWND. Error: " + std::to_string(GetLastError()));
         return;
     }
 
@@ -1046,9 +1012,7 @@ void CreateBackupOverlayWithSeparateProcess(HINSTANCE hInstance) {
     BrowserWindow* mainWin = WindowManager::GetInstance().GetPrimaryWindow();
     if (mainWin) mainWin->backup_overlay_hwnd = g_backup_overlay_hwnd;
 
-    std::ofstream debugLog3("debug_output.log", std::ios::app);
-    debugLog3 << "✅ Backup overlay HWND created: " << backup_hwnd << std::endl;
-    debugLog3.close();
+    LOG_DEBUG_APP("✅ Backup overlay HWND created: " + HwndStr(backup_hwnd));
 
     CefWindowInfo window_info;
     window_info.windowless_rendering_enabled = true;
@@ -1065,9 +1029,7 @@ void CreateBackupOverlayWithSeparateProcess(HINSTANCE hInstance) {
     CefRefPtr<MyOverlayRenderHandler> render_handler = new MyOverlayRenderHandler(backup_hwnd, width, height);
     backup_handler->SetRenderHandler(render_handler);
 
-    std::ofstream debugLog4("debug_output.log", std::ios::app);
-    debugLog4 << "💾 Backup overlay render handler set for HWND: " << backup_hwnd << std::endl;
-    debugLog4.close();
+    LOG_DEBUG_APP("💾 Backup overlay render handler set for HWND: " + HwndStr(backup_hwnd));
 
     bool result = CefBrowserHost::CreateBrowser(
         window_info,
@@ -1080,21 +1042,15 @@ void CreateBackupOverlayWithSeparateProcess(HINSTANCE hInstance) {
 
     if (result) {
         std::cout << "✅ Backup overlay browser created with subprocess" << std::endl;
-        std::ofstream debugLog4("debug_output.log", std::ios::app);
-        debugLog4 << "✅ Backup overlay browser created with subprocess" << std::endl;
-        debugLog4.close();
+        LOG_DEBUG_APP("✅ Backup overlay browser created with subprocess");
 
         LONG exStyle = GetWindowLong(backup_hwnd, GWL_EXSTYLE);
         SetWindowLong(backup_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
-        std::ofstream debugLog6("debug_output.log", std::ios::app);
-        debugLog6 << "💾 Mouse input ENABLED for backup overlay HWND: " << backup_hwnd << std::endl;
-        debugLog6.close();
+        LOG_DEBUG_APP("💾 Mouse input ENABLED for backup overlay HWND: " + HwndStr(backup_hwnd));
 
     } else {
         std::cout << "❌ Failed to create backup overlay browser" << std::endl;
-        std::ofstream debugLog5("debug_output.log", std::ios::app);
-        debugLog5 << "❌ Failed to create backup overlay browser" << std::endl;
-        debugLog5.close();
+        LOG_ERROR_APP("❌ Failed to create backup overlay browser");
     }
 }
 #endif // _WIN32
@@ -1102,9 +1058,7 @@ void CreateBackupOverlayWithSeparateProcess(HINSTANCE hInstance) {
 #ifdef _WIN32
 void CreateBRC100AuthOverlayWithSeparateProcess(HINSTANCE hInstance) {
     std::cout << "🔐 Creating BRC-100 auth overlay with separate process" << std::endl;
-    std::ofstream debugLog("debug_output.log", std::ios::app);
-    debugLog << "🔐 Creating BRC-100 auth overlay with separate process" << std::endl;
-    debugLog.close();
+    LOG_DEBUG_APP("🔐 Creating BRC-100 auth overlay with separate process");
 
     // Get main window dimensions for positioning
     RECT mainRect;
@@ -1123,9 +1077,7 @@ void CreateBRC100AuthOverlayWithSeparateProcess(HINSTANCE hInstance) {
 
     if (!auth_hwnd) {
         std::cout << "❌ Failed to create BRC-100 auth overlay HWND. Error: " << GetLastError() << std::endl;
-        std::ofstream debugLog2("debug_output.log", std::ios::app);
-        debugLog2 << "❌ Failed to create BRC-100 auth overlay HWND. Error: " << GetLastError() << std::endl;
-        debugLog2.close();
+        LOG_ERROR_APP("❌ Failed to create BRC-100 auth overlay HWND. Error: " + std::to_string(GetLastError()));
         return;
     }
 
@@ -1138,9 +1090,7 @@ void CreateBRC100AuthOverlayWithSeparateProcess(HINSTANCE hInstance) {
     BrowserWindow* mainWin = WindowManager::GetInstance().GetPrimaryWindow();
     if (mainWin) mainWin->brc100_auth_overlay_hwnd = g_brc100_auth_overlay_hwnd;
 
-    std::ofstream debugLog3("debug_output.log", std::ios::app);
-    debugLog3 << "✅ BRC-100 auth overlay HWND created: " << auth_hwnd << std::endl;
-    debugLog3.close();
+    LOG_DEBUG_APP("✅ BRC-100 auth overlay HWND created: " + HwndStr(auth_hwnd));
 
     // Create new CEF browser with subprocess
     CefWindowInfo window_info;
@@ -1173,28 +1123,20 @@ void CreateBRC100AuthOverlayWithSeparateProcess(HINSTANCE hInstance) {
 
     if (result) {
         std::cout << "✅ BRC-100 auth overlay browser created with subprocess" << std::endl;
-        std::ofstream debugLog4("debug_output.log", std::ios::app);
-        debugLog4 << "✅ BRC-100 auth overlay browser created with subprocess" << std::endl;
-        debugLog4.close();
+        LOG_DEBUG_APP("✅ BRC-100 auth overlay browser created with subprocess");
 
         // Enable mouse input for BRC-100 auth overlay
         LONG exStyle = GetWindowLong(auth_hwnd, GWL_EXSTYLE);
         SetWindowLong(auth_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
-        std::ofstream debugLog6("debug_output.log", std::ios::app);
-        debugLog6 << "🔐 Mouse input ENABLED for BRC-100 auth overlay HWND: " << auth_hwnd << std::endl;
-        debugLog6.close();
+        LOG_DEBUG_APP("🔐 Mouse input ENABLED for BRC-100 auth overlay HWND: " + HwndStr(auth_hwnd));
 
         // Force a repaint to ensure the overlay is visible
         InvalidateRect(auth_hwnd, nullptr, TRUE);
         UpdateWindow(auth_hwnd);
-        std::ofstream debugLog7("debug_output.log", std::ios::app);
-        debugLog7 << "🔐 Forced repaint for BRC-100 auth overlay HWND: " << auth_hwnd << std::endl;
-        debugLog7.close();
+        LOG_DEBUG_APP("🔐 Forced repaint for BRC-100 auth overlay HWND: " + HwndStr(auth_hwnd));
     } else {
         std::cout << "❌ Failed to create BRC-100 auth overlay browser" << std::endl;
-        std::ofstream debugLog5("debug_output.log", std::ios::app);
-        debugLog5 << "❌ Failed to create BRC-100 auth overlay browser" << std::endl;
-        debugLog5.close();
+        LOG_ERROR_APP("❌ Failed to create BRC-100 auth overlay browser");
     }
 }
 

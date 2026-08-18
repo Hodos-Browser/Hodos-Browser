@@ -147,7 +147,7 @@ nlohmann::json WalletService::makeHttpRequest(const std::string& method, const s
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     curl_easy_cleanup(curl);
 
-    LOG_DEBUG_WALLET("✅ HTTP " + std::to_string(http_code) + " (response: " + std::to_string(response_body.length()) + " bytes)");
+    LOG_DEBUG_WALLET("✅ HTTP " + std::to_string(http_code) + " (" + std::to_string(response_body.length()) + " bytes)");
 
     // Parse JSON response
     try {
@@ -156,7 +156,7 @@ nlohmann::json WalletService::makeHttpRequest(const std::string& method, const s
         }
         return nlohmann::json::parse(response_body);
     } catch (const nlohmann::json::exception& e) {
-        LOG_ERROR_WALLET("❌ Failed to parse JSON response: " + std::string(e.what()));
+        LOG_ERROR_WALLET("❌ Failed to parse wallet JSON: " + std::string(e.what()));
         LOG_ERROR_WALLET("   Response was: " + response_body);
         return nlohmann::json::object();
     }

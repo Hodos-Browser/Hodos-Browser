@@ -4091,6 +4091,22 @@ static bool MaybeApplyStagedUpdate(const std::string& profileId) {
     // Record a PERSISTENT rejection so this exact staged build is skipped on future
     // boots (review #4: avoid per-boot wallet churn). Use ONLY for reasons that won't
     // change for the same bytes (tamper/signer/rollback) — NOT for transient defers.
+    // P0-A2. A TRANSIENT abort of a committed apply. Unlike rejectPersistent this does
+    // NOT touch lastFailureBuild, so the same staged build is retried on the next boot --
+    // an AV scanner holding one file open must not permanently block a good update.
+    // What it does do is leave a record: an update that decides not to happen used to be
+    // one LOG_WARNING in a log nobody reads, which is why this class of failure could
+    // have run indefinitely with the user simply never receiving updates again.
+    auto abortTransient = [&](const std::string& reason) -> bool {
+        state.lastAbortReason = reason;
+        state.lastAbortCount += 1;
+        updatefs::WriteFileAtomic(SU_Widen(statePath), SerializeUpdateState(state));
+        LOG_ERROR("Silent apply ABORTED (build " + std::to_string(marker.buildNumber) +
+                  ", consecutive aborts: " + std::to_string(state.lastAbortCount) +
+                  ") - " + reason + " - will retry next boot");
+        return false;
+    };
+
     auto rejectPersistent = [&](const std::string& reason) -> bool {
         LOG_WARNING("Silent apply: reject build " + std::to_string(marker.buildNumber) + " — " + reason);
         state.lastFailureBuild = marker.buildNumber;
@@ -4299,11 +4315,27 @@ static bool MaybeApplyStagedUpdate(const std::string& profileId) {
     const std::wstring rollbackW = SU_Widen(AppPaths::GetRollbackDir());
     updatefs::RemoveTree(rollbackW);
     FileManifest oldManifest;
-    if (!updatefs::BuildManifestForTree(appDirW, oldManifest, {L"update"})) {
-        LOG_WARNING("Silent apply: cannot manifest {app} — abort"); return false;
+    // P0-A1: skip volatile artifacts (*.log, *.tmp, crashpad\). Sha256FileW opens
+    // WITHOUT FILE_SHARE_WRITE, so ANY file under {app} being written at walk time --
+    // an AV temp file, a crash dump, a stray log -- returned "" and aborted the entire
+    // silent apply. Removing our own 52 stray writes fixed our instance; this fixes the
+    // class. They are excluded from the rollback COPY too, so a rollback cannot restore
+    // a stale log.
+    if (!updatefs::BuildManifestForTree(appDirW, oldManifest, {L"update"},
+                                        /*excludeVolatileArtifacts=*/true)) {
+        return abortTransient("cannot manifest {app}");
     }
-    if (!updatefs::CopyTreeRecursive(appDirW, rollbackW, {L"update"})) {
-        LOG_WARNING("Silent apply: {app} backup failed — abort"); return false;
+    if (!updatefs::CopyTreeRecursive(appDirW, rollbackW, {L"update"},
+                                     /*excludeVolatileArtifacts=*/true)) {
+        return abortTransient("{app} backup failed");
+    }
+    // Backup is through: this build is not being blocked by a transient I/O problem.
+    if (state.lastAbortCount != 0) {
+        LOG_INFO("Silent apply: backup succeeded after " + std::to_string(state.lastAbortCount) +
+                 " abort(s) - clearing the abort record");
+        state.lastAbortCount = 0;
+        state.lastAbortReason.clear();
+        updatefs::WriteFileAtomic(SU_Widen(statePath), SerializeUpdateState(state));
     }
     const std::string rbManifestPath = AppPaths::GetRollbackDir() + "\\manifest.json";
     updatefs::WriteFileAtomic(SU_Widen(rbManifestPath), SerializeManifest(oldManifest));
@@ -4313,7 +4345,7 @@ static bool MaybeApplyStagedUpdate(const std::string& profileId) {
     if (!walletDir.empty() &&
         GetFileAttributesW((walletW + L"\\wallet.db").c_str()) != INVALID_FILE_ATTRIBUTES) {
         if (!updatefs::SnapshotWalletDbSet(walletW, rollbackW + L"\\wallet")) {
-            LOG_WARNING("Silent apply: money-DB snapshot failed — abort (no rollback safety)"); return false;
+            return abortTransient("money-DB snapshot failed (no rollback safety)");
         }
     } else {
         LOG_INFO("Silent apply: no wallet.db to snapshot (fresh install) — continuing");

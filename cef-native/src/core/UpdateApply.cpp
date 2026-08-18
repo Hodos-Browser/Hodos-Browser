@@ -105,6 +105,8 @@ std::string SerializeUpdateState(const UpdateState& s) {
     j["signerThumbprint"] = s.signerThumbprint;
     j["lastFailureBuild"] = s.lastFailureBuild;
     j["lastFailureReason"] = s.lastFailureReason;
+    j["lastAbortReason"] = s.lastAbortReason;
+    j["lastAbortCount"] = s.lastAbortCount;
     j["rescanAfterRollback"] = s.rescanAfterRollback;
     return j.dump(2);
 }
@@ -119,6 +121,8 @@ bool ParseUpdateState(const std::string& jsonStr, UpdateState& out) {
     out.signerThumbprint = getStr(j, "signerThumbprint");
     out.lastFailureBuild = getLong(j, "lastFailureBuild");
     out.lastFailureReason = getStr(j, "lastFailureReason");
+    out.lastAbortReason = getStr(j, "lastAbortReason");
+    out.lastAbortCount = getLong(j, "lastAbortCount");
     out.rescanAfterRollback = getBool(j, "rescanAfterRollback");
     return true;
 }

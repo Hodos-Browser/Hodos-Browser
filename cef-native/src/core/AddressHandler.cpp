@@ -76,15 +76,9 @@ bool AddressHandler::Execute(const CefString& name,
                         result->SetValue("index", CefV8Value::CreateInt(addressData["index"].get<int>()), V8_PROPERTY_ATTRIBUTE_NONE);
 
                         std::cout << "🔍 V8 object created, setting retval..." << std::endl;
-                        std::ofstream debugLog("debug_output.log", std::ios::app);
-                        debugLog << "🔍 V8 object created, setting retval..." << std::endl;
-                        debugLog.close();
 
                         retval = result;
                         std::cout << "✅ retval set, returning true" << std::endl;
-                        std::ofstream debugLog2("debug_output.log", std::ios::app);
-                        debugLog2 << "✅ retval set, returning true" << std::endl;
-                        debugLog2.close();
                         return true;
 
                     } catch (const std::exception& e) {

@@ -255,6 +255,93 @@ TEST(Manifest, ExcludesTopLevelDir) {
     }
 }
 
+// ---- P0-A1: volatile artifacts must not abort the backup --------------------
+//
+// The defect these cover: Sha256FileW opens with FILE_SHARE_READ|FILE_SHARE_DELETE and
+// NOT FILE_SHARE_WRITE, so hashing a file another process holds open for writing returns
+// "" -- and BuildManifestForTree turns that into `return false`, which aborts the entire
+// silent apply, silently. Any writer under {app} does it: an AV temp file, a crash dump,
+// or (until this phase) our own 52 stray log writes.
+//
+// Each test observes BOTH halves in one run: the pre-fix call (excludeVolatileArtifacts
+// = false) must FAIL, and only then does the post-fix call passing prove anything.
+
+namespace {
+// Hold a file open for writing WITHOUT FILE_SHARE_WRITE -- i.e. exactly what
+// std::ofstream(path, ios::app) does, which is what the stray writes were.
+struct ExclusiveWriter {
+    HANDLE h = INVALID_HANDLE_VALUE;
+    explicit ExclusiveWriter(const fs::path& p) {
+        h = CreateFileW(p.wstring().c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+                        nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    }
+    bool ok() const { return h != INVALID_HANDLE_VALUE; }
+    ~ExclusiveWriter() { if (ok()) CloseHandle(h); }
+};
+}  // namespace
+
+TEST(VolatileArtifacts, ClassifiesLogsTmpAndCrashpadOnly) {
+    EXPECT_TRUE(IsVolatileArtifact(L"debug_output.log"));
+    EXPECT_TRUE(IsVolatileArtifact(L"debug.log"));
+    EXPECT_TRUE(IsVolatileArtifact(L"DEBUG.LOG"));            // case-insensitive
+    EXPECT_TRUE(IsVolatileArtifact(L"startup_log.txt"));      // historical stray name
+    EXPECT_TRUE(IsVolatileArtifact(L"something.tmp"));
+    EXPECT_TRUE(IsVolatileArtifact(L"crashpad/reports/a.dmp"));
+    EXPECT_TRUE(IsVolatileArtifact(std::wstring(L"crashpad") + wchar_t(92) + L"a.dmp"));
+
+    // Everything {app} legitimately ships must NOT be excluded, or the backup manifest
+    // would silently stop covering real files -- a far worse failure than the one fixed.
+    EXPECT_FALSE(IsVolatileArtifact(L"HodosBrowser.exe"));
+    EXPECT_FALSE(IsVolatileArtifact(L"libcef.dll"));
+    EXPECT_FALSE(IsVolatileArtifact(L"resources.pak"));
+    EXPECT_FALSE(IsVolatileArtifact(L"icudtl.dat"));
+    EXPECT_FALSE(IsVolatileArtifact(L"v8_context_snapshot.bin"));
+    EXPECT_FALSE(IsVolatileArtifact(L"locales\en-US.pak"));
+    EXPECT_FALSE(IsVolatileArtifact(L"frontend\index.html"));
+    EXPECT_FALSE(IsVolatileArtifact(L"update-state.json"));
+    EXPECT_FALSE(IsVolatileArtifact(L"catalog.txt"));         // .txt is NOT blanket-excluded
+}
+
+TEST(Manifest, OpenLogAbortsWholeWalkUnlessVolatileExcluded) {
+    TempDir t;
+    Write(t / L"HodosBrowser.exe", "exe");
+    Write(t / L"debug_output.log", "held open by the browser");
+
+    ExclusiveWriter writer(t / L"debug_output.log");
+    ASSERT_TRUE(writer.ok());
+
+    // RED (the shipped behaviour): one open log aborts the manifest for the WHOLE tree.
+    hodos::FileManifest before;
+    EXPECT_FALSE(BuildManifestForTree(t.dir.wstring(), before, {L"update"}, false));
+
+    // GREEN: with the volatile exclusion the walk completes and still covers real files.
+    hodos::FileManifest after;
+    ASSERT_TRUE(BuildManifestForTree(t.dir.wstring(), after, {L"update"}, true));
+    EXPECT_EQ(after.entries.count("hodosbrowser.exe"), 1u);   // keys are lower-cased
+    EXPECT_EQ(after.entries.count("debug_output.log"), 0u);
+}
+
+TEST(CopyTreeRecursive, StaleLogIsNotCarriedIntoTheBackup) {
+    TempDir src, dst;
+    Write(src / L"HodosBrowser.exe", "exe");
+    Write(src / L"debug_output.log", "held open");
+
+    ExclusiveWriter writer(src / L"debug_output.log");
+    ASSERT_TRUE(writer.ok());
+
+    // RED: WITHOUT the exclusion the stale log IS copied into the backup, so a rollback
+    // restores it. (The copy itself succeeds -- unlike the manifest walk above. Only
+    // Sha256FileW omits FILE_SHARE_WRITE; copy_file opens the source permissively.)
+    ASSERT_TRUE(CopyTreeRecursive(src.dir.wstring(), dst.dir.wstring(), {L"update"}, false));
+    EXPECT_TRUE(Exists(dst / L"debug_output.log"));
+
+    TempDir dst2;
+    ASSERT_TRUE(CopyTreeRecursive(src.dir.wstring(), dst2.dir.wstring(), {L"update"}, true));
+    EXPECT_TRUE(Exists(dst2 / L"HodosBrowser.exe"));
+    // A stale log must not be carried into the backup -- a rollback would restore it.
+    EXPECT_FALSE(Exists(dst2 / L"debug_output.log"));
+}
+
 // ---- CopyTreeRecursive ------------------------------------------------------
 TEST(CopyTreeRecursive, CopiesAllPreservingStructure) {
     TempDir src, dst;

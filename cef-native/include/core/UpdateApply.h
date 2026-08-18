@@ -77,8 +77,15 @@ struct UpdateState {
     bool paused = false;             // a failed silent apply sets this
     long highWaterBuild = 0;         // highest build ever confirmed healthy (anti-rollback cache)
     std::string signerThumbprint;    // installed-signer cache
-    long lastFailureBuild = 0;
+    long lastFailureBuild = 0;       // a PERMANENT rejection: this build is never retried
     std::string lastFailureReason;
+    // P0-A2. An APPLY ABORT is a different event from a rejection: it is transient
+    // (an unreadable file, a failed copy) and the same build SHOULD be retried next
+    // boot. Recording it in lastFailureBuild would permanently skip a good build --
+    // see the skip gate that consults it -- so aborts get their own pair. Read by a
+    // human/support, not by the skip gate.
+    std::string lastAbortReason;
+    long lastAbortCount = 0;         // consecutive aborts; reset once a backup succeeds
     bool rescanAfterRollback = false;  // V3-4: old wallet rescans on-chain after a rollback
 };
 

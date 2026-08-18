@@ -56,7 +56,10 @@ $Gates = @(
         Id       = 'G1'
         Name     = 'Bare-filename file sinks (relative path resolves against CWD, i.e. {app})'
         Owner    = 'Phase 0'
-        Baseline = 52
+        # Lowered 52 -> 0 by Phase 0 (P0-A3). All 52 removed: debug_output.log x44
+        # (WalletService 19, simple_app 17, my_overlay_render_handler .cpp/.mm 3+3,
+        # AddressHandler 2) + startup_log.txt x8 (simple_app). No residuals.
+        Baseline = 0
         Target   = 0
         Paths    = @('cef-native/src', 'cef-native/include')
         Include  = @('*.cpp', '*.mm', '*.h')
@@ -115,7 +118,11 @@ $Gates = @(
         Owner    = 'Phase 0'
         # Measured 2026-08-18 by THIS script. A hand-rolled grep gave 11 -- a narrower
         # pattern. Always baseline with the tool that will do the measuring.
-        Baseline = 15
+        # Lowered 15 -> 0 by Phase 0 (P0-A8). Response BODIES are gone entirely; the
+        # remaining prose hits ("...HTTP response...") were reworded, and txid/error are
+        # now extracted into named locals BEFORE the log call rather than reached through
+        # `response` inside it. No residuals.
+        Baseline = 0
         Target   = 0
         Paths    = @('cef-native/src/core')
         Include  = @('WalletService.cpp', 'WalletService_mac.cpp', '__preflight_probe.cpp')

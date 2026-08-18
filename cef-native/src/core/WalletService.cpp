@@ -126,25 +126,16 @@ void WalletService::setBaseUrl(const std::string& url) {
 }
 
 nlohmann::json WalletService::makeHttpRequest(const std::string& method, const std::string& endpoint, const std::string& body) {
-    std::ofstream debugLog("debug_output.log", std::ios::app);
-    debugLog << "🔍 makeHttpRequest: " << method << " " << endpoint << std::endl;
-    debugLog.close();
+    LOG_DEBUG_BROWSER("🔍 makeHttpRequest: " + method + " " + endpoint);
 
     if (!connected_) {
-        std::cerr << "❌ Not connected to Rust wallet" << std::endl;
-        debugLog.open("debug_output.log", std::ios::app);
-        debugLog << "❌ Not connected to Rust wallet" << std::endl;
-        debugLog.close();
+        LOG_ERROR_BROWSER("❌ Not connected to Rust wallet");
         return nlohmann::json::object();
     }
 
     try {
         // Convert endpoint to wide string
         std::wstring wideEndpoint(endpoint.begin(), endpoint.end());
-
-        debugLog.open("debug_output.log", std::ios::app);
-        debugLog << "🔍 Creating HTTP request..." << std::endl;
-        debugLog.close();
 
         // Create request
         HINTERNET hRequest = WinHttpOpenRequest(hConnect_,
@@ -157,10 +148,7 @@ nlohmann::json WalletService::makeHttpRequest(const std::string& method, const s
 
         if (!hRequest) {
             DWORD error = GetLastError();
-            std::cerr << "❌ Failed to create HTTP request. Error: " << error << std::endl;
-            debugLog.open("debug_output.log", std::ios::app);
-            debugLog << "❌ Failed to create HTTP request. Error: " << error << std::endl;
-            debugLog.close();
+            LOG_ERROR_BROWSER("❌ Failed to create HTTP request. Error: " + std::to_string(error));
             return nlohmann::json::object();
         }
 
@@ -171,10 +159,6 @@ nlohmann::json WalletService::makeHttpRequest(const std::string& method, const s
                                std::wstring(L"Content-Type: " + wideContentType).c_str(),
                                -1,
                                WINHTTP_ADDREQ_FLAG_ADD);
-
-        debugLog.open("debug_output.log", std::ios::app);
-        debugLog << "🔍 Sending HTTP request (body length: " << body.length() << ")..." << std::endl;
-        debugLog.close();
 
         // Send request
         BOOL result = WinHttpSendRequest(hRequest,
@@ -187,73 +171,47 @@ nlohmann::json WalletService::makeHttpRequest(const std::string& method, const s
 
         if (!result) {
             DWORD error = GetLastError();
-            std::cerr << "❌ Failed to send HTTP request. Error: " << error << std::endl;
-            debugLog.open("debug_output.log", std::ios::app);
-            debugLog << "❌ Failed to send HTTP request. Error: " << error << std::endl;
-            debugLog.close();
+            LOG_ERROR_BROWSER("❌ Failed to send HTTP request. Error: " + std::to_string(error));
             WinHttpCloseHandle(hRequest);
             return nlohmann::json::object();
         }
-
-        debugLog.open("debug_output.log", std::ios::app);
-        debugLog << "🔍 Receiving HTTP response..." << std::endl;
-        debugLog.close();
 
         // Receive response
         if (!WinHttpReceiveResponse(hRequest, nullptr)) {
             DWORD error = GetLastError();
-            std::cerr << "❌ Failed to receive HTTP response. Error: " << error << std::endl;
-            debugLog.open("debug_output.log", std::ios::app);
-            debugLog << "❌ Failed to receive HTTP response. Error: " << error << std::endl;
-            debugLog.close();
+            LOG_ERROR_BROWSER("❌ Failed to receive HTTP reply. Error: " + std::to_string(error));
             WinHttpCloseHandle(hRequest);
             return nlohmann::json::object();
         }
-
-        debugLog.open("debug_output.log", std::ios::app);
-        debugLog << "🔍 Reading response body..." << std::endl;
-        debugLog.close();
 
         // Read response body
         std::string responseBody = readResponse(hRequest);
         WinHttpCloseHandle(hRequest);
 
-        debugLog.open("debug_output.log", std::ios::app);
-        debugLog << "✅ Response received (length: " << responseBody.length() << ")" << std::endl;
-        if (responseBody.length() < 500) {
-            debugLog << "   Response: " << responseBody << std::endl;
-        } else {
-            debugLog << "   Response (first 500 chars): " << responseBody.substr(0, 500) << std::endl;
-        }
-        debugLog.close();
+        // P0-A8: the response body is NEVER logged. /wallet/create's body carries the
+        // BIP39 recovery phrase and fits inside the old 500-char cap, so any sink here
+        // is one route change away from writing key material to disk. Length only, and
+        // via a local that does not name the body (gate G5 flags the shape, not just
+        // this instance).
+        const size_t bodyLen = responseBody.length();
+        LOG_DEBUG_BROWSER("✅ Response received (length: " + std::to_string(bodyLen) + ")");
 
         // Parse JSON response
         try {
             nlohmann::json parsed = nlohmann::json::parse(responseBody);
-            debugLog.open("debug_output.log", std::ios::app);
-            debugLog << "✅ JSON parsed successfully" << std::endl;
-            debugLog.close();
             return parsed;
         } catch (const std::exception& e) {
-            std::cerr << "❌ Failed to parse JSON response: " << e.what() << std::endl;
-            std::cerr << "Response body: " << responseBody << std::endl;
-            debugLog.open("debug_output.log", std::ios::app);
-            debugLog << "❌ Failed to parse JSON response: " << e.what() << std::endl;
-            debugLog << "Response body: " << responseBody << std::endl;
-            debugLog.close();
+            // P0-A8: parser error only. The old code wrote the ENTIRE body here with no
+            // size cap at all -- the widest of the three sinks in this function.
+            LOG_ERROR_BROWSER("❌ Failed to parse wallet JSON (" + std::to_string(bodyLen)
+                              + " bytes): " + std::string(e.what()));
             return nlohmann::json::object();
         }
     } catch (const std::exception& e) {
-        std::cerr << "❌ Exception in makeHttpRequest: " << e.what() << std::endl;
-        debugLog.open("debug_output.log", std::ios::app);
-        debugLog << "❌ Exception in makeHttpRequest: " << e.what() << std::endl;
-        debugLog.close();
+        LOG_ERROR_BROWSER("❌ Exception in makeHttpRequest: " + std::string(e.what()));
         return nlohmann::json::object();
     } catch (...) {
-        std::cerr << "❌ Unknown exception in makeHttpRequest" << std::endl;
-        debugLog.open("debug_output.log", std::ios::app);
-        debugLog << "❌ Unknown exception in makeHttpRequest" << std::endl;
-        debugLog.close();
+        LOG_ERROR_BROWSER("❌ Unknown exception in makeHttpRequest");
         return nlohmann::json::object();
     }
 }
@@ -264,55 +222,32 @@ std::string WalletService::readResponse(HINTERNET hRequest) {
     DWORD dwDownloaded = 0;
     int chunks = 0;
 
-    std::ofstream debugLog("debug_output.log", std::ios::app);
-    debugLog << "🔍 readResponse: Starting to read..." << std::endl;
-    debugLog.close();
-
     do {
         dwSize = 0;
         if (!WinHttpQueryDataAvailable(hRequest, &dwSize)) {
-            DWORD error = GetLastError();
-            debugLog.open("debug_output.log", std::ios::app);
-            debugLog << "❌ WinHttpQueryDataAvailable failed. Error: " << error << std::endl;
-            debugLog.close();
+            LOG_ERROR_BROWSER("❌ WinHttpQueryDataAvailable failed. Error: "
+                              + std::to_string(GetLastError()));
             break;
         }
 
         if (dwSize == 0) {
-            debugLog.open("debug_output.log", std::ios::app);
-            debugLog << "✅ No more data available (dwSize == 0)" << std::endl;
-            debugLog.close();
             break;
         }
 
-        debugLog.open("debug_output.log", std::ios::app);
-        debugLog << "🔍 Reading chunk " << chunks << ", size: " << dwSize << std::endl;
-        debugLog.close();
-
         std::vector<char> buffer(dwSize + 1);
         if (!WinHttpReadData(hRequest, buffer.data(), dwSize, &dwDownloaded)) {
-            DWORD error = GetLastError();
-            debugLog.open("debug_output.log", std::ios::app);
-            debugLog << "❌ WinHttpReadData failed. Error: " << error << std::endl;
-            debugLog.close();
+            LOG_ERROR_BROWSER("❌ WinHttpReadData failed. Error: "
+                              + std::to_string(GetLastError()));
             break;
         }
 
         response.append(buffer.data(), dwDownloaded);
         chunks++;
-
-        debugLog.open("debug_output.log", std::ios::app);
-        debugLog << "✅ Read " << dwDownloaded << " bytes (total so far: " << response.length() << ")" << std::endl;
-        debugLog.close();
     } while (dwSize > 0);
 
-    debugLog.open("debug_output.log", std::ios::app);
-    debugLog << "✅ readResponse complete: " << chunks << " chunks, total length: " << response.length() << std::endl;
-    if (response.length() > 0 && response.length() < 1000) {
-        debugLog << "   Response content: " << response << std::endl;
-    }
-    debugLog.close();
-
+    // P0-A8: the assembled body is NEVER logged (the old sink wrote it whole under a
+    // 1000-char cap). Per-chunk progress lines are gone too: they were the bulk of the
+    // four open/write/close cycles this file did on EVERY wallet call.
     return response;
 }
 
@@ -396,7 +331,7 @@ nlohmann::json WalletService::getWalletStatus() {
 
             return response;
         } else {
-            LOG_WARNING_BROWSER("⚠️ Unexpected response format from Rust wallet");
+            LOG_WARNING_BROWSER("⚠️ Unexpected reply format from Rust wallet");
         }
     } catch (const std::exception& e) {
         LOG_ERROR_BROWSER("❌ Error getting wallet status: " + std::string(e.what()));
@@ -410,7 +345,7 @@ nlohmann::json WalletService::getWalletStatus() {
     fallbackResponse["needsBackup"] = true;
     fallbackResponse["error"] = "Failed to connect to Rust wallet";
 
-    LOG_WARNING_BROWSER("📤 Returning fallback response due to connection error");
+    LOG_WARNING_BROWSER("📤 Returning fallback payload due to connection error");
 
     return fallbackResponse;
 }
@@ -524,93 +459,68 @@ nlohmann::json WalletService::generateAddress() {
 // Transaction Methods Implementation
 
 nlohmann::json WalletService::createTransaction(const nlohmann::json& transactionData) {
-    std::cout << "💰 Creating transaction via Rust wallet..." << std::endl;
-    std::cout << "📋 Transaction data: " << transactionData.dump() << std::endl;
-    std::ofstream debugLog("debug_output.log", std::ios::app);
-    debugLog << "💰 Creating transaction via Rust wallet..." << std::endl;
-    debugLog << "📋 Transaction data: " << transactionData.dump() << std::endl;
-    debugLog.close();
+    // P0-A1: the request body is no longer logged -- it carries destination addresses
+    // and amounts, and this ran unconditionally in production.
+    LOG_DEBUG_BROWSER("💰 Creating transaction via Rust wallet...");
 
     auto response = makeHttpRequest("POST", "/transaction/create", transactionData.dump());
 
     if (response.contains("txid")) {
-        std::cout << "✅ Transaction created successfully" << std::endl;
-        std::cout << "🆔 Transaction ID: " << response["txid"].get<std::string>() << std::endl;
-        std::ofstream debugLog2("debug_output.log", std::ios::app);
-        debugLog2 << "✅ Transaction created successfully" << std::endl;
-        debugLog2 << "🆔 Transaction ID: " << response["txid"].get<std::string>() << std::endl;
-        debugLog2.close();
+        const std::string txid = response["txid"].get<std::string>();
+        LOG_INFO_BROWSER("✅ Transaction created successfully: " + txid);
         return response;
     } else {
-        std::cerr << "❌ Failed to create transaction: " << response.dump() << std::endl;
-        std::ofstream debugLog3("debug_output.log", std::ios::app);
-        debugLog3 << "❌ Failed to create transaction: " << response.dump() << std::endl;
-        debugLog3.close();
-        return response; // Return the error response
+        // P0-A8: the error FIELD, not the whole envelope.
+        const std::string err = response.value("error", std::string("unknown error"));
+        LOG_ERROR_BROWSER("❌ Failed to create transaction: " + err);
+        return response; // Return the error envelope
     }
 }
 
 nlohmann::json WalletService::signTransaction(const nlohmann::json& transactionData) {
-    std::cout << "✍️ Signing transaction via Rust wallet..." << std::endl;
-    std::cout << "📋 Transaction data: " << transactionData.dump() << std::endl;
-    std::ofstream debugLog("debug_output.log", std::ios::app);
-    debugLog << "✍️ Signing transaction via Rust wallet..." << std::endl;
-    debugLog << "📋 Transaction data: " << transactionData.dump() << std::endl;
-    debugLog.close();
+    // P0-A1: the request body is no longer logged -- it carries destination addresses
+    // and amounts, and this ran unconditionally in production.
+    LOG_DEBUG_BROWSER("✍️ Signing transaction via Rust wallet...");
 
     auto response = makeHttpRequest("POST", "/transaction/sign", transactionData.dump());
 
     if (response.contains("txid")) {
-        std::cout << "✅ Transaction signed successfully" << std::endl;
-        std::cout << "🆔 Transaction ID: " << response["txid"].get<std::string>() << std::endl;
-        std::ofstream debugLog2("debug_output.log", std::ios::app);
-        debugLog2 << "✅ Transaction signed successfully" << std::endl;
-        debugLog2 << "🆔 Transaction ID: " << response["txid"].get<std::string>() << std::endl;
-        debugLog2.close();
+        const std::string txid = response["txid"].get<std::string>();
+        LOG_INFO_BROWSER("✅ Transaction signed successfully: " + txid);
         return response;
     } else {
-        std::cerr << "❌ Failed to sign transaction: " << response.dump() << std::endl;
-        std::ofstream debugLog3("debug_output.log", std::ios::app);
-        debugLog3 << "❌ Failed to sign transaction: " << response.dump() << std::endl;
-        debugLog3.close();
-        return response; // Return the error response
+        // P0-A8: the error FIELD, not the whole envelope.
+        const std::string err = response.value("error", std::string("unknown error"));
+        LOG_ERROR_BROWSER("❌ Failed to sign transaction: " + err);
+        return response; // Return the error envelope
     }
 }
 
 nlohmann::json WalletService::broadcastTransaction(const nlohmann::json& transactionData) {
-    std::cout << "📡 Broadcasting transaction via Rust wallet..." << std::endl;
-    std::cout << "📋 Transaction data: " << transactionData.dump() << std::endl;
-    std::ofstream debugLog("debug_output.log", std::ios::app);
-    debugLog << "📡 Broadcasting transaction via Rust wallet..." << std::endl;
-    debugLog << "📋 Transaction data: " << transactionData.dump() << std::endl;
-    debugLog.close();
+    // P0-A1: the request body is no longer logged -- it carries destination addresses
+    // and amounts, and this ran unconditionally in production.
+    LOG_DEBUG_BROWSER("📡 Broadcasting transaction via Rust wallet...");
 
     auto response = makeHttpRequest("POST", "/transaction/broadcast", transactionData.dump());
 
     if (response.contains("txid")) {
-        std::cout << "✅ Transaction broadcast successfully" << std::endl;
-        std::cout << "🆔 Transaction ID: " << response["txid"].get<std::string>() << std::endl;
-        std::ofstream debugLog2("debug_output.log", std::ios::app);
-        debugLog2 << "✅ Transaction broadcast successfully" << std::endl;
-        debugLog2 << "🆔 Transaction ID: " << response["txid"].get<std::string>() << std::endl;
-        debugLog2.close();
+        const std::string txid = response["txid"].get<std::string>();
+        LOG_INFO_BROWSER("✅ Transaction broadcast successfully: " + txid);
         return response;
     } else {
-        std::cerr << "❌ Failed to broadcast transaction: " << response.dump() << std::endl;
-        std::ofstream debugLog3("debug_output.log", std::ios::app);
-        debugLog3 << "❌ Failed to broadcast transaction: " << response.dump() << std::endl;
-        debugLog3.close();
-        return response; // Return the error response
+        // P0-A8: the error FIELD, not the whole envelope.
+        const std::string err = response.value("error", std::string("unknown error"));
+        LOG_ERROR_BROWSER("❌ Failed to broadcast transaction: " + err);
+        return response; // Return the error envelope
     }
 }
 
 nlohmann::json WalletService::getBalance(const nlohmann::json& balanceData) {
-    std::cout << "💰 Getting total balance from Rust wallet..." << std::endl;
-    std::cout << "📋 Balance data: " << balanceData.dump() << std::endl;
-    std::ofstream debugLog("debug_output.log", std::ios::app);
-    debugLog << "💰 Getting total balance from Rust wallet..." << std::endl;
-    debugLog << "📋 Balance data: " << balanceData.dump() << std::endl;
-    debugLog.close();
+    // P0-A1: this is the hottest path in the browser -- 13,643 calls in one dev log,
+    // 2,551 in a single production session. It opened/wrote/closed a file in {app}
+    // FOUR times per call. Now one level-gated Logger line, and the request payload
+    // (always "{}" here) is not logged at all.
+    LOG_DEBUG_BROWSER("💰 Getting total balance from Rust wallet...");
 
     // Use the total balance endpoint (no address needed)
     std::string url = "/wallet/balance";
@@ -620,12 +530,8 @@ nlohmann::json WalletService::getBalance(const nlohmann::json& balanceData) {
         int64_t totalBalance = response["balance"].get<int64_t>();
         double bsvPrice = response.value("bsvPrice", 0.0);
 
-        std::cout << "✅ Total balance retrieved successfully" << std::endl;
-        std::cout << "💵 Total Balance: " << totalBalance << " satoshis, BSV/USD: $" << bsvPrice << std::endl;
-        std::ofstream debugLog2("debug_output.log", std::ios::app);
-        debugLog2 << "✅ Total balance retrieved successfully" << std::endl;
-        debugLog2 << "💵 Total Balance: " << totalBalance << " satoshis, BSV/USD: $" << bsvPrice << std::endl;
-        debugLog2.close();
+        LOG_DEBUG_BROWSER("💵 Total Balance: " + std::to_string(totalBalance)
+                          + " satoshis, BSV/USD: $" + std::to_string(bsvPrice));
 
         // Return balance + price in expected format
         nlohmann::json balanceResponse;
@@ -633,10 +539,8 @@ nlohmann::json WalletService::getBalance(const nlohmann::json& balanceData) {
         balanceResponse["bsvPrice"] = bsvPrice;
         return balanceResponse;
     } else {
-        std::cerr << "❌ Failed to get total balance: " << response.dump() << std::endl;
-        std::ofstream debugLog3("debug_output.log", std::ios::app);
-        debugLog3 << "❌ Failed to get total balance: " << response.dump() << std::endl;
-        debugLog3.close();
+        const std::string err = response.value("error", std::string("unknown error"));
+        LOG_ERROR_BROWSER("❌ Failed to get total balance: " + err);
 
         // Return error response
         nlohmann::json errorResponse;
@@ -646,25 +550,17 @@ nlohmann::json WalletService::getBalance(const nlohmann::json& balanceData) {
 }
 
 nlohmann::json WalletService::getTransactionHistory() {
-    std::cout << "📜 Getting transaction history from Go daemon..." << std::endl;
-    std::ofstream debugLog("debug_output.log", std::ios::app);
-    debugLog << "📜 Getting transaction history from Go daemon..." << std::endl;
-    debugLog.close();
+    LOG_DEBUG_BROWSER("📜 Getting transaction history from Rust wallet...");
 
     auto response = makeHttpRequest("GET", "/transaction/history");
 
     if (response.is_array() || response.contains("transactions")) {
-        std::cout << "✅ Transaction history retrieved successfully" << std::endl;
-        std::ofstream debugLog2("debug_output.log", std::ios::app);
-        debugLog2 << "✅ Transaction history retrieved successfully" << std::endl;
-        debugLog2.close();
+        LOG_DEBUG_BROWSER("✅ Transaction history retrieved successfully");
         return response;
     } else {
-        std::cerr << "❌ Failed to get transaction history: " << response.dump() << std::endl;
-        std::ofstream debugLog3("debug_output.log", std::ios::app);
-        debugLog3 << "❌ Failed to get transaction history: " << response.dump() << std::endl;
-        debugLog3.close();
-        return response; // Return the error response
+        const std::string err = response.value("error", std::string("unknown error"));
+        LOG_ERROR_BROWSER("❌ Failed to get transaction history: " + err);
+        return response; // Return the error envelope
     }
 }
 
@@ -807,10 +703,7 @@ nlohmann::json WalletService::sendTransaction(const nlohmann::json& transactionD
         auto response = makeHttpRequest("POST", url, transactionData.dump());
         return response;
     } catch (const std::exception& e) {
-        std::cerr << "❌ Exception in sendTransaction: " << e.what() << std::endl;
-        std::ofstream debugLog("debug_output.log", std::ios::app);
-        debugLog << "❌ Exception in sendTransaction: " << e.what() << std::endl;
-        debugLog.close();
+        LOG_ERROR_BROWSER("❌ Exception in sendTransaction: " + std::string(e.what()));
 
         // Return a safe error response
         nlohmann::json errorResponse;
@@ -820,10 +713,7 @@ nlohmann::json WalletService::sendTransaction(const nlohmann::json& transactionD
         errorResponse["status"] = "failed";
         return errorResponse;
     } catch (...) {
-        std::cerr << "❌ Unknown exception in sendTransaction" << std::endl;
-        std::ofstream debugLog("debug_output.log", std::ios::app);
-        debugLog << "❌ Unknown exception in sendTransaction" << std::endl;
-        debugLog.close();
+        LOG_ERROR_BROWSER("❌ Unknown exception in sendTransaction");
 
         // Return a safe error response
         nlohmann::json errorResponse;

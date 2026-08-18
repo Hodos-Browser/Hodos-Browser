@@ -30,7 +30,15 @@ TabManager& TabManager::GetInstance() {
 TabManager::TabManager()
     : active_tab_id_(-1),
       next_tab_id_(1) {
-    LOG(INFO) << "TabManager initialized";
+    // P0-A3: deliberately does NOT log.
+    //
+    // This singleton is sometimes constructed BEFORE CefInitialize, and Chromium's
+    // LOG() lazily initialises logging on first use, defaulting to "debug.log" in the
+    // process CWD -- which for a shortcut launch is {app}. CefSettings.log_file is only
+    // applied inside CefInitialize, and no public CEF API configures browser-process
+    // logging earlier, so the window cannot be closed from the logging side.
+    // Empirically this line was the ONLY message that ever reached {app}\debug.log.
+    // If a new message ever appears there, look for a LOG() added in this window.
 }
 
 TabManager::~TabManager() {

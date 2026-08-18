@@ -97,6 +97,8 @@ TEST(UpdateState, RoundTripsAllFields) {
     in.signerThumbprint = "AB12CD34";
     in.lastFailureBuild = 414;
     in.lastFailureReason = "health timeout";
+    in.lastAbortReason = "cannot manifest {app}";
+    in.lastAbortCount = 3;
     in.rescanAfterRollback = true;
 
     UpdateState out;
@@ -107,7 +109,49 @@ TEST(UpdateState, RoundTripsAllFields) {
     EXPECT_EQ(out.signerThumbprint, "AB12CD34");
     EXPECT_EQ(out.lastFailureBuild, 414);
     EXPECT_EQ(out.lastFailureReason, "health timeout");
+    EXPECT_EQ(out.lastAbortReason, "cannot manifest {app}");
+    EXPECT_EQ(out.lastAbortCount, 3);
     EXPECT_TRUE(out.rescanAfterRollback);
+}
+
+// ---- P0-A2: an apply ABORT is recorded, and is NOT a rejection --------------
+//
+// Before this, a committed apply that could not manifest or copy {app} produced one
+// LOG_WARNING and `return false`. Nothing reached the user, nothing reached disk, and
+// nothing distinguished "updated fine" from "has not updated since July" -- on the
+// mechanism that delivers every future security fix.
+
+TEST(UpdateState, AbortFieldsDefaultEmptyAndParseFromAnOlderFile) {
+    // An update-state.json written by a pre-P0 build has neither key. It must still
+    // parse, with the abort record simply empty -- not a failed read, which the callers
+    // treat as "not silent-eligible" and would stop updates outright.
+    UpdateState out;
+    ASSERT_TRUE(ParseUpdateState(
+        R"({"schema":1,"silent":true,"paused":false,"highWaterBuild":40199})", out));
+    EXPECT_TRUE(out.silent);
+    EXPECT_EQ(out.highWaterBuild, 40199);
+    EXPECT_EQ(out.lastAbortCount, 0);
+    EXPECT_TRUE(out.lastAbortReason.empty());
+}
+
+TEST(UpdateState, AbortRecordDoesNotBlockTheStagedBuild) {
+    // THE point of giving aborts their own fields. A transient I/O failure records an
+    // abort but must leave lastFailureBuild alone, because the skip gate consults that
+    // field and would then never retry a perfectly good build. Same state, both fields
+    // set independently: only the rejection pair may block.
+    UpdateState s;
+    s.lastAbortReason = "{app} backup failed";
+    s.lastAbortCount = 2;
+    // No rejection recorded, so nothing blocks: paused is false and lastFailureBuild 0.
+    EXPECT_EQ(s.lastFailureBuild, 0);
+    EXPECT_FALSE(PausedBlocksStagedBuild(s.paused, 40199, s.lastFailureBuild));
+
+    // RED half: had the abort been written to the rejection pair instead, the very same
+    // staged build would be blocked from ever retrying.
+    UpdateState wrong;
+    wrong.paused = true;
+    wrong.lastFailureBuild = 40199;
+    EXPECT_TRUE(PausedBlocksStagedBuild(wrong.paused, 40199, wrong.lastFailureBuild));
 }
 
 TEST(UpdateState, GarbageReturnsFalse) {

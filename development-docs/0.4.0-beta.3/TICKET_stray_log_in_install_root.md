@@ -1,11 +1,48 @@
 # TICKET — 44 raw `ofstream("debug_output.log")` writes land a log INSIDE `{app}`, the one place the silent updater forbids
 
 **Filed:** 2026-08-17, investigating the "everything bogged down" incident
-**Severity:** 🚨 **can SILENTLY abort silent auto-update** (confirmed mechanism) + bypasses every logging control
-**Status:** OPEN — **beta.3, high**
+**Severity:** ~~🚨 **can SILENTLY abort silent auto-update** (confirmed mechanism)~~ → see §0 —
+**wallet financial data written into the install root, outside every logging control**
+**Status:** 🟡 CODE COMPLETE (Phase 0, 2026-08-18) — T2/T3 rows owed
 **Present in:** beta.1 **and beta.2** (`WalletService.cpp` is byte-identical between the two tags)
 
 ---
+
+## §0 — What this ticket is actually about (added 2026-08-18)
+
+This ticket has now produced **two** headline justifications, and **both were refuted by
+verification**. They are kept, struck, because each is the reading a careful person naturally
+arrives at, and the next person will arrive at it too.
+
+| # | Claimed | Verdict |
+|---|---|---|
+| 1 | The signed `expected-new-manifest.json` check rejects unknown files in `{app}` | ❌ **Refuted** — `VerifyTreeAgainstManifest` iterates only `m.entries`; it never enumerates the directory |
+| 2 | The stray log **silently aborts silent auto-update** via the backup walk | ❌ **Refuted** — `MaybeApplyStagedUpdate` (`cef_browser_shell.cpp:4787`) runs **before** `CefInitialize` (`:5277`) and only past a `selfCount == 1` gate (`:4155-4165`) plus a wallet-dead gate (`:4172`). No Hodos process can hold the log open during `BuildManifestForTree` |
+| 3 | The **BIP39 recovery phrase** reaches `{app}` in plaintext | ❌ **Refuted by measurement** — `P0-S1`, see the phase contract §4a |
+
+### ⭐ What is actually true, and it is enough
+
+The 52 writes are **live and shipping**, and what they put in the install root is **wallet financial
+and privacy data**:
+
+- `{app}\debug_output.log` on the owner's beta.2 install grew **1,896,960 → 2,118,968 bytes between
+  14:15 and 15:26 on 2026-08-18** — measured twice, while the browser was simply in use.
+- Its contents are **full wallet HTTP response bodies**: 2,551 `/wallet/balance` bodies in that one
+  session (exact satoshi balance + BSV/USD price), and via `WalletService.cpp:531/558/585` the
+  **entire `/transaction/send` request body** — destination addresses and amounts.
+- Written **unconditionally in production**, bypassing level gating, the resolved log directory, and
+  any future rotation; **copied into the rollback backup**; and never cleaned up.
+- `getBalance` alone did **four** open/write/close cycles per call, synchronously, on the browser UI
+  thread — 13,643 calls in one dev log.
+
+On a browser whose product claim is privacy, that is the defect. It does not need the auto-update
+story to be worth fixing, and §2's *class* problem (A1) is real independently of our log.
+
+### ⚠️ Corollary for §6.5 of `SPRINT_PLAN.md`
+
+The open **disclosure-posture** decision was scoped as depending on Phase 0's reproduction result.
+There is **no key-material disclosure** here, so no disclosure decision is owed for this defect.
+Phase 0.5's (a fund-moving endpoint with no approval gate) is untouched by this and remains open.
 
 ## The finding
 
@@ -44,6 +81,9 @@ Written minutes after a fresh **beta.2** install.
 > **outside** the install root: the browser holds the log open for writing, and **a log inside
 > `{app}` broke the silent-update backup hash of the `{app}` tree.**
 
+⚠️ **2026-08-18:** this rule is still right, but note that the *historical* reason it records is the
+one §0 row 2 refutes for **today's** code. The rule stands on §0's grounds instead.
+
 We already hit this once and moved the *Logger's* file out of `{app}`. **These 44 raw writes were
 never moved with it**, so the exact condition the rule forbids is back — and it is live in a shipped
 build.
@@ -64,7 +104,12 @@ inspect this will arrive at it too.
 directory**, so a file present in `{app}` but absent from the manifest is never examined. The
 post-install integrity gate is therefore **not** the exposure.
 
-⛔ **But the BACKUP side is, and it is worse — it is a silent abort of the whole update.**
+⛔ ~~**But the BACKUP side is, and it is worse — it is a silent abort of the whole update.**~~
+
+⚠️ **STRUCK 2026-08-18 — refuted. Everything from here to the end of this section describes a real
+mechanism that cannot actually be reached.** The chain below is correct about `Sha256FileW` and
+`BuildManifestForTree`; what it misses is *when* the walk runs. See §0 row 2. The code reasoning is
+kept because A1 below is a genuine defect of the same shape that **is** reachable by other writers.
 
 `cef_browser_shell.cpp:4302`, immediately before the `{app}` backup:
 
@@ -282,14 +327,21 @@ this ticket; note the hazard, and if a new message ever appears in `{app}\debug.
 
 ## Acceptance
 
-- [ ] all 44 raw writes removed; equivalents routed through `Logger`
-- [ ] build guard rejects bare-filename `ofstream` in shipped code, **verified by making it fail**
-- [ ] `{app}` stays clean across a full session — measured
-- [ ] cleanup ships for existing installs
+- [x] all **52** raw writes removed (44 `debug_output.log` + 8 `startup_log.txt` — the original count
+      of 44 missed `startup_log.txt` entirely); equivalents routed through `Logger`
+- [x] build guard rejects bare-filename `ofstream` in shipped code, **verified by making it fail**
+      (`preflight.ps1` gate `G1`, negative control observed `1 > 0`)
+- [ ] `{app}` stays clean across a full session — measured *(T3, owed)*
+- [x] cleanup ships for existing installs *(verified already present: `hodos-browser.iss:93-105`,
+      four files + `{app}\*.log` on uninstall; the upgrade-install **run** is still owed)*
 - [x] ~~answered: does the signed-manifest check reject unknown files in `{app}`?~~ **No** — resolved
       2026-08-18; the exposure is the backup walk, not the integrity gate (see above)
-- [ ] **A1** decided and implemented: `Sha256FileW` share-mode / exclusion policy
-- [ ] **A2**: abort raised above `LOG_WARNING`, reason recorded in update state, repeated aborts visible
-- [ ] **A3**: `TabManager`'s raw `LOG(INFO)` removed/re-routed; `debug.log` excluded from the backup;
+- [x] **A1** decided and implemented: **option 3 (exclude by policy)**. `IsVolatileArtifact` skips
+      `*.log`, `*.tmp`, `crashpad\`, and `startup_log.txt`, in **both** `BuildManifestForTree` and
+      `CopyTreeRecursive`. ⚠️ Note the copy side is *not* an abort fix — see the phase contract §5a.3
+- [x] **A2**: raised to `LOG_ERROR`, reason + consecutive count recorded in `update-state.json`,
+      cleared once a backup succeeds. ⚠️ Recorded in **new** `lastAbortReason`/`lastAbortCount`
+      fields, **not** `lastFailureBuild` — that one permanently blocks the build (contract §5a.2)
+- [ ] **A3**: `TabManager`'s raw `LOG(INFO)` removed (done); `debug.log` excluded from the backup (done);
       verified `{app}\debug.log` stops being recreated across several launches (it is
       ordering-dependent, so **one clean launch is not evidence** — check repeatedly)

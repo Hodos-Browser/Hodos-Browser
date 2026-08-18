@@ -142,11 +142,11 @@ wrong reason.**
 
 | Gate | What it catches | Baseline | Target | Owner | Lowered by |
 |---|---|---|---|---|---|
-| `G1` | bare-filename file sinks (relative path ⇒ CWD ⇒ `{app}`) | **52** | 0 | Phase 0 | Phase 0 |
+| `G1` | bare-filename file sinks (relative path ⇒ CWD ⇒ `{app}`) | ~~52~~ → **0** | 0 | Phase 0 | ✅ Phase 0, 2026-08-18 |
 | `G2` | substring origin checks on the internal frontend port | **5** | 2 | Phase 0.5 | Phase 0.5 |
 | `G3` | F8 secret-log gate, Rust | **0** | 0 | ported from `test.yml` | — |
 | `G4` | F8 secret-log gate, C++ | **0** | 0 | ported from `test.yml` | — |
-| `G5` | full wallet HTTP response bodies reaching a sink | **15** | 0 | Phase 0 | Phase 0 |
+| `G5` | full wallet HTTP response bodies reaching a sink | ~~15~~ → **0** | 0 | Phase 0 | ✅ Phase 0, 2026-08-18 |
 
 ⭐ `G2` deliberately **does not** flag a prefix check — `rfind(X, 0) == 0` or `find(X) != 0`. Those
 are the correct form; flagging them would teach the wrong lesson. Only unanchored substring searches
@@ -175,6 +175,26 @@ have produced a **false green**:
    G1 read `1 violation` against a real 52 — and *passed*, as "below baseline".
 4. `cargo`'s stderr warnings became terminating errors under `EAP=Stop`, killing the run on a warning.
 
+### Baselines lowered — 2026-08-18, Phase 0 (`P0-A3`, `P0-A8`)
+
+`G1` **52 → 0** and `G5` **15 → 0`**. No residuals in either: every one of the 52 relative-path
+writes is gone, and no log statement in `WalletService.cpp`/`WalletService_mac.cpp` names a response
+at all.
+
+⚠️ **Two things worth keeping from driving `G5` to zero**, because both are the harness catching the
+author rather than the code:
+
+1. **Two replacement lines passed only because `grep` is line-based.** `LOG_INFO_BROWSER("… " +
+   response["txid"]…)` wrapped across two lines, so the gate never saw `LOG_…(` and `response` on one
+   line. That is a **false green** produced by code formatting, and it is the same family as the four
+   defects in §9 below. Fixed properly by extracting `txid`/`err` into named locals **before** the log
+   call — which is also better code.
+2. **`G5` at target 0 is a naming rule, not only a leak detector.** Reaching zero required rewording
+   four log messages that merely contained the English word "response". That is accepted deliberately:
+   for these two files — the wallet HTTP transport — "no log statement may name the response" is a
+   cheap, enforceable bright line, and the alternative (loosening the pattern so prose passes) would
+   weaken the gate to make the code look clean.
+
 ### Baseline run — 2026-08-18, before any Phase 0 code
 
 ```
@@ -199,6 +219,27 @@ To close the two skips: build `hodos_tests` once
 (`cmake -S cef-native -B cef-native/build -DHODOS_BUILD_TESTS=ON`, then
 `cmake --build cef-native/build --config Release --target hodos_tests`) and pass `-Full` for the
 frontend leg. Until then, **record INCOMPLETE in the sign-off table — do not round it up.**
+
+### Phase 0 run — 2026-08-18, after the fix
+
+```
+T0  G1  PASS   0 violations, at baseline   [Phase 0,    target 0]
+T0  G2  PASS   5 violations, at baseline   [Phase 0.5,  target 2]
+T0  G3  PASS   0 violations, at baseline   [ported,     target 0]
+T0  G4  PASS   0 violations, at baseline   [ported,     target 0]
+T0  G5  PASS   0 violations, at baseline   [Phase 0,    target 0]
+T1a     PASS  cargo test - rust-wallet
+T1b     PASS  cargo test - adblock-engine
+T1c     PASS  hodos_tests            181 tests, 180 passed, 1 skipped
+T1d     PASS  frontend build (-Full)
+
+PREFLIGHT: PASS - all checks ran and passed.                exit 0
+```
+
+Negative control re-run at the **new** baselines: all 5 gates seen to fail
+(`1>0`, `6>5`, `1>0`, `1>0`, `1>0`), probes cleaned up. `G1` and `G5` detecting at `1 > 0` is
+strictly stronger than the old `53 > 52` / `16 > 15` — at a baseline of 52 a single new violation was
+a rounding error in the count.
 
 ### T1c closed — 2026-08-18
 

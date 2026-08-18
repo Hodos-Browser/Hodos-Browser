@@ -14,6 +14,7 @@
 #include <windows.h>
 
 #include <cstdlib>
+#include <cwctype>   // towlower, for IsVolatileArtifact (P0-A1)
 #include <filesystem>
 #include <vector>
 
@@ -69,6 +70,26 @@ bool IsExcludedTopLevel(const fs::path& rel, const std::vector<std::wstring>& ex
 }
 }  // namespace
 
+// P0-A1. Kept deliberately narrow: an extension allow-list plus the exact names our
+// own history produced. Nothing {app} legitimately ships ends in .log or .tmp.
+bool IsVolatileArtifact(const std::wstring& relPath) {
+    fs::path rel(relPath);
+    std::wstring ext = rel.extension().wstring();
+    for (auto& c : ext) c = (wchar_t)towlower(c);
+    if (ext == L".log" || ext == L".tmp") return true;
+
+    std::wstring leaf = rel.filename().wstring();
+    for (auto& c : leaf) c = (wchar_t)towlower(c);
+    if (leaf == L"startup_log.txt") return true;   // pre-P0 installs still carry it
+
+    for (const auto& part : rel) {
+        std::wstring c = part.wstring();
+        for (auto& ch : c) ch = (wchar_t)towlower(ch);
+        if (c == L"crashpad") return true;
+    }
+    return false;
+}
+
 std::string Sha256FileW(const std::wstring& path) {
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ,
                            FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr,
@@ -116,7 +137,8 @@ bool EnsureDirExists(const std::wstring& dir) {
 }
 
 bool BuildManifestForTree(const std::wstring& rootDir, FileManifest& out,
-                          const std::vector<std::wstring>& excludeDirNames) {
+                          const std::vector<std::wstring>& excludeDirNames,
+                          bool excludeVolatileArtifacts) {
     out.entries.clear();
     std::error_code ec;
     if (!fs::is_directory(rootDir, ec)) return false;
@@ -135,6 +157,7 @@ bool BuildManifestForTree(const std::wstring& rootDir, FileManifest& out,
         }
         if (!it->is_regular_file(ec)) continue;
         if (IsExcludedTopLevel(rel, excludeDirNames)) continue;
+        if (excludeVolatileArtifacts && IsVolatileArtifact(rel.wstring())) continue;
         const std::string sha = Sha256FileW(p.wstring());
         if (sha.empty()) return false;  // unreadable file => fail (don't ship a partial manifest)
         out.entries[NormalizeManifestKey(WideToUtf8(rel.wstring()))] = sha;
@@ -167,7 +190,8 @@ VerifyResult VerifyTreeAgainstManifest(const std::wstring& rootDir, const FileMa
 }
 
 bool CopyTreeRecursive(const std::wstring& srcDir, const std::wstring& dstDir,
-                       const std::vector<std::wstring>& excludeDirNames) {
+                       const std::vector<std::wstring>& excludeDirNames,
+                       bool excludeVolatileArtifacts) {
     std::error_code ec;
     if (!fs::is_directory(srcDir, ec)) return false;
     if (!EnsureDirExists(dstDir)) return false;
@@ -188,6 +212,7 @@ bool CopyTreeRecursive(const std::wstring& srcDir, const std::wstring& dstDir,
         }
         if (!it->is_regular_file(ec)) continue;
         if (IsExcludedTopLevel(rel, excludeDirNames)) continue;
+        if (excludeVolatileArtifacts && IsVolatileArtifact(rel.wstring())) continue;
         const fs::path target = dst / rel;
         fs::create_directories(target.parent_path(), ec);
         fs::copy_file(p, target, fs::copy_options::overwrite_existing, ec);

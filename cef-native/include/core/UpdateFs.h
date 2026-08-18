@@ -36,11 +36,21 @@ std::string Sha256FileW(const std::wstring& path);
 // after the call.
 bool EnsureDirExists(const std::wstring& dir);
 
+// P0-A1: true for files nobody promised are stable -- *.log, *.tmp, anything under a
+// `crashpad` dir, and the historical stray names. Hashing one of these while another
+// process holds it open for write makes Sha256FileW return "" (it opens WITHOUT
+// FILE_SHARE_WRITE), which aborts the whole silent-apply backup, silently. They are
+// also worthless in a rollback: restoring a stale log helps nobody.
+bool IsVolatileArtifact(const std::wstring& relPath);
+
 // Build a {normalized-relpath -> sha256} manifest for every regular file under
 // rootDir (recursive). Top-level subdirs whose name is in excludeDirNames are
-// skipped entirely (e.g. "update", ".restore-tmp"). False on enumeration error.
+// skipped entirely (e.g. "update", ".restore-tmp"). When excludeVolatileArtifacts is
+// set, files matching IsVolatileArtifact are skipped too (P0-A1).
+// False on enumeration error.
 bool BuildManifestForTree(const std::wstring& rootDir, FileManifest& out,
-                          const std::vector<std::wstring>& excludeDirNames = {});
+                          const std::vector<std::wstring>& excludeDirNames = {},
+                          bool excludeVolatileArtifacts = false);
 
 // Verify every manifest entry exists under rootDir with the recorded sha256.
 // Does NOT reject EXTRA files (a superset tree passes — the manifest defines the
@@ -50,9 +60,13 @@ VerifyResult VerifyTreeAgainstManifest(const std::wstring& rootDir, const FileMa
 
 // Recursively copy every regular file under srcDir into dstDir, preserving the
 // relative structure and creating dirs as needed. Overwrites existing files.
-// Top-level subdirs in excludeDirNames are skipped. False on any copy failure.
+// Top-level subdirs in excludeDirNames are skipped; when excludeVolatileArtifacts is
+// set, IsVolatileArtifact files are skipped too (P0-A1 -- keeps a growing log out of
+// the rollback copy, so a rollback cannot restore a stale one).
+// False on any copy failure.
 bool CopyTreeRecursive(const std::wstring& srcDir, const std::wstring& dstDir,
-                       const std::vector<std::wstring>& excludeDirNames = {});
+                       const std::vector<std::wstring>& excludeDirNames = {},
+                       bool excludeVolatileArtifacts = false);
 
 // THE V3-3a money-DB restore primitive (I9). Restore the wallet DB as a FULL SET:
 //   1. DELETE target <walletDir>\wallet.db-wal AND \wallet.db-shm FIRST — a

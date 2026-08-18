@@ -23,9 +23,6 @@ MyOverlayRenderHandler::MyOverlayRenderHandler(HWND hwnd, int width, int height)
     : hwnd_(hwnd), width_(width), height_(height),
       hdc_mem_(nullptr), hbitmap_(nullptr), dib_data_(nullptr) {
 
-    std::ofstream debugLog("debug_output.log", std::ios::app);
-    debugLog << "🎨 MyOverlayRenderHandler constructor called for HWND: " << hwnd_ << " size: " << width_ << "x" << height_ << std::endl;
-    debugLog.close();
 
     // Confirm DWM composition
     BOOL dwmEnabled = FALSE;
@@ -82,9 +79,6 @@ MyOverlayRenderHandler::MyOverlayRenderHandler(HWND hwnd, int width, int height)
 MyOverlayRenderHandler::MyOverlayRenderHandler(void* nsview, int width, int height)
     : nsview_(nsview), width_(width), height_(height) {
 
-    std::ofstream debugLog("debug_output.log", std::ios::app);
-    debugLog << "🎨 MyOverlayRenderHandler constructor called for NSView (macOS) - size: " << width_ << "x" << height_ << std::endl;
-    debugLog.close();
 
     // macOS: CALayer setup handled in NSView subclass
     // The NSView already has a CALayer with setWantsLayer:YES
@@ -154,9 +148,6 @@ void MyOverlayRenderHandler::OnPaint(CefRefPtr<CefBrowser> browser,
     // ====== Windows Implementation ======
 
     std::cout << "🧪 OnPaint called (Windows) - type: " << type << " size: " << width << "x" << height << std::endl;
-    std::ofstream debugLog("debug_output.log", std::ios::app);
-    debugLog << "🧪 OnPaint called (Windows) - type: " << type << " size: " << width << "x" << height << std::endl;
-    debugLog.close();
 
     bool isMostlyTransparent = true;
     const uint8_t* alpha = reinterpret_cast<const uint8_t*>(buffer);
