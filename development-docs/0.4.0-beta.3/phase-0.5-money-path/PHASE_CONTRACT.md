@@ -35,22 +35,22 @@ while a send the user initiates in their own wallet UI continues to complete **w
 - [x] The three `:5137` **trust-boundary** substring gates use a prefix/origin match (plus a fourth, §4c)
 - [x] T0 gate `G2` baseline driven **5 → 2**, with both residuals named in §6
 - [x] `IsInternalOrigin("")` decided — **left as-is deliberately**; the defect was the derivation, §4d
-- [ ] ⭐ **C1** — origin derivation is **scheme-anchored**: only `http://`, `https://`, `hodos://`
+- [x] ⭐ **C1** — origin derivation is **scheme-anchored**: only `http://`, `https://`, `hodos://`
       yield an origin; userinfo stripped through the last `@` of the authority; everything else
       returns empty **so the ancestor cascade and the `opaque-origin.invalid` sentinel actually
       run**. One derivation, one spelling, applied once. The same reduction inside
       `hodos::IsInternalFrontendUrl` / `hodos::IsLoopbackUrl`, which are **also** fooled by userinfo
-- [ ] ⭐ **C2** — every wallet-touching IPC arm is gated at the **top of
+- [x] ⭐ **C2** — every wallet-touching IPC arm is gated at the **top of
       `OnProcessMessageReceived`**, not per-arm. A wallet arm added later **fails closed by
       default**, not by someone remembering to add a check
-- [ ] The `send_transaction` IPC arm specifically no longer reaches Rust header-free from a web page
+- [x] The `send_transaction` IPC arm specifically no longer reaches Rust header-free from a web page (`X2`, §4i)
 
 **Half 0.5b — the Rust money path**
 
 - [x] `send_transaction` takes `HttpRequest` and routes external callers through `dispatch_payment`,
       exactly as `create_action` does
-- [ ] An internal caller (no `X-Requesting-Domain`) is **unchanged** — no modal, no new latency
-- [ ] ⭐ **C3** — `peerpay_send` and `paymail_send` take `HttpRequest` and route through
+- [x] An internal caller (no `X-Requesting-Domain`) is **unchanged** — no modal, no new latency (`R1`, §4i)
+- [x] ⭐ **C3** — `peerpay_send` and `paymail_send` take `HttpRequest` and route through
       `dispatch_payment`. ⚠️ `{recipient_identity_key|paymail, amount_satoshis}` is a **third** body
       shape — `d33741a`'s "do both or neither" warning applies with an extra shape
 - [x] `.block_on_origin_mismatch(true)` on the CORS layer
@@ -82,23 +82,23 @@ is rewritten to match.
 
 | ID | 🟢 GREEN | 🔴 RED — must be *seen* to fail | 🎯 SUBJECT | Tier | Result |
 |---|---|---|---|---|---|
-| `P0.5-X1` ⭐**NEW** | A frame at `data:text/html,a://127.0.0.1:5137/<script>…` is stamped **external and gated** | ⛔ Pre-fix it must reach Rust **header-free** (internal). This crafted `data:` URL is the new RED — the `about:blank` case alone is a strict subset and was never the reachable input class | Rust-side gate outcome **and** the browser-process origin log line, in the same run as an internal control | T1 | ⬜ |
-| `P0.5-X2` ⭐**NEW** | `cefMessage.send('send_transaction', …)` from `https://example.com` is **refused before dispatch** | ⛔ Pre-fix: **MEASURED spending, no prompt** — §4g | The **browser-process** IPC dispatch, not Rust alone. Rust cannot distinguish the transports; both arrive header-free | T1 | ⬜ |
-| `P0.5-X3` ⭐**NEW** | A **newly added** wallet arm with no explicit check is **denied** from an external origin | ⛔ Add a throwaway arm that calls a wallet endpoint → pre-fix it dispatches | The default-deny allowlist, not any one arm. This row is the whole point of C2 | T1 | ⬜ |
-| `P0.5-X4` ⭐**NEW** | `http://127.0.0.1:5137@evil.com/` is **not** internal to `IsInternalFrontendUrl` / `IsLoopbackUrl` | ⛔ Pre-fix both return **true** (verified: both are `rfind(pfx,0)==0`, so userinfo prefix-matches) | The two `PortConfig.h` predicates, unit-testable without CEF | T0 | ⬜ |
+| `P0.5-X1` ⭐**NEW** | A frame at `data:text/html,a://127.0.0.1:5137/<script>…` is stamped **external and gated** | ⛔ Pre-fix it must reach Rust **header-free** (internal). This crafted `data:` URL is the new RED — the `about:blank` case alone is a strict subset and was never the reachable input class | Rust-side gate outcome **and** the browser-process origin log line, in the same run as an internal control | T1 | ✅ **GREEN, RED observed — §4i.** Self-scripting crafted `data:` frame attributed to `example.com` and DENIED; pre-fix build dispatched it |
+| `P0.5-X2` ⭐**NEW** | `cefMessage.send('send_transaction', …)` from `https://example.com` is **refused before dispatch** | ⛔ Pre-fix: **MEASURED spending, no prompt** — §4g | The **browser-process** IPC dispatch, not Rust alone. Rust cannot distinguish the transports; both arrive header-free | T1 | ✅ **GREEN, RED observed — §4i.** Refused at the gate, nothing reached the wallet; pre-fix the SAME call logged `💸 /transaction/send … 999999999999 satoshis` |
+| `P0.5-X3` ⭐**NEW** | A **newly added** wallet arm with no explicit check is **denied** from an external origin | ⛔ Add a throwaway arm that calls a wallet endpoint → pre-fix it dispatches | The default-deny allowlist, not any one arm. This row is the whole point of C2 | T1 | ✅ **GREEN, RED observed — §4i.** `get_balance` denied; pre-fix it disclosed `Balance: 41924349 satoshis` to example.com |
+| `P0.5-X4` ⭐**NEW** | `http://127.0.0.1:5137@evil.com/` is **not** internal to `IsInternalFrontendUrl` / `IsLoopbackUrl` | ⛔ Pre-fix both return **true** (verified: both are `rfind(pfx,0)==0`, so userinfo prefix-matches) | The two `PortConfig.h` predicates, unit-testable without CEF | T0 | ✅ **GREEN, RED observed** — 15 unit tests; 8 fail against the pre-fix bodies (commit `aa439d3`) |
 | `P0.5-G1` | `https://<origin>/?x=127.0.0.1:5137` is served **nothing** from disk | ⛔ **Pre-fix this must SUCCEED** — if it does not, §7.3 is refuted and this row is withdrawn | **Release-shaped** build: `IsFrontendAvailable()` is true in production (`{app}\frontend\`), so this is not a dev-only defect | T2 | 🟡 **UNTESTABLE IN DEV** — see §4a. Code fixed; RED still owed on a release-shaped build |
 | `P0.5-G2` | The same page gets **no** `window.hodosBrowser.identity` | Pre-fix it must be **defined**. Control: the same page *without* the substring must get neither | Renderer for **that page's** frame — not an overlay. `type:"page"` over CDP is not proof of which browser | T2 | ✅ **GREEN, RED observed** — §4b |
 | `P0.5-G3` |  `preflight.ps1` gate `G2` passes at baseline **2** (from 5) | Add one new `find("127.0.0.1:5137")` → gate **exits non-zero** even at a non-zero baseline | `preflight.ps1 -NegativeControl` | T0 | ✅ **GREEN** `2 violations, at baseline`; 🔴 observed `3 > 2` |
-| `P0.5-E1` | An origin-less **or origin-forged** frame is gated | Feed both an `about:blank` child **and** the crafted `data:` URL → each must be seen ungated pre-fix | The Rust-side gate outcome | T1 | 🔴 **REOPENED 2026-08-19** — the GREEN in §4d is real *for `about:blank`* and **void as evidence that the boundary holds**. The step-1 parse is unanchored, so an attacker-chosen frame URL never reaches the cascade. Superseded by `P0.5-X1`; keep this row until X1 is green |
+| `P0.5-E1` | An origin-less **or origin-forged** frame is gated | Feed both an `about:blank` child **and** the crafted `data:` URL → each must be seen ungated pre-fix | The Rust-side gate outcome | T1 | ✅ **GREEN, RED observed — §4i.** `about:blank` child now inherits `example.com` and is denied; pre-fix empty origin ⇒ `IsInternalOrigin("")==true` ⇒ dispatched. Superseded by `X1` |
 
 ### Half 0.5b — Rust money path
 
 | ID | 🟢 GREEN | 🔴 RED — must be *seen* to fail | 🎯 SUBJECT | Tier | Result |
 |---|---|---|---|---|---|
-| `P0.5-R1` | User send from the wallet UI → **no modal**, tx broadcasts | Stub the internal branch to require approval → a modal appears | Frame URL `127.0.0.1:5137`; Rust log shows **no** `X-Requesting-Domain` | T2 | ⬜ |
-| `P0.5-R2` | External page, over-cap send → **202 + modal** | Revert the `dispatch_payment` wiring → the send completes silently | Rust log shows `X-Requesting-Domain: <exact page host>` | T2 | ⬜ |
-| `P0.5-R3` ✏️**REWRITTEN** | External `sendMax:true` → **forced prompt** (not a cap evaluation) | Same revert → full balance sweeps | Scratch wallet, funded with a token amount. ⛔ **Never the production wallet.** The dev wallet (`HodosBrowserDev`, 41,931,019 sats) is a valid scratch wallet — the production wallet is a **separate DB** (§4h) | T2 | ⬜ |
-| `P0.5-X5` ⭐**NEW** | `peerpay_send` / `paymail_send` from an external origin → **202 + modal** | ⛔ Pre-fix: both spend with **no gate of any kind** — they take no `HttpRequest`, so `dispatch_payment` is structurally impossible | Both endpoints, both body shapes. ⚠️ A **third** body shape — do both or neither | T2 | ⬜ |
+| `P0.5-R1` | User send from the wallet UI → **no modal**, tx broadcasts | Stub the internal branch to require approval → a modal appears | Frame URL `127.0.0.1:5137`; Rust log shows **no** `X-Requesting-Domain` | T2 | ✅ **GREEN — §4i.** Owner-run send, 201,274 sats: no modal, no gate line, no `X-Requesting-Domain`, no IPC denial, `POST /transaction/send 200`, broadcast `SEEN_ON_NETWORK` |
+| `P0.5-R2` | External page, over-cap send → **202 + modal** | Revert the `dispatch_payment` wiring → the send completes silently | Rust log shows `X-Requesting-Domain: <exact page host>` | T2 | ✅ **GREEN — §4i.** External page → 202 + modal, owner saw and denied it; Rust logged `domain=example.com` (exact page host) |
+| `P0.5-R3` ✏️**REWRITTEN** | External `sendMax:true` → **forced prompt** (not a cap evaluation) | Same revert → full balance sweeps | Scratch wallet, funded with a token amount. ⛔ **Never the production wallet.** The dev wallet (`HodosBrowserDev`, 41,931,019 sats) is a valid scratch wallet — the production wallet is a **separate DB** (§4h) | T2 | ✅ **GREEN as rewritten — §4i.** `sendMax:true` from an approved domain → 202 forced prompt. ⚠️ Rendered as **"0 sats"** (finding 6) |
+| `P0.5-X5` ⭐**NEW** | `peerpay_send` / `paymail_send` from an external origin → **202 + modal** | ⛔ Pre-fix: both spend with **no gate of any kind** — they take no `HttpRequest`, so `dispatch_payment` is structurally impossible | Both endpoints, both body shapes. ⚠️ A **third** body shape — do both or neither | T2 | ✅ **GREEN, RED observed** — commit `9dc1586`. ⛔ First measurement was a FALSE GREEN (unknown domain ⇒ domain-trust fired first); re-run against an APPROVED domain |
 | `P0.5-C1` | Cross-origin simple POST no longer executes the handler | Remove `block_on_origin_mismatch` → the handler runs despite the browser hiding the response | **Server-side effect**, not the browser's error. A blocked read is not a blocked write | T2 | ✅ **GREEN, RED observed — §4e.** ⚠️ But the same measurement **confirmed panel finding 4**: it also 400s the direct-HTTP dApp transport. Owner decision owed before this row signs off |
 | ~~`P0.5-R4`~~ | ~~Gold pill fires on a newly silent-approved send~~ | — | — | — | ⛔ **WITHDRAWN 2026-08-19 — the row has no subject.** No `/transaction/send` call can emit `payment_success_indicator`: all six `OnWalletCallSuccess` sites derive `wasAutoApprovedPayment` as `ok && isPaymentEndpoint(endpoint) && !isError`, and `isPaymentEndpoint` is `{/createAction, /acquireCertificate, /sendMessage}` — `d33741a` deliberately excludes `/transaction/send`. Stronger: an external send can never be **silently** approved at all, because `matrix_c.rs:240` prompts unconditionally. The obvious way to "test the pill" is a `createAction`, which **passes with both commits reverted** — a HARNESS §6-Q1 void green waiting to happen. R-GOLD stays covered by `../REGRESSION_SET.md:35-41` at the 0.5→1 boundary. Filed separately: an `X-User-Approved` replay on `/transaction/send` moves funds and emits no pill while a byte-identical `/createAction` replay does |
 
@@ -347,6 +347,89 @@ the image name `HodosBrowser.exe`; and `cargo build … | grep` **discards the e
 
 *(Unrelated, observed in the same port scan: **CDP 9222 is LISTENING on the production browser** —
 `../TICKET_cdp_port_open_in_release.md`, now observed live rather than inferred. Not this phase.)*
+
+### 4i. 🟢 LIVE RUN — the whole 0.5a table, GREEN and RED, same day, same machine
+
+**MEASUREMENT, 2026-08-19.** Dev browser (`cef-native/build/bin/Release`, `HODOS_DEV=1`,
+`--profile=Default`) on **CDP 9322**. Production browser ran concurrently on 9222 throughout and was
+never driven; dev processes were killed **by executable path**, never image name (52 production
+processes still alive after each kill, prod CDP still bound).
+
+⚠️ **SUBJECT DISCIPLINE.** The browser exposed **11 CDP targets, every one `type:"page"`** — the
+header and ten overlays included. The harness (`scratchpad/cdp.py`) therefore selects targets **by
+URL only** and refuses on ambiguity, and every `evaluate()` returns `location.href` alongside its
+value so each result carries proof of which document produced it. Tabs were **navigated**, never
+created via `PUT /json/new` (CDP-created tabs bypass `OnBeforeBrowse`). For `X1` the crafted frame's
+existence was additionally proven out of `Page.getFrameTree` before the assertion was read.
+
+**RED was produced by rebuilding the shell from `8d0f270` (pre-fix `simple_handler.cpp` +
+`PortConfig.h`), relaunching, and re-firing the identical calls** — not by reasoning about what the
+old code would have done.
+
+| Probe, from `https://example.com` | 🔴 PRE-FIX build | 🟢 POST-FIX build |
+|---|---|---|
+| `cefMessage.send('send_transaction', {amount: 999999999999})` (`X2`) | dispatched → wallet logged `💸 /transaction/send called` · `Amount: 999999999999 satoshis` | `🛡️ IPC DENIED: 'send_transaction' from external origin 'example.com'` — **nothing reached the wallet** |
+| `cefMessage.send('get_balance')` (`X3`) | dispatched → wallet logged `✅ Balance: 41924349 satoshis` **disclosed to the page** | `🛡️ IPC DENIED: 'get_balance' …` |
+| self-scripting `data:text/html,a://127.0.0.1:5137/<script>…` frame (`X1`) | dispatched | attributed to **`example.com`**, denied |
+| `about:blank` child, `contentWindow.cefMessage` (`E1`) | empty origin ⇒ `IsInternalOrigin("")==true` ⇒ dispatched | attributed to **`example.com`**, denied |
+
+**Controls in the same runs — the gate discriminates, it does not merely block:**
+
+| Control | Result |
+|---|---|
+| `wallet_call` from `example.com` (allowlisted) | ✅ reached the wallet and was **engine**-gated: `🔒 IPC: domain example.com trust_level: unknown` → `minted approval … type=DomainApproval`. dApp interop intact |
+| Overlays + header throughout | ✅ `🔒 IPC internal origin 127.0.0.1:5137 — direct dispatch`, continuously, unaffected |
+
+⭐ **Two false starts, recorded because they are the interesting part:**
+
+1. `f.contentWindow.cefMessage` on a **`data:`** frame throws
+   `SecurityError: Blocked a frame with origin "https://example.com" from accessing a cross-origin
+   frame` — a `data:` frame is opaque-origin, so the parent cannot script into it. **The parent-reach
+   PoC shape does not work for `data:`; the frame must run its own inline script.** A harness that
+   only tried the parent-reach shape would have reported X1 green against *vulnerable* code.
+2. A second probe fired at the same domain while an approval was pending returned nothing — it was
+   **queued** by `hasPendingForDomain`, not dropped. Sequencing artefact, not a defect.
+
+**`P0.5-R1` — the pairing control, run by the owner in the wallet UI.** Real send, **201,274 sats**
+to the wallet's own address:
+
+| Check | Result |
+|---|---|
+| Approval modal | **none** — no `engine Prompt`, no `minted approval` in the Rust log |
+| `X-Requesting-Domain` | **absent** (internal path) |
+| Any `IPC DENIED` during the send | **none** — the new default-deny gate blocked nothing the UI needed |
+| HTTP | `POST /transaction/send 200`, 2.05 s |
+| Broadcast | `gorillapool_mapi accepted … SEEN_ON_NETWORK` |
+| Balance | 41,924,349 → 41,721,875 = **−202,474** exactly (201,274 + 1,000 service fee + 200 mining fee) |
+
+⇒ **R-INTEXT holds on both halves in the same session**: eleven wallet IPC arms are now default-denied
+to web pages, and the first-party UI — which uses those same arms — is untouched.
+
+**`P0.5-R2`** — external over-cap send via the allowlisted bridge → 202 + modal; **the owner saw the
+prompt and denied it**; Rust logged `domain=example.com`, the exact page host.
+
+**`P0.5-R3`** — from an *approved* scratch domain (so domain-trust passes and only the payment gate
+can decide): both `amount:5000000` and `sendMax:true` → 202 `payment_confirmation` /
+`price_unavailable`. Forced prompt, as rewritten.
+
+🚨 **Finding 6 is now observed on FOUR calls, and the worst is `sendMax:true`.** A full-balance sweep
+is presented to the user as `{"satoshis":0,"cents":0,"bsvPrice":0}` — **"0 sats"** — under a
+price-outage cause that is not occurring (the same session's price cache returned **$14.89–$14.95**).
+Endpoints affected: `/transaction/send` (both amount and sendMax), `/wallet/peerpay/send`,
+`/wallet/paymail/send`. This is the single most user-hostile thing left in the phase.
+
+**Dev-DB hygiene:** both scratch domain-permission rows (`approved-test.example`,
+`r2-payment.example`) were deleted after use; `example.com` never persisted a row (deny writes none).
+
+⚠️ **Out of scope, observed and NOT chased** (CLAUDE.md #13 — do not touch production code reached
+via an incidental finding): the R1 send inserted its pending change output under the **unsigned**
+txid `c86ebe1d…`, while the transaction that broadcast is `6e222710…` (the txid changes once
+signatures are added; `c86ebe1d` is not and never will be on-chain). Balance is nonetheless exactly
+right, and this matches the documented **ghost output** lifecycle `TaskFailAbandoned` exists to clean.
+Separately, an incoming **unconfirmed** output to the wallet's own address is not credited by
+`/wallet/sync` (full or partial): sync calls `fetch_all_utxos`, and the codebase has a *separate*
+`fetch_utxos_single_address_with_unconfirmed` that it does not use. Both are **pre-existing** —
+`git diff 637e216..HEAD` touches no UTXO/sync/balance/monitor file. **File as tickets, not here.**
 
 ## 5. Blast radius
 
