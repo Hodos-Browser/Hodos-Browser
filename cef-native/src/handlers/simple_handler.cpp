@@ -1986,6 +1986,70 @@ bool SimpleHandler::OnBeforePopup(
     return false;
 }
 
+// ============================================================================
+// P0.5 C1/C2 — the IPC trust boundary. ONE derivation, applied ONCE.
+// ============================================================================
+//
+// ⛔ READ BEFORE ADDING AN IPC ARM. The reason Phase 0.5 was refuted by its own
+// adversarial panel is that the origin check lived INSIDE the wallet_call arm,
+// so `send_transaction` (simple_handler.cpp, the arm that the wallet UI itself
+// uses) had none — and `cefMessage` is injected into EVERY V8 context with no
+// message-name allowlist. MEASURED 2026-08-19: from https://example.com,
+//   cefMessage.send('send_transaction', [JSON.stringify({toAddress:'1…',
+//                                                        amount: N, sendMax:false})])
+// reached Rust with no X-Requesting-Domain, so dispatch_payment took its
+// `None => Proceed` branch: no gate, no modal, no gold pill. Eleven other wallet
+// arms shared that shape. Gating arm-by-arm is HOW that was missed.
+//
+// So the gate is here, at the top, and it is DEFAULT-DENY: a new arm added later
+// is refused from a web page automatically. You only touch the list below if you
+// are deliberately exposing something to untrusted content — which should be
+// close to never.
+static std::string ResolveIpcOrigin(CefRefPtr<CefBrowser> browser,
+                                    CefRefPtr<CefFrame> frame) {
+    std::string origin;
+    if (frame) {
+        origin = hodos::OriginFromUrl(frame->GetURL().ToString());
+
+        // about:blank / data: / blob: inherit the nearest real ancestor origin.
+        for (CefRefPtr<CefFrame> f = frame->GetParent(); f && origin.empty();
+             f = f->GetParent()) {
+            origin = hodos::OriginFromUrl(f->GetURL().ToString());
+        }
+
+        // Last resort: this browser's top-level document.
+        if (origin.empty() && browser && browser->GetMainFrame()) {
+            origin = hodos::OriginFromUrl(browser->GetMainFrame()->GetURL().ToString());
+        }
+    }
+
+    // Unknown provenance is NOT trusted provenance. RFC 2606 reserves .invalid,
+    // so this can never collide with a real host and is always gated external.
+    if (origin.empty()) origin = "opaque-origin.invalid";
+    return origin;
+}
+
+// The ONLY messages an untrusted web page may send. Everything else is refused.
+//
+// These four are the complete set of IPC names emitted by code we inject into a
+// PAGE context (verified by grepping every cefMessage.send / ProcessMessage
+// Create site in cef-native/):
+//   wallet_call            — the dApp bridge; gated downstream by the Rust engine
+//   cosmetic_class_id_query— adblock cosmetic filtering, runs on every page
+//   find_result_js         — find-in-page, injected into the searched page
+//   qr_found               — QR scan results, injected into the scanned page
+//
+// ⚠️ qr_found is allowed to PRESERVE EXISTING BEHAVIOUR, not because it is
+// beyond suspicion: a hostile page can post fabricated scan results. It reaches
+// a form the user must still confirm, so it is not a fund-mover on its own.
+// Named as a residual in the Phase 0.5 contract §6 for WS6/Phase 5.
+static bool IpcMessageAllowedFromWebPage(const std::string& name) {
+    return name == "wallet_call"
+        || name == "cosmetic_class_id_query"
+        || name == "find_result_js"
+        || name == "qr_found";
+}
+
 bool SimpleHandler::OnProcessMessageReceived(
     CefRefPtr<CefBrowser> browser,
     CefRefPtr<CefFrame> frame,
@@ -1996,6 +2060,16 @@ bool SimpleHandler::OnProcessMessageReceived(
 
     std::string message_name = message->GetName();
     LOG_DEBUG_BROWSER("📨 Message received: " + message_name + ", Browser ID: " + std::to_string(browser->GetIdentifier()));
+
+    // ===== P0.5 C2 — DEFAULT-DENY TRUST GATE (see ResolveIpcOrigin above) =====
+    // Resolved once, here, and reused by every arm below that needs it. Do NOT
+    // re-derive an origin further down: a second spelling is how this broke.
+    const std::string ipcOrigin = ResolveIpcOrigin(browser, frame);
+    if (!IsInternalOrigin(ipcOrigin) && !IpcMessageAllowedFromWebPage(message_name)) {
+        LOG_WARNING_BROWSER("🛡️ IPC DENIED: '" + message_name + "' from external origin '"
+                            + ipcOrigin + "' — not in the web-page allowlist");
+        return true;  // handled (swallowed); the page gets no response
+    }
 
     // ========== WALLET IPC BRIDGE (Phase 2.5) ==========
     // Promise-correlated wallet calls from the shim's window.__hodos_walletCall.
@@ -2047,51 +2121,29 @@ bool SimpleHandler::OnProcessMessageReceived(
         // (that bridge is main-frame-only), but it DOES get `cefMessage`, the raw IPC
         // underneath. Fixing the bridge would not have closed this.
         //
-        // ⛔ The fix belongs HERE, at the derivation, NOT in IsInternalOrigin. That
+        // ⛔ The fix belongs at the DERIVATION, NOT in IsInternalOrigin. That
         // predicate is also fed by the HTTP path, where an absent X-Requesting-Domain
         // legitimately means "internal"; flipping it would break every real internal
         // call. What is wrong is manufacturing an empty origin for a frame that HAS a
         // security origin — an about:blank child inherits its parent's.
         //
-        // So: this frame -> nearest ancestor with a real origin -> the top document.
-        // If none of those yields one, FAIL CLOSED with a sentinel that can never be a
-        // real host (RFC 2606 reserves .invalid), so it is stamped as an external
-        // domain and gated, rather than silently becoming internal.
-        auto originFromUrl = [](const std::string& u) -> std::string {
-            size_t protoEnd = u.find("://");
-            if (protoEnd == std::string::npos) return std::string();
-            size_t hostStart = protoEnd + 3;
-            size_t pathStart = u.find('/', hostStart);
-            return (pathStart != std::string::npos)
-                ? u.substr(hostStart, pathStart - hostStart)
-                : u.substr(hostStart);
-        };
-
-        std::string origin;
-        if (frame) {
-            origin = originFromUrl(frame->GetURL().ToString());
-
-            // Inherit from the nearest ancestor that has one (about:blank/data:/blob:).
-            for (CefRefPtr<CefFrame> f = frame->GetParent(); f && origin.empty();
-                 f = f->GetParent()) {
-                origin = originFromUrl(f->GetURL().ToString());
-            }
-
-            // Last resort: the top-level document of this browser.
-            if (origin.empty() && browser && browser->GetMainFrame()) {
-                origin = originFromUrl(browser->GetMainFrame()->GetURL().ToString());
-            }
-
-            if (origin.empty()) {
-                // Unknown provenance is NOT trusted provenance.
-                origin = "opaque-origin.invalid";
-                LOG_WARNING_BROWSER(
-                    "🛡️ wallet_call from a frame with no resolvable origin (url='"
-                    + frame->GetURL().ToString() + "') — failing closed as external");
-            }
-        } else {
-            origin = "opaque-origin.invalid";
-            LOG_WARNING_BROWSER("🛡️ wallet_call with no frame — failing closed as external");
+        // That derivation + its fail-closed cascade now live in ResolveIpcOrigin at
+        // the top of this file, and run for EVERY message, not just this arm.
+        //
+        // ⛔ P0.5 C1 — do NOT re-derive the origin here. The inline lambda this
+        // replaced searched the whole frame URL for "://" with no scheme anchor,
+        // so a crafted data:/about:blank frame URL supplied a NON-EMPTY attacker
+        // origin at step 1 — which meant the ancestor cascade and the
+        // opaque-origin sentinel below it were never reached, and
+        // `data:text/html,a://127.0.0.1:5137/` was accepted as wallet-internal.
+        // The derivation now lives in ResolveIpcOrigin (scheme-anchored, userinfo
+        // stripped) and has already run at the top of this function.
+        const std::string& origin = ipcOrigin;
+        if (origin == "opaque-origin.invalid") {
+            LOG_WARNING_BROWSER(
+                "🛡️ wallet_call from a frame with no resolvable origin (url='"
+                + std::string(frame ? frame->GetURL().ToString() : "<no frame>")
+                + "') — failing closed as external");
         }
 
         CefRefPtr<CefFrame> capturedFrame = frame;
@@ -8006,7 +8058,7 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
     {
         std::string frontend_dir;
         // P0.5-G1: prefix match, not substring. The old find() served
-        // {app}rontend\index.html (via the SPA fallback) to ANY url containing
+        // {app}\frontend\index.html (via the SPA fallback) to ANY url containing
         // the string, on the attacker's own origin.
         if (hodos::IsInternalFrontendUrl(url) &&
             IsFrontendAvailable(frontend_dir)) {

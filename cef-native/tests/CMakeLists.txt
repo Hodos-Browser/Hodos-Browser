@@ -40,6 +40,7 @@ add_executable(hodos_tests
     update_fs_test.cpp                  # commit 6b.2a — backup/verify/restore primitives
     silent_state_writer_test.cpp        # #1 — silent-eligibility mirror pure helpers
     farbling_policy_test.cpp            # C2 — eTLD+1 keying, seed persistence, HMAC
+    port_config_origin_test.cpp         # P0.5 C1 (row X4) — scheme-anchored origin derivation
 
     # Production sources under test (built into the test exe directly).
     # (Phase 2.6-H removed permission_engine_test / permission_gate_test along
