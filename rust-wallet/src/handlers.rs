@@ -17105,6 +17105,7 @@ pub struct PeerpaySendRequest {
 /// 5. Send encrypted message via MessageBox API (BRC-2 + BRC-103)
 pub async fn peerpay_send(
     state: web::Data<AppState>,
+    http_req: HttpRequest,
     body: web::Bytes,
 ) -> HttpResponse {
     log::info!("💸 /wallet/peerpay/send called");
@@ -17144,6 +17145,43 @@ pub async fn peerpay_send(
             "success": false,
             "error": "Amount must be greater than 0"
         }));
+    }
+
+    // ===== P0.5 C3 — payment gate. MUST stay above every fund-moving step. =====
+    //
+    // Until 2026-08-19 this handler took only (state, body): with no HttpRequest
+    // there was no header map, so dispatch_payment was STRUCTURALLY IMPOSSIBLE and
+    // the only gate was domain_trust_mw, which returns Proceed for any domain at
+    // trust_level = approved. That bypassed the per-tx cap, the per-session cap AND
+    // the session counters — strictly worse than the /transaction/send hole closed
+    // in d33741a, because this handler takes an attacker-controlled destination and
+    // amount and broadcasts (its only validation was amount_satoshis <= 0).
+    //
+    // Reachable from any page: wallet_call concatenates a page-supplied endpoint
+    // onto the wallet base URL with no allowlist, and isWalletEndpoint's "/wallet/"
+    // arm matches this route.
+    //
+    // Discriminator unchanged (R-INTEXT): dispatch_payment returns Proceed when
+    // there is no X-Requesting-Domain, so a PeerPay send from the user's own wallet
+    // UI is untouched — no modal, no new latency.
+    //
+    // ⚠️ THIRD BODY SHAPE. This is {recipient_identity_key, amount_satoshis} — not
+    // {toAddress, amount, sendMax} and not {outputs:[{satoshis}]}. C++'s
+    // isPaymentEndpoint() does not list this route, so external callers arrive with
+    // no X-Payment-* headers and are fail-closed into a price_unavailable prompt
+    // rather than priced at 0 cents. Adding this route to isPaymentEndpoint WITHOUT
+    // also teaching extractOutputSatoshis this shape would price every PeerPay send
+    // at 0 cents and silently auto-approve it. Do both or neither.
+    let outcome = crate::permission_service::dispatch_payment(
+        &state.permission,
+        &state.database,
+        state.current_user_id,
+        &http_req,
+        &body,
+        "/wallet/peerpay/send",
+    );
+    if let crate::permission_service::GateOutcome::EarlyReturn(resp) = outcome {
+        return resp;
     }
 
     // Get our master keys
@@ -18148,6 +18186,7 @@ pub struct PaymailResolveQuery {
 /// builds a transaction, broadcasts, and optionally notifies the receiver.
 pub async fn paymail_send(
     state: web::Data<AppState>,
+    http_req: HttpRequest,
     body: web::Bytes,
 ) -> HttpResponse {
     log::info!("💸 /wallet/paymail/send called");
@@ -18168,6 +18207,32 @@ pub async fn paymail_send(
             "success": false,
             "error": "Amount must be greater than 0"
         }));
+    }
+
+    // ===== P0.5 C3 — payment gate. MUST stay above every fund-moving step. =====
+    //
+    // Same defect and same fix as peerpay_send above — see that comment for the
+    // full rationale. This handler also took only (state, body), so
+    // dispatch_payment was structurally impossible and an attacker-controlled
+    // paymail + amount reached broadcast behind domain_trust_mw alone.
+    //
+    // Deliberately placed BEFORE parse_paymail and before get_p2p_destination:
+    // resolving a paymail is an OUTBOUND request to a third-party host, so gating
+    // earlier also stops a denied call from leaking the recipient to that host.
+    //
+    // ⚠️ THIRD BODY SHAPE: {paymail, amount_satoshis}. The isPaymentEndpoint /
+    // extractOutputSatoshis "do both or neither" warning in peerpay_send applies
+    // verbatim here.
+    let outcome = crate::permission_service::dispatch_payment(
+        &state.permission,
+        &state.database,
+        state.current_user_id,
+        &http_req,
+        &body,
+        "/wallet/paymail/send",
+    );
+    if let crate::permission_service::GateOutcome::EarlyReturn(resp) = outcome {
+        return resp;
     }
 
     // Parse paymail (handles $handle → alias@handcash.io conversion)
