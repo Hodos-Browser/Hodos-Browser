@@ -1,7 +1,7 @@
 # Phase 0.5 — money path & trust boundary · PHASE CONTRACT
 
 **Workstream:** WS5(a) · **Ticket:** `../TICKET_loopback_host_form_wallet_routing.md` §6.2, §7.1, §7.3
-**Status:** 🚧 IN PROGRESS — code complete, panel + T2 rows owed · **Opened:** 2026-08-18 · **Amended:** 2026-08-19 (§4a–§4c, §5a) · **Platforms:** both (Rust = one binary; the C++ gates are cross-platform)
+**Status:** 🔴 NOT SIGNED OFF — adversarial panel returned DO-NOT-SIGN-OFF; 3 criticals, one MEASURED. Repair prompt: `../SESSION_PROMPT_beta3_p05_repair.md` · **Opened:** 2026-08-18 · **Amended:** 2026-08-19 (§4a–§4c, §5a) · **Platforms:** both (Rust = one binary; the C++ gates are cross-platform)
 **Standard:** `../HARNESS.md`.
 
 ---
@@ -158,8 +158,15 @@ here; a stricter opaque-origin model belongs with Phase 5's parsed predicate.
 
 ## 5. Blast radius
 
-- `rust-wallet/src/handlers.rs :: send_transaction` (9612–9951) — signature change; every caller is
-  `WalletService::sendTransaction` via `simple_handler.cpp:5740`, i.e. first-party today.
+- `rust-wallet/src/handlers.rs :: send_transaction` (9612–9951) — signature change; ~~every caller is
+  `WalletService::sendTransaction` via `simple_handler.cpp:5740`, i.e. first-party today.~~
+  ⛔ **FALSE — refuted by measurement 2026-08-19.** That call site is the `send_transaction` **IPC
+  arm** (`simple_handler.cpp:5760`), which performs no origin check, and `cefMessage` is injected
+  into every V8 context with no message-name allowlist. A page at `https://example.com` reached
+  `/transaction/send` unprompted (`Amount: 999999999999 satoshis`, HTTP 500 at UTXO selection only
+  because the amount exceeded the balance). This was the load-bearing assumption of the phase and it
+  was carried forward from the contract without being tested. Struck, not deleted — it is exactly the
+  kind of plausible premise this project keeps shipping on.
 - `rust-wallet/src/main.rs` — CORS builder (`:922-930`). One line, affects every route.
 - `cef-native/src/handlers/simple_handler.cpp:7962` — frontend-from-disk gate.
 - `cef-native/src/handlers/simple_render_process_handler.cpp:539,541` — the privileged V8 surface
