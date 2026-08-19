@@ -30,8 +30,22 @@ struct WhatsOnChainUTXO {
     tx_pos: u32,
     value: i64,
     /// Block height. 0 or negative = unconfirmed (mempool only).
+    ///
+    /// MEASURED 2026-08-19: entries from the *unconfirmed* endpoints omit this
+    /// field entirely (they carry `status:"unconfirmed"` + `hex` instead), so the
+    /// `serde(default)` is load-bearing, not defensive — it is what makes a
+    /// mempool UTXO deserialize as height 0.
     #[serde(default)]
     height: i64,
+    /// WoC flags an output that a *mempool* transaction already spends.
+    ///
+    /// ⚠️ The confirmed endpoint keeps returning such an output as "unspent"
+    /// until the spending tx confirms. Counting it overstates the balance —
+    /// measured on this wallet: a 19,077,803 sat output came back
+    /// `isSpentInMempoolTx: true` while our own spend of it sat in the mempool.
+    /// Nothing read this field before 2026-08-19.
+    #[serde(default, rename = "isSpentInMempoolTx")]
+    is_spent_in_mempool_tx: bool,
 }
 
 /// WhatsOnChain /unspent/all wrapper response
@@ -309,13 +323,78 @@ fn generate_p2pkh_script_from_address(address: &str) -> Result<String, String> {
     Ok(script_hex)
 }
 
-/// Fetch UTXOs for multiple addresses using WhatsOnChain bulk endpoint.
+/// WhatsOnChain bulk endpoints. **Both are required.**
 ///
-/// POST https://api.whatsonchain.com/v1/bsv/main/addresses/confirmed/unspent
-/// Body: { "addresses": ["addr1", "addr2", ...] }  (max 20)
+/// ⛔ MEASURED 2026-08-19 — do not "simplify" these into the single
+/// `addresses/unspent` endpoint. Despite its name it returns **confirmed only**.
+/// Same address, same moment, one unconfirmed output present:
+///   addresses/unspent              -> 1 entry  (confirmed only)   ❌
+///   addresses/confirmed/unspent    -> 1 entry  (confirmed)        ✔
+///   addresses/unconfirmed/unspent  -> 1 entry  (the mempool one)  ✔
+/// The single-address `address/{a}/unspent/all` *does* include both, which is why
+/// TaskSyncPending's individual tier saw a payment the bulk tier could not.
+const WOC_BULK_CONFIRMED: &str =
+    "https://api.whatsonchain.com/v1/bsv/main/addresses/confirmed/unspent";
+const WOC_BULK_UNCONFIRMED: &str =
+    "https://api.whatsonchain.com/v1/bsv/main/addresses/unconfirmed/unspent";
+
+/// One bulk POST with retry/backoff. Returns parsed items, or None if the
+/// endpoint could not be read after retries.
+async fn fetch_bulk_chunk(
+    client: &reqwest::Client,
+    url: &str,
+    body: &serde_json::Value,
+    max_retries: u32,
+    initial_delay_ms: u64,
+) -> Option<Vec<WhatsOnChainBulkItem>> {
+    for attempt in 0..=max_retries {
+        let response = match client.post(url).json(body).send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                if attempt < max_retries {
+                    let delay_ms = initial_delay_ms * (1 << attempt);
+                    log::warn!("   Bulk request failed (attempt {}/{}): {}. Retrying in {}ms...",
+                              attempt + 1, max_retries + 1, e, delay_ms);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+                    continue;
+                }
+                log::warn!("   Bulk request failed after {} attempts: {}", max_retries + 1, e);
+                return None;
+            }
+        };
+
+        let status = response.status();
+        if status.is_success() {
+            return match response.json::<Vec<WhatsOnChainBulkItem>>().await {
+                Ok(items) => Some(items),
+                Err(e) => {
+                    log::warn!("   Failed to parse bulk response from {}: {}", url, e);
+                    None
+                }
+            };
+        } else if status.is_server_error() && attempt < max_retries {
+            let delay_ms = initial_delay_ms * (1 << attempt);
+            log::warn!("   Bulk server error {} (attempt {}/{}). Retrying in {}ms...",
+                      status, attempt + 1, max_retries + 1, delay_ms);
+            tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+            continue;
+        } else {
+            log::warn!("   Bulk endpoint {} returned status {}", url, status);
+            return None;
+        }
+    }
+    None
+}
+
+/// Fetch UTXOs for multiple addresses using WhatsOnChain bulk endpoints.
 ///
-/// Chunks addresses into groups of 20, retries on failure, falls back to
-/// single-address fetching if the bulk endpoint returns an error.
+/// Chunks addresses into groups of 20 and, for each chunk, reads **both** the
+/// confirmed and the unconfirmed endpoint (see the constants above for why both).
+/// The confirmed read is authoritative — if it fails, the chunk falls back to
+/// single-address fetching. The unconfirmed read is **best-effort**: losing it
+/// costs mempool visibility for one tick, which must not trigger a 20×
+/// single-address fallback storm.
+///
 /// Returns (utxos, success_count) where success_count is the number of addresses
 /// that were successfully checked (got a 200 response).
 async fn fetch_utxos_bulk(addresses: &[crate::json_storage::AddressInfo]) -> Result<(Vec<UTXO>, usize), String> {
@@ -354,73 +433,73 @@ async fn fetch_utxos_bulk(addresses: &[crate::json_storage::AddressInfo]) -> Res
                   chunk_idx + 1, chunks.len(), addr_list.len());
 
         let body = serde_json::json!({ "addresses": addr_list });
-        let mut bulk_ok = false;
 
-        // Retry loop for bulk endpoint
-        for attempt in 0..=MAX_RETRIES {
-            let response = match client.post("https://api.whatsonchain.com/v1/bsv/main/addresses/confirmed/unspent")
-                .json(&body)
-                .send()
-                .await
-            {
-                Ok(resp) => resp,
-                Err(e) => {
-                    if attempt < MAX_RETRIES {
-                        let delay_ms = INITIAL_DELAY_MS * (1 << attempt);
-                        log::warn!("   Bulk request failed (attempt {}/{}): {}. Retrying in {}ms...",
-                                  attempt + 1, MAX_RETRIES + 1, e, delay_ms);
-                        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+        // Confirmed read is AUTHORITATIVE — its failure drives the fallback.
+        let confirmed_items =
+            fetch_bulk_chunk(&client, WOC_BULK_CONFIRMED, &body, MAX_RETRIES, INITIAL_DELAY_MS).await;
+        let bulk_ok = confirmed_items.is_some();
+
+        // Unconfirmed read is BEST-EFFORT — never let it trigger the fallback.
+        let unconfirmed_items = if bulk_ok {
+            fetch_bulk_chunk(&client, WOC_BULK_UNCONFIRMED, &body, MAX_RETRIES, INITIAL_DELAY_MS).await
+        } else {
+            None  // the single-address fallback below already covers both
+        };
+        if bulk_ok && unconfirmed_items.is_none() {
+            log::warn!("   Mempool read unavailable for this chunk — confirmed UTXOs only this tick");
+        }
+
+        if let Some(items) = confirmed_items {
+            let mut mempool_spent_skipped = 0usize;
+            let mut unconfirmed_added = 0usize;
+
+            // `false` = confirmed pass (counts toward success), `true` = mempool pass.
+            for (is_mempool_pass, batch) in [(false, Some(items)), (true, unconfirmed_items)] {
+                let Some(batch) = batch else { continue };
+                for item in batch {
+                    if !item.error.is_empty() {
+                        log::warn!("   Bulk API error for {}: {}", item.address, item.error);
                         continue;
                     }
-                    log::warn!("   Bulk request failed after {} attempts: {}", MAX_RETRIES + 1, e);
-                    break;
-                }
-            };
-
-            let status = response.status();
-            if status.is_success() {
-                match response.json::<Vec<WhatsOnChainBulkItem>>().await {
-                    Ok(items) => {
-                        for item in items {
-                            if !item.error.is_empty() {
-                                log::warn!("   Bulk API error for {}: {}", item.address, item.error);
-                                continue;
-                            }
-                            total_success_count += 1; // This address was successfully checked
-                            let address_index = addr_to_index.get(item.address.as_str()).copied().unwrap_or(0);
-                            let script = match addr_to_script.get(item.address.as_str()) {
-                                Some(s) => s.clone(),
-                                None => continue,
-                            };
-                            for u in item.utxos() {
-                                all_utxos.push(UTXO {
-                                    txid: u.tx_hash.clone(),
-                                    vout: u.tx_pos,
-                                    satoshis: u.value,
-                                    script: script.clone(),
-                                    address_index,
-                                    custom_instructions: None,
-                                    confirmed: true, // Bulk endpoint only returns confirmed UTXOs
-                                });
-                            }
+                    // Count each address ONCE — on the confirmed pass only, or the
+                    // success count would double and misreport coverage.
+                    if !is_mempool_pass {
+                        total_success_count += 1;
+                    }
+                    let address_index = addr_to_index.get(item.address.as_str()).copied().unwrap_or(0);
+                    let script = match addr_to_script.get(item.address.as_str()) {
+                        Some(s) => s.clone(),
+                        None => continue,
+                    };
+                    for u in item.utxos() {
+                        // Already spent by a mempool tx — WoC still lists it as
+                        // unspent on the confirmed endpoint. Counting it overstates
+                        // the balance until the spend confirms.
+                        if u.is_spent_in_mempool_tx {
+                            mempool_spent_skipped += 1;
+                            continue;
                         }
-                        bulk_ok = true;
-                        break;
-                    }
-                    Err(e) => {
-                        log::warn!("   Failed to parse bulk response: {}", e);
-                        break; // Fall through to single-address fallback
+                        if is_mempool_pass {
+                            unconfirmed_added += 1;
+                        }
+                        all_utxos.push(UTXO {
+                            txid: u.tx_hash.clone(),
+                            vout: u.tx_pos,
+                            satoshis: u.value,
+                            script: script.clone(),
+                            address_index,
+                            custom_instructions: None,
+                            // Derived, never assumed: mempool entries omit `height`
+                            // and default to 0.
+                            confirmed: u.height > 0,
+                        });
                     }
                 }
-            } else if status.is_server_error() && attempt < MAX_RETRIES {
-                let delay_ms = INITIAL_DELAY_MS * (1 << attempt);
-                log::warn!("   Bulk server error {} (attempt {}/{}). Retrying in {}ms...",
-                          status, attempt + 1, MAX_RETRIES + 1, delay_ms);
-                tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
-                continue;
-            } else {
-                log::warn!("   Bulk endpoint returned status {}", status);
-                break; // Fall through to single-address fallback
+            }
+
+            if unconfirmed_added > 0 || mempool_spent_skipped > 0 {
+                log::info!("   Bulk chunk: +{} unconfirmed UTXO(s), {} skipped as spent-in-mempool",
+                          unconfirmed_added, mempool_spent_skipped);
             }
         }
         // Fallback: single-address fetch for this chunk if bulk failed

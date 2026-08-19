@@ -33,7 +33,7 @@ The Monitor replaces the ad-hoc background services (`arc_status_poller`, `cache
 | `task_unfail.rs` | Recover falsely-failed transactions by checking on-chain status (6-hour window) | 300s |
 | `task_review_status.rs` | Consistency: propagate proof completion to transactions, fix output spendable flags, clean stale reservations | 60s |
 | `task_purge.rs` | Retention cleanup across 5 tables (`monitor_events`, `proven_tx_reqs`, `parent_transactions`, `peerpay_outbox`, `peerpay_pending_verification`) | 3600s |
-| `task_sync_pending.rs` | Tiered UTXO sync for addresses with `pending_utxo_check=1` via WhatsOnChain API (30s fresh / 3m recent / 30m old) | 30s |
+| `task_sync_pending.rs` | Tiered UTXO sync for addresses with `pending_utxo_check=1` via WhatsOnChain API (30s fresh / 3m recent / 5m old) | 30s |
 | `task_check_peerpay.rs` | Poll MessageBox for incoming BRC-29 PeerPay payments, auto-accept via BRC-42 key derivation | 60s |
 | `task_backup.rs` | Periodic on-chain wallet backup via self-call to `/wallet/backup/onchain`; returns `BackupOutcome` | 10800s (3h) |
 | `task_replay_overlay.rs` | Retry overlay notification for certificates stuck in `unpublished_pending_overlay` (max 20 attempts) | 300s |
@@ -156,9 +156,25 @@ Syncs addresses flagged with `pending_utxo_check=1`, tiered by address age so ol
 |------|-------------|---------------|------|
 | Fresh | 0–3 h (`FRESH_THRESHOLD_SECS`) | every tick (30s) | individual (includes mempool/unconfirmed) |
 | Recent | 3–18 h (`RECENT_THRESHOLD_SECS`) | every 3 min (`RECENT_CHECK_INTERVAL_SECS`) | individual |
-| Old | 18 h+ | every 30 min (`OLD_CHECK_INTERVAL_SECS`) | bulk (`check_addresses_bulk`, confirmed only) |
+| Old | 18 h+ | every 5 min (`OLD_CHECK_INTERVAL_SECS`) | bulk (`check_addresses_bulk`, **confirmed + unconfirmed** since 2026-08-19) |
 
 On the first run after startup (`FIRST_RUN` atomic), **all** pending addresses are checked individually as a startup sweep, then the tier timestamps are reset.
+
+> ⛔ **The old tier was BLIND to mempool until 2026-08-19**, because `check_addresses_bulk` hit
+> WoC's `addresses/confirmed/unspent`. An incoming payment to any address older than 18 h was
+> invisible until it confirmed. MEASURED on the dev wallet: 201,274 sats to an 18h+ address showed
+> nothing for the whole mempool window, while 5,000 sats to a recent address appeared at once —
+> same wallet, same day, address age the only variable.
+>
+> ⛔ **`addresses/unspent` does NOT fix this** — despite the name it returns confirmed only
+> (measured). The bulk path now reads **both** `confirmed/unspent` and `unconfirmed/unspent`; the
+> confirmed read is authoritative (its failure drives the single-address fallback) and the
+> unconfirmed read is best-effort. `WhatsOnChainUTXO.height` is `serde(default)` because mempool
+> entries omit the field entirely.
+>
+> ⚠️ Outputs flagged `isSpentInMempoolTx` are now skipped. WoC keeps returning an output as unspent
+> on the confirmed endpoint while a mempool tx spends it; counting it overstates the balance. This
+> fired 4 times on the very first post-fix sweep.
 
 Per-cycle behavior:
 

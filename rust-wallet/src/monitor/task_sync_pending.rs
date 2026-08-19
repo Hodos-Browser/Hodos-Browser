@@ -8,7 +8,7 @@
 //! - Startup: check ALL pending addresses immediately (individual)
 //! - Fresh (0-3 hours): every 30 seconds (individual, includes unconfirmed)
 //! - Recent (3-18 hours): every 3 minutes (individual)
-//! - Old (18+ hours): every 30 minutes (bulk, confirmed only)
+//! - Old (18+ hours): every 5 minutes (bulk, confirmed + unconfirmed)
 //!
 //! Interval: 30 seconds (task runs every tick, but only checks addresses
 //! whose tier is due)
@@ -31,7 +31,24 @@ const UNCONFIRMED_CHECK_SECS: i64 = 30 * 60; // 30 minutes
 const FRESH_THRESHOLD_SECS: i64 = 3 * 3600;   // 0-3 hours: check every tick (30s)
 const RECENT_THRESHOLD_SECS: i64 = 18 * 3600;  // 3-18 hours: check every 3 minutes
 const RECENT_CHECK_INTERVAL_SECS: u64 = 180;   // 3 minutes
-const OLD_CHECK_INTERVAL_SECS: u64 = 1800;     // 30 minutes
+// 5 minutes. Was 1800 (30 min), lowered 2026-08-19.
+//
+// Until then the old tier was BLIND to mempool, because check_addresses_bulk hit
+// WoC's confirmed-only endpoint — so an incoming payment to any address older
+// than 18h was invisible until it confirmed. MEASURED on this wallet: a 201,274
+// sat payment to an 18h+ address showed nothing for the whole mempool window,
+// while a 5,000 sat payment to a recent address appeared at once. Same wallet,
+// same day; the only variable was address age.
+//
+// utxo_fetcher now reads the unconfirmed endpoint too, so this tier can finally
+// see mempool at all — leaving only latency, which this constant fixes.
+//
+// Cost is bounded and small: addresses are chunked 20 at a time and each chunk
+// costs 2 requests (confirmed + unconfirmed). 277 addresses = 14 chunks = 28
+// requests per sweep; at 5-minute sweeps that is ~5.6 requests/min against WoC.
+// ⛔ Do NOT "fix" this tier by moving it to per-address checks: 277 addresses
+// would be 277 requests instead of 28, which is what actually risks rate limits.
+const OLD_CHECK_INTERVAL_SECS: u64 = 300;
 
 /// First run flag — on startup, check all addresses immediately
 static FIRST_RUN: AtomicBool = AtomicBool::new(true);
@@ -78,7 +95,7 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
     let now_i64 = now_secs as i64;
     let mut fresh_addresses = Vec::new();   // 0-3h: check every tick
     let mut recent_addresses = Vec::new();  // 3-18h: check every 3 min
-    let mut old_addresses = Vec::new();     // 18h+: check every 30 min
+    let mut old_addresses = Vec::new();     // 18h+: check every 5 min
 
     for addr in &all_pending {
         let age_secs = now_i64 - addr.created_at;
@@ -117,11 +134,11 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
         check_addresses_individually(state, &recent_addresses).await?;
     }
 
-    // Old addresses: check every 30 minutes, bulk (confirmed only)
+    // Old addresses: bulk sweep (confirmed + unconfirmed since 2026-08-19)
     let last_old = LAST_OLD_CHECK.load(Ordering::Relaxed);
     if !old_addresses.is_empty() && now_secs - last_old >= OLD_CHECK_INTERVAL_SECS {
         LAST_OLD_CHECK.store(now_secs, Ordering::Relaxed);
-        info!("🔄 TaskSyncPending: checking {} old address(es) (18h+) via bulk", old_addresses.len());
+        info!("🔄 TaskSyncPending: checking {} old address(es) (18h+) via bulk (incl. mempool)", old_addresses.len());
         check_addresses_bulk(state, &old_addresses).await?;
     }
 
