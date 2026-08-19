@@ -9611,6 +9611,7 @@ pub struct SendTransactionRequest {
 
 pub async fn send_transaction(
     state: web::Data<AppState>,
+    http_req: HttpRequest,
     body: web::Bytes,
 ) -> HttpResponse {
     log::info!("💸 /transaction/send called");
@@ -9652,6 +9653,40 @@ pub async fn send_transaction(
             "success": false,
             "error": "Amount must be greater than 0"
         }));
+    }
+
+    // -- P0.5-R2 / R3 -- payment gate -----------------------------------------
+    // This endpoint moves funds and, until beta.3, had NO approval gate at all: it
+    // built a createAction body and invoked create_action with a SYNTHETIC header-less
+    // request, so the caller's X-Requesting-Domain never reached the engine and
+    // dispatch_payment returned Proceed for everyone. /transaction/send is matched by
+    // isWalletEndpoint's "/transaction/" arm, so a web page can reach it -- including
+    // with sendMax:true, which sweeps the entire balance.
+    //
+    // Same call shape as create_action, and the discriminator is unchanged:
+    // dispatch_payment returns Proceed when there is no X-Requesting-Domain header, so
+    // a send the user initiates in their own wallet UI is untouched -- no modal, no new
+    // latency (R-INTEXT, internal half).
+    //
+    // WARNING for whoever extends this: external callers reach dispatch_payment WITHOUT
+    // X-Payment-* headers, because C++'s isPaymentEndpoint() does not list
+    // /transaction/send. That path is fail-closed by design -- it forces a
+    // price_unavailable prompt rather than pricing the call at 0 cents. So an external
+    // send always prompts and can never silently exceed a cap. Adding this endpoint to
+    // isPaymentEndpoint WITHOUT also teaching extractOutputSatoshis this body shape
+    // ({toAddress, amount, sendMax} -- NOT {outputs:[{satoshis}]}) would price every
+    // send at 0 cents and silently auto-approve it, which is strictly worse than the
+    // prompt. Do both or neither.
+    let outcome = crate::permission_service::dispatch_payment(
+        &state.permission,
+        &state.database,
+        state.current_user_id,
+        &http_req,
+        &body,
+        "/transaction/send",
+    );
+    if let crate::permission_service::GateOutcome::EarlyReturn(resp) = outcome {
+        return resp;
     }
 
     // For sendMax: set output satoshis to 0 as placeholder — createAction will override
@@ -9704,6 +9739,11 @@ pub async fn send_transaction(
         }
     };
 
+    // The INNER call is deliberately internal. The gate below/above already ran at
+    // THIS endpoint, bound to the body the caller actually sent. Forwarding http_req
+    // here instead would re-gate on a body WE synthesised, so an X-User-Approved
+    // replay would have to match a create_action body the user never saw -- and it
+    // would risk prompting twice for a single send.
     let internal_req = actix_web::test::TestRequest::default().to_http_request();
     let create_response = create_action(state.clone(), internal_req, web::Bytes::from(create_body)).await;
 

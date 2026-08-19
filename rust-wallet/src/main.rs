@@ -926,6 +926,13 @@ async fn main() -> std::io::Result<()> {
             .allowed_origin("http://localhost")
             .allow_any_method()
             .allow_any_header()
+            // P0.5-C1. Without this, actix-cors only omits the CORS response headers on
+            // an origin mismatch — the browser hides the RESPONSE but the handler has
+            // already RUN. For a wallet that means a cross-origin simple POST could still
+            // move funds while the attacker simply never reads the reply. A blocked read
+            // is not a blocked write. This makes the mismatch terminate the request
+            // before it reaches a handler.
+            .block_on_origin_mismatch(true)
             .max_age(3600);
 
         App::new()

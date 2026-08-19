@@ -2029,20 +2029,69 @@ bool SimpleHandler::OnProcessMessageReceived(
             ? args->GetString(4).ToString()
             : std::string("POST");
 
-        // Extract calling frame's origin (host[:port]) for X-Requesting-Domain.
-        // Frame methods must be called from the UI thread (which is where we
-        // are right now).
+        // ── P0.5-E1 — resolve the SECURITY origin, not merely this frame's URL ──
+        //
+        // MEASURED 2026-08-19, and this was a live bypass. An about:blank / data: /
+        // blob: frame has no "://", so the old parse left `origin` EMPTY — and
+        // IsInternalOrigin("") returns true, which routes the call down
+        // runIpcCallDirect and reaches Rust with NO X-Requesting-Domain, i.e.
+        // fully-trusted wallet-internal.
+        //
+        // The exploit needed no trick at all: from https://example.com,
+        //     var f = document.createElement('iframe'); document.body.appendChild(f);
+        //     f.contentWindow.cefMessage.send('wallet_call', [...]);
+        // produced exactly this in the browser log:
+        //     🔒 IPC internal origin  — direct dispatch          <- note the empty origin
+        //
+        // ⚠️ Note WHICH api: the about:blank child does NOT get __hodos_walletCall
+        // (that bridge is main-frame-only), but it DOES get `cefMessage`, the raw IPC
+        // underneath. Fixing the bridge would not have closed this.
+        //
+        // ⛔ The fix belongs HERE, at the derivation, NOT in IsInternalOrigin. That
+        // predicate is also fed by the HTTP path, where an absent X-Requesting-Domain
+        // legitimately means "internal"; flipping it would break every real internal
+        // call. What is wrong is manufacturing an empty origin for a frame that HAS a
+        // security origin — an about:blank child inherits its parent's.
+        //
+        // So: this frame -> nearest ancestor with a real origin -> the top document.
+        // If none of those yields one, FAIL CLOSED with a sentinel that can never be a
+        // real host (RFC 2606 reserves .invalid), so it is stamped as an external
+        // domain and gated, rather than silently becoming internal.
+        auto originFromUrl = [](const std::string& u) -> std::string {
+            size_t protoEnd = u.find("://");
+            if (protoEnd == std::string::npos) return std::string();
+            size_t hostStart = protoEnd + 3;
+            size_t pathStart = u.find('/', hostStart);
+            return (pathStart != std::string::npos)
+                ? u.substr(hostStart, pathStart - hostStart)
+                : u.substr(hostStart);
+        };
+
         std::string origin;
         if (frame) {
-            std::string frameUrl = frame->GetURL().ToString();
-            size_t protoEnd = frameUrl.find("://");
-            if (protoEnd != std::string::npos) {
-                size_t hostStart = protoEnd + 3;
-                size_t pathStart = frameUrl.find('/', hostStart);
-                origin = (pathStart != std::string::npos)
-                    ? frameUrl.substr(hostStart, pathStart - hostStart)
-                    : frameUrl.substr(hostStart);
+            origin = originFromUrl(frame->GetURL().ToString());
+
+            // Inherit from the nearest ancestor that has one (about:blank/data:/blob:).
+            for (CefRefPtr<CefFrame> f = frame->GetParent(); f && origin.empty();
+                 f = f->GetParent()) {
+                origin = originFromUrl(f->GetURL().ToString());
             }
+
+            // Last resort: the top-level document of this browser.
+            if (origin.empty() && browser && browser->GetMainFrame()) {
+                origin = originFromUrl(browser->GetMainFrame()->GetURL().ToString());
+            }
+
+            if (origin.empty()) {
+                // Unknown provenance is NOT trusted provenance.
+                origin = "opaque-origin.invalid";
+                LOG_WARNING_BROWSER(
+                    "🛡️ wallet_call from a frame with no resolvable origin (url='"
+                    + frame->GetURL().ToString() + "') — failing closed as external");
+            }
+        } else {
+            origin = "opaque-origin.invalid";
+            LOG_WARNING_BROWSER("🛡️ wallet_call with no frame — failing closed as external");
         }
 
         CefRefPtr<CefFrame> capturedFrame = frame;

@@ -1,7 +1,7 @@
 # Phase 0.5 — money path & trust boundary · PHASE CONTRACT
 
 **Workstream:** WS5(a) · **Ticket:** `../TICKET_loopback_host_form_wallet_routing.md` §6.2, §7.1, §7.3
-**Status:** 🚧 IN PROGRESS — gates done · **Opened:** 2026-08-18 · **Amended:** 2026-08-19 (§4a–§4c, §5a) · **Platforms:** both (Rust = one binary; the C++ gates are cross-platform)
+**Status:** 🚧 IN PROGRESS — code complete, panel + T2 rows owed · **Opened:** 2026-08-18 · **Amended:** 2026-08-19 (§4a–§4c, §5a) · **Platforms:** both (Rust = one binary; the C++ gates are cross-platform)
 **Standard:** `../HARNESS.md`.
 
 ---
@@ -13,14 +13,14 @@ while a send the user initiates in their own wallet UI continues to complete **w
 
 ## 2. Done means
 
-- [ ] `send_transaction` takes `HttpRequest` and routes external callers through `dispatch_payment`,
+- [x] `send_transaction` takes `HttpRequest` and routes external callers through `dispatch_payment`,
       exactly as `create_action` does
 - [ ] An internal caller (no `X-Requesting-Domain`) is **unchanged** — no modal, no new latency
 - [ ] `sendMax` from an external origin is subject to the per-tx and per-session caps
-- [ ] `.block_on_origin_mismatch(true)` on the CORS layer
+- [x] `.block_on_origin_mismatch(true)` on the CORS layer
 - [x] The three `:5137` **trust-boundary** substring gates use a prefix/origin match (plus a fourth, §4c)
 - [x] T0 gate `G2` baseline driven **5 → 2**, with both residuals named in §6
-- [ ] `IsInternalOrigin("")` decided — it is now load-bearing
+- [x] `IsInternalOrigin("")` decided — **left as-is deliberately**; the defect was the derivation, §4d
 
 ## 3. Invariants preserved
 
@@ -39,11 +39,11 @@ while a send the user initiates in their own wallet UI continues to complete **w
 | `P0.5-R2` | External page, over-cap send → **202 + modal** | Revert the `dispatch_payment` wiring → the send completes silently | Rust log shows `X-Requesting-Domain: <exact page host>` | T2 | ⬜ |
 | `P0.5-R3` | External `sendMax:true` is capped | Same revert → full balance sweeps | Scratch wallet, funded with a token amount. ⛔ **Never the production wallet** | T2 | ⬜ |
 | `P0.5-R4` | Gold pill fires on a newly silent-approved send | Stub the emit → no pill | Correct tab via `TabManager::GetTabIdForBrowserIdentifier` | T2 | ⬜ |
-| `P0.5-C1` | Cross-origin simple POST no longer executes the handler | Remove `block_on_origin_mismatch` → the handler runs despite the browser hiding the response | **Server-side effect**, not the browser's error. A blocked read is not a blocked write | T2 | ⬜ |
+| `P0.5-C1` | Cross-origin simple POST no longer executes the handler | Remove `block_on_origin_mismatch` → the handler runs despite the browser hiding the response | **Server-side effect**, not the browser's error. A blocked read is not a blocked write | T2 | 🟡 **CODE IN** — verified from actix-cors 0.7.1 source, not docs: header-less requests hit `(None, _) => false` and still reach the handler; only a present-but-mismatched Origin short-circuits. Server-side effect test ⬜ owed |
 | `P0.5-G1` | `https://<origin>/?x=127.0.0.1:5137` is served **nothing** from disk | ⛔ **Pre-fix this must SUCCEED** — if it does not, §7.3 is refuted and this row is withdrawn | **Release-shaped** build: `IsFrontendAvailable()` is true in production (`{app}\frontend\`), so this is not a dev-only defect | T2 | 🟡 **UNTESTABLE IN DEV** — see §4a. Code fixed; RED still owed on a release-shaped build |
 | `P0.5-G2` | The same page gets **no** `window.hodosBrowser.identity` | Pre-fix it must be **defined**. Control: the same page *without* the substring must get neither | Renderer for **that page's** frame — not an overlay. `type:"page"` over CDP is not proof of which browser | T2 | ✅ **GREEN, RED observed** — §4b |
 | `P0.5-G3` |  `preflight.ps1` gate `G2` passes at baseline **2** (from 5) | Add one new `find("127.0.0.1:5137")` → gate **exits non-zero** even at a non-zero baseline | `preflight.ps1 -NegativeControl` | T0 | ✅ **GREEN** `2 violations, at baseline`; 🔴 observed `3 > 2` |
-| `P0.5-E1` | `IsInternalOrigin("")` behaves per the decision taken | Feed an origin-less frame → observe the decided outcome, not today's silent `true` | The Rust-side gate outcome | T1 | ⬜ |
+| `P0.5-E1` | `IsInternalOrigin("")` behaves per the decision taken | Feed an origin-less frame → observe the decided outcome, not today's silent `true` | The Rust-side gate outcome | T1 | ✅ **GREEN, RED observed** — §4d. It was a live bypass, not a decision |
 
 **Pairing:** `R1`/`R2` are the two halves of `R-INTEXT` and are each other's control. **Neither may be
 signed off alone.** A fix that satisfies one by breaking the other is the specific failure this
@@ -105,6 +105,56 @@ Repaired with `hodos::IsLoopbackUrl()` — anchored scheme+host prefixes, in `Po
 `IsInternalFrontendUrl` — so internal and external are true complements again. The deliberate
 exclusion of loopback pages from the dApp shim, documented in the gating cascade at `:758-770`, is
 preserved; only the matching is anchored.
+
+### 4d. 🚨 `P0.5-E1` — REPRODUCED as a live bypass, then closed
+
+The contract carried this as a decision to be *taken*. It is not a decision; it was an exploitable
+hole, and it is now measured on both sides.
+
+**The exploit needs no trick at all — just an iframe.** From `https://example.com`:
+
+```js
+var f = document.createElement('iframe');   // no src  =>  about:blank
+document.body.appendChild(f);
+f.contentWindow.cefMessage.send('wallet_call', ['id','status','/wallet/status','{}','GET']);
+```
+
+| | browser-process log |
+|---|---|
+| **RED (pre-fix)** | `🔒 IPC internal origin  — direct dispatch` ← note the **empty** origin |
+| **GREEN (post-fix)** | `🔒 IPC: domain example.com trust_level: unknown` ← attributed to the parent, gated |
+| **Control, same run** | overlays + header still `🔒 IPC internal origin 127.0.0.1:5137 — direct dispatch` |
+
+`about:blank` has no `://`, so the old parse produced an empty `origin`; `IsInternalOrigin("")`
+returns `true`; the call took `runIpcCallDirect` and reached Rust with **no `X-Requesting-Domain`**,
+which `domain_trust_mw` reads as fully-trusted wallet-internal.
+
+⭐ **The API that matters is `cefMessage`, not `__hodos_walletCall`.** The `about:blank` child does
+**not** receive the wallet bridge — that is main-frame-only per the shim's gating cascade — but it
+*does* receive `cefMessage`, the raw IPC underneath. Anyone reasoning about this boundary from the
+bridge alone would conclude, wrongly, that subframes are already safe.
+
+**Severity, relative to the rest of this phase.** Worse than `P0.5-G2`: that one required the
+attacker to place a magic string in their own URL; this one requires only an iframe. It is the exact
+path `REGRESSION_SET.md` flags as *"the one path by which external can silently become internal"* —
+now measured rather than suspected.
+
+**The fix is at the derivation, not the predicate.** `IsInternalOrigin("")` is left alone
+deliberately: it is also fed by the HTTP path, where an absent `X-Requesting-Domain` legitimately
+means internal, so flipping it would break every real internal call. What was wrong was
+*manufacturing* an empty origin for a frame that has a perfectly good security origin — an
+`about:blank` child inherits its parent's. So the derivation now resolves:
+
+1. this frame's URL → 2. nearest ancestor with a real origin → 3. the top-level document
+
+and, if none of those yields one, **fails closed** with `opaque-origin.invalid` (RFC 2606 reserves
+`.invalid`, so it can never collide with a real host) — stamped as an external domain and gated,
+rather than silently becoming internal.
+
+⚠️ Attribution note, deliberate: a `data:`/`blob:` frame is *opaque*-origin per spec, so inheriting
+the ancestor's origin is slightly more permissive than a strict reading — such a frame is attributed
+to the page that created it. It is still **external and gated**, which is the property that matters
+here; a stricter opaque-origin model belongs with Phase 5's parsed predicate.
 
 ## 5. Blast radius
 
