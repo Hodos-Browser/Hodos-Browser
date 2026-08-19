@@ -2,6 +2,7 @@
 #include "../../include/handlers/simple_render_process_handler.h"
 
 // V8 handlers (cross-platform)
+#include "../../include/core/PortConfig.h"
 #include "../../include/core/IdentityHandler.h"
 
 // Cross-platform handlers (work on both platforms)
@@ -510,9 +511,15 @@ void SimpleRenderProcessHandler::OnContextCreated(
     // and a JS override wrapping an API Blink already farbles would double-perturb it.
     // Inject window.chrome stub on external pages so bot detection sees a real Chrome signal.
     // Injected separately from fingerprint script so it works even when FP protection is disabled.
+    // P0.5 — a FOURTH gate of the same family, found by running the fix for the other
+    // three (contract section 4c). This was an unanchored search of the whole URL, so
+    // https://example.com/?x=127.0.0.1:5137 read as loopback. Once the internal gates
+    // became prefix matches that page was neither internal NOR external and fell
+    // through both branches, losing the dApp shim entirely. Anchored, the two
+    // classifications are true complements again.
     bool isExternalPage = !url.empty() &&
-        url.find("127.0.0.1") == std::string::npos &&
-        url.find("localhost") == std::string::npos;
+        !hodos::IsLoopbackUrl(url) &&
+        !hodos::IsInternalFrontendUrl(url);
     if (isExternalPage) {
         std::string chromeStub = R"JS(
 (function() {
@@ -536,9 +543,14 @@ void SimpleRenderProcessHandler::OnContextCreated(
 
     // Check if this is an overlay browser (any browser that's not the main root browser)
     bool isMainBrowser = (url == "http://127.0.0.1:5137" || url == "http://127.0.0.1:5137/");
-    bool isOverlayBrowser = !isMainBrowser && url.find("127.0.0.1:5137") != std::string::npos;
+    // P0.5-G2: prefix match, not substring. These two flags gate the privileged V8
+    // surface below — hodosBrowser.identity / .navigation / .history and the
+    // WALLET_CALL_BRIDGE / CWI shim. Measured 2026-08-19: with the old find(), a page
+    // at https://example.com/?x=127.0.0.1:5137 received all three; the same page
+    // without the query string received none.
+    bool isOverlayBrowser = !isMainBrowser && hodos::IsInternalFrontendUrl(url);
     bool isOmniboxOverlay = (url.find("/omnibox") != std::string::npos);
-    bool isInternalPage = (url.find("127.0.0.1:5137") != std::string::npos);
+    bool isInternalPage = hodos::IsInternalFrontendUrl(url);
 
     if (isOverlayBrowser) {
         LOG_DEBUG_RENDER("🎯 OVERLAY BROWSER V8 CONTEXT CREATED!");

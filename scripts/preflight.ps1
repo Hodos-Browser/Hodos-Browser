@@ -76,7 +76,12 @@ $Gates = @(
         # simple_render_process_handler.cpp:539 and :541.
         # Target 2 = the two TabManager history-exclusion uses -- sloppy, but not a trust
         # boundary; they go with W7 in beta.4. Phase 0.5 fixes the other three.
-        Baseline = 5
+        # Lowered 5 -> 2 by Phase 0.5 (P0.5-G3). The three trust-boundary gates now use
+        # hodos::IsInternalFrontendUrl (a prefix match). The 2 residuals are named in
+        # phase-0.5-money-path/PHASE_CONTRACT.md section 6: TabManager.cpp:176 and
+        # TabManager_mac.mm:191, both history-exclusion, not a trust boundary. They go
+        # with W7 in beta.4.
+        Baseline = 2
         Target   = 2
         Paths    = @('cef-native/src', 'cef-native/include')
         Include  = @('*.cpp', '*.mm', '*.h')

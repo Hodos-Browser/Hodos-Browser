@@ -133,11 +133,8 @@ static bool IsOverlayEffectivelyVisible(HWND hwnd) {
 // Forward declaration for cross-platform tab creation helper (defined later in file)
 static void CreateNewTabWithUrl(const std::string& url);
 
-static bool IsInternalFrontendUrl(const std::string& url) {
-    return url.rfind("http://127.0.0.1:5137", 0) == 0 ||
-           url.rfind("http://localhost:5137", 0) == 0 ||
-           url.rfind("hodos://", 0) == 0;
-}
+// P0.5: moved to hodos::IsInternalFrontendUrl (include/core/PortConfig.h) so the
+// render process uses the SAME predicate instead of a second spelling.
 
 static Tab* GetZoomTargetTab() {
     Tab* active_tab = TabManager::GetInstance().GetActiveTab();
@@ -150,7 +147,7 @@ static Tab* GetZoomTargetTab() {
         url = active_tab->browser->GetMainFrame()->GetURL().ToString();
     }
 
-    if (IsInternalFrontendUrl(url)) {
+    if (hodos::IsInternalFrontendUrl(url)) {
         LOG_WARNING_BROWSER("Ignoring native zoom for internal frontend page: " + url);
         return nullptr;
     }
@@ -7959,7 +7956,10 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
     // network-fetch from port 5137, which has no server in production.
     {
         std::string frontend_dir;
-        if (url.find("127.0.0.1:5137") != std::string::npos &&
+        // P0.5-G1: prefix match, not substring. The old find() served
+        // {app}rontend\index.html (via the SPA fallback) to ANY url containing
+        // the string, on the attacker's own origin.
+        if (hodos::IsInternalFrontendUrl(url) &&
             IsFrontendAvailable(frontend_dir)) {
             return new LocalFileResourceRequestHandler(frontend_dir, url);
         }

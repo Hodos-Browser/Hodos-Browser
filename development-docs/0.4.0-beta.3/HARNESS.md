@@ -143,7 +143,7 @@ wrong reason.**
 | Gate | What it catches | Baseline | Target | Owner | Lowered by |
 |---|---|---|---|---|---|
 | `G1` | bare-filename file sinks (relative path ⇒ CWD ⇒ `{app}`) | ~~52~~ → **0** | 0 | Phase 0 | ✅ Phase 0, 2026-08-18 |
-| `G2` | substring origin checks on the internal frontend port | **5** | 2 | Phase 0.5 | Phase 0.5 |
+| `G2` | substring origin checks on the internal frontend port | ~~5~~ → **2** | 2 | Phase 0.5 | ✅ Phase 0.5, 2026-08-19 |
 | `G3` | F8 secret-log gate, Rust | **0** | 0 | ported from `test.yml` | — |
 | `G4` | F8 secret-log gate, C++ | **0** | 0 | ported from `test.yml` | — |
 | `G5` | full wallet HTTP response bodies reaching a sink | ~~15~~ → **0** | 0 | Phase 0 | ✅ Phase 0, 2026-08-18 |

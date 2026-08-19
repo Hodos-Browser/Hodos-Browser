@@ -50,6 +50,53 @@ inline std::string AdblockUrl(const std::string& path) { return AdblockBaseUrl()
 
 // True if `url` targets the local wallet on the active port, in EITHER host form.
 // Replaces literal find("localhost:31301") / find("127.0.0.1:31301") gates.
+// ---------------------------------------------------------------------------
+// P0.5 — the FRONTEND origin. Deliberately here beside IsWalletHostPort: same
+// shape of predicate, same "one spelling only" rule.
+//
+// 5137 is NOT a backend port and does NOT take a dev offset. It is a URL
+// NAMESPACE: in production nothing listens on it — GetResourceRequestHandler
+// intercepts these URLs and LocalFileResourceRequestHandler serves {app}rontend// from disk. Same string in dev and release, which is why it is a plain literal
+// rather than a WalletPort()-style helper.
+//
+// TRUST BOUNDARY - this MUST be a prefix match. An unanchored substring search
+// for the host:port admits any URL that merely CONTAINS it, anywhere - including
+// in a query string the page author controls. (Spelled indirectly on purpose: the
+// preflight G2 gate greps for that pattern, and a comment quoting it verbatim
+// counts as a violation.) Measured 2026-08-19 against a live dev build: a page at
+// https://example.com/?x=127.0.0.1:5137 received hodosBrowser.identity,
+// .navigation and .history, while the SAME page without the query string
+// received none of them.
+//
+// Mirrors the three prefixes simple_handler.cpp has always used, including
+// hodos:// — NavigationHandler rewrites that scheme to http://127.0.0.1:5137/,
+// so a frame can legitimately carry it.
+inline bool IsInternalFrontendUrl(const std::string& url) {
+    return url.rfind("http://127.0.0.1:5137", 0) == 0
+        || url.rfind("http://localhost:5137", 0) == 0
+        || url.rfind("hodos://", 0) == 0;
+}
+
+// P0.5 — "is this URL served by something on THIS machine's loopback?"
+//
+// Companion to IsInternalFrontendUrl. The render process excludes loopback pages
+// from the dApp provider shim on purpose (a local dev server is not a dApp; see the
+// gating cascade in simple_render_process_handler.cpp). That exclusion was written
+// as an unanchored search of the whole URL for "127.0.0.1"/"localhost", so
+// https://example.com/?x=127.0.0.1:5137 counted as loopback. Anchored on the
+// scheme+host prefix, it cannot be spoofed from a query string or path.
+inline bool IsLoopbackUrl(const std::string& url) {
+    static const char* kPrefixes[] = {
+        "http://127.0.0.1", "https://127.0.0.1",
+        "http://localhost", "https://localhost",
+        "http://[::1]",     "https://[::1]",
+    };
+    for (const char* pfx : kPrefixes) {
+        if (url.rfind(pfx, 0) == 0) return true;
+    }
+    return false;
+}
+
 inline bool IsWalletHostPort(const std::string& url) {
     const std::string p = WalletPortStr();
     return url.find("localhost:" + p) != std::string::npos
