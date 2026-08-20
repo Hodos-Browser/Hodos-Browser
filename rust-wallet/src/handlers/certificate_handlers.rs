@@ -2768,13 +2768,15 @@ async fn create_certificate_transaction(
 
         for utxo in &api_utxos {
             // Upsert output (insert if not exists)
-            if let Err(e) = output_repo.upsert_received_utxo(
+            // Honour utxo.confirmed — see task_sync_pending.rs.
+            if let Err(e) = output_repo.upsert_received_utxo_with_confirmed(
                 DEFAULT_USER_ID,
                 &utxo.txid,
                 utxo.vout,
                 utxo.satoshis,
                 &utxo.script,
                 utxo.address_index,
+                utxo.confirmed,
             ) {
                 log::warn!("   Failed to cache output {}:{}: {}", &utxo.txid[..std::cmp::min(16, utxo.txid.len())], utxo.vout, e);
             }

@@ -3272,13 +3272,18 @@ pub async fn wallet_sync(
 
                 if !addr_utxos.is_empty() {
                     for utxo in &addr_utxos {
-                        match output_repo.upsert_received_utxo(
+                        // Honour utxo.confirmed — the bulk fetcher has returned
+                        // mempool entries since 293f269, and the plain
+                        // upsert_received_utxo hardcodes confirmed=true.
+                        // See task_sync_pending.rs for the full note.
+                        match output_repo.upsert_received_utxo_with_confirmed(
                             state.current_user_id,
                             &utxo.txid,
                             utxo.vout,
                             utxo.satoshis,
                             &utxo.script,
                             addr.index,
+                            utxo.confirmed,
                         ) {
                             Ok(1) => new_utxo_count += 1,
                             Ok(_) => {}
@@ -4981,13 +4986,15 @@ pub(crate) async fn create_action_internal(
                         .collect();
 
                     for utxo in &addr_utxos {
-                        if let Err(e) = output_repo.upsert_received_utxo(
+                        // Honour utxo.confirmed — see task_sync_pending.rs.
+                        if let Err(e) = output_repo.upsert_received_utxo_with_confirmed(
                             state.current_user_id,
                             &utxo.txid,
                             utxo.vout,
                             utxo.satoshis,
                             &utxo.script,
                             addr.index,
+                            utxo.confirmed,
                         ) {
                             log::warn!("   Failed to cache UTXO {}:{} for {}: {}", utxo.txid, utxo.vout, addr.address, e);
                         }

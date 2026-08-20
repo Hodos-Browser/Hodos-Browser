@@ -293,9 +293,19 @@ async fn check_addresses_bulk(
             }
 
             for utxo in &addr_utxos {
-                match output_repo.upsert_received_utxo(
+                // ⛔ Honour utxo.confirmed. Before 2026-08-19 the bulk path read only
+                // WoC's CONFIRMED endpoint, so `upsert_received_utxo` (which hardcodes
+                // confirmed=true) was correct by construction. 293f269 added the
+                // unconfirmed endpoint to this same path, which made that hardcode a
+                // money-visibility bug: a mempool receive was written confirmed=1, so
+                // get_stale_unconfirmed — the thing that exists to catch receives that
+                // never confirm — could never see it, and an evicted or double-spent
+                // receive became a permanent phantom spendable output.
+                // The individual tier above already had this shape; this is the same
+                // helper, not a new one.
+                match output_repo.upsert_received_utxo_with_confirmed(
                     state.current_user_id, &utxo.txid, utxo.vout,
-                    utxo.satoshis, &utxo.script, addr.index,
+                    utxo.satoshis, &utxo.script, addr.index, utxo.confirmed,
                 ) {
                     Ok(1) => {
                         new_utxo_count += 1;
@@ -314,7 +324,13 @@ async fn check_addresses_bulk(
                         }
                     }
                     Ok(_) => {
-                        let _ = output_repo.mark_output_confirmed(&utxo.txid, utxo.vout as i32);
+                        // Already existed — upgrade ONLY on a confirmed sighting.
+                        // Unguarded, the mempool pass would flip confirmed 0 -> 1 for
+                        // an output that is still only in the mempool. Same guard the
+                        // individual tier already has.
+                        if utxo.confirmed {
+                            let _ = output_repo.mark_output_confirmed(&utxo.txid, utxo.vout as i32);
+                        }
                     }
                     Err(e) => warn!("   Failed to insert output {}:{}: {}", utxo.txid, utxo.vout, e),
                 }
