@@ -982,6 +982,24 @@ impl PaymentCall {
 /// return Proceed via the replay path, the engine has consumed the
 /// approval (body-hash bound at mint time) and the user explicitly
 /// approved this exact payment.
+/// An amount the CALLER resolved, overriding whatever the X-Payment-* headers say.
+///
+/// P0.5 finding 6, Option A. Exists for exactly one case today: `{sendMax:true}`
+/// on `/transaction/send`. C++ prices payment endpoints from the request body, but
+/// a sendMax body carries no amount — the amount IS the spendable balance, which
+/// only this process knows. C++ therefore reports `price_available=false` for that
+/// shape and the handler resolves the real figure here.
+///
+/// ⛔ Do NOT reach for this to "fix" a missing header generally. A missing header
+/// is supposed to fail closed into a PriceUnavailable prompt; this override exists
+/// because the amount is genuinely knowable, not because the prompt was annoying.
+#[derive(Debug, Clone, Copy)]
+pub struct ResolvedAmount {
+    pub satoshis: i64,
+    pub cents: i64,
+    pub bsv_price_available: bool,
+}
+
 pub fn dispatch_payment(
     permission: &Arc<PermissionService>,
     database: &Arc<Mutex<WalletDatabase>>,
@@ -989,6 +1007,21 @@ pub fn dispatch_payment(
     http_req: &HttpRequest,
     body: &[u8],
     endpoint: &str,
+) -> GateOutcome {
+    dispatch_payment_with_amount(
+        permission, database, current_user_id, http_req, body, endpoint, None,
+    )
+}
+
+/// `dispatch_payment`, plus a caller-resolved amount. See [`ResolvedAmount`].
+pub fn dispatch_payment_with_amount(
+    permission: &Arc<PermissionService>,
+    database: &Arc<Mutex<WalletDatabase>>,
+    current_user_id: i64,
+    http_req: &HttpRequest,
+    body: &[u8],
+    endpoint: &str,
+    resolved: Option<ResolvedAmount>,
 ) -> GateOutcome {
     let domain = match http_req
         .headers()
@@ -1051,7 +1084,7 @@ pub fn dispatch_payment(
     // direct curl), fall back to a price_unavailable shape that forces the
     // engine to Prompt — better to ask the user than to silently bypass caps
     // by treating the call as 0 cents.
-    let payment = match PaymentCall::from_headers(http_req) {
+    let mut payment = match PaymentCall::from_headers(http_req) {
         Some(p) => p,
         None => {
             log::warn!(
@@ -1066,6 +1099,19 @@ pub fn dispatch_payment(
             }
         }
     };
+
+    // Caller-resolved amount wins over the headers. Only the amount fields are
+    // replaced — browser_id stays whatever C++ stamped, because it identifies the
+    // tab for session counters and the caller has no better value for it.
+    if let Some(r) = resolved {
+        log::info!(
+            "🛡️ dispatch_payment: caller-resolved amount for {} {} — {} sats / {} cents (price_available={})",
+            domain, endpoint, r.satoshis, r.cents, r.bsv_price_available
+        );
+        payment.satoshis = r.satoshis;
+        payment.cents = r.cents;
+        payment.bsv_price_available = r.bsv_price_available;
+    }
 
     let perm_row = {
         let db_guard = match database.lock() {

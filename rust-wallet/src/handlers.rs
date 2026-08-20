@@ -9684,13 +9684,59 @@ pub async fn send_transaction(
     // ({toAddress, amount, sendMax} -- NOT {outputs:[{satoshis}]}) would price every
     // send at 0 cents and silently auto-approve it, which is strictly worse than the
     // prompt. Do both or neither.
-    let outcome = crate::permission_service::dispatch_payment(
+    // P0.5 finding 6 — resolve sendMax HERE, because only this process can.
+    //
+    // C++ prices a payment endpoint from the request body, but a {sendMax:true}
+    // body carries no amount: the amount IS the spendable balance. C++ therefore
+    // reports price_available=false for that shape, which without this block lands
+    // on matrix_c.rs's PriceUnavailable branch and renders the modal as "0 sats"
+    // under a price-feed outage that is not occurring — over a full-balance sweep.
+    //
+    // The balance is a deliberate OVER-estimate of the sweep (the real send is
+    // balance minus mining + service fees), so the cap decision errs toward
+    // prompting rather than toward silence. If either the balance read or the
+    // price lookup fails we pass nothing, and the gate falls back to the
+    // fail-closed PriceUnavailable prompt exactly as before.
+    let resolved_amount = if send_max {
+        let balance = state
+            .database
+            .lock()
+            .ok()
+            .and_then(|db| {
+                crate::database::OutputRepository::new(db.connection())
+                    .calculate_balance(state.current_user_id)
+                    .ok()
+            });
+        match (balance, state.price_cache.get_cached().or_else(|| state.price_cache.get_stale())) {
+            (Some(sats), Some(price_usd)) if sats > 0 && price_usd > 0.0 => {
+                let cents = ((sats as f64 / 100_000_000.0) * price_usd * 100.0) as i64;
+                log::info!(
+                    "   sendMax gate: resolved sweep as {} sats / {} cents (balance-derived)",
+                    sats, cents
+                );
+                Some(crate::permission_service::ResolvedAmount {
+                    satoshis: sats,
+                    cents,
+                    bsv_price_available: true,
+                })
+            }
+            _ => {
+                log::warn!("   sendMax gate: could not resolve balance or price — falling back to the price_unavailable prompt");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let outcome = crate::permission_service::dispatch_payment_with_amount(
         &state.permission,
         &state.database,
         state.current_user_id,
         &http_req,
         &body,
         "/transaction/send",
+        resolved_amount,
     );
     if let crate::permission_service::GateOutcome::EarlyReturn(resp) = outcome {
         return resp;

@@ -42,6 +42,7 @@ std::string g_pendingModalDomain = "";
 #include <atomic>
 #include <set>
 #include <nlohmann/json.hpp>
+#include "../../include/core/PaymentCost.h"
 #include <cstdlib>
 #include <ctime>
 #include <chrono>
@@ -1595,11 +1596,15 @@ public:
     // lambda. No callers since 5.b commit `e8168d6`. Use
     // openPaymentConfirmationModal at file scope for the modern entry point.)
 
-    // Check if endpoint is a payment-relevant BRC-100 endpoint
+    // Payment-relevant endpoint check + amount extraction + pricing.
+    //
+    // ⛔ ALL THREE MOVED to include/core/PaymentCost.h during P0.5 finding 6, so
+    // they can be unit-tested without CEF (same reason, and same precedent, as
+    // JsStringEscape.h under the F6 audit). These are thin delegates ONLY — do not
+    // reintroduce logic here, and do not add a seventh copy of the pricing rule at
+    // a call site. Six copies of it is what this phase removed.
     static bool isPaymentEndpoint(const std::string& endpoint) {
-        return endpoint.find("/createAction") != std::string::npos
-            || endpoint.find("/acquireCertificate") != std::string::npos
-            || endpoint.find("/sendMessage") != std::string::npos;
+        return hodos::IsPaymentEndpoint(endpoint);
     }
 
     // Check if endpoint is proveCertificate (identity field disclosure)
@@ -1641,21 +1646,18 @@ public:
     }
 
     // Parse request body JSON and sum outputs[].satoshis
+    using PaymentCost = hodos::PaymentCost;
+
     static int64_t extractOutputSatoshis(const std::string& body) {
-        if (body.empty()) return 0;
-        try {
-            auto json = nlohmann::json::parse(body);
-            if (!json.contains("outputs") || !json["outputs"].is_array()) return 0;
-            int64_t total = 0;
-            for (const auto& output : json["outputs"]) {
-                if (output.contains("satoshis") && output["satoshis"].is_number()) {
-                    total += output["satoshis"].get<int64_t>();
-                }
-            }
-            return total;
-        } catch (...) {
-            return 0;
-        }
+        return hodos::ExtractOutputSatoshis(body);
+    }
+
+    // Reads the live price here so the six call sites stay one-liners; the pure
+    // rule (including the sendMax fail-closed case) lives in PaymentCost.h.
+    static PaymentCost computePaymentCost(const std::string& endpoint,
+                                          const std::string& body) {
+        return hodos::ComputePaymentCost(endpoint, body,
+                                         BSVPriceCache::GetInstance().getPrice());
     }
 
     // CertDisclosureInfo moved to file scope (above) in Phase 2.5 Commit 6
@@ -2031,21 +2033,12 @@ void runIpcEngineCascade(const std::string& requestId,
                           const DomainPermissionCache::Permission& perm) {
     using AWRH = AsyncWalletResourceHandler;
 
-    // Compute payment context if this is a payment endpoint (matches 5.b).
-    const bool isPaymentKind = AWRH::isPaymentEndpoint(endpoint);
-    int64_t satoshis = 0;
-    double bsvPrice = 0;
-    bool priceAvailable = false;
-    int64_t cents = 0;
-    if (isPaymentKind) {
-        satoshis = AWRH::extractOutputSatoshis(bodyJson);
-        bsvPrice = BSVPriceCache::GetInstance().getPrice();
-        priceAvailable = (bsvPrice > 0);
-        if (priceAvailable && satoshis > 0) {
-            cents = static_cast<int64_t>(
-                (static_cast<double>(satoshis) / 100000000.0) * bsvPrice * 100.0);
-        }
-    }
+    // P0.5 finding 6 — one rule, see AWRH::computePaymentCost.
+    const AWRH::PaymentCost cost = AWRH::computePaymentCost(endpoint, bodyJson);
+    const bool isPaymentKind = cost.isPayment;
+    const int64_t satoshis = cost.satoshis;
+    const bool priceAvailable = cost.priceAvailable;
+    const int64_t cents = cost.cents;
 
     // Phase 2.6-G — C++ is a thin proxy. Domain-trust runs as a Rust
     // middleware and the per-handler kind gates (payment/scoped/cert/privacy)
@@ -2295,17 +2288,14 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
     // so the eventual re-issue (after a connect prompt) still carries X-Payment-*
     // for Rust's payment gate and the gold-pill indicator fires. Done for every
     // trust level since the first call may be a connect that re-issues later.
-    if (isPaymentEndpoint(endpoint_)) {
-        int64_t satoshis = extractOutputSatoshis(body_);
-        double bsvPrice = BSVPriceCache::GetInstance().getPrice();
-        const bool priceAvailable = (bsvPrice > 0);
-        int64_t cents = 0;
-        if (priceAvailable && satoshis > 0) {
-            cents = static_cast<int64_t>((static_cast<double>(satoshis) / 100000000.0) * bsvPrice * 100.0);
+    {
+        // P0.5 finding 6 — one rule, see computePaymentCost.
+        const PaymentCost cost = computePaymentCost(endpoint_, body_);
+        if (cost.isPayment) {
+            preCalculatedCents_ = cost.cents;
+            preCalculatedSatoshis_ = cost.satoshis;
+            preCalculatedBsvPriceAvailable_ = cost.priceAvailable;
         }
-        preCalculatedCents_ = cents;
-        preCalculatedSatoshis_ = satoshis;
-        preCalculatedBsvPriceAvailable_ = priceAvailable;
     }
 
     handle_request = true;
@@ -3034,16 +3024,11 @@ static void resumeInternalResponse(const PendingAuthRequest& req,
         // AsyncHTTPClient::OnRequestComplete already handles the indicator
         // when it sees a fresh response come back via onAuthResponseReceived;
         // the handler's own flow re-runs the OnWalletCallSuccess derivation).
-        bool isPaymentKind = AsyncWalletResourceHandler::isPaymentEndpoint(endpoint);
-        int64_t cents = 0;
-        if (isPaymentKind) {
-            int64_t satoshis = AsyncWalletResourceHandler::extractOutputSatoshis(body);
-            double bsvPrice = BSVPriceCache::GetInstance().getPrice();
-            if (bsvPrice > 0 && satoshis > 0) {
-                cents = static_cast<int64_t>(
-                    (static_cast<double>(satoshis) / 100000000.0) * bsvPrice * 100.0);
-            }
-        }
+        // P0.5 finding 6 — one rule, see AsyncWalletResourceHandler::computePaymentCost.
+        const AsyncWalletResourceHandler::PaymentCost cost =
+            AsyncWalletResourceHandler::computePaymentCost(endpoint, body);
+        const bool isPaymentKind = cost.isPayment;
+        const int64_t cents = cost.cents;
         bool isErrorInResponse = false;
         if (ok && isPaymentKind) {
             try {
@@ -3157,16 +3142,11 @@ static void resumeHttpCallbackResponse(const PendingAuthRequest& req,
         // Payment indicator: same derivation as resumeIpcResponse. The
         // handler's pre-calculated cents may be stale (price moved between
         // modal-open and modal-approve), so re-extract here.
-        bool isPaymentKind = AsyncWalletResourceHandler::isPaymentEndpoint(endpoint);
-        int64_t cents = 0;
-        if (isPaymentKind) {
-            int64_t satoshis = AsyncWalletResourceHandler::extractOutputSatoshis(body);
-            double bsvPrice = BSVPriceCache::GetInstance().getPrice();
-            if (bsvPrice > 0 && satoshis > 0) {
-                cents = static_cast<int64_t>(
-                    (static_cast<double>(satoshis) / 100000000.0) * bsvPrice * 100.0);
-            }
-        }
+        // P0.5 finding 6 — one rule, see AsyncWalletResourceHandler::computePaymentCost.
+        const AsyncWalletResourceHandler::PaymentCost cost =
+            AsyncWalletResourceHandler::computePaymentCost(endpoint, body);
+        const bool isPaymentKind = cost.isPayment;
+        const int64_t cents = cost.cents;
         bool isErrorInResponse = false;
         if (ok && isPaymentKind) {
             try {
@@ -3271,16 +3251,11 @@ static void resumeIpcResponse(const PendingAuthRequest& req,
 
         // Q4: re-extract cents at re-issue time so any BSV-price movement between
         // modal-open and modal-approve is reflected in the recorded spend.
-        bool isPaymentKind = AsyncWalletResourceHandler::isPaymentEndpoint(endpoint);
-        int64_t cents = 0;
-        if (isPaymentKind) {
-            int64_t satoshis = AsyncWalletResourceHandler::extractOutputSatoshis(body);
-            double bsvPrice = BSVPriceCache::GetInstance().getPrice();
-            if (bsvPrice > 0 && satoshis > 0) {
-                cents = static_cast<int64_t>(
-                    (static_cast<double>(satoshis) / 100000000.0) * bsvPrice * 100.0);
-            }
-        }
+        // P0.5 finding 6 — one rule, see AsyncWalletResourceHandler::computePaymentCost.
+        const AsyncWalletResourceHandler::PaymentCost cost =
+            AsyncWalletResourceHandler::computePaymentCost(endpoint, body);
+        const bool isPaymentKind = cost.isPayment;
+        const int64_t cents = cost.cents;
         bool isErrorInResponse = false;
         if (ok && isPaymentKind) {
             try {
