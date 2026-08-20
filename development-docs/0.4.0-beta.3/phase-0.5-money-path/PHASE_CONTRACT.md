@@ -1,7 +1,7 @@
 # Phase 0.5 — money path & trust boundary · PHASE CONTRACT
 
 **Workstream:** WS5(a) · **Ticket:** `../TICKET_loopback_host_form_wallet_routing.md` §6.2, §7.1, §7.3
-**Status:** 🔴 NOT SIGNED OFF — **IN REPAIR.** Adversarial panel returned DO-NOT-SIGN-OFF; 3 criticals, all now MEASURED. Repair prompt: `../SESSION_PROMPT_beta3_p05_repair.md` · **Opened:** 2026-08-18 · **Amended:** 2026-08-19 (§4a–§4c, §5a), 2026-08-19 **repair scope** (§2, §4 split into 0.5a/0.5b, §4e–§4g, §5b, §6) · **Platforms:** both (Rust = one binary; the C++ gates are cross-platform)
+**Status:** 🔴 NOT SIGNED OFF — **REPAIR COMPLETE, BLOCKED ON A NEW CRITICAL.** Findings 4, 5 and 6 are fixed and GREEN with REDs run in-session (§4j); the first panel's 3 criticals remain MEASURED and closed. ⛔ **§4k is a NEW critical found 2026-08-19 and it blocks sign-off:** an approved dApp can rewrite the whole permission table, defeating every payment cap and the identity-key privacy gate. Still owed: `G1` on a release-shaped build and the post-repair panel. Repair prompt: `../SESSION_PROMPT_beta3_p05_repair.md` · **Opened:** 2026-08-18 · **Amended:** 2026-08-19 (§4a–§4c, §5a), 2026-08-19 **repair scope** (§2, §4 split into 0.5a/0.5b, §4e–§4g, §5b, §6) · **Platforms:** both (Rust = one binary; the C++ gates are cross-platform)
 **Standard:** `../HARNESS.md`.
 
 > ⭐ **Scope change, owner-approved 2026-08-19: C1, C2 and C3 are folded into this phase.**
@@ -54,10 +54,10 @@ while a send the user initiates in their own wallet UI continues to complete **w
       `dispatch_payment`. ⚠️ `{recipient_identity_key|paymail, amount_satoshis}` is a **third** body
       shape — `d33741a`'s "do both or neither" warning applies with an extra shape
 - [x] `.block_on_origin_mismatch(true)` on the CORS layer
-- [ ] Finding 4 resolved — §4e measured that this **400s the direct-HTTP dApp transport**. Needs an
+- [x] Finding 4 resolved — allowlist the two re-issue origins, keep `block_on_origin_mismatch(true)`. Owner decision taken 2026-08-19. **GREEN with RED, §4j** (live dApp call, not reasoning). ~~Needs an
       owner decision (CLAUDE.md #13), not a reflex fix
-- [ ] Finding 6 resolved — the forced prompt must not render **"0 sats"** under a false
-      price-outage cause
+- [x] Finding 6 resolved — the three fund-movers are priced, and `sendMax` is resolved by Rust from the spendable balance. **GREEN with RED, §4j**: 42,449,558 sats / `per_tx_limit` with the fix in, `0 sats` / `price_unavailable` with it out. ~~the forced prompt must not render **"0 sats"** under a false
+      price-outage cause~~
 
 ⛔ **Struck 2026-08-19 — refuted by panel finding 6, and the correction is not cosmetic:**
 ~~`sendMax` from an external origin is subject to the per-tx and per-session caps.~~ With no
@@ -99,8 +99,8 @@ is rewritten to match.
 | `P0.5-R2` | External page, over-cap send → **202 + modal** | Revert the `dispatch_payment` wiring → the send completes silently | Rust log shows `X-Requesting-Domain: <exact page host>` | T2 | ✅ **GREEN — §4i.** External page → 202 + modal, owner saw and denied it; Rust logged `domain=example.com` (exact page host) |
 | `P0.5-R3` ✏️**REWRITTEN** | External `sendMax:true` → **forced prompt** (not a cap evaluation) | Same revert → full balance sweeps | Scratch wallet, funded with a token amount. ⛔ **Never the production wallet.** The dev wallet (`HodosBrowserDev`, 41,931,019 sats) is a valid scratch wallet — the production wallet is a **separate DB** (§4h) | T2 | ✅ **GREEN as rewritten — §4i.** `sendMax:true` from an approved domain → 202 forced prompt. ⚠️ Rendered as **"0 sats"** (finding 6) |
 | `P0.5-X5` ⭐**NEW** | `peerpay_send` / `paymail_send` from an external origin → **202 + modal** | ⛔ Pre-fix: both spend with **no gate of any kind** — they take no `HttpRequest`, so `dispatch_payment` is structurally impossible | Both endpoints, both body shapes. ⚠️ A **third** body shape — do both or neither | T2 | ✅ **GREEN, RED observed** — commit `9dc1586`. ⛔ First measurement was a FALSE GREEN (unknown domain ⇒ domain-trust fired first); re-run against an APPROVED domain |
-| `P0.5-C1` | Cross-origin simple POST no longer executes the handler | Remove `block_on_origin_mismatch` → the handler runs despite the browser hiding the response | **Server-side effect**, not the browser's error. A blocked read is not a blocked write | T2 | ✅ **GREEN, RED observed — §4e.** ⚠️ But the same measurement **confirmed panel finding 4**: it also 400s the direct-HTTP dApp transport. Owner decision owed before this row signs off |
-| ~~`P0.5-R4`~~ | ~~Gold pill fires on a newly silent-approved send~~ | — | — | — | ⛔ **WITHDRAWN 2026-08-19 — the row has no subject.** No `/transaction/send` call can emit `payment_success_indicator`: all six `OnWalletCallSuccess` sites derive `wasAutoApprovedPayment` as `ok && isPaymentEndpoint(endpoint) && !isError`, and `isPaymentEndpoint` is `{/createAction, /acquireCertificate, /sendMessage}` — `d33741a` deliberately excludes `/transaction/send`. Stronger: an external send can never be **silently** approved at all, because `matrix_c.rs:240` prompts unconditionally. The obvious way to "test the pill" is a `createAction`, which **passes with both commits reverted** — a HARNESS §6-Q1 void green waiting to happen. R-GOLD stays covered by `../REGRESSION_SET.md:35-41` at the 0.5→1 boundary. Filed separately: an `X-User-Approved` replay on `/transaction/send` moves funds and emits no pill while a byte-identical `/createAction` replay does |
+| `P0.5-C1` | Cross-origin simple POST no longer executes the handler | Remove `block_on_origin_mismatch` → the handler runs despite the browser hiding the response | **Server-side effect**, not the browser's error. A blocked read is not a blocked write | T2 | ✅ **GREEN, RED observed — §4e + §4j.** Finding 4 is now CLOSED: the two re-issue origins are allowlisted and the page's own trust headers stripped, `block_on_origin_mismatch(true)` KEPT. Live dApp POST+GET → 200; with the two allowlist lines removed the POST returns **200 carrying a CORS error body**. Exact control: `:31302` / `:31400`, one digit away, still 400 |
+| `P0.5-R4` ✏️**UN-WITHDRAWN** | Gold pill fires on a newly silent-approved send | Pre-finding-6 the pill could not fire for this endpoint at all | The **tab** badge (`Tab::id`), driven by `OnWalletCallSuccess` | T2 | ✅ **GREEN — §4j, observed live by the owner.** ⛔ The 2026-08-19 withdrawal rested on "`isPaymentEndpoint` excludes `/transaction/send`, so the pill can never fire" — **finding 6 kills that premise.** Log: `OnWalletCallSuccess fired (79 cents … /transaction/send)` and `(63 cents … /wallet/peerpay/send)`. R-GOLD holds on the newly-silent path. ⛔ The first-party send form still does NOT fire the pill and should not — it goes through `WalletService`, which has **zero** references to `OnWalletCallSuccess`, and the pill is a per-tab badge while the wallet overlay is not a tab |
 
 **Pairing — three pairs, none may be signed off alone:**
 
@@ -431,6 +431,223 @@ Separately, an incoming **unconfirmed** output to the wallet's own address is no
 `fetch_utxos_single_address_with_unconfirmed` that it does not use. Both are **pre-existing** —
 `git diff 637e216..HEAD` touches no UTXO/sync/balance/monitor file. **File as tickets, not here.**
 
+### 4j. 🟢 SECOND LIVE RUN — the repair (findings 4/5/6, stoi, UTXO), independently re-run
+
+**MEASUREMENT, 2026-08-19 evening**, by a different session from the one that wrote C1/C2/C3.
+Dev wallet **31401**, dev browser **CDP 9322**; production ran throughout on 31301/9222 and was
+never driven (verified: 51 prod browser processes alive after each dev kill, prod wallet 200 on
+31301). Dev processes killed **by executable path** every time.
+
+⚠️ **Every RED below was produced in THIS session** — none inherited from §4i.
+
+**Finding 4 + 5 — CORS.** Subject: a real `https://` page's own `fetch`, asserted with
+`location.href` in the same call.
+
+| | 🟢 fix in | 🔴 two allowlist lines removed, rebuilt |
+|---|---|---|
+| POST `/getVersion` from `https://example.com` | **200** + real JSON | **200 carrying `Origin is not allowed to make this request`** |
+| GET `/getVersion` from the same page | **200** + real JSON | **200** + real JSON (survives — see below) |
+
+Three results in one control:
+
+1. The allowlist entries are what admit the POST ⇒ **Chromium does stamp a loopback origin on the
+   re-issue.** Panel finding 4 called that link "unverified by anyone"; it is now measured.
+2. The GET survives *without* the allowlist because the **header strip** removed the page's own
+   `Origin` ⇒ the two halves cover **different verbs** and neither alone is sufficient.
+3. It reproduces finding 4's "silent and mangled" claim: the page receives **HTTP 200 carrying a
+   plain-text CORS error body**, because `GetResponseHeaders` hardcodes `SetStatus(200)`.
+
+Rust-boundary matrix (real `curl`, not the PowerShell alias): `127.0.0.1:31301` **200**,
+`:31401` **200**, `:5137` **200**, no-Origin **200**; `https://zanaadu.com` **400**,
+`https://evil.example` **400**, `null` **400**. ⭐ **Exact control:** `127.0.0.1:31302` and
+`:31400` — one digit away — **400**. So it is the allowlist entries specifically, not "loopback is
+trusted".
+
+⚠️ **Two denylist entries the agreed fix sketch MISSED**, both of which would have left the hole
+open on the headers that matter: **`X-Bsv-Price-Available`** is a trust header living *under* the
+`x-bsv-` prefix this loop forwards on purpose (needs an EXACT strip, not a prefix strip, or the
+strip takes the whole BRC-31 family with it), and **`X-Cert-Approved-Fields`** is injected on the
+cert-replay path and Rust trusts it.
+
+**Finding 6 — the "0 sats" prompt.** Same call, same wallet, minutes apart, one token changed
+(`if send_max` → `if false && send_max`, rebuilt):
+
+| | `satoshis` | `cents` | `engineReason` |
+|---|---|---|---|
+| 🟢 fix in | **42,449,558** | **670** | `per_tx_limit` |
+| 🔴 fix out | **0** | 0 | `price_unavailable` |
+
+⭐ **The cap branches are now REACHABLE for this endpoint.** §2's struck bullet said they were
+unreachable and rewrote `R3` to "forced prompt". With the amount resolved, the engine reaches
+`per_tx_limit` — so the *original* claim is achievable after all, by a different mechanism than
+first written. `R3` stands as rewritten (a forced prompt still occurs); the note is that the reason
+is now a real cap evaluation, not a false price outage.
+
+**Finding 6, the C++ half** (browser transport only — ⛔ `curl` CANNOT test this: it has no C++
+header injection, would show the OLD behaviour, and would read as a false failure):
+`/transaction/send` priced at **79 cents**, `/wallet/peerpay/send` at **63 cents** — endpoints that
+before this commit reached Rust unpriced and always rendered "0 sats".
+
+**0.5a re-run in full** (`HARNESS` §5 — the whole table, not the failing row), from
+`https://example.com`, all in one run:
+
+| Probe | Verdict |
+|---|---|
+| `send_transaction`, `get_balance`, `address_generate`, `get_transaction_history` | 🛡️ **DENIED** — external origin |
+| `find_result_js`, `qr_found`, `cosmetic_class_id_query` | ✅ dispatched, **no denial** |
+| `about:blank` child (`E1`) | 🛡️ DENIED — attributed to the parent |
+| crafted self-scripting `data:` frame (`X1`) | 🛡️ DENIED — attributed to the parent (frame existence proven out of `Page.getFrameTree`) |
+| overlays + header throughout | ✅ `IPC internal origin 127.0.0.1:5137 — direct dispatch`, continuous |
+
+⭐ **C2's four-name allowlist is INDEPENDENTLY CONFIRMED COMPLETE.** Re-derived from scratch: all
+`CefProcessMessage::Create` sites split by process (only 5 are renderer→browser, one being the
+generic `cefMessage.send`), then every C++/JS string literal containing `cefMessage.send`, then
+every `ExecuteJavaScript` site targeting a *tab* frame. Exactly four names originate in page
+context. `adblock-engine/` contains zero `cefMessage` references. **`find_result_js` and `qr_found`
+had never been exercised** and are now measured passing. This run is also a within-run control: same
+page, same API, some names denied and some allowed ⇒ the gate discriminates by name+origin rather
+than blanket-blocking.
+
+**`P0.5-R4` — UN-WITHDRAWN, and green.** The row was withdrawn on the premise that
+`isPaymentEndpoint` excludes `/transaction/send` so the pill can never fire. Finding 6 kills that
+premise. **Observed live by the owner**, and in the browser log:
+`💰 OnWalletCallSuccess fired (79 cents from example.com … endpoint=/transaction/send)` and
+`(63 cents … /wallet/peerpay/send)`. R-GOLD holds on the newly-silent path.
+⛔ The **first-party send form still does not and should not fire the pill** — it goes through
+`WalletService`, which has **zero** references to `OnWalletCallSuccess` (verified). The pill is a
+per-**tab** badge keyed on `Tab::id`; the wallet overlay is not a tab.
+
+**Unit tests.** 211 C++ pass (14 new in `tests/payment_cost_test.cpp`), 1 pre-existing skip
+(`UpdateStagerRig.StagesFromLocalFeed`, needs a rig — named, because a skip is never a pass); 33
+`hodos_permission_engine` pass.
+⭐ **Negative control, and it earned its keep.** Deleting the `sendMax` arm does **not** make
+satoshis 0 — it makes it **1**, the decoy `amount:1` in the sweep body. The failure mode is not
+"obviously broken", it is "plausible one-satoshi payment, priced at 0 cents, silently approved,
+entire balance gone". Seen RED for that exact reason, then green on restore.
+
+### 4k. 🚨 NEW CRITICAL — an approved dApp can rewrite the whole permission table
+
+**MEASURED 2026-08-19 from a REAL third-party dApp** (`brc-cloud.bcryderman.workers.dev`, approved
+by the owner with one ordinary click). A page-context call through the wallet bridge created:
+
+```json
+{"domain":"escalation-probe.invalid","trustLevel":"approved",
+ "perTxLimitCents":9999999,"identityKeyDisclosureAllowed":true}
+```
+
+**No modal. No user interaction. Silent success.** Row read back from the DB to confirm, then deleted.
+
+`handlers.rs :: set_domain_permission` has **no gate of its own** — zero `check_domain_approved`,
+zero `dispatch_*` (grepped). Its only protection is `domain_trust_mw`, which checks the **calling**
+domain. So once the user approves **any** dApp — the most ordinary action in the product — that dApp
+can:
+
+- approve **itself** with a `$99,999.99` per-tx cap ⇒ silent unlimited spending, payment caps defeated
+- set `identityKeyDisclosureAllowed: true` ⇒ silent identity-key reveal (a privacy-perimeter gate)
+- approve **any other domain** ⇒ collaborator sites the user never saw
+
+It cannot set `blocked` (validation admits only `approved`/`unknown`), which is irrelevant to the attack.
+
+⚠️ **Scope of the proof:** the unrestricted **write** is measured. It was NOT chained to an actual
+silent spend — that costs money, and self-targeting is the identical call with a different domain
+string. → **Blocker for beta.3 sign-off.** Not introduced by this phase; long-standing.
+
+### 4l. Environment findings from the live run — file, do not chase
+
+- 🚨 **`peerpay_send` broadcasts to any well-formed identity key with no reachability check.**
+  Demonstrated **accidentally**: a probe passed a fabricated recipient key, and 4,000,000 sats were
+  derived to an address whose private key nobody holds and **broadcast** (`668f4fc1…`,
+  SEEN_ON_NETWORK). Unrecoverable. A user who mistypes an identity key silently destroys funds.
+  The contract already noted its only validation is `amount_satoshis <= 0`; this makes the
+  consequence concrete. **Dev wallet only; net −4,002,400 sats ≈ $0.63.**
+- ⚠️ **The C++ `DomainPermissionCache` goes stale on a direct `POST /domain/permissions`.** C++ read
+  `example.com` as `trust_level: blocked` while the DB said `approved`. Harmless *here* only because
+  C++ is a thin proxy and forwards regardless, with Rust authoritative — but the `blocked` in those
+  log lines is **not what the engine decided on**, which is a trap for anyone reading them later.
+- ⚠️ **Chromium 150 gates the direct-fetch transport behind a Local Network Access prompt.** A public
+  `https://` site must be granted permission before it may reach `127.0.0.1` at all. Observed live:
+  the request fails with `Failed to fetch` and **no network event**, so it never reaches our CORS
+  layer. Every dApp on `@bsv/sdk WalletClient`'s default transport now needs that one-time grant.
+  The IPC bridge is unaffected.
+- ⛔ **`brc-cloud.bcryderman.workers.dev` cannot work with Hodos regardless of the CORS fix, and it
+  was a MISLEADING symptom.** Its own CSP pins `connect-src` to `https://127.0.0.1:2121` (HandCash
+  bridge) and `http://127.0.0.1:3321` (MetaNet), and the page contains **zero** references to
+  `window.CWI` — it probes those two ports and nothing else. So the browser blocks a fetch to our
+  port before the network stack. Hodos's injected provider *does* work on that page
+  (`CWI.getVersion()` returned real wallet JSON), but the site never looks for it.
+  ⇒ If this site motivated the CORS investigation, the 400s were real but were **never** what
+  stopped it.
+- ⭐ **Full connect cascade proven on a real third-party dApp:** unknown domain → 202 → Hodos connect
+  modal → owner approved → `🔐 Drained 1 pending request(s) … (1 resumed)` → wallet responded.
+- ⚠️ **`POST /domain/permissions` is `#[serde(rename_all = "camelCase")]`.** snake_case keys are
+  silently dropped to `None` — no error, the row just does not change. Cost one confused cycle.
+
+### 4m. ⭐ OUT-OF-SCOPE FIX, owner-approved — foreign wallet-bridge interception (commit `9b73bd7`)
+
+**Not Phase 0.5** (dApp interop, not the money path or trust boundary). Recorded here because it
+was found by this phase's live harness and fixed while the diagnosis was hot; it belongs to the
+interop ticket line, and **it does not gate 0.5 sign-off**.
+
+**The symptom.** The HandCash App Lab (`brc-cloud.bcryderman.workers.dev/app-lab`, built by the
+HandCash devs) reported **"Bridge unavailable"** against Hodos. Hodos is supposed to intercept ANY
+local wallet-bridge call and re-point it at our wallet — that re-pointing is the entire reason this
+browser owns its own ports. It never fired.
+
+⛔ **TWO WRONG DIAGNOSES, both recorded because both were plausible and both cost time:**
+
+1. *"The site's CSP blocks us."* **False.** Its CSP permits `https://127.0.0.1:2121` and
+   `http://127.0.0.1:3321`; the only thing CSP blocked was a probe **invented by the tester** to
+   31401 — a request the site would never make. Concluding from the failure of a synthetic request
+   that the real path was broken is the same class of error as the farbling harnesses in
+   `feedback_negative_control_required`: **measuring the wrong subject.**
+2. *"The site hardcodes competitor ports, so it cannot work with us."* **False, and backwards** —
+   intercepting exactly that case is the product's job.
+
+**Three defects, each invisible until the one before it was fixed:**
+
+| # | Defect | Why it hid the next one |
+|---|---|---|
+| 1 | Foreign-bridge arms were bare `url.find("localhost:3321")` literals — **one host spelling only** | Request never reached the interceptor at all, so 2 and 3 were unobservable |
+| 2 | `redirectPort` rewrites host:port but **not the scheme** — `https://…:2121` became `https://…:31401` against an HTTP-only wallet | TLS handshake failure looks identical to "no bridge" |
+| 3 | **`/health` was not in `isWalletEndpoint`** — the FIRST call any bridge-probing dApp makes | Correctly re-pointed, then dropped one line later: `Not a wallet endpoint, allowing normal processing` |
+
+⭐ **Defect 1 is exactly the trap `hodos::IsWalletHostPort` exists to prevent** — `cef-native/CLAUDE.md`
+already says the two spellings "must move in lockstep" — and these three literals bypassed it. Fixed
+with `hodos::IsLoopbackHostPort(url, port)` in `PortConfig.h`, beside `IsWalletHostPort`, so the pair
+cannot drift again. **Route every future foreign-bridge port through the helper, never a literal.**
+
+⛔ **Defect 3's fix is HOST-SCOPED on purpose.** Every other arm of `isWalletEndpoint` is a bare path
+substring — fine for a distinctive name like `/createAction`, **not** for `/health`. Unscoped it
+would hijack the health endpoint of every ordinary website the user visits and route it to the
+wallet. The arm must stay qualified by `IsWalletHostPort`.
+
+**EVIDENCE — paired, same machine, rebuild the only variable.**
+
+🔴 **RED (pre-fix):** both `127.0.0.1` forms produced **no interception line whatsoever**;
+site banner **"Bridge unavailable"**.
+
+🟢 **GREEN (post-fix)** — same probe, all four rewrites logged:
+
+```
+http://localhost:3321/getVersion  -> http://localhost:31401/getVersion
+http://127.0.0.1:3321/getVersion  -> http://127.0.0.1:31401/getVersion
+https://localhost:2121/getVersion -> https://...:31401 -> http://localhost:31401
+https://127.0.0.1:2121/getVersion -> https://...:31401 -> http://127.0.0.1:31401
+```
+
+Site banner flips to **"Connected"**, and its own BRC-100 runner produces a call our wallet serves:
+`POST /getVersion HTTP/1.1" 200 221`.
+
+⇒ **A third-party dApp hardcoded to the HandCash and MetaNet bridges now talks to Hodos.**
+Read-only functions only were exercised; the BRC-29 payment runner was deliberately not clicked.
+
+⚠️ **This supersedes the brc-cloud bullet in §4l**, which concluded the site "cannot work with Hodos
+regardless of the CORS fix". That conclusion was drawn from the wrong subject and is **withdrawn** —
+struck in place per `HARNESS` §8 rather than deleted, because the reasoning error is the instructive
+part. What survives from that bullet: the site genuinely contains **zero** references to
+`window.CWI`, so it is a bridge-probing client rather than an injected-provider client, and Hodos's
+injected provider does also work on that page (`CWI.getVersion()` returned real wallet JSON).
+
 ## 5. Blast radius
 
 - `rust-wallet/src/handlers.rs :: send_transaction` (9612–9951) — signature change; ~~every caller is
@@ -630,9 +847,9 @@ overridden, and the reason is recorded here so a future reader does not "tidy" t
 
 **Owner decisions still open (blocking sign-off, not blocking implementation):**
 
-1. **Finding 4** (§4e) — allowlist `127.0.0.1:31301`/`31401`, revert `block_on_origin_mismatch`, or
-   accept broken direct-HTTP dApp interop for beta.3? Production code, CLAUDE.md #13. ⬜ **Not made.**
-2. `P0.5-R3` — design around the **202 decision** (no funds needed) or prove the full broadcast?
+1. ~~**Finding 4** (§4e) — allowlist, revert, or accept broken interop?~~ ✅ **MADE 2026-08-19: allowlist `127.0.0.1:31301`/`31401` + strip page-supplied trust headers, keep `block_on_origin_mismatch(true)`.** Landed `d0ee6db`, evidenced §4j. ⚠️ The strip needed **two entries the agreed sketch missed** — `X-Bsv-Price-Available` (lives under the deliberately-forwarded `x-bsv-` prefix, so it needs an EXACT strip) and `X-Cert-Approved-Fields`.
+2. 🚨 **NEW, BLOCKING — §4k permission-table escalation.** An approved dApp can `POST /domain/permissions` for ANY domain with ANY caps and `identityKeyDisclosureAllowed:true`, silently. Measured from a real third-party dApp. Fix in beta.3 or accept for the tester base? `set_domain_permission` has no gate of its own; the cheapest close is to refuse the write when the request carries an `X-Requesting-Domain` at all (i.e. dApp-originated), which needs no schema change. ⬜ **Not made.**
+3. `P0.5-R3` — design around the **202 decision** (no funds needed) or prove the full broadcast?
    ⬜ Not made. *(§4h: the dev wallet is a valid scratch wallet either way.)*
 3. Phase 0's `P0-A4`/`P0-A5` RC gates — scheduled when the beta.3 RC is built. ⬜
 
@@ -646,4 +863,7 @@ overridden, and the reason is recorded here so a future reader does not "tidy" t
 | dev/prod deconfliction (§4h) | **VERIFIED** — separate DBs, concurrent, prod never touched | 2026-08-19 | assistant |
 | regression set (0.5 → 1) | | | |
 | adversarial review (panel) | **DO NOT SIGN OFF** — 23 findings, 3 critical | 2026-08-19 | panel |
+| repair re-run, all rows + REDs (§4j) | **GREEN, every RED run in-session** | 2026-08-20 | assistant |
+| §4k permission-table escalation | 🔴 **NEW CRITICAL — BLOCKS SIGN-OFF** | 2026-08-20 | assistant |
+| foreign-bridge interop (§4m, out of scope) | **GREEN with RED** — real dApp connects, `9b73bd7` | 2026-08-20 | assistant |
 | adversarial review (post-repair) | | | |
