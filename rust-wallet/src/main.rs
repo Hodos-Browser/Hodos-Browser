@@ -924,6 +924,23 @@ async fn main() -> std::io::Result<()> {
             .allowed_origin("http://localhost:5137")
             .allowed_origin("http://127.0.0.1")
             .allowed_origin("http://localhost")
+            // P0.5 finding 4. These two are NOT a page-reachable origin — they are
+            // the wallet's own base URL, which is what Chromium stamps on the POST
+            // the C++ interceptor RE-ISSUES on a dApp's behalf: CORS overwrites
+            // Origin with request_initiator->Serialize(), and CEF sets
+            // request_initiator from the TARGET url. Without them,
+            // block_on_origin_mismatch(true) below returns 400 before any handler
+            // runs and every external dApp on @bsv/sdk WalletClient's default
+            // transport breaks. MEASURED 2026-08-19: 400 with the flag on, 200 with
+            // the one line removed.
+            //
+            // ⛔ Safe because `Origin` is a FORBIDDEN HEADER NAME — page JS cannot
+            // set it, only the browser can, so a hostile page always gets its own
+            // origin stamped and stays blocked. Both ports are listed because the
+            // dev build runs on 31401 and the release build on 31301, and the value
+            // is derived from whichever port THIS process bound.
+            .allowed_origin("http://127.0.0.1:31301")
+            .allowed_origin("http://127.0.0.1:31401")
             .allow_any_method()
             .allow_any_header()
             // P0.5-C1. Without this, actix-cors only omits the CORS response headers on

@@ -3648,15 +3648,60 @@ void AsyncWalletResourceHandler::startAsyncHTTPRequest() {
             preCalculatedBsvPriceAvailable_ ? "1" : "0"));
     }
 
+    // P0.5 finding 5 — STRIP the C++-derived trust headers off the page's own
+    // header set before merging it in.
+    //
+    // ⛔ THIS IS A DENYLIST, AND IT MUST STAY ONE. Everything not named below is
+    // forwarded, because BRC-31 `x-authrite-*` / `x-bsv-*` headers are forwarded
+    // DELIBERATELY and an allowlist would silently break dApp auth.
+    //
+    // Why it is needed: `headers` already carries X-Requesting-Domain (above) and
+    // the X-Payment-* set. This loop merges the PAGE's headers into that same map,
+    // and CEF serialises duplicates through AddHeadersFromString, whose per-line
+    // SetHeader is a case-insensitive OVERWRITE. Exactly one value reaches actix.
+    // So a page supplying an empty `X-Requesting-Domain` could overwrite the
+    // derived one, and Rust reads a missing/empty domain as fully-trusted
+    // wallet-internal — a total trust escalation on this transport. A page
+    // supplying X-Payment-* could likewise flip the deliberate fail-closed
+    // price_unavailable branch into SilentWithinCaps.
+    //
+    // ⚠️ Two of these are NOT obvious and were missed by the original fix sketch:
+    //   * X-Bsv-Price-Available is a trust header that lives under the `x-bsv-`
+    //     prefix this loop forwards on purpose — so it needs an EXACT strip, not
+    //     a prefix strip, or stripping it would take the BRC-31 family with it.
+    //   * X-Cert-Approved-Fields is injected on the cert-replay path
+    //     (simple_handler.cpp) and Rust trusts it; request_gate.rs's "never
+    //     page-supplied" premise is only true once it is stripped here.
+    static const char* const kTrustHeaderExact[] = {
+        "origin",
+        "x-requesting-domain",
+        "x-user-approved",
+        "x-browser-id",
+        "x-bsv-price-available",
+        "x-cert-approved-fields",
+    };
+
     // Forward original headers (including BRC-31 Authrite headers)
     for (const auto& header : originalHeaders_) {
         std::string headerName = header.first.ToString();
         std::string headerValue = header.second.ToString();
 
-        if (headerName.find("x-authrite-") != std::string::npos ||
-            headerName.find("X-Authrite-") != std::string::npos ||
-            headerName.find("x-bsv-") != std::string::npos ||
-            headerName.find("X-BSV-") != std::string::npos) {
+        std::string lowerName = headerName;
+        std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
+
+        bool isTrustHeader = (lowerName.rfind("x-payment-", 0) == 0);
+        if (!isTrustHeader) {
+            for (const char* denied : kTrustHeaderExact) {
+                if (lowerName == denied) { isTrustHeader = true; break; }
+            }
+        }
+        if (isTrustHeader) {
+            LOG_WARNING_HTTP("🛡️ Dropping page-supplied trust header '" + headerName
+                             + "' — C++ derives this one");
+            continue;
+        }
+
+        if (lowerName.rfind("x-authrite-", 0) == 0 || lowerName.rfind("x-bsv-", 0) == 0) {
             LOG_DEBUG_HTTP("🔐 Forwarding auth header: " + headerName + " = " + headerValue.substr(0, 50) + "...");
         }
 
