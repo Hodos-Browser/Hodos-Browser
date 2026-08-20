@@ -164,4 +164,22 @@ inline bool IsWalletHostPort(const std::string& url) {
         || url.find("127.0.0.1:" + p) != std::string::npos;
 }
 
+// A loopback host:port in EITHER host spelling.
+//
+// ⛔ Exists because three hardcoded literals in simple_handler.cpp's resource
+// dispatch matched only `localhost:<port>`, so a dApp using the `127.0.0.1`
+// spelling of the SAME port was never intercepted. MEASURED 2026-08-19 against
+// the HandCash App Lab, whose CSP pins connect-src to https://127.0.0.1:2121 and
+// http://127.0.0.1:3321: `localhost:3321` was intercepted and re-pointed at our
+// wallet, `127.0.0.1:3321` was ignored entirely, and the site reported "Bridge
+// unavailable". Same port, same path, only the host form differed.
+//
+// The two spellings must always move in lockstep — that is the whole reason
+// IsWalletHostPort above checks both. Route every foreign-bridge port through
+// THIS helper rather than writing a literal, so the pair cannot drift again.
+inline bool IsLoopbackHostPort(const std::string& url, const std::string& port) {
+    return url.find("localhost:" + port) != std::string::npos
+        || url.find("127.0.0.1:" + port) != std::string::npos;
+}
+
 }  // namespace hodos

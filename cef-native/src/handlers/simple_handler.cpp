@@ -8170,10 +8170,24 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
     // Intercept HTTP requests for all browsers when they're making external requests
     // Check if the request is to localhost ports that BRC-100 sites commonly use
     // OR if it's a BRC-104 /.well-known/auth request (standard wallet authentication endpoint)
+    // Foreign local wallet bridges we deliberately intercept and re-point at OUR
+    // wallet, so a dApp hardcoded to another wallet's port still reaches Hodos.
+    // That re-pointing is the entire reason this browser owns its own ports.
+    //
+    // ⛔ These MUST test both host spellings. Until 2026-08-19 they were bare
+    // `url.find("localhost:3321")` literals, so the `127.0.0.1` spelling of the
+    // same port fell straight through to the real network. MEASURED against the
+    // HandCash App Lab (brc-cloud.bcryderman.workers.dev/app-lab), whose CSP pins
+    // connect-src to https://127.0.0.1:2121 + http://127.0.0.1:3321:
+    //   http://localhost:3321/getVersion  -> intercepted, re-pointed at 31401
+    //   http://127.0.0.1:3321/getVersion  -> NOT intercepted at all
+    // Same port, same path, only the host form differed — and the site reported
+    // "Bridge unavailable". hodos::IsLoopbackHostPort checks both; do not go back
+    // to a literal.
     if (hodos::IsWalletHostPort(url) ||
-        url.find("localhost:3321") != std::string::npos ||
-        url.find("localhost:2121") != std::string::npos ||
-        url.find("localhost:8080") != std::string::npos ||
+        hodos::IsLoopbackHostPort(url, "3321") ||   // MetaNet Client
+        hodos::IsLoopbackHostPort(url, "2121") ||   // HandCash local bridge
+        hodos::IsLoopbackHostPort(url, "8080") ||
         url.find("messagebox.babbage.systems") != std::string::npos ||
         url.find("/.well-known/auth") != std::string::npos) {
         LOG_DEBUG_BROWSER("🌐 Intercepting wallet request from browser role: " + role_);

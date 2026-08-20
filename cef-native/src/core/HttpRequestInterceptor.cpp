@@ -3761,6 +3761,21 @@ CefRefPtr<CefResourceHandler> HttpRequestInterceptor::GetResourceHandler(
     redirectPort("localhost:", "localhost:" + hodos::WalletPortStr());
     redirectPort("127.0.0.1:", "127.0.0.1:" + hodos::WalletPortStr());
 
+    // The wallet speaks HTTP only. redirectPort rewrites host:port but NOT the
+    // scheme, and a dApp hardcoded to a foreign bridge may well use https — the
+    // HandCash bridge on 2121 does. Without this, re-pointing that request lands
+    // an https:// client on our plaintext server and it dies in the TLS
+    // handshake. MEASURED 2026-08-19: https://localhost:2121/getVersion was
+    // re-pointed to https://localhost:31401/getVersion, scheme intact.
+    //
+    // ⛔ Downgrade ONLY once the URL is already OUR wallet host:port, never
+    // before — this must not become a general https->http rewrite.
+    if (url.rfind("https://", 0) == 0 && hodos::IsWalletHostPort(url)) {
+        url = "http://" + url.substr(8);
+        LOG_DEBUG_HTTP("🌐 Scheme downgrade for local wallet: " + originalUrl + " -> " + url);
+        request->SetURL(url);
+    }
+
     LOG_DEBUG_HTTP("🌐 About to check if wallet endpoint...");
 
     // BRC-104 authentication endpoint interception
@@ -5086,6 +5101,23 @@ CefRefPtr<CefCookieAccessFilter> HttpRequestInterceptor::GetCookieAccessFilter(
 }
 
 bool HttpRequestInterceptor::isWalletEndpoint(const std::string& url) {
+    // Bridge DISCOVERY. `/health` is the first thing a dApp probing a local
+    // wallet bridge calls — both the MetaNet (3321) and HandCash (2121) bridges
+    // expose it, and so do we (`GET /health`, main.rs). Until 2026-08-19 it was
+    // absent here, so the HandCash App Lab's probe was correctly re-pointed at
+    // our wallet and then dropped one line later with "Not a wallet endpoint,
+    // allowing normal processing" — the wallet never saw it and the site
+    // reported "Bridge unavailable".
+    //
+    // ⛔ SCOPED to our own host:port ON PURPOSE. Every other arm below is a bare
+    // path substring, which is safe for distinctive names like /createAction but
+    // NOT for `/health` — unscoped it would hijack the health endpoint of every
+    // ordinary website the user visits and route it to the wallet. This arm must
+    // stay host-qualified.
+    if (hodos::IsWalletHostPort(url) && url.find("/health") != std::string::npos) {
+        return true;
+    }
+
     // Check if URL contains wallet endpoints
     return (url.find("/brc100/") != std::string::npos ||
             url.find("/wallet/") != std::string::npos ||
