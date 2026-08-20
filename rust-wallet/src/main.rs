@@ -74,6 +74,53 @@ async fn domain_trust_mw(
         None => return Ok(next.call(req).await?.map_into_boxed_body()),
     };
 
+    // ⛔ THE PERMISSION TABLE IS FIRST-PARTY ONLY. (P0.5 §4k)
+    //
+    // MEASURED 2026-08-19 from a REAL approved dApp: a page-context
+    // `POST /domain/permissions` carrying an arbitrary
+    // `{domain, perTxLimitCents, identityKeyDisclosureAllowed}` body succeeded
+    // SILENTLY and wrote the row — no modal, no notification. `set_domain_permission`
+    // has no gate of its own, and this middleware used to wave approved domains
+    // straight through. So ONE ordinary "approve this dApp" click — the most common
+    // action in the product — handed that site the ability to raise its own spending
+    // caps without limit, switch on silent identity-key disclosure, and approve
+    // collaborator domains the user never visited.
+    //
+    // Why "has the header" is exactly "came from a web page": every legitimate
+    // writer of this table is first-party and reaches Rust header-free. The C++
+    // modal-approval writes use `SyncHttpClient::Post` / `CefRequest` with
+    // Content-Type ONLY (verified at every `/domain/permissions*` and
+    // `/wallet/session-*` call site in cef-native), and the wallet UI's own calls go
+    // down the internal IPC path, which builds its header map from scratch.
+    // `X-Requesting-Domain` is stamped solely on the dApp-request forwarding paths.
+    //
+    // ⛔ Gated HERE, once, over the WHOLE subtree — deliberately not per handler. A
+    // sub-permission endpoint added later is refused by default instead of by
+    // someone remembering. Gating arm-by-arm is exactly how the `send_transaction`
+    // IPC arm was missed and how this phase came to be refuted.
+    {
+        let path = req.request().path().to_string();
+        let method = req.request().method().clone();
+        let is_mutation = method == actix_web::http::Method::POST
+            || method == actix_web::http::Method::DELETE;
+        let is_permission_surface = path.starts_with("/domain/permissions")
+            || path == "/wallet/session-approve"
+            || path == "/wallet/session-revoke";
+
+        if is_mutation && is_permission_surface {
+            log::warn!(
+                "🛡️ REFUSED {} {} from dApp origin '{}' — the permission table is first-party only",
+                method, path, domain
+            );
+            return Ok(req.into_response(
+                actix_web::HttpResponse::Forbidden().json(serde_json::json!({
+                    "error": "permission_table_is_first_party_only",
+                    "endpoint": path,
+                })),
+            ));
+        }
+    }
+
     let permission = req
         .app_data::<web::Data<Arc<permission_service::PermissionService>>>()
         .expect("PermissionService Data registered in App")
