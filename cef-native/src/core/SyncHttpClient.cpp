@@ -40,7 +40,36 @@ static bool ParseUrl(const std::string& url, std::wstring& host, INTERNET_PORT& 
     std::string hostStr;
     if (colonPos != std::string::npos) {
         hostStr = hostPort.substr(0, colonPos);
-        port = static_cast<INTERNET_PORT>(std::stoi(hostPort.substr(colonPos + 1)));
+
+        // P0.5 finding 12 (first half). This std::stoi was UNGUARDED, and the
+        // string it parses is partly page-controlled: the IPC bridge builds
+        // `WalletBaseUrl() + endpoint` where `endpoint` comes straight off a
+        // wallet_call message with no leading-'/' check. A page sending
+        // endpoint="99999999999" produced "http://127.0.0.1:31401" +
+        // "99999999999" => port text "3140199999999999", which threw
+        // std::out_of_range on a CEF worker thread with no handler anywhere up
+        // the stack => browser-process abort. endpoint="9/x" instead wrapped the
+        // port through the uint16 cast and retargeted the call at a DIFFERENT
+        // local service, with the body readable by the page.
+        //
+        // ⛔ Reachable with NO approval: the IPC path forwards to Rust FIRST and
+        // lets the engine decide, so the URL is built and parsed before Rust ever
+        // answers. Fail the parse instead — ParseUrl already returns bool and
+        // every caller already handles false.
+        //
+        // The endpoint ALLOWLIST (making wallet_call accept only known routes) is
+        // deliberately NOT here — that is Phase 5, with the isWalletEndpoint
+        // route table. This closes the crash and the retarget, not the class.
+        const std::string portStr = hostPort.substr(colonPos + 1);
+        if (portStr.empty() || portStr.size() > 5 ||
+            portStr.find_first_not_of("0123456789") != std::string::npos) {
+            return false;
+        }
+        const unsigned long portNum = std::stoul(portStr);  // <=5 digits, cannot throw
+        if (portNum == 0 || portNum > 65535) {
+            return false;
+        }
+        port = static_cast<INTERNET_PORT>(portNum);
     } else {
         hostStr = hostPort;
         port = isHttps ? INTERNET_DEFAULT_HTTPS_PORT : INTERNET_DEFAULT_HTTP_PORT;
