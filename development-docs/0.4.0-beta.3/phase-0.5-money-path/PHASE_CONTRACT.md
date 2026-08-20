@@ -1,7 +1,7 @@
 # Phase 0.5 — money path & trust boundary · PHASE CONTRACT
 
 **Workstream:** WS5(a) · **Ticket:** `../TICKET_loopback_host_form_wallet_routing.md` §6.2, §7.1, §7.3
-**Status:** 🔴 NOT SIGNED OFF — **REPAIR COMPLETE, BLOCKED ON A NEW CRITICAL.** Findings 4, 5 and 6 are fixed and GREEN with REDs run in-session (§4j); the first panel's 3 criticals remain MEASURED and closed. ⛔ **§4k is a NEW critical found 2026-08-19 and it blocks sign-off:** an approved dApp can rewrite the whole permission table, defeating every payment cap and the identity-key privacy gate. Still owed: `G1` on a release-shaped build and the post-repair panel. Repair prompt: `../SESSION_PROMPT_beta3_p05_repair.md` · **Opened:** 2026-08-18 · **Amended:** 2026-08-19 (§4a–§4c, §5a), 2026-08-19 **repair scope** (§2, §4 split into 0.5a/0.5b, §4e–§4g, §5b, §6) · **Platforms:** both (Rust = one binary; the C++ gates are cross-platform)
+**Status:** 🔴 NOT SIGNED OFF — **REPAIR COMPLETE, BLOCKED ON A NEW CRITICAL.** Findings 4, 5 and 6 are fixed and GREEN with REDs run in-session (§4j); the first panel's 3 criticals remain MEASURED and closed. ✅ **§4k — the new critical found 2026-08-19 — is FIXED and GREEN with RED (`81c054c`)**, including an owner-clicked control proving the connect-approval path still writes. Still owed: `G1` on a release-shaped build and the post-repair panel. Repair prompt: `../SESSION_PROMPT_beta3_p05_repair.md` · **Opened:** 2026-08-18 · **Amended:** 2026-08-19 (§4a–§4c, §5a), 2026-08-19 **repair scope** (§2, §4 split into 0.5a/0.5b, §4e–§4g, §5b, §6) · **Platforms:** both (Rust = one binary; the C++ gates are cross-platform)
 **Standard:** `../HARNESS.md`.
 
 > ⭐ **Scope change, owner-approved 2026-08-19: C1, C2 and C3 are folded into this phase.**
@@ -525,7 +525,7 @@ satoshis 0 — it makes it **1**, the decoy `amount:1` in the sweep body. The fa
 "obviously broken", it is "plausible one-satoshi payment, priced at 0 cents, silently approved,
 entire balance gone". Seen RED for that exact reason, then green on restore.
 
-### 4k. 🚨 NEW CRITICAL — an approved dApp can rewrite the whole permission table
+### 4k. ✅ CLOSED — an approved dApp could rewrite the whole permission table (fixed `81c054c`)
 
 **MEASURED 2026-08-19 from a REAL third-party dApp** (`brc-cloud.bcryderman.workers.dev`, approved
 by the owner with one ordinary click). A page-context call through the wallet bridge created:
@@ -550,7 +550,42 @@ It cannot set `blocked` (validation admits only `approved`/`unknown`), which is 
 
 ⚠️ **Scope of the proof:** the unrestricted **write** is measured. It was NOT chained to an actual
 silent spend — that costs money, and self-targeting is the identical call with a different domain
-string. → **Blocker for beta.3 sign-off.** Not introduced by this phase; long-standing.
+string. Not introduced by this phase; long-standing.
+
+**FIXED 2026-08-20, `81c054c`.** `domain_trust_mw` now refuses POST/DELETE on
+`/domain/permissions*` plus `/wallet/session-approve` / `-revoke` when the request carries
+`X-Requesting-Domain` — i.e. when it came from a web page.
+
+⭐ **Why "has the header" == "came from a web page", verified at every call site:** every
+legitimate writer is first-party and reaches Rust header-free. The C++ modal-approval writes use
+`SyncHttpClient::Post` / `CefRequest` with **Content-Type only**, and the wallet UI goes down the
+internal IPC path, which builds its header map from scratch. `X-Requesting-Domain` is stamped
+solely on dApp-request forwarding paths.
+
+⛔ **Gated ONCE over the whole subtree, not per handler** — a sub-permission endpoint added later is
+refused by default rather than by someone remembering. Gating arm-by-arm is how the
+`send_transaction` IPC arm was missed. Reads are deliberately **not** blocked (a narrower privacy
+question, filed separately rather than widened into this fix).
+
+| | Result |
+|---|---|
+| 🔴 **RED** (pre-fix) | page call RESOLVED, row `id=86` written, `perTxLimitCents 9999999`, `identityKeyDisclosureAllowed true` |
+| 🟢 **GREEN** (post-fix) | identical page call → `REJECTED permission_table_is_first_party_only`, **no row** |
+| 🟢 **GREEN, hardest case** | re-tested with the site **fully approved incl. `bundledScopeGrant`** → still refused |
+
+⭐ **THE PAIRING CONTROL — the failure this fix could itself have caused, and the one `curl` cannot
+prove.** The dApp was revoked, a wallet call fired to raise a real connect modal, and **the owner
+clicked Allow**:
+
+```
+🔐 Domain permission sync write ... -> status 200      (NOT 403)
+🔐 Drained 1 pending request(s) ... (1 resumed)
+```
+
+Row `id=88` created; the parked `CWI.getVersion()` then returned real wallet JSON. ⇒ **The gate
+blocks the SITE's write and permits the BROWSER's write on the user's behalf.** That distinction is
+the entire permission model, and it is now measured in both directions on the same domain minutes
+apart.
 
 ### 4l. Environment findings from the live run — file, do not chase
 
@@ -848,7 +883,7 @@ overridden, and the reason is recorded here so a future reader does not "tidy" t
 **Owner decisions still open (blocking sign-off, not blocking implementation):**
 
 1. ~~**Finding 4** (§4e) — allowlist, revert, or accept broken interop?~~ ✅ **MADE 2026-08-19: allowlist `127.0.0.1:31301`/`31401` + strip page-supplied trust headers, keep `block_on_origin_mismatch(true)`.** Landed `d0ee6db`, evidenced §4j. ⚠️ The strip needed **two entries the agreed sketch missed** — `X-Bsv-Price-Available` (lives under the deliberately-forwarded `x-bsv-` prefix, so it needs an EXACT strip) and `X-Cert-Approved-Fields`.
-2. 🚨 **NEW, BLOCKING — §4k permission-table escalation.** An approved dApp can `POST /domain/permissions` for ANY domain with ANY caps and `identityKeyDisclosureAllowed:true`, silently. Measured from a real third-party dApp. Fix in beta.3 or accept for the tester base? `set_domain_permission` has no gate of its own; the cheapest close is to refuse the write when the request carries an `X-Requesting-Domain` at all (i.e. dApp-originated), which needs no schema change. ⬜ **Not made.**
+2. ~~🚨 **NEW, BLOCKING — §4k permission-table escalation.** An approved dApp can `POST /domain/permissions` for ANY domain with ANY caps and `identityKeyDisclosureAllowed:true`, silently. Measured from a real third-party dApp. Fix in beta.3 or accept for the tester base? `set_domain_permission` has no gate of its own; the cheapest close is to refuse the write when the request carries an `X-Requesting-Domain` at all (i.e. dApp-originated), which needs no schema change.~~ ✅ **MADE 2026-08-20: fix in beta.3.** Landed `81c054c`, evidenced §4k, including an owner-clicked approval control proving the first-party path still writes.
 3. `P0.5-R3` — design around the **202 decision** (no funds needed) or prove the full broadcast?
    ⬜ Not made. *(§4h: the dev wallet is a valid scratch wallet either way.)*
 3. Phase 0's `P0-A4`/`P0-A5` RC gates — scheduled when the beta.3 RC is built. ⬜
@@ -864,6 +899,6 @@ overridden, and the reason is recorded here so a future reader does not "tidy" t
 | regression set (0.5 → 1) | | | |
 | adversarial review (panel) | **DO NOT SIGN OFF** — 23 findings, 3 critical | 2026-08-19 | panel |
 | repair re-run, all rows + REDs (§4j) | **GREEN, every RED run in-session** | 2026-08-20 | assistant |
-| §4k permission-table escalation | 🔴 **NEW CRITICAL — BLOCKS SIGN-OFF** | 2026-08-20 | assistant |
+| §4k permission-table escalation | ✅ **FIXED + GREEN with RED** — `81c054c`; owner-clicked approval control passed | 2026-08-20 | assistant + owner |
 | foreign-bridge interop (§4m, out of scope) | **GREEN with RED** — real dApp connects, `9b73bd7` | 2026-08-20 | assistant |
 | adversarial review (post-repair) | | | |
