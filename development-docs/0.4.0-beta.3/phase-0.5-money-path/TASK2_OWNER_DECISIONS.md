@@ -1,7 +1,15 @@
 # Task 2 — six decisions owed to the owner
 
 **Written 2026-08-20**, after clearing panel #2's Task 0 and Task 1.
-⛔ **Nothing here has been changed.** CLAUDE.md #13: where the evidence points at
+**Updated 2026-08-21** with the owner's decisions.
+
+| Status | Items |
+|---|---|
+| ✅ **DECIDED + FIXED** | **2** (`reveal-mnemonic`), **3** (`wallet/settings`) — `c8558dc` |
+| ✅ **ANSWERED** | **6** (macOS ships ⇒ the SSRF is a BLOCKER, relayed as E1) |
+| ⬜ **STILL OWED** | **1** (sharpened below — worse than filed), **4**, **5** |
+
+⛔ **Items 1, 4 and 5 have NOT been changed.** CLAUDE.md #13: where the evidence points at
 production code, present the evidence and get approval first.
 
 All six are **pre-existing** — none was introduced by Phase 0.5. Every file:line
@@ -25,16 +33,64 @@ Two halves, very different cost:
 - **loopback-port half** — any page on any `127.0.0.1:<port>` gets full first-party
   trust. Needs the user to be running a local server (see #4).
 
-> **Recommendation: fix the empty-origin half in beta.3; defer the port half to Phase 5.**
-> Failing closed on an empty origin is a small, well-bounded change with a clean
-> negative control. The port half is a genuine design question (#4) and deserves the
-> Phase 5 `IsWalletOrigin()` treatment rather than a rushed predicate.
-> **Correct the C1 banner claim in the contract regardless — that costs nothing and
-> the record is currently wrong.**
+### ⚠️ SHARPENED 2026-08-21 — I traced the whole chain, and it is worse than filed
+
+The panel filed this as `IsInternalOrigin("") == true`. That framing is **too narrow, and the
+empty-origin half is NOT the reachable part on the IPC transport** — `ResolveIpcOrigin` already
+substitutes `"opaque-origin.invalid"` for an empty origin, so C1's cascade genuinely fails closed
+there. Credit where due: that half works.
+
+**The real defect is the SECOND derivation, on the HTTP transport, and it is a userinfo bypass.**
+Chain verified end to end this session:
+
+```
+extractDomain(browser, request)            HttpRequestInterceptor.cpp :: extractDomain
+  -> domain                                 (hand-rolled: find "://", read to next "/")
+  -> AsyncWalletResourceHandler(..., domain, ...)
+  -> requestDomain_
+  -> IsInternalOrigin(requestDomain_)       -> "🔒 Internal origin … — bypassing domain check"
+```
+
+`extractDomain` **does not strip userinfo**. So for a page at
+`https://127.0.0.1:31301@evil.com/` — which actually loads from **evil.com** — it returns the
+string `127.0.0.1:31301@evil.com`. `IsInternalOrigin`'s `matchesHostOrHostColon("127.0.0.1")` sees
+`127.0.0.1` followed by `:` and returns **true**. The page is treated as **wallet-internal** and the
+domain check is skipped entirely.
+
+The empty case is the same defect's second face: a top-level document whose URL has no `://`
+(e.g. `about:blank`) with no referrer yields `""`, and `IsInternalOrigin("")` returns true.
+
+**Why this is embarrassing rather than merely bad:** the correct derivation already exists, is
+already used by the IPC path, and is **already unit-tested against this exact input** —
+`tests/port_config_origin_test.cpp :: UserinfoIsStripped` asserts
+`OriginFromUrl("http://127.0.0.1:5137@evil.com/") == "evil.com"`. We wrote the rule down, pinned it
+with a test, and then left a second parser that violates it on the money transport.
+
+**Status: CODE_READING, not measured.** ⛔ I have not driven a browser to
+`https://127.0.0.1:31301@evil.com/` and watched the bypass fire. Two things could still block it:
+Chromium may strip or refuse userinfo on top-level navigation, and **Chromium 150 gates direct
+fetch to `127.0.0.1` behind a Local Network Access prompt**, so the HTTP transport may be
+unreachable from a public page without a grant. **Both must be checked before this is called
+exploitable** — that is the experiment attached to this hypothesis.
+
+**The fix, if you want it, is small and low-risk:** replace `extractDomain`'s hand-rolled parse with
+`hodos::OriginFromUrl(mainFrameUrl)` and fail closed on empty (mirroring `ResolveIpcOrigin`'s
+sentinel). ⛔ **Do not write a third parser.**
+
+> **Recommendation: fix in beta.3 — but measure the reachability first, in that order.**
+> The change is "call the already-tested helper", which is about as safe as a security fix gets.
+> But it also alters what `extractDomain` returns for iframes and odd URLs on a path that every
+> wallet HTTP request crosses, so I would want the LNA/userinfo reachability answer before landing
+> it, not after. If reachability turns out to be blocked, this drops to a defence-in-depth cleanup
+> and can ride to Phase 5 with item 4 — the two are the same predicate.
+
+**The C1 banner claim has been corrected in code** (`simple_handler.cpp`, the C1/C2 banner) —
+it said *"ONE derivation, applied ONCE"*, which was false and actively harmful, because it tells the
+next reader to stop looking.
 
 ---
 
-## 2. `/wallet/reveal-mnemonic` on the no-PIN branch
+## 2. ✅ DECIDED + FIXED (`c8558dc`) — `/wallet/reveal-mnemonic` on the no-PIN branch
 
 Returns the **BIP39 recovery phrase to page context** after one Allow click.
 
@@ -53,7 +109,7 @@ reachable from web content". On the no-PIN branch that last clause does not hold
 
 ---
 
-## 3. `POST /wallet/settings` is page-callable
+## 3. ✅ DECIDED + FIXED (`c8558dc`) — `POST /wallet/settings` is page-callable
 
 Rewrites `default_per_tx_limit_cents`, `default_per_session_limit_cents`,
 `default_rate_limit_per_min` — the values **every future approval inherits** — plus
@@ -117,7 +173,7 @@ The panel flagged the **modality**, not a proven exploit: whether
 
 ---
 
-## 6. macOS — does beta.3 ship macOS?
+## 6. ✅ ANSWERED — YES, beta.3 ships macOS ⇒ the SSRF is a BLOCKER
 
 **This is a direct question, and it changes the severity of a finding.** The
 curl-userinfo SSRF on the macOS `wallet_call` path (an arbitrary-URL fetch from the
@@ -139,11 +195,11 @@ macOS this session**.
 
 ## Summary — what I would do
 
-| # | Item | Recommendation |
+| # | Item | Status |
 |---|---|---|
-| 2 | `reveal-mnemonic` to page context | **Fix in beta.3.** Would not ship it. |
-| 3 | `POST /wallet/settings` page-callable | **Fix in beta.3.** One line in the gate that just landed. |
-| 1 | `IsInternalOrigin("")` empty-origin half | **Fix in beta.3**; defer the port half. Correct the C1 claim regardless. |
-| 5 | Two-phase action lifecycle | **Measure before fixing.** Biggest unexamined surface. |
-| 4 | Loopback-port trust | **Phase 5 headline**, not a cleanup. |
-| 6 | macOS scope | **Owner answer needed** — it re-ranks #6 and sizes Task 4. |
+| 2 | `reveal-mnemonic` to page context | ✅ **FIXED** `c8558dc`, RED + GREEN + first-party control |
+| 3 | `POST /wallet/settings` page-callable | ✅ **FIXED** `c8558dc`, RED rewrote the defaults 1000→999999 |
+| 6 | macOS scope | ✅ **ANSWERED: ships.** SSRF promoted to BLOCKER, relayed as E1 |
+| 1 | `extractDomain` userinfo bypass (was filed as `IsInternalOrigin("")`) | ⬜ **OWED — measure reachability, then fix.** Sharper than filed: the IPC half already fails closed; the HTTP half treats `https://127.0.0.1:31301@evil.com/` as wallet-internal. C1 banner claim corrected in code. |
+| 5 | Two-phase action lifecycle | ⬜ **OWED — measure before fixing.** Biggest unexamined surface |
+| 4 | Loopback-port trust | ⬜ **OWED — Phase 5 headline**, same predicate as #1's port half |

@@ -1987,8 +1987,29 @@ bool SimpleHandler::OnBeforePopup(
 }
 
 // ============================================================================
-// P0.5 C1/C2 — the IPC trust boundary. ONE derivation, applied ONCE.
+// P0.5 C1/C2 — the IPC trust boundary. One derivation for THIS transport.
 // ============================================================================
+//
+// ⛔ CLAIM CORRECTED 2026-08-21 (adversarial panel #2, Task 2 item 1). This
+// banner read "ONE derivation, applied ONCE." That was FALSE, and the false
+// version is worse than no banner: it tells the next reader the derivation
+// problem is solved everywhere, so they stop looking.
+//
+// The truth: this file's cascade is the hardened derivation, and it governs the
+// IPC transport ONLY. The HTTP transport has a SECOND, INDEPENDENT and
+// UNHARDENED derivation — `HttpRequestInterceptor::extractDomain` — which
+// hand-rolls its own "find :// then read to the next /" parse. It does not
+// anchor on scheme and it does NOT strip userinfo, so it diverges from
+// `hodos::OriginFromUrl` on exactly the inputs OriginFromUrl was written to
+// defeat. Its result flows to `requestDomain_` and then to
+// `IsInternalOrigin(requestDomain_)`, whose true branch logs "bypassing domain
+// check".
+//
+// Recorded, not fixed — owner decision pending. See
+// development-docs/0.4.0-beta.3/phase-0.5-money-path/TASK2_OWNER_DECISIONS.md #1.
+// ⚠️ Whoever fixes it: the correct derivation already exists and is already
+// unit-tested (`PortConfig.h :: OriginFromUrl`, `tests/port_config_origin_test.cpp`
+// :: UserinfoIsStripped). The fix is to CALL it, not to write a third one.
 //
 // ⛔ READ BEFORE ADDING AN IPC ARM. The reason Phase 0.5 was refuted by its own
 // adversarial panel is that the origin check lived INSIDE the wallet_call arm,
