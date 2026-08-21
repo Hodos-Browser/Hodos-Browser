@@ -557,6 +557,19 @@ impl<'a> OutputRepository<'a> {
     /// # Arguments
     /// * `derivation_method` - "BIP32" or "BRC-42"
     /// * `address_index` - The HD address index (-1 for master, 0+ for derived)
+    /// * `confirmed` - false when the UTXO was only seen in mempool (height <= 0)
+    ///
+    /// ⛔ `confirmed` is an EXPLICIT parameter, never the schema default. (P0.5 panel #2, 1.6)
+    ///
+    /// This INSERT used to list 14 columns and omit `confirmed`, so every row it
+    /// wrote took the `DEFAULT 1` from the V14 migration and a mempool-only output
+    /// was recorded as CONFIRMED. 4eacb51 fixed exactly that bug on the sibling
+    /// `upsert_received_utxo_with_confirmed`, but its audit was file-scoped rather
+    /// than dataflow-scoped and missed this function — so the bug stayed live on
+    /// `wallet_recover` and `wallet_rescan`, the two paths where a user is most
+    /// exposed, because a restore is when the DB has nothing to cross-check against.
+    /// The value was already sitting on `utxo_fetcher::UTXO::confirmed` at both call
+    /// sites; it simply was not written.
     pub fn upsert_received_utxo_with_derivation(
         &self,
         user_id: i64,
@@ -566,6 +579,7 @@ impl<'a> OutputRepository<'a> {
         script_hex: &str,
         address_index: i32,
         derivation_method: &str,
+        confirmed: bool,
     ) -> Result<usize> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -587,8 +601,9 @@ impl<'a> OutputRepository<'a> {
             "INSERT OR IGNORE INTO outputs (
                 user_id, txid, vout, satoshis, locking_script,
                 derivation_prefix, derivation_suffix,
-                spendable, change, provided_by, purpose, type, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, 0, 'you', 'receive', 'P2PKH', ?8, ?9)",
+                spendable, change, provided_by, purpose, type, created_at, updated_at,
+                confirmed
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, 0, 'you', 'receive', 'P2PKH', ?8, ?9, ?10)",
             rusqlite::params![
                 user_id,
                 txid,
@@ -599,6 +614,7 @@ impl<'a> OutputRepository<'a> {
                 derivation_suffix,
                 now,
                 now,
+                if confirmed { 1i32 } else { 0i32 },
             ],
         )?;
 

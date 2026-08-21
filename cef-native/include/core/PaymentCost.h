@@ -46,38 +46,86 @@ inline bool IsPaymentEndpoint(const std::string& endpoint) {
 //   /transaction/send     {toAddress, amount, sendMax}
 //   /wallet/peerpay/send  {recipient_identity_key, amount_satoshis}
 //   /wallet/paymail/send  {paymail, amount_satoshis}
+// ⛔ NEVER RETURN THE FIRST SHAPE THAT MATCHES. (P0.5 panel #2, findings 1.1 + 1.2)
+//
+// This function used to test each shape in turn and return from the first branch
+// that matched. Two ways that under-priced a real spend to ZERO — and 0 cents with
+// a live price reads as "under every cap", which auto-approves SILENTLY:
+//
+//   1. DECOY KEY. `{"outputs":[], "toAddress":"1…", "amount":100000000}` matched the
+//      `outputs` branch, summed an empty array, and returned 0 — while Rust's
+//      `SendTransactionRequest` (no `deny_unknown_fields`) ignored the decoy
+//      `outputs` and spent the real `amount`. Any amount, one Allow click.
+//
+//   2. NESTED sendMax. Only TOP-LEVEL `sendMax` was checked, but createAction reads
+//      it from `options` (`handlers.rs :: create_action_internal`, "Extract send_max
+//      early"). `{"outputs":[{"satoshis":1}], "options":{"sendMax":true}}` priced at
+//      1 satoshi and swept the wallet. Both layers re-read the same wrong quantity,
+//      so the Rust defence-in-depth missed it identically.
+//
+// The rule now: find EVERY amount shape the body carries. Exactly one → price it.
+// More than one → the body is ambiguous about what it spends, so refuse to price it
+// and let Rust resolve or the user confirm. An EMPTY `outputs` array is not a shape
+// at all and falls through, so a decoy cannot mask the field that really spends.
+inline bool IsSendMaxAnywhere(const nlohmann::json& json) {
+    auto truthy = [](const nlohmann::json& v) {
+        return v.is_boolean() && v.get<bool>();
+    };
+    if (json.contains("sendMax") && truthy(json["sendMax"])) return true;
+    // createAction carries it here, and this is the half that was missed.
+    if (json.contains("options") && json["options"].is_object()) {
+        const auto& opts = json["options"];
+        if (opts.contains("sendMax") && truthy(opts["sendMax"])) return true;
+    }
+    return false;
+}
+
 inline int64_t ExtractOutputSatoshis(const std::string& body) {
     if (body.empty()) return 0;
     try {
         auto json = nlohmann::json::parse(body);
+        if (!json.is_object()) return 0;
 
-        // createAction — sum the requested outputs.
-        if (json.contains("outputs") && json["outputs"].is_array()) {
+        // Checked before any amount shape: when sendMax is set the handler IGNORES
+        // whatever amount the body carries, so pricing that amount under-prices a
+        // full-balance sweep.
+        if (IsSendMaxAnywhere(json)) return kAmountNotDerivable;
+
+        int shapes = 0;
+        int64_t amount = 0;
+
+        // createAction — sum the requested outputs. An empty array is NOT a shape:
+        // it carries no amount, and treating it as "0 satoshis" is exactly the
+        // decoy above.
+        if (json.contains("outputs") && json["outputs"].is_array()
+            && !json["outputs"].empty()) {
             int64_t total = 0;
             for (const auto& output : json["outputs"]) {
                 if (output.contains("satoshis") && output["satoshis"].is_number()) {
                     total += output["satoshis"].get<int64_t>();
                 }
             }
-            return total;
+            amount = total;
+            ++shapes;
         }
 
-        // sendMax wins over amount: when it is set the handler IGNORES the body's
-        // `amount`, so trusting that field here would under-price a full sweep.
-        if (json.contains("sendMax") && json["sendMax"].is_boolean()
-            && json["sendMax"].get<bool>()) {
-            return kAmountNotDerivable;
-        }
+        // /transaction/send — {toAddress, amount}.
         if (json.contains("amount") && json["amount"].is_number()) {
-            return json["amount"].get<int64_t>();
+            amount = json["amount"].get<int64_t>();
+            ++shapes;
         }
 
         // PeerPay + Paymail share the {..., amount_satoshis} shape.
         if (json.contains("amount_satoshis") && json["amount_satoshis"].is_number()) {
-            return json["amount_satoshis"].get<int64_t>();
+            amount = json["amount_satoshis"].get<int64_t>();
+            ++shapes;
         }
 
-        return 0;
+        // Two or more spendable shapes in one body: we cannot know which one the
+        // handler will honour, so fail CLOSED rather than guess. Rust resolves the
+        // real figure, or the user is asked.
+        if (shapes > 1) return kAmountNotDerivable;
+        return amount;  // shapes == 1 → that amount; shapes == 0 → 0
     } catch (...) {
         return 0;
     }

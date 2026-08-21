@@ -146,4 +146,75 @@ TEST(ComputePaymentCost, SubCentPaymentKeepsPriceAvailable) {
     EXPECT_EQ(c.satoshis, 10);
 }
 
+// ---------------------------------------------------------------------------
+// P0.5 adversarial panel #2 — the two ways a real spend was priced at ZERO.
+//
+// Both mattered because 0 cents WITH a live price is not "unpriced": matrix_c
+// reads it as under every cap and auto-approves SILENTLY, no modal. Each test
+// below fails against the pre-fix first-match cascade.
+// ---------------------------------------------------------------------------
+
+// 1.1 — the decoy. An empty `outputs` array used to match the createAction
+// branch and return 0, while Rust ignored `outputs` and spent `amount`.
+TEST(ExtractOutputSatoshis, DecoyEmptyOutputsDoesNotMaskTheRealAmount) {
+    EXPECT_EQ(hodos::ExtractOutputSatoshis(
+                  R"({"outputs":[],"toAddress":"1abc","amount":100000000})"),
+              100000000);
+}
+
+TEST(ExtractOutputSatoshis, DecoyEmptyOutputsDoesNotMaskAmountSatoshis) {
+    EXPECT_EQ(hodos::ExtractOutputSatoshis(
+                  R"({"outputs":[],"recipient_identity_key":"02ab","amount_satoshis":4200})"),
+              4200);
+}
+
+// An empty outputs array on its own is still 0 — it genuinely carries no amount.
+TEST(ExtractOutputSatoshis, EmptyOutputsAloneIsZero) {
+    EXPECT_EQ(hodos::ExtractOutputSatoshis(R"({"outputs":[]})"), 0);
+}
+
+// Two POPULATED shapes are ambiguous: we cannot know which one the handler
+// honours, so refuse to price rather than guess.
+TEST(ExtractOutputSatoshis, TwoAmountShapesAreNotDerivable) {
+    EXPECT_EQ(hodos::ExtractOutputSatoshis(
+                  R"({"outputs":[{"satoshis":1}],"amount":100000000})"),
+              hodos::kAmountNotDerivable);
+}
+
+// 1.2 — createAction reads sendMax from `options`, not the top level. Pricing
+// this from outputs[] under-priced a full-wallet sweep as 1 satoshi.
+TEST(ExtractOutputSatoshis, NestedOptionsSendMaxIsNotDerivable) {
+    EXPECT_EQ(hodos::ExtractOutputSatoshis(
+                  R"({"outputs":[{"satoshis":1}],"options":{"sendMax":true}})"),
+              hodos::kAmountNotDerivable);
+}
+
+// options.sendMax:false must NOT trip the sentinel — ordinary createAction.
+TEST(ExtractOutputSatoshis, NestedOptionsSendMaxFalseStillPrices) {
+    EXPECT_EQ(hodos::ExtractOutputSatoshis(
+                  R"({"outputs":[{"satoshis":9000}],"options":{"sendMax":false}})"),
+              9000);
+}
+
+// The consequence the whole fix exists to prevent, asserted end to end:
+// a decoy body must never reach the engine as "priced, 0 cents".
+TEST(ComputePaymentCost, DecoyOutputsIsNeverPricedAtZeroWithPriceAvailable) {
+    const auto c = hodos::ComputePaymentCost(
+        "/transaction/send",
+        R"({"outputs":[],"toAddress":"1abc","amount":100000000})", kPrice);
+    EXPECT_TRUE(c.isPayment);
+    EXPECT_EQ(c.satoshis, 100000000);
+    EXPECT_TRUE(c.priceAvailable);
+    EXPECT_GT(c.cents, 0);   // pre-fix this was 0 with priceAvailable=true
+}
+
+TEST(ComputePaymentCost, NestedSendMaxSweepIsNeverPriceAvailable) {
+    const auto c = hodos::ComputePaymentCost(
+        "/createAction",
+        R"({"outputs":[{"satoshis":1}],"options":{"sendMax":true}})", kPrice);
+    EXPECT_TRUE(c.isPayment);        // it IS a payment — it must still be gated
+    EXPECT_FALSE(c.priceAvailable);  // but we refuse to price a sweep
+    EXPECT_EQ(c.cents, 0);
+}
+
 }  // namespace

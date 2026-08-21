@@ -9605,7 +9605,21 @@ pub async fn get_current_address(state: web::Data<AppState>) -> HttpResponse {
 }
 
 // Request structure for /transaction/send (frontend wallet)
+//
+// `deny_unknown_fields` is a MONEY control, not tidiness. (P0.5 panel #2, 1.1)
+// Without it serde silently discarded keys it did not recognise, so
+// `{"outputs":[], "toAddress":"1…", "amount":100000000}` let the C++ pricing layer
+// match the decoy `outputs`, price the call at 0 cents with a live price — which
+// the engine reads as under every cap and auto-approves — while THIS struct ignored
+// `outputs` and spent the real `amount`. C++ now refuses to price an ambiguous body
+// (`PaymentCost.h :: ExtractOutputSatoshis`); this is the other half, so a decoy is
+// rejected outright at the door instead of merely being priced correctly.
+//
+// Safe for our own callers: the wallet UI builds this body field-by-field in
+// `frontend/src/hooks/useTransaction.ts` (toAddress / amount / feeRate / sendMax) —
+// it does NOT forward the raw form object.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SendTransactionRequest {
     #[serde(rename = "toAddress")]
     pub to_address: String,
@@ -15394,6 +15408,8 @@ pub async fn wallet_recover(
                     &utxo.script,
                     addr_index,
                     &addr.derivation_method,
+                    // P0.5 panel #2, 1.6 — this was always available and never written.
+                    utxo.confirmed,
                 ) {
                     log::error!("   ❌ Failed to insert UTXO {}:{}: {}",
                               &utxo.txid[..std::cmp::min(16, utxo.txid.len())], utxo.vout, e);
@@ -15615,6 +15631,8 @@ pub async fn wallet_rescan(
                     &utxo.script,
                     addr_index,
                     &addr.derivation_method,
+                    // P0.5 panel #2, 1.6 — this was always available and never written.
+                    utxo.confirmed,
                 ) {
                     Ok(1) => new_utxos_found += 1,
                     Ok(_) => {} // Already existed
@@ -17142,7 +17160,10 @@ pub async fn wallet_import(
 // PeerPay endpoints (BRC-29 via MessageBox)
 // =============================================================================
 
+// P0.5 panel #2, 1.1 — see SendTransactionRequest. A decoy key that serde
+// silently drops is how a fund-mover gets priced at 0 cents and auto-approved.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PeerpaySendRequest {
     pub recipient_identity_key: String,
     pub amount_satoshis: i64,
@@ -18222,7 +18243,10 @@ fn conn_update_status(
 // Paymail (bsvalias) Endpoints — Phase 3b Sprint 1
 // ============================================================================
 
+// P0.5 panel #2, 1.1 — see SendTransactionRequest. A decoy key that serde
+// silently drops is how a fund-mover gets priced at 0 cents and auto-approved.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PaymailSendRequest {
     pub paymail: String,
     pub amount_satoshis: i64,
