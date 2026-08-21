@@ -1085,6 +1085,7 @@ dependencies = [
  "log",
  "once_cell",
  "pbkdf2",
+ "percent-encoding",
  "rand 0.8.5",
  "regex",
  "reqwest",

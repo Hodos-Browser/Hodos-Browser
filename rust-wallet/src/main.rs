@@ -99,23 +99,86 @@ async fn domain_trust_mw(
     // someone remembering. Gating arm-by-arm is exactly how the `send_transaction`
     // IPC arm was missed and how this phase came to be refuted.
     {
-        let path = req.request().path().to_string();
+        let raw_path = req.request().path().to_string();
+
+        // ⛔ MATCH THE PATH ACTIX ROUTES ON, NOT THE ONE IT REPORTS. (P0.5 panel #2, 1.3)
+        //
+        // actix-router 0.5.3 percent-DECODES the path before matching, while
+        // `HttpRequest::path()` hands back the RAW request target. The first cut of
+        // this gate compared the raw path, so `POST /domain/%70ermissions` was routed
+        // to `set_domain_permission` while the gate saw a path it did not recognise
+        // and waved it through. ONE character defeated the whole control.
+        //
+        // MEASURED 2026-08-20 against pinned actix-web 4.11.0, from an APPROVED
+        // scratch domain:
+        //   RED  `POST /domain/permissions`   + X-Requesting-Domain → 403, row unchanged
+        //   BUG  `POST /domain/%70ermissions` + X-Requesting-Domain → 200, row REWRITTEN:
+        //        perTxLimitCents 50 → 999999, perSessionLimitCents 100 → 999999,
+        //        identityKeyDisclosureAllowed false → true.
+        //
+        // Both forms are matched below. Decoding here rather than re-deriving a
+        // matcher keeps the gate and the router on ONE decoder — the same rule
+        // CLAUDE.md states for `RegistrableDomainFromUrl`, where two independent
+        // derivations of the same value fail closed and silently.
+        let decoded_path = percent_encoding::percent_decode_str(&raw_path)
+            .decode_utf8_lossy()
+            .into_owned();
+
         let method = req.request().method().clone();
         let is_mutation = method == actix_web::http::Method::POST
             || method == actix_web::http::Method::DELETE;
-        let is_permission_surface = path.starts_with("/domain/permissions")
-            || path == "/wallet/session-approve"
-            || path == "/wallet/session-revoke";
 
-        if is_mutation && is_permission_surface {
+        // ⛔ SUBTREES, NOT A LIST OF STRINGS. (P0.5 panel #2, 1.4)
+        //
+        // The previous revision enumerated three exact paths and missed
+        // `/wallet/session/close`, which drops the whole per-browser counter entry —
+        // per-session dollar cap, max-tx-per-session AND rate limit — so an approved
+        // dApp reset its own spending limits on demand and spent without bound.
+        // MEASURED 2026-08-20: pay(4c) → 500, pay → 202 session_cap, pay → 202
+        // (control), page-origin `POST /wallet/session/close` → 200, pay → 500.
+        //
+        // It was missed even though the comment right above it warned that
+        // enumerating instead of gating a subtree is exactly how the original hole
+        // survived. So: match PREFIXES. Every route under `/domain/` and every route
+        // under `/wallet/session` is permission, trust or session state (verified
+        // against the full route table 2026-08-20 — 17 and 3 routes respectively).
+        // A sub-permission or session endpoint added later is refused by default
+        // instead of by someone remembering to extend a list.
+        fn is_permission_surface(path: &str) -> bool {
+            path.starts_with("/domain/") || path.starts_with("/wallet/session")
+        }
+        let hits_surface =
+            is_permission_surface(&raw_path) || is_permission_surface(&decoded_path);
+
+        // Carve-out: a site may revoke ITSELF. (P0.5 panel #2, 1.5)
+        //
+        // `window.yours.disconnect()` / `window.panda.disconnect()` are page-context
+        // JS in cef-native's own injected shim (`CWIShimScript.h`, the `disconnect`
+        // legacy method) issuing `DELETE /domain/permissions?domain=<own host>`. The
+        // gate above 403s it, silently breaking a shipped API — 81c054c's "verified
+        // at every call site" audit missed it because it looked only at C++ call
+        // sites, not at the JS that C++ injects.
+        //
+        // Permitted because it moves privilege DOWN: §4k exists to stop a site
+        // ESCALATING, and revoking is the opposite. Narrow on purpose — DELETE only,
+        // that one path only, and the target domain must equal the requesting domain,
+        // so a site can drop its own grant and nobody else's.
+        let is_self_revoke = method == actix_web::http::Method::DELETE
+            && decoded_path == "/domain/permissions"
+            && percent_encoding::percent_decode_str(req.request().query_string())
+                .decode_utf8_lossy()
+                .split('&')
+                .any(|kv| kv.strip_prefix("domain=").is_some_and(|v| v == domain));
+
+        if is_mutation && hits_surface && !is_self_revoke {
             log::warn!(
-                "🛡️ REFUSED {} {} from dApp origin '{}' — the permission table is first-party only",
-                method, path, domain
+                "🛡️ REFUSED {} {} (decoded '{}') from dApp origin '{}' — the permission table is first-party only",
+                method, raw_path, decoded_path, domain
             );
             return Ok(req.into_response(
                 actix_web::HttpResponse::Forbidden().json(serde_json::json!({
                     "error": "permission_table_is_first_party_only",
-                    "endpoint": path,
+                    "endpoint": decoded_path,
                 })),
             ));
         }
