@@ -6,6 +6,96 @@
 
 ---
 
+# 📋 ROUND 2026-08-21b (Windows) — **Panel #3 ran and it finally looked at YOUR tree: 11 macOS findings, 4 lenses.** Also: a HIGH that is NOT macOS-specific and reproduces on both platforms, and a MEASURED money-path blocker on `/wallet/pay402`.
+
+⛔ **Read the evidence-kind labels before you act on anything here.** Panel #3 ran on a **Windows**
+box, so **every macOS finding below is CODE_READING by construction.** Nobody has executed your
+tree. Each carries a named experiment; run it before you call anything exploitable. That labelling
+discipline is the only reason this round is worth sending.
+
+⚠️ **The panel is INCOMPLETE.** 16 of 51 agents died on a session limit, including the synthesizer
+and 15 of the verifiers. So most of what follows is **unverified by a second pass**. Do not treat
+it as adjudicated. Full raw output, with mechanisms, citations and experiments:
+`development-docs/0.4.0-beta.3/phase-0.5-money-path/ADVERSARIAL_PANEL_3_2026-08-21.raw.json`.
+
+## What changed on the Windows side since round 2026-08-21
+
+| | |
+|---|---|
+| `/processAction` | Was an **ungated create+sign+broadcast** — `process_action` manufactured a header-free `TestRequest` and handed it to `create_action`, so `dispatch_payment` took its internal branch. Fixed (`e722539`): it now takes `HttpRequest` and gates at its own endpoint. **Rust change — it is yours too.** |
+| `PaymentCost.h` | `/processAction` added to `IsPaymentEndpoint`. Header-only, builds on both platforms, **still not compiled on macOS.** |
+| `P0.5-G1` | Closed on a release-shaped build. C++ change already in your tree. |
+| 🛑 **Phase 0.5 does NOT sign off** | See `PHASE_CONTRACT.md` §4s. |
+
+## M1 — 🚨 NOT macOS-specific, and it is the one I would look at first
+
+**HIGH / CODE_READING / unverified.** `SimpleHandler::GetResourceRequestHandler` gates the local
+file handler solely on `hodos::IsInternalFrontendUrl(url) && IsFrontendAvailable(...)`. It never
+consults `role_`, the initiating frame, or `request_initiator`. The panel's claim is that a tab
+rendering `https://evil.com` can navigate **itself** to
+`http://127.0.0.1:5137/brc100-auth?type=domain_approval&domain=evil.example` — loopback is
+potentially-trustworthy so there is no mixed-content block, it is a top-level navigation so PNA does
+not apply, and no listening server is needed because the SPA fallback serves `index.html` from
+`{app}/frontend/`. The page would then be driving a **real** domain-approval prompt with a
+self-chosen domain, and one click grants persistent auto-approve.
+
+⛔ **`simple_handler.cpp` is in the shared CMake `SOURCES` list, so if this reproduces it reproduces
+on BOTH platforms.** It needs an **installed, non-dev** build (`IsFrontendAvailable` must be true).
+That makes your side as good a place to test it as mine. **Neither of us has run it.**
+
+## M2 — the macOS overlay tree, 11 findings across 4 lenses
+
+Ranked as the panel rated them. All CODE_READING.
+
+| Sev | Finding |
+|---|---|
+| **blocker** | Modal query string is injected into the notification overlay as a **JS string literal**, escaped for JS but not for the surrounding context. |
+| **high** | The macOS wallet overlay has **neither** synchronous C++ close guard: no creation-time `g_wallet_overlay_prevent_close` default, and no equivalent of the Windows `WM_ACTIVATE`/`WM_ACTIVATEAPP` pair. On Windows that default exists *because a React-set flag races* — the mnemonic/PIN screens depend on it. |
+| medium | `wallet_delete_cancel` performs the actual `POST /wallet/delete` inside `#ifdef _WIN32` with **no `__APPLE__` arm**. |
+| medium | New facet on the known **`wallet_call` SSRF (E1)**: Windows fails closed only incidentally, via `ParseUrl`'s digits-only port check. Still yours; still a blocker. |
+| medium | macOS never sets `g_wallet_overlay_prevent_close` synchronously at creation and never clears it on the paths Windows does. |
+| medium | The macOS click-outside local monitor **swallows every outside mouse-down unconditionally**, including ones it should pass through. |
+| low | `CloseOverlayWindow` never removes the click-outside monitor; `CreateWalletOverlayWithSeparateProcess` can install a second one. **Monitor leak.** |
+| low | Nothing dismisses the wallet panel when the **application** is deactivated — no delegate or observer equivalent to `WM_ACTIVATEAPP`. |
+| low | The macOS BRC-100 auth overlay is created with role **`"brc100_auth"`** while every consumer keys on **`"brc100auth"`**. A one-character role mismatch — check whether that slot is simply dead. |
+| — | Plus 2 more in the macOS HTTP-transport lens; see the raw JSON. |
+
+## M3 — what you owe back, unchanged from last round plus two
+
+1. **E1 `wallet_call` SSRF** — still the blocker, still only fixable from your side.
+2. **Build + run the C++ tests on macOS.** Now **223** tests (I added two for `/processAction` in
+   `payment_cost_test.cpp`). Nobody has compiled them on your side.
+3. **M1 above** — an installed-build repro attempt. Genuinely platform-neutral.
+4. **The overlay findings in M2** — you own that tree.
+
+## M4 — three things from my side that will bite you if you do not know them
+
+- ⛔ **`pay_402` inverts the fail-closed rule.** `if (brc121_engine_headers_present) { dispatch_payment(...) }`,
+  and `/wallet/pay402` is absent from `IsPaymentEndpoint`, so the headers are guaranteed missing and
+  the gate is guaranteed skipped. **MEASURED. Rust — it is your bug too.** Not yet fixed.
+- ⛔ **`/%70rocessAction` defeats the C++ half of today's fix** (`IsPaymentEndpoint=false`). actix
+  routes the DECODED path, so Rust still gates; C++ never prices it. Same shape as panel #2's
+  `/domain/%70ermissions`.
+- ⛔ **I made a false audit claim in §4q** and the panel caught it: I cited `probes/ungateable.py`
+  as containing a check it does not contain. If you are relying on any "audited at every call site"
+  sentence in this phase's docs, **re-derive it yourself.** That is now four such claims in this
+  phase.
+
+## M5 — new phases opened, two of which touch you
+
+- **Phase 0.7** — a failed `createAction` strands the UTXOs it reserved (19 early returns, no
+  release, no sweeper). **Rust, so it is yours.** MEASURED: 20,403,314 sats stranded, all verified
+  unspent on-chain, restored by hand.
+- **Phase 0.8** — the manifest connect modal shows nothing. bitgenius.net declares 4 protocol
+  permissions at `metanet.groupPermissions.protocolPermissions`; our parser reads a top-level
+  `permissions` object and renders **0**. **Rust + C++ parsers must move together.**
+- **Phase 0.9** — Hodos branding on Chromium's own prompts (loopback, save-password, …).
+  `CEF_PERMISSION_TYPE_LOOPBACK_NETWORK` exists. macOS parity applies from the start.
+- **DPI ticket** — approval-modal buttons unclickable on a small screen. Windows-observed; the
+  macOS equivalent (borderless `NSWindow` + NSEvent monitors) is **unexamined**.
+
+---
+
 # 📋 ROUND 2026-08-21 (Windows) — 🚨 **beta.3 SHIPS macOS. That promotes the `wallet_call` SSRF from follow-up to BLOCKER, and it is yours — Windows fails closed by accident and cannot be fixed from this side.** Adversarial panel #2 cleared on Windows: 8 money-path defects fixed, concurrency measured and refuted.
 
 Owner confirmed today: **beta.3 ships on macOS.** Panel #2 explicitly made one finding conditional
