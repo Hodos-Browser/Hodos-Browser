@@ -5170,44 +5170,64 @@ bool HttpRequestInterceptor::isSocketIOConnection(const std::string& url) {
     return (isLocalhost && isSocketIO) || isBabbageMessagebox;
 }
 
+// ⛔ ONE derivation, shared with the IPC transport. Do not hand-roll a third.
+// (P0.5 adversarial panel #2, Task 2 item 1 — owner-approved 2026-08-21.)
+//
+// This used to hand-roll its own "find :// then read to the next /" parse. It did
+// not anchor on scheme and it did NOT strip userinfo, so it diverged from
+// `hodos::OriginFromUrl` — the hardened derivation C1 introduced for the IPC
+// path — on exactly the inputs OriginFromUrl exists to defeat. Its result flows
+// straight to `requestDomain_` and then to `IsInternalOrigin(requestDomain_)`,
+// whose true branch logs "bypassing domain check".
+//
+// MEASURED 2026-08-21 in the running dev browser, paired with its control:
+//   CONTROL  navigate to  https://example.com/
+//            -> "Using main frame URL for domain extraction: https://example.com/"
+//            -> "Extracted domain: example.com"                     (external, correct)
+//   RED      navigate to  https://127.0.0.1:31301@example.com/
+//            -> "Extracted domain: 127.0.0.1:31301@example.com"
+//            -> "🔒 Internal origin 127.0.0.1:31301@example.com — bypassing domain check"
+// The page loads from example.com. It was granted WALLET-INTERNAL trust.
+//
+// ⚠️ And nothing in the page's own view betrays it: Chromium strips credentials
+// from `location.href`, which reported plain "https://example.com/", while CEF's
+// `GetURL()` kept them. A defender reading the page cannot see the attack.
+//
+// Reachability is not theoretical: from that same document,
+// `fetch("http://127.0.0.1:31401/wallet/status")` returned **HTTP 200**, so the
+// Local Network Access gate does not close this path.
+//
+// Empty now fails CLOSED via the same opaque sentinel `ResolveIpcOrigin` uses.
+// Safe: across the entire 204 MB dev log, `extractDomain` produced an empty
+// result ZERO times, so no legitimate caller depended on empty => internal.
 std::string HttpRequestInterceptor::extractDomain(CefRefPtr<CefBrowser> browser, CefRefPtr<CefRequest> request) {
     std::string domain;
 
-    // Use main frame URL as the primary source (most reliable)
+    // Primary: the main frame's URL.
     if (browser) {
         CefRefPtr<CefFrame> mainFrame = browser->GetMainFrame();
         if (mainFrame && mainFrame->GetURL().length() > 0) {
-            std::string mainFrameUrl = mainFrame->GetURL().ToString();
+            const std::string mainFrameUrl = mainFrame->GetURL().ToString();
             LOG_DEBUG_HTTP("🌐 Using main frame URL for domain extraction: " + mainFrameUrl);
-            size_t protocolPos = mainFrameUrl.find("://");
-            if (protocolPos != std::string::npos) {
-                size_t domainStart = protocolPos + 3;
-                size_t domainEnd = mainFrameUrl.find("/", domainStart);
-                if (domainEnd != std::string::npos) {
-                    domain = mainFrameUrl.substr(domainStart, domainEnd - domainStart);
-                } else {
-                    domain = mainFrameUrl.substr(domainStart);
-                }
-            }
+            domain = hodos::OriginFromUrl(mainFrameUrl);
         }
     }
 
-    // Fallback to referrer URL if main frame URL is not available
-    if (domain.empty()) {
-        std::string referrerUrl = request->GetReferrerURL().ToString();
+    // Fallback: the referrer, when the main frame URL yielded no origin.
+    if (domain.empty() && request) {
+        const std::string referrerUrl = request->GetReferrerURL().ToString();
         if (!referrerUrl.empty()) {
             LOG_DEBUG_HTTP("🌐 Using referrer URL for domain extraction (fallback): " + referrerUrl);
-            size_t protocolPos = referrerUrl.find("://");
-            if (protocolPos != std::string::npos) {
-                size_t domainStart = protocolPos + 3;
-                size_t domainEnd = referrerUrl.find("/", domainStart);
-                if (domainEnd != std::string::npos) {
-                    domain = referrerUrl.substr(domainStart, domainEnd - domainStart);
-                } else {
-                    domain = referrerUrl.substr(domainStart);
-                }
-            }
+            domain = hodos::OriginFromUrl(referrerUrl);
         }
+    }
+
+    // Unknown provenance is NOT trusted provenance. RFC 2606 reserves .invalid,
+    // so this can never collide with a real host and is always gated external.
+    // Same sentinel, same reasoning, as ResolveIpcOrigin.
+    if (domain.empty()) {
+        LOG_DEBUG_HTTP("🌐 No derivable origin — failing closed to the opaque sentinel");
+        domain = "opaque-origin.invalid";
     }
 
     LOG_DEBUG_HTTP("🌐 Extracted domain: " + domain);
