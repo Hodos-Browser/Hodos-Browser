@@ -742,6 +742,23 @@ check-and-record atomic under one write lock. Not a beta.3 blocker.
 - `4eacb51` "recovery.rs needs none" — **FALSE at the dataflow.** File-scoped audit;
   `upsert_received_utxo_with_derivation` omitted `confirmed` from its INSERT.
 
+#### Task 2 — owner decisions TAKEN 2026-08-21
+
+| # | Item | Decision |
+|---|---|---|
+| 6 | **Does beta.3 ship macOS?** | ✅ **YES.** This promotes the macOS `wallet_call` SSRF from follow-up to **SIGN-OFF BLOCKER**. Relayed to the macOS session as ask E1 (`MAC_RELAY_BETA3.md`, round 2026-08-21) with verified citations, a repro and a cross-platform negative control. **Windows fails closed only by accident** — `ParseUrl`'s digits-only port check, inside `#ifdef _WIN32` — so it cannot be fixed from this side. |
+| 2 | `/wallet/reveal-mnemonic` to page context | ✅ **FIXED in beta.3** — `c8558dc`. RED: page origin → **401, handler REACHED**; only the PIN stopped it, and the no-PIN branch has none. GREEN: 403, handler never runs. First-party still 401 on a wrong PIN. |
+| 3 | `POST /wallet/settings` page-callable | ✅ **FIXED in beta.3** — `c8558dc`. RED: page origin → **200, global defaults REWRITTEN** (per_tx 1000 → 999999, per_session 5000 → 999999). GREEN: 403. Defaults restored after the RED. |
+| 1 | `IsInternalOrigin("")` + second derivation | ⬜ still owed — empty-origin half recommended for beta.3, port half to Phase 5. **The C1 banner claim is FALSE either way and must be corrected.** |
+| 4 | Loopback-port trust | ⬜ Phase 5 headline |
+| 5 | Two-phase action lifecycle | ⬜ **measure before fixing** — largest unexamined surface |
+
+⛔ **macOS is now in scope for sign-off.** Panel #2 examined exactly ONE line of the macOS tree
+(the curl SSRF). `cef_browser_shell_mac.mm`, the `Create*OverlayMacOS` roster and
+`InstallClickOutsideMonitor` are **unaudited by anyone**. "Panel #2 cleared" means the *Windows*
+money path was cleared. CLAUDE.md invariant #9 parity verification is outstanding, and the C++
+`PaymentCost.h` change + its 9 tests have **not been built on macOS**.
+
 #### Still owed before sign-off
 
 | | |
