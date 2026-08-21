@@ -1395,3 +1395,119 @@ overridden, and the reason is recorded here so a future reader does not "tidy" t
 | §4k permission-table escalation | ✅ **FIXED + GREEN with RED** — `81c054c`; owner-clicked approval control passed | 2026-08-20 | assistant + owner |
 | foreign-bridge interop (§4m, out of scope) | **GREEN with RED** — real dApp connects, `9b73bd7` | 2026-08-20 | assistant |
 | adversarial review (post-repair) | | | |
+
+### 4t. Panel #3 verification + two money-path fixes (2026-08-21, session 2) — commit `7a35b1c`
+
+The session that recorded §4s handed off two MEASURED defects and three unverified blockers.
+This session fixed the two, verified the three (all now MEASURED, not code-read), measured the
+"run-first" self-nav item, and corrected one false claim in the handoff prompt itself.
+
+#### Task 1 — `/wallet/pay402` gate inversion — FIXED, RED+GREEN both mine
+
+- **RED (pre-fix binary, 13:18):** approved domain `teragun.com`, no `X-Payment-*` -> **no gate
+  line**, straight to BRC-42 derivation. Paired control 68 ms later WITH the headers -> `202
+  per_tx_limit`. The gate worked; it was being skipped.
+- **GREEN (rebuilt, 13:33):** same call -> `202`; control A (headers) unchanged; control B
+  (internal, no `X-Requesting-Domain`) unchanged at 500, no gate line (`R-INTEXT` holds).
+- Fix: removed the `brc121_engine_headers_present` conditional (a dead rollout gate); added
+  `/wallet/pay402` to `IsPaymentEndpoint` AND taught `ExtractOutputSatoshis` the fifth body
+  shape (top-level `{satoshis}`) — do-both-or-neither. Page-driven confirmation from a real
+  teragun.com tab: `endpoint=/wallet/pay402 reason=per_tx_limit` (the discriminator proving the
+  C++ half priced it).
+
+#### Task 2 — `/%70rocessAction` encoded-path desync — FIXED as a PATTERN
+
+- New `hodos::RequestPathForMatching` (PortConfig.h): cut query/fragment, then percent-decode
+  ONCE (matching actix-router). Called INSIDE `IsPaymentEndpoint` and `isWalletEndpoint`.
+- `isWalletEndpoint` was worse than the panel said: it missed the encoded path too, so the
+  request was not intercepted AT ALL and reached the wallet with no `X-Requesting-Domain` (read
+  as first-party). Cutting the query also retired a pre-existing false positive:
+  `/wallet/status?next=/createAction` was being priced as a payment.
+- Page-driven GREEN: `POST /%70rocessAction` (raw in the actix log) -> `endpoint=/processAction
+  reason=per_tx_limit`, identical to the plain-path control in the same run.
+- **NEGATIVE CONTROL:** 12 new tests built + run against the UNFIXED headers first -> **7 failed**;
+  restored -> **232 passed / 1 skipped / 0 failed**.
+
+#### CORRECTION — the handoff prompt's Task 2 premise was FALSE (fifth false audit claim)
+
+The prompt said `is_permission_surface` in `main.rs` "has the identical shape and the identical
+hole." It has NEITHER. Two of its four arms are `starts_with` subtrees and the predicate runs
+over BOTH raw and decoded paths. **MEASURED:** `POST /wallet/%73ettings` from an approved dApp
+-> **403**; the same encoded path with no domain header -> **400** (handler ran), proving actix
+routes it and the gate is not vacuous. No change made there.
+
+#### Task 3 — the three unverified blockers, now MEASURED
+
+1. **Modal query-string JS injection at 127.0.0.1:5137 — CONFIRMED, MEASURED (both legs).**
+   dApp-controlled `basket` from `/listOutputs` flows verbatim into a `showNotification('...')`
+   literal that escapes only `'` (not backslash). Sent a `backup-`-prefixed basket (forces a 202
+   via `is_protected_basket`, so the payload reaches the overlay deterministically) carrying a
+   backslash-quote breakout. First payload was a SyntaxError (missing the `}` that closes the
+   template `if`-block — the finding's own example includes it); corrected, the injected code
+   ran. **Leg A (fetch):** the injected `fetch(/wallet/status?<mk>)` produced a domain-trust
+   prompt for `domain=127.0.0.1:5137 endpoint=/wallet/status` — a request no page made.
+   **Leg B (wallet_call, the escalation):** the injected `cefMessage.send('wallet_call', [...,
+   '/wallet/status?<mk>', ...])` reached the wallet as `GET /wallet/status?<mk>` **200, no
+   prompt, no gate** — internal-origin direct dispatch. `escapeJsonForJs` (escapes backslash)
+   exists in-tree and is the correct encoder; it is unused here. **FIX OWED.**
+
+2. **`createAction options.sendWith` — CONFIRMED. Gate-blindness MEASURED; broadcast path read.**
+   MEASURED: `outputs:[{satoshis:1}] + sendWith:[bogus]` from approved teragun -> **no modal**
+   (silent auto-approve; reached address conversion), while `outputs:[{satoshis:5000000}]` no
+   sendWith -> `202 per_tx_limit`. The gate prices only `outputs[].satoshis`, blind to sendWith.
+   Broadcast path read-verified: `parent_transactions.get_by_txid` has NO status filter;
+   `get_local_parent_tx` filters only `status != 'completed'` — neither checks nosend/ownership/
+   aborted, unlike `broadcast_nosend`. A real withheld tx was NOT broadcast (that is the harm).
+   **FIX OWED.**
+
+3. **Cross-origin iframe of the wallet UI + forged postMessage — CONFIRMED, all four legs
+   (three MEASURED on a production-layout build).** Staged `frontend/` next to the exe (a
+   disk-only marker proved `LocalFileResourceRequestHandler` was live), then from a teragun.com
+   tab:
+   - **SERVE:** `<iframe src=127.0.0.1:5137/wallet-panel>` loaded a cross-origin document
+     (`contentWindow.document` threw SecurityError; `onload` fired) — no `X-Frame-Options`.
+   - **TRUST:** eval inside the framed OOPIF (`parentIsCrossOrigin: X-ORIGIN`) -> it holds
+     `hodosBrowser` (identity/wallet/address/history...), `cefMessage`, `__hodos_walletCall`.
+   - **DRIVE:** `iframe.contentWindow.postMessage({type:'qr_scan_result',...})` from teragun
+     prefilled the frame's send-form input with the attacker address `1BitcoinEater...`.
+   - **SPEND:** one clickjacked click (unautomatable; the form is armed).
+   Root causes read-verified: `GetResourceRequestHandler` dispatches on `IsInternalFrontendUrl`
+   only (`request_initiator` unused); `LocalFileResourceHandler.h` sets no framing headers;
+   `isInternalPage` has no `frame->IsMain()` guard; `WalletPanel.tsx` message handler has no
+   `event.origin` check (a fix must still allow `origin===''` — the legit C++ QR path posts with
+   an empty origin). **FIX OWED.**
+
+#### The "run-first" item — internal-UI self-navigation — MEASURED
+
+A page navigated its own tab to `http://127.0.0.1:5137/brc100-auth?type=domain_approval&domain=
+evil-attacker-p3.com`. It rendered the REAL connect prompt for the attacker-named domain
+(internal origin, holds the wallet bridge). Clicking Allow -> `POST /domain/permissions
+domain=evil-attacker-p3.com` **200** (first-party, ungated) and a live `approved` grant appeared
+in `domain_permissions`. **Grant deleted afterward; DB clean.** Reduces to one deceptive click on
+a genuine-looking prompt for a domain the attacker fully controls. **FIX OWED.**
+
+#### Other MEASURED (panel, MED/LOW) — confirmed, not blockers
+
+- `IsPaymentEndpoint` lists `/acquireCertificate` and `/sendMessage` but `ExtractOutputSatoshis`
+  has no body shape for either -> priced 0 -> silent under a live price. Confirmed by reading.
+  Fix direction (price vs delist) depends on whether those endpoints should be metered — **owner
+  decision owed (CLAUDE.md #13); not changed.** `IsInternalOrigin` loopback-port breadth,
+  `IsWalletHostPort` unanchored substring, and `OriginFromUrl` authority-scan were verified by
+  the panel's compiled probes and are read-consistent with the source; not re-measured here.
+
+#### Stranding incident — caused, verified, released, balance whole
+
+A user-approved 5,000,000-sat probe prompt drove the `X-User-Approved` replay through
+`create_action_internal`, which RESERVED the 5M input (placeholder `pending-1787341796717`,
+`spendable=0`) and then died at the broken-checksum probe address — Phase 0.7 strand. Balance
+fell 38,775,868 -> 33,775,868 (stable across reads, no 429). **Lesson: the "address->script is
+after the gate" safety model holds for a GATE bypass, but a user-APPROVED probe reserves UTXOs
+BEFORE the checksum guard fires, so it strands.** Verified `d03d8e9af606...:0` unspent on-chain
+(WoC spend-query 404, 283 confs), released via the wallet's own `restore_by_spending_description`
+SQL with the wallet stopped (WAL-safe), restarted -> balance back to **38,775,868**. Zero
+stranded remaining. Production (31301) never touched.
+
+#### Verdict — still DO NOT SIGN OFF
+
+Two money-path defects fixed and committed. Three blockers + the self-nav item are now MEASURED
+and **FIX OWED** — none can sign off Phase 0.5. Panel #3 must still be re-run to completion.
