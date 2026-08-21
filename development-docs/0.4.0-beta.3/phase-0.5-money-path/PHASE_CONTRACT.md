@@ -1511,3 +1511,69 @@ stranded remaining. Production (31301) never touched.
 
 Two money-path defects fixed and committed. Three blockers + the self-nav item are now MEASURED
 and **FIX OWED** — none can sign off Phase 0.5. Panel #3 must still be re-run to completion.
+
+### 4u. Panel #3 blockers — ALL FOUR FIXED, each with a negative control (2026-08-21, session 2)
+
+Owner directed "fix the 4 blockers first." Done, one commit each, isolated and reversible.
+
+| # | Blocker | Commit | Negative control |
+|---|---|---|---|
+| 1 | Modal query-string JS injection at 127.0.0.1:5137 | `99cd651` | Same wallet_call-injection probe that produced `GET /wallet/status?WCINJ 200` now yields **0** injected calls; the 202 basket prompt still fires (feature intact). |
+| 2 | `createAction sendWith` broadcasts arbitrary local txids | `7d06d68` | Unit test `sendwith_only_broadcasts_nosend_status`: stub the predicate to the pre-fix behaviour (`status != 'completed'`) → **RED** on "status 'failed' must be refused"; restored → passes. |
+| 3 | Cross-origin iframe of the wallet UI | `4b66183` | Production-layout build: teragun.com framing `127.0.0.1:5137/wallet-panel` now gives a `chrome-error://` "refused to connect" frame with **no** `__hodos_walletCall` bridge — vs the RED where the frame committed the wallet UI with the full bridge + a prefilled attacker recipient. |
+| 4 | Internal-UI self-navigation writes an attacker-named grant | `ee8f836` | Dev: self-nav a tab to `brc100-auth?domain=evil-selfnav-p3b.com` + Allow → **REFUSED** `from role 'tab_1'`, zero `POST /domain/permissions`, no DB row — vs the RED (`domain=evil-attacker-p3.com` wrote a grant). **Positive control:** the same IPC from the notification overlay (role `notification`) still writes the grant — real approval flow intact. |
+
+#### The fixes
+
+1. **Modal injection.** `buildExtraParamsFromPayload` now `urlEncode()`s every
+   dApp-controlled value (basket, protocol*, counterparty, kind, verifier, keyID,
+   protocol JSON, exceededLimit) and `openCertificateDisclosureModal` encodes each
+   `fields` entry — matching the certType/certifier already encoded there. Defence
+   in depth: `CreateNotificationOverlay` on BOTH platforms now `escapeJsonForJs()`
+   the whole query instead of the hand-rolled `'`-only loop. React's URLSearchParams
+   decodes for display — no regression (verified: `applyParams` uses URLSearchParams).
+
+2. **sendWith.** Each sendWith txid is gated on `status == 'nosend'` before
+   broadcast (via `sendwith_status_is_broadcastable`), mirroring `broadcast_nosend`.
+   The legit flow (a prior `noSend=true` tx at status=nosend, then a second
+   createAction sendWith'ing it) still passes; failed/aborted/completed/etc. are
+   refused. A live probe was deliberately not run — reaching the sendWith block
+   requires the main createAction to broadcast a real tx, and the RED requires
+   broadcasting a real `failed` tx (= the double-spend harm). **Still owed** (not
+   this fix): pricing the sendWith amount, and scoping to txids the requesting
+   domain owns — the latter needs a domain column on `transactions` (schema,
+   invariant #2), owner decision owed.
+
+3. **Cross-origin iframe.** `LocalFileResourceRequestHandler` now emits
+   `X-Frame-Options: SAMEORIGIN` + CSP `frame-ancestors 'self'` on every internal
+   response, so Chromium refuses to commit the wallet UI in any cross-origin
+   frame — for EVERY internal page, not just WalletPanel. Defence in depth:
+   `WalletPanel.tsx`'s message handler drops any event whose origin is neither ''
+   (the empty origin the C++ QR path uses — verified at
+   simple_render_process_handler.cpp:903) nor `window.location.origin`. **Residual
+   (minor):** `hodosBrowser`/`cefMessage` still appear on the blocked
+   `chrome-error://` frame, but it is a non-scriptable cross-origin error page with
+   no bridge — inert. Tightening `isInternalPage` to `frame->IsMain()` is a sensible
+   follow-up but not a live surface once framing is blocked.
+
+4. **Self-nav grant.** `add_domain_permission` and `add_domain_permission_advanced`
+   now refuse any sender whose `role_` is not `notification`/`brc100auth`. These
+   IPCs come solely from BRC100AuthOverlayRoot's Allow, which runs in those overlay
+   roles; a self-navigated tab is `tab_<id>` and is refused.
+
+#### Environment
+
+Every fix built, negative-controlled, and committed with the dev stack killed by
+exe path only. Two production-layout cycles (staged `frontend/` next to the exe,
+removed afterward — Vite mode restored, disk marker gone). C++ suite **232 passed /
+1 skipped**. Balance held at **38,775,868** throughout (the only movement all
+session was one scheduled 7,160-sat on-chain backup); the single stranded 5M UTXO
+from a user-approved probe was released (§4t). Production (31301) never driven.
+
+#### Still owed before Phase 0.5 sign-off
+
+- Panel #3 **re-run to completion** (it died on a session limit — HARNESS §8: incomplete ≠ pass).
+- The §4o disclosure set + `is_permission_surface`-as-subtree → **Phase 5** (owner-deferred).
+- sendWith pricing + domain-ownership scoping (needs schema) — **owner decision owed**.
+- `/acquireCertificate` + `/sendMessage` do-both-or-neither (price vs delist) — **owner decision owed**.
+- The macOS CODE_READING findings (11) belong to the macOS session with named experiments.
