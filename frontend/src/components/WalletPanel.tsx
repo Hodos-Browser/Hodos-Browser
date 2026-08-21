@@ -372,6 +372,22 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
   // Listen for QR scan results from C++ IPC (Phase 1 DOM scan + Phase 2 screen capture)
   useEffect(() => {
     const handler = (event: MessageEvent) => {
+      // ⛔ ORIGIN CHECK — defence in depth for the cross-origin-iframe blocker
+      // (P0.5 panel #3). The legitimate producer of these messages is the C++
+      // render process, which delivers them via
+      // `dispatchEvent(new MessageEvent('message', ...))` from
+      // simple_render_process_handler.cpp (the qr_scan_result / screen-capture
+      // arms) — that carries an EMPTY origin. A cross-origin page that framed
+      // this panel (the SERVE leg, now blocked at the root by X-Frame-Options on
+      // LocalFileResourceRequestHandler) would post with its own real origin.
+      // Accept only the empty origin (C++ inject) or our own origin; drop the
+      // rest, so a forged qr_scan_result can never prefill and open the send
+      // form. MEASURED before this: a teragun.com parent prefilled the send-form
+      // recipient with an attacker address via one postMessage.
+      if (event.origin !== '' && event.origin !== window.location.origin) {
+        return;
+      }
+
       const type = event.data?.type;
 
       // Phase 1: DOM scan results

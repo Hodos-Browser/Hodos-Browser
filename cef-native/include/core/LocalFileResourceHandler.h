@@ -68,7 +68,7 @@ public:
         if (stream) {
             // File found - serve it with correct MIME type
             std::string mime = GetMimeForPath(url_path);
-            return new CefStreamResourceHandler(mime, stream);
+            return MakeGuardedHandler(mime, stream);
         }
 
         // SPA fallback: file not found -> serve index.html
@@ -77,7 +77,7 @@ public:
         std::string index_path = base_dir_ + "index.html";
         stream = CefStreamReader::CreateForFile(index_path);
         if (stream) {
-            return new CefStreamResourceHandler("text/html", stream);
+            return MakeGuardedHandler("text/html", stream);
         }
 
         // index.html not found - frontend dir is broken
@@ -94,6 +94,36 @@ public:
 private:
     std::string base_dir_;
     std::string url_;
+
+    // ⛔ FRAME-PROTECT EVERY internal-frontend response. (P0.5 panel #3 —
+    // cross-origin iframe of the wallet UI.)
+    //
+    // This handler serves {app}\frontend\ for the 127.0.0.1:5137 namespace in
+    // production, and CefStreamResourceHandler's (mime, stream) constructor
+    // emits NO framing headers. MEASURED 2026-08-21: a page on a foreign https
+    // origin could `<iframe src=127.0.0.1:5137/wallet-panel>`, the frame
+    // committed the wallet UI, `simple_render_process_handler.cpp` gave that
+    // subframe the full privileged surface (hodosBrowser / cefMessage /
+    // __hodos_walletCall — isInternalPage has no frame->IsMain() guard), and a
+    // forged `postMessage` prefilled its send form. One clickjacked click = a
+    // spend from an embedded wallet.
+    //
+    // X-Frame-Options: SAMEORIGIN — and its modern equivalent CSP
+    // frame-ancestors 'self' — let 127.0.0.1:5137 frame itself (no legit
+    // same-origin framing is broken) while Chromium refuses to commit the
+    // document in ANY cross-origin frame. This closes the SERVE leg at the root,
+    // for every internal page, not just WalletPanel. The Vite dev server has no
+    // such header, so this protection is production-only — which is exactly
+    // where LocalFileResourceRequestHandler runs.
+    static CefRefPtr<CefResourceHandler> MakeGuardedHandler(
+        const std::string& mime, CefRefPtr<CefStreamReader> stream) {
+        CefResponse::HeaderMap headers;
+        headers.insert(std::make_pair("X-Frame-Options", "SAMEORIGIN"));
+        headers.insert(std::make_pair("Content-Security-Policy",
+                                      "frame-ancestors 'self'"));
+        return new CefStreamResourceHandler(
+            200, "OK", mime, headers, stream);
+    }
 
     // Extract path from URL: "http://127.0.0.1:5137/assets/index.js" -> "assets/index.js"
     // Empty or "/" -> "index.html"
