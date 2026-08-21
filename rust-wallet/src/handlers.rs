@@ -19496,6 +19496,28 @@ pub async fn debug_broadcast_nosend(
 
     log::info!("   Transaction status: {}", tx_status);
 
+    // ⛔ ENFORCE nosend — this handler's comment above CLAIMED to "Verify the
+    // transaction ... is in nosend status" but never did. (P0.5 panel re-run —
+    // the THIRD nosend sibling the sendWith fix's "cannot diverge again" comment
+    // did not cover.) Broadcasting any other status here has the same harm as the
+    // sendWith path: a `failed` tx (inputs already restored spendable by
+    // mark_failed) gets resurrected on-chain into a double-spend, and a withheld
+    // BRC-121 nosend pays a server that delivered nothing. Mirrors
+    // broadcast_nosend and sendwith_status_is_broadcastable. Defence in depth
+    // behind the /wallet/debug subtree gate now in main.rs::is_permission_surface,
+    // which already stops a dApp reaching here at all.
+    if !sendwith_status_is_broadcastable(Some(tx_status.as_str())) {
+        log::warn!(
+            "   🛡️ debug_broadcast_nosend REFUSED: status='{}', not 'nosend'",
+            tx_status
+        );
+        return HttpResponse::Ok().json(serde_json::json!({
+            "success": true,
+            "skipped": true,
+            "reason": format!("status is '{}', not 'nosend'", tx_status),
+        }));
+    }
+
     let raw_tx_bytes = match hex::decode(&raw_tx_hex) {
         Ok(b) => b,
         Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({"error": format!("invalid raw_tx: {}", e)})),

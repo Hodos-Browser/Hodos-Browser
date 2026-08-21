@@ -180,6 +180,20 @@ async fn domain_trust_mw(
                 // wrong PIN = the handler still runs for the wallet UI).
                 || path == "/wallet/reveal-mnemonic"
                 || path == "/wallet/settings"
+                // ⛔ THIRD CLASS: the /wallet/debug subtree. (P0.5 panel re-run.)
+                // These are developer/repair tools that move funds and rewrite
+                // output state — `debug_broadcast_nosend` broadcasts a local tx
+                // and re-marks its inputs spent, `debug_repair_nosend` rewrites
+                // status. They are registered UNCONDITIONALLY (main.rs, no
+                // HODOS_DEV gate) and none takes an `HttpRequest`, so they cannot
+                // gate themselves. MEASURED 2026-08-21: from an APPROVED dApp
+                // origin, `POST /wallet/debug/broadcast-nosend` reached the
+                // handler (404 on a bogus txid) — a dApp has no business calling
+                // a debug endpoint at all. A SUBTREE prefix closes all three
+                // (validate-beef / repair-nosend / broadcast-nosend) and any
+                // debug endpoint added later, by default; the header-free
+                // first-party path (developer tooling / wallet UI) is untouched.
+                || path.starts_with("/wallet/debug")
         }
         let hits_surface =
             is_permission_surface(&raw_path) || is_permission_surface(&decoded_path);

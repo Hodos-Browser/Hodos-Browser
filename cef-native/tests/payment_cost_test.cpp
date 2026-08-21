@@ -337,4 +337,26 @@ TEST(IsPaymentEndpoint, MalformedEscapesAreInertNotCrashes) {
     EXPECT_TRUE(hodos::IsPaymentEndpoint("/createAction%"));
 }
 
+// P0.5 panel RE-RUN — a page-controlled query with a `://` in it must NOT be
+// read as an authority. Pre-fix RequestPathForMatching found `://` over the whole
+// target, treated the query as an authority, and returned "" for
+// `/createAction?z=a://b`, so IsPaymentEndpoint said "not a payment" while actix
+// still routed /createAction — stripping the gold pill + cap metering.
+TEST(IsPaymentEndpoint, QueryEmbeddedSchemeDoesNotHidePaymentEndpoint) {
+    EXPECT_TRUE(hodos::IsPaymentEndpoint("/createAction?z=a://b"));
+    EXPECT_TRUE(hodos::IsPaymentEndpoint("/processAction?next=http://evil/"));
+    EXPECT_TRUE(hodos::IsPaymentEndpoint("/wallet/pay402?u=ws://x"));
+    EXPECT_TRUE(hodos::IsPaymentEndpoint("/createAction#frag://z"));
+}
+
+TEST(RequestPathForMatching, QuerySchemeIsCutBeforeSchemeDetection) {
+    EXPECT_EQ(hodos::RequestPathForMatching("/createAction?z=a://b"), "/createAction");
+    EXPECT_EQ(hodos::RequestPathForMatching("/createAction#a://b"), "/createAction");
+    // A REAL absolute URL still yields its path.
+    EXPECT_EQ(hodos::RequestPathForMatching("https://127.0.0.1:5137/createAction?x=1"),
+              "/createAction");
+    // Authority-only real URL yields empty (no path).
+    EXPECT_EQ(hodos::RequestPathForMatching("https://127.0.0.1:5137"), "");
+}
+
 }  // namespace

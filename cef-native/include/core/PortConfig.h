@@ -202,18 +202,29 @@ inline bool IsWalletHostPort(const std::string& url) {
 // Returns the path only. Accepts either an absolute URL (what `isWalletEndpoint`
 // is handed) or a bare origin-relative target (what `endpoint_` holds).
 inline std::string RequestPathForMatching(const std::string& target) {
-    size_t start = 0;
-    const size_t schemeEnd = target.find("://");
-    if (schemeEnd != std::string::npos) {
-        const size_t slash = target.find('/', schemeEnd + 3);
-        if (slash == std::string::npos) return std::string();  // authority only
-        start = slash;
-    }
-
+    // Step 1 — cut the query and fragment FIRST, over the WHOLE target. This has
+    // to precede scheme detection: `find("://")` over the raw target would
+    // otherwise match a `://` a page put INSIDE the query
+    // (`/createAction?z=a://b`), read the query as an authority, find no path
+    // slash after it, and return "" — so `IsPaymentEndpoint` said "not a payment"
+    // while actix (which drops the query) still routed `/createAction`. That
+    // desync stripped the gold pill and the cap metering. (P0.5 panel re-run —
+    // the code did NOT match its own "cut query first" comment.)
     size_t end = target.size();
-    for (size_t i = start; i < target.size(); ++i) {
+    for (size_t i = 0; i < target.size(); ++i) {
         const char c = target[i];
         if (c == '?' || c == '#') { end = i; break; }
+    }
+
+    // Step 2 — find the scheme WITHIN the path portion only. `schemeEnd < end`
+    // keeps a query-embedded `://` from being treated as an authority, and the
+    // path slash must also fall before `end`.
+    size_t start = 0;
+    const size_t schemeEnd = target.find("://");
+    if (schemeEnd != std::string::npos && schemeEnd < end) {
+        const size_t slash = target.find('/', schemeEnd + 3);
+        if (slash == std::string::npos || slash >= end) return std::string();  // authority only
+        start = slash;
     }
 
     auto hexVal = [](char c) -> int {
