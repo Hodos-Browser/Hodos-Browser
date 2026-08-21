@@ -6489,6 +6489,50 @@ pub(crate) async fn create_action_internal(
         for sw_txid in &send_with_txids {
             log::info!("   📡 Broadcasting sendWith txid: {}", sw_txid);
 
+            // ⛔ GATE: the txid MUST be in `nosend` status. (P0.5 panel #3 —
+            // sendWith broadcasts arbitrary local txids.) Without this check the
+            // loop below would hand ANY local raw tx to broadcast_transaction:
+            // parent_transactions.get_by_txid has no status filter, and
+            // get_local_parent_tx filters only `status != 'completed'`. That let
+            // an approved dApp — which learns every txid from /listActions — name
+            //   (a) a BRC-121 nosend payment the browser deliberately withheld
+            //       (402 server never returned 200), paying a server that
+            //       delivered nothing, OR
+            //   (b) a tx TaskUnFail/TaskFailAbandoned had marked `failed` (which
+            //       restored its inputs as spendable), resurrecting it on-chain
+            //       while the wallet re-spends those same inputs — a genuine
+            //       double-spend race over the user's funds.
+            // And the payment gate never priced this: computePaymentCost sums
+            // only outputs[].satoshis, so a 1-sat createAction carrying sendWith
+            // auto-approves SILENTLY (MEASURED 2026-08-21). This mirrors
+            // broadcast_nosend's own `status == "nosend"` guard exactly — the
+            // legitimate flow (a prior noSend=true createAction, status=nosend,
+            // then a second createAction with sendWith=[that txid]) still passes;
+            // anything failed / aborted / completed / already-broadcast is refused.
+            let sw_status: Option<String> = {
+                let db = state.database.lock().unwrap();
+                db.connection()
+                    .query_row(
+                        "SELECT status FROM transactions WHERE txid = ?1 LIMIT 1",
+                        rusqlite::params![sw_txid],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .ok()
+            };
+            if !sendwith_status_is_broadcastable(sw_status.as_deref()) {
+                log::warn!(
+                    "   🛡️ sendWith REFUSED for {}: status={:?}, not 'nosend' — only a withheld \
+                     (noSend) transaction may be broadcast via sendWith",
+                    &sw_txid[..16.min(sw_txid.len())],
+                    sw_status
+                );
+                results.push(SendWithResult {
+                    txid: sw_txid.clone(),
+                    status: "failed".to_string(),
+                });
+                continue;
+            }
+
             // Look up the signed raw tx from parent_transactions or transactions table
             let sw_beef_hex = {
                 let db = state.database.lock().unwrap();
@@ -9257,6 +9301,39 @@ pub async fn address_to_script(
                 "error": format!("Invalid address: {}", e)
             }))
         }
+    }
+}
+
+#[cfg(test)]
+mod sendwith_guard_tests {
+    use super::*;
+
+    // P0.5 panel #3 — sendWith may broadcast ONLY a `nosend` tx. NEGATIVE
+    // CONTROL: stub sendwith_status_is_broadcastable to `status != Some("completed")`
+    // (the pre-fix behaviour of get_local_parent_tx, which returned every
+    // non-completed row including `failed`) and this test goes red on
+    // "failed"/"unproven"/"sending" — the exact statuses whose broadcast is the
+    // double-spend / withheld-payment harm.
+    #[test]
+    fn sendwith_only_broadcasts_nosend_status() {
+        assert!(
+            sendwith_status_is_broadcastable(Some("nosend")),
+            "the legitimate withheld-tx flow must still broadcast"
+        );
+        for bad in [
+            "failed", "completed", "unproven", "sending", "nonfinal", "unsigned",
+            "unprocessed", "aborted", "broadcast", "",
+        ] {
+            assert!(
+                !sendwith_status_is_broadcastable(Some(bad)),
+                "status '{}' must be refused by sendWith",
+                bad
+            );
+        }
+        assert!(
+            !sendwith_status_is_broadcastable(None),
+            "a txid absent from the transactions table must never broadcast"
+        );
     }
 }
 
@@ -18211,6 +18288,25 @@ pub struct BroadcastNosendRequest {
 /// existing broadcast_transaction helper. ARC dedupes if the server has already
 /// broadcast independently. Status moves nosend → sending → unproven →
 /// completed via the Monitor pipeline.
+/// A local txid may be broadcast via `createAction options.sendWith` ONLY when
+/// it is in `nosend` status. (P0.5 panel #3 — sendWith broadcasts arbitrary
+/// local txids.) This mirrors `broadcast_nosend`'s own `status == "nosend"`
+/// guard exactly, so the two sibling broadcast paths cannot diverge again.
+///
+/// `None` (the txid is not in the transactions table at all) is NOT
+/// broadcastable — an unknown txid must never reach broadcast_transaction.
+///
+/// The legitimate sendWith flow is: a prior `createAction` with `noSend=true`
+/// leaves a signed tx at `status='nosend'`, then a second `createAction` with
+/// `sendWith=[that txid]` broadcasts it. Every other status — `failed`
+/// (inputs already restored as spendable → resurrecting it is a double-spend),
+/// `completed`, `unproven`, `sending`, `nonfinal`, `unsigned`, `unprocessed` —
+/// is refused.
+#[inline]
+fn sendwith_status_is_broadcastable(status: Option<&str>) -> bool {
+    status == Some("nosend")
+}
+
 pub async fn broadcast_nosend(
     state: web::Data<AppState>,
     body: web::Bytes,
