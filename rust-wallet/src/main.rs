@@ -145,7 +145,41 @@ async fn domain_trust_mw(
         // A sub-permission or session endpoint added later is refused by default
         // instead of by someone remembering to extend a list.
         fn is_permission_surface(path: &str) -> bool {
-            path.starts_with("/domain/") || path.starts_with("/wallet/session")
+            path.starts_with("/domain/")
+                || path.starts_with("/wallet/session")
+                // ⛔ SECOND CLASS: not the permission TABLE, but the same trust
+                // property — first-party only. (Panel #2 Task 2, owner-approved
+                // 2026-08-21.) Both handlers take `(state, body)` with NO
+                // `HttpRequest` parameter, so — exactly like `sign_action` — they
+                // structurally cannot gate themselves. The gate has to be here.
+                //
+                // `/wallet/reveal-mnemonic` returns the BIP39 RECOVERY PHRASE. On
+                // the no-PIN branch it hands it over whenever the wallet is
+                // unlocked (DPAPI/Keychain auto-unlock at startup means: always),
+                // after one Allow click. That is key exfiltration of the whole
+                // wallet, including funds not yet received, and it contradicts
+                // CLAUDE.md Invariant #1's "never reachable from web content".
+                //
+                // `/wallet/settings` rewrites `default_per_tx/per_session/rate` —
+                // the limits EVERY FUTURE approval inherits — plus
+                // `default_identity_key_disclosure_allowed`. Same escalation as
+                // §4k without needing the encoding trick: a site that can no
+                // longer raise its own caps could still raise the defaults that
+                // every later grant copies.
+                //
+                // MEASURED 2026-08-21 with these two arms removed, from an
+                // APPROVED dApp origin:
+                //   RED  POST /wallet/reveal-mnemonic -> 401 — it REACHED the
+                //        handler; only the PIN stopped it, and the no-PIN branch
+                //        has no PIN to stop it with.
+                //   RED  POST /wallet/settings        -> 200 and the global
+                //        defaults were REWRITTEN: per_tx 1000 -> 999999,
+                //        per_session 5000 -> 999999.
+                // With them in place both return 403 and neither handler runs,
+                // while the header-free first-party path is untouched (401 on a
+                // wrong PIN = the handler still runs for the wallet UI).
+                || path == "/wallet/reveal-mnemonic"
+                || path == "/wallet/settings"
         }
         let hits_surface =
             is_permission_surface(&raw_path) || is_permission_surface(&decoded_path);
@@ -172,11 +206,14 @@ async fn domain_trust_mw(
 
         if is_mutation && hits_surface && !is_self_revoke {
             log::warn!(
-                "🛡️ REFUSED {} {} (decoded '{}') from dApp origin '{}' — the permission table is first-party only",
+                "🛡️ REFUSED {} {} (decoded '{}') from dApp origin '{}' — first-party only",
                 method, raw_path, decoded_path, domain
             );
             return Ok(req.into_response(
                 actix_web::HttpResponse::Forbidden().json(serde_json::json!({
+                    // Kept as-is: this string is the discriminator the §4k and
+                    // panel-#2 evidence rows assert on, and renaming it would
+                    // silently invalidate those tests.
                     "error": "permission_table_is_first_party_only",
                     "endpoint": decoded_path,
                 })),
