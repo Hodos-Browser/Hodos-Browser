@@ -4967,6 +4967,24 @@ bool SimpleHandler::OnProcessMessageReceived(
     if (message_name == "add_domain_permission") {
         LOG_DEBUG_BROWSER("🔐 add_domain_permission message received from role: " + role_);
 
+        // ⛔ ONLY the approval overlays may write a domain grant. (P0.5 panel #3
+        // — internal-UI self-navigation.) `add_domain_permission` is sent solely
+        // by BRC100AuthOverlayRoot's Allow button, which legitimately runs in the
+        // "notification" overlay (SimpleHandler("notification")) or the
+        // "brc100auth" overlay. MEASURED 2026-08-21: a web page navigated its own
+        // TAB to http://127.0.0.1:5137/brc100-auth?type=domain_approval&domain=<attacker>,
+        // rendered the real connect prompt for a domain IT chose, and one Allow
+        // click wrote an `approved` grant — because the tab is an internal-origin
+        // page, so its cefMessage IPC and the resulting first-party
+        // POST /domain/permissions were ungated. A tab has role "tab_<id>", never
+        // "notification"/"brc100auth", so this closes the self-nav path while the
+        // real overlay flow is unaffected.
+        if (role_ != "notification" && role_ != "brc100auth") {
+            LOG_WARNING_BROWSER("🛡️ add_domain_permission REFUSED from role '" + role_
+                + "' — only the approval overlay may grant domain trust (self-nav guard)");
+            return true;
+        }
+
         // Extract domain from JSON
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         LOG_DEBUG_BROWSER("🔐 Args size: " + std::to_string(args ? args->GetSize() : 0));
@@ -5049,6 +5067,15 @@ bool SimpleHandler::OnProcessMessageReceived(
 
     if (message_name == "add_domain_permission_advanced") {
         LOG_DEBUG_BROWSER("🔐 add_domain_permission_advanced message received from role: " + role_);
+
+        // ⛔ Same approval-overlay gate as add_domain_permission above. The
+        // advanced Allow (custom limits) is the same BRC100AuthOverlayRoot flow
+        // and must not be drivable from a self-navigated tab either. (P0.5 panel #3.)
+        if (role_ != "notification" && role_ != "brc100auth") {
+            LOG_WARNING_BROWSER("🛡️ add_domain_permission_advanced REFUSED from role '" + role_
+                + "' — only the approval overlay may grant domain trust (self-nav guard)");
+            return true;
+        }
 
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         if (args && args->GetSize() > 0) {
