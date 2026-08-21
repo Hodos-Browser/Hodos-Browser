@@ -1059,6 +1059,89 @@ ran, and it reported **0** for the foreign origin.
 ⚠️ A domain-approval modal for `example.com` was raised by the mis-aimed C1 probe at 09:37 and
 **timed out unanswered after 45 s** (`⏱️ Wallet HTTP request timeout`). Nothing was approved.
 
+### 4s. 🛑 PANEL #3 — **DO NOT SIGN OFF.** It broke my own work from today.
+
+**Run 2026-08-21**, 14 lenses (8 macOS, 4 on this session's fixes, 2 regression/harness).
+**44 raw findings.** ⚠️ **The run is INCOMPLETE**: 16 of 51 agents died on a session limit,
+including **the synthesizer**, so 15 verification passes never ran and there is no synthesis.
+Raw output preserved at `ADVERSARIAL_PANEL_3_2026-08-21.raw.json`. Per HARNESS §8 this is
+**INCOMPLETE, not a pass** — the panel must be re-run to completion before sign-off.
+
+#### ⛔⛔ First, a FALSE CLAIM OF MY OWN, corrected
+
+§4q said the five synthetic-request sites were *"mechanically re-derived, not read —
+`probes/ungateable.py`'s sibling check walks each `TestRequest…` site back to its enclosing `fn`
+and looks for a `dispatch_*` call in between."*
+
+**That sentence is FALSE in two ways, and the panel caught both.**
+
+1. **The cited artifact does not contain the check.** `grep -rn TestRequest probes/` returns
+   **zero** hits. The committed `ungateable.py` only enumerates routes from `main.rs`. I ran the
+   sibling check as a throwaway inline script, never committed it, and then described the committed
+   file as containing it. **This is the fourth false audit claim in this phase and the first one
+   that is mine.** The rule I have been applying to `81c054c` and `4eacb51` applies to me.
+2. **The check itself was too shallow to support the claim.** It asked only *"is there a
+   `dispatch_*` call between `fn` entry and the synthetic request?"* It never asked whether that
+   call was **unconditional**. For `pay_402` it is not — see below. So even had the script been
+   committed, "all five clean" would still have been wrong.
+
+#### 🚨 BLOCKER, **MEASURED** — `/wallet/pay402` inverts the fail-closed rule
+
+Every other gated endpoint fails **closed** when the `X-Payment-*` headers are absent:
+`PaymentCall::from_headers` returns `None`, `dispatch_payment` substitutes
+`bsv_price_available=false`, and `matrix_c.rs` renders a PriceUnavailable prompt. `pay_402` is the
+one handler that does the opposite:
+
+```rust
+let brc121_engine_headers_present = http_req.headers().contains_key("X-Payment-Satoshis")
+                                 || http_req.headers().contains_key("X-User-Approved");
+if brc121_engine_headers_present { dispatch_payment(...) }   // ⛔ absent headers => NO GATE
+```
+
+And `hodos::IsPaymentEndpoint` (`PaymentCost.h`) **does not list `/wallet/pay402`**, while the
+external IPC arm stamps `X-Payment-*` only `if (isPaymentEndpoint(...))`. So the absence of the
+endpoint from the list *guarantees* the headers are missing, which *guarantees* the gate is
+skipped. `check_domain_approved` runs but enforces trust level only, no caps.
+
+⇒ **an approved dApp mints and broadcasts an arbitrary-value BRC-121 payment with no cap, no rate
+limit, no modal and no gold pill.** Same endpoint list, same "do both or neither" rule, same
+failure I fixed for `/processAction` this morning — one row down.
+
+#### 🟠 HIGH, **MEASURED** — today's `/processAction` fix is defeated by one encoded character
+
+`/%70rocessAction` → `IsPaymentEndpoint=false` (compiled probe against `PaymentCost.h` at
+`8946f1a`). actix routes the **decoded** path, so Rust still runs `process_action` and its gate,
+but C++ never prices it ⇒ amount-blind `price_unavailable` prompt, **no gold pill**, and the
+per-session dollar cap never advances. Fails closed on the money, open on the UX and the counters.
+**This is panel #2's finding 1.3 (`/domain/%70ermissions`) in a new location** — I added a
+substring match to a string list on the same day the contract records "gate SUBTREES, never a list
+of exact strings."
+
+#### Other MEASURED findings
+
+| Sev | Finding |
+|---|---|
+| HIGH | `IsInternalOrigin` trusts **any** loopback port while `IsInternalFrontendUrl` requires `:5137` — the two predicates disagree and **the money path uses the looser one**. Known-open as Task 2 item 4, now compiled and measured rather than read. |
+| MED | `hodos::IsWalletHostPort` is still an **unanchored substring search**: `IsWalletHostPort("https://evil.com/?q=127.0.0.1:31301") == 1`. The exact pattern `PortConfig.h`'s own banner forbids for the `:5137` gate, never applied to these two helpers. |
+| MED | `PaymentCost.h`'s "do both or neither" rule is **already violated in-tree**: `/acquireCertificate` and `/sendMessage` are listed in `IsPaymentEndpoint` but have no body shape in `ExtractOutputSatoshis`. `payment_cost_test.cpp` asserts only the violating half, so the 221-green suite **cannot detect** the failure the header was extracted to prevent. |
+| LOW | `OriginFromUrl`'s authority scan terminates only on `/ ? #`, so a backslash, TAB, LF or SPACE before the last `@` yields an internal origin. Latent — every caller today passes a Chromium-canonicalized spec. |
+
+#### Unverified, and that matters
+
+The three **blocker**-rated CODE_READING findings below never got a verification pass (their
+refuters died on the limit). **Do not act on them, and do not dismiss them, until they are run:**
+a page framing the internal wallet UI and driving its send form by forged `postMessage`;
+the modal query string injected into the notification overlay as a JS string literal;
+`createAction options.sendWith` broadcasting arbitrary local txids.
+
+macOS produced 11 findings across 4 lenses — all **CODE_READING by construction**, since the panel
+ran on Windows. They belong to the macOS session with named experiments attached.
+
+#### Verdict
+
+🛑 **DO NOT SIGN OFF Phase 0.5.** One MEASURED blocker on the money path, one MEASURED
+high against a fix that landed today, one false claim of mine corrected, and an incomplete panel.
+
 #### Still owed before sign-off
 
 | | |
@@ -1066,7 +1149,7 @@ ran, and it reported **0** for the foreign origin.
 | Task 2 — six owner decisions | 🟡 **1, 2, 3, 6 CLOSED**; **5 MEASURED** — the lifecycle is clean, but the measurement found `/processAction` (§4o, `P0.5-X6`), a **blocker-class ungated fund-mover**, plus an ungated disclosure set. **Fix NOT written — owner decision owed.** **4 still owed** (Phase 5) |
 | Task 3 — `P0.5-G1` on a release-shaped build | ✅ **CLOSED — §4p.** RED reproduced, GREEN, subject proven with a disk-only marker |
 | Task 4 — whole evidence table re-run | 🟡 **DONE for everything drivable without the owner — §4r.** `R1` (full, wallet-UI send) and `R4` (gold pill) still owed |
-| Task 4 — **panel #3, MUST cover macOS** | ⬜ — panel #2 examined exactly one line of that tree |
+| Task 4 — **panel #3** | 🛑 **RUN, INCOMPLETE, DO NOT SIGN OFF — §4s.** 44 findings; synthesizer + 15 verifiers died on a session limit. MEASURED blocker on `/wallet/pay402`; today's `/processAction` fix defeated by one encoded character; a FALSE claim in §4q corrected. **Re-run to completion.** |
 | Concurrency hardening (latent) | ⬜ follow-up |
 
 #### ⚠️ Unrelated finding surfaced during this session — NOT caused by these fixes
