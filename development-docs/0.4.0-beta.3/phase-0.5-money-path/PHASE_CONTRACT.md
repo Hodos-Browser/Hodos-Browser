@@ -989,13 +989,84 @@ header-only TU — the `JsStringEscape.h` / `PaymentCost.h` move. That is a prod
 the C2 gate, and doing it in the same session that changed the money path is exactly the kind of
 rushed edit this phase exists to avoid. **Named here so it is visible, not quietly dropped.**
 
+### 4r. Task 4 — THE WHOLE TABLE, re-run 2026-08-21 after the fix
+
+⛔ The whole table, not the failing rows. Run against the **rebuilt** binaries (wallet rebuilt
+09:06, C++ 09:19), because a fix measured against yesterday's DLL is the "right value, wrong
+subject" failure this phase exists to prevent.
+
+| Row | Result |
+|---|---|
+| `X1` | ✅ crafted `data:` frame resolved as **`example.com`**, both messages DENIED |
+| `X2` | ✅ `🛡️ IPC DENIED: 'send_transaction' from external origin 'example.com'`; **0** `/transaction/send` lines in the wallet log |
+| `X3` | ✅ `🛡️ IPC DENIED: 'get_balance' …` |
+| `X4` | ✅ in preflight T1c — 222 tests, 221 passed, 1 skipped, 0 failed |
+| `G1` | ✅ **closed today** — §4p, release-shaped, RED reproduced |
+| `G2` | ✅ `hodosBrowser.identity` is `undefined` **with and without** the `:5137` substring in the page URL |
+| `G3` | ✅ `preflight.ps1 -Full` → **PASS, nothing skipped**; `-NegativeControl` → **every one of the 5 gates seen to fail** on an injected violation |
+| `E1` | ✅ `about:blank` child inherited `example.com` and was DENIED 19 ms after its parent |
+| `R1` | 🟡 **half.** Header-free internal caller **unchanged** on both `/transaction/send` and `/processAction`: no gate line, straight to build. The owner-run wallet-UI send was **NOT** re-run — see below |
+| `R2` | ✅ `202 … per_tx_limit` |
+| `R3` | ✅ `202`, and the payload reads **`satoshis: 17,938,546 / cents: 319 / exceededLimit: "both"`** — **not** "0 sats". Finding 6 confirmed live |
+| `X5` | ✅ `peerpay_send` and `paymail_send` both `202 … per_tx_limit` |
+| `C1` | ✅ see the control set below |
+| `R4` | ⬜ gold pill — needs the owner |
+| `X6` | ✅ §4q |
+| panel #2 1.3 / 1.4, Task 2 items 2 / 3 | ✅ all four `403 permission_table_is_first_party_only` |
+| false-green control | ✅ an **unapproved** origin gets `domain_approval / new_domain_no_manifest` — `domain_trust_mw` answers first, which is why every payment row above uses an **approved** domain |
+
+Six `🛡️ engine Prompt (payment)` lines for six external rows, **zero** for the two
+internal ones. `R-INTEXT` holds in both directions.
+
+**`C1` — measured where it actually lives, with three controls.** ⚠️ My first attempt measured
+the wrong layer and I nearly recorded it: a page-context `fetch` to a wallet endpoint is caught by
+the **C++ interceptor**, which forwarded it with `X-Requesting-Domain: example.com`, got Rust's 202,
+and opened a **domain-approval modal** — so the handler did not run, but **CORS was never the
+deciding layer**. Re-measured with curl, straight to actix:
+
+| | `Origin` | Content-Type | Result | Handler ran? |
+|---|---|---|---|---|
+| SUBJECT | `https://evil.example` | `text/plain` (simple, no preflight) | `400 Origin is not allowed to make this request` | **0** |
+| CONTROL A | `http://127.0.0.1:5137` | `text/plain` | `400 Invalid JSON request: Content type error` — a **different error at a different layer**, so CORS admitted it | 0 |
+| CONTROL B | `http://127.0.0.1:31400` (one digit off) | `text/plain` | `400 Origin is not allowed…` | **0** |
+| CONTROL C | `http://127.0.0.1:5137` | `application/json` | **`200`** | **1** |
+
+Control C is what makes the subject row mean something: the harness **can** report a handler that
+ran, and it reported **0** for the foreign origin.
+
+#### ⛔ Two things this re-run got wrong before it got them right
+
+1. **`X1`'s first probe measured NOTHING and looked green.** The frame's inline script began with
+   `parent.__x1 = "ran"` — and a `data:` frame is **opaque-origin**, so that throws a SecurityError
+   and kills the script before it reaches `cefMessage`. The iframe appended, no deny line appeared,
+   and "no deny line" is indistinguishable from "gate held". Fixed by making the liveness signal
+   itself the evidence: the frame sends `__x1_probe_marker`, a message name that exists nowhere, so
+   it can only be DENIED — and the deny line prints the **resolved origin**, which is the quantity
+   the row is about. Liveness independently confirmed via `postMessage` (`frameScriptRan: "yes"`).
+2. **`/transaction/send` returns `500` for an invalid address where `/processAction` returns `400`.**
+   My assertion was over-specific about the status code. CLAUDE.md #13: the property under test is
+   "the internal caller is ungated", and it held — no gate line, reached address validation. The
+   status-code inconsistency is **pre-existing** and untouched by this phase. **Test-only fix**;
+   filed as cosmetic, not chased.
+
+#### Still owed — these two need the owner, and neither can be faked
+
+| Row | Why |
+|---|---|
+| `R1` (full) | A real send **from the wallet UI**, which must complete with **no modal**. Only the owner can drive the overlay; a curl with no header proves the Rust half but not that the UI still works end to end. |
+| `R4` | The **gold pill** on the tab badge after a silent-approved payment. It is a visual artifact on a real tab. |
+
+⚠️ A domain-approval modal for `example.com` was raised by the mis-aimed C1 probe at 09:37 and
+**timed out unanswered after 45 s** (`⏱️ Wallet HTTP request timeout`). Nothing was approved.
+
 #### Still owed before sign-off
 
 | | |
 |---|---|
 | Task 2 — six owner decisions | 🟡 **1, 2, 3, 6 CLOSED**; **5 MEASURED** — the lifecycle is clean, but the measurement found `/processAction` (§4o, `P0.5-X6`), a **blocker-class ungated fund-mover**, plus an ungated disclosure set. **Fix NOT written — owner decision owed.** **4 still owed** (Phase 5) |
 | Task 3 — `P0.5-G1` on a release-shaped build | ✅ **CLOSED — §4p.** RED reproduced, GREEN, subject proven with a disk-only marker |
-| Task 4 — whole evidence table re-run + panel #3 | ⬜ |
+| Task 4 — whole evidence table re-run | 🟡 **DONE for everything drivable without the owner — §4r.** `R1` (full, wallet-UI send) and `R4` (gold pill) still owed |
+| Task 4 — **panel #3, MUST cover macOS** | ⬜ — panel #2 examined exactly one line of that tree |
 | Concurrency hardening (latent) | ⬜ follow-up |
 
 #### ⚠️ Unrelated finding surfaced during this session — NOT caused by these fixes
