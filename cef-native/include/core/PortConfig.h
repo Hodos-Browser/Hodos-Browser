@@ -164,6 +164,82 @@ inline bool IsWalletHostPort(const std::string& url) {
         || url.find("127.0.0.1:" + p) != std::string::npos;
 }
 
+// ⛔ MATCH THE PATH THE SERVER ROUTES ON, NOT THE RAW REQUEST TARGET.
+// (P0.5 panel #3 — `/%70rocessAction`.)
+//
+// Every endpoint predicate on the C++ side exists to predict which Rust handler
+// actix will run. actix-router percent-DECODES the path before matching, while
+// our matchers read the RAW target — so `POST /%70rocessAction` was routed to
+// `process_action` while `IsPaymentEndpoint` returned false. C++ never stamped
+// the X-Payment-* headers, the spend was priced blind, there was no gold pill,
+// and the per-session dollar cap never advanced. `isWalletEndpoint` missed it by
+// the same character, so the request was not intercepted at all.
+//
+// This is panel #2's finding 1.3 in a third location. `main.rs` closed it by
+// running its predicate over BOTH the raw and the decoded path. The C++ side is
+// closed HERE instead — one normalizer, called INSIDE the predicates, so a
+// caller cannot forget it. Adding one more exact string to a list already known
+// to be the wrong shape is how this defect was created; do not do that again.
+//
+// TWO steps, and the ORDER is load-bearing:
+//
+//   1. Cut the query and fragment FIRST. `endpoint_` is the raw target INCLUDING
+//      the query string, so decoding first would let `/foo?x=%2FcreateAction`
+//      decode into `/foo?x=/createAction` and match — inventing a payment
+//      endpoint out of page-controlled text. Cutting first puts the query beyond
+//      the reach of every matcher, which also retires the pre-existing
+//      false-positive where `https://site/?r=/createAction` was intercepted and
+//      forwarded to the wallet.
+//
+//   2. Decode EXACTLY ONCE, because actix-router decodes exactly once.
+//      `%2570rocessAction` decodes to `%70rocessAction`, which actix does NOT
+//      route to `process_action` (404). Decoding twice would price a call the
+//      wallet will never run — the same desync in the other direction.
+//
+// Invalid escapes are left verbatim (`%zz` stays `%zz`) and a trailing `%` or
+// `%A` cannot run off the end, matching what a lenient decoder yields.
+//
+// Returns the path only. Accepts either an absolute URL (what `isWalletEndpoint`
+// is handed) or a bare origin-relative target (what `endpoint_` holds).
+inline std::string RequestPathForMatching(const std::string& target) {
+    size_t start = 0;
+    const size_t schemeEnd = target.find("://");
+    if (schemeEnd != std::string::npos) {
+        const size_t slash = target.find('/', schemeEnd + 3);
+        if (slash == std::string::npos) return std::string();  // authority only
+        start = slash;
+    }
+
+    size_t end = target.size();
+    for (size_t i = start; i < target.size(); ++i) {
+        const char c = target[i];
+        if (c == '?' || c == '#') { end = i; break; }
+    }
+
+    auto hexVal = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+
+    std::string out;
+    out.reserve(end - start);
+    for (size_t i = start; i < end; ++i) {
+        if (target[i] == '%' && i + 2 < end) {
+            const int hi = hexVal(target[i + 1]);
+            const int lo = hexVal(target[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out.push_back(static_cast<char>((hi << 4) | lo));
+                i += 2;
+                continue;
+            }
+        }
+        out.push_back(target[i]);
+    }
+    return out;
+}
+
 // A loopback host:port in EITHER host spelling.
 //
 // ⛔ Exists because three hardcoded literals in simple_handler.cpp's resource

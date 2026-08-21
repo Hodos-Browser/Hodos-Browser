@@ -5118,45 +5118,61 @@ bool HttpRequestInterceptor::isWalletEndpoint(const std::string& url) {
         return true;
     }
 
-    // Check if URL contains wallet endpoints
-    return (url.find("/brc100/") != std::string::npos ||
-            url.find("/wallet/") != std::string::npos ||
-            url.find("/transaction/") != std::string::npos ||
-            url.find("/getVersion") != std::string::npos ||
-            url.find("/getPublicKey") != std::string::npos ||
-            url.find("/createAction") != std::string::npos ||
-            url.find("/signAction") != std::string::npos ||
-            url.find("/processAction") != std::string::npos ||
-            url.find("/internalizeAction") != std::string::npos ||
-            url.find("/abortAction") != std::string::npos ||
-            url.find("/listActions") != std::string::npos ||
-            url.find("/isAuthenticated") != std::string::npos ||
-            url.find("/createSignature") != std::string::npos ||
-            url.find("/api/brc-100/") != std::string::npos ||
-            url.find("/waitForAuthentication") != std::string::npos ||
-            url.find("/listOutputs") != std::string::npos ||
-            url.find("/relinquishOutput") != std::string::npos ||
-            url.find("/createHmac") != std::string::npos ||
-            url.find("/verifyHmac") != std::string::npos ||
-            url.find("/encrypt") != std::string::npos ||
-            url.find("/decrypt") != std::string::npos ||
-            url.find("/revealCounterpartyKeyLinkage") != std::string::npos ||
-            url.find("/revealSpecificKeyLinkage") != std::string::npos ||
-            url.find("/verifySignature") != std::string::npos ||
-            url.find("/getNetwork") != std::string::npos ||
-            url.find("/getHeight") != std::string::npos ||
-            url.find("/getHeaderForHeight") != std::string::npos ||
-            url.find("/acquireCertificate") != std::string::npos ||
-            url.find("/listCertificates") != std::string::npos ||
-            url.find("/proveCertificate") != std::string::npos ||
-            url.find("/relinquishCertificate") != std::string::npos ||
-            url.find("/discoverByIdentityKey") != std::string::npos ||
-            url.find("/discoverByAttributes") != std::string::npos ||
-            url.find("/socket.io/") != std::string::npos ||
-            url.find("/.well-known/auth") != std::string::npos ||
-            url.find("/listMessages") != std::string::npos ||
-            url.find("/sendMessage") != std::string::npos ||
-            url.find("/acknowledgeMessage") != std::string::npos);
+    // ⛔ NORMALIZE, then match. Same rule and same normalizer as
+    // hodos::IsPaymentEndpoint — see PortConfig.h :: RequestPathForMatching.
+    //
+    // Two defects this closes, in opposite directions:
+    //   MISSED  `/%70rocessAction` did not match any arm below, so the request
+    //           was not intercepted AT ALL — it went straight to loopback with
+    //           no X-Requesting-Domain, which Rust reads as a first-party call.
+    //           actix routes the decoded path, so the handler ran regardless.
+    //   INVENTED  every arm below is a bare substring of the WHOLE url, query
+    //           included, so `https://site/?r=/createAction` was intercepted and
+    //           forwarded to the wallet. Cutting the query retires that.
+    //
+    // The `/health` arm above deliberately keeps the full url — it is scoped by
+    // IsWalletHostPort, which is a host:port test, not a path test.
+    const std::string path = hodos::RequestPathForMatching(url);
+
+    // Check if the request path is a wallet endpoint
+    return (path.find("/brc100/") != std::string::npos ||
+            path.find("/wallet/") != std::string::npos ||
+            path.find("/transaction/") != std::string::npos ||
+            path.find("/getVersion") != std::string::npos ||
+            path.find("/getPublicKey") != std::string::npos ||
+            path.find("/createAction") != std::string::npos ||
+            path.find("/signAction") != std::string::npos ||
+            path.find("/processAction") != std::string::npos ||
+            path.find("/internalizeAction") != std::string::npos ||
+            path.find("/abortAction") != std::string::npos ||
+            path.find("/listActions") != std::string::npos ||
+            path.find("/isAuthenticated") != std::string::npos ||
+            path.find("/createSignature") != std::string::npos ||
+            path.find("/api/brc-100/") != std::string::npos ||
+            path.find("/waitForAuthentication") != std::string::npos ||
+            path.find("/listOutputs") != std::string::npos ||
+            path.find("/relinquishOutput") != std::string::npos ||
+            path.find("/createHmac") != std::string::npos ||
+            path.find("/verifyHmac") != std::string::npos ||
+            path.find("/encrypt") != std::string::npos ||
+            path.find("/decrypt") != std::string::npos ||
+            path.find("/revealCounterpartyKeyLinkage") != std::string::npos ||
+            path.find("/revealSpecificKeyLinkage") != std::string::npos ||
+            path.find("/verifySignature") != std::string::npos ||
+            path.find("/getNetwork") != std::string::npos ||
+            path.find("/getHeight") != std::string::npos ||
+            path.find("/getHeaderForHeight") != std::string::npos ||
+            path.find("/acquireCertificate") != std::string::npos ||
+            path.find("/listCertificates") != std::string::npos ||
+            path.find("/proveCertificate") != std::string::npos ||
+            path.find("/relinquishCertificate") != std::string::npos ||
+            path.find("/discoverByIdentityKey") != std::string::npos ||
+            path.find("/discoverByAttributes") != std::string::npos ||
+            path.find("/socket.io/") != std::string::npos ||
+            path.find("/.well-known/auth") != std::string::npos ||
+            path.find("/listMessages") != std::string::npos ||
+            path.find("/sendMessage") != std::string::npos ||
+            path.find("/acknowledgeMessage") != std::string::npos);
 }
 
 bool HttpRequestInterceptor::isSocketIOConnection(const std::string& url) {

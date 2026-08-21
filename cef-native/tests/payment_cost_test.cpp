@@ -238,4 +238,103 @@ TEST(ComputePaymentCost, NestedSendMaxSweepIsNeverPriceAvailable) {
     EXPECT_EQ(c.cents, 0);
 }
 
+
+// ===========================================================================
+// P0.5 panel #3 — the encoded-path desync, and the pay402 gate inversion.
+// ===========================================================================
+
+// 🚨 THE BLOCKER. /wallet/pay402 mints and signs a BRC-121 payment for an
+// arbitrary amount. Its absence here did not merely leave the call unpriced:
+// handlers.rs :: pay_402 gated ITSELF on the X-Payment-* headers being present,
+// and the page/IPC arm stamps those only for endpoints in this list. Absent
+// here => headers guaranteed absent => gate guaranteed skipped.
+TEST(IsPaymentEndpoint, Pay402Matches) {
+    EXPECT_TRUE(hodos::IsPaymentEndpoint("/wallet/pay402"));
+}
+
+// The paired half of the do-both-or-neither rule. pay402's body is the FIFTH
+// shape: TOP-LEVEL {satoshis}. Listing the endpoint without teaching this shape
+// prices every pay402 at 0 cents, which with a live price reads as under every
+// cap and auto-approves SILENTLY.
+TEST(ExtractOutputSatoshis, Pay402TopLevelSatoshisShape) {
+    EXPECT_EQ(hodos::ExtractOutputSatoshis(
+                  R"({"server_pubkey_hex":"02ab","satoshis":721000,)"
+                  R"("original_url":"https://x/y"})"),
+              721000);
+}
+
+TEST(ComputePaymentCost, Pay402IsPricedNotSilentlyZero) {
+    const auto c = hodos::ComputePaymentCost(
+        "/wallet/pay402",
+        R"({"server_pubkey_hex":"02ab","satoshis":5000000,"original_url":"https://x/"})",
+        kPrice);
+    EXPECT_TRUE(c.isPayment);
+    EXPECT_EQ(c.satoshis, 5000000);
+    EXPECT_TRUE(c.priceAvailable);
+    EXPECT_GT(c.cents, 0);
+}
+
+// A body carrying BOTH outputs[] and a top-level satoshis is ambiguous, so the
+// new fifth shape cannot be used to re-open the decoy family of panel #2 1.1.
+TEST(ExtractOutputSatoshis, TopLevelSatoshisPlusOutputsIsAmbiguous) {
+    EXPECT_EQ(hodos::ExtractOutputSatoshis(
+                  R"({"outputs":[{"satoshis":1}],"satoshis":100000000})"),
+              hodos::kAmountNotDerivable);
+}
+
+// 🟠 ONE ENCODED CHARACTER defeated the /processAction fix that landed the same
+// day. actix-router percent-decodes before routing, so process_action RAN while
+// this predicate said "not a payment" => priced blind, no gold pill, and the
+// per-session dollar cap never advanced.
+TEST(IsPaymentEndpoint, PercentEncodedProcessActionStillMatches) {
+    EXPECT_TRUE(hodos::IsPaymentEndpoint("/%70rocessAction"));
+    EXPECT_TRUE(hodos::IsPaymentEndpoint("/%70rocess%41ction"));
+    EXPECT_TRUE(hodos::IsPaymentEndpoint("/createAction"));
+}
+
+TEST(IsPaymentEndpoint, PercentEncodedAcrossTheWholeFamily) {
+    EXPECT_TRUE(hodos::IsPaymentEndpoint("/%63reateAction"));
+    EXPECT_TRUE(hodos::IsPaymentEndpoint("/transaction/%73end"));
+    EXPECT_TRUE(hodos::IsPaymentEndpoint("/wallet/peerpay/%73end"));
+    EXPECT_TRUE(hodos::IsPaymentEndpoint("/wallet/paymail/%73end"));
+    EXPECT_TRUE(hodos::IsPaymentEndpoint("/wallet/%70ay402"));
+}
+
+// ⛔ DECODE ONCE, because actix decodes once. %25 -> '%', so %2570rocessAction
+// becomes %70rocessAction, which actix does NOT route to process_action (404).
+// Treating it as a payment would price a call the wallet will never run.
+TEST(IsPaymentEndpoint, DoubleEncodedIsNotAPaymentBecauseActixWontRouteIt) {
+    EXPECT_FALSE(hodos::IsPaymentEndpoint("/%2570rocessAction"));
+}
+
+// ⛔ QUERY IS CUT BEFORE DECODING. Otherwise page-controlled query text invents
+// a payment endpoint out of nothing.
+TEST(IsPaymentEndpoint, QueryStringCannotInventAPaymentEndpoint) {
+    EXPECT_FALSE(hodos::IsPaymentEndpoint("/wallet/status?next=/createAction"));
+    EXPECT_FALSE(hodos::IsPaymentEndpoint("/wallet/status?next=%2FcreateAction"));
+    EXPECT_FALSE(hodos::IsPaymentEndpoint("/wallet/status#/createAction"));
+}
+
+// A real payment endpoint keeps matching when it legitimately carries a query.
+TEST(IsPaymentEndpoint, RealPaymentEndpointWithQueryStillMatches) {
+    EXPECT_TRUE(hodos::IsPaymentEndpoint("/createAction?trace=1"));
+}
+
+// Non-payment endpoints stay non-payment - the predicate did not become a
+// blanket true.
+TEST(IsPaymentEndpoint, NonPaymentEndpointsUnchanged) {
+    EXPECT_FALSE(hodos::IsPaymentEndpoint("/wallet/status"));
+    EXPECT_FALSE(hodos::IsPaymentEndpoint("/wallet/balance"));
+    EXPECT_FALSE(hodos::IsPaymentEndpoint("/listActions"));
+    EXPECT_FALSE(hodos::IsPaymentEndpoint(""));
+}
+
+// Malformed escapes must not throw or run off the end of the buffer.
+TEST(IsPaymentEndpoint, MalformedEscapesAreInertNotCrashes) {
+    EXPECT_FALSE(hodos::IsPaymentEndpoint("/%"));
+    EXPECT_FALSE(hodos::IsPaymentEndpoint("/%A"));
+    EXPECT_FALSE(hodos::IsPaymentEndpoint("/%zz"));
+    EXPECT_TRUE(hodos::IsPaymentEndpoint("/createAction%"));
+}
+
 }  // namespace

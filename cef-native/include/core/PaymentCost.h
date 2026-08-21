@@ -20,6 +20,8 @@
 #include <string>
 #include <nlohmann/json.hpp>
 
+#include "PortConfig.h"  // RequestPathForMatching — see IsPaymentEndpoint below
+
 namespace hodos {
 
 // Sentinel: this body moves funds but the amount is NOT derivable from it.
@@ -28,31 +30,51 @@ namespace hodos {
 constexpr int64_t kAmountNotDerivable = -1;
 
 inline bool IsPaymentEndpoint(const std::string& endpoint) {
-    return endpoint.find("/createAction") != std::string::npos
-        || endpoint.find("/acquireCertificate") != std::string::npos
-        || endpoint.find("/sendMessage") != std::string::npos
+    // ⛔ NORMALIZE FIRST — never match the raw target. `/%70rocessAction` routes
+    // to `process_action` in actix but did not match here, so the call was
+    // priced blind. See PortConfig.h :: RequestPathForMatching for the full
+    // account. Normalizing INSIDE the predicate is the point: the callers below
+    // (the IPC/page arm in HttpRequestInterceptor.cpp and every future one)
+    // cannot forget to do it.
+    const std::string path = RequestPathForMatching(endpoint);
+    return path.find("/createAction") != std::string::npos
+        || path.find("/acquireCertificate") != std::string::npos
+        || path.find("/sendMessage") != std::string::npos
         // P0.5 finding 6 — the three direct fund-movers. Before this they reached
         // Rust with no X-Payment-* headers, so request_gate.rs substituted
         // {satoshis:0, cents:0, price_available:false} and matrix_c.rs rendered a
         // modal reading "0 sats", blaming a price-feed outage that was not
         // occurring, over what could be a full-balance sweep.
-        || endpoint.find("/transaction/send") != std::string::npos
-        || endpoint.find("/wallet/peerpay/send") != std::string::npos
-        || endpoint.find("/wallet/paymail/send") != std::string::npos
+        || path.find("/transaction/send") != std::string::npos
+        || path.find("/wallet/peerpay/send") != std::string::npos
+        || path.find("/wallet/paymail/send") != std::string::npos
         // P0.5 Task A / §4o (`P0.5-X6`) — /processAction is create + sign +
         // BROADCAST in one call, and it was absent here, so C++ never stamped the
         // X-Payment-* headers and never treated it as a spend. Its body is the
         // SAME {outputs:[{satoshis}]} shape as /createAction, so ExtractOutputSatoshis
-        // already handles it — no fifth body shape. ⛔ Pairs with the Rust-side gate
+        // already handles it — no new body shape. ⛔ Pairs with the Rust-side gate
         // in handlers.rs :: process_action; do both or neither.
-        || endpoint.find("/processAction") != std::string::npos;
+        || path.find("/processAction") != std::string::npos
+        // P0.5 panel #3 — /wallet/pay402 mints and signs a BRC-121 BEEF payment
+        // for an arbitrary amount, and it was absent here. That absence was not
+        // merely a missing price: `handlers.rs :: pay_402` gated itself on
+        // `X-Payment-Satoshis || X-User-Approved` being PRESENT, so not listing
+        // the endpoint here GUARANTEED the headers were missing, which
+        // GUARANTEED the gate was skipped. An approved dApp minted an
+        // uncapped, unmetered, unprompted payment. Measured 2026-08-21.
+        // ⛔ Its body is a FIFTH shape — {satoshis} at top level — taught to
+        // ExtractOutputSatoshis below. Do both or neither: listing it here
+        // without that shape would price every pay402 at 0 cents, which with a
+        // live price reads as under every cap and auto-approves SILENTLY.
+        || path.find("/wallet/pay402") != std::string::npos;
 }
 
-// FOUR body shapes, because four endpoint families reach here:
-//   /createAction         {outputs:[{satoshis}, ...]}
+// FIVE body shapes, because five endpoint families reach here:
+//   /createAction         {outputs:[{satoshis}, ...]}   (and /processAction)
 //   /transaction/send     {toAddress, amount, sendMax}
 //   /wallet/peerpay/send  {recipient_identity_key, amount_satoshis}
 //   /wallet/paymail/send  {paymail, amount_satoshis}
+//   /wallet/pay402        {server_pubkey_hex, satoshis, original_url}
 // ⛔ NEVER RETURN THE FIRST SHAPE THAT MATCHES. (P0.5 panel #2, findings 1.1 + 1.2)
 //
 // This function used to test each shape in turn and return from the first branch
@@ -125,6 +147,17 @@ inline int64_t ExtractOutputSatoshis(const std::string& body) {
         // PeerPay + Paymail share the {..., amount_satoshis} shape.
         if (json.contains("amount_satoshis") && json["amount_satoshis"].is_number()) {
             amount = json["amount_satoshis"].get<int64_t>();
+            ++shapes;
+        }
+
+        // /wallet/pay402 — {server_pubkey_hex, satoshis, original_url}. TOP-LEVEL
+        // `satoshis`, which is why it is its own shape and not the createAction
+        // one: createAction carries `satoshis` only INSIDE `outputs[]`, and this
+        // branch deliberately does not look in there. A body carrying both is
+        // two shapes and falls to the ambiguity rule below, so the decoy family
+        // that motivated that rule cannot be re-opened through this branch.
+        if (json.contains("satoshis") && json["satoshis"].is_number()) {
+            amount = json["satoshis"].get<int64_t>();
             ++shapes;
         }
 

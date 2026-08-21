@@ -17813,18 +17813,52 @@ pub async fn pay_402(
     // C++ cap cascade in TryHandleBrc121_402 + its SessionManager reads are
     // deleted once this is live (and SessionManager itself dies in 2.6-H).
     //
-    // Rollout gate: engage ONLY when the CEF interceptor sends the engine
-    // headers (X-Payment-* for a fresh decision, or X-User-Approved for the
-    // post-modal replay). Old/internal callers that send neither fall through
-    // to the legacy mint path unchanged — so this Rust step is dormant until
-    // the paired C++ flip lands (which sends the headers + reads the 202).
+    // ⛔ UNCONDITIONAL. It used to be wrapped in
+    //   `if headers.contains_key("X-Payment-Satoshis") || contains_key("X-User-Approved")`
+    // as a ROLLOUT gate, dormant until the paired C++ flip landed. That flip DID
+    // land (`TryHandleBrc121_402` stamps the X-Payment-* set at its own call
+    // site), so the condition stopped protecting a rollout and became a hole:
     //
-    // dispatch_payment outcomes:
-    //   Proceed       → Silent (within caps) OR approved replay → mint below.
-    //   EarlyReturn    → 202 prompt (no mint, C++ surfaces the modal) or 403 deny.
-    let brc121_engine_headers_present = http_req.headers().contains_key("X-Payment-Satoshis")
-        || http_req.headers().contains_key("X-User-Approved");
-    if brc121_engine_headers_present {
+    //   * `/wallet/pay402` was NOT in `hodos::IsPaymentEndpoint`, and the
+    //     page/IPC arm of the interceptor stamps X-Payment-* only for endpoints
+    //     in that list. So for a request arriving that way the headers were
+    //     GUARANTEED absent, which made skipping the gate GUARANTEED too.
+    //   * `check_domain_approved` below enforces trust level only — no per-tx
+    //     cap, no per-session cap, no rate limit. An APPROVED dApp therefore
+    //     minted and broadcast an arbitrary-value BRC-121 payment with no cap,
+    //     no modal and no gold pill. MEASURED 2026-08-21 against an approved
+    //     domain, paired with a control 68 ms apart that sent the headers and
+    //     was correctly stopped at `reason=per_tx_limit`.
+    //
+    // Every other gated endpoint fails CLOSED on absent headers —
+    // `PaymentCall::from_headers` returns None, `dispatch_payment` substitutes
+    // `bsv_price_available=false`, and matrix_c renders a PriceUnavailable
+    // prompt. This handler was the one that did the opposite.
+    //
+    // Unconditional is SAFE for all four callers, because dispatch_payment
+    // already discriminates on the headers itself — that is precisely why the
+    // outer check was redundant as well as harmful:
+    //
+    //   internal / wallet UI (no X-Requesting-Domain)
+    //       → dispatch_payment returns Proceed on its FIRST statement.
+    //         R-INTEXT preserved by construction, not by this call site.
+    //   C++ BRC-121 fresh decision (X-Payment-* present)
+    //       → engine decides on the real price. UNCHANGED — this path already
+    //         satisfied the old condition.
+    //   C++ BRC-121 paid retry (X-User-Approved)
+    //       → replay path, body-sha256-bound, records the spend, proceeds.
+    //         UNCHANGED, and it deliberately does not require X-Payment-*.
+    //   page / IPC direct call (X-Requesting-Domain, no X-Payment-*)
+    //       → NEWLY GATED. With the paired `IsPaymentEndpoint` entry it is
+    //         priced from the body and decided on its merits; without it, it
+    //         falls to the PriceUnavailable prompt. Either way it can no longer
+    //         mint silently.
+    //
+    // Placed BEFORE the reuse cache and the mint. `broadcast_nosend` needs no
+    // gate of its own: it can only publish a tx already in `nosend` status,
+    // i.e. one this gate (or createAction's) already approved and recorded.
+    // The money is committed here, at the mint, which is where it is metered.
+    {
         let outcome = crate::permission_service::dispatch_payment(
             &state.permission,
             &state.database,
