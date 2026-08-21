@@ -170,7 +170,7 @@ window it needs. **Incidental, not designed**, so it is recorded as LATENT with 
 follow-up. ⚠️ It could plausibly behave differently on your hardware; if you ever have a cheap
 reason to re-run it, the harness design is in `PHASE_CONTRACT.md` §4n.
 
-**(b) 🚨 A 429 on the mempool endpoint appears to mark real outputs spent.** Unrelated to any of the
+**(b) ⚠️ A 429 on the mempool endpoint causes a TRANSIENT balance under-report.** ⛔ **I first wrote this up as possible money loss and that was WRONG — corrected same day, before you read it. It self-heals.** Unrelated to any of the
 above and **not caused by these fixes**. My dev wallet's spendable balance fell
 **38,362,835 → 16,586,118 sats** in windows where no wallet call was made. Log mechanism:
 `addresses/unconfirmed/unspent` → **429 Too Many Requests** → *"Mempool read unavailable for this
@@ -179,6 +179,16 @@ pre-drop figure was an overstatement being corrected or real money written off i
 — it needs its own investigation and I have not opened one. This is Rust, so **you are exposed to it
 too**; if you see an unexplained balance drop on your side, this is the first thing to check, and
 please say so, because a second sighting would tell us a lot.
+
+**⛔ CORRECTED 2026-08-21 — I OVERSTATED THIS. It self-heals; no money was lost.**
+The balance came back: **38,362,835 → 16,586,118 → 38,341,860**. The residual 20,975 sats is
+*exactly* the three on-chain wallet backups that ran in between (6994 + 6989 + 6992), so the
+recovery is complete. The 429 → confirmed-only fallback causes a **TRANSIENT BALANCE
+UNDER-REPORT that resolves on the next successful mempool read** — it does NOT destroy outputs.
+`Marked 1 outputs as spent` is real but evidently reversible by the next sync.
+Still worth a ticket (an under-reported balance can make a legitimate send fail with
+"Insufficient funds", which I saw during the concurrency probes), but it is **NOT** the
+money-loss event I first described.
 
 ---
 

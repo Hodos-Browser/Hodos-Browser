@@ -759,16 +759,56 @@ check-and-record atomic under one write lock. Not a beta.3 blocker.
 money path was cleared. CLAUDE.md invariant #9 parity verification is outstanding, and the C++
 `PaymentCost.h` change + its 9 tests have **not been built on macOS**.
 
+#### Task 2 item 1 — MEASURED, then FIXED (`13e6e2d`), 2026-08-21
+
+The panel filed this as `IsInternalOrigin("") == true`. **That framing was wrong.** The IPC half
+already fails closed (`ResolveIpcOrigin` substitutes `opaque-origin.invalid`). The real defect was a
+**userinfo bypass on the HTTP transport**, and it is now measured, not read.
+
+| | Input `https://127.0.0.1:31301@example.com/` |
+|---|---|
+| **CONTROL** `https://example.com/` | `Extracted domain: example.com` — correct, both before and after |
+| **RED** (pre-fix) | `Extracted domain: 127.0.0.1:31301@example.com` → `🔒 Internal origin … — bypassing domain check` |
+| **GREEN** (post-fix) | main-frame URL **identical**; `Extracted domain: example.com`; `Internal origin` × **0** |
+
+**Reachability settled affirmatively:** from that document
+`fetch("http://127.0.0.1:31401/wallet/status")` returned **HTTP 200**, so the Chromium 150 Local
+Network Access gate does **not** close this path. `extractDomain` has fired 17 times historically,
+every time for a real public https origin.
+
+⚠️ **The page's own view does not betray it.** Chromium strips credentials from `location.href`
+(which read plain `https://example.com/`) while CEF's `GetURL()` keeps them.
+
+⭐ **END-TO-END, OWNER-WITNESSED:** `POST /transaction/send` from the spoofed page now raises a
+domain-approval modal and **the owner clicked Block** — `"User rejected authentication"`. Pre-fix no
+modal would have appeared, because the domain check was skipped outright. Balance unchanged either
+side: `38,341,860`.
+
+Fixed by **calling** `hodos::OriginFromUrl` — the derivation that already existed, was already used
+by the IPC path, and was already unit-tested against this exact input. Empty now fails closed via
+the same opaque sentinel; safe because `extractDomain` produced an empty result **zero** times
+across the 204 MB dev log.
+
 #### Still owed before sign-off
 
 | | |
 |---|---|
-| Task 2 — six owner decisions | ⬜ **brought back with recommendations, NOT fixed** (CLAUDE.md #13) |
+| Task 2 — six owner decisions | 🟡 **1, 2, 3, 6 CLOSED** (1/2/3 fixed, 6 answered: macOS ships). **4 + 5 still owed** — 5 needs measuring first |
 | Task 3 — `P0.5-G1` on a release-shaped build | ⬜ |
 | Task 4 — whole evidence table re-run + panel #3 | ⬜ |
 | Concurrency hardening (latent) | ⬜ follow-up |
 
 #### ⚠️ Unrelated finding surfaced during this session — NOT caused by these fixes
+
+**⛔ CORRECTED 2026-08-21 — I OVERSTATED THIS. It self-heals; no money was lost.**
+The balance came back: **38,362,835 → 16,586,118 → 38,341,860**. The residual 20,975 sats is
+*exactly* the three on-chain wallet backups that ran in between (6994 + 6989 + 6992), so the
+recovery is complete. The 429 → confirmed-only fallback causes a **TRANSIENT BALANCE
+UNDER-REPORT that resolves on the next successful mempool read** — it does NOT destroy outputs.
+`Marked 1 outputs as spent` is real but evidently reversible by the next sync.
+Still worth a ticket (an under-reported balance can make a legitimate send fail with
+"Insufficient funds", which I saw during the concurrency probes), but it is **NOT** the
+money-loss event I first described.
 
 The dev wallet's spendable balance fell **38,362,835 → 16,586,118 sats** during the
 session, in windows where no wallet call was made. Mechanism visible in the log:
