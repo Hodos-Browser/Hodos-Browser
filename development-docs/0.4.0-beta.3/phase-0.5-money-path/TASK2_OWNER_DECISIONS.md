@@ -5,19 +5,21 @@
 
 | Status | Items |
 |---|---|
-| ✅ **DECIDED + FIXED** | **2** (`reveal-mnemonic`), **3** (`wallet/settings`) — `c8558dc` |
+| ✅ **DECIDED + FIXED** | **1** (`extractDomain` userinfo bypass) — `13e6e2d`; **2** (`reveal-mnemonic`), **3** (`wallet/settings`) — `c8558dc` |
 | ✅ **ANSWERED** | **6** (macOS ships ⇒ the SSRF is a BLOCKER, relayed as E1) |
-| ⬜ **STILL OWED** | **1** (sharpened below — worse than filed), **4**, **5** |
+| 🟡 **MEASURED, FIX OWED** | **5** — the lifecycle itself is clean; the measurement found `/processAction`, a blocker-class ungated fund-mover. See PHASE_CONTRACT §4o |
+| ⬜ **STILL OWED** | **4** (Phase 5) |
 
-⛔ **Items 1, 4 and 5 have NOT been changed.** CLAUDE.md #13: where the evidence points at
-production code, present the evidence and get approval first.
+⛔ **Item 4 has NOT been changed, and neither has the `/processAction` defect item 5 uncovered.** CLAUDE.md #13: where the evidence points at production code, present the evidence and get approval first. (Item 1 WAS changed — measured first, then fixed in `13e6e2d`; see the correction banner below.)
 
 All six are **pre-existing** — none was introduced by Phase 0.5. Every file:line
 below was re-grepped against the current tree this session.
 
 ---
 
-## 1. `IsInternalOrigin("") == true` + a second, unhardened derivation
+## 1. ✅ MEASURED, then FIXED (`13e6e2d`) — `extractDomain` userinfo bypass
+
+> ⛔ **CORRECTION 2026-08-21 — everything below this banner was written BEFORE the experiment was run, and two of its statements are now wrong.** The "Status: CODE_READING, not measured" paragraph is **superseded**: the bypass was driven live and the reachability question it names was settled *affirmatively* — `fetch("http://127.0.0.1:31401/wallet/status")` from a public `https://` document returned **HTTP 200**, so Chromium 150 Local Network Access does **not** close that transport. The recommendation ("fix in beta.3, measure first") was followed in that order and the fix landed by **calling `hodos::OriginFromUrl`**. Full evidence, including an owner-witnessed end-to-end control, is in PHASE_CONTRACT §4n. Kept unedited below because the chain trace is still accurate and the reasoning is worth preserving.
 
 **Verified.** `HttpRequestInterceptor.cpp` — `if (origin.empty()) return true;`, plus
 `matchesHostOrHostColon` accepting any port. Separately, `extractDomain` is a
@@ -150,7 +152,11 @@ collision likely.
 
 ---
 
-## 5. The two-phase action lifecycle cannot be gated at all
+## 5. 🟡 MEASURED 2026-08-21 — the lifecycle is clean; `/processAction` is not
+
+> ✅ **The recommendation below was followed: measured before touching anything, and the measurement is why nothing was written.** Both hypotheses it raises are now **refuted** — `spends` cannot reach the outputs, and the phase-1 gate is noSend-blind (identical over-cap body with `options.noSend:true` still returned `202 … per_tx_limit`). References are indeed not domain-bound, but they are 122-bit UUIDs and existence is the only check.
+>
+> 🚨 **What the measurement DID find is a blocker: `/processAction`.** It manufactures a header-free `TestRequest` and hands it to `create_action`, so the payment gate is not bypassed — it is **erased by construction**. Paired control, same body/headers/domain: `/createAction` → `202 engine Prompt … per_tx_limit`; `/processAction` → no gate line at all. Driven end to end from `https://teragun.com/` via `__hodos_walletCall`; only a deliberately-broken address checksum stopped the spend. Precondition: one ordinary "Connect" click. Adjacent: `/listActions` hands an approved dApp all **242** actions with recipient addresses, and `/wallet/addresses` returns a **53 KB** key-linkage graph. **Full evidence + recommendation: PHASE_CONTRACT §4o, row `P0.5-X6`. Fix NOT written — owner decision owed.**
 
 **Verified structural.** `sign_action` has signature `(state, body)` — **no
 `HttpRequest` parameter**, so it cannot read `X-Requesting-Domain` and has no gate.
@@ -200,6 +206,6 @@ macOS this session**.
 | 2 | `reveal-mnemonic` to page context | ✅ **FIXED** `c8558dc`, RED + GREEN + first-party control |
 | 3 | `POST /wallet/settings` page-callable | ✅ **FIXED** `c8558dc`, RED rewrote the defaults 1000→999999 |
 | 6 | macOS scope | ✅ **ANSWERED: ships.** SSRF promoted to BLOCKER, relayed as E1 |
-| 1 | `extractDomain` userinfo bypass (was filed as `IsInternalOrigin("")`) | ⬜ **OWED — measure reachability, then fix.** Sharper than filed: the IPC half already fails closed; the HTTP half treats `https://127.0.0.1:31301@evil.com/` as wallet-internal. C1 banner claim corrected in code. |
-| 5 | Two-phase action lifecycle | ⬜ **OWED — measure before fixing.** Biggest unexamined surface |
+| 1 | `extractDomain` userinfo bypass (was filed as `IsInternalOrigin("")`) | ✅ **FIXED** `13e6e2d` — measured first (LNA does NOT block it; HTTP 200 from a public https page), then fixed by calling `hodos::OriginFromUrl`. Owner-witnessed end-to-end control. |
+| 5 | Two-phase action lifecycle | 🟡 **MEASURED — lifecycle CLEAN, both hypotheses refuted.** But the measurement found `/processAction`: an ungated create+sign+broadcast, reachable from any approved dApp. 🔴 **Fix owed.** §4o |
 | 4 | Loopback-port trust | ⬜ **OWED — Phase 5 headline**, same predicate as #1's port half |

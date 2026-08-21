@@ -101,6 +101,7 @@ is rewritten to match.
 | `P0.5-X5` ⭐**NEW** | `peerpay_send` / `paymail_send` from an external origin → **202 + modal** | ⛔ Pre-fix: both spend with **no gate of any kind** — they take no `HttpRequest`, so `dispatch_payment` is structurally impossible | Both endpoints, both body shapes. ⚠️ A **third** body shape — do both or neither | T2 | ✅ **GREEN, RED observed** — commit `9dc1586`. ⛔ First measurement was a FALSE GREEN (unknown domain ⇒ domain-trust fired first); re-run against an APPROVED domain |
 | `P0.5-C1` | Cross-origin simple POST no longer executes the handler | Remove `block_on_origin_mismatch` → the handler runs despite the browser hiding the response | **Server-side effect**, not the browser's error. A blocked read is not a blocked write | T2 | ✅ **GREEN, RED observed — §4e + §4j.** Finding 4 is now CLOSED: the two re-issue origins are allowlisted and the page's own trust headers stripped, `block_on_origin_mismatch(true)` KEPT. Live dApp POST+GET → 200; with the two allowlist lines removed the POST returns **200 carrying a CORS error body**. Exact control: `:31302` / `:31400`, one digit away, still 400 |
 | `P0.5-R4` ✏️**UN-WITHDRAWN** | Gold pill fires on a newly silent-approved send | Pre-finding-6 the pill could not fire for this endpoint at all | The **tab** badge (`Tab::id`), driven by `OnWalletCallSuccess` | T2 | ✅ **GREEN — §4j, observed live by the owner.** ⛔ The 2026-08-19 withdrawal rested on "`isPaymentEndpoint` excludes `/transaction/send`, so the pill can never fire" — **finding 6 kills that premise.** Log: `OnWalletCallSuccess fired (79 cents … /transaction/send)` and `(63 cents … /wallet/peerpay/send)`. R-GOLD holds on the newly-silent path. ⛔ The first-party send form still does NOT fire the pill and should not — it goes through `WalletService`, which has **zero** references to `OnWalletCallSuccess`, and the pill is a per-tab badge while the wallet overlay is not a tab |
+| `P0.5-X6` 🚨**NEW 2026-08-21** | `POST /processAction` from an external origin is subject to the SAME gate as `/createAction` | ⛔ **RED OBSERVED — it is not.** Identical body/headers/domain: `/createAction` → `202 engine Prompt … per_tx_limit`; `/processAction` → **no gate line at all**, straight to build. Also driven from a real page via `__hodos_walletCall` | Rust log ordering: the INNER `📋 /createAction called` that `process_action` triggers, with no `engine Prompt/Silent/Deny` between it and `FULL REQUEST`. Page probe returns `location.href` | T1 | 🔴 **OPEN — measured, NOT fixed.** Owner decision owed. §4o |
 
 **Pairing — three pairs, none may be signed off alone:**
 
@@ -789,11 +790,127 @@ by the IPC path, and was already unit-tested against this exact input. Empty now
 the same opaque sentinel; safe because `extractDomain` produced an empty result **zero** times
 across the 204 MB dev log.
 
+#### Task 2 item 5 — MEASURED 2026-08-21. The lifecycle is fine; **`/processAction` is not.**
+
+⛔ **Read the disposition before the mechanism, because both panel hypotheses were WRONG and the
+thing that is actually broken is a third endpoint neither of them named.**
+
+| Panel hypothesis | Verdict |
+|---|---|
+| `PENDING_TRANSACTIONS` references are not domain-bound | ✅ **TRUE, and it does not matter on its own.** `PendingTransaction` (`handlers.rs`) has **no** domain field and `sign_action` looks up by reference alone — but the key is `action-{uuid v4}`, 122 bits, returned only to the caller that created it. **MEASURED:** `/signAction` with `action-00000000-0000-4000-8000-000000000000` → `404 Transaction reference not found`; existence is the *only* check performed. See the `/listActions` finding below for what removes the secrecy. |
+| `options.noSend` changes the effective spend between phase 1 and phase 2 | ❌ **REFUTED BY MEASUREMENT.** The phase-1 gate is noSend-blind: `IsPaymentEndpoint`/`ComputePaymentCost` (`PaymentCost.h`) never read it, and `dispatch_payment` prices from the `X-Payment-*` headers. **MEASURED:** the identical over-cap body with `options.noSend:true` still returned `202 … engineReason:"per_tx_limit"`, cents=17, exactly as with noSend absent. Flipping noSend at `signAction` therefore promotes an *already-approved-at-that-amount* action from unbroadcast to broadcast; it cannot raise the amount. Filed as a residual (approving a nosend action is not the same consent as approving a broadcast), **not** an escalation. |
+| `spends` changes the effective spend | ❌ **REFUTED at the dataflow.** `spends` writes only `tx.inputs[idx].set_script()` and `.sequence`. The **outputs are immutable** from phase 1, and the wallet-input signing loop re-signs indices `num_user_inputs..` unconditionally, overwriting any page-supplied script there. No lever on amount. |
+
+### 🚨 What the measurement found instead — `P0.5-X6`
+
+`/processAction` (`handlers.rs :: process_action`) is a **create + sign + broadcast in one call** that
+takes `(state, body)` — no `HttpRequest` — and then **manufactures one**:
+
+```rust
+let internal_req = actix_web::test::TestRequest::default().to_http_request();
+let create_response = create_action(state.clone(), internal_req, …).await;
+```
+
+That synthetic request carries no headers, so `create_action`'s `dispatch_payment` takes its
+`None => Proceed` branch and `check_domain_approved` finds no domain. **The entire payment gate is
+skipped — not bypassed by a trick, erased by construction.**
+
+**MEASURED, paired, same body, same headers, same approved domain, 15 ms apart:**
+
+| | `POST /createAction` (CONTROL) | `POST /processAction` (SUBJECT) |
+|---|---|---|
+| HTTP | **202** `{"promptType":"payment_confirmation","engineReason":"per_tx_limit"}` | **400** `Invalid address: Address checksum mismatch` |
+| Wallet log | `🛡️ engine Prompt (payment) minted approval id=ba033101… endpoint=/createAction reason=per_tx_limit` | `📋 /processAction called` → `Broadcast: true` → `📋 /createAction called` → **no gate line of any kind** → `Failed to convert address` |
+| What stopped it | the gate | **only my deliberately-broken checksum** |
+
+**Reachable from an ordinary web page — MEASURED end to end**, not reasoned. From
+`https://teragun.com/` in the dev browser (CDP 9322, target selected by URL, `location.href`
+returned with the result):
+
+```js
+window.__hodos_walletCall('processAction', '/processAction',
+  {outputs:[{satoshis:1000000, address:'1BvBMSEYstWetqRdfSf1fQ8Y7AE59Xc8aW'}]}, 'POST')
+```
+→ `📋 /processAction called` · `Broadcast: true` · `📋 /createAction called` · **no modal, no gate
+line** · died at the address checksum.
+**CONTROL from the same page, same body, 22 s later:** `/createAction` →
+`🛡️ engine Prompt (payment) minted approval id=197752a0… reason=per_tx_limit`, modal raised,
+**owner asked about it unprompted and clicked Deny.**
+
+**Why the transports do not save us.** `wallet_call` is necessarily on the C2 web-page allowlist and
+takes the endpoint string **verbatim from the page**; `IsPaymentEndpoint` (`PaymentCost.h`) does not
+list `/processAction`, so C++ never classifies it as a spend and forwards it silently.
+
+**Precondition and severity.** Exactly **one ordinary "Connect" click**. MEASURED: from an
+unapproved origin `domain_trust_mw` answers first — `202 domain_approval / new_domain_no_manifest`.
+From an **approved** origin the per-tx cap, the per-session cap, `max_tx_per_session` and the rate
+limit are **all void**, and no gold pill fires because `OnWalletCallSuccess` never sees a payment.
+This is the same defect class as the `send_transaction` one this phase exists to close, and it
+survived for the same reason: **the fix enumerated endpoints instead of gating a subtree.**
+
+### 🚨 Adjacent, found by the same measurement — `/listActions` hands over the whole wallet
+
+`/listActions` also takes no `HttpRequest`. **MEASURED from `X-Requesting-Domain: teragun.com`:**
+`{"totalActions":242,...}` — the **complete transaction history**: txids, `referenceNumber`,
+amounts, descriptions, labels, inputs, and with `includeOutputs:true` every **recipient address**.
+Byte-identical to the first-party response. Same probe against the read surface:
+
+| Endpoint | dApp origin result |
+|---|---|
+| `GET /wallet/balance` | 200 — `{"balance":19387214,…}` |
+| `GET /wallet/addresses` | 200 — **53,199 bytes**: every address, its **public key**, and its `used` flag |
+| `GET /wallet/activity` | 200 — spend history |
+| `GET /wallet/tokens` | 200 — token outputs |
+
+`/wallet/addresses` is a complete **key-linkage graph** — the thing the BRC-72 privacy perimeter
+exists to protect — disclosed wholesale with no prompt. And `/listActions` returning
+`referenceNumber` is what removes the "unguessable UUID" protection above.
+
+⚠️ My first `/listActions` probe returned `{"totalActions":0}` and I nearly recorded "not
+reproduced". That was my own `labels: []` filter, not a gate. **Re-run with the filter removed
+before believing an empty result.**
+
+### The systemic shape — 73 of 107 routes
+
+`probes/ungateable.py` cross-references every route registered in `main.rs` against its
+handler's signature: **107 routes registered, 34 take `HttpRequest`, 73 do not.** Those 73 cannot
+gate themselves at all. Most are harmless (`/health`, `/getVersion`), but the class includes
+`/processAction`, `/signAction`, `/abortAction`, `/internalizeAction`, `/wallet/broadcast-nosend`,
+`/acquireCertificate`, `/wallet/certificate/{publish,unpublish}` (1000-sat service fee each),
+`/wallet/consolidate-dust`, `/wallet/backup/onchain`, `/listActions`, `/wallet/addresses`,
+`/proveCertificate`, `/discoverByAttributes`, `/wallet/{delete,recover,rescan,unlock}` and
+`/shutdown`. ⛔ Only `/processAction`, `/listActions` and the four read endpoints above were
+**measured**; the rest of that list is **CODE_READING** and must not be reported otherwise.
+
+`domain_trust_mw` is the only place a decision can be made for any of them, and today it makes
+exactly two: the `is_permission_surface` refusal and the domain-trust gate. There is **no payment
+gate and no privacy-perimeter gate in the middleware**, and `is_permission_surface` is a **list of
+exact strings** — the pattern this phase has already been bitten by twice.
+
+### Recommendation — ⛔ NOT DONE, owner decision owed (CLAUDE.md #13)
+
+1. **beta.3 blocker: `/processAction`.** Smallest correct fix is to give `process_action` an
+   `HttpRequest` and **forward it** to `create_action` instead of manufacturing one — the gate then
+   runs unchanged, `X-User-Approved` replay included. ⚠️ Verify the four other production
+   `TestRequest` sites (`send_transaction`, `peerpay_send`, `paymail_send`, `pay_402`) still gate
+   *above* their synthetic request; three were fixed this phase and `pay_402` says so in a comment
+   that must be re-checked, not trusted. Add `/processAction` to `IsPaymentEndpoint` in the same
+   commit so C++ prices it and the gold pill can fire.
+2. **beta.3 or Phase 5, owner's call: the disclosure set.** `/listActions`, `/wallet/addresses`,
+   `/wallet/activity`, `/wallet/balance`, `/wallet/tokens`. This is a policy question, not a bug fix
+   — some dApp read access is presumably intended — so it needs a decision on *what an approved site
+   may read*, not a reflex 403.
+3. **Structural, Phase 5: stop enumerating.** The predicate belongs in the middleware as a
+   **default-deny subtree** mirroring C2's IPC gate, not as a growing string list in
+   `is_permission_surface`.
+4. **Residual:** approving a `noSend` action is not consent to broadcast it; `signAction` and
+   `/wallet/broadcast-nosend` can both flip that with no further prompt.
+
 #### Still owed before sign-off
 
 | | |
 |---|---|
-| Task 2 — six owner decisions | 🟡 **1, 2, 3, 6 CLOSED** (1/2/3 fixed, 6 answered: macOS ships). **4 + 5 still owed** — 5 needs measuring first |
+| Task 2 — six owner decisions | 🟡 **1, 2, 3, 6 CLOSED**; **5 MEASURED** — the lifecycle is clean, but the measurement found `/processAction` (§4o, `P0.5-X6`), a **blocker-class ungated fund-mover**, plus an ungated disclosure set. **Fix NOT written — owner decision owed.** **4 still owed** (Phase 5) |
 | Task 3 — `P0.5-G1` on a release-shaped build | ⬜ |
 | Task 4 — whole evidence table re-run + panel #3 | ⬜ |
 | Concurrency hardening (latent) | ⬜ follow-up |
