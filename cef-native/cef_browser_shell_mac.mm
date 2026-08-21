@@ -24,6 +24,7 @@
 #include "include/handlers/simple_app.h"
 #include "include/core/AppPaths.h"
 #include "include/core/PortConfig.h"
+#include "include/core/JsStringEscape.h"  // escapeJsonForJs — notification query hardening (P0.5 panel #3)
 #include "include/handlers/my_overlay_render_handler.h"
 #include "include/wrapper/cef_library_loader.h"
 #include "OverlayHelpers_mac.h"
@@ -3542,13 +3543,13 @@ void CreateNotificationOverlay(const std::string& type, const std::string& domai
         [g_notification_overlay_window setFrame:mainFrame display:YES];
 
         if (type != "preload") {
-            // Escape single quotes in the query string for JS
-            std::string safeQuery = queryString;
-            size_t pos = 0;
-            while ((pos = safeQuery.find('\'', pos)) != std::string::npos) {
-                safeQuery.replace(pos, 1, "\\'");
-                pos += 2;
-            }
+            // ⛔ escapeJsonForJs, NOT a hand-rolled '-only escape. (P0.5 panel #3
+            // — modal query-string JS injection.) Mirrors the Windows fix in
+            // simple_app.cpp :: CreateNotificationOverlay — the '-only loop left
+            // `\` unescaped, so a backslash in a dApp-controlled query value broke
+            // out into arbitrary JS at 127.0.0.1:5137. escapeJsonForJs leaves
+            // `&`/`=` intact so React still parses the query params.
+            const std::string safeQuery = escapeJsonForJs(queryString);
 
             std::string js = "if(window.showNotification){window.showNotification('" + safeQuery + "')}else{window.location.search='?" + safeQuery + "'}";
             existing->GetMainFrame()->ExecuteJavaScript(js, "", 0);

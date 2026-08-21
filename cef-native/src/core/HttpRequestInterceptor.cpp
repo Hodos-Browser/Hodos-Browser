@@ -1339,10 +1339,16 @@ std::string openCertificateDisclosureModal(const ModalContext& ctx, const Resume
     std::string requestId = PendingRequestManager::GetInstance().addRequest(
         buildPendingAuthRequest("certificate_disclosure", ctx, resume));
 
+    // P0.5 panel #3 — urlEncode each field name. They come from the dApp's
+    // disclosure request and land in the same showNotification('<query>') JS
+    // literal as basket/protocol above; certType/certifier below were already
+    // encoded, `fields` was the one raw value left. The comma separator stays
+    // literal (it is not a urlEncode-reserved char in this scheme) so the React
+    // modal still splits the list.
     std::string fieldsList;
     for (size_t i = 0; i < info.fieldsToReveal.size(); ++i) {
         if (i > 0) fieldsList += ",";
-        fieldsList += info.fieldsToReveal[i];
+        fieldsList += urlEncode(info.fieldsToReveal[i]);
     }
 
     std::string extraParams = "&fields=" + fieldsList;
@@ -2786,10 +2792,25 @@ static std::string buildExtraParamsFromPayload(
         return 0;
     };
 
+    // ⛔ EVERY dApp-CONTROLLED VALUE BELOW IS urlEncode()'d. (P0.5 panel #3 —
+    // modal query-string JS injection.) These strings originate in the dApp's
+    // request body (e.g. `/listOutputs` basket, protocol name, counterparty) and
+    // Rust forwards them verbatim in the 202 promptPayload. They are appended to
+    // a query string that `CreateNotificationOverlay` interpolates into a
+    // `window.showNotification('<query>')` JS string literal, escaping only `'`.
+    // A backslash in an un-encoded value turns the paired `'` into an escaped
+    // backslash + a real string terminator, breaking out into arbitrary JS at
+    // 127.0.0.1:5137 (an IsInternalOrigin document) — a full wallet drain,
+    // MEASURED 2026-08-21. urlEncode's output contains none of ' " \ or control
+    // characters, so it is safe as a JS-literal AND as a query-param value, and
+    // React's URLSearchParams decodes it back for display. The sibling
+    // openCertificateDisclosureModal already urlEncode()'d certType/certifier —
+    // this brings the rest of the payload builders in line. `CreateNotificationOverlay`
+    // is additionally hardened to escapeJsonForJs the whole query as defence in depth.
     if (promptType == "payment_confirmation" || promptType == "rate_limit_exceeded") {
         std::string s = "&satoshis=" + std::to_string(getI64("satoshis"))
                       + "&cents=" + std::to_string(getI64("cents"))
-                      + "&exceededLimit=" + getStr("exceededLimit")
+                      + "&exceededLimit=" + urlEncode(getStr("exceededLimit"))
                       + "&perTxLimit=" + std::to_string(getI64("perTxLimit"))
                       + "&perSessionLimit=" + std::to_string(getI64("perSessionLimit"))
                       + "&sessionSpent=" + std::to_string(getI64("sessionSpent"));
@@ -2801,28 +2822,30 @@ static std::string buildExtraParamsFromPayload(
     }
     if (promptType == "protocol_permission_prompt") {
         return "&protocolLevel=" + std::to_string(getI64("protocolLevel"))
-             + "&protocolName=" + getStr("protocolName")
-             + "&protocolKeyId=" + getStr("protocolKeyId")
-             + "&protocolCounterparty=" + getStr("protocolCounterparty");
+             + "&protocolName=" + urlEncode(getStr("protocolName"))
+             + "&protocolKeyId=" + urlEncode(getStr("protocolKeyId"))
+             + "&protocolCounterparty=" + urlEncode(getStr("protocolCounterparty"));
     }
     if (promptType == "basket_permission_prompt") {
-        return "&basket=" + getStr("basket")
-             + "&basketAccess=" + getStr("basketAccess");
+        return "&basket=" + urlEncode(getStr("basket"))
+             + "&basketAccess=" + urlEncode(getStr("basketAccess"));
     }
     if (promptType == "counterparty_permission_prompt") {
-        return "&counterparty=" + getStr("counterparty");
+        return "&counterparty=" + urlEncode(getStr("counterparty"));
     }
     if (promptType == "key_linkage_reveal") {
         // `protocol` may be null or an array; serialize verbatim so the React
-        // modal sees the same shape Rust emitted.
+        // modal sees the same shape Rust emitted — then urlEncode so the JSON
+        // (which contains `"` and may contain `\`) cannot break out of the JS
+        // literal either.
         std::string protocolStr = (payload.contains("protocol") && !payload["protocol"].is_null())
             ? payload["protocol"].dump()
             : std::string("null");
-        return "&kind=" + getStr("kind")
-             + "&verifier=" + getStr("verifier")
-             + "&counterparty=" + getStr("counterparty")
-             + "&protocol=" + protocolStr
-             + "&keyID=" + getStr("keyID");
+        return "&kind=" + urlEncode(getStr("kind"))
+             + "&verifier=" + urlEncode(getStr("verifier"))
+             + "&counterparty=" + urlEncode(getStr("counterparty"))
+             + "&protocol=" + urlEncode(protocolStr)
+             + "&keyID=" + urlEncode(getStr("keyID"));
     }
     // identity_key_reveal, domain_approval, brc100_auth — no extra params.
     // certificate_disclosure — typed payload, handled by tryHandlePendingResponse directly.

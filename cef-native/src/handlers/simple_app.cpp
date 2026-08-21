@@ -20,6 +20,7 @@
 #include "../../include/core/WindowManager.h"
 #include "../../include/core/LayoutHelpers.h"
 #include "../../include/core/PortConfig.h"
+#include "../../include/core/JsStringEscape.h"  // escapeJsonForJs — notification query hardening
 #include <nlohmann/json.hpp>
 #include <filesystem>
 
@@ -1169,13 +1170,17 @@ void CreateNotificationOverlay(HINSTANCE hInstance, const std::string& type, con
             SWP_SHOWWINDOW);
 
         if (type != "preload") {
-            // Escape single quotes in the query string for JS
-            std::string safeQuery = queryString;
-            size_t pos = 0;
-            while ((pos = safeQuery.find('\'', pos)) != std::string::npos) {
-                safeQuery.replace(pos, 1, "\\'");
-                pos += 2;
-            }
+            // ⛔ escapeJsonForJs, NOT a hand-rolled '-only escape. (P0.5 panel #3
+            // — modal query-string JS injection.) The old loop replaced only `'`
+            // and left `\` untouched, so a backslash in a dApp-controlled query
+            // value (e.g. `/listOutputs` basket) turned the paired `'` into an
+            // escaped backslash + a real string terminator and broke out into
+            // arbitrary JS at 127.0.0.1:5137. The primary fix urlEncode()s those
+            // values at the source (buildExtraParamsFromPayload); this is
+            // defence in depth so ANY value reaching here — including the
+            // C++-derived `domain` — cannot break the literal. escapeJsonForJs
+            // does not touch `&`/`=`, so React still parses the query params.
+            const std::string safeQuery = escapeJsonForJs(queryString);
 
             // Call window.showNotification() — instant React state update, no page load
             std::string js = "if(window.showNotification){window.showNotification('" + safeQuery + "')}else{window.location.search='?" + safeQuery + "'}";
