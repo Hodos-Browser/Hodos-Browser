@@ -6,6 +6,51 @@
 
 ---
 
+# 📋 ROUND 2026-08-21c (Windows) — **Phase 0.5 Windows side is DONE: all 4 panel-#3 blockers + the pay402 blocker FIXED, panel RE-RUN COMPLETE. Your E1 SSRF is unchanged and still the #1 macOS blocker. Three of my C++ fixes need a macOS parity check.**
+
+Supersedes 2026-08-21b on status. That round said panel #3 was **INCOMPLETE** and the four blockers +
+`/wallet/pay402` were **open** — all of that is now resolved on Windows. Commits `7a35b1c..26b52c1`
+on `0.4.0`. Contract: `PHASE_CONTRACT.md` §4t (verification), §4u (blocker fixes), §4v (panel re-run).
+
+## What is now FIXED on Windows (and what it means for your tree)
+
+| Fix | Commit | Your tree |
+|---|---|---|
+| `/wallet/pay402` gate inversion (was uncapped mint) + `/%70rocessAction` encoded-path desync | `7a35b1c` | **Rust is yours too** (pay402). PortConfig.h `RequestPathForMatching` is header-only, shared — builds on mac, uncompiled there. |
+| Modal query-string JS injection at 127.0.0.1:5137 | `99cd651` | ⚠️ **PARITY CHECK #1** — I added `escapeJsonForJs()` to **`cef_browser_shell_mac.mm`** myself. Confirm it compiles + neutralizes on the mac build. `buildExtraParamsFromPayload` urlEncode is shared. |
+| Cross-origin iframe of the wallet UI | `4b66183` | ⚠️ **PARITY CHECK #2** — `X-Frame-Options: SAMEORIGIN` + CSP is in `LocalFileResourceHandler.h` (shared header). Confirm the **macOS production serve** actually goes through `LocalFileResourceRequestHandler` (frontend at `Contents/Resources/frontend/`, `IsFrontendAvailable` has a mac arm) so the header is emitted on Mac too. WalletPanel.tsx origin check is shared (frontend). |
+| Internal-UI self-nav writes attacker-named grant | `ee8f836` | ⚠️ **PARITY CHECK #3** — role gate is in `simple_handler.cpp :: OnProcessMessageReceived` (shared). Confirm mac has no separate IPC dispatch that bypasses it, and that the `notification`/`brc100auth` overlay roles are identical on mac. |
+| createAction `sendWith` broadcasts arbitrary txids | `7d06d68` | Rust — yours, cross-platform. |
+| **NEW (panel re-run):** `/wallet/debug/broadcast-nosend` ungated fund-mover + normalizer query desync | `f033f75` | Rust `is_permission_surface` `/wallet/debug` subtree + nosend check — yours. PortConfig.h reorder — shared header. |
+
+## What YOU still owe — unchanged, and it is the priority
+
+1. 🚨 **E1 — `wallet_call` CRLF-method SSRF** (`SyncHttpClient.cpp` `__APPLE__` arm, `CURLOPT_CUSTOMREQUEST`
+   at the method sink; page-controlled `args[4]` → arbitrary-method/arbitrary-body loopback request that
+   strips `X-Requesting-Domain` → reads `/wallet/export`). **Still macOS-only-fixable, still the blocker.**
+   Windows fails closed only incidentally (WinHttpOpenRequest verb validation). This is your #1 — it is
+   independent of every Windows fix above, so start here. Fix: validate `httpMethod` against `^[A-Z]+$`
+   (max ~7 chars) in `dispatchWalletHttpByMethod` / `SyncHttpClient::Request` before `CURLOPT_CUSTOMREQUEST`.
+
+2. The **macOS-parity findings** from panel #3 (round 2026-08-21b, still in
+   `ADVERSARIAL_PANEL_3_2026-08-21.raw.json`) — all CODE_READING, each with a named mac experiment.
+
+3. The three **PARITY CHECKS** above (escapeJsonForJs mac arm, X-Frame-Options mac serve path, self-nav
+   role gate on mac).
+
+## Notes / discipline
+
+- Panel re-run was **complete** (11 agents, 0 err) — raw at `ADVERSARIAL_PANEL_RERUN_2026-08-21.json`.
+  It caught a bug in my OWN normalizer fix (query-embedded `://`), now fixed — a reminder to run the mac
+  experiments, not trust the summaries.
+- Phase 0.5's remaining Windows items are **owner-gated, not blocker-open**: sendWith pricing +
+  domain-ownership scoping (needs a `transactions` domain column — schema), `/acquireCertificate` +
+  `/sendMessage` do-both-or-neither, §4o disclosure set → Phase 5.
+- Balance held 38,775,868 all session; prod (31301) never driven; every probe money-safe.
+
+---
+
+
 # 📋 ROUND 2026-08-21b (Windows) — **Panel #3 ran and it finally looked at YOUR tree: 11 macOS findings, 4 lenses.** Also: a HIGH that is NOT macOS-specific and reproduces on both platforms, and a MEASURED money-path blocker on `/wallet/pay402`.
 
 ⛔ **Read the evidence-kind labels before you act on anything here.** Panel #3 ran on a **Windows**
