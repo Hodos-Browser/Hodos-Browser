@@ -8392,6 +8392,7 @@ pub struct ProcessActionResponse {
 // /processAction - Complete transaction flow (create + sign + broadcast)
 pub async fn process_action(
     state: web::Data<AppState>,
+    http_req: HttpRequest,
     body: web::Bytes,
 ) -> HttpResponse {
     log::info!("📋 /processAction called");
@@ -8406,6 +8407,49 @@ pub async fn process_action(
             }));
         }
     };
+
+    // P0.5 Task A / §4o (`P0.5-X6`) — THE PAYMENT GATE, and it must be HERE.
+    //
+    // ⛔ This handler used to take `(state, body)` with no `HttpRequest`, and then
+    // MANUFACTURED one — `TestRequest::default().to_http_request()` — to call
+    // `create_action`. A synthetic request carries no headers, so `dispatch_payment`
+    // took its `None => Proceed` internal-caller branch. The gate was not bypassed;
+    // it was ERASED BY CONSTRUCTION, on an endpoint that creates, signs AND
+    // broadcasts in one call.
+    //
+    // MEASURED 2026-08-21, paired, identical body/headers/approved domain, 15 ms
+    // apart:
+    //   /createAction  -> 202, "🛡️ engine Prompt (payment) ... reason=per_tx_limit"
+    //   /processAction -> NO gate line at all, straight through to build
+    // and end to end from a real page — `https://teragun.com/`,
+    // `window.__hodos_walletCall('processAction', '/processAction', {outputs:[…]})`
+    // — with no modal and `Broadcast: true`. Only a deliberately-broken address
+    // checksum stopped the spend. Precondition: one ordinary "Connect" click; an
+    // unapproved origin is still stopped first by `domain_trust_mw`.
+    //
+    // Gated at THIS endpoint, against the body the caller actually sent, because
+    // the inner `create_action` call below re-serialises a DIFFERENT body — so
+    // forwarding `http_req` into it would make an `X-User-Approved` replay hash a
+    // body the user never saw. Same shape as `send_transaction` / `peerpay_send` /
+    // `paymail_send` / `pay_402`; see the comment on the inner call.
+    //
+    // ⚠️ Pricing needs no new body shape: `ProcessActionRequest.outputs` is the
+    // SAME `{outputs:[{satoshis}]}` shape `/createAction` uses, so C++'s
+    // `ExtractOutputSatoshis` handles it once `/processAction` is in
+    // `IsPaymentEndpoint` (PaymentCost.h — changed in the same commit, do both or
+    // neither). Without those headers `PaymentCall::from_headers` returns None and
+    // the engine forces a price_unavailable prompt: fail-closed, not fail-silent.
+    let outcome = crate::permission_service::dispatch_payment(
+        &state.permission,
+        &state.database,
+        state.current_user_id,
+        &http_req,
+        &body,
+        "/processAction",
+    );
+    if let crate::permission_service::GateOutcome::EarlyReturn(resp) = outcome {
+        return resp;
+    }
 
     let should_broadcast = req.broadcast.unwrap_or(true);
     log::info!("   Broadcast: {}", should_broadcast);
@@ -8431,6 +8475,13 @@ pub async fn process_action(
     };
 
     let create_body = serde_json::to_vec(&create_req).unwrap();
+    // The INNER call is deliberately internal — the gate above already ran at
+    // THIS endpoint, bound to the body the caller actually sent. ⛔ Do not
+    // "fix" this by forwarding http_req: `create_req` is re-serialised here and
+    // is NOT the caller's body, so the gate would hash something the user never
+    // saw and every X-User-Approved replay would 403 on body_mismatch. Identical
+    // reasoning to send_transaction's inner call. What was WRONG before was not
+    // the synthetic request — it was that nothing gated above it.
     let internal_req = actix_web::test::TestRequest::default().to_http_request();
     let create_response = create_action(state.clone(), internal_req, web::Bytes::from(create_body)).await;
 

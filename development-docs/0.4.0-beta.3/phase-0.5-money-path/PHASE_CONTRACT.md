@@ -86,7 +86,7 @@ is rewritten to match.
 | `P0.5-X2` ⭐**NEW** | `cefMessage.send('send_transaction', …)` from `https://example.com` is **refused before dispatch** | ⛔ Pre-fix: **MEASURED spending, no prompt** — §4g | The **browser-process** IPC dispatch, not Rust alone. Rust cannot distinguish the transports; both arrive header-free | T1 | ✅ **GREEN, RED observed — §4i.** Refused at the gate, nothing reached the wallet; pre-fix the SAME call logged `💸 /transaction/send … 999999999999 satoshis` |
 | `P0.5-X3` ⭐**NEW** | A **newly added** wallet arm with no explicit check is **denied** from an external origin | ⛔ Add a throwaway arm that calls a wallet endpoint → pre-fix it dispatches | The default-deny allowlist, not any one arm. This row is the whole point of C2 | T1 | ✅ **GREEN, RED observed — §4i.** `get_balance` denied; pre-fix it disclosed `Balance: 41924349 satoshis` to example.com |
 | `P0.5-X4` ⭐**NEW** | `http://127.0.0.1:5137@evil.com/` is **not** internal to `IsInternalFrontendUrl` / `IsLoopbackUrl` | ⛔ Pre-fix both return **true** (verified: both are `rfind(pfx,0)==0`, so userinfo prefix-matches) | The two `PortConfig.h` predicates, unit-testable without CEF | T0 | ✅ **GREEN, RED observed** — 15 unit tests; 8 fail against the pre-fix bodies (commit `aa439d3`) |
-| `P0.5-G1` | `https://<origin>/?x=127.0.0.1:5137` is served **nothing** from disk | ⛔ **Pre-fix this must SUCCEED** — if it does not, §7.3 is refuted and this row is withdrawn | **Release-shaped** build: `IsFrontendAvailable()` is true in production (`{app}\frontend\`), so this is not a dev-only defect | T2 | 🟡 **UNTESTABLE IN DEV** — see §4a. Code fixed; RED still owed on a release-shaped build |
+| `P0.5-G1` | `https://<origin>/?x=127.0.0.1:5137` is served **nothing** from disk | ⛔ **Pre-fix this must SUCCEED** — if it does not, §7.3 is refuted and this row is withdrawn | **Release-shaped** build: `IsFrontendAvailable()` is true in production (`{app}\frontend\`), so this is not a dev-only defect | T2 | ✅ **GREEN, RED OBSERVED — §4p.** Release-shaped layout; pre-fix build served `{app}\frontend\index.html` (title **"Hodos Browser"**) onto `https://example.com`. Subject proven, not asserted |
 | `P0.5-G2` | The same page gets **no** `window.hodosBrowser.identity` | Pre-fix it must be **defined**. Control: the same page *without* the substring must get neither | Renderer for **that page's** frame — not an overlay. `type:"page"` over CDP is not proof of which browser | T2 | ✅ **GREEN, RED observed** — §4b |
 | `P0.5-G3` |  `preflight.ps1` gate `G2` passes at baseline **2** (from 5) | Add one new `find("127.0.0.1:5137")` → gate **exits non-zero** even at a non-zero baseline | `preflight.ps1 -NegativeControl` | T0 | ✅ **GREEN** `2 violations, at baseline`; 🔴 observed `3 > 2` |
 | `P0.5-E1` | An origin-less **or origin-forged** frame is gated | Feed both an `about:blank` child **and** the crafted `data:` URL → each must be seen ungated pre-fix | The Rust-side gate outcome | T1 | ✅ **GREEN, RED observed — §4i.** `about:blank` child now inherits `example.com` and is denied; pre-fix empty origin ⇒ `IsInternalOrigin("")==true` ⇒ dispatched. Superseded by `X1` |
@@ -101,7 +101,7 @@ is rewritten to match.
 | `P0.5-X5` ⭐**NEW** | `peerpay_send` / `paymail_send` from an external origin → **202 + modal** | ⛔ Pre-fix: both spend with **no gate of any kind** — they take no `HttpRequest`, so `dispatch_payment` is structurally impossible | Both endpoints, both body shapes. ⚠️ A **third** body shape — do both or neither | T2 | ✅ **GREEN, RED observed** — commit `9dc1586`. ⛔ First measurement was a FALSE GREEN (unknown domain ⇒ domain-trust fired first); re-run against an APPROVED domain |
 | `P0.5-C1` | Cross-origin simple POST no longer executes the handler | Remove `block_on_origin_mismatch` → the handler runs despite the browser hiding the response | **Server-side effect**, not the browser's error. A blocked read is not a blocked write | T2 | ✅ **GREEN, RED observed — §4e + §4j.** Finding 4 is now CLOSED: the two re-issue origins are allowlisted and the page's own trust headers stripped, `block_on_origin_mismatch(true)` KEPT. Live dApp POST+GET → 200; with the two allowlist lines removed the POST returns **200 carrying a CORS error body**. Exact control: `:31302` / `:31400`, one digit away, still 400 |
 | `P0.5-R4` ✏️**UN-WITHDRAWN** | Gold pill fires on a newly silent-approved send | Pre-finding-6 the pill could not fire for this endpoint at all | The **tab** badge (`Tab::id`), driven by `OnWalletCallSuccess` | T2 | ✅ **GREEN — §4j, observed live by the owner.** ⛔ The 2026-08-19 withdrawal rested on "`isPaymentEndpoint` excludes `/transaction/send`, so the pill can never fire" — **finding 6 kills that premise.** Log: `OnWalletCallSuccess fired (79 cents … /transaction/send)` and `(63 cents … /wallet/peerpay/send)`. R-GOLD holds on the newly-silent path. ⛔ The first-party send form still does NOT fire the pill and should not — it goes through `WalletService`, which has **zero** references to `OnWalletCallSuccess`, and the pill is a per-tab badge while the wallet overlay is not a tab |
-| `P0.5-X6` 🚨**NEW 2026-08-21** | `POST /processAction` from an external origin is subject to the SAME gate as `/createAction` | ⛔ **RED OBSERVED — it is not.** Identical body/headers/domain: `/createAction` → `202 engine Prompt … per_tx_limit`; `/processAction` → **no gate line at all**, straight to build. Also driven from a real page via `__hodos_walletCall` | Rust log ordering: the INNER `📋 /createAction called` that `process_action` triggers, with no `engine Prompt/Silent/Deny` between it and `FULL REQUEST`. Page probe returns `location.href` | T1 | 🔴 **OPEN — measured, NOT fixed.** Owner decision owed. §4o |
+| `P0.5-X6` 🚨**NEW 2026-08-21** | `POST /processAction` from an external origin is subject to the SAME gate as `/createAction` | ⛔ **RED OBSERVED — it is not.** Identical body/headers/domain: `/createAction` → `202 engine Prompt … per_tx_limit`; `/processAction` → **no gate line at all**, straight to build. Also driven from a real page via `__hodos_walletCall` | Rust log ordering: the INNER `📋 /createAction called` that `process_action` triggers, with no `engine Prompt/Silent/Deny` between it and `FULL REQUEST`. Page probe returns `location.href` | T1 | ✅ **GREEN, RED OBSERVED — §4o + §4q.** Owner approved the fix 2026-08-21. Post-fix: `202 engine Prompt … endpoint=/processAction`, from curl AND from the page. `R-INTEXT` re-proved: header-free caller unchanged |
 
 **Pairing — three pairs, none may be signed off alone:**
 
@@ -906,12 +906,95 @@ exact strings** — the pattern this phase has already been bitten by twice.
 4. **Residual:** approving a `noSend` action is not consent to broadcast it; `signAction` and
    `/wallet/broadcast-nosend` can both flip that with no further prompt.
 
+### 4p. ✅ `P0.5-G1` — CLOSED on a release-shaped build. RED reproduced, subject proven
+
+§4a said this could not be judged in dev because `IsFrontendAvailable()` is false without a
+`frontend/` beside the exe. It was made judgeable rather than deferred: `npm run build` →
+`frontend/dist` copied to `cef-native/build/bin/Release/frontend/`, which is exactly the production
+layout. `IsFrontendAvailable()` has **no** dev/release condition — it checks only for
+`<exe_dir>\frontend\index.html` — so this reproduces the production precondition faithfully.
+It also **caches in a static**, so the directory must exist *before* launch.
+
+**Two builds, one line different**, everything else identical:
+
+| Build | Predicate at `simple_handler.cpp :: GetResourceRequestHandler` | `https://example.com/?x=127.0.0.1:5137` | Control `https://example.com/` |
+|---|---|---|---|
+| **A — RED** | `url.find("127.0.0.1:5137") != npos` (the pre-fix form, recovered from `4dec940`) | 🔴 `origin: https://example.com`, **`title: "Hodos Browser"`**, `Hodos_Gold_Icon` present — the wallet UI's `index.html` served **from disk onto the attacker's origin** | `title: "Example Domain"` |
+| **B — GREEN** | `hodos::IsInternalFrontendUrl(url)` | ✅ `title: "Example Domain"` | `title: "Example Domain"` |
+
+§7.3 is therefore **confirmed, not refuted** — the SPA fallback in
+`LocalFileResourceRequestHandler` does serve `index.html` for a query-string match.
+
+⛔ **SUBJECT CONTROL — the green would otherwise be vacuous.** If the `frontend/` directory had
+been missing in build B, `IsFrontendAvailable()` returns false, the handler never engages, and both
+URLs return `Example Domain` **for the wrong reason** — which is exactly what §4a measured
+in dev and correctly refused to call a pass. Proof that it engaged in build B: `__g1_marker.txt`
+was planted in `{exe}\frontend\` only. From inside the browser,
+`fetch("http://127.0.0.1:5137/__g1_marker.txt")` returned **`G1-SUBJECT-MARKER-a7f3c2`**, while
+Vite answers that same URL from outside the browser with its dev-server `index.html`. The marker
+can only have come from disk ⇒ the local-file handler was live.
+
+The release-shaped `frontend/` and the marker were **removed afterwards** and the dev browser
+relaunched against Vite, so the dev tree is back to its normal state.
+
+### 4q. ✅ `P0.5-X6` FIXED — owner approved 2026-08-21
+
+Owner decision: **fix in beta.3**, narrow form. Two halves, one change:
+
+| | |
+|---|---|
+| Rust | `process_action` now takes `HttpRequest` and calls `dispatch_payment(…, "/processAction")` **before** anything else. The inner `create_action` call keeps its synthetic request **deliberately** — `create_req` is re-serialised and is NOT the caller's body, so forwarding `http_req` would make every `X-User-Approved` replay 403 on `body_mismatch`. What was wrong was never the synthetic request; it was that nothing gated above it. |
+| C++ | `/processAction` added to `IsPaymentEndpoint` (`PaymentCost.h`) so the `X-Payment-*` headers are stamped. **No fifth body shape** — it is the same `{outputs:[{satoshis}]}` `/createAction` uses. |
+
+**GREEN, and the RED is the run I did 22 minutes earlier on the pre-fix binary:**
+
+| | Pre-fix (RED, 08:45 / 08:47) | Post-fix (GREEN, 09:07 / 09:21) |
+|---|---|---|
+| curl, approved domain, over-cap | no gate line; `400 Address checksum mismatch` | `202` — `🛡️ engine Prompt (payment) minted approval id=e777a6cf… endpoint=/processAction reason=per_tx_limit` |
+| From `https://teragun.com/` via `__hodos_walletCall` | no modal, `Broadcast: true`, straight to build | `🛡️ engine Prompt (payment) … endpoint=/processAction reason=per_tx_limit` |
+
+⭐ `reason=per_tx_limit` — **not** `price_unavailable` — is the discriminator proving the **C++
+half** landed too: the call was priced at 17 cents against teragun's 13-cent cap, which is only
+possible if `X-Payment-*` were stamped. Had only the Rust half shipped, this row would still be
+green but for the weaker fail-closed reason, and the difference is exactly the "do both or neither"
+rule.
+
+⛔ **`R-INTEXT` re-proved in the same run** — this is the pairing a `/processAction` fix is most
+likely to break. A header-free (first-party) `POST /processAction` is **unchanged**: no gate line,
+straight through to `create_action`, dying at the probe checksum exactly as before.
+
+**Unit tests:** `IsPaymentEndpoint.ProcessActionMatches` and
+`ComputePaymentCost.ProcessActionUsesTheCreateActionOutputsShape` added to
+`cef-native/tests/payment_cost_test.cpp`. **NEGATIVE CONTROL RUN:** with the one-line
+`PaymentCost.h` change reverted and the target rebuilt, **both fail**; restored, the full suite is
+**221 passed / 1 skipped / 0 failed (222 tests)**.
+
+**Re-audit of the other four synthetic-request sites** (the prompt warned not to trust `pay_402`'s
+own comment): mechanically re-derived, not read — `probes/ungateable.py`'s sibling check walks each
+`TestRequest::default().to_http_request()` site back to its enclosing `fn` and looks for a
+`dispatch_*` call in between. `send_transaction` → `dispatch_payment_with_amount`; `peerpay_send`,
+`paymail_send`, `pay_402`, and now `process_action` → `dispatch_payment`. Each was then checked to
+pass the **real** `&http_req` and `&body`, not a stand-in. All five clean.
+
+⚠️ **Still owed from §4o, deferred by owner decision to Phase 5:** the disclosure set
+(`/listActions`, `/wallet/addresses`, `/wallet/activity`, `/wallet/balance`, `/wallet/tokens`) and
+the structural move of the predicate into a **default-deny subtree** in `domain_trust_mw`.
+`is_permission_surface` remains a list of exact strings.
+
+⚠️ **Owed, and NOT written:** there are still **zero** C++ tests for `IsInternalOrigin`,
+`ResolveIpcOrigin` or `IpcMessageAllowedFromWebPage`. `ResolveIpcOrigin` and
+`IpcMessageAllowedFromWebPage` are `static` in `simple_handler.cpp` and `IsInternalOrigin` lives in
+the CEF-dependent `HttpRequestInterceptor.cpp`, so testing them means extracting them to a
+header-only TU — the `JsStringEscape.h` / `PaymentCost.h` move. That is a production refactor of
+the C2 gate, and doing it in the same session that changed the money path is exactly the kind of
+rushed edit this phase exists to avoid. **Named here so it is visible, not quietly dropped.**
+
 #### Still owed before sign-off
 
 | | |
 |---|---|
 | Task 2 — six owner decisions | 🟡 **1, 2, 3, 6 CLOSED**; **5 MEASURED** — the lifecycle is clean, but the measurement found `/processAction` (§4o, `P0.5-X6`), a **blocker-class ungated fund-mover**, plus an ungated disclosure set. **Fix NOT written — owner decision owed.** **4 still owed** (Phase 5) |
-| Task 3 — `P0.5-G1` on a release-shaped build | ⬜ |
+| Task 3 — `P0.5-G1` on a release-shaped build | ✅ **CLOSED — §4p.** RED reproduced, GREEN, subject proven with a disk-only marker |
 | Task 4 — whole evidence table re-run + panel #3 | ⬜ |
 | Concurrency hardening (latent) | ⬜ follow-up |
 

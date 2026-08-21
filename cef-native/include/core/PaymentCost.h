@@ -38,7 +38,14 @@ inline bool IsPaymentEndpoint(const std::string& endpoint) {
         // occurring, over what could be a full-balance sweep.
         || endpoint.find("/transaction/send") != std::string::npos
         || endpoint.find("/wallet/peerpay/send") != std::string::npos
-        || endpoint.find("/wallet/paymail/send") != std::string::npos;
+        || endpoint.find("/wallet/paymail/send") != std::string::npos
+        // P0.5 Task A / §4o (`P0.5-X6`) — /processAction is create + sign +
+        // BROADCAST in one call, and it was absent here, so C++ never stamped the
+        // X-Payment-* headers and never treated it as a spend. Its body is the
+        // SAME {outputs:[{satoshis}]} shape as /createAction, so ExtractOutputSatoshis
+        // already handles it — no fifth body shape. ⛔ Pairs with the Rust-side gate
+        // in handlers.rs :: process_action; do both or neither.
+        || endpoint.find("/processAction") != std::string::npos;
 }
 
 // FOUR body shapes, because four endpoint families reach here:

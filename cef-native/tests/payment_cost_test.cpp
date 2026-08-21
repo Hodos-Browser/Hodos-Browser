@@ -37,6 +37,27 @@ TEST(IsPaymentEndpoint, DirectFundMoversMatch) {
     EXPECT_TRUE(hodos::IsPaymentEndpoint("/wallet/paymail/send"));
 }
 
+TEST(IsPaymentEndpoint, ProcessActionMatches) {
+    // P0.5 Task A / §4o (`P0.5-X6`). /processAction is create + sign + BROADCAST
+    // in one call and was absent from this list, so C++ never stamped the
+    // X-Payment-* headers and never treated it as a spend. Pairs with the Rust
+    // gate in handlers.rs :: process_action — do both or neither.
+    EXPECT_TRUE(hodos::IsPaymentEndpoint("/processAction"));
+}
+
+TEST(ComputePaymentCost, ProcessActionUsesTheCreateActionOutputsShape) {
+    // The point of this row: /processAction needed NO fifth body shape. Its body
+    // is the same {outputs:[{satoshis}]} createAction uses, so if someone ever
+    // "tidies" ExtractOutputSatoshis into a per-endpoint dispatch, this goes red.
+    // 1 BSV at $15 == 1500 cents.
+    const auto c = hodos::ComputePaymentCost(
+        "/processAction", R"({"outputs":[{"satoshis":100000000}]})", kPrice);
+    EXPECT_TRUE(c.isPayment);
+    EXPECT_EQ(c.satoshis, 100000000);
+    EXPECT_EQ(c.cents, 1500);
+    EXPECT_TRUE(c.priceAvailable);
+}
+
 TEST(IsPaymentEndpoint, NonPaymentEndpointsDoNotMatch) {
     EXPECT_FALSE(hodos::IsPaymentEndpoint("/getVersion"));
     EXPECT_FALSE(hodos::IsPaymentEndpoint("/wallet/status"));
