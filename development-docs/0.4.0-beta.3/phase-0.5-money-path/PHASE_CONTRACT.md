@@ -683,6 +683,88 @@ part. What survives from that bullet: the site genuinely contains **zero** refer
 `window.CWI`, so it is a bridge-probing client rather than an injected-provider client, and Hodos's
 injected provider does also work on that page (`CWI.getVersion()` returned real wallet JSON).
 
+### §4n — adversarial panel #2 disposition (2026-08-20)
+
+Panel #2 returned **37 survivors, 6 criticals, DO NOT SIGN OFF** — and named
+concurrency as a modality no lens had examined. Task 0 was to settle that FIRST,
+because if it held it outranked every other fix.
+
+#### Task 0 — the concurrency TOCTOU: **REFUTED as an exploitable path**
+
+The panel's structural reading is CORRECT: `dispatch_payment_with_amount` takes
+three separate lock acquisitions — snapshot, decide, then
+`increment_payment_rate_counter` + `record_spending` — and `HttpServer::new`
+(`main.rs:964` → `.bind()` `:1208` → `.run()` `:1209`) sets **no `.workers()`**,
+so actix runs `num_cpus` workers. Verified current. **But it does not reproduce.**
+
+| | |
+|---|---|
+| Subject | `POST /transaction/send`, APPROVED scratch domain, `X-Payment-*` stamped by hand as C++ would |
+| Safety | valid-prefix / invalid-checksum `toAddress`, so every request that passes the gate dies at address decode. ⚠️ Address validation runs BEFORE the gate (`handlers.rs:9646`), so a malformed-FORMAT address measures nothing — the checksum failure is what lands after it |
+| Design | caps set so the CORRECT answer is exactly **1** (`perSession=5c`, each pay `4c`) |
+| Overlap proven | 20 requests completed inside a **4 ms** window, durations to 7.7 ms, 24 CPUs |
+| **Harness negative control** | `perSession=1000c` → **20 of 20 passed**. The harness CAN report >1 |
+| **Result** | **420 concurrent requests over 11 rounds** (K=20 ×6, K=60 ×5) → **exactly 1 passed, every time** |
+
+**Why it does not win.** The global `Mutex<WalletDatabase>` is acquired inside
+`dispatch_payment` immediately BEFORE the snapshot. A competing thread must
+complete a SQLite read (~100 µs) before it can snapshot, which is far longer than
+the winner's snapshot→record window (~2 µs). The serialization is **incidental**,
+not designed.
+
+⛔ **This is LATENT, not closed.** It is a race that is hard to win, not one that
+cannot be won — a slower DB, a faster snapshot, or a future refactor that moves
+the DB read off that path re-opens it. **Recommended follow-up:** make
+check-and-record atomic under one write lock. Not a beta.3 blocker.
+
+> ⚠️ My first cut of this test was worthless and I nearly reported it: with
+> `perSession=10c` and `4c` payments the correct answer is **2**, and I measured
+> 2 — a number that cannot discriminate. Same failure family as the three farbling
+> harnesses. The negative control is what forced the redesign.
+
+#### Task 1 — the six Tier-1 regressions
+
+| # | Finding | Status | Evidence |
+|---|---|---|---|
+| 1.1 | Decoy `outputs` key ⇒ 0 cents, `priceAvailable=true` ⇒ silent | ✅ FIXED `9e51134` | 9 unit tests GREEN; **RED = 6 fail on reverted header**; decoy → 400 live |
+| 1.2 | `createAction` `options.sendMax` ⇒ silent full sweep | ✅ FIXED `9e51134` | unit GREEN + RED, same run |
+| 1.3 | `/domain/%70ermissions` bypasses §4k | ✅ FIXED `775d87e` | **MEASURED**: pre-fix 200 + row rewritten → post-fix 403 + row unchanged |
+| 1.4 | `POST /wallet/session/close` resets all three counters | ✅ FIXED `775d87e` | **MEASURED**: pre-fix cap reset → post-fix 403, cap held; first-party still 200 |
+| 1.5 | `window.yours.disconnect()` broken by the §4k gate | ✅ FIXED `775d87e` | self-revoke 200; **negative control**: other domain 403 |
+| 1.6 | `confirmed=1` live on `wallet_recover` / `wallet_rescan` | ✅ FIXED `9e51134` | code fix + build; ⬜ NOT exercised against a real mempool-only UTXO |
+
+**Two false commit claims, corrected for the record:**
+
+- `81c054c` "verified at every call site" — **FALSE.** It audited C++ call sites and
+  missed the page-context JS that C++ itself injects (`CWIShimScript.h`). Its own
+  §4k row was also **overstated**: the gate it describes was bypassable by one
+  percent-encoded character.
+- `4eacb51` "recovery.rs needs none" — **FALSE at the dataflow.** File-scoped audit;
+  `upsert_received_utxo_with_derivation` omitted `confirmed` from its INSERT.
+
+#### Still owed before sign-off
+
+| | |
+|---|---|
+| Task 2 — six owner decisions | ⬜ **brought back with recommendations, NOT fixed** (CLAUDE.md #13) |
+| Task 3 — `P0.5-G1` on a release-shaped build | ⬜ |
+| Task 4 — whole evidence table re-run + panel #3 | ⬜ |
+| Concurrency hardening (latent) | ⬜ follow-up |
+
+#### ⚠️ Unrelated finding surfaced during this session — NOT caused by these fixes
+
+The dev wallet's spendable balance fell **38,362,835 → 16,586,118 sats** during the
+session, in windows where no wallet call was made. Mechanism visible in the log:
+`addresses/unconfirmed/unspent` returned **429 Too Many Requests** → *"Mempool read
+unavailable for this chunk — confirmed UTXOs only this tick"* → `Marked 1 outputs as
+spent (spent_by=None)`. So a **rate-limited mempool read degrades to a confirmed-only
+view, and reconciliation then marks real outputs spent.** This is the exact failure
+the UTXO memory warns about (*discovery = union, reconciliation = agreement*).
+Whether the pre-drop figure was an overstatement being corrected, or real money being
+written off, is **NOT established** — it needs its own investigation. My probes are
+exonerated: the sequential run began and ended at 38,362,835 with zero movement, and
+every probe died at address-checksum or was refused 202/403.
+
 ## 5. Blast radius
 
 - `rust-wallet/src/handlers.rs :: send_transaction` (9612–9951) — signature change; ~~every caller is
