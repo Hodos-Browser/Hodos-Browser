@@ -1577,3 +1577,73 @@ from a user-approved probe was released (§4t). Production (31301) never driven.
 - sendWith pricing + domain-ownership scoping (needs schema) — **owner decision owed**.
 - `/acquireCertificate` + `/sendMessage` do-both-or-neither (price vs delist) — **owner decision owed**.
 - The macOS CODE_READING findings (11) belong to the macOS session with named experiments.
+
+### 4v. Panel #3 RE-RUN — COMPLETE, 2 findings, both FIXED (2026-08-21, session 2) — commit `f033f75`
+
+Panel #3 died on a session limit (synthesizer + 15 verifiers never ran) — HARNESS §8: incomplete ≠
+pass. Re-run as an 8-lens adversarial workflow (find → adversarial-verify → synthesize) against the
+FIXED code, explicitly panelling this session's own six fixes. **This run completed cleanly: 11
+agents, 0 errored, 0 empty.** Raw at `ADVERSARIAL_PANEL_RERUN_2026-08-21.json`.
+
+13 raw findings (2 high, 3 med, 7 low, 1 none). Two survived adversarial verification as CONFIRMED;
+both now fixed with negative controls. Both were reachable-in-principle from an approved dApp, and
+one was a bug in this session's own normalizer fix — the panel-your-own-fresh-work rule paying off.
+
+#### Finding 1 [HIGH] — `/wallet/debug/broadcast-nosend` is an ungated fund-mover
+
+The sendWith fix (`7d06d68`) hardened the `broadcast_nosend` sibling and commented "the two sibling
+broadcast paths cannot diverge again" — but a THIRD sibling, `debug_broadcast_nosend`, broadcasts
+ANY status. Its own comment claims to "Verify the transaction ... is in nosend status"; the code read
+the status, **logged it, and never checked it.** Registered unconditionally (no HODOS_DEV gate) and
+absent from `is_permission_surface`. It reverses `mark_failed` cleanup, so a `failed` tx (inputs
+already restored spendable) is resurrected into a double-spend.
+- **RED (MEASURED):** approved dApp `POST /wallet/debug/broadcast-nosend` (bogus txid) → **404**
+  (handler ran, no gate); `/wallet/settings` from the same origin → 403.
+- **Fix, two layers:** `is_permission_surface` gains a `/wallet/debug` **subtree** arm (closes all
+  three debug endpoints + any future one); `debug_broadcast_nosend` now enforces `status=='nosend'`
+  via `sendwith_status_is_broadcastable` (matches its own comment + the two siblings).
+- **GREEN (MEASURED):** approved dApp → all three `/wallet/debug/*` now **403**; first-party (no
+  `X-Requesting-Domain`) still reaches the handler (404 bogus — dev tooling intact); first-party + a
+  real `failed` txid → `{skipped, "status is 'failed', not 'nosend'"}` **200, NOT broadcast**.
+  Proved without broadcasting the failed tx; balance held 38,775,868.
+
+#### Finding 2 [MED, my own fix] — `RequestPathForMatching` read `://` over the whole target first
+
+The comment said "cut query FIRST" but the code ran `find("://")` over the raw target before the
+query-cut. `/createAction?z=a://b` matched the `://` inside the query, treated it as an authority,
+found no path slash, returned "" → `IsPaymentEndpoint("")==false` → **gold pill did not fire and the
+per-session cap did not advance**, while actix (which drops the query) still routed `/createAction`.
+Rust fail-closes to a `price_unavailable` prompt (so not silent — hence MED), but the primary
+anti-silent-payment safeguard was stripped.
+- **Fix:** cut query/fragment FIRST over the whole target, then scan for the scheme only within
+  `[0, end)`.
+- **NEGATIVE CONTROL:** 2 new unit tests (`QueryEmbeddedSchemeDoesNotHidePaymentEndpoint`,
+  `QuerySchemeIsCutBeforeSchemeDetection`) RED against the unfixed header, GREEN after; full C++
+  suite **234 passed / 1 skipped**.
+
+#### Refuted by the panel — do NOT reopen
+
+- **Fix #5 EditPermissionsForm HTTP-write "bypass": REFUTED (low).** Consummation needs the real
+  first-party Hodos SPA running after navigation (the attacker JS context is destroyed) AND a human
+  Save click on a card naming the target domain; clickjacking is closed by fix #4's
+  `X-Frame-Options: SAMEORIGIN` + CSP `frame-ancestors 'self'`. No silent escalation; does not reopen §4k.
+- **Fix #2 modal query-string injection: VERIFIED CORRECT** on both platforms.
+
+#### Recorded for hardening (not blocking)
+
+- **LOW latent:** `PaymentCall::from_headers` (request_gate.rs) fails OPEN on a partial `X-Payment-*`
+  set — `X-Payment-Satoshis` present with `X-Bsv-Price-Available` missing yields
+  `{cents:0, price_available:true}` → Silent. **Not page-reachable today** (all three C++ stamp sites
+  emit together; the Open-path denylist strips page copies). Hardening: make a missing
+  `X-Bsv-Price-Available` default to `false`, or require all three together.
+- **macOS parity** items from the macos-parity lens belong to the mac session (CODE_READING here).
+
+#### Where Phase 0.5 stands after the re-run
+
+The panel is now **COMPLETE** and its two CONFIRMED findings are **FIXED and measured**. What remains
+before sign-off is owner-gated, not blocker-open: sendWith **pricing** + domain-ownership scoping
+(needs a `transactions` domain column, schema), `/acquireCertificate` + `/sendMessage`
+do-both-or-neither (price vs delist), the §4o disclosure set + `is_permission_surface`-as-subtree
+(Phase 5), and the macOS session's parity work incl. the `wallet_call` CRLF-method SSRF. A final
+confirmation panel over `f033f75` (the two fresh fixes) is a reasonable belt-and-suspenders before
+sign-off but is optional — each fix carries its own measured/tested negative control.
