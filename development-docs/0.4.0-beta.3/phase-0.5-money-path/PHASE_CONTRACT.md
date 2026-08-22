@@ -1797,4 +1797,4 @@ DoS/re-prompt).
 roles is safe by code reading (it is emitted only from `BRC100AuthOverlayRoot`, which runs under
 `notification`/`brc100auth`), but it is on the money path (spend approval); the no-regression evidence is
 CODE_READING + unit, not a live approval run (money-path discipline — the browser was not driven this session).
-Named DEV experiment for whoever runs it in relay round 2026-08-22.
+Step-by-step procedure (two-sided A/B: genuine approval succeeds / self-nav tab refused): **`P0.5-B1_SMOKE.md`** in this folder.
