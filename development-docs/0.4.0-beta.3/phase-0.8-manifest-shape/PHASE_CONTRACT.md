@@ -136,7 +136,12 @@ fixture 3) so the data is there the moment it is worth showing.
 - [ ] ⭐ Any field populated from the manifest is **visibly marked as the site's suggestion**, and the
       modal states plainly that these are not the user's defaults. A one-click **"Use my defaults"**
       control reverts every suggested field.
+- [ ] Migration **V24** written and applied as specified in §6b — the `domain_manifest_snapshots`
+      child table and the `settings.default_prefill_from_manifest` column. Owner-approved 2026-08-22.
+      Bump the runner gate in `connection.rs :: WalletDatabase::migrate` and keep it idempotent.
 - [ ] The approved manifest is stored as a **snapshot**, informational only (§6a).
+- [ ] The pre-fill toggle ships **off** by default, at the bottom-right of "Default Limits for New
+      Sites", and never suppresses the site-suggestion marking (§6a, `P0.8-A12`).
 - [ ] Fixtures checked in (§7) and driven by both test suites, each with a negative control.
 
 ## 6a. Consent provenance and the stored snapshot — owner requirement, 2026-08-22
@@ -213,16 +218,20 @@ site's own permission screen, and so "what did this site ask for when I approved
    recommended" months later silently adopts numbers they never saw. Store what was on screen at
    approval time, with `fetched_at` and the URL it came from. A manifest that has **changed** is a
    **re-consent** event — BRC-116 models exactly this as a `renewal` flag — never a silent update.
-3. **Schema change ⇒ owner approval** (CLAUDE.md invariant #2). Spelled out in §6b.
+3. **Schema change ⇒ owner approval** (CLAUDE.md invariant #2). ✅ Granted 2026-08-22; DDL in §6b.
 
 **Scope split:** store the snapshot **in this phase** — it is small (bitgenius is 3.3 KB against a
 64 KB cap) and storing late means the restore button can never be offered for sites approved before
 it landed. The **restore-button UI on the site permission screen is beta.4**; it is purely additive
 once the data exists.
 
-## 6b. Migration V24 — proposed, NOT YET APPROVED
+## 6b. Migration V24 — ✅ APPROVED by the owner 2026-08-22
 
-⛔ **Nothing here exists yet.** The schema is currently at **V23** (`database/migrations.rs`, highest
+Approved as specified below. Invariant #2 is satisfied for **exactly this shape** — if the
+implementation needs to deviate (an extra column, a different table), ask again rather than widening
+it silently.
+
+⛔ **It does not exist yet — it still has to be written.** The schema is currently at **V23** (`database/migrations.rs`, highest
 fn `migrate_v22_to_v23`; the runner in `connection.rs :: WalletDatabase::migrate` gates on
 `current_version < 23`). "V24" is simply the next migration number. CLAUDE.md invariant #2 — do not
 change wallet DB schema without asking — so this needs an explicit owner yes before it is written.

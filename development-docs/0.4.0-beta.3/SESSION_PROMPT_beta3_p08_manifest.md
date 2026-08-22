@@ -129,8 +129,12 @@ max-tx/session — ours, and they default to the user's).
 informational **only**, never a decision input (a discipline we adopt by choice — see §6a rule 1,
 which corrects an earlier draft that mis-cited BRC-116 as compelling it); the snapshot is **as
 approved**, not live, or a site can escalate its recommendations after the fact and have them
-silently adopted later; and it is a **schema change** — ⛔ **migration V24 is PROPOSED, NOT APPROVED**
-(contract §6b has the exact DDL). CLAUDE.md invariant #2: confirm with the owner before writing it.
+silently adopted later; and it is a **schema change** — ✅ **migration V24 is APPROVED**
+(owner, 2026-08-22; exact DDL in contract §6b). It still has to be **written**: the
+`domain_manifest_snapshots` child table plus the `settings.default_prefill_from_manifest` column,
+bumping the runner gate in `connection.rs :: WalletDatabase::migrate`, idempotent like every other
+migration. ⛔ Approval covers **exactly that shape** — if you need to deviate, ask again rather than
+widening it silently (invariant #2).
 
 ⚠️ Deferred (do not build): the *"App ABC recommends these settings — accept or adjust"* modal, and
 the restore-recommended button on the site permission screen (beta.4 — additive once the snapshot
