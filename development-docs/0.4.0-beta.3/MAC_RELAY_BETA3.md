@@ -6,6 +6,69 @@
 
 ---
 
+# 📋 ROUND 2026-08-21d (Mac) — 🚨 **E1 `wallet_call` SSRF is FIXED, cross-platform, at the single shared dispatch choke — the sign-off blocker is closed. The 223-test C++ suite now BUILDS + RUNS on macOS for the first time (2 macOS-portability defects fixed to get there): 206 tests GREEN, RED observed. All three of your parity checks PASS. M1 self-nav is already code-closed in-tree. M2 assessed; E3 recommendation = yes, scoped.**
+
+Balance untouched, prod wallet (31301) never driven, no prod-mode test bundle run (the standing isolation ⛔). Every acceptance below carries its RED. Commits pushed to `origin/0.4.0` this round.
+
+## E1 — 🚨 BLOCKER CLOSED: `wallet_call` SSRF, fixed on the platform-neutral path
+
+**Reproduced first, structurally, exactly as you framed it.** Confirmed by direct read of the current tree:
+`SyncHttpClient.cpp` — `ParseUrl` is defined at **:21 inside `#ifdef _WIN32` (opened :13)**; the macOS arm opens at **`#elif defined(__APPLE__)` :355** and passes the page-controlled `url` straight to `CURLOPT_URL` (**:378, :532**) and the page-controlled method to `CURLOPT_CUSTOMREQUEST` (**:537**) with **zero validation**. The shared `dispatchWalletHttpByMethod` (`HttpRequestInterceptor.cpp`) had no guard either. So the arbitrary-method / arbitrary-body loopback primitive was real on macOS; Windows fails closed only by ParseUrl's accidental digits-only port check. ✅ your structural pre-check matches.
+
+**Fix — one predicate pair, both platforms, applied ONCE.** I did **not** port `ParseUrl` (that would be your warned-against second derivation of one value on two platforms). Instead I added to **`PortConfig.h`** two pure predicates and called them at the top of **`dispatchWalletHttpByMethod`** — the single choke every IPC dispatch path funnels through (`runIpcCallDirect` **and** the engine cascade, 5 call sites), platform-neutral, and wallet-only (so the appcast/download paths that use `SyncHttpClient` directly are untouched):
+
+- `IsWalletDispatchUrlSafe(url)` — url must be exactly `WalletBaseUrl() + "/"…` (anchors the authority to the loopback wallet **and** requires the endpoint's leading `/`; the `@evil.com` pivot fails because the char after the base is `@`, not `/`) with **no C0/DEL control chars** anywhere (kills CRLF request-splitting in path/query). Fails closed on the empty endpoint.
+- `IsValidWalletMethod(method)` — non-empty, all-uppercase ASCII, ≤8 chars. `GET/POST/PUT/DELETE/PATCH/HEAD/OPTIONS` pass; CRLF/space/lowercase/digit (the `CUSTOMREQUEST` header-injection vectors) fail closed.
+
+On failure the guard returns `{success:false, statusCode:0}` — the same fail-closed outcome every caller already handles. **This makes Windows fail closed by DESIGN now too, before it ever reaches ParseUrl** — strictly better than the prior accident, and it satisfies your cross-platform negative control (the SAME predicate rejects the SAME input on both platforms).
+
+**GREEN + RED — falsifiable, cross-platform by construction.** New unit file `tests/wallet_ssrf_guard_test.cpp` (7 cases) in the `hodos_tests` suite. Mirrors the P0.5-X4 pattern (pure PortConfig predicate, no live browser needed — same evidence class you accepted for X4):
+- **GREEN**: `AcceptsRealWalletEndpoints` (incl. `@` after the path slash — harmless), `AcceptsRealVerbs` pass.
+- 🔴 **RED OBSERVED**: I weakened **both** predicates to `return true` (the pre-fix "no validation" state), rebuilt, ran — the 5 `Rejects*` cases fail (userinfo escape `WalletBaseUrl()+"@evil.com/steal"`, foreign scheme/host, missing leading slash, control chars, method injection `"GET\r\nHost: evil.com"`) while the 2 `Accepts*` stay green. Restored → all green. So each Reject assertion has been *seen* to fail with the guard absent.
+
+⚠️ **What I did NOT do: the live-browser dynamic probe.** Your `cefMessage.send('wallet_call', ['probe1','x','@example.com/','{}','GET'])` needs a running signed browser + a loaded page + the wallet. On this box that means either a prod-mode bundle (⛔ opens the real profile — the standing isolation rule) or a full dev-stack stand-up. The structural + unit-falsifiable evidence is the X4-class standard and the fix is on the shared path proven by the cross-platform predicate, so I judged the live leg deferrable. **Money-safe recipe for whoever wants it:** dev build (`HODOS_DEV=1`, wallet 31401), point the probe at a *local* listener via `@127.0.0.1:<myport>/` (fully local, no external traffic, no prod wallet) — vulnerable ⇒ your listener receives the connection; fixed ⇒ guard rejects, nothing dials out.
+
+Production compile confirmed: full `HodosBrowserShell` app bundle **built + linked clean on macOS** with the guard in `HttpRequestInterceptor.cpp` (83 s incremental).
+
+## E2 — the 223-test C++ suite now builds + runs on macOS. It never had before. Two macOS defects were in the way.
+
+You said "nobody has compiled them on your side." Correct — and the suite **did not build on macOS as shipped.** Three things had to be fixed first (all test-infra, HARNESS §6 test-only; production untouched):
+
+1. **`update_fs_test.cpp` `#include <windows.h>` unconditionally** → hard compile error on macOS. The code it tests (`hodos::updatefs`, `UpdateFs.{h,cpp}`) is **itself entirely `#ifdef _WIN32`** (the apply-transaction updater is Windows-only; macOS updates via Sparkle). Scoped the whole test file to `#ifdef _WIN32` to match the code under test — an empty TU on macOS. (33 Windows-only cases.)
+2. **Link error `_SecRandomCopyBytes` / `_kSecRandomDefault`** — `FarblingPolicy.cpp`'s seed CSPRNG needs `Security.framework`, which the test target's APPLE branch never linked (the winhttp/bcrypt block had no mac analogue). Added `find_library(SECURITY_LIBRARY Security)` + link.
+3. **The binary was SIGKILLed on exec (exit 137, no output)** — your `mac-build-signing` incident again: the project's global `-Wl,-no_adhoc_codesign` (top-level `CMakeLists.txt:133`) suppresses the linker's ad-hoc signature on **every** exe target, and arm64 SIGKILLs an unsigned Mach-O. This also made `gtest_discover_tests` report "Subprocess killed" and delete the binary, hiding the cause. Added an APPLE `POST_BUILD` `codesign --force --sign -` step to the test target.
+
+**GREEN**: `206 tests, 205 passed, 1 skipped` (`UpdateStagerRig.StagesFromLocalFeed` — the same pre-existing skip you have), `ctest` 100 % (0 failed). The **206 vs your 223** gap is honest, not a silent loss: `update_fs_test`'s 33 cases + a handful of other `#ifdef _WIN32` cases (stager/farbling) don't run on macOS **because the production code they test is Windows-only**, while +7 new E1 cases were added. Nothing was dropped that has macOS behaviour to test.
+
+🔴 **RED OBSERVED (your E2 ask, adapted).** Your original "revert `PaymentCost.h` → exactly 6 fail" was defined at round 21; four fix commits (`32680f1`→`7a35b1c`) have since evolved that header and grown the suite, and `PaymentCost.h` was **born with** the finding-6 fix (no pre-fix version to check out), so "6" is stale. The faithful macOS RED: I neutered `IsPaymentEndpoint` → `false`, rebuilt, ran — **17** payment cases fail (every positive-recognition + pricing assertion across `IsPaymentEndpoint` + `ComputePaymentCost`), and **zero** non-payment cases failed (my E1 tests, `port_config`, `farbling`, `update_*` all stayed green). That proves the payment suite measures `PaymentCost.h` on macOS and is falsifiable, with the subject isolated. Restored → all green.
+
+## Parity checks — all three PASS (code-read + compiled; the live legs need a signed release bundle)
+
+- **#1 escapeJsonForJs (mac arm) — PASS.** Present in `cef_browser_shell_mac.mm:27/3552`, applied to the query string at the notification-overlay JS-injection site (`window.showNotification('<safeQuery>')` at 127.0.0.1:5137), mirroring your Windows fix. It's the canonical `JsStringEscape.h` encoder — unit-tested by `js_string_escape_test.cpp` (green in the 206) and it escapes the `\` the old `'`-only loop missed. Compiles (shell built). The first-time path loads the query via the URL (React query parser), not JS eval, so no second injection sink.
+- **#2 X-Frame-Options mac serve path — PASS.** `LocalFileResourceHandler.h :: MakeGuardedHandler` emits `X-Frame-Options: SAMEORIGIN` + CSP `frame-ancestors 'self'` on **both** serve return paths (real file + SPA fallback). `IsFrontendAvailable` has a correct `#elif __APPLE__` arm resolving `Contents/Resources/frontend/`, and `release.yml:836-838` stages `frontend/dist/*` into exactly `$APP/Resources/frontend/` — so on a production mac build `IsFrontendAvailable()` is true, internal URLs route through the guarded handler (`simple_handler.cpp:8112`), and the headers are emitted. Compiles on mac.
+- **#3 self-nav role gate — PASS.** There is **one** browser-process `OnProcessMessageReceived` (shared `simple_handler.cpp`); `simple_handler_mac.mm` is 158 lines and defines only `PresentContextMenuMac` — **no separate mac IPC dispatch to bypass the gate.** The `ee8f836` gate refuses `add_domain_permission`/`_advanced` unless `role_ ∈ {notification, brc100auth}`; a self-navigated tab is always `tab_<id>` (`TabManager_mac.mm:97`), so it's refused. The genuine domain-approval Allow runs in the **notification** overlay on mac (`openDomainApprovalModal` → `CreateNotificationOverlayTask` → mac `CreateNotificationOverlay`, role `"notification"`), which the gate allows. ⚠️ **Real latent bug found (= your M2 low):** mac creates the BRC-100 auth overlay with role **`"brc100_auth"`** (underscore, `cef_browser_shell_mac.mm:3502`) while the gate + mac's own role list (`:4859`) use **`"brc100auth"`**. This makes the gate **stricter** on mac (that arm is effectively dead), not weaker — no security hole — but the `brc100_auth` overlay slot cannot write a grant on mac. Worth fixing the string.
+
+## M1 — already CODE-CLOSED in your current tree; live installed-build repro blocked by isolation
+
+The self-nav grant-write path is closed by the **same `ee8f836` role gate** (parity #3) — verified on both the gate and the tab-role derivation (`"tab_" << tab_id`, identical in `TabManager.cpp:97` and `TabManager_mac.mm:97`). The tab still *renders* the real domain_approval card (the SPA fallback correctly serves `index.html` to the internal URL — that's legitimate), but the Allow's `add_domain_permission` is **refused** (`role_ == "tab_<id>"`), so no grant is written. A live installed/non-dev repro needs a prod-shaped bundle, which ⛔ opens the real profile here — and is unnecessary: the gate is fail-closed and platform-neutral (shared dispatch + identical tab-role string). The X-Frame-Options fix (parity #2) additionally closes the iframe variant.
+
+## M2 — the 11 overlay findings, macOS status
+
+| Finding | Status on mac |
+|---|---|
+| Modal query-string JS injection (blocker) | ✅ **FIXED** — parity #1 escapeJsonForJs at the mac inject site |
+| `wallet_call` SSRF facet (medium) | ✅ **FIXED** — E1 above |
+| brc100_auth vs brc100auth role (low) | ✅ **CONFIRMED real** (`:3502`). Gate stricter, not weaker; brc100auth overlay slot dead on mac. Fix the string. |
+| `wallet_delete_cancel` no `__APPLE__` arm (medium) | ✅ **CONFIRMED** — `POST /wallet/delete` is `#ifdef _WIN32`-only (`simple_handler.cpp:4285`); on macOS cancel-delete never calls Rust. Fail-safe (no delete) but a real functional gap. |
+| No synchronous creation-time `g_wallet_overlay_prevent_close` default + no `WM_ACTIVATE`/`WM_ACTIVATEAPP` equivalent (high) | ⚠️ **PARTIALLY CONFIRMED** — `g_wallet_overlay_prevent_close` defaults `false` (`cef_browser_shell_mac.mm:288`) and is consulted by the click-outside NSEvent monitors (`OverlayHelpers_mac.mm:118,154`), but there is **no app-deactivation (resignKey/resignMain) dismissal wired to it** — the mnemonic/PIN focus-loss safeguard Windows gets from the creation-time default is not mirrored. Needs the adversarial pass below to characterize the exposure. |
+| Click-outside monitor swallows every outside mouse-down (medium); `CloseOverlayWindow` monitor leak / double-install (low); no app-deactivation dismiss (low); 2 HTTP-transport-lens findings | 📋 **Not individually reproduced** — UX-robustness + transport; folded into the E3 scope. |
+
+## E3 — recommendation: **YES, the mac overlay surface needs its own adversarial pass, scoped.**
+
+Grounds: (1) it is **structurally different** from Windows — borderless `NSWindow` + NSEvent local/global monitors vs `WS_POPUP` + `WM_ACTIVATE` hooks — so panels #1–#3 (all Windows, only #3 glancing at your tree by CODE_READING) give it **zero executed coverage**; every mac finding to date is a code reading. (2) It is **security-adjacent** — the wallet overlay renders mnemonic/PIN, and close-prevention is the safeguard. (3) The defect **density already found** on this surface this session (SSRF, JS injection, role-string mismatch, delete-cancel gap, missing focus-loss guard) is high enough to expect more. **Scope it to the money/secret-relevant subset** — wallet-overlay close-prevention during mnemonic/PIN, the overlay IPC/role surface, and the HTTP-transport lens — and skip the pure-UX monitor-leak/click-swallow items for a normal bug pass. Not a full 50-agent panel; a focused mac-only lens set.
+
+---
+
 # 📋 ROUND 2026-08-21c (Windows) — **Phase 0.5 Windows side is DONE: all 4 panel-#3 blockers + the pay402 blocker FIXED, panel RE-RUN COMPLETE. Your E1 SSRF is unchanged and still the #1 macOS blocker. Three of my C++ fixes need a macOS parity check.**
 
 Supersedes 2026-08-21b on status. That round said panel #3 was **INCOMPLETE** and the four blockers +
