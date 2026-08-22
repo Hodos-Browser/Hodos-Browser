@@ -4022,6 +4022,116 @@ struct PendingTransaction {
 static PENDING_TRANSACTIONS: Lazy<StdMutex<HashMap<String, PendingTransaction>>> =
     Lazy::new(|| StdMutex::new(HashMap::new()));
 
+/// Monotonic counter making each reservation placeholder unique within the process.
+static RESERVATION_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Mint a fresh `pending-{ts}-{seq}` reservation placeholder.
+///
+/// The placeholder is the *key* a reservation is released by
+/// (`restore_by_spending_description` / `restore_outpoint_if_reserved`), so it has to be
+/// unique per reservation. The original `pending-{timestamp_millis}` was not: two
+/// `createAction`s landing in the same millisecond shared a placeholder, and the
+/// user-provided-input reservation is taken *after* `utxo_selection_lock` is released, so
+/// that collision is reachable. With a scope guard in play a collision is worse than the
+/// leak it fixes -- one call's release would free the other call's reservation, widening
+/// the very selection race the reservation exists to prevent (`R-NORACE`).
+pub(crate) fn new_reservation_placeholder() -> String {
+    let seq = RESERVATION_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("pending-{}-{}", chrono::Utc::now().timestamp_millis(), seq)
+}
+
+/// Placeholders belonging to transactions that are still live in `PENDING_TRANSACTIONS`.
+///
+/// A reservation whose placeholder appears here is in-flight (createAction has stored the
+/// transaction and is awaiting `signAction`), no matter how old it looks. The sweeper
+/// must leave those alone.
+pub(crate) fn live_reservation_placeholders() -> std::collections::HashSet<String> {
+    match PENDING_TRANSACTIONS.lock() {
+        Ok(pending) => pending
+            .values()
+            .filter_map(|t| t.reservation_placeholder.clone())
+            .collect(),
+        Err(e) => {
+            // Poisoned lock: report "everything is live" so the sweeper releases nothing.
+            // Failing closed here costs a leak; failing open risks a double-spend.
+            log::error!("   ⚠️  PENDING_TRANSACTIONS poisoned ({}) — treating all reservations as live", e);
+            std::collections::HashSet::new()
+        }
+    }
+}
+
+/// RAII release for the UTXO reservation taken inside `create_action_internal`.
+///
+/// `create_action_internal` reserves its selected UTXOs by marking them spent against a
+/// `pending-` placeholder, and resolves that placeholder to the real txid only on the
+/// success path. Between the reservation and the point where the transaction is stored in
+/// `PENDING_TRANSACTIONS` there are **19 `return` sites**, none of which released the
+/// reservation: the most ordinary failure the product has -- a mistyped destination
+/// address, which fails checksum validation *after* selection -- silently made the
+/// selected coins unspendable for the life of the process.
+///
+/// Releasing at each `return` is the pattern that rots (and it is the enumerate-don't-gate
+/// mistake this sprint has already paid for three times). `Drop` is correct at all 19
+/// current exits, at any exit added later, and on panic. The success path calls
+/// [`ReservationGuard::commit`], which disarms it.
+///
+/// Release is keyed by the unique placeholder, so a guard can only ever free rows its own
+/// call reserved.
+pub(crate) struct ReservationGuard {
+    database: std::sync::Arc<StdMutex<crate::database::WalletDatabase>>,
+    balance_cache: std::sync::Arc<crate::balance_cache::BalanceCache>,
+    /// `None` once committed -- `Drop` then does nothing.
+    placeholder: Option<String>,
+}
+
+impl ReservationGuard {
+    fn new(state: &AppState, placeholder: String) -> Self {
+        Self {
+            database: state.database.clone(),
+            balance_cache: state.balance_cache.clone(),
+            placeholder: Some(placeholder),
+        }
+    }
+
+    /// Hand the reservation over to the pending transaction's own lifecycle.
+    ///
+    /// Call once the transaction is stored in `PENDING_TRANSACTIONS`: from that point
+    /// `sign_action` resolves the placeholder to the real txid, the broadcast-failure path
+    /// restores it, and the sweeper can see it is in-flight.
+    fn commit(mut self) {
+        self.placeholder = None;
+    }
+}
+
+impl Drop for ReservationGuard {
+    fn drop(&mut self) {
+        let Some(placeholder) = self.placeholder.take() else {
+            return; // committed -- the pending transaction owns these rows now
+        };
+
+        // Drop must never panic, so every failure here is logged and swallowed.
+        let db = match self.database.lock() {
+            Ok(db) => db,
+            Err(e) => {
+                log::error!("   ⚠️  ReservationGuard: DB mutex poisoned ({}) — {} left reserved for the sweeper", e, placeholder);
+                return;
+            }
+        };
+        let output_repo = crate::database::OutputRepository::new(db.connection());
+        match output_repo.restore_by_spending_description(&placeholder) {
+            Ok(0) => {}
+            Ok(count) => {
+                log::info!("   ♻️  createAction failed — released {} reserved UTXO(s) ({})", count, placeholder);
+            }
+            Err(e) => {
+                log::warn!("   ⚠️  ReservationGuard: failed to release {}: {} — the sweeper will retry", placeholder, e);
+            }
+        }
+        drop(db);
+        self.balance_cache.invalidate();
+    }
+}
+
 /// BRC-100 CreateAction input outpoint specification
 /// Can be deserialized from either:
 /// - Object format: {"txid": "abc...", "vout": 0}
@@ -4853,6 +4963,9 @@ pub(crate) async fn create_action_internal(
     // Wallet UTXOs - only fetch if we need them
     let mut selected_utxos: Vec<crate::utxo_fetcher::UTXO> = Vec::new();
     let mut reservation_placeholder: Option<String> = None; // Tracks placeholder spent_txid for rollback
+    // Releases the reservation on every failure exit below (19 `return` sites between the
+    // reservation and the PENDING_TRANSACTIONS insert). Disarmed by `.commit()` on success.
+    let mut reservation_guard: Option<ReservationGuard> = None;
     let addresses: Vec<crate::json_storage::AddressInfo>;
 
     if need_wallet_utxos {
@@ -5099,10 +5212,15 @@ pub(crate) async fn create_action_internal(
 
                 // Mark as spent with a placeholder txid (will be updated with real txid after signing)
                 // Using "pending-{timestamp}" to indicate these are reserved but not yet broadcast
-                let placeholder_txid = format!("pending-{}", chrono::Utc::now().timestamp_millis());
+                let placeholder_txid = new_reservation_placeholder();
                 let utxos_to_reserve: Vec<(String, u32)> = selected_utxos.iter()
                     .map(|u| (u.txid.clone(), u.vout))
                     .collect();
+
+                // Arm the scope guard BEFORE reserving, not after. `mark_multiple_spent`
+                // updates the rows one at a time and can fail partway through, leaving some
+                // already reserved; arming first means those are released too.
+                reservation_guard = Some(ReservationGuard::new(&state, placeholder_txid.clone()));
 
                 match output_repo.mark_multiple_spent(&utxos_to_reserve, &placeholder_txid) {
                     Ok(count) => {
@@ -5130,7 +5248,7 @@ pub(crate) async fn create_action_internal(
     if !user_inputs.is_empty() {
         // Ensure we have a placeholder — create one if wallet UTXOs weren't needed
         if reservation_placeholder.is_none() {
-            reservation_placeholder = Some(format!("pending-{}", chrono::Utc::now().timestamp_millis()));
+            reservation_placeholder = Some(new_reservation_placeholder());
         }
 
         let placeholder = reservation_placeholder.as_ref().unwrap();
@@ -5140,6 +5258,12 @@ pub(crate) async fn create_action_internal(
 
         let db = state.database.lock().unwrap();
         let output_repo = crate::database::OutputRepository::new(db.connection());
+
+        // Same reasoning as above, and it also covers the wallet-UTXO-free path where no
+        // guard has been armed yet. One placeholder either way, so one guard releases both.
+        if reservation_guard.is_none() {
+            reservation_guard = Some(ReservationGuard::new(&state, placeholder.clone()));
+        }
 
         match output_repo.mark_multiple_spent(&user_outpoints, placeholder) {
             Ok(count) => {
@@ -5757,7 +5881,12 @@ pub(crate) async fn create_action_internal(
     // for phase 2, sign_action needs to know whether to broadcast.
     let no_send = req.options.as_ref().and_then(|o| o.no_send).unwrap_or(false);
 
-    // Store transaction in memory with UTXO metadata for signing
+    // Store transaction in memory with UTXO metadata for signing.
+    //
+    // This is the commit point for the reservation: past here the pending transaction owns
+    // the reserved rows (sign_action resolves the placeholder to the real txid, the
+    // broadcast-failure path restores them, and the sweeper sees the placeholder as live),
+    // so the scope guard must stop releasing them.
     {
         let mut pending = PENDING_TRANSACTIONS.lock().unwrap();
         pending.insert(reference.clone(), PendingTransaction {
@@ -5769,6 +5898,12 @@ pub(crate) async fn create_action_internal(
             reservation_placeholder: reservation_placeholder.clone(),
             no_send,
         });
+    }
+
+    // Reservation handed over — from here a failure is cleaned up by the pending
+    // transaction's own lifecycle, not by unreserving the inputs.
+    if let Some(guard) = reservation_guard.take() {
+        guard.commit();
     }
 
     // Log if this is a BRC-29 payment

@@ -197,7 +197,7 @@ A single `status TEXT NOT NULL` column on `transactions` replaced the old dual `
 
 The Monitor (`src/monitor/mod.rs`) is the sole background task scheduler. It runs as a single tokio task with a 30-second tick loop, guarded by `MONITOR_STARTED` against duplicate loops, and gates most tasks behind `db_available()` so a busy DB defers rather than blocks. Intervals come from `TaskSchedule::default()`.
 
-**14 tasks**, one module each in `src/monitor/`:
+**15 tasks**, one module each in `src/monitor/`:
 
 | Task | Interval | Purpose |
 |------|----------|---------|
@@ -215,6 +215,7 @@ The Monitor (`src/monitor/mod.rs`) is the sole background task scheduler. It run
 | TaskVerifyDoubleSpend | 60s | Independently verify ARC `DOUBLE_SPEND_ATTEMPTED` suspicions (`spending_description = 'dss:{txid}'`) against WhatsOnChain; restore false alarms |
 | TaskRetryPeerPayOutbox | 30s | Retry MessageBox delivery for `peerpay_outbox` rows (60s ×10, then 120s ×10, then `exhausted`); actual retry governed by `next_retry_at` |
 | TaskRefreshShipCache | 300s | Keeps `AppState.ship_cache` warm for `tm_identity`. Runs **outside** the `db_available()` gate (pure network + memory) so a busy DB never starves SHIP refresh. |
+| TaskSweepReservations | 300s | Releases `pending-%` UTXO reservations older than `MAX_AGE_SECS` (15 min) that no live `PENDING_TRANSACTIONS` entry claims — the backstop for reservations stranded by a process kill, which the `ReservationGuard` cannot survive. ⛔ **Releases only outpoints positively observed in the on-chain unspent set**; every uncertainty (API down, address not ours, outpoint absent) leaves the reservation standing. Replaced an unconditional, unverified blanket restore that ran at startup and could un-spend a broadcast transaction. |
 
 ### Ghost Transaction Safety Rules
 

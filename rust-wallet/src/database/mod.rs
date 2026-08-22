@@ -58,7 +58,7 @@ pub use tag_repo::TagRepository;
 pub use certificate_repo::CertificateRepository;
 pub use message_relay_repo::{MessageRelayRepository, RelayMessage, MessageRelayStats};
 pub use user_repo::UserRepository;
-pub use output_repo::OutputRepository;
+pub use output_repo::{OutputRepository, StaleReservation};
 // Phase 5 repositories
 pub use tx_label_repo::TxLabelRepository;
 pub use commission_repo::CommissionRepository;

@@ -128,7 +128,8 @@ Key design: `spendable=1` means available (inverse of old `is_spent`). `spent_by
 - `update_spending_description_batch(placeholder, real_txid)` — replace placeholder with actual txid + set spent_by FK
 - `link_outputs_to_transaction(txid, transaction_id)` — set `transaction_id` FK after tx saved
 - `delete_by_txid(txid)`, `disable_by_txid(txid)`, `reenable_failed_outputs(...)` — cleanup / recovery for failed broadcasts
-- `restore_by_spending_description(placeholder)`, `restore_spent_by_txid(txid)`, `restore_pending_placeholders()` — UTXO restoration on failure
+- `restore_by_spending_description(placeholder)`, `restore_spent_by_txid(txid)` — UTXO restoration on failure
+- `list_stale_pending_reservations(older_than_secs) -> Vec<StaleReservation>` + `restore_outpoint_if_reserved(txid, vout, placeholder)` — the read/release halves of the stale-reservation sweep (`monitor/task_sweep_reservations`). The release is scoped to the placeholder so it can never free a reservation a concurrent `createAction` has since taken. ⛔ Replaced `restore_pending_placeholders()`, a blanket `LIKE 'pending-%'` restore with no age filter and no on-chain check — it could un-spend an already-broadcast transaction
 - `assign_basket(output_id, basket_id)`, `remove_from_basket(output_id)`
 - `confirm_double_spend(...)`, `clear_suspected_double_spend(...)`
 - `cleanup_old_spent(days)` — delete spent outputs older than N days

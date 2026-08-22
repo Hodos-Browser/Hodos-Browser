@@ -668,24 +668,23 @@ async fn main() -> std::io::Result<()> {
                     }
                 }
 
-                // Restore any outputs with stale placeholder reservations.
-                // This catches cases where the handler crashed between output reservation
-                // and txid update (e.g., signing failure, deadlock, process kill).
-                {
-                    use database::OutputRepository;
-                    let conn = db.connection();
-                    let output_repo = OutputRepository::new(conn);
-
-                    match output_repo.restore_pending_placeholders() {
-                        Ok(count) if count > 0 => {
-                            log::info!("♻️  Restored {} output(s) with stale placeholder reservations", count);
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            log::warn!("   ⚠️  Failed to restore placeholder outputs: {}", e);
-                        }
-                    }
-                }
+                // Stale `pending-%` placeholder reservations (handler crashed or the
+                // process was killed between reserving outputs and resolving the
+                // placeholder to a real txid) are NOT released here.
+                //
+                // This used to be an unconditional blanket
+                // `UPDATE ... WHERE spending_description LIKE 'pending-%'` with no age
+                // filter and no on-chain check. That can un-spend an output whose
+                // transaction actually broadcast -- every path resolves placeholder ->
+                // real txid before broadcasting, but that update's failure is only a
+                // warning and the broadcast still proceeds -- which makes the wallet
+                // re-offer an already-spent output (`R-NODOUBLE`, a double-spend).
+                //
+                // Release now belongs to `monitor::task_sweep_reservations`, which runs
+                // on the first monitor tick after startup and proves each outpoint is
+                // still unspent on-chain before releasing it. The in-process case is
+                // covered earlier still, by the `ReservationGuard` scope guard in
+                // `create_action_internal`.
 
                 // Clean up interrupted backup transactions.
                 // If a backup tx was created but the process was killed before broadcast

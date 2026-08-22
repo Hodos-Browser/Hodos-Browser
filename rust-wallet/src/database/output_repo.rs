@@ -16,6 +16,22 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::Output;
 
+/// A `pending-%` reservation that has outlived the sweep threshold.
+///
+/// Produced by [`OutputRepository::list_stale_pending_reservations`]; a candidate for
+/// release, **not** a decision to release. See that method for why the decision needs
+/// on-chain evidence.
+#[derive(Debug, Clone)]
+pub struct StaleReservation {
+    pub txid: String,
+    pub vout: u32,
+    pub satoshis: i64,
+    /// The `pending-{ts}-{seq}` (or `pending-backup-{ts}`) placeholder still held.
+    pub placeholder: String,
+    /// Unix seconds the reservation was taken (written by `mark_multiple_spent`).
+    pub updated_at: i64,
+}
+
 pub struct OutputRepository<'a> {
     conn: &'a Connection,
 }
@@ -949,10 +965,76 @@ impl<'a> OutputRepository<'a> {
         Ok(rows_affected)
     }
 
-    /// Restore all outputs with stale placeholder reservations
+    /// List reservations still holding a `pending-%` placeholder older than
+    /// `older_than_secs`.
     ///
-    /// This restores outputs that were reserved but never confirmed (e.g., process crash).
-    pub fn restore_pending_placeholders(&self) -> Result<usize> {
+    /// This is the *read* half of the stale-reservation sweep. It deliberately does
+    /// NOT release anything: releasing requires proving the outpoint is still unspent
+    /// on-chain, which needs the network and therefore cannot live in the repository.
+    ///
+    /// ## Why this replaced the old blanket restore
+    ///
+    /// The previous `restore_pending_placeholders()` was a single
+    /// `UPDATE ... WHERE spending_description LIKE 'pending-%'` with no age filter and
+    /// no on-chain check, run unconditionally at startup. A row can legitimately hold a
+    /// `pending-` placeholder while its transaction is already broadcast: every path
+    /// resolves placeholder -> real txid *before* broadcasting, but
+    /// `update_spending_description_batch` failure is only logged as a warning and the
+    /// broadcast proceeds anyway. Un-spending such a row makes the wallet re-offer an
+    /// output it has already spent -- a double-spend (`R-NODOUBLE`).
+    ///
+    /// `updated_at` is written by `mark_multiple_spent` at reservation time, so it is
+    /// the reservation age; no schema change is needed to age these out.
+    ///
+    /// Note the `LIKE 'pending-%'` pattern also matches the `pending-backup-{ts}`
+    /// namespace used by the on-chain backup path. That is intentional: that path
+    /// releases via `rollback_backup` on its own error returns, but a process kill can
+    /// still strand it, and the same on-chain proof gates its release.
+    pub fn list_stale_pending_reservations(&self, older_than_secs: i64) -> Result<Vec<StaleReservation>> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let cutoff = now - older_than_secs;
+
+        let mut stmt = self.conn.prepare(
+            "SELECT txid, vout, satoshis, spending_description, updated_at
+             FROM outputs
+             WHERE spendable = 0
+               AND txid IS NOT NULL
+               AND spending_description LIKE 'pending-%'
+               AND updated_at <= ?1
+             ORDER BY updated_at",
+        )?;
+
+        let rows = stmt.query_map(rusqlite::params![cutoff], |row| {
+            Ok(StaleReservation {
+                txid: row.get(0)?,
+                vout: row.get::<_, i64>(1)? as u32,
+                satoshis: row.get(2)?,
+                placeholder: row.get(3)?,
+                updated_at: row.get(4)?,
+            })
+        })?;
+
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Release exactly one reserved outpoint, and only if it is *still* reserved under
+    /// `placeholder`.
+    ///
+    /// Scoping the `UPDATE` to the placeholder is what keeps the sweep from widening the
+    /// selection race (`R-NORACE`): between listing a stale reservation and releasing it,
+    /// a concurrent `createAction` may have legitimately re-reserved the row under a new
+    /// placeholder. The `spending_description = ?placeholder` predicate makes that a
+    /// 0-row update instead of freeing a live reservation.
+    ///
+    /// Returns the number of rows released (0 or 1).
+    pub fn restore_outpoint_if_reserved(&self, txid: &str, vout: u32, placeholder: &str) -> Result<usize> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -960,12 +1042,15 @@ impl<'a> OutputRepository<'a> {
 
         let rows_affected = self.conn.execute(
             "UPDATE outputs SET spendable = 1, spent_by = NULL, spending_description = NULL, updated_at = ?1
-             WHERE spendable = 0 AND spending_description LIKE 'pending-%'",
-            rusqlite::params![now],
+             WHERE txid = ?2 AND vout = ?3 AND spending_description = ?4 AND spendable = 0",
+            rusqlite::params![now, txid, vout, placeholder],
         )?;
 
         if rows_affected > 0 {
-            info!("   ♻️  Restored {} output(s) with stale placeholder reservations", rows_affected);
+            info!("   ♻️  Released stale reservation {}:{} (placeholder {})",
+                &txid[..std::cmp::min(16, txid.len())],
+                vout,
+                &placeholder[..std::cmp::min(24, placeholder.len())]);
         }
 
         Ok(rows_affected)
@@ -1162,5 +1247,268 @@ impl<'a> OutputRepository<'a> {
             created_at: row.get(23)?,
             updated_at: row.get(24)?,
         })
+    }
+}
+
+#[cfg(test)]
+mod stale_reservation_tests {
+    use super::*;
+    use crate::database::migrations;
+
+    const HOUR: i64 = 3600;
+
+    fn now() -> i64 {
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
+    }
+
+    fn seed_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
+        migrations::create_schema_v1(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO users (userId, identity_key, active_storage, created_at, updated_at)
+             VALUES (1, 'test_identity_key', 'local', 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    /// Insert an output reserved under `placeholder`, `age_secs` seconds ago.
+    fn reserved(conn: &Connection, txid: &str, vout: u32, sats: i64, placeholder: &str, age_secs: i64) {
+        let ts = now() - age_secs;
+        conn.execute(
+            "INSERT INTO outputs (user_id, spendable, change, vout, satoshis, provided_by, purpose,
+                                  type, txid, spending_description, confirmed, created_at, updated_at)
+             VALUES (1, 0, 0, ?1, ?2, 'you', '', 'P2PKH', ?3, ?4, 1, ?5, ?5)",
+            rusqlite::params![vout, sats, txid, placeholder, ts],
+        )
+        .unwrap();
+    }
+
+    fn is_spendable(conn: &Connection, txid: &str, vout: u32) -> bool {
+        conn.query_row(
+            "SELECT spendable FROM outputs WHERE txid = ?1 AND vout = ?2",
+            rusqlite::params![txid, vout],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+            == 1
+    }
+
+    /// The age filter is the whole point: a reservation younger than the threshold belongs to
+    /// a `createAction` that may still be in flight, and must not be a sweep candidate.
+    #[test]
+    fn age_filter_excludes_fresh_reservations_and_includes_old_ones() {
+        let conn = seed_db();
+        let repo = OutputRepository::new(&conn);
+
+        reserved(&conn, "aa", 0, 1_000, "pending-1-0", 30);
+        reserved(&conn, "bb", 1, 2_000, "pending-2-0", 2 * HOUR);
+
+        let stale = repo.list_stale_pending_reservations(15 * 60).unwrap();
+
+        assert_eq!(stale.len(), 1, "only the 2h-old reservation is a candidate");
+        assert_eq!(stale[0].txid, "bb");
+        assert_eq!(stale[0].vout, 1);
+        assert_eq!(stale[0].satoshis, 2_000);
+        assert_eq!(stale[0].placeholder, "pending-2-0");
+    }
+
+    /// The LIKE pattern deliberately spans every reservation namespace that can strand:
+    /// createAction, on-chain backup (`pending-backup-`) and certificate unpublish
+    /// (`pending-unpub-`). It must not pick up unrelated spending_descriptions -- a real txid,
+    /// an `external-spend` marker, a `dss:` suspected double-spend, or the dust consolidator's
+    /// `consolidate-` namespace.
+    #[test]
+    fn matches_every_pending_namespace_and_nothing_else() {
+        let conn = seed_db();
+        let repo = OutputRepository::new(&conn);
+
+        reserved(&conn, "c1", 0, 1, "pending-1787411964292-0", 2 * HOUR);
+        reserved(&conn, "c2", 0, 1, "pending-backup-1787411964292", 2 * HOUR);
+        reserved(&conn, "c3", 0, 1, "pending-unpub-1787411964292", 2 * HOUR);
+        reserved(&conn, "d1", 0, 1, "consolidate-1787411964292", 2 * HOUR);
+        reserved(&conn, "d2", 0, 1, "external-spend", 2 * HOUR);
+        reserved(&conn, "d3", 0, 1, "dss:abc123", 2 * HOUR);
+        reserved(&conn, "d4", 0, 1, "50939442970f532a2d764d70a75a98c9b80695430b5ffd3b52e9a0348c3ab1be", 2 * HOUR);
+
+        let mut got: Vec<String> = repo
+            .list_stale_pending_reservations(15 * 60)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.txid)
+            .collect();
+        got.sort();
+
+        assert_eq!(got, vec!["c1", "c2", "c3"]);
+    }
+
+    /// A spendable row is not a reservation, however old it looks.
+    #[test]
+    fn ignores_rows_that_are_not_reserved() {
+        let conn = seed_db();
+        let repo = OutputRepository::new(&conn);
+        let ts = now() - 2 * HOUR;
+        conn.execute(
+            "INSERT INTO outputs (user_id, spendable, change, vout, satoshis, provided_by, purpose,
+                                  type, txid, spending_description, confirmed, created_at, updated_at)
+             VALUES (1, 1, 0, 0, 500, 'you', '', 'P2PKH', 'ee', 'pending-9-0', 1, ?1, ?1)",
+            rusqlite::params![ts],
+        )
+        .unwrap();
+
+        assert!(repo.list_stale_pending_reservations(15 * 60).unwrap().is_empty());
+    }
+
+    #[test]
+    fn release_returns_the_outpoint_to_spendable() {
+        let conn = seed_db();
+        let repo = OutputRepository::new(&conn);
+        reserved(&conn, "ff", 2, 7_000, "pending-3-0", 2 * HOUR);
+
+        assert_eq!(repo.restore_outpoint_if_reserved("ff", 2, "pending-3-0").unwrap(), 1);
+        assert!(is_spendable(&conn, "ff", 2));
+
+        let desc: Option<String> = conn
+            .query_row("SELECT spending_description FROM outputs WHERE txid = 'ff'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(desc, None, "the placeholder is cleared on release");
+    }
+
+    /// R-NORACE. Between listing a stale reservation and releasing it, a concurrent
+    /// `createAction` can legitimately re-reserve the row under a *new* placeholder. Releasing
+    /// by outpoint alone would free that live reservation and let two transactions select the
+    /// same UTXO -- strictly worse than the leak this sweep fixes. The release is therefore
+    /// scoped to the placeholder it was listed under.
+    #[test]
+    fn release_does_not_touch_a_row_re_reserved_under_a_new_placeholder() {
+        let conn = seed_db();
+        let repo = OutputRepository::new(&conn);
+        reserved(&conn, "ab", 0, 9_000, "pending-old-0", 2 * HOUR);
+
+        conn.execute(
+            "UPDATE outputs SET spending_description = 'pending-new-1' WHERE txid = 'ab'",
+            [],
+        )
+        .unwrap();
+
+        assert_eq!(
+            repo.restore_outpoint_if_reserved("ab", 0, "pending-old-0").unwrap(),
+            0,
+            "stale placeholder must not free a live reservation"
+        );
+        assert!(!is_spendable(&conn, "ab", 0), "the row stays reserved for the live caller");
+    }
+
+    /// The same scoping protects the ordinary success path: once `sign_action` has resolved
+    /// the placeholder to the real txid, a late sweep must not un-spend it.
+    #[test]
+    fn release_does_not_touch_a_row_already_resolved_to_a_real_txid() {
+        let conn = seed_db();
+        let repo = OutputRepository::new(&conn);
+        reserved(&conn, "ac", 0, 4_000, "pending-4-0", 2 * HOUR);
+        conn.execute(
+            "UPDATE outputs SET spending_description = '50939442970f532a' WHERE txid = 'ac'",
+            [],
+        )
+        .unwrap();
+
+        assert_eq!(repo.restore_outpoint_if_reserved("ac", 0, "pending-4-0").unwrap(), 0);
+        assert!(!is_spendable(&conn, "ac", 0));
+    }
+
+    /// Releasing one outpoint must not disturb the siblings reserved alongside it -- the
+    /// sweep verifies on-chain state per outpoint, so it releases per outpoint.
+    #[test]
+    fn release_is_scoped_to_a_single_outpoint() {
+        let conn = seed_db();
+        let repo = OutputRepository::new(&conn);
+        reserved(&conn, "ad", 0, 1_000, "pending-5-0", 2 * HOUR);
+        reserved(&conn, "ad", 1, 2_000, "pending-5-0", 2 * HOUR);
+
+        assert_eq!(repo.restore_outpoint_if_reserved("ad", 0, "pending-5-0").unwrap(), 1);
+        assert!(is_spendable(&conn, "ad", 0));
+        assert!(!is_spendable(&conn, "ad", 1), "sibling reservation is untouched");
+    }
+}
+
+#[cfg(test)]
+mod reservation_race_tests {
+    use super::*;
+    use crate::database::migrations;
+
+    fn seed_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
+        migrations::create_schema_v1(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO users (userId, identity_key, active_storage, created_at, updated_at)
+             VALUES (1, 'test_identity_key', 'local', 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO outputs (user_id, spendable, change, vout, satoshis, provided_by, purpose,
+                                  type, txid, confirmed, created_at, updated_at)
+             VALUES (1, 1, 0, 0, 10000, 'you', '', 'P2PKH', 'race', 1, 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    /// R-NORACE, tested at the level where the race is actually prevented.
+    ///
+    /// Two `createAction`s that both select the same UTXO are only stopped by
+    /// `mark_multiple_spent`'s `AND spendable = 1` predicate: the first reservation wins and
+    /// the second updates **zero** rows, so the second caller cannot claim the coin.
+    ///
+    /// The assertion is deliberately `0`, not "the two callers picked different UTXOs". A
+    /// harness that fires two concurrent sends at a 40-UTXO wallet reports "different UTXOs"
+    /// whether or not any reservation exists — the correct answer would be the answer anyway,
+    /// which is exactly the shape of test that has cost this sprint days before. Here, a
+    /// broken reservation reports `1`, so the number only comes out right if the mechanism
+    /// works.
+    #[test]
+    fn second_reservation_of_the_same_outpoint_claims_nothing() {
+        let conn = seed_db();
+        let repo = OutputRepository::new(&conn);
+        let outpoint = vec![("race".to_string(), 0u32)];
+
+        let first = repo.mark_multiple_spent(&outpoint, "pending-caller-a-0").unwrap();
+        assert_eq!(first, 1, "the first caller reserves the coin");
+
+        let second = repo.mark_multiple_spent(&outpoint, "pending-caller-b-1").unwrap();
+        assert_eq!(second, 0, "the second caller must claim nothing");
+
+        // And the coin is still held by caller A, not silently re-labelled to caller B.
+        let desc: String = conn
+            .query_row("SELECT spending_description FROM outputs WHERE txid = 'race'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(desc, "pending-caller-a-0");
+    }
+
+    /// The losing caller's scope guard must not free the winner's reservation. This is the
+    /// specific way a release bug would *widen* the race rather than fix the leak: caller B
+    /// fails validation, B's guard fires, and A's coin goes back in the pool while A is still
+    /// building its transaction.
+    #[test]
+    fn losing_callers_guard_does_not_free_the_winners_reservation() {
+        let conn = seed_db();
+        let repo = OutputRepository::new(&conn);
+        let outpoint = vec![("race".to_string(), 0u32)];
+
+        repo.mark_multiple_spent(&outpoint, "pending-caller-a-0").unwrap();
+        repo.mark_multiple_spent(&outpoint, "pending-caller-b-1").unwrap(); // claims nothing
+
+        // Caller B hits one of the 19 early returns; its guard releases its own placeholder.
+        let freed = repo.restore_by_spending_description("pending-caller-b-1").unwrap();
+        assert_eq!(freed, 0, "B's guard must not free a coin B never reserved");
+
+        let spendable: i64 = conn
+            .query_row("SELECT spendable FROM outputs WHERE txid = 'race'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(spendable, 0, "A still holds the reservation");
     }
 }

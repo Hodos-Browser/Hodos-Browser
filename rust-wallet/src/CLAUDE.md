@@ -265,7 +265,7 @@ Seven per-operation chains, tried in order:
 Bitails is deliberately **demoted off** the raw_tx / proof / header chains: it returns HTTP 500 instead of 404 for unknown txids, which poisons error messages. It is kept on `tx_status`, where its response shape is reliable.
 
 ### Background Tasks
-`monitor/` registers **14 tasks** (`monitor/mod.rs :: TaskSchedule` has 14 fields and the run loop dispatches all 14 on a 30 s tick): `check_for_proofs` 60 s, `send_waiting` 120 s, `fail_abandoned` 300 s, `unfail` 300 s, `review_status` 60 s, `purge` 3600 s, `sync_pending` 30 s, `check_peerpay` 60 s, `backup` 10800 s, `replay_overlay` 300 s, `consolidate_dust` 86400 s, `verify_double_spend` 60 s, `retry_peerpay_outbox` 30 s, `refresh_ship_cache` 300 s. `MONITOR_STARTED: AtomicBool` prevents duplicate loops. See `monitor/CLAUDE.md` for per-task detail.
+`monitor/` registers **15 tasks** (`monitor/mod.rs :: TaskSchedule` has 15 fields and the run loop dispatches all 15 on a 30 s tick): `check_for_proofs` 60 s, `send_waiting` 120 s, `fail_abandoned` 300 s, `unfail` 300 s, `review_status` 60 s, `purge` 3600 s, `sync_pending` 30 s, `check_peerpay` 60 s, `backup` 10800 s, `replay_overlay` 300 s, `consolidate_dust` 86400 s, `verify_double_spend` 60 s, `retry_peerpay_outbox` 30 s, `refresh_ship_cache` 300 s, `sweep_reservations` 300 s. `MONITOR_STARTED: AtomicBool` prevents duplicate loops. See `monitor/CLAUDE.md` for per-task detail.
 
 ## External API Dependencies
 
@@ -305,5 +305,5 @@ Bitails is deliberately **demoted off** the raw_tx / proof / header chains: it r
 - `certificate/CLAUDE.md` — BRC-52 certificate parsing/verification types (handlers live in `handlers/certificate_handlers.rs`)
 - `transaction/CLAUDE.md` — Bitcoin SV transaction parsing and building
 - `script/CLAUDE.md` — Script parsing and PushDrop encoding
-- `monitor/CLAUDE.md` — Background task scheduler (14 tasks)
+- `monitor/CLAUDE.md` — Background task scheduler (15 tasks)
 - `/CLAUDE.md` — Root project documentation with full architecture overview

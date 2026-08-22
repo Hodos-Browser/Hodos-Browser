@@ -4,7 +4,31 @@
 refusing to accept the recorded "429 mempool under-report" explanation — there were **zero** 429
 events in the log that day.
 
-**Status: MEASURED, not fixed. Pre-existing — not introduced by Phase 0.5.**
+**Status: FIXED 2026-08-22 (Phase 0.7, Windows).** Pre-existing — not introduced by Phase 0.5.
+Evidence, including every negative control, is in
+`phase-0.7-utxo-reservation-leak/PHASE_CONTRACT.md` §3a.
+
+> ⚠️ **Two claims in this ticket did not survive code re-reading; they are left below as written
+> for provenance.**
+>
+> 1. *"`grep` finds no expiry, rollback, release or staleness sweep."* There was one:
+>    `output_repo.rs :: restore_pending_placeholders()`, a blanket
+>    `UPDATE … WHERE spending_description LIKE 'pending-%'` with no age filter and **no on-chain
+>    check**, run unconditionally at every startup from `main.rs`. So a restart *did* release these
+>    reservations — blindly. That is worse than it sounds: a row can still hold a `pending-`
+>    placeholder while its transaction is already broadcast (the placeholder→txid update is only a
+>    `warn!` on failure and the broadcast proceeds anyway), so the shipped recovery path could
+>    un-spend a real spend. It has been deleted and replaced by the verified sweeper.
+> 2. *"`sign_action` is the only current release."* The placeholder is also resolved inside
+>    `create_action_internal` and restored on the broadcast-failure path.
+>
+> The core finding — that the 19 in-window `return` sites strand the reservation for the life of
+> the process — was confirmed exactly, and re-measured on a pre-fix binary before the fix landed.
+
+**The three UTXOs listed below were already recovered before Phase 0.7 began** (most likely by that
+same blanket startup restore, on a restart during Phase 0.5). At kickoff the wallet held **zero**
+`pending-%` rows, so there was nothing left for the new sweeper to reclaim; A3 was demonstrated on a
+freshly staged strand instead.
 
 ## What happens
 

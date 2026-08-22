@@ -16,6 +16,7 @@
 //! - TaskReviewStatus: Ensure consistency across proven_tx_reqs → transactions → outputs
 //! - TaskPurge: Cleanup old monitor_events and completed proof requests
 //! - TaskSyncPending: Periodic UTXO sync for pending addresses
+//! - TaskSweepReservations: Release stale `pending-%` UTXO reservations (on-chain verified)
 
 pub mod task_check_for_proofs;
 pub mod task_send_waiting;
@@ -31,6 +32,7 @@ pub mod task_consolidate_dust;
 pub mod task_verify_double_spend;
 pub mod task_retry_peerpay_outbox;
 pub mod task_refresh_ship_cache;
+pub mod task_sweep_reservations;
 
 use actix_web::web;
 use log::{info, warn, error, debug};
@@ -58,6 +60,7 @@ struct TaskSchedule {
     verify_double_spend: u64,
     retry_peerpay_outbox: u64,
     refresh_ship_cache: u64,
+    sweep_reservations: u64,
 }
 
 impl Default for TaskSchedule {
@@ -77,6 +80,7 @@ impl Default for TaskSchedule {
             verify_double_spend: 60,  // 1 minute — fast verification for suspected double-spends
             retry_peerpay_outbox: 30, // 30 seconds — fast tick, actual retry governed by next_retry_at
             refresh_ship_cache: 300,  // 5 min — matches ship_cache::FRESH_TTL so cache never enters stale window
+            sweep_reservations: 300,  // 5 min — each run only releases reservations older than MAX_AGE_SECS
         }
     }
 }
@@ -142,7 +146,7 @@ impl Monitor {
 
     /// Main run loop — ticks every 30 seconds, runs tasks that are due
     async fn run(&self) {
-        info!("🔄 Monitor started with 13 tasks (graceful shutdown enabled)");
+        info!("🔄 Monitor started with 15 tasks (graceful shutdown enabled)");
         info!("   TaskCheckForProofs: every {}s", self.schedule.check_for_proofs);
         info!("   TaskSendWaiting: every {}s", self.schedule.send_waiting);
         info!("   TaskFailAbandoned: every {}s", self.schedule.fail_abandoned);
@@ -156,6 +160,7 @@ impl Monitor {
         info!("   TaskConsolidateDust: every {}s (dust UTXO sweep)", self.schedule.consolidate_dust);
         info!("   TaskVerifyDoubleSpend: every {}s (independent DS verification)", self.schedule.verify_double_spend);
         info!("   TaskRefreshShipCache: every {}s (keeps SHIP discovery warm, runs even on busy-DB ticks)", self.schedule.refresh_ship_cache);
+        info!("   TaskSweepReservations: every {}s (releases stale UTXO reservations, on-chain verified)", self.schedule.sweep_reservations);
 
         let tick_interval = Duration::from_secs(30);
         let mut last_check_for_proofs: u64 = 0;
@@ -179,6 +184,10 @@ impl Monitor {
         let mut last_verify_double_spend: u64 = 0; // Check on first tick
         let mut last_retry_peerpay_outbox: u64 = 0; // Check on first tick
         let mut last_refresh_ship_cache: u64 = 0; // 0 = warm cache on first tick (no DB needed)
+        // 0 = sweep on the first tick. This is the startup recovery path for reservations
+        // stranded by a process kill; it replaced an unconditional, unverified blanket
+        // restore that used to run inline in main().
+        let mut last_sweep_reservations: u64 = 0;
 
         // Small initial delay to let the server finish starting up
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -369,6 +378,16 @@ impl Monitor {
                 if let Err(e) = task_retry_peerpay_outbox::run(&self.state, &self.client).await {
                     warn!("   ⚠️ TaskRetryPeerPayOutbox failed: {}", e);
                     self.log_event("TaskRetryPeerPayOutbox:error", Some(&e));
+                }
+            }
+
+            // TaskSweepReservations — release UTXO reservations stranded by a process kill,
+            // each proven unspent on-chain first
+            if now - last_sweep_reservations >= self.schedule.sweep_reservations {
+                last_sweep_reservations = now;
+                if let Err(e) = task_sweep_reservations::run(&self.state).await {
+                    warn!("   ⚠️ TaskSweepReservations failed: {}", e);
+                    self.log_event("TaskSweepReservations:error", Some(&e));
                 }
             }
 
