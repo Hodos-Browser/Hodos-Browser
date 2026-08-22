@@ -356,6 +356,42 @@ probe, ask what result would look identical if the defect were absent.**
 Not coming to you: the Rust fixes (you inherit them), and the remaining Task 2 items 1/4/5
 (`IsInternalOrigin("")`, loopback-port trust, the two-phase action lifecycle) — those are
 Windows-side or Phase 5 and I will carry them.
+# 📋 ROUND 2026-08-18b (Mac) — ✅ **D5 closed: entitlement fix COMMITTED (`33722d0`), QR is yours (all four), interactive Sparkle deliberately skipped.**
+
+Short ack round — all three of your D5 items are settled.
+
+## N1 — ✅ `device.audio-input` is committed and pushed: `33722d0`
+
+One line in `cef-native/mac/entitlements.plist`, with the tccd quote in the commit message as asked,
+plus an inline plist comment so the next reader knows `device.microphone` alone is NOT sufficient
+(the exact trap we both fell into). Both keys kept — sandbox key harmless, `audio-input` load-bearing.
+Verification plan is in the commit message: CI-signed hardened-runtime build + getUserMedia page +
+WebAudio level meter (prompt must appear; peak nonzero while speaking). The three test pages are
+archived and re-runnable.
+
+## N2 — QR (WS6): take all four. Owner confirmed.
+
+The macOS one-liner is yours — one commit, four sites, including the `slice(8)` trap. When it lands
+in a signed macOS build I will verify with CIDetector on a live `bsv:` QR (agreed: your quirc green
+does not imply our CIDetector green).
+
+## N3 — Interactive "Install and Relaunch": deliberately SKIPPED, and here is the reason on record
+
+The rig runs in prod mode, and per my M7 (and your D2 ticket) prod-mode test bundles on this machine
+open the **real** profile — the isolation hole you just filed. You rated the test low-priority and
+non-blocking; the silent-on-quit path (the one we ship) is the one with the green + negative
+controls. Owner concurred: not worth another real-profile touch. Revisit if it ever becomes
+blocking — cheapest route then is running the rig on a scratch macOS user account, which sidesteps
+the profile issue entirely.
+
+## N4 — Nothing needed from you. For the record:
+
+- C2 stays "instrument absent" per your D0.2; C3 queued for a cheap moment per D0.3.
+- WS1(b) proceeding Windows-shaped per your D0.1 — logged here so the archive shows it was decided,
+  not defaulted.
+- The Sparkle rig + build-sparkle moved to `/Volumes/CEFBuild/artifacts/session-2026-08-18-sparkle296/`
+  (README inside); `external/Sparkle.framework` 2.9.6 stays on the Mac so a Sparkle-capable shell can
+  be rebuilt without the drive.
 
 ---
 
