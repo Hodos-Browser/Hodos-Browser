@@ -1647,3 +1647,40 @@ do-both-or-neither (price vs delist), the §4o disclosure set + `is_permission_s
 (Phase 5), and the macOS session's parity work incl. the `wallet_call` CRLF-method SSRF. A final
 confirmation panel over `f033f75` (the two fresh fixes) is a reasonable belt-and-suspenders before
 sign-off but is optional — each fix carries its own measured/tested negative control.
+
+### 4w. Confirmation panel over `f033f75` — 2 fixes CLEAN, 1 adjacent gap FIXED (`3d5e0f7`)
+
+Focused confirmation panel over the two f033f75 fixes (complete: 6 agents, 0 err). Raw in the workflow
+record. Verdict: **both fixes are internally SOUND and regression-free** — FIX A's `/wallet/debug`
+subtree arm has no bypass (checks both raw+decoded, first-party early-returns) and no over-match; FIX B's
+`RequestPathForMatching` reorder correctly handles every regression case (real absolute URLs, fragments,
+double-encoding) with no legit endpoint stopping to match.
+
+**But the completeness critic caught an adjacent gap:** FIX A's own reasoning (a `(state, _body)` handler
+with no `HttpRequest` can't self-gate, and a dApp has no business calling a fund-mover) applies to
+SIBLINGS the fix left open — a whole class, not just `/wallet/debug`. Systematic sweep found the
+dApp-reachable, no-`HttpRequest`, fund-moving/destructive set absent from `is_permission_surface`:
+`wallet_delete` (HIGH — deletes the wallet), `wallet_consolidate_dust` + `wallet_backup_onchain` (MED —
+unprompted broadcast/fee-burn), `broadcast_nosend` (LOW). The sibling `wallet_export` DOES take
+`HttpRequest` and rejects `X-Requesting-Domain` — proof these were omissions. (`sign_action` /
+`internalize_action` are BRC-100 dApp-facing by design and gated at their flow entry / inbound-only;
+`wallet_recover_external` needs attacker-supplied external keys — not an exfil of user funds.)
+
+**Fixed (`3d5e0f7`):** five SUBTREE arms in `is_permission_surface` — `/wallet/delete`,
+`/wallet/consolidate-dust`, `/wallet/backup`, `/wallet/recover`, `/wallet/broadcast-nosend`. Every
+internal/scheduled caller is header-free, verified: `task_consolidate_dust::run_inner` and
+`wallet_delete`'s `do_onchain_backup` are direct fn calls; `task_backup`'s `POST /wallet/backup/onchain`
+and the BRC-121 `BroadcastTask`'s `POST /wallet/broadcast-nosend` both send Content-Type only — so
+first-party is untouched.
+
+**MEASURED.** RED (pre-arms binary, approved dApp, safe endpoints only): `/wallet/broadcast-nosend` → 404
+(handler ran), `/wallet/recover-external` → 400 (deserialize ran) — not gated. GREEN (post-arms): all five
+→ **403** from an approved dApp (gate fires before the handler, so firing `/wallet/delete` was safe).
+POSITIVE CONTROLS: first-party (no header) still reaches every handler (404/400); dApp-legit endpoints
+unaffected (`/wallet/status` 200, `/wallet/pay402` 202 — still a payment gate). Destructive endpoints
+NOT fired pre-fix; their RED is the same `is_permission_surface` mechanism already measured on
+`/wallet/debug`. Balance held (movement all session = two scheduled 3-hourly backups only).
+
+⚠️ **The systematic `is_permission_surface`-as-subtree audit is STILL a Phase 5 item** — this closed the
+concrete dApp-reachable fund-mover class the panel named, but the owner-deferred structural move (a
+default-deny subtree in `domain_trust_mw` rather than an ever-growing arm list) remains owed.
