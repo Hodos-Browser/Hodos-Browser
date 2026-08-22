@@ -194,6 +194,35 @@ async fn domain_trust_mw(
                 // debug endpoint added later, by default; the header-free
                 // first-party path (developer tooling / wallet UI) is untouched.
                 || path.starts_with("/wallet/debug")
+                // ⛔ FOURTH CLASS: no-HttpRequest wallet-management fund-movers /
+                // destructive ops with NO legitimate dApp use. (P0.5 panel
+                // re-run confirmation — the completeness critic found the
+                // /wallet/debug fix left its own siblings open.) Each takes
+                // `(state, _body)` with no `HttpRequest`, so — like the debug and
+                // reveal-mnemonic handlers — it cannot gate itself, and each is
+                // reachable from an approved dApp via the wallet_call bridge:
+                //   /wallet/delete           — DELETES the wallet (HIGH; backs up
+                //                              first, but an unprompted destructive
+                //                              action a dApp must never trigger)
+                //   /wallet/consolidate-dust — broadcasts a consolidation tx
+                //                              (1000 sats to treasury + fee)
+                //   /wallet/backup*          — broadcasts an on-chain backup tx
+                //   /wallet/recover*         — wallet recovery / external sweep
+                //   /wallet/broadcast-nosend — force-finalizes a held nosend tx
+                // The sibling `wallet_export` DOES take `HttpRequest` and rejects
+                // X-Requesting-Domain — proof this is the intended pattern and
+                // these were omissions. Every internal/scheduled caller is
+                // header-free (task_consolidate_dust::run_inner and
+                // wallet_delete's do_onchain_backup are direct fn calls;
+                // task_backup's POST /wallet/backup/onchain and the BRC-121
+                // BroadcastTask's POST /wallet/broadcast-nosend both send only
+                // Content-Type, no X-Requesting-Domain), so the first-party path
+                // is untouched. Subtrees, not exact strings.
+                || path.starts_with("/wallet/delete")
+                || path.starts_with("/wallet/consolidate-dust")
+                || path.starts_with("/wallet/backup")
+                || path.starts_with("/wallet/recover")
+                || path.starts_with("/wallet/broadcast-nosend")
         }
         let hits_surface =
             is_permission_surface(&raw_path) || is_permission_surface(&decoded_path);
