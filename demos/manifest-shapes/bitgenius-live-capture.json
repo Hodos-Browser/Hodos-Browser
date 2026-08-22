@@ -1,0 +1,66 @@
+{
+  "id": "/app",
+  "name": "BitGenius",
+  "short_name": "BitGenius",
+  "description": "Source-grounded AI for BSV builders.",
+  "start_url": "/app",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#08110f",
+  "theme_color": "#08110f",
+  "icons": [
+    { "src": "/brand/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/brand/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ],
+  "screenshots": [
+    { "src": "/screenshots/bitgenius-chat.jpg", "sizes": "1280x720", "type": "image/jpeg", "form_factor": "wide", "label": "A source-grounded BitGenius conversation" },
+    { "src": "/screenshots/bitgenius-mobile.jpg", "sizes": "390x844", "type": "image/jpeg", "form_factor": "narrow", "label": "BitGenius on mobile" }
+  ],
+  "shortcuts": [
+    { "name": "New conversation", "url": "/app", "icons": [{ "src": "/brand/icon-192.png", "sizes": "192x192", "type": "image/png" }] },
+    { "name": "Account and credits", "url": "/app/account", "icons": [{ "src": "/brand/icon-192.png", "sizes": "192x192", "type": "image/png" }] }
+  ],
+  "metanet": {
+    "schemaVersion": 1,
+    "originator": "bitgenius.net",
+    "brc": ["BRC-100", "BRC-103", "BRC-104", "BRC-105", "BRC-116"],
+    "groupPermissions": {
+      "description": "Sign in to BitGenius and approve each BSV checkout with your wallet.",
+      "protocolPermissions": [
+        {
+          "protocolID": [1, "identity key retrieval"],
+          "description": "Use your public identity key as your passwordless BitGenius account."
+        },
+        {
+          "protocolID": [2, "server hmac"],
+          "counterparty": "self",
+          "description": "Create private, replay-resistant authentication session nonces."
+        },
+        {
+          "protocolID": [2, "auth message signature"],
+          "counterparty": "0279887cddd8cb44fc34793fa568dfb86badb1e8f1eace5976a6f4cf3f786cc893",
+          "description": "Authenticate your session with the BitGenius server."
+        },
+        {
+          "protocolID": [2, "3241645161d8"],
+          "counterparty": "0279887cddd8cb44fc34793fa568dfb86badb1e8f1eace5976a6f4cf3f786cc893",
+          "description": "Derive the exact BRC-105 payment output approved for a BitGenius checkout."
+        }
+      ]
+    }
+  },
+  "babbage": {
+    "schemaVersion": 1,
+    "originator": "bitgenius.net",
+    "brc": ["BRC-100", "BRC-103", "BRC-104", "BRC-105", "BRC-116"],
+    "groupPermissions": {
+      "description": "Sign in to BitGenius and approve each BSV checkout with your wallet.",
+      "protocolPermissions": [
+        { "protocolID": [1, "identity key retrieval"], "description": "Use your public identity key as your passwordless BitGenius account." },
+        { "protocolID": [2, "server hmac"], "counterparty": "self", "description": "Create private, replay-resistant authentication session nonces." },
+        { "protocolID": [2, "auth message signature"], "counterparty": "0279887cddd8cb44fc34793fa568dfb86badb1e8f1eace5976a6f4cf3f786cc893", "description": "Authenticate your session with the BitGenius server." },
+        { "protocolID": [2, "3241645161d8"], "counterparty": "0279887cddd8cb44fc34793fa568dfb86badb1e8f1eace5976a6f4cf3f786cc893", "description": "Derive the exact BRC-105 payment output approved for a BitGenius checkout." }
+      ]
+    }
+  }
+}

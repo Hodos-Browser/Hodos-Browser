@@ -1,0 +1,27 @@
+{
+  "version": "1.0",
+  "name": "Fixture HodosLegacy",
+  "description": "The non-standard top-level `permissions` shape from PERMISSION_UX_DESIGN.md §5.",
+  "iconUrl": "/icon-192.png",
+  "permissions": {
+    "protocols": [
+      {
+        "name": "identity key retrieval",
+        "securityLevel": 1,
+        "keyID": "*",
+        "description": "Legacy Hodos shape."
+      }
+    ],
+    "baskets": [
+      {
+        "name": "receipts",
+        "description": "Keep purchase receipts."
+      }
+    ],
+    "spending": {
+      "perTransactionUsd": 100,
+      "perSessionUsd": 1000,
+      "purpose": "In-app purchases."
+    }
+  }
+}

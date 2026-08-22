@@ -14,6 +14,7 @@ practice: they live here.
 |---|---|---|
 | `brc121-402/` | `npm install && npm start` | BRC-121: 402 → BRC-29 payment → retry. Express server, verifies BEEF output 0. |
 | `qr-codes/` | any static server, e.g. `npx serve demos/qr-codes` | QR parsing: BSV address, paymail, handle, identity key, BIP21 with/without amount, and negative cases (segwit, random text, plain URL). |
+| `manifest-shapes/` | any static server, e.g. `npx serve demos/manifest-shapes` | Wallet manifest parsing (beta.3 Phase 0.8): BRC-73 `metanet.groupPermissions`, legacy `babbage`, all four categories, namespace precedence, our own legacy shape, and the two negative cases — an unrecognised shape and an SPA `200 text/html` catch-all. Canonical copy, read by **both** the Rust and C++ parsers. |
 
 `qr-codes/` was at `frontend/public/qr-test.html`, `qr-test-bip21.html` and `qr-images/`. It was
 being **bundled into the shipped browser** — test pages served to real users. Moved here 2026-08-15
