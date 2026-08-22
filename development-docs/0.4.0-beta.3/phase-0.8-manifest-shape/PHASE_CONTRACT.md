@@ -115,6 +115,8 @@ fixture 3) so the data is there the moment it is worth showing.
 4. A site can **never** set its own spending caps, whatever its manifest declares.
 5. The parser is shaped so the three unused BRC-73 categories are **data we already carry**, not a
    future rewrite.
+6. ⭐ **The user always knows whose numbers they are looking at.** A field carrying a site's
+   suggested value must never be indistinguishable from a field carrying the user's own default.
 
 ## 5. Done means
 
@@ -131,9 +133,73 @@ fixture 3) so the data is there the moment it is worth showing.
 - [ ] ⛔ Confirm what a manifest-connect grant **writes** to `domain_permissions` — the row must
       inherit the user's safe defaults ($1 per-tx / $10 per-session), never anything the manifest
       declared. **Not yet measured.** If it already cannot, this is a regression test, not a fix.
-- [ ] Fixtures checked in (§6) and driven by both test suites, each with a negative control.
+- [ ] ⭐ Any field populated from the manifest is **visibly marked as the site's suggestion**, and the
+      modal states plainly that these are not the user's defaults. A one-click **"Use my defaults"**
+      control reverts every suggested field.
+- [ ] The approved manifest is stored as a **snapshot**, informational only (§6a).
+- [ ] Fixtures checked in (§7) and driven by both test suites, each with a negative control.
 
-## 6. Test JSON fixtures
+## 6a. Consent provenance and the stored snapshot — owner requirement, 2026-08-22
+
+### The modal carries two different kinds of content — keep them apart
+
+| Kind | Whose it is | How it is shown |
+|---|---|---|
+| **What the site is asking for** — protocols, baskets, certificates | Inherently the site's | Itemised, with the site's own `description` strings, labelled as the site's request |
+| **The limits we allow it under** — per-tx, per-session, rate/min, max-tx/session | **Ours** | Must default to the **user's** values |
+
+⛔ **This is a security requirement, not styling.** If a modal auto-populated with the site's
+suggested numbers looks identical to one carrying the user's defaults, the site has changed what the
+user approves *without the user knowing*. That is a worse defect than the one this phase exists to
+fix: today the modal shows **nothing**; an undifferentiated one would show **the site's numbers
+dressed as the user's own**. If the differentiation is not built, **do not auto-populate at all.**
+
+### ⚠️ Open design decision — which way round? (owner to settle)
+
+- **(a) Populate with the site's values**, clearly marked, plus a "Use my defaults" button.
+  Best first-run UX on a site whose recommendations are what make it work — but a user who simply
+  clicks Approve accepts the site's numbers, which is exactly the approve-without-reading failure
+  mode this phase exists to close.
+- **(b) Populate with the user's defaults**, show the site's suggestion **beside** each field as
+  information, plus an explicit "Use the site's recommended settings" button.
+  The safe state is the default state, and adopting the site's numbers is an affirmative act.
+
+**Recommendation: (b)** — and the owner's own §6a stored-snapshot idea is what makes (b) affordable:
+its cost (a first run under conservative caps may feel restrictive) is recoverable at any time from
+the site's settings, by a user who now has grounds to trust the site. That progression — conservative
+default, lived experience, informed adjustment — is better consent than front-loading a stranger's
+numbers.
+
+Either way, `R-CAPS` holds: nothing a site declares is *written* without an affirmative user act.
+
+### The stored snapshot
+
+Store the approved manifest so the user can later adopt the site's recommended settings from the
+site's own permission screen, and so "what did this site ask for when I approved it?" is answerable.
+
+⛔ **Three rules, all load-bearing:**
+
+1. **Informational only — never a decision input.** BRC-116 §"Decision Inputs": *"Wallets MUST make
+   allow/deny decisions from canonical permission state… In-memory caches are performance
+   optimizations only and MUST NOT be treated as authoritative permission state."* The authoritative
+   state stays `domain_permissions`. The snapshot only ever feeds **display** and a user-initiated
+   "apply these" action.
+2. **Snapshot as approved, not live.** 🚨 Otherwise: a site publishes modest recommendations, the
+   user approves, the site later publishes aggressive ones, and the user clicking "restore
+   recommended" months later silently adopts numbers they never saw. Store what was on screen at
+   approval time, with `fetched_at` and the URL it came from. A manifest that has **changed** is a
+   **re-consent** event — BRC-116 models exactly this as a `renewal` flag — never a silent update.
+3. **Schema change ⇒ owner approval** (CLAUDE.md invariant #2). Proposed shape: a child table
+   `domain_manifest_snapshots`, FK to `domain_permissions(id)` with `ON DELETE CASCADE`, mirroring
+   the documented `cert_field_permissions` pattern rather than a parallel top-level table. A child
+   table also lets a newer fetch sit alongside the approved one for diffing (rule 2). Migration V24.
+
+**Scope split:** store the snapshot **in this phase** — it is small (bitgenius is 3.3 KB against a
+64 KB cap) and storing late means the restore button can never be offered for sites approved before
+it landed. The **restore-button UI on the site permission screen is beta.4**; it is purely additive
+once the data exists.
+
+## 7. Test JSON fixtures
 
 **Canonical home: `demos/manifest-shapes/`** — one copy, servable *and* unit-testable, mirroring the
 `demos/qr-codes/` precedent (static files, `npx serve`). Rust reads them with `include_str!`; the C++
@@ -151,7 +217,7 @@ pass rule is one home per fact.
 | 7 | `not-a-manifest.html` | The SPA `200 text/html` case. Must yield no manifest. |
 | 8 | `bitgenius-live-capture.json` | The real 3358-byte manifest, captured 2026-08-22, so the acceptance test does not depend on a live third-party site. |
 
-## 7. Evidence table
+## 8. Evidence table
 
 | ID | 🟢 GREEN | 🔴 RED — must be *seen* to fail | 🎯 SUBJECT | Tier |
 |---|---|---|---|---|
@@ -164,6 +230,10 @@ pass rule is one home per fact.
 | `P0.8-A7` | Fixture 7 yields **no** manifest | ⛔ Trust the status code → HTML treated as a manifest | Parse result, driven by real `200 text/html` | T1 |
 | `P0.8-A8` | Fixture 4: `metanet` content wins over `babbage` | ⛔ Swap precedence → legacy content shown | Parsed protocol set | T1 |
 
+| `P0.8-A9` | Every manifest-populated field is visibly marked as the **site's** suggestion, and the modal says so in words | ⛔ Remove the marking → it is indistinguishable from the user's own defaults | The rendered modal, read by someone who did not write it — not the presence of a CSS class | T2 |
+| `P0.8-A10` | One click reverts every suggested field to the user's defaults | ⛔ Stub the control → suggested values survive | The `domain_permissions` row after approval | T1 |
+| `P0.8-A11` | A stored snapshot never changes an allow/deny outcome | ⛔ Feed the snapshot into the gate → a decision moves | Engine decision with and without a snapshot present, identical inputs | T1 |
+
 ⚠️ **Subject-correctness, twice bitten already this sprint.** `A3` must assert *which modal opened*,
 not a parse count — a count assertion passes the instant the parser changes at all, whether or not
 the prompt improved. `A1` must be driven through the C++ parse, because that is what the log line
@@ -175,22 +245,24 @@ Manage Site Permissions first, or the domain is already trusted and nothing will
 for bare hosts**, so a localhost demo cannot exercise the real fetch path — the fixtures test the
 parsers, bitgenius tests the flow.
 
-## 8. Invariants preserved
+## 9. Invariants preserved
 
 | ID | Invariant | Why this phase could break it |
 |---|---|---|
 | `R-PERIM` | Privacy-perimeter gates re-evaluate after a connect approval | `HttpRequestInterceptor.cpp` deliberately does **not** propagate `X-User-Approved` for `domain_approval` / `manifest_connect_bundle` so the kind gates run fresh; its comment calls propagating it a privacy-perimeter bypass. A richer bundle must not start granting those. |
 | `R-CAPS` | A site can never set its own spending caps | `A5`. BRC-73's `amount` is **monthly satoshis**; ours are **per-tx / per-session USD cents** — neither unit nor period matches, so it is displayed, never written. |
+| `R-PROV` | The user can always tell whose numbers a field carries | §6a. An undifferentiated auto-populated modal lets a site alter what is approved without the user knowing. |
+| `R-SNAPSHOT` | A stored manifest is informational, never authoritative | BRC-116 forbids treating cached state as authoritative permission state. `P0.8-A11`. |
 | `R-CONNECT` | An unknown domain still gets a working connect flow | The fallback must not become a dead end. |
 | `R-NOFETCH` | An approved domain is never re-asked for a manifest | Adding a second fetch location must stay behind the `trust == "approved"` short-circuit. |
 
-## 9. Out of scope
+## 10. Out of scope
 
 - The *"app recommends these settings"* modal → `../../TICKET_brc73_group_permissions_manifest.md` §5.
 - Any change to the decision engine.
 - Chromium's Local Network Access prompt branding → Phase 0.9.
 
-## 10. Related
+## 11. Related
 
 - `../../TICKET_brc73_group_permissions_manifest.md` — spec citations, full survey, deferred modal.
 - `bitcoin-sv/BRCs` — `wallet/0073.md`, `wallet/0116.md`.

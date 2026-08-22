@@ -18,8 +18,9 @@ Phase 0.8 was **scoped but NOT implemented** in the previous session (`cc222d3`)
    findings — the spec question is SETTLED, do not re-derive it) and
    `project_beta3_windows_mac_deconfliction_protocol` (git workflow: commit/push per phase, batch the
    relay, rebase before push, **never commit `X402_INTEGRATION.md`**).
-2. `development-docs/0.4.0-beta.3/phase-0.8-manifest-shape/PHASE_CONTRACT.md` — goals §4, done-means
-   §5, fixtures §6, evidence table §7 (A1–A8), invariants §8.
+2. `development-docs/0.4.0-beta.3/phase-0.8-manifest-shape/PHASE_CONTRACT.md` — goals §4, done-means §5,
+   **consent provenance + stored snapshot §6a**, fixtures §7, evidence table §8 (A1–A11),
+   invariants §9.
 3. `development-docs/TICKET_brc73_group_permissions_manifest.md` — spec citations, the adoption
    survey, and the deferred modal. **Archive this ticket when 0.8 closes.**
 4. `demos/manifest-shapes/README.md` + all 8 fixtures.
@@ -52,6 +53,8 @@ The previous session verified these; **re-verify, they may have moved**:
 3. One gesture → one modal.
 4. A site can **never** set its own spending caps.
 5. The three unused BRC-73 categories are data we already carry, not a future rewrite.
+6. ⭐ The user always knows **whose numbers** a field carries — the site's suggestion is never
+   indistinguishable from their own default.
 
 ## 3. Security / privacy review — explicit, not implied
 
@@ -80,9 +83,13 @@ holds — if a BRC-73 field appears to need an engine change, stop and ask.
 `per_session_limit_cents` (1000), `rate_limit_per_min` (30), `max_tx_per_session` (100), plus
 `identity_key_disclosure_allowed` and `bundled_scope_grant`.
 
-BRC-73 offers **one**: `spendingAuthorization.amount` = **monthly satoshis**. So the standard has
-**no rate limit, no per-transaction cap, and no session concept**, and its single number matches
-neither our unit (USD cents) nor our period.
+BRC-73 offers **one**: `spendingAuthorization.amount` = **monthly satoshis**. BRC-116 confirms the
+gap is deliberate and total: *"Protocol permission grants are binary (grant or deny). There are no
+amount limits or ephemeral flags"* (§Protocol Permissions), the same for basket grants, and spending
+is tracked on a **calendar month** basis with no time-based expiry. So the standard has **no rate
+limit, no per-transaction cap, and no session concept anywhere**, and its single number matches
+neither our unit (USD cents) nor our period. We also have **no monthly concept at all** — worth
+deciding whether to add one.
 
 Produce a written recommendation covering both directions:
 - **Do we adjust our engine?** (e.g. is a monthly cap worth carrying alongside per-tx/per-session?)
@@ -97,13 +104,36 @@ Reuse the existing connect-bundle modal (`frontend/src/pages/BRC100AuthOverlayRo
 dispatch; sibling surface `frontend/src/components/wallet/ApprovedSitesTab.tsx`). ⛔ Do not add a new
 overlay HWND — CLAUDE.md's overlay rules.
 
-**Owner requirement:** if we auto-populate fields with the site's suggested settings, the collapsible
-sections **must be expanded on popup** — a user must not approve values hidden behind a collapsed
-section. Anything auto-populated must be visible without interaction.
+**Owner requirements (contract §6a — read it, it is the security argument):**
+- If we auto-populate fields with the site's suggested settings, the collapsible sections **must be
+  expanded on popup** — a user must not approve values hidden behind a collapsed section.
+- ⛔ **A manifest-populated field must never be indistinguishable from the user's own default.** The
+  modal must differentiate visibly *and say so in words*. This is a security requirement: an
+  undifferentiated modal lets a site change what the user approves without the user knowing — worse
+  than the defect this phase fixes, because today the modal shows nothing rather than showing the
+  site's numbers dressed as the user's. **If the differentiation is not built, do not auto-populate.**
+- A one-click **"Use my defaults"** control must revert every suggested field.
+- ⚠️ **Settle the open design decision in §6a first:** populate with the site's values and offer
+  "use my defaults" (a), or populate with the user's defaults and show the site's suggestion beside
+  each field with an explicit "use the site's recommended settings" (b). The contract recommends
+  **(b)** — the safe state is the default state. This is an owner call; ask if unsettled.
 
-⚠️ Deferred (do not build): the *"App ABC recommends these settings — accept or adjust"* modal. No
-surveyed site declares `spendingAuthorization`, so there is no real input to design it against. Parse
-the category anyway so the data is ready.
+Keep the two kinds of modal content apart: **what the site asks for** (protocols, baskets, certs — 
+inherently the site's) versus **the limits we allow it under** (per-tx, per-session, rate/min,
+max-tx/session — ours, and they default to the user's).
+
+**Store the approved manifest as a snapshot** (contract §6a). Three rules, all load-bearing:
+informational **only** — never a decision input (BRC-116: *"In-memory caches are performance
+optimizations only and MUST NOT be treated as authoritative permission state"*); the snapshot is
+**as approved**, not live, or a site can escalate its recommendations after the fact and have them
+silently adopted later; and it is a **schema change**, so CLAUDE.md invariant #2 applies — get owner
+approval, and use a child table with `ON DELETE CASCADE` off `domain_permissions(id)` mirroring the
+`cert_field_permissions` pattern, not a parallel top-level table.
+
+⚠️ Deferred (do not build): the *"App ABC recommends these settings — accept or adjust"* modal, and
+the restore-recommended button on the site permission screen (beta.4 — additive once the snapshot
+data exists). No surveyed site declares `spendingAuthorization`, so there is no real input to design
+the recommendations modal against. Parse the category anyway so the data is ready.
 
 ## 7. Tests — negative control is a hard rule
 
