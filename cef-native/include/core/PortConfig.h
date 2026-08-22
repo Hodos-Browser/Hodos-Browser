@@ -48,6 +48,60 @@ inline std::string AdblockBaseUrl() { return "http://127.0.0.1:" + AdblockPortSt
 inline std::string WalletUrl(const std::string& path)  { return WalletBaseUrl()  + path; }
 inline std::string AdblockUrl(const std::string& path) { return AdblockBaseUrl() + path; }
 
+// ---------------------------------------------------------------------------
+// P0.5 E1 — the wallet_call SSRF guard. macOS-only-EXPLOITABLE, cross-platform-FIXED.
+//
+// The IPC bridge builds `WalletBaseUrl() + endpoint`, where `endpoint` is a raw,
+// page-controlled string off a wallet_call message (args[2]) with no route or
+// shape check, and `httpMethod` (args[4]) reaches CURLOPT_CUSTOMREQUEST verbatim.
+// WalletBaseUrl() has NO trailing slash (above), so an endpoint of "@evil.com/x"
+// yields "http://127.0.0.1:31301@evil.com/x" — curl reads the host up to the LAST
+// '@', so the browser process fetches evil.com. Windows fails closed only by
+// ACCIDENT (ParseUrl's digits-only port check, SyncHttpClient.cpp #ifdef _WIN32);
+// the macOS libcurl arm (#elif __APPLE__) has no validation of any kind and
+// honours it, with page-controlled method + body ⇒ an arbitrary-method,
+// arbitrary-body loopback request primitive.
+//
+// Fixed HERE — one predicate pair, both platforms, applied ONCE at the single
+// shared dispatch choke (dispatchWalletHttpByMethod). ⛔ NOT by porting ParseUrl
+// to macOS: replicating Windows' accidental digits-only safety would give two
+// derivations of one value on two platforms, the exact failure mode CLAUDE.md
+// warns of for RegistrableDomainFromUrl. Validate the INPUT, once.
+//
+// This closes the authority-escape and the CRLF/method-injection class. The
+// endpoint ALLOWLIST (accept only known routes) is deliberately Phase 5, not
+// here — that is the route table, a different and larger change.
+
+// True iff `url` targets the local wallet base and nothing else: exactly
+// WalletBaseUrl() followed by a leading-'/' path, with no control characters.
+// Anchoring to `WalletBaseUrl() + "/"` enforces BOTH properties at once — the
+// endpoint began with '/', and no userinfo/host was injected right after the
+// authority (the "@evil.com" pivot fails because the char after the base is '@',
+// not '/'). The no-control-char sweep stops CRLF request-splitting in the path
+// or query. Fails closed on the empty endpoint (url == base, no trailing slash).
+inline bool IsWalletDispatchUrlSafe(const std::string& url) {
+    const std::string prefix = WalletBaseUrl() + "/";
+    if (url.rfind(prefix, 0) != 0) return false;
+    for (unsigned char c : url) {
+        if (c < 0x20 || c == 0x7f) return false;  // CR, LF, NUL, DEL, other C0
+    }
+    return true;
+}
+
+// True iff `method` is a plausible HTTP verb: non-empty, all uppercase ASCII
+// letters, short. The real verbs (GET/POST/PUT/DELETE/PATCH/HEAD/OPTIONS) all
+// satisfy this; anything carrying CRLF, a space, digits or lowercase — the
+// header-injection vectors into CURLOPT_CUSTOMREQUEST — fails closed. The longest
+// standard verb is OPTIONS (7); 8 leaves one char of slack without admitting
+// junk.
+inline bool IsValidWalletMethod(const std::string& method) {
+    if (method.empty() || method.size() > 8) return false;
+    for (char c : method) {
+        if (c < 'A' || c > 'Z') return false;
+    }
+    return true;
+}
+
 // True if `url` targets the local wallet on the active port, in EITHER host form.
 // Replaces literal find("localhost:31301") / find("127.0.0.1:31301") gates.
 // ---------------------------------------------------------------------------

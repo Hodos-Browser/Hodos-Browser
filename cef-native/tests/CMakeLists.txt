@@ -42,6 +42,7 @@ add_executable(hodos_tests
     farbling_policy_test.cpp            # C2 — eTLD+1 keying, seed persistence, HMAC
     port_config_origin_test.cpp         # P0.5 C1 (row X4) — scheme-anchored origin derivation
     payment_cost_test.cpp               # P0.5 finding 6 — body shapes + the sendMax fail-closed rule
+    wallet_ssrf_guard_test.cpp          # P0.5 E1 — wallet_call SSRF: URL anchor + method validation
 
     # Production sources under test (built into the test exe directly).
     # (Phase 2.6-H removed permission_engine_test / permission_gate_test along
@@ -69,6 +70,11 @@ if(WIN32)
 elseif(APPLE)
     find_package(CURL REQUIRED)
     target_link_libraries(hodos_tests PRIVATE CURL::libcurl)
+    # FarblingPolicy's EnsureProfileSeed uses SecRandomCopyBytes/kSecRandomDefault
+    # (Security.framework) — the macOS analogue of the winhttp/bcrypt block above.
+    # Without this the suite has never linked on macOS (undefined _SecRandomCopyBytes).
+    find_library(SECURITY_LIBRARY Security)
+    target_link_libraries(hodos_tests PRIVATE ${SECURITY_LIBRARY})
 endif()
 
 # nlohmann::json header is needed by ManifestFetcher + UpdateStager (marker).
@@ -91,6 +97,19 @@ target_include_directories(hodos_tests PRIVATE
 target_link_libraries(hodos_tests PRIVATE
     GTest::gtest_main
 )
+
+# macOS: the project sets `-Wl,-no_adhoc_codesign` globally in the top-level
+# CMakeLists (needed for the app bundle's own signing flow), which suppresses the
+# linker's automatic ad-hoc signature on EVERY exe target — including this one.
+# On Apple Silicon an unsigned Mach-O is SIGKILLed on exec (exit 137, no output),
+# so hodos_tests would never run and gtest_discover_tests below would report
+# "Subprocess killed". Re-apply an ad-hoc signature after link. (The app bundle
+# gets its real signature from mac_build_run.sh; this is test-only.)
+if(APPLE)
+    add_custom_command(TARGET hodos_tests POST_BUILD
+        COMMAND codesign --force --sign - $<TARGET_FILE:hodos_tests>
+        COMMENT "Ad-hoc signing hodos_tests (arm64 SIGKILLs unsigned Mach-O)")
+endif()
 
 # Register with CTest so `ctest --test-dir build` works.
 include(GoogleTest)

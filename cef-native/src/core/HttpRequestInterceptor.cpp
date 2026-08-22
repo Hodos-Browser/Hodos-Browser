@@ -1897,6 +1897,22 @@ HttpResponse dispatchWalletHttpByMethod(const std::string& httpMethod,
                                          const std::string& url,
                                          const std::string& bodyJson,
                                          const std::map<std::string, std::string>& headers) {
+    // P0.5 E1 — the wallet_call SSRF guard, applied ONCE at the single shared
+    // dispatch choke every IPC path funnels through (runIpcCallDirect and the
+    // engine cascade). `url` is WalletBaseUrl() + a page-controlled endpoint and
+    // `httpMethod` is page-controlled; without this, the macOS libcurl arm of
+    // SyncHttpClient honours "@evil.com"-style authority escapes and CRLF in the
+    // method. Fail closed here, on the platform-neutral path — never by porting
+    // Windows' accidental ParseUrl safety. See PortConfig.h for the mechanism.
+    if (!hodos::IsWalletDispatchUrlSafe(url) || !hodos::IsValidWalletMethod(httpMethod)) {
+        LOG_WARNING_HTTP("🛡️ wallet dispatch REJECTED (E1 SSRF guard): method='" +
+                         httpMethod + "' url anchored=" +
+                         std::string(hodos::IsWalletDispatchUrlSafe(url) ? "yes" : "no"));
+        HttpResponse denied;
+        denied.success = false;
+        denied.statusCode = 0;
+        return denied;
+    }
     if (httpMethod == "GET") {
         return SyncHttpClient::Get(url, headers, /*timeoutMs=*/30000);
     } else if (httpMethod == "POST") {

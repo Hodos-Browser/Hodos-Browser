@@ -3,6 +3,12 @@
 // rollback must restore the WHOLE {wallet.db,-wal,-shm} set and DELETE a stale
 // new -wal/-shm at the target, or SQLite replays it onto the old db -> corruption.
 
+// The code under test — hodos::updatefs in UpdateFs.{h,cpp} — is itself entirely
+// #ifdef _WIN32 (the apply-transaction auto-updater is Windows-only; macOS updates
+// via Sparkle). So there is nothing to exercise on macOS and this whole file is
+// scoped to match the code it tests: an empty TU elsewhere. Test-only, HARNESS §6.
+#ifdef _WIN32
+
 #include "core/UpdateFs.h"
 #include "core/UpdateStager.h"
 
@@ -518,3 +524,5 @@ TEST(EmbeddedKey, StagerAndFsPublicKeysMatch) {
     // (review 6c.3 LOW — catches a one-sided key rotation at test time).
     EXPECT_STREQ(hodos::UpdateStager::PublicKeyBase64(), hodos::updatefs::PublicKeyBase64());
 }
+
+#endif  // _WIN32
