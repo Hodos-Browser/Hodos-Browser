@@ -326,11 +326,11 @@ External (dApp) pages get only `hodosBrowser.platform`, `window.cefMessage`, and
 
 - Tab browsers: `"tab_1"`, `"tab_2"`, … — built in `TabManager.cpp :: CreateTab` / `TabManager_mac.mm`; `ExtractTabIdFromRole()` parses the numeric ID
 - Infrastructure: `"header"` (toolbar) — built in `WindowManager.cpp :: CreateWindow` / `WindowManager_mac.mm`
-- Overlay browsers: `"settings"`, `"wallet"`, `"backup"`, `"brc100auth"` (Windows) / `"brc100_auth"` (macOS), `"notification"`, `"settings_menu"`, `"omnibox"`, `"cookiepanel"`, `"downloadpanel"`, `"bookmarkspanel"`, `"siteinfopanel"`, `"tablistpanel"`, `"profilepanel"`, `"menu"`
+- Overlay browsers: `"settings"`, `"wallet"`, `"backup"`, `"brc100auth"`, `"notification"`, `"settings_menu"`, `"omnibox"`, `"cookiepanel"`, `"downloadpanel"`, `"bookmarkspanel"`, `"siteinfopanel"`, `"tablistpanel"`, `"profilepanel"`, `"menu"`
 
 `simple_handler.cpp` additionally compares against `"overlay"`, `"wallet_panel"` and `"webview"`, which nothing currently constructs — legacy branches.
 
-> ⚠️ **Known platform divergence:** `simple_app.cpp` constructs the BRC-100 auth overlay handler with role `"brc100auth"`, but `cef_browser_shell_mac.mm` uses `"brc100_auth"`. `simple_handler.cpp` compares against `"brc100auth"` in 9 places, several of which are *not* `#ifdef _WIN32`-guarded — notably the `OnLoadingStateChange` branch that calls `InjectHodosBrowserAPI()` and `sendAuthRequestDataToOverlay()`. Those branches cannot fire on macOS. Treat as a code bug, not a doc gap.
+> ✅ **Resolved 2026-08-22 (P0.5 M2):** the BRC-100 auth overlay role is now `"brc100auth"` on **both** platforms. It previously read `"brc100_auth"` (underscore) on macOS only (`cef_browser_shell_mac.mm`), so it matched none of the 9 `"brc100auth"` role comparisons in `simple_handler.cpp` — the `OnAfterCreated` role-slot registration, the `OnLoadingStateChange` branch that calls `InjectHodosBrowserAPI()` / `sendAuthRequestDataToOverlay()`, and the close paths all silently no-op'd on macOS. ⚠️ Do **not** confuse this overlay-ROLE string with the modal/prompt-TYPE string `"brc100_auth"` (`HttpRequestInterceptor.cpp`, `PendingAuthRequest.h`) — that is a separate, internally-consistent namespace and correctly keeps the underscore.
 
 The role affects which keyboard shortcuts fire, which context menu items appear, which V8 APIs get injected, and how `OnAfterCreated()` registers the browser.
 

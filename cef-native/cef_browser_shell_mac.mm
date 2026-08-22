@@ -3499,7 +3499,15 @@ void CreateBRC100AuthOverlayWithSeparateProcess() {
     settings.background_color = CefColorSetARGB(0, 0, 0, 0);
     settings.javascript = STATE_ENABLED;
 
-    CefRefPtr<SimpleHandler> handler(new SimpleHandler("brc100_auth"));
+    // P0.5 M2 (Mac 2026-08-22): overlay ROLE must be "brc100auth" (no underscore)
+    // to match every role consumer — BrowserWindow's role slot, the 9 role arms in
+    // simple_handler.cpp (OnAfterCreated inject, OnLoadingStateChange auth-data
+    // send, the close paths), and the self-nav grant gate. Windows already uses
+    // "brc100auth" (simple_app.cpp). The underscore left this overlay's role slot
+    // unset and those branches dead on macOS. NOTE: the modal/prompt-TYPE string
+    // "brc100_auth" (HttpRequestInterceptor / PendingAuthRequest) is a DIFFERENT,
+    // internally-consistent namespace and is deliberately left untouched.
+    CefRefPtr<SimpleHandler> handler(new SimpleHandler("brc100auth"));
     CefRefPtr<MyOverlayRenderHandler> render_handler =
         new MyOverlayRenderHandler((__bridge void*)contentView,
                                    (int)mainFrame.size.width,

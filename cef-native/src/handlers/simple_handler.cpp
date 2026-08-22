@@ -4281,7 +4281,7 @@ bool SimpleHandler::OnProcessMessageReceived(
 
     // ========== WALLET DELETE (bypasses CefURLRequest proxy — uses WinHTTP directly) ==========
     if (message_name == "wallet_delete_cancel") {
-        LOG_INFO_BROWSER("🗑️ wallet_delete_cancel — calling Rust /wallet/delete via WinHTTP");
+        LOG_INFO_BROWSER("🗑️ wallet_delete_cancel — calling Rust /wallet/delete");
 #ifdef _WIN32
         HINTERNET hSession = WinHttpOpen(L"HodosBrowser/WalletDelete",
             WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
@@ -4322,13 +4322,25 @@ bool SimpleHandler::OnProcessMessageReceived(
         } else {
             LOG_ERROR_BROWSER("🗑️ WinHttpOpen failed");
         }
-        // localStorage cleanup
+#elif defined(__APPLE__)
+        // P0.5 M2 (Mac 2026-08-22): the whole handler was #ifdef _WIN32 with no
+        // __APPLE__ arm, so on macOS cancel-delete never reached Rust and the
+        // wallet_exists flag was never cleared. Mirror the Windows POST through the
+        // cross-platform SyncHttpClient (CLAUDE.md invariant #9 — no raw platform
+        // HTTP for new arms). Fail-safe either way: a non-2xx just leaves the
+        // wallet in place. Signature is (url, body, contentType, timeoutMs).
+        HttpResponse resp = SyncHttpClient::Post(hodos::WalletUrl("/wallet/delete"),
+                                                 "{}", "application/json", /*timeoutMs=*/5000);
+        LOG_INFO_BROWSER("🗑️ Wallet delete HTTP status: " + std::to_string(resp.statusCode));
+#endif
+        // localStorage cleanup — platform-neutral (CEF ExecuteJavaScript), so it
+        // must run on BOTH platforms. It was inside the _WIN32 block above, which
+        // is the second half of the same macOS regression.
         CefRefPtr<CefBrowser> hdr = SimpleHandler::GetHeaderBrowser();
         if (hdr && hdr->GetMainFrame()) {
             hdr->GetMainFrame()->ExecuteJavaScript(
                 "localStorage.removeItem('hodos_wallet_exists');", "", 0);
         }
-#endif
         // React handles overlay close separately via wallet_allow_close + handleClose()
         return true;
     }
