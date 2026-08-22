@@ -65,13 +65,26 @@ Decoded QR content is matched against BSV payment patterns:
 
 | Pattern | Type | Extract |
 |---------|------|---------|
-| `bitcoin:{address}?amount={n}&label={s}` | BIP21 URI | address, amount, label |
+| `(bitcoin\|bsv):{address}?amount={n}&label={s}` | BIP21 URI | address, amount, label |
 | `^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$` | BSV address | address only |
 | `^(02\|03)[0-9a-fA-F]{64}$` | Identity key (PeerPay) | pubkey |
 | `user@domain` or `$handle` | Paymail | paymail address |
-| Anything else | Non-BSV | Ignored |
+| Anything else | Non-BSV | Ignored (screen-capture path now reports the scheme, e.g. "starts with https:") |
 
-These regexes already exist in `TransactionForm.tsx` (lines 7-11). Reuse them.
+The scheme is an **allowlist** — `bitcoin:` and `bsv:` only (Phase 0.6,
+`0.4.0-beta.3/phase-0.6-qr-bsv-uri/`). Do **not** widen to "any scheme": the scheme signals
+intent-to-pay on the money path. The scheme is stripped by the **first `:`**, never a fixed offset
+(a `slice(8)` would truncate a `bsv:` address and fail closed). The four spellings:
+`QRScreenCapture.cpp`, `cef_browser_shell_mac.mm`, `build_tools/qr-scanner-logic.js` (→ `QRScannerScript.h`),
+`frontend/src/utils/bip21.ts`. The C++ capture classifier is extracted to the unit-tested
+`include/core/QRPayloadClassify.h` (`tests/qr_payload_classify_test.cpp`).
+
+⚠️ **Amount is emitted UNQUOTED** in the capture path's result JSON, which is concatenated into JS and
+run in the wallet overlay — so it is validated to a plain decimal before emission
+(`RE_BIP21_AMOUNT`). An unvalidated amount was arbitrary JS in the privileged overlay; see
+`0.4.0-beta.3/phase-0.6-qr-bsv-uri/MEASUREMENT_amount_injection.md`.
+
+These regexes also exist in `TransactionForm.tsx`. Reuse them.
 
 ### DOM Elements to Scan
 

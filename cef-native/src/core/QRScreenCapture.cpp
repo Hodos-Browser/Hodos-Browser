@@ -3,6 +3,7 @@
 #ifdef _WIN32
 
 #include "../../include/core/QRScreenCapture.h"
+#include "../../include/core/QRPayloadClassify.h"
 #include "../../include/core/Logger.h"
 #include "include/cef_browser.h"
 #include "include/cef_process_message.h"
@@ -14,6 +15,7 @@ extern "C" {
 #include <regex>
 #include <string>
 #include <sstream>
+#include <cctype>
 
 // Logging macros (same pattern as other core .cpp files)
 #define LOG_INFO_QR(msg) Logger::Log(msg, 1, 2)
@@ -42,111 +44,23 @@ static int    s_vscreen_x = 0, s_vscreen_y = 0;
 static int    s_vscreen_w = 0, s_vscreen_h = 0;
 
 // ============================================================================
-// BSV pattern classification (mirrors qr-scanner-logic.js regexes)
+// BSV pattern classification
 // ============================================================================
-
-static const std::regex RE_BSV_ADDRESS(R"(^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$)");
-static const std::regex RE_IDENTITY_KEY(R"(^(02|03)[0-9a-fA-F]{64}$)");
-static const std::regex RE_PAYMAIL(R"(^(\$[a-zA-Z0-9_]+|[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})$)");
-static const std::regex RE_BIP21(R"(^bitcoin:)", std::regex_constants::icase);
-
-// URL-decode a string (for BIP21 label parsing)
-static std::string UrlDecode(const std::string& s) {
-    std::string result;
-    result.reserve(s.size());
-    for (size_t i = 0; i < s.size(); ++i) {
-        if (s[i] == '%' && i + 2 < s.size()) {
-            int hi = 0, lo = 0;
-            if (sscanf(s.c_str() + i + 1, "%1x%1x", &hi, &lo) == 2) {
-                result += static_cast<char>((hi << 4) | lo);
-                i += 2;
-                continue;
-            }
-        }
-        if (s[i] == '+') { result += ' '; continue; }
-        result += s[i];
-    }
-    return result;
-}
-
-// Escape a string for JSON embedding
-static std::string JsonEscape(const std::string& s) {
-    std::string out;
-    out.reserve(s.size() + 8);
-    for (char c : s) {
-        switch (c) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n";  break;
-            case '\r': out += "\\r";  break;
-            case '\t': out += "\\t";  break;
-            default:   out += c;      break;
-        }
-    }
-    return out;
-}
-
-// Classify a QR payload and build a JSON result object.
-// Returns empty string if the payload doesn't match any BSV pattern.
-static std::string ClassifyAndBuildJson(const std::string& text) {
-    // BIP21 URI
-    if (std::regex_search(text, RE_BIP21)) {
-        // Parse bitcoin:address?amount=X&label=Y
-        std::string address, amount, label;
-        size_t colon = text.find(':');
-        std::string rest = (colon != std::string::npos) ? text.substr(colon + 1) : text;
-
-        size_t q = rest.find('?');
-        address = (q != std::string::npos) ? rest.substr(0, q) : rest;
-
-        if (q != std::string::npos) {
-            std::string params = rest.substr(q + 1);
-            std::istringstream ps(params);
-            std::string pair;
-            while (std::getline(ps, pair, '&')) {
-                size_t eq = pair.find('=');
-                if (eq == std::string::npos) continue;
-                std::string key = pair.substr(0, eq);
-                std::string val = UrlDecode(pair.substr(eq + 1));
-                if (key == "amount") amount = val;
-                else if (key == "label") label = val;
-            }
-        }
-
-        std::string json = "{\"type\":\"bip21\",\"value\":\"" + JsonEscape(text) + "\"";
-        if (!address.empty()) json += ",\"address\":\"" + JsonEscape(address) + "\"";
-        if (!amount.empty())  json += ",\"amount\":" + amount;
-        if (!label.empty())   json += ",\"label\":\"" + JsonEscape(label) + "\"";
-        json += ",\"source\":\"screen\"}";
-        return json;
-    }
-
-    // Plain BSV address
-    if (std::regex_match(text, RE_BSV_ADDRESS)) {
-        return "{\"type\":\"address\",\"value\":\"" + JsonEscape(text) +
-               "\",\"address\":\"" + JsonEscape(text) + "\",\"source\":\"screen\"}";
-    }
-
-    // Identity key (BRC-100)
-    if (std::regex_match(text, RE_IDENTITY_KEY)) {
-        return "{\"type\":\"identity_key\",\"value\":\"" + JsonEscape(text) +
-               "\",\"source\":\"screen\"}";
-    }
-
-    // Paymail
-    if (std::regex_match(text, RE_PAYMAIL)) {
-        return "{\"type\":\"paymail\",\"value\":\"" + JsonEscape(text) +
-               "\",\"source\":\"screen\"}";
-    }
-
-    return ""; // Not a BSV pattern
-}
+// The classifier lives in a CEF-free, unit-testable header so the scheme allowlist
+// and the BIP21 amount validation can be tested without GDI/quirc. See
+// include/core/QRPayloadClassify.h and tests/qr_payload_classify_test.cpp.
+using hodos::ClassifyQRPayload;
+using hodos::SchemeForMessage;
 
 // ============================================================================
 // Screen capture + QR decode
 // ============================================================================
 
-static std::string CaptureAndDecode(RECT sel) {
+// Decodes QR(s) in the selection. Returns the classified BSV JSON on success, or
+// "" if nothing classified. When a QR *decoded* but matched no BSV pattern, the
+// (sanitized) scheme of the first such payload is written to *outUnrecognized so
+// the caller can tell the user what it found instead of "no QR found".
+static std::string CaptureAndDecode(RECT sel, std::string* outUnrecognized = nullptr) {
     int w = sel.right - sel.left;
     int h = sel.bottom - sel.top;
     if (w < 10 || h < 10) return "";
@@ -222,11 +136,15 @@ static std::string CaptureAndDecode(RECT sel) {
         std::string payload(reinterpret_cast<char*>(data.payload), data.payload_len);
         LOG_INFO_QR("QR payload: " + payload.substr(0, 200));
 
-        std::string json = ClassifyAndBuildJson(payload);
+        std::string json = ClassifyQRPayload(payload);
         if (!json.empty()) {
             bestResult = json;
             break; // Use first BSV match
         }
+        // Decoded, but not a BSV pattern — remember the first such scheme so the
+        // caller can tell the user what it found (A4 diagnosability).
+        if (outUnrecognized && outUnrecognized->empty())
+            *outUnrecognized = SchemeForMessage(payload);
     }
 
     quirc_destroy(qr);
@@ -497,17 +415,22 @@ void FinishQRScreenCapture(bool cancelled, RECT selection) {
         return;
     }
 
-    std::string resultJson = CaptureAndDecode(selection);
+    std::string unrecognizedScheme;
+    std::string resultJson = CaptureAndDecode(selection, &unrecognizedScheme);
 
     // Reopen wallet overlay
     ShowWalletOverlay(-1, nullptr);
 
-    if (resultJson.empty()) {
-        LOG_INFO_QR("No BSV QR code found in selection");
-        DeliverResult("{\"status\":\"not_found\"}");
-    } else {
+    if (!resultJson.empty()) {
         LOG_INFO_QR("BSV QR code found: " + resultJson.substr(0, 200));
         DeliverResult("{\"status\":\"found\",\"result\":" + resultJson + "}");
+    } else if (!unrecognizedScheme.empty()) {
+        // A QR decoded but is not a BSV payment — tell the user what it was.
+        LOG_INFO_QR("QR decoded but not a BSV payment (scheme: " + unrecognizedScheme + ")");
+        DeliverResult("{\"status\":\"unrecognized\",\"scheme\":\"" + hodos::QrJsonEscape(unrecognizedScheme) + "\"}");
+    } else {
+        LOG_INFO_QR("No QR code found in selection");
+        DeliverResult("{\"status\":\"not_found\"}");
     }
 }
 

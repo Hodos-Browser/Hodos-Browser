@@ -1,0 +1,27 @@
+{
+ "href": "http://127.0.0.1:5137/wallet-panel?iro=50",
+ "cases": [
+  {
+   "name": "benign_numeric",
+   "payload": "bitcoin:16cezrim1PR2DGuFivZr8kWUSan1LD6XFZ?amount=0.11828417&label=PaiyBit%20media",
+   "js": "window.dispatchEvent(new MessageEvent('message',{data:{type:'qr_screen_capture_result',data:{\"status\":\"found\",\"result\":{\"type\":\"bip21\",\"value\":\"bitcoin:16cezrim1PR2DGuFivZr8kWUSan1LD6XFZ?amount=0.11828417&label=PaiyBit%20media\",\"address\":\"16cezrim1PR2DGuFivZr8kWUSan1LD6XFZ\",\"amount\":0.11828417,\"label\":\"PaiyBit media\",\"source\":\"screen\"}}}}));",
+   "ran": true,
+   "probe_after": "(unset)"
+  },
+  {
+   "name": "nonnumeric_amount",
+   "payload": "bitcoin:16cezrim1PR2DGuFivZr8kWUSan1LD6XFZ?amount=abc",
+   "js": "window.dispatchEvent(new MessageEvent('message',{data:{type:'qr_screen_capture_result',data:{\"status\":\"found\",\"result\":{\"type\":\"bip21\",\"value\":\"bitcoin:16cezrim1PR2DGuFivZr8kWUSan1LD6XFZ?amount=abc\",\"address\":\"16cezrim1PR2DGuFivZr8kWUSan1LD6XFZ\",\"amount\":abc,\"source\":\"screen\"}}}}));",
+   "ran": false,
+   "threw": "ReferenceError: abc is not defined"
+  },
+  {
+   "name": "injection",
+   "payload": "bitcoin:16cezrim1PR2DGuFivZr8kWUSan1LD6XFZ?amount=(window.__hodos_qr_probe=typeof fetch,0)",
+   "js": "window.dispatchEvent(new MessageEvent('message',{data:{type:'qr_screen_capture_result',data:{\"status\":\"found\",\"result\":{\"type\":\"bip21\",\"value\":\"bitcoin:16cezrim1PR2DGuFivZr8kWUSan1LD6XFZ?amount=(window.__hodos_qr_probe=typeof fetch,0)\",\"address\":\"16cezrim1PR2DGuFivZr8kWUSan1LD6XFZ\",\"amount\":(window.__hodos_qr_probe=typeof fetch,0),\"source\":\"screen\"}}}}));",
+   "ran": true,
+   "probe_after": "function",
+   "INJECTION_EXECUTED": true
+  }
+ ]
+}

@@ -43,6 +43,7 @@ add_executable(hodos_tests
     port_config_origin_test.cpp         # P0.5 C1 (row X4) — scheme-anchored origin derivation
     payment_cost_test.cpp               # P0.5 finding 6 — body shapes + the sendMax fail-closed rule
     wallet_ssrf_guard_test.cpp          # P0.5 E1 — wallet_call SSRF: URL anchor + method validation
+    qr_payload_classify_test.cpp        # P0.6 — QR scheme allowlist + amount-injection guard (header-only)
 
     # Production sources under test (built into the test exe directly).
     # (Phase 2.6-H removed permission_engine_test / permission_gate_test along

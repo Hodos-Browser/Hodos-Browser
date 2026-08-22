@@ -1,0 +1,22 @@
+{
+  "bsv": {
+    "text": "bsv:16cezrim1PR2DGuFivZr8kWUSan1LD6XFZ?amount=0.11828417&label=PaiyBit%20media",
+    "domFile": "C:\\Users\\archb\\Hodos-Browser\\development-docs\\0.4.0-beta.3\\phase-0.6-qr-bsv-uri\\probes\\qrpage_dom_bsv.html",
+    "bgFile": "C:\\Users\\archb\\Hodos-Browser\\development-docs\\0.4.0-beta.3\\phase-0.6-qr-bsv-uri\\probes\\qrpage_capture_bsv.html"
+  },
+  "bitcoin": {
+    "text": "bitcoin:1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa?amount=0.001&label=Test",
+    "domFile": "C:\\Users\\archb\\Hodos-Browser\\development-docs\\0.4.0-beta.3\\phase-0.6-qr-bsv-uri\\probes\\qrpage_dom_bitcoin.html",
+    "bgFile": "C:\\Users\\archb\\Hodos-Browser\\development-docs\\0.4.0-beta.3\\phase-0.6-qr-bsv-uri\\probes\\qrpage_capture_bitcoin.html"
+  },
+  "foreign": {
+    "text": "https://example.com/pay",
+    "domFile": "C:\\Users\\archb\\Hodos-Browser\\development-docs\\0.4.0-beta.3\\phase-0.6-qr-bsv-uri\\probes\\qrpage_dom_foreign.html",
+    "bgFile": "C:\\Users\\archb\\Hodos-Browser\\development-docs\\0.4.0-beta.3\\phase-0.6-qr-bsv-uri\\probes\\qrpage_capture_foreign.html"
+  },
+  "inj": {
+    "text": "bitcoin:16cezrim1PR2DGuFivZr8kWUSan1LD6XFZ?amount=(window.__hodos_qr_probe=typeof fetch,0)",
+    "domFile": "C:\\Users\\archb\\Hodos-Browser\\development-docs\\0.4.0-beta.3\\phase-0.6-qr-bsv-uri\\probes\\qrpage_dom_inj.html",
+    "bgFile": "C:\\Users\\archb\\Hodos-Browser\\development-docs\\0.4.0-beta.3\\phase-0.6-qr-bsv-uri\\probes\\qrpage_capture_inj.html"
+  }
+}

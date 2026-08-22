@@ -19,11 +19,16 @@
     var BSV_ADDRESS_RE = /^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$/;
     var IDENTITY_KEY_RE = /^(02|03)[0-9a-fA-F]{64}$/;
     var PAYMAIL_RE = /^(\$[a-zA-Z0-9_]+|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})$/;
-    var BIP21_RE = /^bitcoin:/i;
+    // Allowlist of payment schemes: bitcoin: and bsv:. Do NOT widen to "any
+    // scheme" — the scheme signals intent-to-pay (money path). bsv: is the
+    // better scheme for this chain. See TICKET_qr_bsv_uri_scheme_rejected.md.
+    var BIP21_RE = /^(bitcoin|bsv):/i;
 
     function parseBIP21(uri) {
         if (!BIP21_RE.test(uri)) return null;
-        var rest = uri.slice(8); // remove "bitcoin:"
+        // Strip the scheme by the FIRST ':', never a fixed offset — "bitcoin:"
+        // and "bsv:" differ in length, so slice(8) would truncate a bsv: address.
+        var rest = uri.slice(uri.indexOf(':') + 1);
         var qIdx = rest.indexOf('?');
         var address = qIdx >= 0 ? rest.slice(0, qIdx) : rest;
         var params = {};

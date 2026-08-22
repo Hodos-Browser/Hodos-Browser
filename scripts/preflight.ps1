@@ -215,6 +215,25 @@ if ($NegativeControl) {
         }
     }
 
+    # T1e negative control (Phase 0.6): reintroduce the slice(8) scheme-strip trap in
+    # the real bip21.ts / qr-scanner-logic.js and prove the GREEN assertion catches it
+    # (a bsv: address then truncates or fails closed). The harness exits 0 when the trap
+    # is caught -- i.e. when the test is NOT blind, which is the PASS this block wants.
+    if (Test-Selected 'T1e') {
+        $harness = Join-Path $RepoRoot 'development-docs/0.4.0-beta.3/phase-0.6-qr-bsv-uri/probes/qr_scheme_t1e.mjs'
+        $lbl = 'QR scheme classifier trap (slice(8) reintroduced)'
+        if (-not (Test-Path $harness)) {
+            Add-Result 'T1e' $lbl 'SKIPPED' "harness missing: $harness"
+        } elseif (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+            Add-Result 'T1e' $lbl 'SKIPPED' 'node not on PATH'
+        } else {
+            $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+            try { & node --experimental-strip-types $harness --negative-control 2>&1 | Out-String | Write-Verbose } finally { $ErrorActionPreference = $prevEap }
+            if ($LASTEXITCODE -eq 0) { Add-Result 'T1e' $lbl 'PASS' 'bsv: truncates/fails-closed under slice(8); GREEN assertion is not blind' }
+            else { Add-Result 'T1e' $lbl 'FAIL' "could not demonstrate the trap (exited $LASTEXITCODE)" }
+        }
+    }
+
     Write-Host ''
     if ($script:Results.Count -eq 0) {
         Write-Host 'NEGATIVE CONTROL: INCOMPLETE - ZERO gates exercised. This is NOT a pass.' -ForegroundColor Yellow
@@ -315,6 +334,26 @@ if (Test-Selected 'T1d') {
             if ($LASTEXITCODE -eq 0) { Add-Result 'T1d' 'frontend build (tsc -b, vite build)' 'PASS' '' }
             else { Add-Result 'T1d' 'frontend build (tsc -b, vite build)' 'FAIL' "npm run build exited $LASTEXITCODE" }
         } finally { Pop-Location }
+    }
+}
+
+# T1e: QR scheme classifier (Phase 0.6). Exercises the REAL shipped sources --
+# frontend/src/utils/bip21.ts (Node type-stripping) and
+# cef-native/build_tools/qr-scanner-logic.js (real IIFE in a vm sandbox) -- and
+# asserts on the extracted ADDRESS STRING, not scan success. Its --negative-control
+# mode (run only under -NegativeControl above) reintroduces the slice(8) trap.
+if (Test-Selected 'T1e') {
+    $harness = Join-Path $RepoRoot 'development-docs/0.4.0-beta.3/phase-0.6-qr-bsv-uri/probes/qr_scheme_t1e.mjs'
+    $lbl = 'QR scheme classifier (bip21.ts + qr-scanner-logic.js)'
+    if (-not (Test-Path $harness)) {
+        Add-Result 'T1e' $lbl 'SKIPPED' "harness missing: $harness"
+    } elseif (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+        Add-Result 'T1e' $lbl 'SKIPPED' 'node not on PATH'
+    } else {
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try { & node --experimental-strip-types $harness 2>&1 | Out-String | Write-Verbose } finally { $ErrorActionPreference = $prevEap }
+        if ($LASTEXITCODE -eq 0) { Add-Result 'T1e' $lbl 'PASS' '' }
+        else { Add-Result 'T1e' $lbl 'FAIL' "harness exited $LASTEXITCODE - re-run with -Verbose" }
     }
 }
 

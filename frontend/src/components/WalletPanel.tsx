@@ -432,6 +432,14 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
           setTimeout(() => setScanMessage(null), 3000);
           return;
         }
+        if (result.status === 'unrecognized') {
+          // A QR decoded, but it isn't a BSV payment. Say what it was, rather
+          // than the misleading "no QR found" — this is the diagnosability fix.
+          const scheme = typeof result.scheme === 'string' && result.scheme ? result.scheme : 'unknown';
+          setScanMessage(`Found a QR code, but it isn't a BSV payment (starts with "${scheme}:")`);
+          setTimeout(() => setScanMessage(null), 5000);
+          return;
+        }
         if (result.status === 'error') {
           setScanMessage(result.message || 'Screen capture failed');
           setTimeout(() => setScanMessage(null), 5000);

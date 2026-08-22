@@ -3026,7 +3026,14 @@ void ShowWalletOverlay() {
 static const std::regex RE_BSV_ADDRESS(R"(^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$)");
 static const std::regex RE_IDENTITY_KEY(R"(^(02|03)[0-9a-fA-F]{64}$)");
 static const std::regex RE_PAYMAIL(R"(^(\$[a-zA-Z0-9_]+|[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})$)");
-static const std::regex RE_BIP21(R"(^bitcoin:)", std::regex_constants::icase);
+// Allowlist of payment schemes: bitcoin: and bsv:. Do NOT widen to "any scheme"
+// — the scheme signals intent-to-pay (money path). See TICKET_qr_bsv_uri_scheme_rejected.md.
+// Windows twin: QRScreenCapture.cpp (keep the two in lockstep).
+static const std::regex RE_BIP21(R"(^(bitcoin|bsv):)", std::regex_constants::icase);
+// A BIP21 amount is emitted UNQUOTED into JSON that is later concatenated into
+// JavaScript run in the wallet overlay, so it MUST be a plain decimal number.
+// See MEASUREMENT_amount_injection.md.
+static const std::regex RE_BIP21_AMOUNT(R"(^[0-9]+(\.[0-9]+)?$)");
 
 static std::string QRUrlDecode(const std::string& s) {
     std::string result;
@@ -3087,7 +3094,10 @@ static std::string ClassifyBSVContent(const std::string& text) {
 
         std::string json = "{\"type\":\"bip21\",\"value\":\"" + QRJsonEscape(text) + "\"";
         if (!address.empty()) json += ",\"address\":\"" + QRJsonEscape(address) + "\"";
-        if (!amount.empty())  json += ",\"amount\":" + amount;
+        // Emit amount ONLY if it is a plain decimal number — it is unquoted in the
+        // JSON that becomes JavaScript downstream. Anything else is dropped.
+        if (!amount.empty() && std::regex_match(amount, RE_BIP21_AMOUNT))
+            json += ",\"amount\":" + amount;
         if (!label.empty())   json += ",\"label\":\"" + QRJsonEscape(label) + "\"";
         json += ",\"source\":\"screen\"}";
         return json;
