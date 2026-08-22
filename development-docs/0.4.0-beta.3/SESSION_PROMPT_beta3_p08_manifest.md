@@ -19,7 +19,7 @@ Phase 0.8 was **scoped but NOT implemented** in the previous session (`cc222d3`)
    `project_beta3_windows_mac_deconfliction_protocol` (git workflow: commit/push per phase, batch the
    relay, rebase before push, **never commit `X402_INTEGRATION.md`**).
 2. `development-docs/0.4.0-beta.3/phase-0.8-manifest-shape/PHASE_CONTRACT.md` — goals §4, done-means §5,
-   **consent provenance + stored snapshot §6a**, **proposed migration V24 §6b**, fixtures §7,
+   **consent provenance + stored snapshot §6a**, **owner-approved migration V24 §6b**, fixtures §7,
    evidence table §8 (A1–A12), invariants §9.
 3. `development-docs/TICKET_brc73_group_permissions_manifest.md` — spec citations, the adoption
    survey, and the deferred modal. **Archive this ticket when 0.8 closes.**
@@ -143,7 +143,7 @@ the recommendations modal against. Parse the category anyway so the data is read
 
 ## 7. Tests — negative control is a hard rule
 
-Evidence table A1–A8 in the contract. Drive **every** fixture in `demos/manifest-shapes/` through
+Evidence table **A1–A12** in the contract (§8). Drive **every** fixture in `demos/manifest-shapes/` through
 **both** parsers.
 
 - ⛔ **A1's count comes from the C++ parse** of the bytes Rust embeds in the 202 — a Rust-only fix
