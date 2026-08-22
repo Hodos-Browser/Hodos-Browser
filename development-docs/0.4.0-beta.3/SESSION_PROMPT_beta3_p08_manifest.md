@@ -19,8 +19,8 @@ Phase 0.8 was **scoped but NOT implemented** in the previous session (`cc222d3`)
    `project_beta3_windows_mac_deconfliction_protocol` (git workflow: commit/push per phase, batch the
    relay, rebase before push, **never commit `X402_INTEGRATION.md`**).
 2. `development-docs/0.4.0-beta.3/phase-0.8-manifest-shape/PHASE_CONTRACT.md` — goals §4, done-means §5,
-   **consent provenance + stored snapshot §6a**, fixtures §7, evidence table §8 (A1–A11),
-   invariants §9.
+   **consent provenance + stored snapshot §6a**, **proposed migration V24 §6b**, fixtures §7,
+   evidence table §8 (A1–A12), invariants §9.
 3. `development-docs/TICKET_brc73_group_permissions_manifest.md` — spec citations, the adoption
    survey, and the deferred modal. **Archive this ticket when 0.8 closes.**
 4. `demos/manifest-shapes/README.md` + all 8 fixtures.
@@ -113,22 +113,24 @@ overlay HWND — CLAUDE.md's overlay rules.
   than the defect this phase fixes, because today the modal shows nothing rather than showing the
   site's numbers dressed as the user's. **If the differentiation is not built, do not auto-populate.**
 - A one-click **"Use my defaults"** control must revert every suggested field.
-- ⚠️ **Settle the open design decision in §6a first:** populate with the site's values and offer
-  "use my defaults" (a), or populate with the user's defaults and show the site's suggestion beside
-  each field with an explicit "use the site's recommended settings" (b). The contract recommends
-  **(b)** — the safe state is the default state. This is an owner call; ask if unsettled.
+- ✅ **SETTLED (owner, 2026-08-22): build both.** (b) — the user's defaults pre-filled, the site's
+  suggestion shown beside each field — is the **default**. (a) — pre-fill with the site's values —
+  is available behind an **opt-in toggle at the bottom-right of "Default Limits for New Sites"**
+  (`ApprovedSitesTab.tsx:144`), persisted as `default_prefill_from_manifest` on `settings`
+  (default 0), following the `default_identity_key_disclosure_allowed` precedent. ⛔ The toggle
+  changes only **which values are pre-filled** — even with (a) on, site-sourced fields stay marked,
+  sections stay expanded, and "Use my defaults" still works (`P0.8-A12`).
 
 Keep the two kinds of modal content apart: **what the site asks for** (protocols, baskets, certs — 
 inherently the site's) versus **the limits we allow it under** (per-tx, per-session, rate/min,
 max-tx/session — ours, and they default to the user's).
 
-**Store the approved manifest as a snapshot** (contract §6a). Three rules, all load-bearing:
-informational **only** — never a decision input (BRC-116: *"In-memory caches are performance
-optimizations only and MUST NOT be treated as authoritative permission state"*); the snapshot is
-**as approved**, not live, or a site can escalate its recommendations after the fact and have them
-silently adopted later; and it is a **schema change**, so CLAUDE.md invariant #2 applies — get owner
-approval, and use a child table with `ON DELETE CASCADE` off `domain_permissions(id)` mirroring the
-`cert_field_permissions` pattern, not a parallel top-level table.
+**Store the approved manifest as a snapshot** (contract §6a, schema in §6b). Three rules:
+informational **only**, never a decision input (a discipline we adopt by choice — see §6a rule 1,
+which corrects an earlier draft that mis-cited BRC-116 as compelling it); the snapshot is **as
+approved**, not live, or a site can escalate its recommendations after the fact and have them
+silently adopted later; and it is a **schema change** — ⛔ **migration V24 is PROPOSED, NOT APPROVED**
+(contract §6b has the exact DDL). CLAUDE.md invariant #2: confirm with the owner before writing it.
 
 ⚠️ Deferred (do not build): the *"App ABC recommends these settings — accept or adjust"* modal, and
 the restore-recommended button on the site permission screen (beta.4 — additive once the snapshot

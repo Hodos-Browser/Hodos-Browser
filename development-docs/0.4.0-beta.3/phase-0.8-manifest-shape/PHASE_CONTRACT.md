@@ -164,6 +164,27 @@ dressed as the user's own**. If the differentiation is not built, **do not auto-
   information, plus an explicit "Use the site's recommended settings" button.
   The safe state is the default state, and adopting the site's numbers is an affirmative act.
 
+### ✅ SETTLED 2026-08-22 — build both; (b) is the default, (a) is an opt-in toggle
+
+**(b) ships as the default behaviour.** **(a) is available behind a user toggle** for someone who
+understands the trade-off and would rather have the site's values pre-filled.
+
+- **Toggle location:** bottom-right of the **"Default Limits for New Sites"** section —
+  `frontend/src/components/wallet/ApprovedSitesTab.tsx:144`.
+- **Wording must name the risk**, not just the feature. It is opting into having a *site* choose the
+  starting numbers. Something like *"Pre-fill new-site limits with the site's recommended settings"*,
+  off by default.
+- **Persistence:** a global user setting, following the `default_identity_key_disclosure_allowed`
+  precedent (V19) — a `default_*` column on `settings`, saved through the existing `/wallet/settings`
+  GET/POST that this component already uses. Proposed key: `default_prefill_from_manifest`,
+  default `0`. Part of migration V24 (§6b).
+- ⛔ **The toggle changes which values are pre-filled, nothing else.** Even with (a) on, `R-PROV`
+  still holds — every manifest-sourced field stays visibly marked as the site's suggestion, the
+  sections still open expanded, and "Use my defaults" is still present. The toggle is a starting
+  position, never a suppression of the marking.
+
+Original reasoning, retained:
+
 **Recommendation: (b)** — and the owner's own §6a stored-snapshot idea is what makes (b) affordable:
 its cost (a first run under conservative caps may feel restrictive) is recoverable at any time from
 the site's settings, by a user who now has grounds to trust the site. That progression — conservative
@@ -179,25 +200,65 @@ site's own permission screen, and so "what did this site ask for when I approved
 
 ⛔ **Three rules, all load-bearing:**
 
-1. **Informational only — never a decision input.** BRC-116 §"Decision Inputs": *"Wallets MUST make
-   allow/deny decisions from canonical permission state… In-memory caches are performance
-   optimizations only and MUST NOT be treated as authoritative permission state."* The authoritative
-   state stays `domain_permissions`. The snapshot only ever feeds **display** and a user-initiated
-   "apply these" action.
+1. **Informational only — never a decision input.** The authoritative state stays
+   `domain_permissions`; the snapshot only ever feeds **display** and a user-initiated "apply these"
+   action.
+   ⚠️ *Correction, 2026-08-22:* an earlier draft cited BRC-116's *"In-memory caches … MUST NOT be
+   treated as authoritative permission state"* as if it bound this. It does not — that rule is about
+   cached **permission state**, and a manifest snapshot is a record of what a site *asked for*, not a
+   grant. We adopt the discipline **by choice** because it is the right one, not because the spec
+   compels it here. Do not cite it as a requirement.
 2. **Snapshot as approved, not live.** 🚨 Otherwise: a site publishes modest recommendations, the
    user approves, the site later publishes aggressive ones, and the user clicking "restore
    recommended" months later silently adopts numbers they never saw. Store what was on screen at
    approval time, with `fetched_at` and the URL it came from. A manifest that has **changed** is a
    **re-consent** event — BRC-116 models exactly this as a `renewal` flag — never a silent update.
-3. **Schema change ⇒ owner approval** (CLAUDE.md invariant #2). Proposed shape: a child table
-   `domain_manifest_snapshots`, FK to `domain_permissions(id)` with `ON DELETE CASCADE`, mirroring
-   the documented `cert_field_permissions` pattern rather than a parallel top-level table. A child
-   table also lets a newer fetch sit alongside the approved one for diffing (rule 2). Migration V24.
+3. **Schema change ⇒ owner approval** (CLAUDE.md invariant #2). Spelled out in §6b.
 
 **Scope split:** store the snapshot **in this phase** — it is small (bitgenius is 3.3 KB against a
 64 KB cap) and storing late means the restore button can never be offered for sites approved before
 it landed. The **restore-button UI on the site permission screen is beta.4**; it is purely additive
 once the data exists.
+
+## 6b. Migration V24 — proposed, NOT YET APPROVED
+
+⛔ **Nothing here exists yet.** The schema is currently at **V23** (`database/migrations.rs`, highest
+fn `migrate_v22_to_v23`; the runner in `connection.rs :: WalletDatabase::migrate` gates on
+`current_version < 23`). "V24" is simply the next migration number. CLAUDE.md invariant #2 — do not
+change wallet DB schema without asking — so this needs an explicit owner yes before it is written.
+
+It would carry **two** changes, both additive; no existing column or table is altered or dropped:
+
+**1. New child table — the manifest snapshot**
+
+```sql
+CREATE TABLE IF NOT EXISTS domain_manifest_snapshots (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    domain_permission_id INTEGER NOT NULL,
+    manifest_json        TEXT    NOT NULL,  -- raw bytes as fetched, ≤ 64 KB
+    source_url           TEXT    NOT NULL,  -- which of the two locations served it
+    fetched_at           INTEGER NOT NULL,
+    approved_at          INTEGER,           -- NULL = fetched but not the approved snapshot
+    FOREIGN KEY (domain_permission_id) REFERENCES domain_permissions(id) ON DELETE CASCADE
+);
+```
+
+Child table rather than a column on `domain_permissions`, per CLAUDE.md's documented reuse anchor
+(*"extend via child tables joined by FK + CASCADE, mirroring the `cert_field_permissions` pattern"*).
+It also lets a newer fetch sit beside the approved one for diffing, which is what rule 2 needs to
+detect a changed manifest and treat it as re-consent. `ON DELETE CASCADE` means revoking a site
+disposes of its snapshot — no orphaned record of a site the user removed.
+
+**2. New settings column — the pre-fill toggle**
+
+```sql
+ALTER TABLE settings ADD COLUMN default_prefill_from_manifest INTEGER NOT NULL DEFAULT 0;
+```
+
+Mirrors `default_identity_key_disclosure_allowed` (V19). Default `0` = behaviour (b).
+
+**Size:** bitgenius is 3358 bytes; the fetch cap is 64 KB; one row per approved domain with a
+manifest. Negligible.
 
 ## 7. Test JSON fixtures
 
@@ -232,6 +293,7 @@ pass rule is one home per fact.
 
 | `P0.8-A9` | Every manifest-populated field is visibly marked as the **site's** suggestion, and the modal says so in words | ⛔ Remove the marking → it is indistinguishable from the user's own defaults | The rendered modal, read by someone who did not write it — not the presence of a CSS class | T2 |
 | `P0.8-A10` | One click reverts every suggested field to the user's defaults | ⛔ Stub the control → suggested values survive | The `domain_permissions` row after approval | T1 |
+| `P0.8-A12` | With the pre-fill toggle **off** (default), limit fields carry the **user's** defaults; with it **on**, they carry the site's — and in **both** states the site-sourced fields stay marked and "Use my defaults" still works | ⛔ Toggle has no effect, or turning it on suppresses the marking | The rendered modal in both toggle states | T1 |
 | `P0.8-A11` | A stored snapshot never changes an allow/deny outcome | ⛔ Feed the snapshot into the gate → a decision moves | Engine decision with and without a snapshot present, identical inputs | T1 |
 
 ⚠️ **Subject-correctness, twice bitten already this sprint.** `A3` must assert *which modal opened*,
