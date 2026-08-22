@@ -1098,15 +1098,19 @@ std::string openDomainApprovalModal(const ModalContext& ctx, const ResumeContext
 
     // Per-domain dedup — multiple in-flight requests from the same fresh origin
     // share a single modal; all queued requests resolve on Approve.
-    bool modalAlreadyShowing = PendingRequestManager::GetInstance().hasPendingForDomain(ctx.domain);
-
+    // ⛔ Atomic check-and-add (P0.8-A4). Same check-then-act race as the bundle
+    // opener below: this arm is fixed too, deliberately. Fixing the reported arm
+    // and leaving its identical sibling is how the last one survived.
+    //
     // domain_approval historically used an empty body in the queued entry.
     // Preserve that by overriding ctx.body to "" before enrollment.
     PendingAuthRequest req = buildPendingAuthRequest("domain_approval", ctx, resume);
     req.body = "";  // historical: body cleared for domain_approval entries
-    std::string requestId = PendingRequestManager::GetInstance().addRequest(std::move(req));
+    bool wasFirstForDomain = false;
+    std::string requestId = PendingRequestManager::GetInstance()
+        .addRequestIfFirstForDomain(std::move(req), wasFirstForDomain);
 
-    if (modalAlreadyShowing) {
+    if (!wasFirstForDomain) {
         LOG_DEBUG_HTTP("🔒 Modal already pending for domain " + ctx.domain
                        + ", request queued (requestId: " + requestId + ")");
         return requestId;
@@ -1121,16 +1125,16 @@ std::string openDomainApprovalModal(const ModalContext& ctx, const ResumeContext
 std::string openBRC100AuthApprovalModal(const ModalContext& ctx, const ResumeContext& resume) {
     LOG_DEBUG_HTTP("🔐 Triggering BRC-100 auth approval for " + ctx.domain);
 
-    bool modalAlreadyShowing = PendingRequestManager::GetInstance().hasPendingForDomain(ctx.domain);
-
     // BRC-100 auth historically stored body verbatim and used the default
     // "domain_approval" type (no explicit type override). The modal type
     // string used by React is also "domain_approval" — BRC-100 auth shares
     // the React modal page.
-    std::string requestId = PendingRequestManager::GetInstance().addRequest(
-        buildPendingAuthRequest("domain_approval", ctx, resume));
+    // ⛔ Atomic check-and-add (P0.8-A4) — see openDomainApprovalModal.
+    bool wasFirstForDomain = false;
+    std::string requestId = PendingRequestManager::GetInstance().addRequestIfFirstForDomain(
+        buildPendingAuthRequest("domain_approval", ctx, resume), wasFirstForDomain);
 
-    if (modalAlreadyShowing) {
+    if (!wasFirstForDomain) {
         LOG_DEBUG_HTTP("🔐 Modal already pending for domain " + ctx.domain
                        + ", request queued (requestId: " + requestId + ")");
         return requestId;
@@ -1145,17 +1149,25 @@ std::string openBRC100AuthApprovalModal(const ModalContext& ctx, const ResumeCon
 std::string openManifestConnectBundleModal(const ModalContext& ctx, const ResumeContext& resume,
                                      const hodos::Manifest& m) {
     LOG_DEBUG_HTTP("📦 Triggering manifest_connect_bundle for " + ctx.domain
-                    + " (app=" + m.name + ", " + std::to_string(m.protocols.size())
+                    + " (app=" + m.name + ", ns=" + m.sourceNamespace + ", "
+                    + std::to_string(m.protocols.size())
                     + " protocols, " + std::to_string(m.baskets.size())
                     + " baskets, " + std::to_string(m.certificates.size())
                     + " certs, " + std::to_string(m.counterparties.size())
                     + " counterparties)");
 
-    bool modalAlreadyShowing = PendingRequestManager::GetInstance().hasPendingForDomain(ctx.domain);
-    std::string requestId = PendingRequestManager::GetInstance().addRequest(
-        buildPendingAuthRequest("manifest_connect_bundle", ctx, resume));
+    // ⛔ P0.8-A4 — check-and-add must be ATOMIC. This used to be a
+    // `hasPendingForDomain()` call followed by a separate `addRequest()`, two
+    // independent acquisitions of the manager's mutex. Three concurrent
+    // /getVersion calls from one user gesture each read "none pending" before
+    // any of them registered, and all three posted an overlay task: MEASURED
+    // 2026-08-21 as three notification overlays in 56 ms for a single click on
+    // bitgenius.net. `addRequestIfFirstForDomain` does both under one lock.
+    bool wasFirstForDomain = false;
+    std::string requestId = PendingRequestManager::GetInstance().addRequestIfFirstForDomain(
+        buildPendingAuthRequest("manifest_connect_bundle", ctx, resume), wasFirstForDomain);
 
-    if (modalAlreadyShowing) {
+    if (!wasFirstForDomain) {
         LOG_DEBUG_HTTP("📦 Modal already pending for domain " + ctx.domain
                         + ", request queued (requestId: " + requestId + ")");
         return requestId;
@@ -1170,6 +1182,10 @@ std::string openManifestConnectBundleModal(const ModalContext& ctx, const Resume
     j["iconUrl"] = m.iconUrl;
     j["expiresAt"] = m.expiresAt;
     j["version"] = m.version;
+    // beta.3 Phase 0.8 — which declaration shape this came from, and the site's
+    // one-line summary of the whole group. Display only.
+    j["sourceNamespace"] = m.sourceNamespace;
+    j["groupDescription"] = m.groupDescription;
 
     nlohmann::json protocols = nlohmann::json::array();
     for (const auto& p : m.protocols) {
@@ -1177,6 +1193,9 @@ std::string openManifestConnectBundleModal(const ModalContext& ctx, const Resume
             {"securityLevel", p.securityLevel},
             {"name", p.name},
             {"keyId", p.keyId},
+            // BRC-116 §4.1: for Level 2 the wallet MUST identify the
+            // counterparty to the user. Empty = unspecified ("any").
+            {"counterparty", p.counterparty},
             {"purpose", p.purpose},
         });
     }
@@ -1197,14 +1216,24 @@ std::string openManifestConnectBundleModal(const ModalContext& ctx, const Resume
         certs.push_back({
             {"type", c.type},
             {"fields", c.fields},
+            // BRC-116 §4.4 scopes cert access by type + verifier + fields; the
+            // user is shown who receives the data. Display only.
+            {"verifierPublicKey", c.verifierPublicKey},
             {"purpose", c.purpose},
         });
     }
     j["certificates"] = certs;
 
+    // ⛔ R-CAPS. `perTransactionUsd` / `perSessionUsd` come ONLY from our own
+    // legacy shape and share a unit and period with domain_permissions, so the
+    // modal may offer them as a marked suggestion (and pre-fill them only
+    // behind the user's opt-in). `monthlySatoshis` is BRC-73's
+    // spendingAuthorization.amount — a different unit AND a different period
+    // from anything we enforce. It is displayed and never written.
     j["spending"] = {
         {"perTransactionUsd", m.spending.perTransactionUsd},
         {"perSessionUsd", m.spending.perSessionUsd},
+        {"monthlySatoshis", m.spending.monthlySatoshis},
         {"purpose", m.spending.purpose},
     };
 
@@ -1995,12 +2024,11 @@ void handleIpcUnknownTrust(const std::string& requestId,
         CefRefPtr<CefFrame> capturedFrame, int browserId
     ) {
         hodos::Manifest manifest = hodos::ManifestFetcher::Fetch(origin);
-        const bool hasDeclaredPerms = manifest.valid
-            && (!manifest.protocols.empty()
-                || !manifest.baskets.empty()
-                || !manifest.certificates.empty()
-                || !manifest.counterparties.empty()
-                || manifest.spending.perTransactionUsd > 0);
+        // beta.3 Phase 0.8 — `valid` now MEANS "declared at least one
+        // recognised permission" (ManifestFetcher.h), so the old hand-rolled
+        // second check is redundant. Keeping a divergent copy of the rule here
+        // is exactly how the two layers drift.
+        const bool hasDeclaredPerms = manifest.valid;
 
         CefPostTask(TID_UI, base::BindOnce([](
             std::string requestId, std::string methodName, std::string endpoint,

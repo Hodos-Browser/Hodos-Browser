@@ -6,6 +6,89 @@
 
 ---
 
+# 📋 ROUND 2026-08-22b (Windows) — **Phase 0.8 (manifest shape / connect modal) DONE on Windows. Three macOS items, all cheap. ⭐ The one that matters: the connect modal is now TALLER and can AUTO-EXPAND its customize view — that is the borderless-NSWindow sizing/scroll/click-outside risk the phase contract flagged.**
+
+Phase 0.8 closed the shipped defect where bitgenius.net — the one site in the whole survey publishing
+a correct BRC-73 manifest — got a connect prompt itemising **zero** of the four protocols it declares,
+because both parsers reported "valid" on a manifest they had not understood. Also fixed: a site could
+set its **own** payment caps through our legacy manifest shape, and they were rendered under the label
+*"Default payment limits"* — the site's numbers wearing the user's word. Full evidence in
+`development-docs/0.4.0-beta.3/phase-0.8-manifest-shape/PHASE_CONTRACT.md` §3a.
+
+## What you need to verify on macOS
+
+### 1. ⭐ THE REAL RISK — the connect-bundle modal grew, and may open expanded
+
+`frontend/src/pages/BRC100AuthOverlayRoot.tsx`, `manifest_connect_bundle` branch. Shared frontend,
+so the change is already in your tree; what differs is the **window** it renders into.
+
+What changed in the markup:
+- The summary list now itemises **real content** where it used to be empty for most sites: per
+  protocol, the site's own `description` **plus** a counterparty note for every Level-2 entry
+  (BRC-116 §4.1 requires identifying the counterparty); per certificate, the field list **and** the
+  verifier key. bitgenius alone goes from 0 rows to 4 rows of wrapping text.
+- A new provenance block above the buttons, which is **two lines longer** when the site suggested
+  spending limits.
+- 🚨 **`setManifestShowCustomize(true)` can now fire on open.** Owner requirement (contract §6a): a
+  user must not approve values hidden behind a collapsed section, so if any limit field carries — or
+  is merely accompanied by — a site-suggested number, the modal opens **directly in the customize
+  subview**, which is the taller of the two (`maxWidth: 520px`, two scrollable regions).
+
+⛔ Windows is a `WS_POPUP` with the overlay sized to the full main window, so growth is invisible
+there. macOS overlays are **borderless NSWindows** with paired NSEvent click-outside monitors. Please
+check, on `https://bitgenius.net/app` from an unapproved state:
+- the card is not clipped at either height, and the inner `overflowY: auto` regions scroll;
+- **click-outside dismissal still works** when the modal is in the taller customize state — the
+  monitor is installed against the overlay window, and I want to know the hit-test still matches
+  after the content grows;
+- the buttons row stays reachable without scrolling the card itself (there is an open Windows ticket
+  about unclickable modal buttons on small screens —
+  `development-docs/0.4.0-beta.3/TICKET_modal_buttons_unclickable_small_screen.md` — and this change
+  makes that surface bigger on both platforms).
+
+Repro from an unapproved state: right-click the page → **Manage Site Permissions** → revoke
+bitgenius.net first. ⛔ Otherwise `request_gate.rs :: domain_trust_gate` short-circuits on
+`trust == "approved"`, never fetches, and you will be testing nothing.
+
+### 2. `ManifestFetcher` stays shared core — please confirm it stayed that way
+
+`cef-native/src/core/ManifestFetcher.cpp` + `include/core/ManifestFetcher.h` were rewritten and still
+have **no `_mac` arm and no `#ifdef`**. The only platform-touching call is `SyncHttpClient::Get`,
+which is already abstracted. Nothing to port — just confirm no `_mac` variant appeared on your side.
+
+### 3. Expected `cef-native/tests/CMakeLists.txt` conflict, plus a new compile definition
+
+The predictable one. Two changes in that file:
+- a new `target_compile_definitions` block defining **`HODOS_MANIFEST_FIXTURE_DIR`**, pointing at
+  `${CMAKE_CURRENT_SOURCE_DIR}/../../demos/manifest-shapes`;
+- no new source file (the tests were appended to the existing `manifest_fetcher_test.cpp`).
+
+`hodos_tests` goes 251 → **286** cases. ⛔ The fixture tests **fail** (they never skip) if the path
+does not resolve — if you see `canonical fixture missing: …` on macOS, that is the CMake path not
+resolving from your build tree, not a logic failure. Tell me the path it prints.
+
+## What is NOT owed to you
+
+- No new overlay, no new HWND/NSWindow, no new role. Reuses the existing `notification` overlay.
+- No Rust/C++ platform split. `manifest.rs` and `ManifestFetcher.cpp` are both cross-platform.
+- Migration **V24** (`domain_manifest_snapshots` + `settings.default_prefill_from_manifest`) is
+  owner-approved and idempotent; it runs identically on macOS. Nothing to verify beyond the app
+  starting.
+
+## Still owed from me (unchanged, carried forward)
+
+- **A7** from P0.6 — still owed to you, batched with this.
+
+## Still owed from you (my read, correct me)
+
+- **E3's HIGH**: the `ee8f836` role guard covers only 2 of ~7 privileged BRC-100 overlay IPC arms.
+  ⚠️ Phase 0.8 touched `add_domain_permission_advanced`'s *caller* (the modal now sends the user's
+  own limits rather than the site's) but **did not** widen that role guard — the sibling
+  grant/approve/reveal arms are still unguarded. That is your finding and still open; I have not
+  taken it.
+
+---
+
 # 📋 ROUND 2026-08-22 (Mac) — **E3 scoped macOS-overlay adversarial pass DONE. Headline: a HIGH self-nav grant-forgery gap the panel-#3 fix left half-open — the `ee8f836` role guard was added to only 2 of ~7 privileged BRC-100 overlay IPC arms; the sibling grant/approve/reveal arms are reachable from a self-navigated tab and write persistent wallet-permission / identity-disclosure grants for an attacker-chosen domain. Cross-platform (shared C++ + shared frontend), surfaced by the mac role lens. Lens (c) HTTP transport = clean (E1 method sink CLOSED, verified; FOLLOWLOCATION = low/no trigger). Lens (a) close-prevention = the "high" downgrades to LOW once you read the whole surface (mac focus-loss is MORE protective than Windows, and the seed overlay has no click-outside monitor at all). Monitor double-install/leak = REFUTED.**
 
 Everything below is **CODE_READING** — I did not run the browser this round. No finding needed a live run; each is a structural code fact traced end-to-end (C++ IPC gate ↔ frontend param ingestion ↔ C++ handler ↔ Rust middleware). Where a live measurement would upgrade the evidence, I name the money-safe experiment + its negative control. Prod wallet (31301) never touched; no prod-mode bundle run (standing ⛔). HEAD `e2fae9d`. Ran hybrid: I drove lens (a) inline; two read-only subagents did lenses (b)/(c); I re-verified every load-bearing citation by artifact before writing this.

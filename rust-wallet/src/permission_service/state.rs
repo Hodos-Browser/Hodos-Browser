@@ -160,7 +160,42 @@ pub struct PermissionService {
     /// / sendMessage / send_transaction) reads + writes Rust; the BRC-121
     /// path keeps reading + writing C++.
     session_counters: Arc<RwLock<HashMap<i32, SessionCounters>>>,
+
+    /// beta.3 Phase 0.8 — the manifest bytes most recently fetched for a
+    /// domain, held between the fetch in `domain_trust_gate` and the moment
+    /// the user approves the connect modal.
+    ///
+    /// 🚨 This is what makes the stored snapshot "AS APPROVED, not live"
+    /// (contract §6a rule 2). The alternative — re-fetching at approval time —
+    /// would let a site serve modest recommendations to the modal and
+    /// aggressive ones to the store, so a later "restore the site's
+    /// recommended settings" click would silently adopt numbers the user never
+    /// saw. These are the exact bytes the modal was built from.
+    ///
+    /// ⛔ Informational only. Nothing in this map is ever read by a permission
+    /// decision (`R-SNAPSHOT`, `P0.8-A11`) — `decide()` takes a
+    /// `PermissionContext` and this is not in it.
+    ///
+    /// In-memory and bounded: a connect that is never approved just ages out.
+    pending_manifests: Arc<RwLock<HashMap<String, PendingManifest>>>,
 }
+
+/// Manifest bytes awaiting an approval decision. See
+/// `PermissionService::pending_manifests`.
+#[derive(Debug, Clone)]
+pub struct PendingManifest {
+    /// Raw bytes exactly as the site served them (≤ 64 KB by the fetch cap).
+    pub raw_json: String,
+    /// Which of the two locations served it.
+    pub source_url: String,
+    /// Unix epoch seconds at fetch time.
+    pub fetched_at: i64,
+}
+
+/// Cap on `pending_manifests`. A connect prompt the user ignores leaves an
+/// entry behind; at 64 KB apiece this bounds the map at ~2 MB worst case.
+/// Oldest-by-`fetched_at` is evicted when the cap is reached.
+pub const MAX_PENDING_MANIFESTS: usize = 32;
 
 impl PermissionService {
     /// Construct a new PermissionService.
@@ -170,7 +205,48 @@ impl PermissionService {
             identity_key_session_approvals: Arc::new(RwLock::new(HashSet::new())),
             key_linkage_session_approvals: Arc::new(RwLock::new(HashSet::new())),
             session_counters: Arc::new(RwLock::new(HashMap::new())),
+            pending_manifests: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Stash the manifest bytes just fetched for `domain`, so that whichever
+    /// approval lands next can be recorded against exactly what was displayed.
+    /// Evicts the oldest entry when `MAX_PENDING_MANIFESTS` is reached.
+    pub fn remember_fetched_manifest(
+        &self,
+        domain: &str,
+        raw_json: String,
+        source_url: String,
+        fetched_at: i64,
+    ) {
+        let mut guard = self
+            .pending_manifests
+            .write()
+            .expect("pending_manifests lock poisoned");
+        if guard.len() >= MAX_PENDING_MANIFESTS && !guard.contains_key(domain) {
+            if let Some(oldest) = guard
+                .iter()
+                .min_by_key(|(_, v)| v.fetched_at)
+                .map(|(k, _)| k.clone())
+            {
+                guard.remove(&oldest);
+            }
+        }
+        guard.insert(
+            domain.to_string(),
+            PendingManifest { raw_json, source_url, fetched_at },
+        );
+    }
+
+    /// Take the stashed manifest for `domain`, removing it. Returns `None`
+    /// when the domain never served a parseable manifest — the common case,
+    /// and the reason the snapshot write must be strictly best-effort.
+    pub fn take_fetched_manifest(&self, domain: &str) -> Option<PendingManifest> {
+        let mut guard = self
+            .pending_manifests
+            .write()
+            .expect("pending_manifests lock poisoned");
+        guard.remove(domain)
     }
 
     /// Pure-logic decision. Delegates to `hodos_permission_engine::decide`.

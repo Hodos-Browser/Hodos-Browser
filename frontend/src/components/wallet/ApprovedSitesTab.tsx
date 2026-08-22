@@ -12,6 +12,13 @@ interface DefaultLimits {
   // domain_approval / manifest_connect_bundle modals starts ticked for new
   // sites. Default true preserves the Step 1 behavior.
   defaultIdentityKeyDisclosureAllowed: boolean;
+  // beta.3 Phase 0.8 — V24 column. OFF (the default) = the connect modal's
+  // limit fields start from the four values above and a site's suggestion is
+  // shown beside them. ON = a site's suggested values are pre-filled instead.
+  // ⛔ Either way, site-sourced fields stay visibly marked and "Use my
+  // defaults" still works — the toggle changes WHICH values are pre-filled and
+  // nothing else (`R-PROV`, `P0.8-A12`).
+  defaultPrefillFromManifest: boolean;
 }
 
 const ApprovedSitesTab: React.FC = () => {
@@ -21,6 +28,7 @@ const ApprovedSitesTab: React.FC = () => {
     defaultRateLimitPerMin: 30,
     defaultMaxTxPerSession: 100,
     defaultIdentityKeyDisclosureAllowed: true,
+    defaultPrefillFromManifest: false,
   });
   const [savedDefaults, setSavedDefaults] = useState<DefaultLimits>(defaults);
   const [perTxUsd, setPerTxUsd] = useState('1.00');
@@ -44,6 +52,7 @@ const ApprovedSitesTab: React.FC = () => {
         defaultRateLimitPerMin: data.default_rate_limit_per_min ?? 30,
         defaultMaxTxPerSession: data.default_max_tx_per_session ?? 100,
         defaultIdentityKeyDisclosureAllowed: data.default_identity_key_disclosure_allowed ?? true,
+        defaultPrefillFromManifest: data.default_prefill_from_manifest ?? false,
       };
       setDefaults(loaded);
       setSavedDefaults(loaded);
@@ -76,6 +85,7 @@ const ApprovedSitesTab: React.FC = () => {
           default_rate_limit_per_min: defaults.defaultRateLimitPerMin,
           default_max_tx_per_session: defaults.defaultMaxTxPerSession,
           default_identity_key_disclosure_allowed: defaults.defaultIdentityKeyDisclosureAllowed,
+          default_prefill_from_manifest: defaults.defaultPrefillFromManifest,
         }),
       });
       if (!postRes.ok) throw new Error('Failed to save defaults');
@@ -90,6 +100,7 @@ const ApprovedSitesTab: React.FC = () => {
           defaultRateLimitPerMin: data.default_rate_limit_per_min ?? defaults.defaultRateLimitPerMin,
           defaultMaxTxPerSession: data.default_max_tx_per_session ?? defaults.defaultMaxTxPerSession,
           defaultIdentityKeyDisclosureAllowed: data.default_identity_key_disclosure_allowed ?? defaults.defaultIdentityKeyDisclosureAllowed,
+          defaultPrefillFromManifest: data.default_prefill_from_manifest ?? defaults.defaultPrefillFromManifest,
         };
         setDefaults(confirmed);
         setSavedDefaults(confirmed);
@@ -276,6 +287,59 @@ const ApprovedSitesTab: React.FC = () => {
                 </div>
                 <div style={{ color: '#9ca3af', fontSize: '11px', marginTop: '2px' }}>
                   Controls the default state of the bundle checkbox on the first-visit connect prompt.
+                </div>
+              </div>
+            </div>
+
+            {/* beta.3 Phase 0.8 — the pre-fill opt-in (V24), bottom-right of
+                "Default Limits for New Sites" per contract 6a.
+                ⛔ The wording names the RISK, not the feature: the user is
+                opting into letting a *site* choose the starting numbers on
+                their own consent prompt. Ships OFF. */}
+            <div style={{
+              marginTop: '14px',
+              paddingTop: '14px',
+              borderTop: '1px solid #2a2d35',
+              display: 'flex',
+              justifyContent: 'flex-end',
+            }}>
+              <div style={{
+                display: 'flex',
+                alignItems: 'flex-start',
+                gap: '10px',
+                cursor: 'pointer',
+                userSelect: 'none',
+                maxWidth: '420px',
+                textAlign: 'left',
+              }} onClick={() => setDefaults((d) => ({ ...d, defaultPrefillFromManifest: !d.defaultPrefillFromManifest }))}>
+                <div style={{
+                  width: '18px',
+                  height: '18px',
+                  borderRadius: '4px',
+                  border: `2px solid ${defaults.defaultPrefillFromManifest ? '#a67c00' : '#555'}`,
+                  background: defaults.defaultPrefillFromManifest ? '#a67c00' : 'transparent',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  flexShrink: 0,
+                  marginTop: '1px',
+                  transition: 'all 0.15s',
+                }}>
+                  {defaults.defaultPrefillFromManifest && (
+                    <span style={{ color: '#0f1117', fontSize: '12px', fontWeight: 700, lineHeight: 1 }}>&#10003;</span>
+                  )}
+                </div>
+                <div>
+                  <div style={{ fontSize: '13px', color: '#f0f0f0', fontWeight: 600 }}>
+                    Pre-fill new-site limits with the site&apos;s recommended settings
+                  </div>
+                  <div style={{ color: '#9ca3af', fontSize: '11px', marginTop: '2px', lineHeight: 1.5 }}>
+                    Off by default. When on, a site that publishes recommended spending limits
+                    starts the connect prompt with <strong>its</strong> numbers instead of yours.
+                    They stay clearly marked as the site&apos;s and you can always revert with
+                    &quot;Use my defaults&quot;, but you would be letting a site choose the
+                    starting point.
+                  </div>
                 </div>
               </div>
             </div>

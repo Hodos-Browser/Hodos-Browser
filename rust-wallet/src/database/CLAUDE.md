@@ -12,7 +12,7 @@ This module provides the complete data access layer for the HodosBrowser wallet.
 
 **Security invariant**: Mnemonics are stored encrypted (PIN + PBKDF2/AES-GCM or DPAPI/Keychain). The plaintext mnemonic is only held in `WalletDatabase.cached_mnemonic` while the wallet is unlocked.
 
-**Directory inventory**: 26 `.rs` files — 20 repository modules plus `connection.rs`, `migrations.rs`, `migration.rs`, `models.rs`, `helpers.rs`, `mod.rs`.
+**Directory inventory**: 27 `.rs` files — 21 repository modules plus `connection.rs`, `migrations.rs`, `migration.rs`, `models.rs`, `helpers.rs`, `mod.rs`.
 
 ## Key Files
 
@@ -21,7 +21,7 @@ This module provides the complete data access layer for the HodosBrowser wallet.
 | `mod.rs` | Module exports — re-exports 20 repositories and the 21 structs in `models.rs` (plus `RelayMessage`, `MessageRelayStats`, `PermissionAuditEntry` from their repo modules) |
 | `connection.rs` | `WalletDatabase` — connection wrapper, migration runner, PIN/mnemonic cache, wallet creation/recovery orchestration, startup checks and startup column repairs |
 | `models.rs` | Data structs — 21 structs matching database tables |
-| `migrations.rs` | Consolidated V1 schema + incremental migrations `migrate_v1_to_v2` … `migrate_v22_to_v23` (22 incremental functions) |
+| `migrations.rs` | Consolidated V1 schema + incremental migrations `migrate_v1_to_v2` … `migrate_v23_to_v24` (23 incremental functions) |
 | `migration.rs` | One-time JSON→SQLite migration (legacy `wallet.json`/`actions.json`). `migrate_json_to_database` is exported from `mod.rs` but has no remaining in-tree caller — legacy/dormant |
 | `helpers.rs` | Key derivation helpers: `get_master_private_key_from_db`, `get_master_public_key_from_db`, `derive_key_for_output`, plus format converters `address_to_address_info`, `output_to_fetcher_utxo` |
 
@@ -203,6 +203,23 @@ Per-site wallet permissions with spending limits, certificate field access contr
 
 The `*_all` variants include revoked/expired rows (management UI); the plain variants return active grants only.
 
+### DomainManifestSnapshotRepository (`domain_manifest_snapshot_repo.rs`)
+
+beta.3 Phase 0.8 (V24). What a site asked for, **as the user approved it**. Child table of
+`domain_permissions` with `ON DELETE CASCADE`, so revoking a site disposes of its snapshot.
+
+- `record_approved(domain_permission_id, manifest_json, source_url, fetched_at, approved_at)` —
+  supersedes any previous approved row for the same domain (a re-approval is a fresh consent;
+  keeping the old one would make "which numbers did they agree to?" ambiguous)
+- `get_approved(domain_permission_id)`
+
+⛔ **Informational only, never a decision input** (`R-SNAPSHOT`, `P0.8-A11`). Authoritative
+permission state stays in `domain_permissions` + the V18 child tables; nothing here reaches
+`hodos_permission_engine::decide`. 🚨 Rows are stored **as approved, not live** — `approved_at`
+non-NULL marks what was on screen. Otherwise a site could publish modest recommendations, get
+approved, publish aggressive ones, and have a later "restore recommended" click adopt numbers the
+user never saw. Has a `#[cfg(test)] mod tests`.
+
 ### PeerPayRepository (`peerpay_repo.rs`)
 Notification tracking for received payments, chain-verification retries, and the MessageBox outbox. Unit struct — all methods are static and take `conn` as the first argument. Has a `#[cfg(test)] mod tests`.
 
@@ -281,9 +298,9 @@ Identity mapping (master pubkey → userId). Single-user wallets have one defaul
 
 ## Schema & Migrations
 
-**Current version**: **V23** (tracked in the `schema_version` table; the runner reads `MAX(version)`). New databases get the consolidated V1 schema and then run every incremental migration V2→V23 in the same pass, because `current_version` starts at 0 and each guard is `current_version < N`. All migrations are idempotent (check column/table existence, or use `IF NOT EXISTS` / `DROP … IF EXISTS`).
+**Current version**: **V24** (tracked in the `schema_version` table; the runner reads `MAX(version)`). New databases get the consolidated V1 schema and then run every incremental migration V2→V24 in the same pass, because `current_version` starts at 0 and each guard is `current_version < N`. All migrations are idempotent (check column/table existence, or use `IF NOT EXISTS` / `DROP … IF EXISTS`).
 
-Migration runner: `connection.rs :: WalletDatabase::migrate`. Migration bodies: `migrations.rs :: create_schema_v1` + `migrate_vN_to_vN+1` (22 incremental functions, `migrate_v1_to_v2` … `migrate_v22_to_v23`).
+Migration runner: `connection.rs :: WalletDatabase::migrate`. Migration bodies: `migrations.rs :: create_schema_v1` + `migrate_vN_to_vN+1` (23 incremental functions, `migrate_v1_to_v2` … `migrate_v23_to_v24`).
 
 | Version | Purpose |
 |---------|---------|
@@ -310,8 +327,9 @@ Migration runner: `connection.rs :: WalletDatabase::migrate`. Migration bodies: 
 | V21 | `bsv_price_cache` table — single-row (`CHECK (id = 1)`) persistent last-known-good BSV/USD price, so a cold start with both upstream price feeds down still has a fallback |
 | V22 | **Phase 2.6-D Fix #4.** `bundled_scope_grant` column on `domain_permissions` — silences ProtocolUse/BasketAccess prompts for the domain (protected baskets still prompt) |
 | V23 | **Phase 2.6-H cleanup.** Drops `engine_shadow_log`; `permission_audit_log` is kept |
+| V24 | **beta.3 Phase 0.8** (owner-approved 2026-08-22). Two additive changes: the `domain_manifest_snapshots` child table (FK + `ON DELETE CASCADE` off `domain_permissions(id)`, an **informational** record of what a site asked for **as approved** — never a decision input, `R-SNAPSHOT`), and `settings.default_prefill_from_manifest` (default `0`) — the opt-in that decides whether the connect modal's limit fields start from the user's defaults or the site's suggestion |
 
-### Startup repair blocks (`WalletDatabase::migrate`, after V23)
+### Startup repair blocks (`WalletDatabase::migrate`, after V24)
 
 The runner ends with five unconditional column-repair checks that patch DBs where a migration recorded its version but the `ALTER TABLE` never landed (staging-merge damage). Each is a `PRAGMA table_info` check + conditional `ALTER`:
 
@@ -384,7 +402,7 @@ All four `domain_permissions` child tables use `ON DELETE CASCADE` — revoking 
 - **INSERT OR IGNORE**: Used for idempotent inserts (`outputs`, `proven_txs`, `proven_tx_reqs`, `peerpay_received`)
 - **Error pattern**: Repository methods return `rusqlite::Result<T>` or `CacheResult<T>` (for cache-layer repos)
 - **No ORMs**: All SQL is hand-written with `rusqlite::params![]` for type-safe binding
-- **Tests**: four modules carry `#[cfg(test)] mod tests` — `domain_permission_repo.rs`, `message_relay_repo.rs`, `peerpay_repo.rs`, `permission_audit_repo.rs`
+- **Tests**: five modules carry `#[cfg(test)] mod tests` — `domain_permission_repo.rs`, `domain_manifest_snapshot_repo.rs`, `message_relay_repo.rs`, `peerpay_repo.rs`, `permission_audit_repo.rs`
 
 ## Related
 

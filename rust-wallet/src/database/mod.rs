@@ -27,6 +27,8 @@ pub mod commission_repo;
 pub mod settings_repo;
 pub mod sync_state_repo;
 pub mod domain_permission_repo;
+/// beta.3 Phase 0.8 (V24) — informational record of what a site asked for, as approved.
+pub mod domain_manifest_snapshot_repo;
 pub mod peerpay_repo;
 // Phase 2.6-A.5 — engine-to-Rust audit repo (V20).
 // (engine_shadow_repo removed in 2.6-H along with the shadow-log infra.)
@@ -65,6 +67,7 @@ pub use commission_repo::CommissionRepository;
 pub use settings_repo::SettingsRepository;
 pub use sync_state_repo::SyncStateRepository;
 pub use domain_permission_repo::DomainPermissionRepository;
+pub use domain_manifest_snapshot_repo::{DomainManifestSnapshot, DomainManifestSnapshotRepository};
 pub use peerpay_repo::PeerPayRepository;
 // Phase 2.6-A.5 — engine-to-Rust audit repo.
 pub use permission_audit_repo::{PermissionAuditEntry, PermissionAuditRepository};

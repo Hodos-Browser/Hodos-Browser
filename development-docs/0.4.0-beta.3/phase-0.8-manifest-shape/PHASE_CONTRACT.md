@@ -71,7 +71,7 @@ owner merged it back, and the deciding argument is sound:**
 So this phase does the whole job: fail loud **and** understand the standard shape.
 
 **One item stays deferred:** the *"App ABC recommends these settings — accept, or adjust yourself"*
-modal (`../../TICKET_brc73_group_permissions_manifest.md` §5). Not for risk — because **no site in
+modal (`DEFERRED_recommendations_modal.md`). Not for risk — because **no site in
 the survey declares `spendingAuthorization`**, so there is nothing to feed it. Building a modal
 against zero real inputs is how you get the wrong modal. The parser still reads the category (§6
 fixture 3) so the data is there the moment it is worth showing.
@@ -106,6 +106,81 @@ fixture 3) so the data is there the moment it is worth showing.
 ⚠️ Small, hand-picked, one-shot sample, biased *toward* likely adopters — a signal, not a survey.
 ⛔ **`200` does not mean "manifest."** Any fetch must parse-and-reject, never trust the status code.
 
+## 3a. MEASURED RESULTS — 2026-08-22 (implementation session)
+
+Every RED below was **seen to fail on the pre-fix binaries**, by running the new
+assertions against the reverted sources before the fix landed. Baselines before any
+change: `hodos_tests` 250 passed / 1 skipped; `cargo test --bins` 469 tests, green.
+
+### The pre-fix RED, both layers
+
+Rust (`cargo test --bins p08_red::` against the reverted `manifest.rs`) — **10 of 11 failed**:
+
+| Probe | Pre-fix measurement |
+|---|---|
+| `A1` bitgenius | **0 protocols** (the site declares 4) — matches the 2026-08-21 production trace exactly |
+| `A3` `unrecognised-shape.json` | `is_some() == true` → a permission-free bundle |
+| `A6` locations | only `.well-known`; `/manifest.json` never probed |
+| `A8` precedence | 0 protocols, from either namespace |
+| bounds | 500 declared entries → **500 kept** |
+| `iconUrl` | `javascript:alert(1)` passed straight through to the modal's `<img src>` |
+
+C++ (`hodos_tests --gtest_filter=P08Red.*` against the reverted `ManifestFetcher.*`) —
+**10 of 10 failed**. The decisive line:
+
+```
+RED A1: valid=1 protocols=0
+```
+
+⭐ That is the shipped defect in one line: the **C++** parse — the one the
+`📦 Triggering … (N protocols…)` log reads and the one that builds the modal — reported
+the manifest **valid** while itemising **nothing**.
+
+### Two findings the RED run surfaced that were not in the plan
+
+1. 🚨 **`R-CAPS` and `R-PROV` were already violated, and not hypothetically.**
+   `BRC100AuthOverlayRoot.tsx` seeded `manifestPerTxCents` from
+   `m.spending.perTransactionUsd * 100` and rendered it under the label
+   *"**Default** payment limits: $X/tx"*. A site using our legacy shape set its own caps
+   **and they were presented as the user's own defaults**. Measured directly:
+   `RED legacy: protocols=0 perTxUsd=100` — the parser read the site's $100/tx while
+   reading none of its protocols. This is `R-PROV` inverted, in shipped code.
+2. ⛔ **Our own legacy shape never parsed its own documented example.**
+   `hodos-legacy-permissions.json` yielded **0 protocols** pre-fix: the parser only read
+   `protocolID: [level, name]`, while `PERMISSION_UX_DESIGN.md` §5's own example uses the
+   flattened `name` + `securityLevel` spelling. The "regression guard" fixture was
+   guarding a shape that was already broken. Both spellings now parse.
+
+### A third finding, from the negative control itself
+
+⭐⭐ **The first `A5` negative control did not trip, and the harness said so.** Driving it
+with the fixture's 5,000,000 satoshis, the deliberately-broken build still produced
+`perTxCents=100 (source=user)` — because 5,000,000 is above `usableUsd`'s magnitude sanity
+cap and was rejected for being *absurd*, not for being *the wrong unit*. The assertion was
+passing for the wrong reason. `T1f` now also drives BRC-73's own 10,000 example, which sits
+inside the sanity range and isolates the unit rule; the control then trips cleanly
+(`observed perTxCents=1000000 (source=site)`). **A negative control only proves the
+property you thought of** — this one earned its place.
+
+### Post-fix GREEN
+
+| Suite | Before | After |
+|---|---|---|
+| `hodos_tests` (C++) | 250 passed / 1 skipped | **285 passed / 1 skipped** (286 total) |
+| `cargo test --bins` | 469 | **502 passed**, 2 ignored |
+| `T1f` (real `manifestConsent.ts` via node) | did not exist | 26 checks, all pass |
+
+### Verified negative controls (each *seen* to fail, then restored)
+
+| Control | Sabotage | Observed |
+|---|---|---|
+| `A5` Rust | map `spendingAuthorization.amount` → `per_transaction_usd` | `assertion failed … left: 5000000, right: 0` |
+| `A5` C++ | same, in `applyGroupPermissions` | `Which is: 5000000` → `A5_SpendingAuthorizationNeverPopulatesOurCapFields` FAILED |
+| `A5` frontend (`T1f --negative-control`) | `usableUsd(perTransactionUsd ?? monthlySatoshis)` | 10,000 sats/month became **$10,000 per transaction, `source=site`** — caught |
+| fixture wiring | (accidental) wrong relative path in the RED probe | the "missing fixture FAILS, never skips" guard fired and named the path — and revealed `A3` was passing **vacuously** on an empty string |
+
+---
+
 ## 4. Goals
 
 1. A site publishing the **standard** shape gets an itemised connect modal showing what it declared.
@@ -120,29 +195,52 @@ fixture 3) so the data is there the moment it is worth showing.
 
 ## 5. Done means
 
-- [ ] `metanet.groupPermissions` parsed, in **both** layers (`manifest.rs :: parse_manifest`,
+- [x] `metanet.groupPermissions` parsed, in **both** layers (`manifest.rs :: parse_manifest`,
       `ManifestFetcher.cpp :: ParseFromJson`) — they re-parse the same bytes and must move together.
-- [ ] Legacy `babbage.groupPermissions` read as a fallback; `metanet` wins when both are present.
-- [ ] Our legacy top-level `permissions` shape still parses (zero adopters, but it is ours).
-- [ ] All four BRC-73 categories parsed into the existing `Manifest` struct — a **translation layer**.
-      ⛔ The decision engine is not modified. BRC-73 is an *input* to it.
-- [ ] `/manifest.json` fetched in addition to `/.well-known/wallet-manifest.json`, sequential, both
-      under the existing 3 s / 64 KB caps, unknown-domain path only.
-- [ ] A manifest with **no recognised permissions** falls back to `domain_approval`.
-- [ ] Duplicate connect prompts for one gesture coalesced to one — **after** the race is measured.
-- [ ] ⛔ Confirm what a manifest-connect grant **writes** to `domain_permissions` — the row must
-      inherit the user's safe defaults ($1 per-tx / $10 per-session), never anything the manifest
-      declared. **Not yet measured.** If it already cannot, this is a regression test, not a fix.
-- [ ] ⭐ Any field populated from the manifest is **visibly marked as the site's suggestion**, and the
-      modal states plainly that these are not the user's defaults. A one-click **"Use my defaults"**
-      control reverts every suggested field.
-- [ ] Migration **V24** written and applied as specified in §6b — the `domain_manifest_snapshots`
-      child table and the `settings.default_prefill_from_manifest` column. Owner-approved 2026-08-22.
-      Bump the runner gate in `connection.rs :: WalletDatabase::migrate` and keep it idempotent.
-- [ ] The approved manifest is stored as a **snapshot**, informational only (§6a).
-- [ ] The pre-fill toggle ships **off** by default, at the bottom-right of "Default Limits for New
-      Sites", and never suppresses the site-suggestion marking (§6a, `P0.8-A12`).
-- [ ] Fixtures checked in (§7) and driven by both test suites, each with a negative control.
+- [x] Legacy `babbage.groupPermissions` read as a fallback; `metanet` wins when both are present.
+      Conditioned on `groupPermissions` being *present*, not merely the namespace key — socialcert.net
+      serves a bare `babbage` object, and a `metanet: {schemaVersion:1}` must not shadow a populated
+      `babbage` (BRC-116 Backwards Compatibility).
+- [x] Our legacy top-level `permissions` shape still parses. ⚠️ It did **not** before: its own
+      documented example uses the flattened `name` + `securityLevel` spelling, which the parser never
+      read. Both spellings now work — see §3a finding 2.
+- [x] All four BRC-73 categories parsed into the existing `Manifest` struct — a **translation layer**.
+      ⛔ The decision engine is not modified. Confirmed: `PermissionContext` gained no field, and
+      `a11_the_engine_context_carries_no_manifest_content` fails if one appears.
+- [x] `/manifest.json` fetched in addition to `/.well-known/wallet-manifest.json`, sequential
+      (standard location first), both under the existing 3 s / 64 KB caps, unknown-domain path only.
+      ⭐ Hardened beyond the ask (`R-PATH`): an origin carrying a path, query, fragment, userinfo or
+      interior whitespace is now **rejected**, not concatenated, and `http://` is upgraded to `https://`
+      except on loopback — BRC-116 §9.2.
+- [x] A manifest with **no recognised permissions** falls back to `domain_approval`.
+- [x] Duplicate connect prompts for one gesture coalesced to one. The §2 hypothesis is **confirmed by
+      construction**: `hasPendingForDomain()` and `addRequest()` take the manager's mutex separately.
+      Replaced by `PendingRequestManager::addRequestIfFirstForDomain`, which does both under one lock.
+      ⭐ Applied to **all three** openers (`domain_approval`, `brc100_auth`, `manifest_connect_bundle`),
+      not only the reported one — fixing the reported arm and leaving its identical siblings is how the
+      last one survived.
+- [x] 🚨 **MEASURED, and it was a real violation.** The row did NOT inherit the user's defaults: the
+      modal seeded its per-tx / per-session fields from `m.spending.perTransactionUsd` and rendered
+      them as *"**Default** payment limits"*. This was a fix, not a regression test. See §3a finding 1.
+      The four fields now start from the user's own settings, and the modal never had the user's real
+      defaults before either — `/wallet/settings` did not serve `default_max_tx_per_session` at all
+      (V13 column, never in the GET, never in the POST; now both).
+- [x] ⭐ Every manifest-populated field is marked `suggested by site` — in colour, in a border, **and
+      in words**, because colour alone fails a colour-blind user, a high-contrast theme or a
+      screenshot. A one-click **"Use my defaults"** control sits in both the summary and the customize
+      view and reverts all four fields. The rule itself lives in the pure, unit-tested
+      `frontend/src/utils/manifestConsent.ts`, not inline in the component.
+- [x] Migration **V24** written exactly as specified in §6b — `domain_manifest_snapshots` +
+      `settings.default_prefill_from_manifest`, runner gate bumped to `< 24`, idempotent
+      (`CREATE TABLE IF NOT EXISTS` + existence-checked `ALTER`). No deviation from the approved shape.
+- [x] The approved manifest is stored as a snapshot, informational only. Bytes come from the stash
+      `domain_trust_gate` fills at **fetch** time, so what is stored is what the modal was built from —
+      "as approved, not live" (§6a rule 2). Write is strictly best-effort and never fatal.
+- [x] The pre-fill toggle ships **off**, bottom-right of "Default Limits for New Sites", worded to name
+      the risk rather than the feature. `P0.8-A12` proves it changes only *which* values are pre-filled.
+- [x] All 8 fixtures driven by **both** suites from one canonical copy — Rust via `include_str!`
+      (a deleted fixture breaks the build), C++ via `HODOS_MANIFEST_FIXTURE_DIR` from CMake, where a
+      missing fixture **fails and names the path** rather than skipping.
 
 ## 6a. Consent provenance and the stored snapshot — owner requirement, 2026-08-22
 
@@ -287,34 +385,141 @@ pass rule is one home per fact.
 | 7 | `not-a-manifest.html` | The SPA `200 text/html` case. Must yield no manifest. |
 | 8 | `bitgenius-live-capture.json` | The real 3358-byte manifest, captured 2026-08-22, so the acceptance test does not depend on a live third-party site. |
 
-## 8. Evidence table
+## 8. Evidence table — RESULTS
 
-| ID | 🟢 GREEN | 🔴 RED — must be *seen* to fail | 🎯 SUBJECT | Tier |
-|---|---|---|---|---|
-| `P0.8-A1` | bitgenius's real manifest parses to **4 protocols** | ⛔ Pre-fix **0** — measured 2026-08-21 | The `📦 Triggering manifest_connect_bundle … (N protocols…)` line. ⚠️ That count comes from the **C++** parse of the bytes Rust embeds — a Rust-only fix cannot move it | T1 |
-| `P0.8-A2` | The modal **displays** the four with their descriptions | ⛔ Pre-fix it displays none | The rendered overlay, not the parse count | T2 |
-| `P0.8-A3` | Fixture 6 renders **`domain_approval`** | ⛔ Pre-fix it renders a permission-free bundle | Which modal opens, **and** the absence of the `📦 Triggering` line — not the parse count | T1 |
-| `P0.8-A4` | One click → **one** modal | ⛔ Pre-fix three in 56 ms — measured | Notification-overlay creation count, not the 202 count | T1 |
-| `P0.8-A5` | Fixture 3's `spendingAuthorization` does **not** raise the stored caps | ⛔ Stub the clamp → the row takes the site's numbers | The `domain_permissions` row after approval | T1 |
-| `P0.8-A6` | A site serving **only** `/manifest.json` is found | ⛔ Remove the second location → not found | A fixture served at `/manifest.json` only | T1 |
-| `P0.8-A7` | Fixture 7 yields **no** manifest | ⛔ Trust the status code → HTML treated as a manifest | Parse result, driven by real `200 text/html` | T1 |
-| `P0.8-A8` | Fixture 4: `metanet` content wins over `babbage` | ⛔ Swap precedence → legacy content shown | Parsed protocol set | T1 |
+Legend: 🟢 GREEN measured · 🔴 RED *seen* to fail on the pre-fix binary · ⚠️ OWED.
+Detail and raw numbers in §3a.
 
-| `P0.8-A9` | Every manifest-populated field is visibly marked as the **site's** suggestion, and the modal says so in words | ⛔ Remove the marking → it is indistinguishable from the user's own defaults | The rendered modal, read by someone who did not write it — not the presence of a CSS class | T2 |
-| `P0.8-A10` | One click reverts every suggested field to the user's defaults | ⛔ Stub the control → suggested values survive | The `domain_permissions` row after approval | T1 |
-| `P0.8-A12` | With the pre-fill toggle **off** (default), limit fields carry the **user's** defaults; with it **on**, they carry the site's — and in **both** states the site-sourced fields stay marked and "Use my defaults" still works | ⛔ Toggle has no effect, or turning it on suppresses the marking | The rendered modal in both toggle states | T1 |
-| `P0.8-A11` | A stored snapshot never changes an allow/deny outcome | ⛔ Feed the snapshot into the gate → a decision moves | Engine decision with and without a snapshot present, identical inputs | T1 |
+| ID | Verdict | 🎯 What was actually measured |
+|---|---|---|
+| `P0.8-A1` | 🟢 **GREEN** | Both layers, plus the live flow. C++ parse of the real 3358-byte manifest → **4 protocols** with counterparties (`ManifestBrc73.A1_…`); Rust the same; and live against `https://bitgenius.net` the gate embedded 3358 bytes and chose `ManifestConnectBundle`. 🔴 RED: `RED A1: valid=1 protocols=0` on the pre-fix **C++** parse — valid, itemising nothing. |
+| `P0.8-A2` | ⚠️ **OWED — owner visual** | The payload now carries what the modal needs (counterparty per Level-2 protocol, verifier + field list per certificate, `sourceNamespace`, `groupDescription`) and the markup renders them. **I could not drive the rendered overlay**: physical clicks are dropped in this environment ([[reference_sendinput_clicks_blocked_in_agent_env]]) and CDP reports every Hodos overlay as `type:"page"`, which faked a bug once already. Needs a human to look at it. `bitgenius.net` is left **unapproved** so that test will not be vacuous. |
+| `P0.8-A3` | 🟢 **GREEN — right subject, and on a real site** | Asserts **which prompt opened**, not a parse count. Live: `socialcert.net` (publishes a `babbage` key with **no** `groupPermissions` — fixture 6's shape in the wild) → `promptType=domain_approval`, **no manifest in the payload**; `projectbabbage.com` (SPA `200 text/html`) → `domain_approval`, `reason=new_domain_no_manifest`. Fixture 6 and 7 also assert `valid == false` in both parsers. 🔴 RED: pre-fix `unrecognised-shape.json` returned `is_some()/valid == true` → the permission-free bundle. |
+| `P0.8-A4` | 🟡 **PARTIAL — fix landed, browser-level count OWED** | Root cause **confirmed by construction, not hypothesis**: `hasPendingForDomain()` and `addRequest()` take `PendingRequestManager::mutex_` separately, so N concurrent requests all read "none pending". Fixed with `addRequestIfFirstForDomain` (one lock) and applied to **all three** openers. Measured precondition: 3 concurrent `/getVersion` still mint **3 distinct approvalIds** in Rust — by design; coalescing to one *modal* is the C++ side's job. ⛔ That count is browser-side and **not unit-testable**: `PendingAuthRequest.h` includes `cef_resource_handler.h`/`cef_frame.h`, so it cannot link into the CEF-free `hodos_tests`. The overlay-creation count needs a human clicking Connect. |
+| `P0.8-A5` | 🟢 **GREEN + 3 verified negative controls** | Fixture 3's `spendingAuthorization.amount` (5,000,000) lands in `monthly_satoshis` and leaves `per_transaction_usd`/`per_session_usd` at **0**, in both parsers; the frontend rule refuses it in **both** toggle states. Live: the approved `domain_permissions` row read `(100, 1000, 30, 100)` — the user's defaults. 🔴 RED ×3: Rust (`left: 5000000, right: 0`), C++ (`Which is: 5000000`), frontend (10,000 sats/month → **$10,000/tx, `source=site`**). ⭐ The frontend control initially did **not** trip — see §3a. |
+| `P0.8-A6` | 🟢 **GREEN** | Live: the manifest was served from **`https://bitgenius.net/manifest.json`** — BRC-73's canonical location, which the pre-fix build never probed. Unit: `ManifestUrls`/`manifest_urls` return both locations, standard first. 🔴 RED: pre-fix `manifest_url` produced only `.well-known`. ⭐ Hardened beyond the ask — `R-PATH` rejects any origin that is not a bare authority, and `http://` is upgraded except on loopback. |
+| `P0.8-A7` | 🟢 **GREEN (retained property, not a fixed defect)** | Fixture 7 yields no manifest in both parsers, and live `projectbabbage.com` (`200 text/html`) produced `domain_approval`. ⛔ **Honest note: this one passed pre-fix too** — HTML fails `serde_json::from_str`, so status-code trust was never in our code. Recorded as a property now guarded by a regression test, not as a defect this phase closed. |
+| `P0.8-A8` | 🟢 **GREEN** | Fixture 4 → `sourceNamespace == metanet`, 4 protocols, and no entry named `STALE legacy protocol`, in both parsers. 🔴 RED: pre-fix 0 protocols from either namespace. Also pinned: `babbage` is used when `metanet` carries no `groupPermissions` (socialcert's real shape). |
+| `P0.8-A9` | 🟡 **BUILT — owner visual OWED** | Every site-sourced field is marked three ways: a `suggested by site` pill, a coloured border, **and prose** (*"These are not your defaults"*). ⛔ Colour is deliberately never the only signal. 🚨 The RED here was **live in shipped code**: the summary line read *"**Default** payment limits: $X/tx"* with X taken from the site's manifest. Same subject caveat as `A2` — must be read by someone who did not write it. |
+| `P0.8-A10` | 🟢 **GREEN** | `T1f`: `useMyDefaults` restores all four values and clears every `'site'` mark. Present in both the summary and the customize view. |
+| `P0.8-A11` | 🟢 **GREEN** | Two guards. (1) The engine decision is identical across the whole domain-trust matrix — a snapshot has no argument to pass. (2) `PermissionContext`'s `Debug` output is asserted to contain **`manifest_present`** and **not** `manifest_json`/`snapshot`/`raw_json`/`source_url`/`groupPermissions` — the positive assertion is what stops the negative ones being vacuous. Fails the moment anyone gives a snapshot a route in. |
+| `P0.8-A12` | 🟢 **GREEN (rule) / ⚠️ visual OWED** | `T1f`: toggle OFF → fields carry the user's defaults, unmarked, with the site's suggestion surfaced separately; toggle ON → the site's values, **still marked `site`**, with untouched fields still the user's. Live: `settings.default_prefill_from_manifest` read **0** after V24. |
 
-⚠️ **Subject-correctness, twice bitten already this sprint.** `A3` must assert *which modal opened*,
-not a parse count — a count assertion passes the instant the parser changes at all, whether or not
-the prompt improved. `A1` must be driven through the C++ parse, because that is what the log line
-measures.
+### Also measured live, beyond the table
 
-**Live acceptance:** bitgenius.net end to end, from an unapproved state (revoke via right-click →
-Manage Site Permissions first, or the domain is already trusted and nothing will be fetched).
-⚠️ `test-fixtures/manifest-dapp/README.md` records the constraint: the manifest fetch is **HTTPS-only
-for bare hosts**, so a localhost demo cannot exercise the real fetch path — the fixtures test the
-parsers, bitgenius tests the flow.
+| Check | Result |
+|---|---|
+| **Migration V24 on a real DB** | Dev wallet at 299 addresses migrated **V23 → V24** cleanly; `schema_version` = 24, `domain_manifest_snapshots` created, `default_prefill_from_manifest` = **0**. |
+| **Snapshot write** | After a real approve: one row, **3358 bytes**, `source_url=https://bitgenius.net/manifest.json`, `approved_at` set. |
+| **`R-SNAPSHOT` cascade** | Revoking through the product's `DELETE /domain/permissions` dropped the snapshot with the row (1 → 0). ⚠️ A raw `sqlite3` DELETE did **not** cascade — Python does not enable `PRAGMA foreign_keys` per connection, while the wallet does. A test artifact, but it is why this was re-measured through the real endpoint instead of assumed. |
+| **`R-NOFETCH`** | An approved domain (`socialcert.net`) returned `200` with no prompt and no fetch line. |
+| **`R-CAPS` at the row** | `domain_permissions` after a manifest connect: `(100, 1000, 30, 100)` — the user's defaults. |
+| **Preflight** | `PREFLIGHT: PASS` (all T0 gates + T1a–T1f, `-Full`). `NEGATIVE CONTROL: PASS` — every gate, including the new T1f, was seen to fail. |
+
+### What is NOT claimed
+
+⛔ Three things are **owed to a human at the browser**, and no green above should be read as covering
+them: the **rendered** modal (`A2`, `A9`, the visual half of `A12`) and the **one-gesture-one-overlay**
+count (`A4`). Each needs a click on a real connect prompt. `bitgenius.net` was deliberately left
+**unapproved** in the dev database so that test measures something.
+
+## 8a. ⭐ The field gap — recommendation (owner-requested, 2026-08-22)
+
+Our engine has **four** numeric controls. BRC-73 has **one**, and it matches none of ours:
+
+| | Unit | Period | In BRC-73? |
+|---|---|---|---|
+| `per_tx_limit_cents` (100) | USD cents | per transaction | ❌ |
+| `per_session_limit_cents` (1000) | USD cents | per browser session | ❌ |
+| `rate_limit_per_min` (30) | count | per minute | ❌ |
+| `max_tx_per_session` (100) | count | per browser session | ❌ |
+| `spendingAuthorization.amount` | **satoshis** | **calendar month** | ✅ — the only one |
+
+BRC-116 confirms the gap is deliberate and total, not an oversight we can read around:
+*"Protocol permission grants are binary (grant or deny). There are no amount limits or ephemeral
+flags"* (§4.1), the same for baskets (§4.3), and spending *"is tracked on a **calendar month**
+basis"* with `expiry` always `0` (§4.2, §7.3). So the standard has **no rate limit, no
+per-transaction cap and no session concept anywhere** — and we have **no monthly concept at all**.
+
+### Direction 1 — do we adjust our engine? **Recommendation: NO for beta.3. Add a monthly cap in beta.4+, and only then.**
+
+**Why not now.** Nothing is broken. Our four controls are strictly *narrower* than BRC-73's single
+one: a wallet that enforces per-transaction and per-session ceilings already bounds monthly spend,
+just not on a calendar boundary. Adding a fifth control is an **engine change**, which this phase
+explicitly may not make, and it would need a new `domain_permissions` column, a new
+`PermissionContext` field, a new Matrix-C branch, a month-rollover clock, and UI in three places.
+That is a phase, not a patch.
+
+**Why eventually yes.** Two reasons that will not go away:
+1. **Our session concept is weaker than users think.** `per_session_limit_cents` resets when the tab
+   closes — by design, recorded as such — so a user who closes and reopens a tab ten times has
+   authorised ten sessions' worth of spend without a single extra prompt. A calendar-month ceiling is
+   the only one of the five that a determined site cannot reset by asking the user to reload.
+2. **It is the only field a BRC-100 app can actually declare.** As long as we have no monthly
+   concept, `spendingAuthorization` can only ever be *displayed*, and the deferred recommendations
+   modal has nothing it can honour.
+
+⛔ If it is built: it is an **additional** ceiling, never a replacement, and never writable from a
+manifest without an affirmative user act (`R-CAPS` survives).
+
+### Direction 2 — do we propose fields upstream to BRC-73? **Recommendation: YES, but scoped to one field, and not before a real second implementation exists.**
+
+We would be arguing from a shipping implementation, which is the strongest position to propose
+from — but the survey found **1 of 10** sites serving *any* grouped-permission manifest and **0**
+serving `spendingAuthorization`. Proposing rate limits to a schema nobody populates is noise. The
+honest sequence is: ship this, get a second app publishing a manifest, *then* propose.
+
+When we do, propose **one** field, not three. Per-transaction cap is the one with a real safety
+argument that the standard cannot already express; rate limit and session scope are
+implementation policy that BRC-116 §6.5 already leaves to the wallet
+(*"Wallets MAY expose policy controls…"*), and proposing them invites a "that is your UX" rejection
+that would take the useful field down with it.
+
+#### Draft proposal text (for `bitcoin-sv/BRCs`, `wallet/0073.md`)
+
+> **Proposed addition to `spendingAuthorization`: an optional `perTransactionAmount`.**
+>
+> ```json
+> "spendingAuthorization": {
+>   "amount": 10000,
+>   "perTransactionAmount": 500,
+>   "description": "For in-app purchases."
+> }
+> ```
+>
+> `perTransactionAmount` — OPTIONAL. The largest single spend, in satoshis, the application expects
+> to request without a fresh prompt. MUST be ≤ `amount` when both are present. Wallets MAY ignore it;
+> wallets that enforce a per-transaction ceiling SHOULD treat it as the application's *request*, and
+> MUST NOT adopt it without user consent.
+>
+> **Rationale.** `amount` alone cannot distinguish an application that will spend 10,000 satoshis in
+> a hundred small increments from one that will spend it in a single transaction. These have very
+> different risk profiles for the user and, in wallets that enforce a per-transaction ceiling, very
+> different prompt behaviour: the first runs silently, the second prompts on its first action. Today
+> an application has no way to signal which it is, so a wallet must either prompt on a spend the
+> application considered routine or stay silent on one the user would have wanted to see.
+>
+> An OPTIONAL field costs nothing to wallets that do not enforce per-transaction limits (BRC-116 §4.2
+> defines no such ceiling, so ignoring it is conformant) and lets those that do — Hodos enforces a
+> user-configurable per-transaction cap, default $1.00 — show the user a more accurate prompt.
+>
+> **Not proposed, deliberately:** rate limits and session-scoped caps. BRC-116 §6.5 already places
+> prompting policy with the wallet, and neither has an interoperability argument — a wallet can
+> enforce both without the application declaring anything.
+
+⚠️ **Status: drafted, not submitted.** Submitting is an outward-facing act on a public standards
+repo under the Hodos name and is the owner's call, not mine. Prerequisite before submitting: at least
+one BRC-100 app other than bitgenius publishing a `groupPermissions` manifest, so the proposal is
+evidence-backed rather than a lone implementer's preference.
+
+### What this phase did instead, and why it is sufficient for beta.3
+
+Displayed, never converted. The connect modal shows *"This site declares a monthly allowance of
+10,000 satoshis / month. Hodos does not enforce monthly limits — the per-transaction and per-session
+limits below are what will actually apply."* That is honest about the gap in both directions, needs
+no exchange-rate conversion (which moves), and keeps `R-CAPS` literally true.
+
+---
 
 ## 9. Invariants preserved
 
@@ -329,13 +534,16 @@ parsers, bitgenius tests the flow.
 
 ## 10. Out of scope
 
-- The *"app recommends these settings"* modal → `../../TICKET_brc73_group_permissions_manifest.md` §5.
+- The *"app recommends these settings"* modal → `DEFERRED_recommendations_modal.md` (no target release; blocked on a real site declaring `spendingAuthorization`).
 - Any change to the decision engine.
 - Chromium's Local Network Access prompt branding → Phase 0.9.
 
 ## 11. Related
 
-- `../../TICKET_brc73_group_permissions_manifest.md` — spec citations, full survey, deferred modal.
+- `DEFERRED_recommendations_modal.md` — the one item this phase deliberately did not build.
+  ⚠️ `../../TICKET_brc73_group_permissions_manifest.md` was **archived** on 2026-08-22 when this
+  phase closed: its spec citations and adoption survey are §3 above (one home per fact), and its
+  deferred modal is the file named on the line above.
 - `bitcoin-sv/BRCs` — `wallet/0073.md`, `wallet/0116.md`.
 - `test-fixtures/manifest-dapp/` — the existing HTTPS connect-bundle fixture and its constraints.
 - `demos/README.md` — where runnable fixtures live and why.

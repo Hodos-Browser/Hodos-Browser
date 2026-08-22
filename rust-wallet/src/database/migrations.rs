@@ -1252,3 +1252,84 @@ pub fn migrate_v22_to_v23(conn: &Connection) -> Result<()> {
     info!("   ✅ V23 migration applied (engine_shadow_log dropped)");
     Ok(())
 }
+
+/// V23 → V24 — beta.3 Phase 0.8. Manifest snapshots + the pre-fill toggle.
+///
+/// Owner-approved 2026-08-22 (`development-docs/0.4.0-beta.3/phase-0.8-manifest-shape/
+/// PHASE_CONTRACT.md` §6b) as EXACTLY this shape. Two additive changes; no existing
+/// column or table is altered or dropped.
+///
+/// **1. `domain_manifest_snapshots`** — what a site asked for, as approved.
+///
+/// A child table joined by FK + `ON DELETE CASCADE` off `domain_permissions(id)`,
+/// mirroring the `cert_field_permissions` pattern CLAUDE.md names as the reuse
+/// anchor. Revoking a site disposes of its snapshot — no orphaned record of a
+/// site the user removed. Storing a newer fetch beside the approved one is what
+/// lets a *changed* manifest be detected and treated as re-consent.
+///
+/// ⛔ Three rules, all load-bearing (contract §6a):
+///
+/// 1. **Informational only — never a decision input.** Authoritative permission
+///    state stays in `domain_permissions` and the V18 child tables. This table
+///    feeds display and a future user-initiated "apply these" action, nothing
+///    else. (A discipline we adopt by choice; BRC-116's rule about caches not
+///    being authoritative is about cached *permission state*, and a record of
+///    what a site *asked for* is not a grant. Do not cite it as compelling this.)
+/// 2. **As approved, not live.** `approved_at` non-NULL marks the row the user
+///    actually saw. 🚨 Storing the live manifest instead would let a site publish
+///    modest recommendations, get approved, publish aggressive ones, and have a
+///    later "restore recommended" click silently adopt numbers never shown.
+/// 3. Schema change ⇒ owner approval. Granted for this shape only.
+///
+/// `manifest_json` holds the raw bytes as fetched, already ≤ 64 KB by the fetch
+/// cap (`manifest.rs :: MAX_MANIFEST_BYTES`). bitgenius, the largest real one
+/// observed, is 3358 bytes — one row per approved domain is negligible.
+///
+/// **2. `settings.default_prefill_from_manifest`** — the pre-fill opt-in.
+///
+/// Default `0` = behaviour (b): the connect modal's limit fields carry the
+/// USER's defaults and the site's suggestion is shown beside them. `1` = (a):
+/// the site's suggested values are pre-filled instead. ⛔ The toggle changes
+/// only WHICH values are pre-filled — site-sourced fields stay visibly marked
+/// and "Use my defaults" still works in both states (`R-PROV`, `P0.8-A12`).
+/// Mirrors the `default_identity_key_disclosure_allowed` precedent (V19).
+///
+/// Idempotent: `CREATE TABLE IF NOT EXISTS` + an existence-checked `ALTER`, so
+/// re-running on an already-V24 DB is a no-op.
+pub fn migrate_v23_to_v24(conn: &Connection) -> Result<()> {
+    info!("   Creating domain_manifest_snapshots + default_prefill_from_manifest (V24)...");
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS domain_manifest_snapshots (
+            id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+            domain_permission_id INTEGER NOT NULL,
+            manifest_json        TEXT    NOT NULL,
+            source_url           TEXT    NOT NULL,
+            fetched_at           INTEGER NOT NULL,
+            approved_at          INTEGER,
+            FOREIGN KEY (domain_permission_id) REFERENCES domain_permissions(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_domain_manifest_snapshots_domain
+            ON domain_manifest_snapshots(domain_permission_id);"
+    )?;
+
+    let cols: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(settings)")?;
+        let out: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        out
+    };
+    if !cols.iter().any(|c| c == "default_prefill_from_manifest") {
+        conn.execute(
+            "ALTER TABLE settings ADD COLUMN default_prefill_from_manifest INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    } else {
+        info!("   ℹ️  V24: default_prefill_from_manifest already exists, skipping");
+    }
+
+    info!("   ✅ V24 migration applied (domain_manifest_snapshots + default_prefill_from_manifest)");
+    Ok(())
+}

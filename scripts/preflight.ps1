@@ -234,6 +234,27 @@ if ($NegativeControl) {
         }
     }
 
+    # T1f negative control (Phase 0.8): rewrite manifestConsent.ts so BRC-73's
+    # monthly satoshis are read as a per-transaction USD cap -- the exact R-CAPS
+    # breach -- and assert the A5 check SEES it. MEASURED 2026-08-22: with only the
+    # 5,000,000-satoshi fixture this did NOT trip, because that value is above the
+    # magnitude sanity cap and was rejected for the wrong reason. The harness now
+    # also drives BRC-73's own 10,000 example, which isolates the unit rule.
+    if (Test-Selected 'T1f') {
+        $harness = Join-Path $RepoRoot 'development-docs/0.4.0-beta.3/phase-0.8-manifest-shape/probes/manifest_consent_t1f.mjs'
+        $lbl = 'NC: connect-modal consent rule (R-CAPS broken on purpose)'
+        if (-not (Test-Path $harness)) {
+            Add-Result 'T1f' $lbl 'SKIPPED' "harness missing: $harness"
+        } elseif (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+            Add-Result 'T1f' $lbl 'SKIPPED' 'node not on PATH'
+        } else {
+            $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+            try { & node --experimental-strip-types $harness --negative-control 2>&1 | Out-String | Write-Verbose } finally { $ErrorActionPreference = $prevEap }
+            if ($LASTEXITCODE -eq 0) { Add-Result 'T1f' $lbl 'PASS' 'a monthly-satoshis-as-cap regression is caught; the A5 check is not blind' }
+            else { Add-Result 'T1f' $lbl 'FAIL' "could not demonstrate the breach (exited $LASTEXITCODE)" }
+        }
+    }
+
     Write-Host ''
     if ($script:Results.Count -eq 0) {
         Write-Host 'NEGATIVE CONTROL: INCOMPLETE - ZERO gates exercised. This is NOT a pass.' -ForegroundColor Yellow
@@ -354,6 +375,27 @@ if (Test-Selected 'T1e') {
         try { & node --experimental-strip-types $harness 2>&1 | Out-String | Write-Verbose } finally { $ErrorActionPreference = $prevEap }
         if ($LASTEXITCODE -eq 0) { Add-Result 'T1e' $lbl 'PASS' '' }
         else { Add-Result 'T1e' $lbl 'FAIL' "harness exited $LASTEXITCODE - re-run with -Verbose" }
+    }
+}
+
+# T1f: connect-modal consent rule (Phase 0.8). Exercises the REAL shipped source --
+# frontend/src/utils/manifestConsent.ts (Node type-stripping) -- and asserts on WHOSE
+# NUMBER lands in each limit field (`sourceOf`), not merely that a value came back.
+# Its --negative-control mode (run only under -NegativeControl above) rewrites the real
+# source so BRC-73's monthly satoshis are treated as a per-transaction USD cap, and
+# proves the A5 assertion catches it.
+if (Test-Selected 'T1f') {
+    $harness = Join-Path $RepoRoot 'development-docs/0.4.0-beta.3/phase-0.8-manifest-shape/probes/manifest_consent_t1f.mjs'
+    $lbl = 'connect-modal consent rule (manifestConsent.ts)'
+    if (-not (Test-Path $harness)) {
+        Add-Result 'T1f' $lbl 'SKIPPED' "harness missing: $harness"
+    } elseif (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+        Add-Result 'T1f' $lbl 'SKIPPED' 'node not on PATH'
+    } else {
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try { & node --experimental-strip-types $harness 2>&1 | Out-String | Write-Verbose } finally { $ErrorActionPreference = $prevEap }
+        if ($LASTEXITCODE -eq 0) { Add-Result 'T1f' $lbl 'PASS' '' }
+        else { Add-Result 'T1f' $lbl 'FAIL' "harness exited $LASTEXITCODE - re-run with -Verbose" }
     }
 }
 

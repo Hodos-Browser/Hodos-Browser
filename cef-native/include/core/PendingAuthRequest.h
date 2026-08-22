@@ -101,6 +101,36 @@ public:
         return id;
     }
 
+    // beta.3 Phase 0.8 (`P0.8-A4`) — atomic "register, and tell me whether I am
+    // the first for this domain".
+    //
+    // 🚨 Callers used to do this in two steps:
+    //
+    //     bool showing = hasPendingForDomain(domain);   // lock #1
+    //     std::string id = addRequest(req);             // lock #2
+    //     if (showing) { queue } else { open a modal }
+    //
+    // Those are two independent acquisitions of `mutex_`, so N concurrent
+    // requests from ONE user gesture can all observe "none pending" before any
+    // of them inserts, and all N open a modal. MEASURED 2026-08-21: a single
+    // click on bitgenius.net produced three notification overlays in 56 ms,
+    // three 202s and three minted approval ids, all for `/getVersion`.
+    //
+    // ⛔ Do not reintroduce the check-then-act pair. `wasFirstForDomain` is
+    // written under the same lock that performs the insert, so exactly one
+    // caller per domain can ever see `true`.
+    std::string addRequestIfFirstForDomain(PendingAuthRequest req, bool& wasFirstForDomain) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        wasFirstForDomain = true;
+        for (const auto& pair : requests_) {
+            if (pair.second.domain == req.domain) { wasFirstForDomain = false; break; }
+        }
+        std::string id = generateId();
+        req.requestId = id;
+        requests_[id] = std::move(req);
+        return id;
+    }
+
     // Retrieve and remove a request by ID
     bool popRequest(const std::string& requestId, PendingAuthRequest& out) {
         std::lock_guard<std::mutex> lock(mutex_);

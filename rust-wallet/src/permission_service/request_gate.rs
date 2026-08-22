@@ -816,6 +816,20 @@ pub async fn domain_trust_gate(
     };
     let manifest_present = manifest.is_some();
 
+    // beta.3 Phase 0.8 — stash the bytes we just fetched so that, if the user
+    // approves the connect modal these bytes built, the snapshot recorded
+    // against the domain is what was ON SCREEN and not a re-fetch (contract
+    // §6a rule 2 — "as approved, not live"). Purely informational; nothing
+    // below reads it, and `decide()` never sees it (`R-SNAPSHOT`).
+    if let Some(ref m) = manifest {
+        permission.remember_fetched_manifest(
+            domain,
+            m.raw_json.clone(),
+            m.source_url.clone(),
+            chrono::Utc::now().timestamp(),
+        );
+    }
+
     let ctx = context_builder::build_domain_trust_context(perm_row.as_ref(), manifest_present);
     let decision = permission.decide(&ctx);
 

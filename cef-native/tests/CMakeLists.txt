@@ -92,6 +92,14 @@ target_link_libraries(hodos_tests PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 # install has no env-triggerable way to weaken EdDSA / Authenticode verification.
 target_compile_definitions(hodos_tests PRIVATE HODOS_UPDATE_TEST_SEAM)
 
+# beta.3 Phase 0.8 — manifest_fetcher_test reads the CANONICAL fixtures in
+# demos/manifest-shapes/, the same files rust-wallet/src/manifest.rs compiles in
+# with include_str!. One copy, both parsers: a fix in one layer with a test
+# driven only by the other proves nothing (see the fixture README). The test
+# FAILS (never skips) if a fixture is missing.
+target_compile_definitions(hodos_tests PRIVATE
+    HODOS_MANIFEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../demos/manifest-shapes")
+
 target_include_directories(hodos_tests PRIVATE
     ../include
 )

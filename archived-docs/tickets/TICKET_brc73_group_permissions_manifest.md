@@ -1,3 +1,13 @@
+> **ARCHIVED 2026-08-22** — beta.3 Phase 0.8 closed and did the work this ticket tracked.
+>
+> ⛔ **Do not cite this file.** Its two still-relevant sections have single homes elsewhere:
+> - §2 spec citations + §3 adoption survey →
+>   `development-docs/0.4.0-beta.3/phase-0.8-manifest-shape/PHASE_CONTRACT.md` §3
+> - §4 the deferred "App ABC recommends these settings" modal →
+>   `development-docs/0.4.0-beta.3/phase-0.8-manifest-shape/DEFERRED_recommendations_modal.md`
+>
+> Kept only as provenance for how the scope moved. One home per fact (2026-08-03 docs-truth rule).
+
 # BRC-73 manifests — spec reference, adoption survey, and the deferred recommendations modal
 
 **Filed 2026-08-22** out of beta.3 Phase 0.8's kickoff.

@@ -2,7 +2,7 @@
 
 > Pure-logic C++ unit tests for the Hodos browser shell. First infrastructure of its kind in the project — designed as a reference example per `development-docs/DevOps-CICD/TEST_PLAN.md` §5 (and the canonical strategy in `DevOps-CICD/TESTING.md`).
 >
-> ⚠️ **This file is partly STALE (flagged 2026-06-16).** It still describes `permission_engine_test.cpp` (the C++ `PermissionEngine` was deleted in Phase 2.6-H). The test files that actually exist here today are **`manifest_fetcher_test.cpp` (13 tests)** and **`sensitive_cert_fields_test.cpp` (26 tests)** = 39 GoogleTest cases. Treat the per-class "What's Tested" section below as needing a rewrite.
+> ⚠️ **This file is partly STALE (flagged 2026-06-16, re-flagged 2026-08-22).** It still describes `permission_engine_test.cpp` (the C++ `PermissionEngine` was deleted in Phase 2.6-H). The target today builds **14 test files / 286 GoogleTest cases** (285 pass, 1 skipped) — run `hodos_tests.exe --gtest_list_tests` for the live roster rather than trusting any count written here. ⭐ `manifest_fetcher_test.cpp` is now **fixture-driven**: it reads the canonical files in `demos/manifest-shapes/` via the `HODOS_MANIFEST_FIXTURE_DIR` compile definition set in `CMakeLists.txt`, the same files `rust-wallet/src/manifest.rs` compiles in with `include_str!`. ⛔ A missing fixture **fails and names the path**; it never skips. Treat the per-class "What's Tested" section below as needing a rewrite.
 
 ## Overview
 

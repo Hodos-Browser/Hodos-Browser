@@ -985,6 +985,19 @@ impl WalletDatabase {
             info!("   ✅ Schema V23 applied");
         }
 
+        if current_version < 24 {
+            // beta.3 Phase 0.8 (owner-approved 2026-08-22): the
+            // domain_manifest_snapshots child table — an informational record
+            // of what a site asked for AS APPROVED — plus the
+            // settings.default_prefill_from_manifest opt-in that decides
+            // whether the connect modal's limit fields start from the user's
+            // defaults (0, the default) or the site's suggestion (1).
+            info!("   Applying migration V24 (domain_manifest_snapshots + prefill toggle)...");
+            migrations::migrate_v23_to_v24(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (24)", [])?;
+            info!("   ✅ Schema V24 applied");
+        }
+
         // Startup repair: V12 migration may have recorded version but failed to add columns
         // (INSERT INTO schema_version succeeded but ALTER TABLE was skipped/failed).
         // Re-run the column checks unconditionally to patch any inconsistent DBs.

@@ -10479,6 +10479,45 @@ pub async fn set_domain_permission(
     // the React modal must explicitly include it in the POST.
     match repo.upsert(&perm) {
         Ok(id) => {
+            // beta.3 Phase 0.8 — record the manifest the user just approved.
+            //
+            // The bytes come from the stash `domain_trust_gate` filled at FETCH
+            // time, so what is stored is what the connect modal was built from
+            // (contract §6a rule 2: "as approved, not live"). A re-fetch here
+            // would let a site show the modal one manifest and the store
+            // another.
+            //
+            // ⛔ Informational ONLY (`R-SNAPSHOT`, `P0.8-A11`). Nothing reads it
+            // back into a permission decision — `decide()` takes a
+            // `PermissionContext` and the snapshot is not one of its inputs.
+            //
+            // Strictly best-effort and never fatal: the overwhelming majority
+            // of approvals have no manifest at all (1 of 10 surveyed sites
+            // serves one), and a failure here must not break a connect the user
+            // just granted.
+            if perm.trust_level == "approved" {
+                if let Some(pm) = state.permission.take_fetched_manifest(&req.domain) {
+                    let snap_repo =
+                        crate::database::DomainManifestSnapshotRepository::new(db.connection());
+                    match snap_repo.record_approved(
+                        id,
+                        &pm.raw_json,
+                        &pm.source_url,
+                        pm.fetched_at,
+                        chrono::Utc::now().timestamp(),
+                    ) {
+                        Ok(_) => log::info!(
+                            "📦 stored approved manifest snapshot for {} ({} bytes from {})",
+                            req.domain, pm.raw_json.len(), pm.source_url,
+                        ),
+                        Err(e) => log::warn!(
+                            "📦 could not store manifest snapshot for {} (non-fatal): {}",
+                            req.domain, e,
+                        ),
+                    }
+                }
+            }
+
             // Re-read for full response
             match repo.get_by_domain(state.current_user_id, &req.domain) {
                 Ok(Some(saved)) => HttpResponse::Ok().json(serde_json::json!({
@@ -19232,6 +19271,27 @@ pub async fn wallet_settings_get(state: web::Data<AppState>) -> HttpResponse {
         |row| row.get(0),
     ).unwrap_or(1);
 
+    // ⚠️ `default_max_tx_per_session` has existed on `settings` since V13 but
+    // was never served here, so every consumer silently fell back to a
+    // hardcoded 100 and a user who changed it was ignored. beta.3 Phase 0.8
+    // needs the user's REAL four defaults, because the connect modal now
+    // pre-fills from them rather than from the site's manifest (`R-PROV`).
+    let default_max_tx_per_session: i64 = db.connection().query_row(
+        "SELECT default_max_tx_per_session FROM settings LIMIT 1",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(100);
+
+    // beta.3 Phase 0.8 — V24 pre-fill opt-in. 0 (the default) = the connect
+    // modal's limit fields carry the USER's defaults and the site's suggestion
+    // is shown beside them; 1 = the site's suggested values are pre-filled.
+    // ⛔ Either way the site-sourced fields stay visibly marked (`P0.8-A12`).
+    let default_prefill_from_manifest: i64 = db.connection().query_row(
+        "SELECT default_prefill_from_manifest FROM settings LIMIT 1",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(0);
+
     drop(db);
 
     HttpResponse::Ok().json(serde_json::json!({
@@ -19239,7 +19299,9 @@ pub async fn wallet_settings_get(state: web::Data<AppState>) -> HttpResponse {
         "default_per_tx_limit_cents": per_tx,
         "default_per_session_limit_cents": per_session,
         "default_rate_limit_per_min": rate,
+        "default_max_tx_per_session": default_max_tx_per_session,
         "default_identity_key_disclosure_allowed": default_identity_key_disclosure_allowed != 0,
+        "default_prefill_from_manifest": default_prefill_from_manifest != 0,
     }))
 }
 
@@ -19282,6 +19344,30 @@ pub async fn wallet_settings_set(
     if let Some(v) = body.get("default_identity_key_disclosure_allowed").and_then(|v| v.as_bool()) {
         if let Err(e) = db.connection().execute(
             "UPDATE settings SET default_identity_key_disclosure_allowed = ?1",
+            rusqlite::params![if v { 1_i64 } else { 0_i64 }],
+        ) {
+            drop(db);
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}));
+        }
+    }
+
+    // beta.3 Phase 0.8 — the fourth default limit. Never had a setter, so the
+    // "Max Tx/Session" field in Approved Sites has been silently discarded on
+    // save since V13. `set_default_limits` only covers the first three.
+    if let Some(v) = body.get("default_max_tx_per_session").and_then(|v| v.as_i64()) {
+        if let Err(e) = db.connection().execute(
+            "UPDATE settings SET default_max_tx_per_session = ?1",
+            rusqlite::params![v.max(0)],
+        ) {
+            drop(db);
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}));
+        }
+    }
+
+    // beta.3 Phase 0.8 — V24 pre-fill opt-in setter.
+    if let Some(v) = body.get("default_prefill_from_manifest").and_then(|v| v.as_bool()) {
+        if let Err(e) = db.connection().execute(
+            "UPDATE settings SET default_prefill_from_manifest = ?1",
             rusqlite::params![if v { 1_i64 } else { 0_i64 }],
         ) {
             drop(db);

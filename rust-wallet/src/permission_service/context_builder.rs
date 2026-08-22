@@ -631,4 +631,80 @@ mod tests {
         let ctx = build_domain_trust_context(Some(&perm), false);
         assert_eq!(ctx.trust_level, TrustLevel::Blocked);
     }
+
+    // ========================================================================
+    // beta.3 Phase 0.8 — `R-SNAPSHOT` / `P0.8-A11`
+    //
+    // A stored manifest snapshot is INFORMATIONAL. It must never change an
+    // allow/deny outcome. The structural guarantee is that a snapshot has no
+    // route into a `PermissionContext`, and these tests are what fail if
+    // someone later gives it one.
+    // ========================================================================
+
+    /// SUBJECT: the engine's decision, with and without a snapshot in play, for
+    /// identical inputs. Since the snapshot cannot reach the context, the two
+    /// contexts must be byte-identical and the two decisions must match.
+    ///
+    /// ⛔ NEGATIVE CONTROL: add a `snapshot_present: bool` to
+    /// `build_domain_trust_context` and let it influence `trust_level` (the
+    /// obvious "the user approved this before, so trust it" shortcut) — this
+    /// test goes red immediately.
+    #[test]
+    fn a11_a_stored_snapshot_cannot_reach_the_decision() {
+        use hodos_permission_engine::decide;
+
+        // The full domain-trust matrix, evaluated twice. There is no snapshot
+        // argument to pass, which IS the property: the only inputs are the
+        // permission row and `manifest_present`.
+        for trust in ["unknown", "approved", "blocked"] {
+            for manifest_present in [false, true] {
+                let perm = sample_perm(trust, false);
+
+                // "Before a snapshot exists."
+                let ctx_a = build_domain_trust_context(Some(&perm), manifest_present);
+                let decision_a = decide(&ctx_a);
+
+                // "After one has been written." Writing a snapshot touches only
+                // `domain_manifest_snapshots`; it does not mutate the
+                // `domain_permissions` row, so the same row yields the same
+                // context. If a future change made the snapshot an input, it
+                // would have to come through here.
+                let ctx_b = build_domain_trust_context(Some(&perm), manifest_present);
+                let decision_b = decide(&ctx_b);
+
+                assert_eq!(
+                    format!("{:?}", ctx_a),
+                    format!("{:?}", ctx_b),
+                    "context differed for trust={trust} manifest_present={manifest_present}",
+                );
+                assert_eq!(
+                    format!("{:?}", decision_a),
+                    format!("{:?}", decision_b),
+                    "decision moved for trust={trust} manifest_present={manifest_present} \
+                     — a snapshot must never change an allow/deny outcome",
+                );
+            }
+        }
+    }
+
+    /// The same property stated where it is cheapest to check: the context the
+    /// engine consumes carries no manifest bytes at all. Only the one boolean
+    /// "was a manifest present?" crosses the boundary, and that is a property
+    /// of the FETCH, not of anything stored.
+    ///
+    /// If this stops compiling because someone added a `manifest_json` /
+    /// `snapshot` field to `PermissionContext`, that is the alarm, not a chore.
+    #[test]
+    fn a11_the_engine_context_carries_no_manifest_content() {
+        let ctx = build_domain_trust_context(None, true);
+        let rendered = format!("{:?}", ctx);
+        for forbidden in ["manifest_json", "snapshot", "raw_json", "source_url", "groupPermissions"] {
+            assert!(
+                !rendered.contains(forbidden),
+                "PermissionContext exposes {forbidden:?} — a manifest's CONTENT has \
+                 reached the decision layer. Only the `manifest_present` flag may.",
+            );
+        }
+        assert!(rendered.contains("manifest_present"), "the one legitimate flag is missing");
+    }
 }

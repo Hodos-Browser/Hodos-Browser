@@ -35,4 +35,6 @@ pub use request_gate::{
     dispatch_privacy_perimeter, dispatch_scoped_grant, ResolvedAmount,
     domain_trust_gate, is_protected_basket, GateOutcome, PaymentCall, ScopedCall, X_BROWSER_ID,
 };
-pub use state::{ApprovalConsumeError, PendingApproval, PermissionService, SessionCounters};
+pub use state::{
+    ApprovalConsumeError, PendingApproval, PendingManifest, PermissionService, SessionCounters,
+};
