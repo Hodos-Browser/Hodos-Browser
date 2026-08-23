@@ -192,6 +192,38 @@ export function useMyDefaults(userDefaults: ConnectLimits): {
   return { values: { ...userDefaults }, sourceOf: allUserSources() };
 }
 
+/**
+ * The "Use this site's suggested limits" control — the forward direction, and
+ * the mirror of {@link useMyDefaults}.
+ *
+ * Contract §6a defines the shipped behaviour (b) as the user's defaults plus
+ * *"an explicit 'Use the site's recommended settings' button"*. Most users, on
+ * a site whose recommendations are what make it work, will want exactly this;
+ * without it they had to retype the site's numbers by hand.
+ *
+ * ⛔ Adopting is an affirmative act and the fields stay MARKED (`sourceOf`
+ * flips to `'site'`), so `R-PROV` still holds and "Use my defaults" still
+ * reverts. Only figures already in our unit and period can be adopted at all —
+ * BRC-73's monthly satoshis never reach `SiteSuggestedLimits`, so this can
+ * never adopt them (`R-CAPS`). Fields the site said nothing about are untouched.
+ */
+export function useSiteSuggested(
+  current: ConnectLimits,
+  siteSuggests: SiteSuggestedLimits,
+): { values: ConnectLimits; sourceOf: LimitSources } {
+  const values: ConnectLimits = { ...current };
+  const sourceOf = allUserSources();
+  if (siteSuggests.perTxCents !== undefined) {
+    values.perTxCents = siteSuggests.perTxCents;
+    sourceOf.perTxCents = 'site';
+  }
+  if (siteSuggests.perSessionCents !== undefined) {
+    values.perSessionCents = siteSuggests.perSessionCents;
+    sourceOf.perSessionCents = 'site';
+  }
+  return { values, sourceOf };
+}
+
 /** True if any field currently carries a site-supplied value. */
 export function hasSiteSourcedLimit(sourceOf: LimitSources): boolean {
   return ALL_FIELDS.some((f) => sourceOf[f] === 'site');
@@ -214,6 +246,42 @@ export function shouldExpandLimits(
 ): boolean {
   if (hasSiteSourcedLimit(sourceOf)) return true;
   return siteSuggests.perTxCents !== undefined || siteSuggests.perSessionCents !== undefined;
+}
+
+/**
+ * Text-entry rules for the four limit boxes.
+ *
+ * 🚨 These exist because the boxes were once numeric controlled inputs whose
+ * value was re-derived (`(cents/100).toFixed(2)`) on every keystroke. Typing
+ * "25" went 2 → "2.00" → 2.005 → "2.01"; only the spinner arrows worked, and an
+ * integer box could not be cleared because `parseInt("")` is NaN. Reported from
+ * live testing 2026-08-23.
+ *
+ * ⭐ The property that matters is **every prefix of a valid entry is
+ * accepted** — you cannot type "25.00" if "2", "25", "25." are rejected on the
+ * way. That is what the T1f harness asserts, character by character.
+ */
+
+/** True if `raw` is a partial-or-complete dollar entry the box should accept. */
+export function isEditableUsdText(raw: string): boolean {
+  return raw === '' || /^\d*\.?\d{0,2}$/.test(raw);
+}
+
+/** True if `raw` is a partial-or-complete whole-number entry. */
+export function isEditableIntText(raw: string): boolean {
+  return raw === '' || /^\d*$/.test(raw);
+}
+
+/** Cents for a (possibly partial) dollar entry. `""`, `"."` and `"2."` → best effort. */
+export function usdTextToCents(raw: string): number {
+  const n = parseFloat(raw || '0');
+  return Number.isFinite(n) ? Math.round(n * 100) : 0;
+}
+
+/** Whole number for a (possibly partial) integer entry. */
+export function intTextToNumber(raw: string): number {
+  const n = parseInt(raw || '0', 10);
+  return Number.isFinite(n) ? n : 0;
 }
 
 /** `$1.00` from `100`. */

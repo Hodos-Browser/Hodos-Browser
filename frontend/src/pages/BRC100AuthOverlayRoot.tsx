@@ -10,9 +10,14 @@ import { prompt as promptTheme } from '../styles/hodosTheme';
 import {
   resolveConnectLimits,
   useMyDefaults as computeUseMyDefaults,
+  useSiteSuggested as computeUseSiteSuggested,
   shouldExpandLimits,
   formatMonthlyAllowance,
   formatCentsUsd,
+  isEditableUsdText,
+  isEditableIntText,
+  usdTextToCents,
+  intTextToNumber,
   type ConnectLimits,
   type LimitSources,
   type SiteSuggestedLimits,
@@ -420,6 +425,29 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     perTxCents: 'user', perSessionCents: 'user', rateLimitPerMin: 'user', maxTxPerSession: 'user',
   });
   const [manifestSiteSuggests, setManifestSiteSuggests] = useState<SiteSuggestedLimits>({});
+  // Inline "Payment limits" disclosure on the SUMMARY view. Opens automatically
+  // whenever a site number is on screen (contract §6a: a user must not approve
+  // values hidden behind a collapsed section) — which replaces the first pass's
+  // auto-jump into the Customize subview. That jump satisfied the same rule but
+  // threw the user off the consent screen to do it, so they never saw the
+  // itemised "this site is asking permission to" list with the Connect button.
+  const [manifestLimitsOpen, setManifestLimitsOpen] = useState<boolean>(false);
+  // 🚨 The four limit inputs are edited as TEXT, not as numbers.
+  //
+  // They were `<input type="number" value={(cents/100).toFixed(2)}>` — a
+  // controlled field that reformats on every keystroke, so the value fought the
+  // typist: typing "25" went 2 → "2.00" → 2.005 → "2.01" and the caret jumped.
+  // Only the spinner arrows worked, because they emit a complete number each
+  // time. The integer fields broke differently: clearing the box gave
+  // parseInt("") = NaN, clamped to 0, so it could not be emptied to retype.
+  //
+  // Same fix the wallet's own "Default Limits for New Sites" already uses
+  // (`components/wallet/ApprovedSitesTab.tsx`): keep the raw string the user is
+  // typing, validate it with a regex, and derive the number from it. ⛔ Do not
+  // "simplify" this back to a numeric controlled input.
+  const [manifestLimitText, setManifestLimitText] = useState({
+    perTx: '1.00', perSession: '10.00', rate: '30', maxTx: '100',
+  });
 
   // The user's own defaults, fetched from /wallet/settings. Ref (not state)
   // because `applyParams` runs from a JS-injection callback whose closure would
@@ -527,6 +555,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     // Reset every time so a previous site's manifest doesn't leak in.
     setManifestData(null);
     setManifestShowCustomize(false);
+    setManifestLimitsOpen(false);
     setManifestAllowIdentityKey(savedDefaultIdentityKeyRef.current);
     const manifestParam = params.get('manifest');
     if (manifestParam) {
@@ -550,12 +579,11 @@ const BRC100AuthOverlayRoot: React.FC = () => {
         setManifestLimits(resolved.values);
         setManifestLimitSource(resolved.sourceOf);
         setManifestSiteSuggests(resolved.siteSuggests);
+        syncLimitText(resolved.values);
         // Owner requirement (contract §6a): a user must not approve values
         // hidden behind a collapsed section. If the site's numbers are on
         // screen at all, open the section that shows them.
-        if (shouldExpandLimits(resolved.sourceOf, resolved.siteSuggests)) {
-          setManifestShowCustomize(true);
-        }
+        setManifestLimitsOpen(shouldExpandLimits(resolved.sourceOf, resolved.siteSuggests));
       } catch (e) {
         console.error('[Hodos] Failed to parse manifest from extraParams:', e);
         setManifestData(null);
@@ -612,7 +640,9 @@ const BRC100AuthOverlayRoot: React.FC = () => {
         setManifestLimits((cur) => {
           const untouched = cur.perTxCents === 100 && cur.perSessionCents === 1000
             && cur.rateLimitPerMin === 30 && cur.maxTxPerSession === 100;
-          return untouched ? userLimits : cur;
+          if (!untouched) return cur;
+          syncLimitText(userLimits);
+          return userLimits;
         });
       })
       .catch(() => { /* silent — keep defaults */ });
@@ -1149,6 +1179,50 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     }
   };
 
+  // Mirror numeric limits into the editable text drafts. Called whenever the
+  // values change from OUTSIDE the inputs (initial resolve, "Use my defaults",
+  // "Use this site's suggested limits") — never while the user is typing, which
+  // is the whole point.
+  const syncLimitText = (v: ConnectLimits) => {
+    setManifestLimitText({
+      perTx: (v.perTxCents / 100).toFixed(2),
+      perSession: (v.perSessionCents / 100).toFixed(2),
+      rate: String(v.rateLimitPerMin),
+      maxTx: String(v.maxTxPerSession),
+    });
+  };
+
+  // Typing handler for a dollar field. Accepts a partial number ("", "2", "2.",
+  // "2.5") so the box can be cleared and retyped; the numeric state tracks what
+  // is currently parseable.
+  const onLimitTextUsd = (
+    key: 'perTx' | 'perSession',
+    field: 'perTxCents' | 'perSessionCents',
+    raw: string,
+  ) => {
+    if (!isEditableUsdText(raw)) return;  // reject the keystroke, keep old text
+    setManifestLimitText((t) => ({ ...t, [key]: raw }));
+    setLimitField(field, usdTextToCents(raw));
+  };
+
+  // Same for a whole-number field.
+  const onLimitTextInt = (
+    key: 'rate' | 'maxTx',
+    field: 'rateLimitPerMin' | 'maxTxPerSession',
+    raw: string,
+  ) => {
+    if (!isEditableIntText(raw)) return;
+    setManifestLimitText((t) => ({ ...t, [key]: raw }));
+    setLimitField(field, intTextToNumber(raw));
+  };
+
+  // On blur, show the value that will actually be submitted — so a box left
+  // empty reads "0.00" rather than looking like it kept what was there.
+  const onLimitBlurUsd = (key: 'perTx' | 'perSession', cents: number) =>
+    setManifestLimitText((t) => ({ ...t, [key]: (cents / 100).toFixed(2) }));
+  const onLimitBlurInt = (key: 'rate' | 'maxTx', n: number) =>
+    setManifestLimitText((t) => ({ ...t, [key]: String(n) }));
+
   // Edit one limit field. ⛔ Editing a site-suggested value makes it the USER's
   // choice, so the "suggested by site" mark is cleared for that field — the
   // mark answers "whose number is this?", and once the user has typed over it
@@ -1160,6 +1234,24 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     setManifestLimitSource((cur) => ({ ...cur, [field]: 'user' }));
   };
 
+  // beta.3 Phase 0.8 — the FORWARD direction. Contract §6a's definition of the
+  // shipped behaviour (b) is "…show the site's suggestion beside each field as
+  // information, plus an explicit **'Use the site's recommended settings'
+  // button**". The first pass built only the revert half, so a user who WANTED
+  // the site's numbers had to retype them by hand — which is most users, most
+  // of the time, on a site whose recommendations are what make it work.
+  //
+  // ⛔ Adopting the site's numbers is an affirmative act and stays marked: the
+  // fields flip to `sourceOf = 'site'`, so `R-PROV` holds and "Use my defaults"
+  // remains available. Only figures already in OUR unit and period can appear
+  // here at all (`siteSuggestsAnything`) — BRC-73's monthly satoshis never do.
+  const handleUseSiteSuggested = () => {
+    const adopted = computeUseSiteSuggested(manifestLimits, manifestSiteSuggests);
+    setManifestLimits(adopted.values);
+    setManifestLimitSource(adopted.sourceOf);
+    syncLimitText(adopted.values);
+  };
+
   // beta.3 Phase 0.8 (`P0.8-A10`) — one click puts every limit field back to
   // the user's own default and clears every "suggested by this site" mark.
   // Reverts all four, not only the marked ones: a user who has been editing
@@ -1168,6 +1260,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     const reverted = computeUseMyDefaults(savedUserLimitsRef.current);
     setManifestLimits(reverted.values);
     setManifestLimitSource(reverted.sourceOf);
+    syncLimitText(reverted.values);
   };
 
   const handleManifestDecline = () => {
@@ -2061,6 +2154,97 @@ const BRC100AuthOverlayRoot: React.FC = () => {
       || manifestSiteSuggests.perSessionCents !== undefined;
     const monthlyAllowance = formatMonthlyAllowance(manifestData.spending);
 
+    // ⭐ ONE implementation of the limits block, used by BOTH the summary
+    // disclosure and the Customize subview. Two copies would drift, and the
+    // provenance marking is exactly the thing that must not drift.
+    const renderLimitFields = () => (
+      <>
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '10px' }}>
+          <button type="button" onClick={handleUseMyDefaults} style={useMyDefaultsButton}>
+            Use my defaults
+          </button>
+          {siteSuggestsAnything && !anyLimitFromSite && (
+            <button type="button" onClick={handleUseSiteSuggested} style={useMyDefaultsButton}>
+              Use this site's suggested limits
+            </button>
+          )}
+        </div>
+        {anyLimitFromSite && (
+          <div style={{
+            fontSize: '12px', color: COLORS.error, fontWeight: 600,
+            marginBottom: '8px', lineHeight: 1.5,
+          }}>
+            Fields marked <span style={siteSuggestedTag}>suggested by site</span> carry numbers
+            this site chose, not your own defaults.
+          </div>
+        )}
+        {!anyLimitFromSite && siteSuggestsAnything && (
+          <div style={{ fontSize: '12px', color: COLORS.textMuted, marginBottom: '8px', lineHeight: 1.5 }}>
+            These are your own defaults. What this site suggested is shown beneath each field
+            and has not been applied.
+          </div>
+        )}
+        {monthlyAllowance && (
+          <div style={{ fontSize: '12px', color: COLORS.textMuted, marginBottom: '8px', lineHeight: 1.5 }}>
+            This site declares a monthly allowance of <strong>{monthlyAllowance}</strong>.
+            Hodos does not enforce monthly limits — the limits below are what will actually apply.
+          </div>
+        )}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+          <label style={limitFieldLabel(manifestLimitSource.perTxCents)}>
+            Per transaction ($)
+            {manifestLimitSource.perTxCents === 'site' && (
+              <span style={siteSuggestedTag}>suggested by site</span>
+            )}
+            <input type="text" inputMode="decimal"
+              value={manifestLimitText.perTx}
+              onChange={(e) => onLimitTextUsd('perTx', 'perTxCents', e.target.value)}
+              onBlur={() => onLimitBlurUsd('perTx', manifestLimits.perTxCents)}
+              style={limitInputStyle(manifestLimitSource.perTxCents)} />
+            {manifestSiteSuggests.perTxCents !== undefined
+              && manifestLimitSource.perTxCents !== 'site' && (
+              <span style={siteSuggestionHint}>
+                site suggests {formatCentsUsd(manifestSiteSuggests.perTxCents)}
+              </span>
+            )}
+          </label>
+          <label style={limitFieldLabel(manifestLimitSource.perSessionCents)}>
+            Per session ($)
+            {manifestLimitSource.perSessionCents === 'site' && (
+              <span style={siteSuggestedTag}>suggested by site</span>
+            )}
+            <input type="text" inputMode="decimal"
+              value={manifestLimitText.perSession}
+              onChange={(e) => onLimitTextUsd('perSession', 'perSessionCents', e.target.value)}
+              onBlur={() => onLimitBlurUsd('perSession', manifestLimits.perSessionCents)}
+              style={limitInputStyle(manifestLimitSource.perSessionCents)} />
+            {manifestSiteSuggests.perSessionCents !== undefined
+              && manifestLimitSource.perSessionCents !== 'site' && (
+              <span style={siteSuggestionHint}>
+                site suggests {formatCentsUsd(manifestSiteSuggests.perSessionCents)}
+              </span>
+            )}
+          </label>
+          <label style={limitFieldLabel(manifestLimitSource.rateLimitPerMin)}>
+            Rate (requests/min)
+            <input type="text" inputMode="numeric"
+              value={manifestLimitText.rate}
+              onChange={(e) => onLimitTextInt('rate', 'rateLimitPerMin', e.target.value)}
+              onBlur={() => onLimitBlurInt('rate', manifestLimits.rateLimitPerMin)}
+              style={limitInputStyle(manifestLimitSource.rateLimitPerMin)} />
+          </label>
+          <label style={limitFieldLabel(manifestLimitSource.maxTxPerSession)}>
+            Max tx / session
+            <input type="text" inputMode="numeric"
+              value={manifestLimitText.maxTx}
+              onChange={(e) => onLimitTextInt('maxTx', 'maxTxPerSession', e.target.value)}
+              onBlur={() => onLimitBlurInt('maxTx', manifestLimits.maxTxPerSession)}
+              style={limitInputStyle(manifestLimitSource.maxTxPerSession)} />
+          </label>
+        </div>
+      </>
+    );
+
     // Primary view — bundled summary
     if (!manifestShowCustomize) {
       return (
@@ -2258,48 +2442,73 @@ const BRC100AuthOverlayRoot: React.FC = () => {
                 style={{ accentColor: COLORS.primary, width: '16px', height: '16px', cursor: 'pointer' }}
               />
               Allow this site to perform wallet operations without asking each time
-              <InfoIcon tooltip="When ticked, the wallet won't prompt you for individual protocol, basket, or counterparty grants on this site after the first connect. You can revoke this at any time from Manage Site Permissions. Sensitive operations (large payments, identity disclosure, sensitive certificate fields) always prompt regardless." />
+              <InfoIcon tooltip="When ticked, this site can use ANY protocol or basket without prompting - including ones it did not declare in its manifest. Untick it (in Customize) to approve only the specific items listed above. Protected baskets (change outputs, backup tokens) are never included. Sensitive operations - large payments, identity disclosure, sensitive certificate fields - always prompt regardless. Revoke any time from Manage Site Permissions." />
             </label>
 
-            {/* 🚨 THE R-PROV LINE. This used to read "Default payment limits:
-                $X/tx" while X came from the SITE's manifest — the site's
-                numbers wearing the word "Default". It now says in words whose
-                numbers these are, and says it differently in each case. */}
-            <div style={{ fontSize: '12px', color: COLORS.textMuted, marginBottom: '18px', lineHeight: 1.5 }}>
-              {anyLimitFromSite ? (
-                <>
-                  <span style={{ color: COLORS.error, fontWeight: 700 }}>
-                    Payment limits suggested by this site:
-                  </span>{' '}
-                  {formatCentsUsd(manifestLimits.perTxCents)}/tx,{' '}
-                  {formatCentsUsd(manifestLimits.perSessionCents)}/session.{' '}
-                  <strong>These are not your defaults.</strong>{' '}
-                  <button
-                    type="button"
-                    onClick={handleUseMyDefaults}
-                    style={useMyDefaultsButton}
-                  >
-                    Use my defaults
-                  </button>
-                </>
-              ) : (
-                <>
-                  Your payment limits: {formatCentsUsd(manifestLimits.perTxCents)}/tx,{' '}
-                  {formatCentsUsd(manifestLimits.perSessionCents)}/session.
-                  {siteSuggestsAnything && (
+            {/* 🚨 THE R-PROV BLOCK. This used to be one static line reading
+                "Default payment limits: $X/tx" while X came from the SITE's
+                manifest — the site's numbers wearing the word "Default". It now
+                says whose numbers these are, in words, differently in each case,
+                and it EXPANDS IN PLACE rather than throwing the user into the
+                Customize subview to see them (contract §6a). */}
+            <div style={{
+              border: `1px solid ${anyLimitFromSite ? COLORS.gold : '#e5e7eb'}`,
+              borderRadius: '10px', marginBottom: '16px', overflow: 'hidden',
+            }}>
+              <button
+                type="button"
+                onClick={() => setManifestLimitsOpen((o) => !o)}
+                aria-expanded={manifestLimitsOpen}
+                style={{
+                  width: '100%', display: 'flex', alignItems: 'center', gap: '8px',
+                  background: anyLimitFromSite ? 'rgba(217, 119, 6, 0.08)' : 'transparent',
+                  border: 'none', padding: '10px 12px', cursor: 'pointer',
+                  font: 'inherit', textAlign: 'left', color: COLORS.textDark,
+                }}
+              >
+                <span style={{
+                  fontSize: '11px', color: COLORS.textMuted, width: '10px',
+                  transform: manifestLimitsOpen ? 'rotate(90deg)' : 'none',
+                  transition: 'transform 0.15s',
+                }}>&#9654;</span>
+                <span style={{ fontSize: '12px', flex: 1, lineHeight: 1.5 }}>
+                  {anyLimitFromSite ? (
                     <>
-                      {' '}This site suggests{' '}
-                      {manifestSiteSuggests.perTxCents !== undefined
-                        && `${formatCentsUsd(manifestSiteSuggests.perTxCents)}/tx`}
-                      {manifestSiteSuggests.perTxCents !== undefined
-                        && manifestSiteSuggests.perSessionCents !== undefined && ', '}
-                      {manifestSiteSuggests.perSessionCents !== undefined
-                        && `${formatCentsUsd(manifestSiteSuggests.perSessionCents)}/session`}
-                      {' '}— not applied.
+                      <span style={{ color: COLORS.error, fontWeight: 700 }}>
+                        Payment limits suggested by this site:
+                      </span>{' '}
+                      {formatCentsUsd(manifestLimits.perTxCents)}/tx,{' '}
+                      {formatCentsUsd(manifestLimits.perSessionCents)}/session.{' '}
+                      <strong>These are not your defaults.</strong>
+                    </>
+                  ) : (
+                    <>
+                      <strong>Your payment limits:</strong>{' '}
+                      {formatCentsUsd(manifestLimits.perTxCents)}/tx,{' '}
+                      {formatCentsUsd(manifestLimits.perSessionCents)}/session
+                      {siteSuggestsAnything && (
+                        <>
+                          {' '}— this site suggests{' '}
+                          {manifestSiteSuggests.perTxCents !== undefined
+                            && `${formatCentsUsd(manifestSiteSuggests.perTxCents)}/tx`}
+                          {manifestSiteSuggests.perTxCents !== undefined
+                            && manifestSiteSuggests.perSessionCents !== undefined && ', '}
+                          {manifestSiteSuggests.perSessionCents !== undefined
+                            && `${formatCentsUsd(manifestSiteSuggests.perSessionCents)}/session`}
+                          , not applied
+                        </>
+                      )}
                     </>
                   )}
-                  {' '}You can adjust these in Customize.
-                </>
+                </span>
+                <span style={{ fontSize: '11px', color: COLORS.textMuted, whiteSpace: 'nowrap' }}>
+                  {manifestLimitsOpen ? 'Hide' : 'Adjust'}
+                </span>
+              </button>
+              {manifestLimitsOpen && (
+                <div style={{ padding: '0 12px 12px 12px' }}>
+                  {renderLimitFields()}
+                </div>
               )}
             </div>
 
@@ -2326,12 +2535,54 @@ const BRC100AuthOverlayRoot: React.FC = () => {
         <div style={{ ...cardStyle, maxWidth: '520px' }}>
           <HodosWalletHeader />
 
-          <div style={{ fontSize: '15px', fontWeight: 700, color: COLORS.textDark, marginBottom: '4px' }}>
-            Customize permissions for {manifestData.name || cleanDomain}
+          {/* Same branding row as the summary, at 28px — losing the icon on the
+              way into Customize made it feel like a different dialog. */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px' }}>
+            {manifestData.iconUrl && !faviconError ? (
+              <img src={manifestData.iconUrl} width={28} height={28}
+                   style={{ borderRadius: 6, flexShrink: 0 }}
+                   onError={() => setFaviconError(true)} alt="" />
+            ) : !faviconError ? (
+              <img src={`https://www.google.com/s2/favicons?domain=${notificationDomain}&sz=32`}
+                   width={28} height={28} style={{ borderRadius: 6, flexShrink: 0 }}
+                   onError={() => setFaviconError(true)} alt="" />
+            ) : (
+              <div style={{ ...avatarStyle, width: 28, height: 28, fontSize: '13px' }}>
+                {getDomainInitial(notificationDomain)}
+              </div>
+            )}
+            <div style={{ fontSize: '15px', fontWeight: 700, color: COLORS.textDark }}>
+              Customize permissions for {manifestData.name || cleanDomain}
+            </div>
           </div>
-          <div style={{ fontSize: '12px', color: COLORS.textMuted, marginBottom: '14px' }}>
-            Untick anything you don't want to grant.
-          </div>
+          {/* 🚨 QUIET MODE MAKES THESE TICKS INERT — say so, do not imply otherwise.
+              `matrix_c.rs :: decide_scoped_grant` returns
+              Silent(SilentBundledScopeGrant) on `bundled_scope_grant` BEFORE it
+              consults `scoped_grant_exists`, so while quiet mode is on the V18
+              rows these checkboxes write are never read: every ProtocolUse and
+              BasketAccess from this domain goes silent, declared or not.
+              (Protected baskets — default / backup-* / admin * — are still
+              excluded by `dispatch_scoped_grant`.)
+              ⛔ Disabling them is deliberate: it is the ONLY state in which the
+              two controls cannot contradict each other, so there is no
+              cross-toggling to keep in sync. Untick quiet mode to choose
+              individually. Narrowing the flag itself is an ENGINE change and is
+              deliberately NOT done here — beta.4 ticket. */}
+          {manifestAllowBundledScope ? (
+            <div style={{
+              fontSize: '12px', color: COLORS.textDark, marginBottom: '14px',
+              lineHeight: 1.5, background: 'rgba(166, 124, 0, 0.10)',
+              border: `1px solid ${COLORS.gold}`, borderRadius: '8px', padding: '10px 12px',
+            }}>
+              <strong>Quiet mode is on</strong>, so this site can use <em>any</em> protocol or
+              basket without asking — not just the ones listed below. Untick{' '}
+              <strong>Quiet mode</strong> to choose individually.
+            </div>
+          ) : (
+            <div style={{ fontSize: '12px', color: COLORS.textMuted, marginBottom: '14px' }}>
+              Untick anything you don't want to grant.
+            </div>
+          )}
 
           {/* Per-permission checkboxes */}
           <div style={{
@@ -2347,6 +2598,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
                 <input
                   type="checkbox"
                   checked={manifestSelectedProtocols.has(i)}
+                  disabled={manifestAllowBundledScope}
                   onChange={() => toggleManifestPerm(manifestSelectedProtocols, setManifestSelectedProtocols, i)}
                   style={customizeCheckbox}
                 />
@@ -2358,7 +2610,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
                 <input
                   type="checkbox"
                   checked={manifestSelectedBaskets.has(i) && !isProtectedBasket(b.name)}
-                  disabled={isProtectedBasket(b.name)}
+                  disabled={isProtectedBasket(b.name) || manifestAllowBundledScope}
                   onChange={() => toggleManifestPerm(manifestSelectedBaskets, setManifestSelectedBaskets, i)}
                   style={customizeCheckbox}
                 />
@@ -2419,108 +2671,20 @@ const BRC100AuthOverlayRoot: React.FC = () => {
               style={customizeCheckbox}
             />
             <span>
-              <strong>Quiet mode:</strong> Don't prompt for individual protocol or basket grants while connected
+              <strong>Quiet mode:</strong> Let this site use <em>any</em> protocol or basket
+              without asking — including ones it did not list above
             </span>
           </label>
 
-          {/* Payment limit inputs.
-              ⛔ R-PROV / P0.8-A9. These four are OURS — they are the limits we
-              allow the site to operate under, not something it asks for. Any
-              field carrying a site-suggested value is marked in colour AND in
-              words, and one click reverts the lot. */}
-          <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: '8px' }}>
-            <div style={{ fontSize: '13px', fontWeight: 600, color: COLORS.textDark }}>
-              Payment limits
-            </div>
-            <button type="button" onClick={handleUseMyDefaults} style={useMyDefaultsButton}>
-              Use my defaults
-            </button>
+          {/* Payment limit inputs — same shared renderer the summary uses, so the
+              provenance marking cannot drift between the two views.
+              ⛔ R-PROV / P0.8-A9: these four are OURS — the limits we allow the
+              site to operate under, not something it asks for. */}
+          <div style={{ fontSize: '13px', fontWeight: 600, color: COLORS.textDark, marginBottom: '8px' }}>
+            Payment limits
           </div>
-          {anyLimitFromSite && (
-            <div style={{
-              fontSize: '12px', color: COLORS.error, fontWeight: 600,
-              marginBottom: '8px', lineHeight: 1.5,
-            }}>
-              Fields marked <span style={siteSuggestedTag}>suggested by site</span> below carry
-              numbers this site chose, not your own defaults.
-            </div>
-          )}
-          {!anyLimitFromSite && siteSuggestsAnything && (
-            <div style={{ fontSize: '12px', color: COLORS.textMuted, marginBottom: '8px', lineHeight: 1.5 }}>
-              These are your own defaults. What this site suggested is shown beneath each
-              field and has not been applied.
-            </div>
-          )}
-          {monthlyAllowance && (
-            <div style={{ fontSize: '12px', color: COLORS.textMuted, marginBottom: '8px', lineHeight: 1.5 }}>
-              This site declares a monthly allowance of <strong>{monthlyAllowance}</strong>.
-              Hodos does not enforce monthly limits — the per-transaction and per-session
-              limits below are what will actually apply.
-            </div>
-          )}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '14px' }}>
-            <label style={limitFieldLabel(manifestLimitSource.perTxCents)}>
-              Per transaction ($)
-              {manifestLimitSource.perTxCents === 'site' && (
-                <span style={siteSuggestedTag}>suggested by site</span>
-              )}
-              <input
-                type="number"
-                min={0}
-                step={0.01}
-                value={(manifestLimits.perTxCents / 100).toFixed(2)}
-                onChange={(e) => setLimitField('perTxCents',
-                  Math.round(parseFloat(e.target.value || '0') * 100))}
-                style={limitInputStyle(manifestLimitSource.perTxCents)}
-              />
-              {manifestSiteSuggests.perTxCents !== undefined
-                && manifestLimitSource.perTxCents !== 'site' && (
-                <span style={siteSuggestionHint}>
-                  site suggests {formatCentsUsd(manifestSiteSuggests.perTxCents)}
-                </span>
-              )}
-            </label>
-            <label style={limitFieldLabel(manifestLimitSource.perSessionCents)}>
-              Per session ($)
-              {manifestLimitSource.perSessionCents === 'site' && (
-                <span style={siteSuggestedTag}>suggested by site</span>
-              )}
-              <input
-                type="number"
-                min={0}
-                step={0.01}
-                value={(manifestLimits.perSessionCents / 100).toFixed(2)}
-                onChange={(e) => setLimitField('perSessionCents',
-                  Math.round(parseFloat(e.target.value || '0') * 100))}
-                style={limitInputStyle(manifestLimitSource.perSessionCents)}
-              />
-              {manifestSiteSuggests.perSessionCents !== undefined
-                && manifestLimitSource.perSessionCents !== 'site' && (
-                <span style={siteSuggestionHint}>
-                  site suggests {formatCentsUsd(manifestSiteSuggests.perSessionCents)}
-                </span>
-              )}
-            </label>
-            <label style={limitFieldLabel(manifestLimitSource.rateLimitPerMin)}>
-              Rate (requests/min)
-              <input
-                type="number"
-                min={0}
-                value={manifestLimits.rateLimitPerMin}
-                onChange={(e) => setLimitField('rateLimitPerMin', parseInt(e.target.value || '0'))}
-                style={limitInputStyle(manifestLimitSource.rateLimitPerMin)}
-              />
-            </label>
-            <label style={limitFieldLabel(manifestLimitSource.maxTxPerSession)}>
-              Max tx / session
-              <input
-                type="number"
-                min={0}
-                value={manifestLimits.maxTxPerSession}
-                onChange={(e) => setLimitField('maxTxPerSession', parseInt(e.target.value || '0'))}
-                style={limitInputStyle(manifestLimitSource.maxTxPerSession)}
-              />
-            </label>
+          <div style={{ marginBottom: '14px' }}>
+            {renderLimitFields()}
           </div>
 
           {/* Allow without limits — payment caps only, scoped grants unaffected */}

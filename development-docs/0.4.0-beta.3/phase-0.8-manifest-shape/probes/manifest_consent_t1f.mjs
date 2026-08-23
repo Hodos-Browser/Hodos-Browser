@@ -102,8 +102,9 @@ function check(name, cond, detail) {
 }
 
 const M = await loadModule();
-const { resolveConnectLimits, useMyDefaults, hasSiteSourcedLimit, shouldExpandLimits,
-        formatMonthlyAllowance } = M;
+const { resolveConnectLimits, useMyDefaults, useSiteSuggested, hasSiteSourcedLimit,
+        shouldExpandLimits, formatMonthlyAllowance,
+        isEditableUsdText, isEditableIntText, usdTextToCents, intTextToNumber } = M;
 
 console.log(NC ? '=== T1f NEGATIVE CONTROL (R-CAPS deliberately broken) ===' : '=== T1f ===');
 
@@ -212,6 +213,70 @@ check('A10 "Use my defaults" restores every value',
 check('A10 "Use my defaults" clears every site mark',
   !hasSiteSourcedLimit(reverted.sourceOf),
   JSON.stringify(reverted.sourceOf));
+
+// ── "Use this site's suggested limits" — the forward direction ──────────────
+
+const adopted = useSiteSuggested(USER_DEFAULTS, off.siteSuggests);
+check('adopt: takes the site\'s figures',
+  adopted.values.perTxCents === 10000 && adopted.values.perSessionCents === 100000,
+  JSON.stringify(adopted.values));
+check('adopt: the adopted fields stay MARKED as the site\'s (R-PROV)',
+  adopted.sourceOf.perTxCents === 'site' && adopted.sourceOf.perSessionCents === 'site',
+  JSON.stringify(adopted.sourceOf));
+check('adopt: fields the site said nothing about are untouched and stay the user\'s',
+  adopted.values.rateLimitPerMin === 30 && adopted.sourceOf.rateLimitPerMin === 'user',
+  JSON.stringify({ v: adopted.values, s: adopted.sourceOf }));
+check('adopt then revert round-trips exactly',
+  JSON.stringify(useMyDefaults(USER_DEFAULTS).values) === JSON.stringify(USER_DEFAULTS),
+  'Use my defaults must undo an adopt');
+
+// 🚨 R-CAPS: adopting must be IMPOSSIBLE for a BRC-73 monthly figure, because
+// it never becomes a suggestion in the first place.
+const brc73Suggests = resolveConnectLimits({
+  userDefaults: USER_DEFAULTS, spending: BRC73_SPENDING_SMALL, prefillFromManifest: false,
+}).siteSuggests;
+const adoptedBrc73 = useSiteSuggested(USER_DEFAULTS, brc73Suggests);
+check('adopt: a BRC-73 monthly allowance can never be adopted as a cap',
+  adoptedBrc73.values.perTxCents === 100 && adoptedBrc73.sourceOf.perTxCents === 'user',
+  `got ${adoptedBrc73.values.perTxCents} (${adoptedBrc73.sourceOf.perTxCents})`);
+
+// ── The limit boxes must be TYPEABLE ────────────────────────────────────────
+// Reported live 2026-08-23: only the spinner arrows worked. The property is
+// that EVERY PREFIX of a valid entry is accepted — you cannot type "25.00" if
+// "2", "25" or "25." are rejected along the way.
+
+for (const [entry, accept, toNum, expected] of [
+  ['25.00', isEditableUsdText, usdTextToCents, 2500],
+  ['0.50',  isEditableUsdText, usdTextToCents, 50],
+  ['7',     isEditableUsdText, usdTextToCents, 700],
+  ['120',   isEditableIntText, intTextToNumber, 120],
+  ['5',     isEditableIntText, intTextToNumber, 5],
+]) {
+  let everyPrefixOk = true;
+  const rejected = [];
+  for (let i = 1; i <= entry.length; i++) {
+    const prefix = entry.slice(0, i);
+    if (!accept(prefix)) { everyPrefixOk = false; rejected.push(prefix); }
+  }
+  check(`typing "${entry}" — every prefix accepted`, everyPrefixOk,
+    `rejected: ${JSON.stringify(rejected)}`);
+  check(`typing "${entry}" — final value is ${expected}`, toNum(entry) === expected,
+    `got ${toNum(entry)}`);
+}
+
+check('a box can be CLEARED to retype (empty string accepted)',
+  isEditableUsdText('') && isEditableIntText(''),
+  'an empty box must be a legal intermediate state');
+check('an emptied box reads as 0, not NaN',
+  usdTextToCents('') === 0 && intTextToNumber('') === 0,
+  `${usdTextToCents('')} / ${intTextToNumber('')}`);
+check('a bare decimal point mid-typing is accepted and parses',
+  isEditableUsdText('2.') && usdTextToCents('2.') === 200,
+  `accept=${isEditableUsdText('2.')} value=${usdTextToCents('2.')}`);
+check('junk is rejected outright',
+  !isEditableUsdText('abc') && !isEditableUsdText('1.234') && !isEditableUsdText('-5')
+    && !isEditableIntText('1.5') && !isEditableIntText('x'),
+  'letters, >2dp, negatives and decimals-in-int must all be refused');
 
 // ── Hostile declared values never reach an input box ────────────────────────
 

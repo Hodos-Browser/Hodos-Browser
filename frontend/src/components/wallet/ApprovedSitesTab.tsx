@@ -291,56 +291,61 @@ const ApprovedSitesTab: React.FC = () => {
               </div>
             </div>
 
-            {/* beta.3 Phase 0.8 — the pre-fill opt-in (V24), bottom-right of
-                "Default Limits for New Sites" per contract 6a.
-                ⛔ The wording names the RISK, not the feature: the user is
-                opting into letting a *site* choose the starting numbers on
-                their own consent prompt. Ships OFF. */}
+            {/* beta.3 Phase 0.8 — the pre-fill opt-in (V24). Grouped with the
+                identity-key default because both answer "how should a FRESH
+                site's connect prompt start?", and both are one-line toggles.
+                ⛔ Ships OFF: the user is opting into letting a *site* choose
+                the starting numbers on their own consent prompt, so the detail
+                lives in the tooltip but the risk is named in the label. */}
             <div style={{
-              marginTop: '14px',
-              paddingTop: '14px',
-              borderTop: '1px solid #2a2d35',
+              marginTop: '12px',
               display: 'flex',
-              justifyContent: 'flex-end',
-            }}>
+              alignItems: 'center',
+              gap: '10px',
+              cursor: 'pointer',
+              userSelect: 'none',
+            }} onClick={() => setDefaults((d) => ({ ...d, defaultPrefillFromManifest: !d.defaultPrefillFromManifest }))}>
               <div style={{
+                width: '18px',
+                height: '18px',
+                borderRadius: '4px',
+                border: `2px solid ${defaults.defaultPrefillFromManifest ? '#a67c00' : '#555'}`,
+                background: defaults.defaultPrefillFromManifest ? '#a67c00' : 'transparent',
                 display: 'flex',
-                alignItems: 'flex-start',
-                gap: '10px',
-                cursor: 'pointer',
-                userSelect: 'none',
-                maxWidth: '420px',
-                textAlign: 'left',
-              }} onClick={() => setDefaults((d) => ({ ...d, defaultPrefillFromManifest: !d.defaultPrefillFromManifest }))}>
-                <div style={{
-                  width: '18px',
-                  height: '18px',
-                  borderRadius: '4px',
-                  border: `2px solid ${defaults.defaultPrefillFromManifest ? '#a67c00' : '#555'}`,
-                  background: defaults.defaultPrefillFromManifest ? '#a67c00' : 'transparent',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  flexShrink: 0,
-                  marginTop: '1px',
-                  transition: 'all 0.15s',
-                }}>
-                  {defaults.defaultPrefillFromManifest && (
-                    <span style={{ color: '#0f1117', fontSize: '12px', fontWeight: 700, lineHeight: 1 }}>&#10003;</span>
-                  )}
-                </div>
-                <div>
-                  <div style={{ fontSize: '13px', color: '#f0f0f0', fontWeight: 600 }}>
-                    Pre-fill new-site limits with the site&apos;s recommended settings
-                  </div>
-                  <div style={{ color: '#9ca3af', fontSize: '11px', marginTop: '2px', lineHeight: 1.5 }}>
-                    Off by default. When on, a site that publishes recommended spending limits
-                    starts the connect prompt with <strong>its</strong> numbers instead of yours.
-                    They stay clearly marked as the site&apos;s and you can always revert with
-                    &quot;Use my defaults&quot;, but you would be letting a site choose the
-                    starting point.
-                  </div>
-                </div>
+                alignItems: 'center',
+                justifyContent: 'center',
+                flexShrink: 0,
+                transition: 'all 0.15s',
+              }}>
+                {defaults.defaultPrefillFromManifest && (
+                  <span style={{ color: '#0f1117', fontSize: '12px', fontWeight: 700, lineHeight: 1 }}>&#10003;</span>
+                )}
+              </div>
+              <div style={{ fontSize: '13px', color: '#f0f0f0', fontWeight: 600 }}>
+                Pre-fill new-site limits with the site&apos;s recommended settings
+                <span
+                  title={"Off by default. When on, a site that publishes recommended spending limits starts "
+                    + "the connect prompt with ITS numbers instead of yours. They stay clearly marked as the "
+                    + "site's suggestion and you can always revert with \u201cUse my defaults\u201d, but you "
+                    + "would be letting a site choose the starting point. Leave this off to start every new "
+                    + "site from your own limits above and adopt a site's numbers only when you choose to."}
+                  style={{
+                    marginLeft: '6px',
+                    cursor: 'help',
+                    color: '#9ca3af',
+                    fontSize: '11px',
+                    border: '1px solid #9ca3af',
+                    borderRadius: '50%',
+                    width: '14px',
+                    height: '14px',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontWeight: 600,
+                    lineHeight: 1,
+                    verticalAlign: 'middle',
+                  }}
+                >i</span>
               </div>
             </div>
 
