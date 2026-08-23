@@ -1163,6 +1163,40 @@ mod tests {
         assert_eq!(m.spending.monthly_satoshis, 0);
     }
 
+    /// The shipped demo dApp's manifest must actually parse — otherwise the
+    /// demo silently degrades to a plain `domain_approval` prompt and looks
+    /// like the feature is broken. `test-fixtures/manifest-dapp/` is what a
+    /// human deploys to an HTTPS host to see the itemised modal.
+    #[test]
+    fn shipped_demo_dapp_manifest_parses() {
+        const DEMO: &str = include_str!("../../test-fixtures/manifest-dapp/manifest.json");
+        let m = parse_manifest(DEMO).expect("the demo dApp manifest must parse");
+        assert_eq!(m.source_namespace, SOURCE_METANET);
+        assert_eq!(m.protocols.len(), 3);
+        assert_eq!(m.baskets.len(), 2);
+        assert_eq!(m.certificates.len(), 1);
+        assert_eq!(m.spending.monthly_satoshis, 250_000);
+        // The demo exists to show a FULLY itemised modal — every category and
+        // every BRC-116 display field the modal can render.
+        assert_eq!(m.protocols[1].counterparty, "self");
+        assert!(!m.protocols[2].counterparty.is_empty(), "a named Level-2 counterparty");
+        assert!(!m.certificates[0].verifier_public_key.is_empty(), "a verifier to display");
+        assert!(m.protocols.iter().all(|p| !p.purpose.is_empty()));
+    }
+
+    /// The legacy-shape half of the same fixture — the ONLY way to demo the
+    /// `R-PROV` "suggested by site" marking, because BRC-73 has no field in our
+    /// unit and so can never pre-fill one of our caps.
+    #[test]
+    fn shipped_demo_dapp_legacy_manifest_still_carries_a_cap_suggestion() {
+        const DEMO: &str =
+            include_str!("../../test-fixtures/manifest-dapp/.well-known/wallet-manifest.json");
+        let m = parse_manifest(DEMO).expect("the legacy demo manifest must parse");
+        assert_eq!(m.source_namespace, SOURCE_HODOS_LEGACY);
+        assert_eq!(m.spending.per_transaction_usd, 1);
+        assert_eq!(m.spending.per_session_usd, 5);
+    }
+
     #[test]
     fn parse_preserves_raw_json_for_the_snapshot() {
         let src = r#"{"metanet":{"groupPermissions":{"protocolPermissions":[{"protocolID":[1,"p"],"description":"d"}]}}}"#;

@@ -1,0 +1,59 @@
+{
+  "id": "/",
+  "name": "Hodos BRC-73 Demo dApp",
+  "short_name": "Hodos Demo",
+  "description": "Demo dApp declaring all four BRC-73 grouped-permission categories.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#08110f",
+  "theme_color": "#08110f",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" }
+  ],
+  "metanet": {
+    "schemaVersion": 1,
+    "brc": ["BRC-73", "BRC-100", "BRC-116"],
+    "groupPermissions": {
+      "description": "Everything this demo app needs, declared up front.",
+      "protocolPermissions": [
+        {
+          "protocolID": [1, "identity key retrieval"],
+          "description": "Use your public identity key as your passwordless account."
+        },
+        {
+          "protocolID": [2, "server hmac"],
+          "counterparty": "self",
+          "description": "Create private, replay-resistant session nonces."
+        },
+        {
+          "protocolID": [2, "demo messaging"],
+          "counterparty": "0279887cddd8cb44fc34793fa568dfb86badb1e8f1eace5976a6f4cf3f786cc893",
+          "description": "Send end-to-end encrypted messages to the demo server."
+        }
+      ],
+      "spendingAuthorization": {
+        "amount": 250000,
+        "description": "Buy demo items without approving each one."
+      },
+      "basketAccess": [
+        {
+          "basket": "demo-tickets",
+          "description": "Store the demo tickets you buy."
+        },
+        {
+          "basket": "demo-receipts",
+          "description": "Keep your purchase receipts."
+        }
+      ],
+      "certificateAccess": [
+        {
+          "type": "vdDWvftf1H+5+ZprUw123kjHlywH+v20aPQTuXgMpNc=",
+          "fields": ["userName", "profilePhoto"],
+          "verifierPublicKey": "0279887cddd8cb44fc34793fa568dfb86badb1e8f1eace5976a6f4cf3f786cc893",
+          "description": "Show your name and photo on your public demo profile."
+        }
+      ]
+    }
+  }
+}
