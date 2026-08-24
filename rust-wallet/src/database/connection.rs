@@ -998,6 +998,17 @@ impl WalletDatabase {
             info!("   ✅ Schema V24 applied");
         }
 
+        if current_version < 25 {
+            // beta.3 Phase 0.8 (owner-approved 2026-08-23): a user-level
+            // default for QUIET MODE, the widest grant on the connect screen.
+            // It was hardcoded ON in the modal with no way to change how a
+            // fresh site starts. Ships 1 so behaviour is unchanged.
+            info!("   Applying migration V25 (default_bundled_scope_grant)...");
+            migrations::migrate_v24_to_v25(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (25)", [])?;
+            info!("   ✅ Schema V25 applied");
+        }
+
         // Startup repair: V12 migration may have recorded version but failed to add columns
         // (INSERT INTO schema_version succeeded but ALTER TABLE was skipped/failed).
         // Re-run the column checks unconditionally to patch any inconsistent DBs.

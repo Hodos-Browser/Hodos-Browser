@@ -24,7 +24,20 @@
   </p>
 
   <button id="connect">Connect (getPublicKey via window.CWI)</button>
+  <button id="hmac">Level-2 call (createHmac, counterparty "self")</button>
   <pre id="out">Ready. Click Connect.</pre>
+
+  <p class="hint">
+    The second button exists to answer <strong>UI_FOLLOWUPS.md §4</strong>: the connect modal
+    <em>displays</em> a Level-2 counterparty but the grant row is written with
+    <code>counterparty = NULL</code>. Before changing what gets written we have to know what the
+    counterparty actually <em>is</em> at request time for a protocol the manifest declares as
+    <code>"self"</code>. This fires exactly that call — <code>[2, 'server hmac']</code>, which
+    <code>/manifest.json</code> declares with <code>counterparty: "self"</code> — so the wallet log
+    shows what <code>dispatch_scoped_grant</code> builds into
+    <code>ScopedCall::Protocol{ counterparty }</code>.
+    Run it with <strong>quiet mode OFF</strong>, or the grant is never consulted.
+  </p>
 
   <script>
     const out = document.getElementById('out');
@@ -47,6 +60,29 @@
         log('getPublicKey result:', res);
       } catch (e) {
         log('getPublicKey error (expected if you Deny):', String(e && e.message ? e.message : e));
+      }
+    });
+
+    // UI_FOLLOWUPS.md §4 measurement probe. `[2, 'server hmac']` is the protocol
+    // /manifest.json declares with counterparty "self", so this is the call whose
+    // request-time counterparty we need to read before deciding whether the
+    // connect modal may write that value into a permission row.
+    document.getElementById('hmac').addEventListener('click', async () => {
+      if (!window.CWI || typeof window.CWI.createHmac !== 'function') {
+        log('window.CWI.createHmac not available', 'The shim did not inject, or this build lacks createHmac.');
+        return;
+      }
+      try {
+        out.textContent = "Calling window.CWI.createHmac({ protocolID: [2, 'server hmac'], counterparty: 'self' }) …";
+        const res = await window.CWI.createHmac({
+          protocolID: [2, 'server hmac'],
+          keyID: '1',
+          counterparty: 'self',
+          data: [1, 2, 3, 4],
+        });
+        log('createHmac result:', res);
+      } catch (e) {
+        log('createHmac error (expected if you Deny):', String(e && e.message ? e.message : e));
       }
     });
   </script>

@@ -12,6 +12,11 @@ interface DefaultLimits {
   // domain_approval / manifest_connect_bundle modals starts ticked for new
   // sites. Default true preserves the Step 1 behavior.
   defaultIdentityKeyDisclosureAllowed: boolean;
+  // beta.3 Phase 0.8 — V25 column. How QUIET MODE starts on a fresh site's
+  // connect prompt. ⚠️ The widest grant on that screen: it covers protocols
+  // and baskets the site never declared. Default true = the behaviour that
+  // shipped before this was configurable.
+  defaultBundledScopeGrant: boolean;
   // beta.3 Phase 0.8 — V24 column. OFF (the default) = the connect modal's
   // limit fields start from the four values above and a site's suggestion is
   // shown beside them. ON = a site's suggested values are pre-filled instead.
@@ -29,6 +34,7 @@ const ApprovedSitesTab: React.FC = () => {
     defaultMaxTxPerSession: 100,
     defaultIdentityKeyDisclosureAllowed: true,
     defaultPrefillFromManifest: false,
+    defaultBundledScopeGrant: true,
   });
   const [savedDefaults, setSavedDefaults] = useState<DefaultLimits>(defaults);
   const [perTxUsd, setPerTxUsd] = useState('1.00');
@@ -53,6 +59,7 @@ const ApprovedSitesTab: React.FC = () => {
         defaultMaxTxPerSession: data.default_max_tx_per_session ?? 100,
         defaultIdentityKeyDisclosureAllowed: data.default_identity_key_disclosure_allowed ?? true,
         defaultPrefillFromManifest: data.default_prefill_from_manifest ?? false,
+        defaultBundledScopeGrant: data.default_bundled_scope_grant ?? true,
       };
       setDefaults(loaded);
       setSavedDefaults(loaded);
@@ -86,6 +93,7 @@ const ApprovedSitesTab: React.FC = () => {
           default_max_tx_per_session: defaults.defaultMaxTxPerSession,
           default_identity_key_disclosure_allowed: defaults.defaultIdentityKeyDisclosureAllowed,
           default_prefill_from_manifest: defaults.defaultPrefillFromManifest,
+          default_bundled_scope_grant: defaults.defaultBundledScopeGrant,
         }),
       });
       if (!postRes.ok) throw new Error('Failed to save defaults');
@@ -101,6 +109,7 @@ const ApprovedSitesTab: React.FC = () => {
           defaultMaxTxPerSession: data.default_max_tx_per_session ?? defaults.defaultMaxTxPerSession,
           defaultIdentityKeyDisclosureAllowed: data.default_identity_key_disclosure_allowed ?? defaults.defaultIdentityKeyDisclosureAllowed,
           defaultPrefillFromManifest: data.default_prefill_from_manifest ?? defaults.defaultPrefillFromManifest,
+          defaultBundledScopeGrant: data.default_bundled_scope_grant ?? defaults.defaultBundledScopeGrant,
         };
         setDefaults(confirmed);
         setSavedDefaults(confirmed);
@@ -236,10 +245,28 @@ const ApprovedSitesTab: React.FC = () => {
             </div>
 
             {/* Phase 1.5 Step 5 — default identity-key bundle toggle (V19 column) */}
+            {/* beta.3 Phase 0.8 UI follow-up (owner-requested 2026-08-23) — the
+                two "how should a FRESH site's prompt start?" toggles share one
+                horizontal line, pre-fill pushed to the right.
+
+                ⚠️ `flexWrap: 'wrap'` is load-bearing, not decoration. Two
+                checkbox+label pairs side by side is the exact shape that clips
+                at 125%/1366 and 150%/1366 (DPI_RESOLUTION_TEST_MATRIX.md cells
+                #4/#6/#9), and both labels here are long. Wrapping to two rows
+                is the correct degradation; truncating a consent label is not.
+                `marginLeft: 'auto'` right-justifies only while they share a
+                line — once wrapped the second falls to the left, as it should. */}
             <div style={{
               marginTop: '14px',
               paddingTop: '14px',
               borderTop: '1px solid #2a2d35',
+              display: 'flex',
+              flexWrap: 'wrap',
+              alignItems: 'flex-start',
+              gap: '12px 24px',
+            }}>
+            <div style={{
+              flex: '1 1 220px',
               display: 'flex',
               alignItems: 'center',
               gap: '10px',
@@ -298,7 +325,9 @@ const ApprovedSitesTab: React.FC = () => {
                 the starting numbers on their own consent prompt, so the detail
                 lives in the tooltip but the risk is named in the label. */}
             <div style={{
-              marginTop: '12px',
+              // Owner-directed 2026-08-23: three toggles share the row and are
+              // evenly spaced, so each takes an equal share and wraps together.
+              flex: '1 1 220px',
               display: 'flex',
               alignItems: 'center',
               gap: '10px',
@@ -349,7 +378,69 @@ const ApprovedSitesTab: React.FC = () => {
               </div>
             </div>
 
-            <div className="wd-defaults-actions">
+
+            {/* beta.3 Phase 0.8 (V25, owner-approved 2026-08-23) — the quiet-mode
+                default. ⚠️ Deliberately the LAST of the three: it is the widest
+                grant of the set, and the one whose tooltip has to do the most
+                work. Same row, equal share, wraps with the others. */}
+            <div style={{
+              flex: '1 1 220px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px',
+              cursor: 'pointer',
+              userSelect: 'none',
+            }} onClick={() => setDefaults((d) => ({ ...d, defaultBundledScopeGrant: !d.defaultBundledScopeGrant }))}>
+              <div style={{
+                width: '18px',
+                height: '18px',
+                borderRadius: '4px',
+                border: `2px solid ${defaults.defaultBundledScopeGrant ? '#a67c00' : '#555'}`,
+                background: defaults.defaultBundledScopeGrant ? '#a67c00' : 'transparent',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                flexShrink: 0,
+                transition: 'all 0.15s',
+              }}>
+                {defaults.defaultBundledScopeGrant && (
+                  <span style={{ color: '#0f1117', fontSize: '12px', fontWeight: 700, lineHeight: 1 }}>&#10003;</span>
+                )}
+              </div>
+              <div style={{ fontSize: '13px', color: '#f0f0f0', fontWeight: 600 }}>
+                Start new sites in quiet mode
+                <span
+                  title={"Quiet mode lets a site use ANY protocol or basket without asking each time — "
+                    + "including ones it never declared in its manifest. On (the shipped default) means a new "
+                    + "site's connect prompt starts with that box ticked; turn this off to be asked the first "
+                    + "time a site uses each protocol or basket. Protected baskets are never included, and "
+                    + "large payments, identity disclosure and sensitive certificate fields always prompt "
+                    + "either way. You can change it per site on the connect prompt, or later from Manage "
+                    + "Site Permissions."}
+                  style={{
+                    marginLeft: '6px',
+                    cursor: 'help',
+                    color: '#9ca3af',
+                    fontSize: '11px',
+                    border: '1px solid #9ca3af',
+                    borderRadius: '50%',
+                    width: '14px',
+                    height: '14px',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontWeight: 600,
+                    lineHeight: 1,
+                    verticalAlign: 'middle',
+                  }}
+                >i</span>
+              </div>
+            </div>
+            </div>
+
+            {/* Owner-reported 2026-08-23: the Save/Reset row sat too close to
+                the toggles above it and read as part of them. */}
+            <div className="wd-defaults-actions" style={{ marginTop: '20px' }}>
               <HodosButton
                 variant="primary"
                 onClick={handleSaveDefaults}

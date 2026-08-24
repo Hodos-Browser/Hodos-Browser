@@ -255,6 +255,25 @@ if ($NegativeControl) {
         }
     }
 
+    # T1g negative control (Phase 0.8): restore the background-without-colour
+    # override that SHIPPED in 8f3982c and assert the contrast check sees it.
+    # MEASURED: the breach reads 1.08:1 -- near-white on near-white -- which is
+    # exactly what the owner saw as an empty box on 2026-08-23.
+    if (Test-Selected 'T1g') {
+        $harness = Join-Path $RepoRoot 'development-docs/0.4.0-beta.3/phase-0.8-manifest-shape/probes/limit_field_contrast_t1g.mjs'
+        $lbl = 'NC: limit-field contrast (invisible-value defect restored)'
+        if (-not (Test-Path $harness)) {
+            Add-Result 'T1g' $lbl 'SKIPPED' "harness missing: $harness"
+        } elseif (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+            Add-Result 'T1g' $lbl 'SKIPPED' 'node not on PATH'
+        } else {
+            $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+            try { & node $harness --negative-control 2>&1 | Out-String | Write-Verbose } finally { $ErrorActionPreference = $prevEap }
+            if ($LASTEXITCODE -eq 0) { Add-Result 'T1g' $lbl 'PASS' 'an unreadable consent value is caught; the contrast check is not blind' }
+            else { Add-Result 'T1g' $lbl 'FAIL' "could not demonstrate the breach (exited $LASTEXITCODE)" }
+        }
+    }
+
     Write-Host ''
     if ($script:Results.Count -eq 0) {
         Write-Host 'NEGATIVE CONTROL: INCOMPLETE - ZERO gates exercised. This is NOT a pass.' -ForegroundColor Yellow
@@ -396,6 +415,26 @@ if (Test-Selected 'T1f') {
         try { & node --experimental-strip-types $harness 2>&1 | Out-String | Write-Verbose } finally { $ErrorActionPreference = $prevEap }
         if ($LASTEXITCODE -eq 0) { Add-Result 'T1f' $lbl 'PASS' '' }
         else { Add-Result 'T1f' $lbl 'FAIL' "harness exited $LASTEXITCODE - re-run with -Verbose" }
+    }
+}
+
+# T1g: limit-field contrast (Phase 0.8). The consent screen's spending caps must be
+# READABLE, in both provenance states. Guards the surface T1f cannot see: round 2
+# shipped a marked-field style that put near-white text on a near-white box (1.07:1),
+# hiding the very number the site had chosen. Reads the real .tsx and runs the real
+# WCAG relative-luminance formula -- not a string match, which any restyle defeats.
+if (Test-Selected 'T1g') {
+    $harness = Join-Path $RepoRoot 'development-docs/0.4.0-beta.3/phase-0.8-manifest-shape/probes/limit_field_contrast_t1g.mjs'
+    $lbl = 'limit-field contrast (BRC100AuthOverlayRoot.tsx)'
+    if (-not (Test-Path $harness)) {
+        Add-Result 'T1g' $lbl 'SKIPPED' "harness missing: $harness"
+    } elseif (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+        Add-Result 'T1g' $lbl 'SKIPPED' 'node not on PATH'
+    } else {
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try { & node $harness 2>&1 | Out-String | Write-Verbose } finally { $ErrorActionPreference = $prevEap }
+        if ($LASTEXITCODE -eq 0) { Add-Result 'T1g' $lbl 'PASS' '' }
+        else { Add-Result 'T1g' $lbl 'FAIL' "harness exited $LASTEXITCODE - re-run with -Verbose" }
     }
 }
 

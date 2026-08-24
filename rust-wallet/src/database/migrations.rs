@@ -1333,3 +1333,56 @@ pub fn migrate_v23_to_v24(conn: &Connection) -> Result<()> {
     info!("   ✅ V24 migration applied (domain_manifest_snapshots + default_prefill_from_manifest)");
     Ok(())
 }
+
+/// Migrate V24 → V25: add `settings.default_bundled_scope_grant`.
+///
+/// beta.3 Phase 0.8, owner-approved 2026-08-23 during live testing.
+///
+/// "Quiet mode" (`domain_permissions.bundled_scope_grant`) already exists
+/// PER SITE — it is the connect modal's *"let this site use any protocol or
+/// basket without asking"* checkbox, and the engine consults it in
+/// `matrix_c.rs :: decide_scoped_grant` before any per-scope grant. What did
+/// not exist was a USER-LEVEL DEFAULT for how that checkbox starts on a fresh
+/// site, so it was hardcoded ON in the modal.
+///
+/// That is the same gap V19 closed for identity-key disclosure and V24 closed
+/// for manifest pre-fill, and it is the more consequential of the three:
+/// quiet mode is the widest grant on the screen, covering protocols and
+/// baskets the site never declared. A user who wants to be asked every time
+/// had to untick it on every single site.
+///
+/// ⚠️ Ships `1` (ON), deliberately matching the modal's existing hardcoded
+/// default. This migration must not change behaviour for anyone — it only
+/// makes the existing default configurable. ⛔ Do not "improve" it to 0 here:
+/// that would silently start prompting existing users on every protocol call,
+/// which reads as a regression, not a hardening. Changing the shipped default
+/// is a separate, deliberate decision.
+///
+/// See also `TICKET_quiet_mode_wider_than_manifest.md` — narrowing quiet mode
+/// to what a manifest actually declared is the open follow-up, and it would
+/// change what this default MEANS without changing its storage.
+///
+/// Idempotent: existence-checked `ALTER`, so re-running on a V25 DB is a no-op.
+pub fn migrate_v24_to_v25(conn: &Connection) -> Result<()> {
+    info!("   Adding default_bundled_scope_grant column to settings (V25)...");
+
+    let cols: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(settings)")?;
+        let out: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        out
+    };
+    if !cols.iter().any(|c| c == "default_bundled_scope_grant") {
+        conn.execute(
+            "ALTER TABLE settings ADD COLUMN default_bundled_scope_grant INTEGER NOT NULL DEFAULT 1",
+            [],
+        )?;
+    } else {
+        info!("   ℹ️  V25: default_bundled_scope_grant already exists, skipping");
+    }
+
+    info!("   ✅ V25 migration applied (default_bundled_scope_grant)");
+    Ok(())
+}

@@ -172,7 +172,18 @@ const InfoIcon: React.FC<{ tooltip?: string; style?: React.CSSProperties }> = ({
   style,
 }) => {
   const [open, setOpen] = React.useState(false);
-  const text = tooltip || 'Identify you across the Metanet with your wallet identity key. This key is the same across every BRC-100 site you visit, so granting it lets sites recognize you between visits.';
+  // ⛔ The last sentence is not filler. Owner, 2026-08-23, reading a real
+  // manifest: a site declared a PROTOCOL named "identity key retrieval"
+  // described as "use your public identity key as your passwordless
+  // account", and it read as though ticking or unticking it governed
+  // identity disclosure. It does not — that row is an ordinary protocol
+  // grant (`ProtocolUse`), while identity disclosure is a separate gate
+  // (`identity_key_disclosure_allowed` / `CallKind::IdentityKeyReveal`).
+  // A site can name a protocol anything, so the wallet cannot recognise
+  // "the identity one" from site-authored text; the copy therefore states
+  // outright that THIS control is the only one, rather than trying to
+  // couple the two. See TICKET_connect_modal_two_views_drift.md.
+  const text = tooltip || 'Identify you across the Metanet with your wallet identity key. This key is the same across every BRC-100 site you visit, so granting it lets sites recognize you between visits. This checkbox is the ONLY control over your identity key — no permission a site lists can grant it, whatever the site calls it.';
   return (
     <span
       onMouseEnter={() => setOpen(true)}
@@ -234,6 +245,68 @@ const InfoIcon: React.FC<{ tooltip?: string; style?: React.CSSProperties }> = ({
     </span>
   );
 };
+
+/**
+ * beta.3 Phase 0.8 UI follow-up (owner-requested 2026-08-23) — turn the raw
+ * Level-2 counterparty into something a human can act on the right way.
+ *
+ * BRC-116 §4.1 requires the wallet to identify WHO a Level 2 protocol
+ * operation is with. The declared value is one of three things, and the
+ * ordering that matters is the opposite of how they read:
+ *
+ *   66-hex pubkey  → ONE named party. The NARROWEST of the three.
+ *   "self"         → the user's own keys. Nothing leaves.
+ *   "anyone" / ""  → anybody can derive the matching key. The WIDEST.
+ *
+ * ⭐ A wall of hex looks scarier than the English word "anyone" while being
+ * strictly safer, so the copy states the width explicitly instead of leaving
+ * the user to infer it from the shape of the value.
+ *
+ * ⛔ There is nothing for the user to DO with the value — it is an
+ * identifier, not a decision. Every tooltip says so rather than implying an
+ * action the screen does not offer.
+ *
+ * ⚠️ The label for a named key deliberately does NOT say "this site's
+ * server". That is the overwhelmingly likely reading, but it is UNVERIFIED —
+ * the manifest is untrusted text, and asserting an identity we have not
+ * checked is the exact display-vs-reality defect class this phase exists to
+ * remove. The tooltip carries the likelihood; the label carries only the
+ * fact. (`identity_resolver.rs` can resolve the key to a real name later —
+ * see UI_FOLLOWUPS.md §2.)
+ */
+function describeCounterparty(counterparty?: string): {
+  label: string;
+  hex?: string;
+  tooltip: string;
+} {
+  if (counterparty === 'self') {
+    return {
+      // Owner misread the previous wording ("you only") as meaning the SITE
+      // only. It means the opposite: the pairing is the user with themselves.
+      label: 'your own keys only',
+      tooltip: 'Limited to operations with your own keys — nothing is shared '
+        + 'with anyone else. This is the narrowest of the three options. '
+        + 'You do not need to do anything with this.',
+    };
+  }
+  if (!counterparty || counterparty === 'anyone') {
+    return {
+      label: 'anyone',
+      tooltip: 'This site did not limit this permission to one party, so it '
+        + 'can use this protocol with anybody. This is the WIDEST of the '
+        + 'three options — narrower would be one named party, or your own '
+        + 'keys only. You do not need to do anything with this.',
+    };
+  }
+  return {
+    label: 'one specific party',
+    hex: counterparty,
+    tooltip: 'Limited to a single party, identified by its public key — for a '
+      + 'site this is normally its own server. That is narrower, and safer, '
+      + 'than letting the site use this protocol with anyone. It is an '
+      + 'identifier only: you do not need to do anything with this value.',
+  };
+}
 
 // Phase 1.5 Step 0 — Hodos wallet attribution header. Renders the
 // Hodos_Gold_Wallet_Icon.svg at the top of every auth/payment/cert/
@@ -352,6 +425,11 @@ const BRC100AuthOverlayRoot: React.FC = () => {
   // (not state) because applyParams is invoked from a JS-injection callback
   // whose closure would otherwise capture stale state.
   const savedDefaultIdentityKeyRef = useRef<boolean>(true);
+
+  // beta.3 Phase 0.8 V25 — the user's default for QUIET MODE, the widest grant
+  // on the connect screen. Was hardcoded `true` with no way to change it.
+  // Defaults to true here so a wallet without V25 behaves exactly as before.
+  const savedDefaultBundledScopeRef = useRef<boolean>(true);
 
   // Phase 1.5 Step 5 — manifest_connect_bundle state. Parsed once from the
   // C++-supplied `manifest` query param; sub-permissions start all-selected
@@ -550,6 +628,14 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     // Domain-approval bundle: initialize from the user's saved default (V19),
     // not hardcoded true. Ref keeps applyParams non-stale across re-renders.
     setAllowIdentityKey(savedDefaultIdentityKeyRef.current);
+    // 🚨 beta.3 Phase 0.8: these two were NEVER reset here. The notification
+    // overlay is keep-alive and reused for every prompt, so whatever the user
+    // chose for the LAST site was still on screen for the NEXT one — a consent
+    // checkbox showing a state the user never chose for the site in front of
+    // them. Now re-seeded from the V25 user default on every prompt, which
+    // fixes the leak and the hardcoded default in one move.
+    setAllowBundledScope(savedDefaultBundledScopeRef.current);
+    setManifestAllowBundledScope(savedDefaultBundledScopeRef.current);
 
     // Phase 1.5 Step 5 — manifest_connect_bundle params.
     // Reset every time so a previous site's manifest doesn't leak in.
@@ -594,7 +680,21 @@ const BRC100AuthOverlayRoot: React.FC = () => {
   useEffect(() => {
     // Register JS injection callbacks for C++ to call (avoids full page navigation)
     (window as any).showNotification = (queryString: string) => {
-      applyParams(queryString);
+      // ⛔ Refresh BEFORE applying, never after. The tempting alternative —
+      // render immediately from the cached refs and re-resolve when a fresh
+      // fetch lands — makes the numbers CHANGE UNDER THE USER'S EYES on a
+      // spending-limit consent screen. A user who reads "$10.00" and clicks
+      // Approve on "$1.00" (or the reverse) has been misled by us, which is a
+      // worse failure than the stale value this fixes.
+      //
+      // Bounded by a timeout so an unreachable wallet cannot swallow the
+      // prompt entirely: on timeout we fall through with the last known good
+      // refs, which is exactly the old behaviour and no worse.
+      const REFRESH_TIMEOUT_MS = 1200;
+      Promise.race([
+        refreshWalletDefaults(),
+        new Promise((resolve) => setTimeout(resolve, REFRESH_TIMEOUT_MS)),
+      ]).then(() => applyParams(queryString));
     };
     (window as any).hideNotification = () => {
       setNotificationType('');
@@ -605,7 +705,18 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     // checkbox. If they set it to OFF in Approved Sites, fresh-site prompts
     // should start the checkbox unticked. Default to true on any fetch failure
     // so we don't accidentally degrade UX on a wallet that doesn't have V19 yet.
-    walletFetch('/wallet/settings')
+    //
+    // 🚨 beta.3 Phase 0.8, MEASURED LIVE 2026-08-23: this used to run ONLY here,
+    // in a mount-only effect. The notification overlay is KEEP-ALIVE — it mounts
+    // once per browser launch and C++ then drives it by injecting
+    // `window.showNotification()` per prompt — so these three refs were a
+    // snapshot of the wallet settings AS OF BROWSER START, never refreshed.
+    // Any change the user made in "Default Limits for New Sites" was ignored
+    // until they restarted the browser. Found because toggling the V24 pre-fill
+    // opt-in did nothing; it also silently affected the identity-key default
+    // and all four limit values. `refreshWalletDefaults` is now also awaited at
+    // the top of every prompt (see `showNotification` above).
+    const refreshWalletDefaults = () => walletFetch('/wallet/settings')
       .then((res) => res.ok ? res.json() : null)
       .then((data) => {
         if (!data) return;
@@ -632,6 +743,9 @@ const BRC100AuthOverlayRoot: React.FC = () => {
         savedUserLimitsRef.current = userLimits;
         savedPrefillFromManifestRef.current =
           data.default_prefill_from_manifest === true;
+        if (typeof data.default_bundled_scope_grant === 'boolean') {
+          savedDefaultBundledScopeRef.current = data.default_bundled_scope_grant;
+        }
         // A notification may already be on screen when this resolves (the
         // fetch is async and applyParams can run first). Re-resolve so the
         // fields show the user's real defaults rather than the hardcoded
@@ -645,7 +759,9 @@ const BRC100AuthOverlayRoot: React.FC = () => {
           return userLimits;
         });
       })
-      .catch(() => { /* silent — keep defaults */ });
+      .catch(() => { /* silent — keep the last known good values */ });
+
+    refreshWalletDefaults();
 
     // Initial load: parse URL params (backward compat + first page load)
     const search = window.location.search;
@@ -1115,11 +1231,42 @@ const BRC100AuthOverlayRoot: React.FC = () => {
 
       manifestData.protocols.forEach((p, i) => {
         if (!manifestSelectedProtocols.has(i)) return;
+        // ⛔ COUNTERPARTY: write ONLY a concrete compressed public key. Owner
+        // approved 2026-08-23 after the measurement below; do not widen this
+        // without repeating it.
+        //
+        // Phase 0.8 introduced a display-vs-reality gap here: the modal showed
+        // the Level-2 counterparty but every row landed with `counterparty =
+        // NULL` (= ANY counterparty), so the screen promised something
+        // narrower than the grant.
+        //
+        // 🚨 MEASURED LIVE 2026-08-23, and this is WHY 'self'/'anyone' stay
+        // NULL rather than being written verbatim. `createHmac` was fired for
+        // a protocol the manifest declares as `counterparty: "self"`, and the
+        // wallet logged:
+        //     🛡️ engine Prompt (scoped) ... endpoint=/createHmac kind=ProtocolUse
+        // `ProtocolUse` (not `CounterpartyUse`) means the request arrived with
+        // counterparty = None — `handlers.rs :: peek_scoped_grant_scope_protocol`
+        // collapses "self", "anyone" and "" to None before the gate sees them.
+        // Storing the literal 'self' would then be compared against a NULL
+        // parameter in `is_protocol_granted`:
+        //     ('self' IS NULL AND NULL IS NULL)  -> false
+        //     'self' = NULL                      -> NULL, not true
+        //     counterparty IS NULL               -> false
+        // i.e. it could NEVER match, and would permanently re-prompt a call
+        // the user had already approved. Denying is safer than over-granting,
+        // but it is still a regression, and an invisible one.
+        //
+        // A real 66-hex key DOES arrive intact, so writing it genuinely
+        // narrows the grant to match what the modal displayed.
+        const cp = (p.counterparty || '').trim();
+        const concreteCounterparty = /^0[23][0-9a-fA-F]{64}$/.test(cp) ? cp : undefined;
         writes.push(post('/domain/permissions/protocol', {
           domain,
           securityLevel: p.securityLevel,
           protocolName: p.name,
           keyId: p.keyId || '*',
+          ...(concreteCounterparty ? { counterparty: concreteCounterparty } : {}),
         }));
       });
 
@@ -2169,19 +2316,20 @@ const BRC100AuthOverlayRoot: React.FC = () => {
             </button>
           )}
         </div>
+        {/* R-PROV legend. Short enough to hold one line at 440px — the two
+            sentences these replaced wrapped to three lines apiece and read as
+            a warning banner rather than a caption (owner, 2026-08-23). The
+            asterisk carries the mark; this line says what it means, and one
+            of the two ALWAYS renders whenever the site suggested anything, so
+            provenance is never silent. */}
         {anyLimitFromSite && (
-          <div style={{
-            fontSize: '12px', color: COLORS.error, fontWeight: 600,
-            marginBottom: '8px', lineHeight: 1.5,
-          }}>
-            Fields marked <span style={siteSuggestedTag}>suggested by site</span> carry numbers
-            this site chose, not your own defaults.
+          <div style={{ fontSize: '12px', color: COLORS.textMuted, marginBottom: '8px' }}>
+            <span style={siteSuggestedMark}>***</span> = this site&apos;s numbers, not your defaults.
           </div>
         )}
         {!anyLimitFromSite && siteSuggestsAnything && (
-          <div style={{ fontSize: '12px', color: COLORS.textMuted, marginBottom: '8px', lineHeight: 1.5 }}>
-            These are your own defaults. What this site suggested is shown beneath each field
-            and has not been applied.
+          <div style={{ fontSize: '12px', color: COLORS.textMuted, marginBottom: '8px' }}>
+            Your defaults. This site&apos;s suggestion is shown below, not applied.
           </div>
         )}
         {monthlyAllowance && (
@@ -2192,10 +2340,12 @@ const BRC100AuthOverlayRoot: React.FC = () => {
         )}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
           <label style={limitFieldLabel(manifestLimitSource.perTxCents)}>
-            Per transaction ($)
-            {manifestLimitSource.perTxCents === 'site' && (
-              <span style={siteSuggestedTag}>suggested by site</span>
-            )}
+            <span>
+              Per transaction ($)
+              {manifestLimitSource.perTxCents === 'site' && (
+                <span style={siteSuggestedMark} title="Suggested by this site, not your default">***</span>
+              )}
+            </span>
             <input type="text" inputMode="decimal"
               value={manifestLimitText.perTx}
               onChange={(e) => onLimitTextUsd('perTx', 'perTxCents', e.target.value)}
@@ -2209,10 +2359,12 @@ const BRC100AuthOverlayRoot: React.FC = () => {
             )}
           </label>
           <label style={limitFieldLabel(manifestLimitSource.perSessionCents)}>
-            Per session ($)
-            {manifestLimitSource.perSessionCents === 'site' && (
-              <span style={siteSuggestedTag}>suggested by site</span>
-            )}
+            <span>
+              Per session ($)
+              {manifestLimitSource.perSessionCents === 'site' && (
+                <span style={siteSuggestedMark} title="Suggested by this site, not your default">***</span>
+              )}
+            </span>
             <input type="text" inputMode="decimal"
               value={manifestLimitText.perSession}
               onChange={(e) => onLimitTextUsd('perSession', 'perSessionCents', e.target.value)}
@@ -2311,18 +2463,13 @@ const BRC100AuthOverlayRoot: React.FC = () => {
                   <span>
                     {p.purpose || `Use protocol "${p.name}"`}
                     {/* BRC-116 §4.1: for a Level 2 protocol the wallet MUST
-                        identify the counterparty to the user. A Level 2 entry
-                        that names none is shown as "any counterparty" rather
-                        than hidden — understating is the defect, not the fix. */}
-                    {p.securityLevel === 2 && (
-                      <span style={{ color: COLORS.textMuted, fontSize: '11px', marginLeft: '6px' }}>
-                        {p.counterparty === 'self'
-                          ? '(with you only)'
-                          : p.counterparty === 'anyone' || !p.counterparty
-                            ? '(with any counterparty)'
-                            : `(with ${p.counterparty.slice(0, 10)}…)`}
-                      </span>
-                    )}
+                        identify the counterparty to the user. It is no longer
+                        shown inline here — it moved to the "Who these are
+                        with" footnote below (owner request, 2026-08-23), which
+                        has the room to say what the value MEANS rather than
+                        dropping ten characters of hex mid-sentence. Every
+                        Level 2 entry still appears there, INCLUDING one that
+                        names no counterparty: understating is the defect. */}
                   </span>
                 </div>
               ))}
@@ -2403,10 +2550,71 @@ const BRC100AuthOverlayRoot: React.FC = () => {
               )}
             </div>
 
+            {/* ⭐ "Who these are with" — the Level-2 counterparty footnote.
+                Moved out of the inline permission lines on owner request
+                (2026-08-23, UI_FOLLOWUPS.md §1 reading (a)): inline, it was
+                ten characters of hex interrupting a plain-English sentence
+                and the owner's first question about it was literally "what
+                exactly is that number?". Down here there is room to name the
+                width of the grant, which is the only thing about it that
+                bears on their safety.
+
+                ⛔ Renders for EVERY securityLevel === 2 protocol, including
+                the ones naming no counterparty — those are the WIDEST case
+                and hiding them would understate the grant. */}
+            {manifestData.protocols.some((p) => p.securityLevel === 2) && (
+              <div style={{
+                border: '1px solid #e5e7eb',
+                borderRadius: '10px',
+                padding: '10px 12px',
+                marginBottom: '16px',
+              }}>
+                <div style={{
+                  fontSize: '12px',
+                  fontWeight: 600,
+                  color: COLORS.textDark,
+                  marginBottom: '6px',
+                  display: 'flex',
+                  alignItems: 'center',
+                }}>
+                  Who these are with
+                  <InfoIcon tooltip="Some permissions are limited to operations with one particular party. This is who — an identifier, not a choice you need to make. Fewer parties is narrower, and narrower is safer." />
+                </div>
+                {manifestData.protocols.map((p, i) => {
+                  if (p.securityLevel !== 2) return null;
+                  const cp = describeCounterparty(p.counterparty);
+                  return (
+                    <div key={`cp-note-${i}`} style={{
+                      fontSize: '12px',
+                      color: COLORS.textMuted,
+                      lineHeight: 1.5,
+                      marginBottom: '4px',
+                    }}>
+                      <span style={{ color: COLORS.textDark }}>{p.name}</span>
+                      {' — with '}
+                      <span style={{ fontWeight: 600 }}>{cp.label}</span>
+                      <InfoIcon tooltip={cp.tooltip} />
+                      {cp.hex && (
+                        <div style={{
+                          fontFamily: 'monospace',
+                          fontSize: '11px',
+                          wordBreak: 'break-all',
+                          opacity: 0.8,
+                          marginTop: '1px',
+                        }}>
+                          {cp.hex}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
             {/* Identity-key bundle checkbox — same pattern as domain_approval Step 1 */}
             <label style={{
               display: 'flex',
-              alignItems: 'center',
+              alignItems: 'flex-start',
               gap: '8px',
               fontSize: '13px',
               color: COLORS.textDark,
@@ -2418,16 +2626,38 @@ const BRC100AuthOverlayRoot: React.FC = () => {
                 type="checkbox"
                 checked={manifestAllowIdentityKey}
                 onChange={(e) => setManifestAllowIdentityKey(e.target.checked)}
-                style={{ accentColor: COLORS.primary, width: '16px', height: '16px', cursor: 'pointer' }}
+                style={{
+                  accentColor: COLORS.primary, width: '16px', height: '16px',
+                  cursor: 'pointer', flexShrink: 0, marginTop: '2px',
+                }}
               />
-              Allow this site to identify you
-              <InfoIcon />
+              {/* ⛔ Wording is SHARED with the Customize view — keep them
+                  identical. Owner-reported 2026-08-23, the same drift as the
+                  quiet-mode label: one control read two different ways
+                  depending on which screen you were on, and the shorter one
+                  dropped "across the Metanet" — the fact that actually matters,
+                  since this key is the SAME on every BRC-100 site and is
+                  therefore what lets sites correlate you between them.
+                  Single <span> so the flex container doesn't shatter it. */}
+              <span style={{ lineHeight: 1.45 }}>
+                <strong>Identity:</strong> Allow this site to identify you across the Metanet
+                <InfoIcon />
+              </span>
             </label>
 
             {/* Phase 2.6-D Fix #4 — bundled scope grant checkbox. Default ON. */}
+            {/* ⚠️ The text MUST stay inside a single <span>. This <label> is a
+                flex container with `gap: 8px`, so every child element and text
+                node becomes its own FLEX ITEM and wraps independently — with
+                the gap inserted between each. When the wording gained <strong>
+                and <em>, the line shattered into fragments ("mode" under
+                "Quiet", "any" on its own). `flexShrink: 0` on the box is the
+                other half: without it the checkbox is compressed to a
+                different size than its neighbour once the row overflows.
+                Both reported by the owner on 2026-08-23. */}
             <label style={{
               display: 'flex',
-              alignItems: 'center',
+              alignItems: 'flex-start',
               gap: '8px',
               fontSize: '13px',
               color: COLORS.textDark,
@@ -2439,10 +2669,24 @@ const BRC100AuthOverlayRoot: React.FC = () => {
                 type="checkbox"
                 checked={manifestAllowBundledScope}
                 onChange={(e) => setManifestAllowBundledScope(e.target.checked)}
-                style={{ accentColor: COLORS.primary, width: '16px', height: '16px', cursor: 'pointer' }}
+                style={{
+                  accentColor: COLORS.primary, width: '16px', height: '16px',
+                  cursor: 'pointer', flexShrink: 0, marginTop: '2px',
+                }}
               />
-              Allow this site to perform wallet operations without asking each time
-              <InfoIcon tooltip="When ticked, this site can use ANY protocol or basket without prompting - including ones it did not declare in its manifest. Untick it (in Customize) to approve only the specific items listed above. Protected baskets (change outputs, backup tokens) are never included. Sensitive operations - large payments, identity disclosure, sensitive certificate fields - always prompt regardless. Revoke any time from Manage Site Permissions." />
+              <span style={{ lineHeight: 1.45 }}>
+              {/* ⛔ Owner-reported 2026-08-23: this used to read "Allow this
+                  site to perform wallet operations without asking each time",
+                  which omits the single most important fact about the control
+                  — that it also covers protocols and baskets the site NEVER
+                  DECLARED. The Customize view already said so; the summary,
+                  which is the screen most users actually read, did not. One
+                  control must not carry two meanings. Wording is now shared
+                  with Customize; keep them identical. */}
+              <strong>Quiet mode:</strong> let this site use <em>any</em> protocol or
+              basket without asking — including ones it did not list above
+              <InfoIcon tooltip="When ticked, this site can use ANY protocol or basket without prompting - including ones it did not declare in its manifest. Untick it to approve only the specific items listed above. Protected baskets (change outputs, backup tokens) are never included. Sensitive operations - large payments, identity disclosure, sensitive certificate fields - always prompt regardless. Revoke any time from Manage Site Permissions." />
+              </span>
             </label>
 
             {/* 🚨 THE R-PROV BLOCK. This used to be one static line reading
@@ -2451,8 +2695,14 @@ const BRC100AuthOverlayRoot: React.FC = () => {
                 says whose numbers these are, in words, differently in each case,
                 and it EXPANDS IN PLACE rather than throwing the user into the
                 Customize subview to see them (contract §6a). */}
+            {/* Owner-directed 2026-08-23: no tinted panel and no tinted border
+                for the site-suggested state. The amber wash plus gold outline
+                turned a legitimate, user-chosen configuration into what looked
+                like an error banner. The WORDS still carry the provenance —
+                that is what R-PROV requires, and words survive a screenshot,
+                greyscale and a colour-blind reader in a way a wash does not. */}
             <div style={{
-              border: `1px solid ${anyLimitFromSite ? COLORS.gold : '#e5e7eb'}`,
+              border: '1px solid #e5e7eb',
               borderRadius: '10px', marginBottom: '16px', overflow: 'hidden',
             }}>
               <button
@@ -2461,7 +2711,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
                 aria-expanded={manifestLimitsOpen}
                 style={{
                   width: '100%', display: 'flex', alignItems: 'center', gap: '8px',
-                  background: anyLimitFromSite ? 'rgba(217, 119, 6, 0.08)' : 'transparent',
+                  background: 'transparent',
                   border: 'none', padding: '10px 12px', cursor: 'pointer',
                   font: 'inherit', textAlign: 'left', color: COLORS.textDark,
                 }}
@@ -2474,7 +2724,12 @@ const BRC100AuthOverlayRoot: React.FC = () => {
                 <span style={{ fontSize: '12px', flex: 1, lineHeight: 1.5 }}>
                   {anyLimitFromSite ? (
                     <>
-                      <span style={{ color: COLORS.error, fontWeight: 700 }}>
+                      {/* ⚠️ NOT COLORS.error ('#c62828'). MEASURED 3.00:1 against
+                          the dark card — below WCAG AA, on the one line whose
+                          job is to say "these are not your defaults". Same red
+                          family as the *** mark (6.10:1), so the two read as
+                          one signal instead of two different warnings. */}
+                      <span style={{ color: '#f87171', fontWeight: 700 }}>
                         Payment limits suggested by this site:
                       </span>{' '}
                       {formatCentsUsd(manifestLimits.perTxCents)}/tx,{' '}
@@ -2982,23 +3237,31 @@ const checkmark: React.CSSProperties = {
 };
 
 // beta.3 Phase 0.8 — R-PROV styling. A field carrying a site-suggested value
-// must be distinguishable from one carrying the user's own default. ⛔ Colour
-// alone is not the mechanism — every one of these is paired with the words
-// "suggested by site" in the markup, because a colour-blind user, a
-// high-contrast theme or a screenshot must still convey it. The style is the
-// reinforcement, not the signal.
-const siteSuggestedTag: React.CSSProperties = {
-  display: 'inline-block',
-  marginLeft: '6px',
-  padding: '1px 6px',
-  borderRadius: '999px',
-  fontSize: '10px',
-  fontWeight: 700,
-  letterSpacing: '0.02em',
-  color: '#7a2e00',
-  background: '#ffe4cc',
-  border: '1px solid #d97706',
-  verticalAlign: 'middle',
+// must be distinguishable from one carrying the user's own default.
+//
+// ⛔ Colour alone is STILL not the mechanism. It is now a red asterisk glyph
+// plus a legend line, which is why the rule survives the 2026-08-23 restyle:
+// an asterisk is a character, not a colour, so it survives greyscale, a
+// high-contrast theme, a screenshot and a colour-blind reader exactly as the
+// old "suggested by site" pill did. The colour is reinforcement, not signal.
+// Each marked control also carries a `title` with the words, so nothing that
+// reads the accessibility tree loses the provenance either.
+//
+// 🚨 The pill it replaced was not merely loud — it was masking a defect. It
+// set `background: '#fff8f0'` on the INPUT while leaving `color` at the dark
+// theme's '#f0f0f0': near-white text on a near-white box, contrast ≈ 1.07:1.
+// The number a user was about to approve as their spending cap was invisible
+// exactly when the site had chosen it. The pill stayed dark-on-light and
+// perfectly legible, so the screen shouted about a value it was hiding.
+// ⛔ Never re-introduce a background override here without setting `color`
+// with it — this input inherits a DARK theme (`COLORS.white` is '#1a1d23').
+const siteSuggestedMark: React.CSSProperties = {
+  color: '#f87171',
+  fontWeight: 800,
+  fontSize: '15px',
+  letterSpacing: '1px',
+  marginLeft: '4px',
+  lineHeight: 1,
 };
 
 const siteSuggestionHint: React.CSSProperties = {
@@ -3025,16 +3288,25 @@ const limitFieldLabel = (source: 'user' | 'site'): React.CSSProperties => ({
   flexDirection: 'column',
   gap: '4px',
   fontSize: '12px',
-  color: source === 'site' ? '#7a2e00' : '#9ca3af',
+  // Owner-directed 2026-08-23: one colour in both states. Recolouring the
+  // label (dark brown originally, then amber) made a normal, user-chosen
+  // state look like a fault. The `***` is the differentiator.
+  color: '#9ca3af',
   fontWeight: source === 'site' ? 600 : 400,
 });
 
-/** Input styling for a limit field; outlined when the value came from the site. */
-const limitInputStyle = (source: 'user' | 'site'): React.CSSProperties => ({
+/** Input styling for a limit field.
+ *
+ *  Owner-directed 2026-08-23: identical in both provenance states. The red
+ *  outline read as an error, not as information — the screen looked like it
+ *  was scolding the user for a state they had deliberately chosen. The `***`
+ *  beside the label carries the mark instead.
+ *
+ *  ⛔ If you ever restore a `background` override here you MUST set `color`
+ *  with it. This input inherits a DARK theme (`COLORS.white` is '#1a1d23');
+ *  the version that set only `background` shipped a 1.07:1 spending cap. */
+const limitInputStyle = (_source: 'user' | 'site'): React.CSSProperties => ({
   ...customizeNumberInput,
-  ...(source === 'site'
-    ? { borderColor: '#d97706', borderWidth: '2px', background: '#fff8f0' }
-    : {}),
 });
 
 // Phase 1.5 Step 5 — Customize subview shared styles for manifest_connect_bundle.

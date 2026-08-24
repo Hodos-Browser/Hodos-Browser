@@ -19292,6 +19292,18 @@ pub async fn wallet_settings_get(state: web::Data<AppState>) -> HttpResponse {
         |row| row.get(0),
     ).unwrap_or(0);
 
+    // beta.3 Phase 0.8 — V25 quiet-mode default. 1 (the shipped default, and
+    // what the modal hardcoded before this existed) = the connect prompt's
+    // quiet-mode checkbox starts TICKED for a fresh site. ⚠️ This is the
+    // WIDEST grant on that screen — it covers protocols and baskets the site
+    // never declared — so a user who wants to be asked can now default it OFF
+    // once instead of unticking it on every site.
+    let default_bundled_scope_grant: i64 = db.connection().query_row(
+        "SELECT default_bundled_scope_grant FROM settings LIMIT 1",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(1);
+
     drop(db);
 
     HttpResponse::Ok().json(serde_json::json!({
@@ -19302,6 +19314,7 @@ pub async fn wallet_settings_get(state: web::Data<AppState>) -> HttpResponse {
         "default_max_tx_per_session": default_max_tx_per_session,
         "default_identity_key_disclosure_allowed": default_identity_key_disclosure_allowed != 0,
         "default_prefill_from_manifest": default_prefill_from_manifest != 0,
+        "default_bundled_scope_grant": default_bundled_scope_grant != 0,
     }))
 }
 
@@ -19368,6 +19381,17 @@ pub async fn wallet_settings_set(
     if let Some(v) = body.get("default_prefill_from_manifest").and_then(|v| v.as_bool()) {
         if let Err(e) = db.connection().execute(
             "UPDATE settings SET default_prefill_from_manifest = ?1",
+            rusqlite::params![if v { 1_i64 } else { 0_i64 }],
+        ) {
+            drop(db);
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}));
+        }
+    }
+
+    // beta.3 Phase 0.8 — V25 quiet-mode default setter.
+    if let Some(v) = body.get("default_bundled_scope_grant").and_then(|v| v.as_bool()) {
+        if let Err(e) = db.connection().execute(
+            "UPDATE settings SET default_bundled_scope_grant = ?1",
             rusqlite::params![if v { 1_i64 } else { 0_i64 }],
         ) {
             drop(db);
