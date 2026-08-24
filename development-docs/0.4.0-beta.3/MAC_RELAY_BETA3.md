@@ -1108,3 +1108,89 @@ honest framing is "unknown, and the gate costs one line."
 - Sparkle 2.9.6: **green + its negative control**, or a defect.
 - Your call on §A4.
 - Anything macOS-shaped you want in the beta.3 cut line before it is fixed.
+
+
+---
+
+# Round — 2026-08-23 (Windows) · P0.8 consent-modal work, `6fc35d2`
+
+Windows-side Phase 0.8 is closed on the items it opened with. **Almost all of it is
+shared React**, so it reaches macOS the moment you rebuild — you do not need to port
+it, you need to **look at it**, and one item genuinely needs a macOS decision.
+
+## B1 — Shared React, lands on macOS automatically (verify, don't port)
+
+`frontend/src/pages/BRC100AuthOverlayRoot.tsx` + `components/wallet/ApprovedSitesTab.tsx`:
+
+- the connect modal's provenance marking is now a red `***` + one legend line
+  (the pill and the red panel chrome are gone — the owner read them as an error banner);
+- a **"Who these are with"** footnote replaces the inline Level-2 counterparty hex;
+- summary and Customize now share **identical** wording for quiet mode and identity;
+- three default toggles share one wrapping row in *Default Limits for New Sites*.
+
+⚠️ **The one thing worth your eyes:** every one of those is a **wrapping layout at a
+narrow width**. Windows has NOT run DPI cells #4/#6/#9 on them either — see B4. On
+macOS the equivalent risk is a small window / non-Retina / large-text accessibility
+setting. A quick pass at a deliberately narrow window is worth more than a code read.
+
+## B2 — 🚨 Three low-contrast defects, and one is the reason to look at YOUR palette
+
+The connect modal inherits a **dark** theme where `COLORS.white` is `#1a1d23` — the
+palette names are legacy and actively misleading. A site-marked limit input was
+setting `background: '#fff8f0'` **without** `color`, leaving the dark theme's
+near-white text on a near-white box: **1.07:1**. The spending cap the user was about
+to approve was *invisible*, and only in the state where the SITE had chosen the
+number. Two more: a 1.5:1 label and a 3.00:1 heading.
+
+New gate **`T1g`** (`phase-0.8-manifest-shape/probes/limit_field_contrast_t1g.mjs`,
+wired into `scripts/preflight.ps1` in both modes) reads the real `.tsx` and runs the
+real WCAG luminance formula; its negative control injects the shipped defect and
+measures **1.08:1**.
+
+👉 **It is cross-platform** (pure Node, no CEF, no Windows API) — it should run as-is
+on macOS. Please confirm it does, because it is the only automated contrast coverage
+we have. ⚠️ It guards **colour, not layout**.
+
+## B3 — 🚨 A keep-alive-overlay bug class that is NOT Windows-specific
+
+Two separate defects, one root: **the notification overlay is long-lived, but its
+state was written as if it mounted fresh each prompt.**
+
+1. `/wallet/settings` was fetched **once** in a mount-only `useEffect`, so those refs
+   were a snapshot **as of browser start** — every change in *Default Limits for New
+   Sites* was ignored until restart. Now refreshed **before** each prompt (never
+   after: re-resolving post-render changes numbers under the user's eyes on a consent
+   screen), bounded by a 1200 ms race.
+2. Neither quiet-mode checkbox was reset between prompts, so the previous site's
+   choice was still on screen for the next site.
+
+👉 **macOS runs the same keep-alive overlay model**, so both bugs existed there too and
+both fixes arrive with the shared React. ⭐ Worth a sweep for anything else in the
+macOS overlay path initialised once and assumed fresh.
+
+## B4 — ⚠️ What Windows did NOT verify, so don't inherit the assumption
+
+**DPI matrix cells #4/#6/#9 have not been run on any of this.** Three checkboxes now
+share a row and two consent labels now wrap — precisely the shape those cells catch.
+A dedicated session is being opened for a comprehensive DPI/scaling assessment.
+
+⭐ Finding worth your input: `DPI_RESOLUTION_TEST_MATRIX.md`'s pass criteria and its
+one-line programmatic assertion cover the **header/toolbar only**. They say nothing
+about **overlays or modals** — which is where all of today's layout risk sits, and
+where the macOS overlay model differs most (borderless `NSWindow` vs `WS_POPUP`). If
+you have macOS-side scaling criteria worth encoding, the new session is the moment.
+
+## B5 — Schema: **V25** (`settings.default_bundled_scope_grant`)
+
+Owner-approved. Ships `1`, matching the modal's previously-hardcoded default, so no
+behaviour changes for anyone. ⛔ Do **not** "improve" it to `0` — that would start
+prompting existing users on every protocol call, which reads as a regression, not as
+hardening. macOS picks it up on the next wallet build; migration is idempotent.
+
+## B6 — What I need back
+
+- Does **`T1g`** run clean on macOS (green **and** its negative control)?
+- Any macOS scaling/accessibility criteria to fold into the DPI matrix's **overlay**
+  gap (B4) — that doc currently has none.
+- Still open from the previous round: Sparkle 2.9.6 green + negative control, and
+  your call on §A4 (Big Sur users).
