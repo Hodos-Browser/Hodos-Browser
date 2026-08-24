@@ -11,10 +11,31 @@
 Same modal, same build, same session — **only the display changed.** That is a display-geometry
 bug, not a React bug.
 
+## ⛔ CORRECTION 2026-08-23 — the premise below is wrong, the mechanism is real
+
+**MEASURED** (grep, `cef-native/`): every Windows overlay is created with **`SetAsPopup`**
+(`simple_app.cpp` — settings, wallet, backup, brc100auth, notification, menu, omnibox, cookie,
+download, …). That is a **windowed** CEF browser, which receives mouse input from Windows directly.
+There is **no `SetAsWindowless`** in that file at all. So *"overlays are OSR"* is **false on
+Windows** — it is true on macOS, and `MAC_RELAY_BETA3.md` §D1 says so explicitly.
+
+⭐ **But the hand-forwarding is real anyway**: `cef_browser_shell.cpp` has **48 `GET_X_LPARAM`
+sites** feeding `SendMouseClickEvent` / `SendMouseMoveEvent` with **zero DPI conversion**, while the
+process is `PER_MONITOR_AWARE_V2`.
+
+So the real question for Phase 1 is sharper than this ticket originally framed it: **windowed
+browsers that already receive native input ALSO have a parallel hand-rolled injection path.** Ask
+why it exists before assuming its coordinates are the bug — a double-delivery or a
+correct-native-plus-wrong-synthetic pair produces different symptoms than a single wrong path, and
+the fix differs accordingly.
+
+⚠️ Still an **assumption, not a finding**: nobody has reproduced the offset under instrumentation.
+
 ## Why this is probably a hit-test bug, not clipping
 
-Overlays are **OSR (off-screen rendered)** browsers. They do not get mouse input for free: each
-overlay's WndProc forwards it by hand —
+~~Overlays are **OSR (off-screen rendered)** browsers.~~ (See the correction above — on Windows they
+are windowed `SetAsPopup` browsers.) Each overlay's WndProc nonetheless forwards mouse input by
+hand —
 
 ```cpp
 case WM_LBUTTONDOWN:
