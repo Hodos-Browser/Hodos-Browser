@@ -1,5 +1,6 @@
 // src/simple_app.cpp
 #include "../../include/handlers/simple_app.h"
+#include "../../include/core/PendingPermissionRequest.h"
 #include "../../include/handlers/simple_handler.h"
 #include "../../include/handlers/simple_render_process_handler.h"
 #include "../../include/handlers/my_overlay_render_handler.h"
@@ -1143,6 +1144,15 @@ void CreateBRC100AuthOverlayWithSeparateProcess(HINSTANCE hInstance) {
 
 void CreateNotificationOverlay(HINSTANCE hInstance, const std::string& type, const std::string& domain, const std::string& extraParams) {
     LOG_INFO_APP("🔔 Creating notification overlay (type: " + type + ", domain: " + domain + ")");
+
+    // beta.3 P0.9 — if a permission prompt is parked and something ELSE is taking
+    // the shared overlay, latch it now so the prompt can be re-shown when the
+    // overlay is released. Recorded here (the single choke point that knows the
+    // incoming `type`) rather than inferred at close time, which races.
+    if (type != "permission_request" && type != "preload") {
+        PendingPermissionManager::GetInstance().markPreempted();
+    }
+
 
     extern HWND g_notification_overlay_hwnd;
 

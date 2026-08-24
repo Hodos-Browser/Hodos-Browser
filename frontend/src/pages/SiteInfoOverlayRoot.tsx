@@ -16,6 +16,8 @@ import MicIcon from '@mui/icons-material/Mic';
 import LocationOnIcon from '@mui/icons-material/LocationOn';
 import NotificationsIcon from '@mui/icons-material/Notifications';
 import ContentPasteIcon from '@mui/icons-material/ContentPaste';
+import DnsIcon from '@mui/icons-material/Dns';
+import RouterIcon from '@mui/icons-material/Router';
 import RestartAltIcon from '@mui/icons-material/RestartAlt';
 import { HodosButton } from '../components/HodosButton';
 import { usePrivacyShield } from '../hooks/usePrivacyShield';
@@ -28,6 +30,10 @@ const CAP_META: Record<string, { label: string; Icon: React.ElementType }> = {
     location: { label: 'Location', Icon: LocationOnIcon },
     notifications: { label: 'Notifications', Icon: NotificationsIcon },
     clipboard: { label: 'Clipboard', Icon: ContentPasteIcon },
+    // beta.3 Phase 0.9 — Chromium's Local Network Access asks. Present here so a
+    // grant is revocable; a permission that can only be granted is a one-way door.
+    loopback: { label: 'Server on this computer', Icon: DnsIcon },
+    local_network: { label: 'Local network devices', Icon: RouterIcon },
 };
 
 // Connection state mirrors MainBrowserView's securityState derivation.

@@ -45,6 +45,7 @@ add_executable(hodos_tests
     wallet_ssrf_guard_test.cpp          # P0.5 E1 — wallet_call SSRF: URL anchor + method validation
     ipc_role_guard_test.cpp             # P0.5 B1 — self-nav grant gate: family + approval-overlay role (header-only)
     qr_payload_classify_test.cpp        # P0.6 — QR scheme allowlist + amount-injection guard (header-only)
+    site_permission_mapping_test.cpp    # P0.9 — CEF-bit -> Hodos-type boundary + frozen stored ids (header-only)
 
     # Production sources under test (built into the test exe directly).
     # (Phase 2.6-H removed permission_engine_test / permission_gate_test along

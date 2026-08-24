@@ -1,5 +1,7 @@
 #pragma once
 
+#include "SitePermissionType.h"
+
 #include <sqlite3.h>
 #include <string>
 #include <mutex>
@@ -11,24 +13,6 @@
 //
 // Permission callbacks (CefPermissionHandler) fire on the browser-process UI
 // thread, so a plain std::mutex is sufficient.
-
-// Hodos-stable permission ids — DECOUPLED from CEF's bitflag enums so a Chromium
-// bump that renumbers cef_permission_request_types_t can't corrupt stored rows.
-// CEF <-> these are mapped only at the callback boundary (simple_handler.cpp).
-enum class SitePermissionType : int {
-    Camera        = 1,
-    Microphone    = 2,
-    Location      = 3,
-    Notifications = 4,
-    Clipboard     = 5,
-    // v2 (schema already supports; not yet wired): Midi=6, Usb=7, Bluetooth=8, ...
-};
-
-enum class SitePermissionState : int {
-    Ask   = 0,   // no stored decision (absence of a row) — defer to a prompt
-    Allow = 1,
-    Block = 2,
-};
 
 class SitePermissionStore {
 public:

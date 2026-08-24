@@ -9,6 +9,7 @@
 #import <mach-o/dyld.h>
 
 #include "include/cef_application_mac.h"
+#include "include/core/PendingPermissionRequest.h"
 #include "cef_app.h"
 #include "cef_client.h"
 #include "cef_browser.h"
@@ -3543,6 +3544,15 @@ void CreateBRC100AuthOverlayWithSeparateProcess() {
 }
 
 void CreateNotificationOverlay(const std::string& type, const std::string& domain, const std::string& extraParams) {
+
+    // beta.3 P0.9 — if a permission prompt is parked and something ELSE is taking
+    // the shared overlay, latch it now so the prompt can be re-shown when the
+    // overlay is released. Recorded here (the single choke point that knows the
+    // incoming `type`) rather than inferred at close time, which races.
+    if (type != "permission_request" && type != "preload") {
+        PendingPermissionManager::GetInstance().markPreempted();
+    }
+
     LOG_INFO("🔔 Creating notification overlay (type: " + type + ", domain: " + domain + ") (macOS)");
 
     NSRect mainFrame = [g_main_window frame];

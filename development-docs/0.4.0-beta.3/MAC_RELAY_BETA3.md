@@ -1194,3 +1194,27 @@ hardening. macOS picks it up on the next wallet build; migration is idempotent.
   gap (B4) — that doc currently has none.
 - Still open from the previous round: Sparkle 2.9.6 green + negative control, and
   your call on §A4 (Big Sur users).
+
+
+---
+
+# 📋 ROUND 2026-08-24 (Windows) — Phase 0.9 loopback prompt branding
+
+👉 **Full round is in `MAC_RELAY_P09_ROUND.md`** (kept as its own file so this one does not
+conflict if you are editing it).
+
+**One-line ask:** every macOS code path in Phase 0.9 is written and compiles, and **not one has ever
+executed**. Windows verified the behaviour end to end; Mac has had zero runtime exposure.
+
+🚨 **The macOS-specific risk worth your attention** — on Windows, this phase exposed a bug where a
+wallet modal painted over a permission prompt and the overlay-hide path was then skipped, leaving an
+**invisible, click-eating, full-window overlay** for up to 300 s. Fixed on Windows. macOS uses
+borderless `NSWindow`s with NSEvent monitors instead of `SetAsPopup` windowed browsers, so the fix
+is unproven there. Please check specifically that no invisible overlay survives after a permission
+prompt is pre-empted and answered.
+
+⚠️ Before testing anything, use the new test-control tool — a "fresh profile" is **not** a fresh
+test, because one wallet DB is shared by every browser profile:
+
+    python development-docs/0.4.0-beta.3/phase-0.9-chromium-prompt-branding/reset_test_state.py show
+    ... clear-loopback ALL / clear-wallet-domain <domain> / verify      # verify exits non-zero on mismatch

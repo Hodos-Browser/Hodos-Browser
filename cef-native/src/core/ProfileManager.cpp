@@ -401,6 +401,25 @@ bool ProfileManager::DeleteProfile(const std::string& id) {
         return false;
     }
 
+    // ⛔ Can't delete the profile THIS process is running on. Added 2026-08-24
+    // after it was done by accident during beta.3 P0.9 testing (log 11:05:13
+    // launch Profile_4 -> 11:05:41 delete Profile_4). Nothing stopped it, and the
+    // consequences were both confusing and unsafe:
+    //   * the live process kept its data directory and its --profile= argument,
+    //     but profiles.json no longer listed that id, so the header UI failed its
+    //     own lookup and fell back to displaying the DEFAULT profile's identity —
+    //     the browser looked like it had silently switched profiles;
+    //   * the freed id was immediately reissued to the next profile created (see
+    //     GenerateProfileId), which then adopted ~200 MB of the deleted profile's
+    //     history, cookies and content settings.
+    // ⚠️ Read currentProfileId_ DIRECTLY — GetCurrentProfileId() takes the same
+    // mutex this function already holds and would deadlock.
+    if (id == currentProfileId_) {
+        std::cerr << "❌ Cannot delete the profile this window is running on — "
+                     "switch to another profile first" << std::endl;
+        return false;
+    }
+
     auto it = std::find_if(profiles_.begin(), profiles_.end(),
         [&id](const ProfileInfo& p) { return p.id == id; });
 
@@ -414,7 +433,8 @@ bool ProfileManager::DeleteProfile(const std::string& id) {
 
     profiles_.erase(it);
 
-    // If we deleted the current profile, switch to default
+    // Unreachable since the guard above — kept as belt-and-braces only. If you find
+    // yourself relying on this, the guard has been weakened and that is the bug.
     if (currentProfileId_ == id) {
         currentProfileId_ = defaultProfileId_;
     }
@@ -762,6 +782,31 @@ std::string ProfileManager::GenerateProfileId() {
             }
         } catch (...) {}
     }
+
+    // ⛔ ALSO scan the filesystem. DeleteProfile deliberately does NOT remove files
+    // ("Not deleting files for safety"), so a deleted profile's directory outlives
+    // its registry entry. Scanning only `profiles_` therefore frees the id for
+    // reuse, and because `profile.path = profile.id`, the next profile created
+    // ADOPTS the deleted profile's data wholesale — history, cookies, and the
+    // Chromium content settings that carry permission grants. Observed 2026-08-24:
+    // a new profile named "Profile_2" took id Profile_4 and inherited ~200 MB.
+    // An id is only free if BOTH the registry and the disk say so.
+    try {
+        for (const auto& entry : fs::directory_iterator(app_data_path_)) {
+            if (!entry.is_directory()) continue;
+            const std::string dirName = entry.path().filename().string();
+            if (dirName.rfind("Profile_", 0) != 0) continue;
+            try {
+                const int num = std::stoi(dirName.substr(8));
+                if (num >= maxNum) maxNum = num + 1;
+            } catch (...) {}
+        }
+    } catch (const std::exception& e) {
+        // A scan failure must not hand back a possibly-colliding id silently.
+        std::cerr << "⚠️ Profile id scan failed (" << e.what()
+                  << ") — id may collide with an orphaned directory" << std::endl;
+    }
+
     return "Profile_" + std::to_string(maxNum);
 }
 

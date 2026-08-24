@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import DomainPermissionForm from '../components/DomainPermissionForm';
 import { walletFetch } from '../services/walletApi';
 import type { DomainPermissionSettings } from '../components/DomainPermissionForm';
@@ -342,6 +342,46 @@ const HodosWalletHeader: React.FC = () => (
 // ⚠️ Do NOT "unify" these two into one header. The wallet icon on wallet prompts is
 // load-bearing (principle #1 above): it is how the user tells the wallet apart from
 // the site. Picking the right one per prompt IS the feature.
+// beta.3 P0.9 — disclosure for a connect modal that is ALSO answering a parked
+// loopback / local-network permission. Rendered only when C++ set
+// `grantsLocalAccess=1`, which it does only when such a permission is genuinely
+// parked for this host. ⛔ A connect modal that grants only wallet access must
+// never show this, and a modal that DOES carry the network grant must never hide
+// it — the single consent is only defensible because it says what it covers.
+const LocalAccessNotice: React.FC<{ onShown: () => void }> = ({ onShown }) => {
+  // ⛔ Fail-closed link. C++ refuses to grant the loopback permission unless the
+  // approval carries localAccessAcknowledged, and ONLY this component can set it.
+  // So if a connect branch forgets to render the notice, the grant is declined
+  // instead of being made silently — which is exactly what happened on the first
+  // pass, when domain_approval carried the flag and rendered nothing.
+  React.useEffect(() => { onShown(); }, [onShown]);
+  return (
+  // ⛔ Styling is deliberately INFORMATIONAL, not a warning. Owner call 2026-08-24:
+  // loopback access is all-or-nothing everywhere — no browser offers per-app local
+  // access — so a site that can reach the wallet can reach other local software by
+  // definition. That is industry-standard behaviour, not an alarm. Dressing it in
+  // warning colours would train users to dismiss a routine, expected disclosure.
+  // It must still be READ, so it keeps its own panel and a bold lead line.
+  <div style={{
+    display: 'flex',
+    gap: '10px',
+    alignItems: 'flex-start',
+    background: 'rgba(255, 255, 255, 0.04)',
+    border: `1px solid ${COLORS.borderLight}`,
+    borderRadius: '8px',
+    padding: '10px 12px',
+    marginBottom: '14px',
+  }}>
+    <span style={{ fontSize: '16px', lineHeight: '18px', flexShrink: 0 }}>💻</span>
+    <div style={{ fontSize: '12px', lineHeight: 1.5, color: COLORS.textDark }}>
+      <strong>This also allows access to other apps on this computer.</strong>{' '}
+      Connecting lets this site reach software running on your machine, not only your
+      Hodos wallet. You can change this later in Site controls.
+    </div>
+  </div>
+  );
+};
+
 const HodosBrowserHeader: React.FC = () => (
   <div style={attributionHeaderStyle}>
     <img
@@ -401,6 +441,15 @@ const BRC100AuthOverlayRoot: React.FC = () => {
   // b1b — site-permission prompt (camera/mic/location/notifications/clipboard).
   // `permCode` selects the icon + wording; `permRequestId` keys the C++ callback.
   const [permCode, setPermCode] = useState<string>('');
+  // beta.3 P0.9 — set by C++ ONLY when this connect modal has claimed a parked
+  // loopback / local-network permission, i.e. approving here also grants the site
+  // access to other software running on this machine. It must never be set for an
+  // ordinary CWI call, or the modal would claim to grant something it does not.
+  const [grantsLocalAccess, setGrantsLocalAccess] = useState<boolean>(false);
+  // Set only by LocalAccessNotice mounting. Sent with the approval so C++ can
+  // fail closed when the disclosure was not actually displayed.
+  const [localAccessShown, setLocalAccessShown] = useState<boolean>(false);
+  const markLocalAccessShown = useCallback(() => setLocalAccessShown(true), []);
   const [permRequestId, setPermRequestId] = useState<string>('');
   const [permSubmitted, setPermSubmitted] = useState<boolean>(false);  // one decision per prompt
 
@@ -547,6 +596,8 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     // b1b — site-permission prompt params.
     setPermCode(params.get('perm') || '');
     setPermRequestId(params.get('requestId') || '');
+    setGrantsLocalAccess(params.get('grantsLocalAccess') === '1');
+    setLocalAccessShown(false);   // re-earned on every show, never inherited
     setPermSubmitted(false);  // fresh prompt → re-enable buttons
 
     // Reset UI state for fresh notification
@@ -837,7 +888,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
         ]);
         // Tell the interceptor to forward the pending request
         window.cefMessage.send('brc100_auth_response', [
-          JSON.stringify({ approved: true, whitelist: true }),
+          JSON.stringify({ approved: true, whitelist: true, localAccessAcknowledged: localAccessShown }),
         ]);
       }
       window.cefMessage?.send('overlay_close', []);
@@ -864,7 +915,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
           }),
         ]);
         window.cefMessage.send('brc100_auth_response', [
-          JSON.stringify({ approved: true, whitelist: true }),
+          JSON.stringify({ approved: true, whitelist: true, localAccessAcknowledged: localAccessShown }),
         ]);
       }
       window.cefMessage?.send('overlay_close', []);
@@ -1317,6 +1368,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
       if (window.cefMessage) {
         window.cefMessage.send('brc100_auth_response', [JSON.stringify({
           approved: true,
+          localAccessAcknowledged: localAccessShown,
           whitelist: true,
         })]);
       }
@@ -1650,13 +1702,43 @@ const BRC100AuthOverlayRoot: React.FC = () => {
   // clipboard. Replaces Chromium's stock prompt with the Hodos-branded one;
   // the choice is resolved + persisted via the permission_response IPC. ──
   if (notificationType === 'permission_request') {
-    const PERM: Record<string, { icon: string; label: string }> = {
+    // `note` is optional and only set for the Phase 0.9 network asks — camera and
+    // mic are self-explanatory, "talk to a server on your computer" is not.
+    // ⛔ The note deliberately does NOT mention the wallet. Wallet traffic is served
+    // by our own resource handler (isWalletEndpoint) and never reaches the network
+    // stack, so it never raises this prompt — implying otherwise would tell the user
+    // that blocking here protects their wallet, which is false.
+    //
+    // ⛔ `noOnce` — MEASURED 2026-08-24, do not remove without re-measuring.
+    // CEF's cef_permission_request_result_t offers only ACCEPT / DENY / DISMISS /
+    // IGNORE. There is NO "grant once". So on the OnShowPermissionPrompt path,
+    // answering ACCEPT makes Chromium write a PERSISTENT content setting, and an
+    // "Allow this time" button would be a lie: measured on this build, clicking it
+    // for example.com produced `loopback_network -> ALLOW` in the profile's
+    // Preferences, which survives restart.
+    // Camera/mic are exempt because they arrive via OnRequestMediaAccessPermission,
+    // whose Continue() grants the single request WITHOUT persisting anything — so
+    // for those, "Allow this time" is truthful (confirmed: a stored mic Allow exists
+    // in our DB with no matching Chromium content setting).
+    const PERM: Record<string, { icon: string; label: string; note?: string; noOnce?: boolean }> = {
       camera:        { icon: '📷', label: 'use your camera' },
       microphone:    { icon: '🎤', label: 'use your microphone' },
       camera_mic:    { icon: '🎥', label: 'use your camera and microphone' },
       location:      { icon: '📍', label: 'know your location' },
       notifications: { icon: '🔔', label: 'show notifications' },
       clipboard:     { icon: '📋', label: 'read your clipboard' },
+      loopback:      {
+        noOnce: true,
+        icon: '💻',
+        label: 'connect to a server running on your computer',
+        note: 'Most websites never need this. Only allow it if you expect this site to work with software running on this machine.',
+      },
+      local_network: {
+        noOnce: true,
+        icon: '🏠',
+        label: 'connect to other devices on your local network',
+        note: 'This would let the site reach printers, routers and other devices on your network. Most websites never need this.',
+      },
     };
     const perm = PERM[permCode] || { icon: '🔐', label: 'access a device feature' };
     const decide = (decision: 'allow_once' | 'allow_always' | 'block') => {
@@ -1692,19 +1774,46 @@ const BRC100AuthOverlayRoot: React.FC = () => {
             </div>
           </div>
 
-          <div style={{ fontSize: '40px', textAlign: 'center', marginBottom: '22px' }}>{perm.icon}</div>
+          <div style={{ fontSize: '40px', textAlign: 'center', marginBottom: perm.note ? '14px' : '22px' }}>{perm.icon}</div>
 
-          <div style={{ display: 'flex', gap: '12px', marginBottom: '10px' }}>
-            <HodosButton variant="secondary" disabled={permSubmitted} onClick={() => decide('allow_once')} style={{ flex: 1 }}>
-              Allow this time
-            </HodosButton>
-            <HodosButton variant="primary" disabled={permSubmitted} onClick={() => decide('allow_always')} style={{ flex: 1 }}>
-              Allow every visit
-            </HodosButton>
-          </div>
-          <HodosButton variant="secondary" disabled={permSubmitted} onClick={() => decide('block')} style={{ width: '100%' }}>
-            Don't allow
-          </HodosButton>
+          {perm.note && (
+            <div style={{
+              fontSize: '13px',
+              color: COLORS.textMuted,
+              lineHeight: 1.5,
+              marginBottom: '22px',
+              textAlign: 'center',
+            }}>
+              {perm.note}
+            </div>
+          )}
+
+          {perm.noOnce ? (
+            // Two buttons only — offering "Allow this time" here would promise an
+            // ephemeral grant the platform cannot give (see `noOnce` above).
+            <div style={{ display: 'flex', gap: '12px', marginBottom: '10px' }}>
+              <HodosButton variant="secondary" disabled={permSubmitted} onClick={() => decide('block')} style={{ flex: 1 }}>
+                Don't allow
+              </HodosButton>
+              <HodosButton variant="primary" disabled={permSubmitted} onClick={() => decide('allow_always')} style={{ flex: 1 }}>
+                Allow
+              </HodosButton>
+            </div>
+          ) : (
+            <>
+              <div style={{ display: 'flex', gap: '12px', marginBottom: '10px' }}>
+                <HodosButton variant="secondary" disabled={permSubmitted} onClick={() => decide('allow_once')} style={{ flex: 1 }}>
+                  Allow this time
+                </HodosButton>
+                <HodosButton variant="primary" disabled={permSubmitted} onClick={() => decide('allow_always')} style={{ flex: 1 }}>
+                  Allow every visit
+                </HodosButton>
+              </div>
+              <HodosButton variant="secondary" disabled={permSubmitted} onClick={() => decide('block')} style={{ width: '100%' }}>
+                Don't allow
+              </HodosButton>
+            </>
+          )}
         </div>
       </div>
     );
@@ -2768,6 +2877,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
             </div>
 
             {/* Buttons: Decline / Customize / Connect */}
+            {grantsLocalAccess && <LocalAccessNotice onShown={markLocalAccessShown} />}
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', flexWrap: 'wrap' }}>
               <HodosButton variant="secondary" onClick={handleManifestDecline}>
                 Decline
@@ -2966,6 +3076,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
           </div>
 
           {/* Buttons: Back / Connect with current selections */}
+          {grantsLocalAccess && <LocalAccessNotice onShown={markLocalAccessShown} />}
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
             <HodosButton variant="secondary" onClick={() => setManifestShowCustomize(false)}>
               Back
@@ -3110,6 +3221,13 @@ const BRC100AuthOverlayRoot: React.FC = () => {
           >
             {showAdvanced ? '\u25BC' : '\u25B6'} Advanced settings
           </div>
+
+          {/* ⛔ P0.9 — MUST sit outside both approve paths. This branch has TWO ways
+              to approve: the Allow button below, and DomainPermissionForm's own save
+              (handleAllowAdvanced), which REPLACES that button row. Putting the
+              notice next to the buttons would hide it on the Advanced path — which
+              is how it went missing from this branch entirely on the first pass. */}
+          {grantsLocalAccess && <LocalAccessNotice onShown={markLocalAccessShown} />}
 
           {/* Collapsible advanced section */}
           {showAdvanced && (

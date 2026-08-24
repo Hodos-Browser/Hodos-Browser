@@ -24,6 +24,8 @@ struct PendingPermissionRequest {
     int browserId = 0;                // the requesting tab browser (for close/nav cleanup)
     int64_t createdAtMs = 0;          // park time (for the stale-entry sweep)
     std::vector<SitePermissionType> types;  // permission type(s) to persist on Allow/Block
+    bool boundToConnectModal = false;  // P0.9: the wallet connect modal answers this one
+    std::string boundModalDomain;      // P0.9: host of the modal that claimed it
 };
 
 class PendingPermissionManager {
@@ -81,6 +83,106 @@ public:
         out = it->second;
         requests_.erase(it);
         return true;
+    }
+
+    // --- beta.3 P0.9: BINDING a loopback/local-network permission to the wallet
+    // connect modal. Owner decision 2026-08-24, superseding the 2026-08-21
+    // "no auto-allow for loopback" line and recorded in PHASE_CONTRACT.md.
+    //
+    // Rationale: the loopback grant is BLANKET (Chromium keys it on the requesting
+    // origin only — TOP_ORIGIN_ONLY_SCOPE — with no target port), and connecting a
+    // wallet already hands the site local access. Two prompts for one decision is
+    // worse UX and no more protective, PROVIDED the connect modal discloses that it
+    // also grants access to other local apps. That disclosure is the condition on
+    // which this is safe; do not remove one without removing the other. ---
+
+    // Is a network-class permission (loopback / local network) parked for `host`?
+    // `types` carries our stable ids: 6 = LocalNetwork, 7 = Loopback.
+    bool hasParkedNetworkPermissionForHost(const std::string& host) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto& kv : requests_) {
+            if (kv.second.host != host || kv.second.isMedia) continue;
+            for (auto t : kv.second.types) {
+                if (t == SitePermissionType::LocalNetwork ||
+                    t == SitePermissionType::Loopback) return true;
+            }
+        }
+        return false;
+    }
+
+    // Bind every parked network permission for `host` to a connect modal: the
+    // delayed "show our own prompt" task must NOT fire for these.
+    void bindNetworkPermissionsForHost(const std::string& host) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto& kv : requests_) {
+            if (kv.second.host != host || kv.second.isMedia) continue;
+            for (auto t : kv.second.types) {
+                if (t == SitePermissionType::LocalNetwork ||
+                    t == SitePermissionType::Loopback) {
+                    kv.second.boundToConnectModal = true;
+                    kv.second.boundModalDomain = host;
+                    break;
+                }
+            }
+        }
+    }
+
+    bool isBound(const std::string& requestId) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = requests_.find(requestId);
+        return it != requests_.end() && it->second.boundToConnectModal;
+    }
+
+    // Pop every network permission bound to a connect modal for `host`, so the
+    // caller can resolve them with the modal's answer.
+    std::vector<PendingPermissionRequest> popBoundNetworkPermissionsForHost(const std::string& host) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::vector<PendingPermissionRequest> out;
+        for (auto it = requests_.begin(); it != requests_.end();) {
+            if (it->second.boundToConnectModal && it->second.host == host && !it->second.isMedia) {
+                out.push_back(it->second);
+                it = requests_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        return out;
+    }
+
+    // --- beta.3 P0.9: pre-emption latch. Set at the MOMENT another overlay type
+    // takes the shared notification overlay while a permission prompt is parked.
+    // ⛔ Do NOT infer this later from g_pendingModalDomain: the modal's own
+    // response handler clears that string in the same millisecond it closes the
+    // overlay (MEASURED 2026-08-24 08:32:39.741 — brc100_auth_response then
+    // overlay_close, same ms), so a check at close time always reads empty. ---
+    void markPreempted() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!requests_.empty()) preempted_ = true;
+    }
+    bool consumePreempted() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const bool p = preempted_ && !requests_.empty();
+        preempted_ = false;
+        return p;
+    }
+
+    // Look at the parked request WITHOUT removing it, and restart its staleness
+    // clock. Used when the shared notification overlay was taken over by a wallet
+    // modal and we need to re-show the prompt once the overlay is free again
+    // (beta.3 P0.9): the CEF callback must stay parked across that hand-off, and
+    // the 60s watchdog must not reap it while it is queued behind the modal.
+    // ⛔ Skips entries already BOUND to a connect modal: those are that modal's to
+    // answer, and re-showing one produces the double-consent this phase removes
+    // (and lets the user Block while the modal is still promising access).
+    bool peekParked(PendingPermissionRequest& out) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto& kv : requests_) {
+            if (kv.second.boundToConnectModal) continue;
+            kv.second.createdAtMs = nowMs();   // restart the watchdog for the re-show
+            out = kv.second;
+            return true;
+        }
+        return false;
     }
 
     // Retrieve + remove by CEF prompt_id (OnDismissPermissionPrompt cleanup).
@@ -151,4 +253,5 @@ private:
     // browserId -> host -> set<permission-type-int> (ephemeral allow-once grants)
     std::map<int, std::map<std::string, std::set<int>>> sessionGrants_;
     uint64_t counter_ = 0;
+    bool preempted_ = false;   // a modal stole the overlay from a parked prompt
 };

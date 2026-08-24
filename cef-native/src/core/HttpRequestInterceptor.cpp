@@ -23,6 +23,9 @@
 #include <iostream>
 
 #include "../../include/core/PendingAuthRequest.h"
+#include "../../include/core/PendingPermissionRequest.h"
+#include "../../include/core/WalletActivityTracker.h"
+#include "../../include/core/SitePermissionStore.h"
 #include "../../include/core/PaidContentCache.h"
 #include "../../include/core/TabManager.h"
 
@@ -683,6 +686,24 @@ static std::string escapeForJsSingleQuote(const std::string& input) {
 class AsyncHTTPClient;
 
 // UI-thread task to create a notification overlay (CreateWindowEx requires UI thread)
+// beta.3 P0.9 — which modal types represent "connect this site to the wallet",
+// i.e. the surfaces that may answer a parked loopback / local-network permission.
+// ⛔ Deliberately excludes payment, rate-limit, protocol/basket/counterparty grants
+// and certificate disclosure: those are per-operation consents, not "this site may
+// reach local software", and must not silently carry a network grant.
+// ⛔ Only types that ACTUALLY RENDER LocalAccessNotice may appear here. Checked
+// 2026-08-24: BRC100AuthOverlayRoot.tsx has render branches for
+// manifest_connect_bundle and domain_approval, and NONE for "brc100_auth" — so
+// flagging that type would grant blanket local access with the disclosure silently
+// missing. If you add a type here, add the notice to its branch in the same commit.
+// (manifest_connect_bundle's branch is guarded by `&& manifestData`; when the parse
+// yields nothing the C++ side already falls back to domain_approval, which also
+// renders the notice, so that path stays covered.)
+static bool IsConnectModalType(const std::string& type) {
+    return type == "manifest_connect_bundle" ||
+           type == "domain_approval";
+}
+
 class CreateNotificationOverlayTask : public CefTask {
 public:
     CreateNotificationOverlayTask(const std::string& type, const std::string& domain,
@@ -691,11 +712,31 @@ public:
     void Execute() override {
         LOG_DEBUG_HTTP("🔔 CreateNotificationOverlayTask executing for " + type_ + " / " + domain_);
         g_pendingModalDomain = domain_;
+
+        // beta.3 P0.9 — a CONNECT modal claims any parked loopback / local-network
+        // permission for this host: the user makes one decision, and it answers both.
+        //
+        // ⛔ Only the connect surfaces, and ONLY when such a permission is actually
+        // parked. Flagging an ordinary CWI call (payment, protocol grant, cert
+        // disclosure) would tell the user they are granting local-app access when
+        // that modal grants nothing of the kind — the exact "modal grants more than
+        // it says" defect this phase exists to avoid, just inverted.
+        std::string extra = extraParams_;
+        if (IsConnectModalType(type_)) {
+            auto& pm = PendingPermissionManager::GetInstance();
+            const std::string host = SitePermissionStore::NormalizeHost(domain_);
+            if (pm.hasParkedNetworkPermissionForHost(host)) {
+                pm.bindNetworkPermissionsForHost(host);
+                extra += "&grantsLocalAccess=1";
+                LOG_INFO_HTTP("🔔 Connect modal for " + host +
+                              " claimed a parked local-network permission — disclosing it in the modal");
+            }
+        }
 #ifdef _WIN32
         extern HINSTANCE g_hInstance;
-        CreateNotificationOverlay(g_hInstance, type_, domain_, extraParams_);
+        CreateNotificationOverlay(g_hInstance, type_, domain_, extra);
 #elif defined(__APPLE__)
-        CreateNotificationOverlay(type_, domain_, extraParams_);
+        CreateNotificationOverlay(type_, domain_, extra);
 #endif
     }
 private:
@@ -3968,6 +4009,13 @@ CefRefPtr<CefResourceHandler> HttpRequestInterceptor::GetResourceHandler(
     }
 
     LOG_DEBUG_HTTP("🌐 Wallet endpoint detected, creating async handler");
+
+    // beta.3 P0.9 — mark this host as mid-conversation with the wallet, so a parked
+    // loopback permission waits for the connect modal instead of racing a timer.
+    // `domain` (the requesting page's host) is extracted a few lines below for the
+    // handler; recompute here rather than reorder that code.
+    hodos::WalletActivityTracker::GetInstance().NoteWalletRequest(
+        SitePermissionStore::NormalizeHost(extractDomain(browser, request)));
 
     // Get request body
     std::string body;

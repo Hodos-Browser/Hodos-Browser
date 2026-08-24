@@ -35,6 +35,9 @@
 #include "../../include/core/EphemeralCookieManager.h"
 #include "../../include/core/BookmarkManager.h"
 #include "../../include/core/SitePermissionStore.h"
+#include "../../include/core/SitePermissionMapping.h"
+#include "../../include/core/WalletActivityTracker.h"
+#include "include/cef_request_context.h"
 #include "../../include/core/PendingPermissionRequest.h"
 #include "../../include/core/SettingsManager.h"
 #include "../../include/core/AutoUpdater.h"
@@ -496,6 +499,209 @@ static void SweepStalePermissions() {
     for (auto& pr : expired) ResolveDeadPermission(pr);
 }
 
+// beta.3 P0.9 — deferred show for the network permissions (loopback / local
+// network). These are the only two that a wallet connect modal can answer on the
+// user's behalf, so we give that modal a moment to appear before putting a second
+// prompt on screen. If no connect modal claims the request inside the window, this
+// fires and shows the Hodos prompt exactly as any other permission.
+//
+// MEASURED spacing on bitgenius.net: the permission arrived 239 ms BEFORE the
+// connect modal (08:39:34.776 -> 08:39:35.015). The window below is ~3x that, and
+// deliberately far under the 60 s watchdog.
+// ⛔ NOT a guess at how long the connect modal takes — that guess failed. These are
+// poll/quiet parameters: we re-check every kNetworkPermissionPollMs and only show the
+// standalone prompt once the host has been QUIET (no wallet endpoint traffic) for
+// kWalletQuietMs with no modal pending. kNetworkPermissionMaxWaitMs is a backstop so
+// a wedged wallet cannot suppress the prompt indefinitely; it sits well under the 60 s
+// stale-permission watchdog.
+static const int kNetworkPermissionPollMs = 200;
+static const int64_t kWalletQuietMs = 1200;
+static const int64_t kNetworkPermissionMaxWaitMs = 15000;
+
+class ShowDeferredPermissionTask : public CefTask {
+public:
+    explicit ShowDeferredPermissionTask(const std::string& requestId, int64_t waitedMs = 0)
+        : requestId_(requestId), waitedMs_(waitedMs) {}
+    void Execute() override {
+        auto& mgr = PendingPermissionManager::GetInstance();
+        if (mgr.isBound(requestId_)) {
+            LOG_INFO_BROWSER("ð Deferred permission " + requestId_ +
+                             " is bound to a connect modal — not showing a second prompt");
+            return;
+        }
+        PendingPermissionRequest pr;
+        if (!mgr.peekParked(pr) || pr.requestId != requestId_) return;  // answered/reaped already
+        if (pr.types.empty()) return;
+        const std::string code = hodos::siteperm::PermCode(pr.types[0]);
+        if (code.empty()) return;
+
+        // ⛔ Same guard FireHodosPermissionPrompt applies. A non-connect modal
+        // (payment, cert disclosure, rate limit) can own the shared overlay without
+        // binding this permission; painting over it destroys a live consent surface
+        // AND strands the overlay, because permission_response's hide block is
+        // itself gated on g_pendingModalDomain being empty. Resolve with DISMISS
+        // instead: nothing is stored and Chromium simply asks again.
+        extern std::string g_pendingModalDomain;
+        if (!g_pendingModalDomain.empty()) {
+            PendingPermissionRequest dead;
+            if (mgr.pop(requestId_, dead) && dead.promptCb) {
+                dead.promptCb->Continue(CEF_PERMISSION_RESULT_DISMISS);
+            }
+            LOG_INFO_BROWSER("🔔 Deferred permission for " + pr.host +
+                             " dismissed — a modal (" + g_pendingModalDomain +
+                             ") owns the overlay; Chromium will ask again");
+            return;
+        }
+        // Still talking to the wallet, or a modal is already queued for this host?
+        // Then a connect modal may still be coming — wait rather than flash a prompt
+        // that is about to be replaced. MEASURED 2026-08-24 13:24:16: the old fixed
+        // window expired 71 ms before the modal arrived and did exactly that.
+        const bool walletBusy =
+            hodos::WalletActivityTracker::GetInstance().IsTalkingToWallet(pr.host, kWalletQuietMs) ||
+            PendingRequestManager::GetInstance().hasPendingForDomain(pr.host);
+        if (walletBusy && waitedMs_ < kNetworkPermissionMaxWaitMs) {
+            CefPostDelayedTask(TID_UI,
+                               new ShowDeferredPermissionTask(requestId_, waitedMs_ + kNetworkPermissionPollMs),
+                               kNetworkPermissionPollMs);
+            return;
+        }
+        if (walletBusy) {
+            LOG_WARNING_BROWSER("🔔 " + pr.host + " still busy with the wallet after " +
+                                std::to_string(kNetworkPermissionMaxWaitMs) +
+                                "ms — showing the permission prompt anyway");
+        }
+
+        LOG_INFO_BROWSER("ð No connect modal claimed " + pr.host +
+                         " — showing the Hodos " + code + " prompt (waited " +
+                         std::to_string(waitedMs_) + "ms)");
+#ifdef _WIN32
+        extern HINSTANCE g_hInstance;
+        extern void CreateNotificationOverlay(HINSTANCE, const std::string&, const std::string&, const std::string&);
+        CreateNotificationOverlay(g_hInstance, "permission_request", pr.host,
+                                  "&requestId=" + pr.requestId + "&perm=" + code);
+#elif defined(__APPLE__)
+        extern void CreateNotificationOverlay(const std::string&, const std::string&, const std::string&);
+        CreateNotificationOverlay("permission_request", pr.host,
+                                  "&requestId=" + pr.requestId + "&perm=" + code);
+#endif
+    }
+private:
+    std::string requestId_;
+    int64_t waitedMs_;
+    IMPLEMENT_REFCOUNTING(ShowDeferredPermissionTask);
+    DISALLOW_COPY_AND_ASSIGN(ShowDeferredPermissionTask);
+};
+
+// beta.3 P0.9 — the shared notification overlay multiplexes wallet modals AND
+// permission prompts, and the existing guard is one-directional: a permission
+// prompt refuses to stomp a modal that is ALREADY open, but nothing stops a modal
+// that opens a moment LATER from painting over the prompt.
+//
+// MEASURED 2026-08-24 on bitgenius.net: the loopback prompt took the overlay at
+// 07:46:17.201 and manifest_connect_bundle replaced it at 07:46:17.635 — 434 ms.
+// The user saw only the wallet modal; the CEF permission callback stayed parked,
+// unanswered, and `hasPending()` then forced every later prompt to Chromium's
+// stock UI until the 60s watchdog reaped it.
+//
+// Fix (owner's Option A): leave the wallet flow completely untouched, and re-show
+// the still-parked prompt once the modal releases the overlay. peekParked() also
+// restarts the staleness clock so the watchdog cannot reap it mid-hand-off.
+static void ReshowParkedPermissionPrompt() {
+    PendingPermissionRequest pr;
+    if (!PendingPermissionManager::GetInstance().peekParked(pr)) return;
+    if (pr.types.empty()) return;
+    const std::string code =
+        (pr.isMedia && pr.types.size() > 1)
+            ? std::string("camera_mic")
+            : std::string(hodos::siteperm::PermCode(pr.types[0]));
+    if (code.empty()) return;
+    LOG_INFO_BROWSER("ð Re-showing parked permission prompt for " + pr.host +
+                     " (perm=" + code + ") — a modal had taken the shared overlay");
+#ifdef _WIN32
+    extern HINSTANCE g_hInstance;
+    extern void CreateNotificationOverlay(HINSTANCE, const std::string&, const std::string&, const std::string&);
+    CreateNotificationOverlay(g_hInstance, "permission_request", pr.host,
+                              "&requestId=" + pr.requestId + "&perm=" + code);
+#elif defined(__APPLE__)
+    extern void CreateNotificationOverlay(const std::string&, const std::string&, const std::string&);
+    CreateNotificationOverlay("permission_request", pr.host,
+                              "&requestId=" + pr.requestId + "&perm=" + code);
+#endif
+}
+
+// beta.3 P0.9 (HIGH-4 from the adversarial review) — write the hub's decision
+// THROUGH to Chromium's own content setting for the two network types.
+//
+// Why this is required and not optional: for the prompt-path permissions Chromium
+// consults ITS setting before it ever calls OnShowPermissionPrompt again. Once a
+// grant exists there, our SQLite row is never read, so a hub toggle that writes
+// only SQLite changes a value nobody consults — the UI would show "Block" while the
+// site kept full loopback access. That is worse than the one-way door the hub
+// entries were added to close, because it also lies about it.
+//
+// ⚠️ Scoped deliberately to LocalNetwork/Loopback. Camera/mic are media-path and
+// genuinely governed by our store; location/notifications/clipboard have the SAME
+// defect but predate this phase and are covered by their own ticket — widening it
+// here would be smuggling a fix for the existing five into a branding phase.
+static void MirrorNetworkPermissionToChromium(const std::string& host,
+                                              SitePermissionType type,
+                                              SitePermissionState state) {
+    if (type != SitePermissionType::Loopback && type != SitePermissionType::LocalNetwork) return;
+    if (host.empty()) return;
+    auto ctx = CefRequestContext::GetGlobalContext();
+    if (!ctx) return;
+
+    const cef_content_setting_types_t ct =
+        (type == SitePermissionType::Loopback) ? CEF_CONTENT_SETTING_TYPE_LOOPBACK_NETWORK
+                                               : CEF_CONTENT_SETTING_TYPE_LOCAL_NETWORK;
+    // Ask == "no stored decision" for us, and DEFAULT is Chromium's way of saying
+    // the same thing (it deletes the exception rather than storing ASK).
+    const cef_content_setting_values_t cv =
+        (state == SitePermissionState::Allow) ? CEF_CONTENT_SETTING_VALUE_ALLOW :
+        (state == SitePermissionState::Block) ? CEF_CONTENT_SETTING_VALUE_BLOCK :
+                                                CEF_CONTENT_SETTING_VALUE_DEFAULT;
+
+    // Chromium keys this setting on the requesting origin (TOP_ORIGIN_ONLY_SCOPE)
+    // and only admits secure origins, so an https origin URL is the right key.
+    const std::string originUrl = "https://" + host + "/";
+    ctx->SetContentSetting(originUrl, originUrl, ct, cv);
+    LOG_INFO_BROWSER("🛈 Mirrored " + std::string(hodos::siteperm::PermCode(type)) + "=" +
+                     std::string(state == SitePermissionState::Allow ? "allow" :
+                                 state == SitePermissionState::Block ? "block" : "ask") +
+                     " to Chromium content settings for " + host);
+}
+
+// Emit the authoritative profile list to one browser. Extracted 2026-08-24 from
+// the profiles_get_all handler so profiles_delete can re-emit after a REFUSED
+// delete — otherwise the panel keeps showing a row the backend still has.
+static void SendProfilesToBrowser(CefRefPtr<CefBrowser> browser) {
+    if (!browser || !browser->GetMainFrame()) return;
+    auto profiles = ProfileManager::GetInstance().GetAllProfiles();
+    auto current = ProfileManager::GetInstance().GetCurrentProfile();
+    std::string defaultId = ProfileManager::GetInstance().GetDefaultProfileId();
+
+    // R6: build with nlohmann::json (not hand-concatenation) so a profile NAME
+    // containing quotes/backslashes/control chars can't break the JSON and wedge
+    // the picker.
+    nlohmann::json doc;
+    doc["currentProfileId"] = current.id;
+    doc["defaultProfileId"] = defaultId;
+    doc["profiles"] = nlohmann::json::array();
+    for (const auto& p : profiles) {
+        nlohmann::json pj;
+        pj["id"] = p.id;
+        pj["name"] = p.name;
+        pj["color"] = p.color;
+        pj["avatarInitial"] = p.avatarInitial;
+        if (!p.avatarImage.empty()) pj["avatarImage"] = p.avatarImage;
+        doc["profiles"].push_back(pj);
+    }
+    CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("profiles_result");
+    response->GetArgumentList()->SetString(0, doc.dump());
+    browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
+    LOG_DEBUG_BROWSER("👤 Sent " + std::to_string(profiles.size()) + " profiles");
+}
+
 // b1b.1 — effective state for a request: the persisted store decision, but an
 // ephemeral allow-once SESSION grant (this tab + host) promotes "Ask" → "Allow"
 // so re-requests don't re-prompt until the tab navigates away / closes.
@@ -508,8 +714,13 @@ static SitePermissionState EffectiveState(int browserId, const std::string& host
     return s;
 }
 
-// b2b — the 5 daily-driver capabilities surfaced in the site-info hub's permission
-// manager. Keep in sync with SitePermissionType + the React hook's CAPS list.
+// b2b — the capabilities surfaced in the site-info hub's permission manager.
+// Keep in sync with SitePermissionType + the React hook's CAPS list.
+//
+// beta.3 Phase 0.9 added local_network + loopback. They belong here and not only
+// in the prompt: a permission a user can GRANT but never REVOKE is a one-way
+// door, and "Manage Site Permissions" is a load-bearing safeguard (CLAUDE.md).
+// Codes come from siteperm::PermCode so the hub and the prompt cannot drift.
 struct SitePermCap { const char* code; SitePermissionType type; };
 static const SitePermCap kSitePermCaps[] = {
     {"camera",        SitePermissionType::Camera},
@@ -517,6 +728,8 @@ static const SitePermCap kSitePermCaps[] = {
     {"location",      SitePermissionType::Location},
     {"notifications", SitePermissionType::Notifications},
     {"clipboard",     SitePermissionType::Clipboard},
+    {"local_network", SitePermissionType::LocalNetwork},
+    {"loopback",      SitePermissionType::Loopback},
 };
 
 static const char* SitePermStateStr(SitePermissionState s) {
@@ -3456,37 +3669,7 @@ bool SimpleHandler::OnProcessMessageReceived(
     // Profile Manager IPC handlers
     if (message_name == "profiles_get_all") {
         LOG_DEBUG_BROWSER("👤 profiles_get_all requested");
-        
-        auto profiles = ProfileManager::GetInstance().GetAllProfiles();
-        auto current = ProfileManager::GetInstance().GetCurrentProfile();
-        std::string defaultId = ProfileManager::GetInstance().GetDefaultProfileId();
-
-        // R6: build the picker payload with nlohmann::json (not hand-concatenation)
-        // so a profile NAME containing quotes/backslashes/control chars can't break
-        // the JSON and wedge the picker. (This is a JSON *document* — distinct from
-        // escapeJsonForJs/F6, which escapes for embedding into a JS string literal.)
-        nlohmann::json doc;
-        doc["currentProfileId"] = current.id;
-        doc["defaultProfileId"] = defaultId;
-        doc["profiles"] = nlohmann::json::array();
-        for (const auto& p : profiles) {
-            nlohmann::json pj;
-            pj["id"] = p.id;
-            pj["name"] = p.name;
-            pj["color"] = p.color;
-            pj["avatarInitial"] = p.avatarInitial;
-            if (!p.avatarImage.empty()) {
-                pj["avatarImage"] = p.avatarImage;
-            }
-            doc["profiles"].push_back(pj);
-        }
-        std::string json = doc.dump();
-        
-        CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("profiles_result");
-        response->GetArgumentList()->SetString(0, json);
-        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
-        
-        LOG_DEBUG_BROWSER("👤 Sent " + std::to_string(profiles.size()) + " profiles");
+        SendProfilesToBrowser(browser);
         return true;
     }
 
@@ -3527,8 +3710,20 @@ bool SimpleHandler::OnProcessMessageReceived(
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         if (args->GetSize() >= 1) {
             std::string id = args->GetString(0).ToString();
-            ProfileManager::GetInstance().DeleteProfile(id);
-            LOG_INFO_BROWSER("👤 Profile deleted: " + id);
+            const bool deleted = ProfileManager::GetInstance().DeleteProfile(id);
+            if (deleted) {
+                LOG_INFO_BROWSER("👤 Profile deleted: " + id);
+            } else {
+                // A refusal must be visible. The old code logged "Profile deleted"
+                // unconditionally — including for the delete-the-running-profile case
+                // that is now blocked — so the log asserted something that had not
+                // happened, and React removed the row optimistically regardless.
+                LOG_WARNING_BROWSER("👤 Profile delete REFUSED for '" + id +
+                                    "' (running profile / default / last remaining)");
+            }
+            // Re-emit the authoritative list either way so the panel cannot show a
+            // deletion that did not occur.
+            SendProfilesToBrowser(browser);
         }
         return true;
     }
@@ -4432,6 +4627,15 @@ bool SimpleHandler::OnProcessMessageReceived(
             extern std::string g_pendingModalDomain;
             g_pendingModalDomain = "";
             LOG_DEBUG_BROWSER("🔔 Notification overlay hidden (keep-alive), cleared modal domain");
+            // Re-show only if a modal actually PRE-EMPTED a parked prompt. The latch
+            // is set when the modal takes the overlay, not read from
+            // g_pendingModalDomain here — that string is already cleared by the
+            // modal's own response handler in the same millisecond (measured).
+            // The latch also prevents a self-loop: closing the permission prompt
+            // itself never sets it, so it cannot re-open itself forever.
+            if (PendingPermissionManager::GetInstance().consumePreempted()) {
+                ReshowParkedPermissionPrompt();
+            }
         } else if (target_hwnd && IsWindow(target_hwnd)) {
             LOG_DEBUG_BROWSER("✅ Found " + role_ + " overlay window: " + std::to_string(reinterpret_cast<uintptr_t>(target_hwnd)));
 
@@ -4529,6 +4733,15 @@ bool SimpleHandler::OnProcessMessageReceived(
             extern std::string g_pendingModalDomain;
             g_pendingModalDomain = "";
             LOG_DEBUG_BROWSER("🔔 Notification overlay hidden (keep-alive), cleared modal domain");
+            // Re-show only if a modal actually PRE-EMPTED a parked prompt. The latch
+            // is set when the modal takes the overlay, not read from
+            // g_pendingModalDomain here — that string is already cleared by the
+            // modal's own response handler in the same millisecond (measured).
+            // The latch also prevents a self-loop: closing the permission prompt
+            // itself never sets it, so it cannot re-open itself forever.
+            if (PendingPermissionManager::GetInstance().consumePreempted()) {
+                ReshowParkedPermissionPrompt();
+            }
         } else if (target_window) {
             LOG_DEBUG_BROWSER("✅ Found " + role_ + " overlay window");
 
@@ -4797,6 +5010,60 @@ bool SimpleHandler::OnProcessMessageReceived(
                 LOG_DEBUG_BROWSER("🔐 Auth response - Approved: " + std::to_string(approved) +
                     ", Whitelist: " + std::to_string(whitelist) +
                     ", RequestId: " + requestId);
+
+                // beta.3 P0.9 — resolve any loopback / local-network permission this
+                // connect modal claimed. Approve -> ACCEPT, which makes Chromium write
+                // a persistent ALLOW by itself (measured: no content-setting code of
+                // ours is involved). Decline -> DISMISS, NOT deny: declining a wallet
+                // connect is a light act, and DENY would write a permanent, blanket
+                // block on every local app for that site, undoable today only by hand-
+                // editing Preferences. DISMISS stores nothing and lets it ask again.
+                {
+                    extern std::string g_pendingModalDomain;
+                    const std::string permHost = SitePermissionStore::NormalizeHost(
+                        !g_pendingModalDomain.empty() ? g_pendingModalDomain : responseData.value("domain", std::string()));
+                    // A binding that outlived its modal must never be cashed in by an
+                    // unrelated later approval (a payment, a certificate disclosure).
+                    // That is enforced by the DISCLOSURE ACK below, not by inspecting
+                    // the request type: only LocalAccessNotice mounting can set
+                    // localAccessAcknowledged, and no payment/cert branch renders it.
+                    //
+                    // ⛔ Do NOT reinstate a requestId-based check here. MEASURED
+                    // 2026-08-24 10:18-10:19: neither handleManifestDecline nor the
+                    // connect senders put `requestId` in the brc100_auth_response
+                    // payload, so gating on it never matched — the binding was never
+                    // popped, hasPending() stayed true, and EVERY later permission on
+                    // any site fell through to Chromium's stock prompt.
+                    //
+                    // We therefore always POP (so nothing can jam) and let the ack
+                    // decide whether it becomes a grant or a DISMISS.
+                    // ⛔ FAIL CLOSED on the disclosure. `localAccessAcknowledged` is set
+                    // only by LocalAccessNotice actually mounting, so a connect branch
+                    // that carries the grant but renders no notice CANNOT produce a
+                    // grant — it degrades to DISMISS. This replaces the code comment
+                    // that previously "guaranteed" the flag and the disclosure agreed,
+                    // and which was already wrong for domain_approval when written.
+                    const bool discloseAck = responseData.value("localAccessAcknowledged", false);
+                    const bool grantNetwork = approved && discloseAck;
+                    if (approved && !discloseAck) {
+                        LOG_WARNING_BROWSER("🔔 Connect approval for " + permHost +
+                                            " carried a bound local-network permission but NO"
+                                            " disclosure acknowledgement — refusing the grant");
+                    }
+                    if (!permHost.empty()) {
+                        auto bound = PendingPermissionManager::GetInstance()
+                                         .popBoundNetworkPermissionsForHost(permHost);
+                        for (auto& bp : bound) {
+                            if (!bp.promptCb) continue;
+                            bp.promptCb->Continue(grantNetwork ? CEF_PERMISSION_RESULT_ACCEPT
+                                                               : CEF_PERMISSION_RESULT_DISMISS);
+                            LOG_INFO_BROWSER(std::string("🔔 Connect modal answered the local-network "
+                                             "permission for ") + permHost + " -> " +
+                                             (grantNetwork ? "ACCEPT (Chromium persists ALLOW)"
+                                                           : "DISMISS (nothing stored, may ask again)"));
+                        }
+                    }
+                }
 
                 // Look up the pending request
                 PendingAuthRequest pendingReq;
@@ -7519,6 +7786,7 @@ bool SimpleHandler::OnProcessMessageReceived(
         }
         if (typeOk && !host.empty() && ParseSitePermState(stateS, st)) {
             SitePermissionStore::GetInstance().SetState(host, type, st);
+            MirrorNetworkPermissionToChromium(host, type, st);
             LOG_DEBUG_BROWSER("🛈 site permission " + code + "=" + stateS + " for " + host);
         }
         SendSitePermissionsToBrowser(browser, host);
@@ -7533,6 +7801,10 @@ bool SimpleHandler::OnProcessMessageReceived(
         host = SitePermissionStore::NormalizeHost(host);
         if (!host.empty()) {
             SitePermissionStore::GetInstance().ResetDomain(host);
+            // Reset must clear Chromium's copy too, or "reset" leaves the real grant
+            // in place while every row we own reads Ask.
+            MirrorNetworkPermissionToChromium(host, SitePermissionType::Loopback, SitePermissionState::Ask);
+            MirrorNetworkPermissionToChromium(host, SitePermissionType::LocalNetwork, SitePermissionState::Ask);
             LOG_DEBUG_BROWSER("🛈 site permissions reset for " + host);
         }
         SendSitePermissionsToBrowser(browser, host);
@@ -7552,7 +7824,31 @@ bool SimpleHandler::OnProcessMessageReceived(
                 PendingPermissionRequest pr;
                 if (PendingPermissionManager::GetInstance().pop(requestId, pr)) {
                     const bool grant = (decision == "allow_once" || decision == "allow_always");
-                    const bool persist = (decision == "allow_always" || decision == "block");
+
+                    // ⛔ OWNER STANDARD, 2026-08-24: "Decisions based on prompts are
+                    // temporary and get re-prompted; overt user actions stay until the
+                    // user overtly changes them back."
+                    //
+                    // So a DENIAL made in a prompt must not stick. The user was
+                    // interrupted, may not have understood the ask, and should not have
+                    // to find a settings panel to undo a snap judgement — if they come
+                    // back to the site, they get asked again. Someone who meant it
+                    // simply does not come back. A denial in the Site controls PANEL is
+                    // the opposite case: deliberate, sought out, and stays put.
+                    //
+                    // Applied to the two network types only. Location / notifications /
+                    // clipboard have the same defect but predate this phase, and the
+                    // contract forbids smuggling changes to the existing five in here —
+                    // see the ticket.
+                    bool promptDenialIsTemporary = false;
+                    for (auto t : pr.types) {
+                        if (t == SitePermissionType::Loopback || t == SitePermissionType::LocalNetwork) {
+                            promptDenialIsTemporary = true;
+                            break;
+                        }
+                    }
+                    const bool persist = (decision == "allow_always") ||
+                                         (decision == "block" && !promptDenialIsTemporary);
                     if (persist) {
                         auto st = (decision == "block") ? SitePermissionState::Block : SitePermissionState::Allow;
                         for (auto t : pr.types) SitePermissionStore::GetInstance().SetState(pr.host, t, st);
@@ -7561,12 +7857,36 @@ bool SimpleHandler::OnProcessMessageReceived(
                         // allows re-requests until navigate-away / tab close.
                         for (auto t : pr.types)
                             PendingPermissionManager::GetInstance().grantSession(pr.browserId, pr.host, static_cast<int>(t));
+                        // ⚠️ MEASURED 2026-08-24 (beta.3 P0.9): on the PROMPT path this
+                        // grant is only half-ephemeral. CEF has no "grant once" result —
+                        // only ACCEPT/DENY/DISMISS/IGNORE — so the ACCEPT below makes
+                        // Chromium write a PERSISTENT content setting that outlives the
+                        // session and OVERRIDES this one (Chromium consults its own
+                        // setting before it ever calls us again). The media path is
+                        // unaffected: CefMediaAccessCallback::Continue persists nothing.
+                        // The Phase 0.9 UI therefore hides "Allow this time" for the
+                        // prompt-path network types (`noOnce` in BRC100AuthOverlayRoot).
+                        // The remaining prompt-path types (location / notifications /
+                        // clipboard) still offer it and still mislead — owner decision
+                        // pending; this WARNING makes each occurrence visible.
+                        if (!pr.isMedia) {
+                            LOG_WARNING_BROWSER("🔔 'allow_once' on the prompt path for " + pr.host +
+                                                " — Chromium will persist this grant; the ephemeral"
+                                                " session grant does not govern");
+                        }
                     }
                     if (pr.isMedia) {
                         if (grant && pr.mediaCb) pr.mediaCb->Continue(pr.requestedMask);
                         else if (pr.mediaCb) pr.mediaCb->Cancel();
                     } else if (pr.promptCb) {
-                        pr.promptCb->Continue(grant ? CEF_PERMISSION_RESULT_ACCEPT : CEF_PERMISSION_RESULT_DENY);
+                        // DENY writes a permanent Chromium block; DISMISS writes nothing
+                        // and lets Chromium ask again. The network types take DISMISS so
+                        // a prompt denial cannot become a permanent, blanket ban on all
+                        // local software for that site.
+                        const auto denyResult = promptDenialIsTemporary
+                            ? CEF_PERMISSION_RESULT_DISMISS
+                            : CEF_PERMISSION_RESULT_DENY;
+                        pr.promptCb->Continue(grant ? CEF_PERMISSION_RESULT_ACCEPT : denyResult);
                     }
                     LOG_INFO_BROWSER("🔔 permission_response '" + decision + "' for " + pr.host);
                 } else {
@@ -8290,7 +8610,8 @@ CefRefPtr<CefPermissionHandler> SimpleHandler::GetPermissionHandler() {
     return this;
 }
 
-// b1a — site permissions. Honor STORED Allow/Block silently; for "Ask" (or any
+// b1a — site permissions (camera/mic/location/notifications/clipboard, plus the
+// Phase 0.9 local-network + loopback asks). Honor STORED Allow/Block silently; for "Ask" (or any
 // non-unanimous set) return false so Chromium's stock prompt shows (today's working
 // behavior). b1b replaces that "Ask" path with the Hodos-branded prompt + persists
 // the choice. All callbacks fire on the browser-process UI thread.
@@ -8335,22 +8656,29 @@ bool AllAsk(const std::vector<SitePermissionState>& states) {
     return !states.empty();
 }
 
-const char* PermCode(SitePermissionType t) {
-    switch (t) {
-        case SitePermissionType::Camera:        return "camera";
-        case SitePermissionType::Microphone:    return "microphone";
-        case SitePermissionType::Location:      return "location";
-        case SitePermissionType::Notifications: return "notifications";
-        case SitePermissionType::Clipboard:     return "clipboard";
-        default:                                return "";
-    }
-}
+// PermCode + the CEF-bit mapping now live in SitePermissionMapping.h so they are
+// unit-testable without CEF. This TU is the ONLY one that sees both that header
+// and cef_types.h, so it is where the mirrored bit values are proved correct.
+// A Chromium bump that renumbers cef_permission_request_types_t breaks the build
+// here instead of silently mis-granting a stored permission.
+static_assert(hodos::siteperm::kBitCameraPanTiltZoom == CEF_PERMISSION_TYPE_CAMERA_PAN_TILT_ZOOM, "CEF bit drift: CAMERA_PAN_TILT_ZOOM");
+static_assert(hodos::siteperm::kBitCameraStream      == CEF_PERMISSION_TYPE_CAMERA_STREAM,        "CEF bit drift: CAMERA_STREAM");
+static_assert(hodos::siteperm::kBitClipboard         == CEF_PERMISSION_TYPE_CLIPBOARD,            "CEF bit drift: CLIPBOARD");
+static_assert(hodos::siteperm::kBitGeolocation       == CEF_PERMISSION_TYPE_GEOLOCATION,          "CEF bit drift: GEOLOCATION");
+static_assert(hodos::siteperm::kBitMicStream         == CEF_PERMISSION_TYPE_MIC_STREAM,           "CEF bit drift: MIC_STREAM");
+static_assert(hodos::siteperm::kBitNotifications     == CEF_PERMISSION_TYPE_NOTIFICATIONS,        "CEF bit drift: NOTIFICATIONS");
+static_assert(hodos::siteperm::kBitLocalNetwork      == CEF_PERMISSION_TYPE_LOCAL_NETWORK,        "CEF bit drift: LOCAL_NETWORK");
+static_assert(hodos::siteperm::kBitLoopbackNetwork   == CEF_PERMISSION_TYPE_LOOPBACK_NETWORK,     "CEF bit drift: LOOPBACK_NETWORK");
+
+using hodos::siteperm::PermCode;
 }  // namespace
 
 // b1b — park the CEF callback and show the Hodos-branded prompt (notification
-// overlay, type="permission_request"). Windows-only for now; on mac (and if a
-// prompt is already parked) returns false so the caller falls back to Chromium's
-// stock prompt. Returns true iff the Hodos prompt was fired (caller returns true).
+// overlay, type="permission_request"). Implemented on BOTH Windows and macOS —
+// each arm calls its platform's CreateNotificationOverlay. Returns false (caller
+// falls back to Chromium's stock prompt) when a prompt is already parked, when a
+// wallet modal owns the shared overlay, or on an unsupported platform. Returns
+// true iff the Hodos prompt was fired (caller returns true).
 // NOTE: file-scope static (NOT in the anonymous namespace) so the `extern
 // g_hInstance` below resolves to the real global rather than an internal-linkage
 // shadow (C7631).
@@ -8457,17 +8785,27 @@ bool SimpleHandler::OnShowPermissionPrompt(
     const std::string host = SitePermissionStore::NormalizeHost(originStr);
     if (host.empty()) return false;
 
-    // Map the requested CEF permission bits to our v1-managed types. PTZ is treated
-    // as Camera so a stored camera decision governs pan/tilt/zoom too.
-    std::vector<SitePermissionType> types;
-    if (requested_permissions & (CEF_PERMISSION_TYPE_CAMERA_STREAM | CEF_PERMISSION_TYPE_CAMERA_PAN_TILT_ZOOM))
-        types.push_back(SitePermissionType::Camera);
-    if (requested_permissions & CEF_PERMISSION_TYPE_MIC_STREAM)    types.push_back(SitePermissionType::Microphone);
-    if (requested_permissions & CEF_PERMISSION_TYPE_GEOLOCATION)   types.push_back(SitePermissionType::Location);
-    if (requested_permissions & CEF_PERMISSION_TYPE_NOTIFICATIONS) types.push_back(SitePermissionType::Notifications);
-    if (requested_permissions & CEF_PERMISSION_TYPE_CLIPBOARD)     types.push_back(SitePermissionType::Clipboard);
+    // Map the requested CEF permission bits to our managed types (PTZ folds into
+    // Camera). Shared with the unit test via SitePermissionMapping.h.
+    std::vector<SitePermissionType> types = hodos::siteperm::MaskToTypes(requested_permissions);
 
-    // Not a v1-managed permission (MIDI, USB, etc.) → defer to Chromium.
+    // beta.3 Phase 0.9 instrumentation. The raw mask + origin is the ONLY way to
+    // learn which request actually raised a Local Network Access prompt: wallet
+    // traffic is served from our own resource handler (isWalletEndpoint) and never
+    // reaches the network stack, so it can never appear here. Without this line the
+    // prompt's wording would be written against a guess.
+    {
+        std::string codes;
+        for (auto t : types) { if (!codes.empty()) codes += ","; codes += PermCode(t); }
+        LOG_INFO_BROWSER("🔔 OnShowPermissionPrompt origin=" + originStr +
+                         " mask=0x" + [](uint32_t m) {
+                             const char* h = "0123456789abcdef"; std::string o;
+                             for (int i = 28; i >= 0; i -= 4) o += h[(m >> i) & 0xF];
+                             return o; }(requested_permissions) +
+                         " mapped=[" + codes + "]");
+    }
+
+    // Not a managed permission (MIDI, USB, etc.) → defer to Chromium.
     if (types.empty()) return false;
 
     const bool secure = IsSecureOrigin(originStr);
@@ -8500,6 +8838,23 @@ bool SimpleHandler::OnShowPermissionPrompt(
         pr.promptId = prompt_id;
         pr.browserId = browser ? browser->GetIdentifier() : 0;
         pr.types = types;
+
+        // P0.9 — the two network permissions defer: a wallet connect modal for the
+        // same host may be about to open, and it answers this request on the user's
+        // behalf (one consent, disclosed in that modal). Everything else shows now.
+        const bool isNetworkPerm = (types[0] == SitePermissionType::Loopback ||
+                                    types[0] == SitePermissionType::LocalNetwork);
+        if (isNetworkPerm) {
+            if (PendingPermissionManager::GetInstance().hasPending()) return false;  // one at a time
+            const std::string id = PendingPermissionManager::GetInstance().add(std::move(pr));
+            LOG_INFO_BROWSER("🔔 Network permission parked for " + host +
+                             " — waiting for the host to go quiet with the wallet"
+                             " (requestId=" + id + ")");
+            CefPostDelayedTask(TID_UI, new ShowDeferredPermissionTask(id, kNetworkPermissionPollMs),
+                               kNetworkPermissionPollMs);
+            return true;   // parked; resolved by the connect modal or the deferred prompt
+        }
+
         if (FireHodosPermissionPrompt(host, std::move(pr), PermCode(types[0]))) return true;
     }
     return false;  // mixed / multi-type / insecure / mac / busy → Chromium prompt
