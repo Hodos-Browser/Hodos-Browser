@@ -2,7 +2,7 @@
 
 Kept as its own file so it cannot conflict with `MAC_RELAY_BETA3.md` if you are editing that.
 
-Commits on `origin/0.4.0`: `0a7d43b` `a3d8202` `47d9a06` `9b8f264`.
+Commits on `origin/0.4.0`: `0a7d43b` `a3d8202` `47d9a06` `9b8f264` `d60ca6e` `84997eb`.
 Detail: `phase-1-overlay-input-dpi/PHASE_CONTRACT.md` + `MEASUREMENTS.md`.
 
 ---
@@ -115,7 +115,22 @@ installed browser. Ports differ on your side; the target-discipline is the reusa
    redirected to the same file anyway"* — that is **contradicted by measurement** on Windows. Please
    check whether it holds on macOS, because if it does the doc needs a platform qualifier rather than
    a correction.
-2. **Deleting a profile now deletes its data** (owner's call; it previously kept every cookie and
+2. **A startup sweep renames orphaned profile directories** (`84997eb`).
+   `ProfileManager::Initialize` now calls `SweepOrphanedProfileDirs()` after `Load()` — a call
+   site **both platforms already share**, so this is live on macOS the moment you build, without
+   you doing anything. Please read it before your next build rather than after.
+   It renames (never deletes) any `Profile_<N>` directory that is not listed in `profiles.json`
+   **and** carries positive evidence a session ran on it (`Preferences` / `History` / `Cookies` /
+   `bookmarks.db` / `Network` / `Local Storage`). ⚠️ That marker list is the race guard, not
+   tidiness: `CreateProfile` makes the directory *before* the profile appears in `profiles.json`,
+   so a legitimate new profile briefly looks exactly like an orphan. `settings.json` is
+   deliberately **not** a marker because it is copied at create time.
+   👉 **Ask: are those six marker filenames right on macOS?** They are Chromium's, so they should
+   be — but if a macOS profile directory names any of them differently, the sweep silently does
+   nothing there and the migration never happens on your platform. **This is the one item here
+   that fails SILENTLY if I got it wrong.**
+
+3. **Deleting a profile now deletes its data** (owner's call; it previously kept every cookie and
    session forever — 173.8 MB found on one abandoned profile). Rename-first, then remove, gated on a
    `profile.lock` probe. `IsProfileLockedByAnotherInstance()` has a **POSIX arm you should read**:
    unlike Windows, your lock file is not delete-on-close, so its existence proves nothing and the
@@ -128,6 +143,8 @@ installed browser. Ports differ on your side; the target-discipline is the reusa
 3. **D3.2** — do your click-outside NSEvent monitors consult `g_file_dialog_active`?
 4. **D1** — your view on the sizing-contract shape before either side writes it.
 5. **D5.1** — does `std::cout` reach a log on macOS?
+6. **D5.2** — are the six orphan-sweep marker filenames correct for a macOS profile directory?
+   Silent no-op if not.
 
 Still open from earlier rounds and not superseded: Sparkle 2.9.6 green + its negative control, your
 call on §A4 (Big Sur), and `T1g` on macOS.
