@@ -1460,8 +1460,12 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
 
         std::cout << "❌ Get balance error received: " << errorMessage << std::endl;
 
-        // Execute JavaScript to handle the error
-        std::string js = "if (window.onGetBalanceError) { window.onGetBalanceError('" + errorMessage + "'); }";
+        // P2a: errorMessage is a JSON envelope built from exception text, and it was being
+        // pasted between single quotes RAW -- one apostrophe or backslash in a what()
+        // string breaks out of the literal. Route it through the canonical encoder like
+        // every other injection site in this file.
+        std::string js = "if (window.onGetBalanceError) { window.onGetBalanceError(\""
+                       + escapeJsonForJs(errorMessage) + "\"); }";
         frame->ExecuteJavaScript(js, frame->GetURL(), 0);
 
         return true;

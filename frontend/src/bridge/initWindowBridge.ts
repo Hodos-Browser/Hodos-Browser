@@ -152,6 +152,9 @@ window.hodosBrowser.address.generate = () => {
 };
 
 
+// P2a: shared in-flight slot for getBalance — see the comment on getBalance below.
+let balanceInFlight: Promise<any> | null = null;
+
 // Wallet methods
 if (!window.hodosBrowser.wallet) {
   window.hodosBrowser.wallet = {
@@ -430,32 +433,79 @@ if (!window.hodosBrowser.wallet) {
     },
 
     getBalance: () => {
+      // P2a: the native side calls a SINGLE global window.onGetBalanceResponse, so two
+      // overlapping getBalance() calls clobber each other -- the first reply resolves one
+      // promise and deletes the handlers, and the other waits out its 10 s timeout and
+      // reports a spurious failure. Measured 1 run in 3 once the C++ balance call moved
+      // off the UI thread, because concurrent calls became reachable: the UI thread used
+      // to serialise them for us by accident.
+      //
+      // Dedupe in flight. Correct for a read-only query -- callers racing for the same
+      // number can share one answer -- and it leaves the IPC contract untouched.
+      //
+      // ⚠️ sendTransaction and the other single-slot callbacks in this file have the same
+      // shape. NOT fixed here on purpose: a send must never be deduped with another send.
+      // Tracked in TICKET_bridge_single_slot_callbacks_race.md.
+      if (balanceInFlight) {
+        console.log("💳 JS: get_balance already in flight — joining it");
+        return balanceInFlight;
+      }
+
       console.log("💳 JS: Sending get_balance to native");
-      return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
+      const p = new Promise((resolve, reject) => {
+        const settle = () => {
           delete window.onGetBalanceResponse;
           delete window.onGetBalanceError;
+          balanceInFlight = null;
+        };
+        const timeout = setTimeout(() => {
+          settle();
           reject(new Error('get_balance timed out'));
         }, 10000);
 
         window.onGetBalanceResponse = (data: any) => {
           clearTimeout(timeout);
+          settle();
+
+          // P2a: the native side reports a wallet failure as a RESOLVED response carrying
+          // {"error": "..."} and no balance -- getBalance() returns that envelope from
+          // WalletService rather than throwing. Every caller then did
+          //     setBalance(response.balance)      // undefined
+          //     setCachedBalance(response.balance) // undefined -> key dropped by JSON
+          // so a wallet that was merely unreachable displayed a confident **0 sats /
+          // $0.00** and POISONED the localStorage cache, which the 30 s background poller
+          // then re-poisoned and the next launch read back as a real zero.
+          //
+          // ⛔ Telling a user their balance is zero because a socket did not answer is
+          // worse than any spinner. Violates the standing rule that a cache must not
+          // self-poison on failure.
+          //
+          // A promise for a balance must not resolve with a non-balance. All three
+          // callers already have catch blocks, so rejecting routes them to their existing
+          // error paths and skips their cache writes.
+          if (!data || typeof data.balance !== 'number' || !isFinite(data.balance)) {
+            const msg = (data && data.error) || 'Wallet did not return a balance';
+            console.error("❌ Balance unavailable:", msg);
+            reject(new Error(msg));
+            return;
+          }
+
           console.log("✅ Balance retrieved:", data);
           resolve(data);
-          delete window.onGetBalanceResponse;
-          delete window.onGetBalanceError;
         };
 
         window.onGetBalanceError = (error: string) => {
           clearTimeout(timeout);
           console.error("❌ Balance retrieval error:", error);
+          settle();
           reject(new Error(error));
-          delete window.onGetBalanceResponse;
-          delete window.onGetBalanceError;
         };
 
         window.cefMessage?.send('get_balance', []);
       });
+
+      balanceInFlight = p;
+      return p;
     },
 
     sendTransaction: (data: any) => {

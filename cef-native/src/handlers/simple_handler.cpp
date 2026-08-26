@@ -6124,39 +6124,77 @@ bool SimpleHandler::OnProcessMessageReceived(
     }
 
 
-        if (message_name == "get_balance") {
+    if (message_name == "get_balance") {
         LOG_DEBUG_BROWSER("💰 Get balance requested from browser ID: " + std::to_string(browser->GetIdentifier()));
 
-        try {
-            // Call WalletService to get balance (no arguments needed)
-            WalletService walletService;
+        // P2a-A2: the wallet call below is SYNCHRONOUS. Running it inline would run it on
+        // the browser-process UI thread -- the thread that drives EVERY browser in the
+        // process, ordinary tabs included. A wallet that accepts the connection and never
+        // answers therefore froze the whole browser for the length of the timeout, and the
+        // balance poller re-armed it, so it never self-healed.
+        //
+        // MEASURED pre-fix (MEASUREMENTS.md M5, two runs): CDP /json/list 31.8 s / 31.4 s
+        // against a 1 ms control, and 128 s to navigate an UNRELATED tab to example.com.
+        // That is the beta.1 "web pages stalled too" symptom.
+        //
+        // ⭐ The renderer contract was ALREADY asynchronous -- initWindowBridge.ts sends
+        // get_balance and waits for get_balance_response / get_balance_error with its own
+        // timeout -- so only the C++ side ever blocked. No JavaScript changes.
+        //
+        // ⛔ The lever is read ONCE, here, in the BROWSER process. Never move an env gate
+        // into a child: a sandboxed child does not reliably inherit the environment, and
+        // that assumption killed every renderer during the sandbox work (S2).
+        static const bool kForceSyncOnUiThread = [] {
+            const char* v = std::getenv("HODOS_WALLET_SYNC_UI");
+            return v && std::string(v) == "1";
+        }();
 
-            // Pass empty JSON object to satisfy the method signature
-            nlohmann::json emptyData = nlohmann::json::object();
-            nlohmann::json result = walletService.getBalance(emptyData);
+        // Captureless so it can be bound into a CEF task. Does the blocking wallet call,
+        // then hops the answer back to TID_UI -- CefBrowser is only safe to touch there.
+        auto fetchAndDeliver = [](CefRefPtr<CefBrowser> target) {
+            std::string payload;
+            bool ok = true;
+            try {
+                WalletService walletService;
+                payload = walletService.getBalance(nlohmann::json::object()).dump();
+            } catch (const std::exception& e) {
+                nlohmann::json err;
+                err["error"] = e.what();
+                payload = err.dump();
+                ok = false;
+            } catch (...) {
+                nlohmann::json err;
+                err["error"] = "unknown error";
+                payload = err.dump();
+                ok = false;
+            }
 
-            LOG_DEBUG_BROWSER("✅ Balance result: " + result.dump());
+            // P0-A8 convention, kept: length only. The dump carries the user's balance in
+            // satoshis and the BSV price, and this line ran ~2,551 times per production
+            // session straight into a plaintext log.
+            LOG_DEBUG_BROWSER(std::string("✅ Balance fetch ") + (ok ? "ok" : "failed")
+                              + " (" + std::to_string(payload.length()) + " bytes)");
 
-            // Send result back to the requesting browser
-            CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("get_balance_response");
-            CefRefPtr<CefListValue> responseArgs = response->GetArgumentList();
-            responseArgs->SetString(0, result.dump());
+            CefPostTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b, std::string p, bool good) {
+                // The browser may have closed while we were waiting on the wallet.
+                if (!b) return;
+                CefRefPtr<CefFrame> frame = b->GetMainFrame();
+                if (!frame) return;
+                CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create(
+                    good ? "get_balance_response" : "get_balance_error");
+                response->GetArgumentList()->SetString(0, p);
+                frame->SendProcessMessage(PID_RENDERER, response);
+            }, target, payload, ok));
+        };
 
-            browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
-            LOG_DEBUG_BROWSER("📤 Balance response sent back to browser");
-
-        } catch (const std::exception& e) {
-            LOG_DEBUG_BROWSER("❌ Get balance failed: " + std::string(e.what()));
-
-            // Send error response
-            nlohmann::json errorResponse;
-            errorResponse["error"] = e.what();
-
-            CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("get_balance_error");
-            CefRefPtr<CefListValue> responseArgs = response->GetArgumentList();
-            responseArgs->SetString(0, errorResponse.dump());
-
-            browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
+        if (kForceSyncOnUiThread) {
+            // 🔴 P2a-A2's negative control, on the SAME binary: restores the pre-fix
+            // blocking path so the freeze can be reproduced without swapping builds.
+            LOG_WARNING_BROWSER("⚠️ HODOS_WALLET_SYNC_UI=1 — balance runs ON the UI thread "
+                                "(P2a-A2 negative control; expect the browser to freeze)");
+            fetchAndDeliver(browser);
+        } else {
+            CefPostTask(TID_FILE_USER_BLOCKING, base::BindOnce(fetchAndDeliver, browser));
         }
 
         return true;
