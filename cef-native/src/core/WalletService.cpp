@@ -125,7 +125,8 @@ void WalletService::setBaseUrl(const std::string& url) {
     }
 }
 
-nlohmann::json WalletService::makeHttpRequest(const std::string& method, const std::string& endpoint, const std::string& body) {
+nlohmann::json WalletService::makeHttpRequest(const std::string& method, const std::string& endpoint,
+                                              const std::string& body, int timeoutMs) {
     LOG_DEBUG_BROWSER("🔍 makeHttpRequest: " + method + " " + endpoint);
 
     if (!connected_) {
@@ -150,6 +151,40 @@ nlohmann::json WalletService::makeHttpRequest(const std::string& method, const s
             DWORD error = GetLastError();
             LOG_ERROR_BROWSER("❌ Failed to create HTTP request. Error: " + std::to_string(error));
             return nlohmann::json::object();
+        }
+
+        // P2a-A1: bound the wait. Set PER REQUEST, not on the session: the session is
+        // shared by every endpoint this WalletService serves, and /wallet/balance and
+        // /transaction/send need very different budgets.
+        //
+        // ⛔ Before this, nothing in this function called WinHttpSetTimeouts at all, so
+        // WinHTTP's 30 s receive default applied -- and because the call is synchronous on
+        // the CEF UI thread, a non-answering wallet froze the whole browser for 30 s at a
+        // time. MEASUREMENTS.md M5.
+        //
+        // Resolve is left at 0 (infinite) as WinHTTP recommends for a literal IP; connect
+        // is capped short because this is loopback -- if 127.0.0.1 will not accept inside
+        // a second, waiting longer does not help.
+        //
+        // ⚠️ WinHttpSetTimeouts is PER PHASE, while macOS's CURLOPT_TIMEOUT_MS is a TOTAL.
+        // Passing timeoutMs to both send and receive therefore meant "up to 2 × timeoutMs"
+        // on Windows and "exactly timeoutMs" on macOS -- measured as a 3.73 s failure
+        // against a documented 2000 ms budget. Send gets the same short fixed budget as
+        // connect (the request body is a few hundred bytes to loopback; if that will not
+        // go out in a second, waiting is pointless), so recv carries the budget and the
+        // number in the constant means what it says on both platforms.
+        {
+            const DWORD resolveMs = 0;
+            const DWORD connectMs = 1000;
+            const DWORD sendMs    = 1000;
+            const DWORD recvMs    = static_cast<DWORD>(timeoutMs);
+            if (!WinHttpSetTimeouts(hRequest, resolveMs, connectMs, sendMs, recvMs)) {
+                // Not fatal -- we fall back to WinHTTP's defaults, which is the old
+                // behaviour. Logged because silently keeping a 30 s freeze is exactly the
+                // failure this row exists to prevent.
+                LOG_WARNING_BROWSER("⚠️ WinHttpSetTimeouts failed (" + std::to_string(GetLastError())
+                                    + ") - falling back to WinHTTP defaults for " + endpoint);
+            }
         }
 
         // Set headers
@@ -501,7 +536,8 @@ nlohmann::json WalletService::broadcastTransaction(const nlohmann::json& transac
     // and amounts, and this ran unconditionally in production.
     LOG_DEBUG_BROWSER("📡 Broadcasting transaction via Rust wallet...");
 
-    auto response = makeHttpRequest("POST", "/transaction/broadcast", transactionData.dump());
+    auto response = makeHttpRequest("POST", "/transaction/broadcast", transactionData.dump(),
+                                    kWalletBroadcastTimeoutMs);
 
     if (response.contains("txid")) {
         const std::string txid = response["txid"].get<std::string>();
@@ -524,7 +560,7 @@ nlohmann::json WalletService::getBalance(const nlohmann::json& balanceData) {
 
     // Use the total balance endpoint (no address needed)
     std::string url = "/wallet/balance";
-    auto response = makeHttpRequest("GET", url, "");
+    auto response = makeHttpRequest("GET", url, "", kWalletBalanceTimeoutMs);
 
     if (response.contains("balance")) {
         int64_t totalBalance = response["balance"].get<int64_t>();
@@ -700,7 +736,8 @@ nlohmann::json WalletService::sendTransaction(const nlohmann::json& transactionD
         // Call the /transaction/send endpoint and forward the response directly to the frontend
         // The frontend will parse and handle success/failure
         std::string url = "/transaction/send";
-        auto response = makeHttpRequest("POST", url, transactionData.dump());
+        auto response = makeHttpRequest("POST", url, transactionData.dump(),
+                                        kWalletBroadcastTimeoutMs);
         return response;
     } catch (const std::exception& e) {
         LOG_ERROR_BROWSER("❌ Exception in sendTransaction: " + std::string(e.what()));
