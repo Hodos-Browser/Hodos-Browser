@@ -1,4 +1,5 @@
 #include "../../include/core/HistoryManager.h"
+#include "../../include/core/LogSafeUrl.h"
 #include "../../include/core/Logger.h"
 #include <iostream>
 #include <sstream>
@@ -7,6 +8,7 @@
 
 #define LOG_DEBUG_HISTORY(msg) Logger::Log(msg, 0, 0)
 #define LOG_INFO_HISTORY(msg) Logger::Log(msg, 1, 0)
+#define LOG_WARNING_HISTORY(msg) Logger::Log(msg, 2, 0)
 #define LOG_ERROR_HISTORY(msg) Logger::Log(msg, 3, 0)
 
 HistoryManager& HistoryManager::GetInstance() {
@@ -132,7 +134,6 @@ bool HistoryManager::AddVisit(const std::string& url, const std::string& title, 
         if (it != recent_visits_.end()) {
             auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now_clock - it->second).count();
             if (elapsed < DEBOUNCE_SECONDS) {
-                LOG_INFO_HISTORY("📚 Skipping duplicate visit (debounced): " + url);
                 return true; // Return true - not an error, just skipped
             }
         }
@@ -152,9 +153,14 @@ bool HistoryManager::AddVisit(const std::string& url, const std::string& title, 
         }
     }
 
+    // P2: the per-visit narration that used to live here ("Adding visit: <url>",
+    // "Recording history: <url> [<title>]", "Visit recorded successfully", ...) was DELETED.
+    // It was ~87,000 INFO lines per 50 days carrying the user's full browsing history AND
+    // page titles into a plaintext file that outlived their clearing their own history --
+    // a second copy of the very database this function is writing to, which the user CAN
+    // clear. ⛔ Do not restore it: failures below still log at ERROR, which is the part with
+    // diagnostic value. See phase-2-logging-syncio/MEASUREMENTS.md M7.
     int64_t now = GetCurrentChromiumTime();
-
-    LOG_INFO_HISTORY("📚 Adding visit: " + url);
 
     // First, check if URL exists
     const char* check_sql = "SELECT id, visit_count FROM urls WHERE url = ?";
@@ -175,7 +181,6 @@ bool HistoryManager::AddVisit(const std::string& url, const std::string& title, 
         // URL exists
         url_id = sqlite3_column_int64(stmt, 0);
         visit_count = sqlite3_column_int(stmt, 1);
-        LOG_INFO_HISTORY("📚 URL exists, updating (current visits: " + std::to_string(visit_count) + ")");
     }
     sqlite3_finalize(stmt);
 
@@ -201,7 +206,6 @@ bool HistoryManager::AddVisit(const std::string& url, const std::string& title, 
         }
 
         url_id = sqlite3_last_insert_rowid(history_db_);
-        LOG_INFO_HISTORY("✅ New URL inserted with ID: " + std::to_string(url_id));
     } else {
         // Update existing URL
         const char* update_url_sql = "UPDATE urls SET visit_count = visit_count + 1, last_visit_time = ?, title = ? WHERE id = ?";
@@ -223,7 +227,6 @@ bool HistoryManager::AddVisit(const std::string& url, const std::string& title, 
             return false;
         }
 
-        LOG_INFO_HISTORY("✅ URL updated, new visit count: " + std::to_string(visit_count + 1));
     }
 
     // Insert visit record
@@ -246,7 +249,6 @@ bool HistoryManager::AddVisit(const std::string& url, const std::string& title, 
         return false;
     }
 
-    LOG_INFO_HISTORY("✅ Visit recorded successfully");
     return true;
 }
 
@@ -324,7 +326,7 @@ std::vector<HistoryEntry> HistoryManager::SearchHistory(const HistorySearchParam
 
     // Try to open database if not already open
     if (!history_db_ && !OpenDatabase()) {
-        std::cerr << "⚠️ History database not available yet" << std::endl;
+        LOG_WARNING_HISTORY(LogFmt() << "⚠️ History database not available yet");
         return entries;
     }
 
@@ -361,7 +363,7 @@ std::vector<HistoryEntry> HistoryManager::SearchHistory(const HistorySearchParam
     int rc = sqlite3_prepare_v2(history_db_, sql.str().c_str(), -1, &stmt, nullptr);
 
     if (rc != SQLITE_OK) {
-        std::cerr << "❌ Failed to prepare search query: " << sqlite3_errmsg(history_db_) << std::endl;
+        LOG_ERROR_HISTORY(LogFmt() << "❌ Failed to prepare search query: " << sqlite3_errmsg(history_db_));
         return entries;
     }
 
@@ -404,7 +406,7 @@ std::vector<HistoryEntry> HistoryManager::SearchHistory(const HistorySearchParam
 
     sqlite3_finalize(stmt);
 
-    std::cout << "🔍 Search returned " << entries.size() << " entries" << std::endl;
+    LOG_INFO_HISTORY(LogFmt() << "🔍 Search returned " << entries.size() << " entries");
     return entries;
 }
 
@@ -621,7 +623,7 @@ std::vector<HistoryEntry> HistoryManager::GetTopSites(int limit) {
 bool HistoryManager::DeleteHistoryEntry(const std::string& url) {
     // Try to open database if not already open
     if (!history_db_ && !OpenDatabase()) {
-        std::cerr << "⚠️ History database not available yet" << std::endl;
+        LOG_WARNING_HISTORY(LogFmt() << "⚠️ History database not available yet");
         return false;
     }
 
@@ -635,7 +637,7 @@ bool HistoryManager::DeleteHistoryEntry(const std::string& url) {
 
     int rc = sqlite3_prepare_v2(history_db_, get_id_sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        std::cerr << "❌ Failed to query URL ID: " << sqlite3_errmsg(history_db_) << std::endl;
+        LOG_ERROR_HISTORY(LogFmt() << "❌ Failed to query URL ID: " << sqlite3_errmsg(history_db_));
         return false;
     }
 
@@ -648,7 +650,7 @@ bool HistoryManager::DeleteHistoryEntry(const std::string& url) {
     sqlite3_finalize(stmt);
 
     if (url_id < 0) {
-        std::cout << "⚠️ URL not found in history: " << url << std::endl;
+        LOG_INFO_HISTORY(LogFmt() << "⚠️ URL not found in history: " << url);
         return false;
     }
 
@@ -656,7 +658,7 @@ bool HistoryManager::DeleteHistoryEntry(const std::string& url) {
     const char* delete_visits_sql = "DELETE FROM visits WHERE url = ?";
     rc = sqlite3_prepare_v2(history_db_, delete_visits_sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        std::cerr << "❌ Failed to delete visits: " << sqlite3_errmsg(history_db_) << std::endl;
+        LOG_ERROR_HISTORY(LogFmt() << "❌ Failed to delete visits: " << sqlite3_errmsg(history_db_));
         return false;
     }
 
@@ -668,7 +670,7 @@ bool HistoryManager::DeleteHistoryEntry(const std::string& url) {
     const char* delete_url_sql = "DELETE FROM urls WHERE id = ?";
     rc = sqlite3_prepare_v2(history_db_, delete_url_sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        std::cerr << "❌ Failed to delete URL: " << sqlite3_errmsg(history_db_) << std::endl;
+        LOG_ERROR_HISTORY(LogFmt() << "❌ Failed to delete URL: " << sqlite3_errmsg(history_db_));
         return false;
     }
 
@@ -677,7 +679,7 @@ bool HistoryManager::DeleteHistoryEntry(const std::string& url) {
     sqlite3_finalize(stmt);
 
     if (rc == SQLITE_DONE) {
-        std::cout << "✅ Deleted history entry: " << url << std::endl;
+        LOG_INFO_HISTORY(LogFmt() << "✅ Deleted history entry: " << url);
         return true;
     }
 
@@ -687,7 +689,7 @@ bool HistoryManager::DeleteHistoryEntry(const std::string& url) {
 bool HistoryManager::DeleteAllHistory() {
     // Try to open database if not already open
     if (!history_db_ && !OpenDatabase()) {
-        std::cerr << "⚠️ History database not available yet" << std::endl;
+        LOG_WARNING_HISTORY(LogFmt() << "⚠️ History database not available yet");
         return false;
     }
 
@@ -705,19 +707,19 @@ bool HistoryManager::DeleteAllHistory() {
     int rc = sqlite3_exec(history_db_, delete_sql, nullptr, nullptr, &err_msg);
 
     if (rc != SQLITE_OK) {
-        std::cerr << "❌ Failed to clear history: " << err_msg << std::endl;
+        LOG_ERROR_HISTORY(LogFmt() << "❌ Failed to clear history: " << err_msg);
         sqlite3_free(err_msg);
         return false;
     }
 
-    std::cout << "✅ All history cleared" << std::endl;
+    LOG_INFO_HISTORY(LogFmt() << "✅ All history cleared");
     return true;
 }
 
 bool HistoryManager::DeleteHistoryRange(int64_t start_time, int64_t end_time) {
     // Try to open database if not already open
     if (!history_db_ && !OpenDatabase()) {
-        std::cerr << "⚠️ History database not available yet" << std::endl;
+        LOG_WARNING_HISTORY(LogFmt() << "⚠️ History database not available yet");
         return false;
     }
 
@@ -731,7 +733,7 @@ bool HistoryManager::DeleteHistoryRange(int64_t start_time, int64_t end_time) {
 
     int rc = sqlite3_prepare_v2(history_db_, delete_visits_sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        std::cerr << "❌ Failed to prepare delete range query: " << sqlite3_errmsg(history_db_) << std::endl;
+        LOG_ERROR_HISTORY(LogFmt() << "❌ Failed to prepare delete range query: " << sqlite3_errmsg(history_db_));
         return false;
     }
 
@@ -744,14 +746,14 @@ bool HistoryManager::DeleteHistoryRange(int64_t start_time, int64_t end_time) {
     const char* cleanup_sql = "DELETE FROM urls WHERE id NOT IN (SELECT DISTINCT url FROM visits)";
     rc = sqlite3_prepare_v2(history_db_, cleanup_sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        std::cerr << "❌ Failed to clean up orphaned URLs: " << sqlite3_errmsg(history_db_) << std::endl;
+        LOG_ERROR_HISTORY(LogFmt() << "❌ Failed to clean up orphaned URLs: " << sqlite3_errmsg(history_db_));
         return false;
     }
 
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
 
-    std::cout << "✅ History range cleared" << std::endl;
+    LOG_INFO_HISTORY(LogFmt() << "✅ History range cleared");
     return true;
 }
 
@@ -824,7 +826,7 @@ std::vector<HistoryEntry> HistoryManager::GetHistorySimple(int limit) {
 
         entries.push_back(entry);
 
-        LOG_INFO_HISTORY("📚 Found URL: " + entry.url + " (visits: " + std::to_string(entry.visit_count) + ")");
+        LOG_DEBUG_HISTORY("📚 Found URL: " + hodos::LogSafeUrl(entry.url) + " (visits: " + std::to_string(entry.visit_count) + ")");
     }
 
     LOG_INFO_HISTORY("📚 Simple query returned " + std::to_string(row_count) + " rows");
@@ -947,7 +949,7 @@ std::vector<HistoryEntryWithScore> HistoryManager::SearchHistoryWithFrecency(con
         // Check if query matches domain (domain starts with query or equals query)
         if (!domain.empty() && (domain == query_lower || domain.find(query_lower) == 0)) {
             entry.frecency_score *= 1.5;
-            LOG_INFO_HISTORY("📈 Domain boost applied to: " + entry.entry.url + " (new score: " + std::to_string(entry.frecency_score) + ")");
+            LOG_DEBUG_HISTORY("📈 Domain boost applied to: " + hodos::LogSafeUrl(entry.entry.url) + " (new score: " + std::to_string(entry.frecency_score) + ")");
         }
     }
 

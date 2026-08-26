@@ -73,6 +73,18 @@ void ChromiumLogSink(const char* line, int level) {
 
 void InstallChildProcessLogSink() {
     g_verbose = CommandLineHasVerboseSwitch();
+
+    // beta.3 P2b: Logger now has a minimum-level gate, and it defaults to INFO -- the safe,
+    // production value. Nothing in a CHILD process calls SetMinLevel, so without this line
+    // the new gate drops every child-side DEBUG record BEFORE it reaches this sink, and
+    // --hodos-render-verbose silently stops working.
+    //
+    // The switch stays the source of truth for the DEBUG tier (see the g_verbose check in
+    // ChromiumLogSink); this just makes sure the gate agrees with it.
+    // ⛔ Read from the COMMAND LINE, never the environment: a sandboxed child does not
+    // reliably inherit the environment, and that assumption killed every renderer during
+    // the S2 sandbox work.
+    Logger::SetMinLevel(g_verbose ? LogLevel::DEBUG : LogLevel::INFO);
     Logger::SetSink(&ChromiumLogSink);
 }
 

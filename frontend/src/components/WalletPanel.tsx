@@ -35,7 +35,7 @@ interface WalletPanelProps {
 }
 
 export default function WalletPanel({ onClose }: WalletPanelProps) {
-  const { balance, usdValue, bsvPrice, isLoading, isRefreshing, refreshBalance } = useBalance();
+  const { balance, usdValue, bsvPrice, isLoading, isRefreshing, refreshBalance, error: balanceError } = useBalance();
   const { currentAddress, isGenerating, generateAndCopy } = useAddress();
 
   const [showSendForm, setShowSendForm] = useState(false);
@@ -611,6 +611,28 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
               </span>
             )}
           </div>
+          {/* P2a-A3: useBalance has always tracked `error`, and NOTHING rendered it. With
+              the wallet unreachable the panel showed a stale figure with no hint that it
+              was stale -- and, before the bridge fix, a confident $0.00. Say so plainly
+              instead. Amber, not red: the number above is real, just not current. */}
+          {balanceError && !isRefreshing && (
+            <div
+              className="balance-stale-light"
+              role="status"
+              style={{
+                marginTop: 6,
+                fontSize: 12,
+                lineHeight: 1.35,
+                color: '#7a4b00',
+                background: '#fff4e0',
+                border: '1px solid #e0a955',
+                borderRadius: 4,
+                padding: '5px 8px',
+              }}
+            >
+              Balance may be out of date - the wallet did not respond.
+            </div>
+          )}
         </div>
       </div>
 

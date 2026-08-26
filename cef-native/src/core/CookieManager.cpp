@@ -1,5 +1,6 @@
 #include "../../include/core/CookieManager.h"
 #include "../../include/core/Logger.h"
+#include "../../include/core/LogSafeUrl.h"
 #include "../../include/core/AppPaths.h"
 
 #include "include/cef_cookie.h"
@@ -262,7 +263,7 @@ void CookieManager::HandleGetAllCookies(CefRefPtr<CefBrowser> browser) {
 void CookieManager::HandleDeleteCookie(CefRefPtr<CefBrowser> browser,
                                         const std::string& url,
                                         const std::string& name) {
-    LOG_INFO_COOKIE("HandleDeleteCookie: url=" + url + ", name=" + name);
+    LOG_INFO_COOKIE("HandleDeleteCookie: url=" + hodos::LogSafeUrl(url) + ", name=" + name);
 
     CefRefPtr<CefCookieManager> manager =
         CefCookieManager::GetGlobalManager(nullptr);

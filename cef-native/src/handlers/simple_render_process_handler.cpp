@@ -17,6 +17,7 @@
 #include <map>
 
 #include "../../include/core/Logger.h"
+#include "../../include/core/LogSafeUrl.h"
 #include "../../include/core/FingerprintProtection.h"
 #include "../../include/core/CWIShimScript.h"
 
@@ -67,8 +68,8 @@ public:
         }
 
         std::string messageName = arguments[0]->GetStringValue();
-        std::cout << "📤 cefMessage.send() called with message: " << messageName << std::endl;
-        std::cout << "📤 Arguments count: " << arguments.size() << std::endl;
+        LOG_DEBUG_RENDER(LogFmt() << "📤 cefMessage.send() called with message: " << messageName);
+        LOG_DEBUG_RENDER(LogFmt() << "📤 Arguments count: " << arguments.size());
 
         // Try multiple logging approaches
         LOG_DEBUG_RENDER("📤 cefMessage.send() called with message: " + messageName);
@@ -82,39 +83,39 @@ public:
 
         // Add arguments if provided (skip first argument which is the message name)
         for (size_t i = 1; i < arguments.size(); i++) {
-            std::cout << "📤 Processing argument " << (i-1) << ": ";
             LOG_DEBUG_RENDER("📤 Processing argument " + std::to_string(i-1) + ": ");
 
             if (arguments[i]->IsString()) {
                 std::string value = arguments[i]->GetStringValue();
-                std::cout << "String: " << value << std::endl;
-                LOG_DEBUG_RENDER("String: " + value);
+                // ⛔ Length only. This dumps ARBITRARY IPC payloads -- measured leaking a
+                // full URL with its query string into cef_debug.log the moment the
+                // surrounding std::cout was converted to a real sink. What flows through
+                // here is unbounded (wallet call bodies, tab state, page URLs), so no
+                // redaction rule can be trusted to cover it; do not log the value.
+                LOG_DEBUG_RENDER("String arg (" + std::to_string(value.size()) + " bytes)");
                 args->SetString(i - 1, value);
             } else if (arguments[i]->IsBool()) {
                 bool value = arguments[i]->GetBoolValue();
-                std::cout << "Bool: " << (value ? "true" : "false") << std::endl;
                 LOG_DEBUG_RENDER("Bool: " + std::string(value ? "true" : "false"));
                 args->SetBool(i - 1, value);
             } else if (arguments[i]->IsInt()) {
                 int value = arguments[i]->GetIntValue();
-                std::cout << "Int: " << value << std::endl;
                 LOG_DEBUG_RENDER("Int: " + std::to_string(value));
                 args->SetInt(i - 1, value);
             } else if (arguments[i]->IsDouble()) {
                 double value = arguments[i]->GetDoubleValue();
-                std::cout << "Double: " << value << std::endl;
                 LOG_DEBUG_RENDER("Double: " + std::to_string(value));
                 args->SetDouble(i - 1, value);
             } else if (arguments[i]->IsArray()) {
                 // Expand ALL array elements into the message args list
                 CefRefPtr<CefV8Value> array = arguments[i];
-                std::cout << "Array with length: " << array->GetArrayLength() << std::endl;
                 LOG_DEBUG_RENDER("Array with length: " + std::to_string(array->GetArrayLength()));
                 for (int j = 0; j < array->GetArrayLength(); j++) {
                     CefRefPtr<CefV8Value> element = array->GetValue(j);
                     if (element->IsString()) {
                         std::string value = element->GetStringValue();
-                        LOG_DEBUG_RENDER("Array[" + std::to_string(j) + "] String: " + value);
+                        LOG_DEBUG_RENDER("Array[" + std::to_string(j) + "] String arg ("
+                                         + std::to_string(value.size()) + " bytes)");
                         args->SetString(j, value);
                     } else if (element->IsBool()) {
                         bool value = element->GetBoolValue();
@@ -131,7 +132,6 @@ public:
                     }
                 }
             } else {
-                std::cout << "Unknown type" << std::endl;
                 LOG_DEBUG_RENDER("Unknown type");
             }
         }
@@ -140,10 +140,8 @@ public:
         CefRefPtr<CefV8Context> context = CefV8Context::GetCurrentContext();
         if (context && context->GetFrame()) {
             context->GetFrame()->SendProcessMessage(PID_BROWSER, message);
-            std::cout << "✅ Process message sent to browser process: " << messageName << std::endl;
             LOG_DEBUG_RENDER("✅ Process message sent to browser process: " + messageName);
         } else {
-            std::cout << "❌ Failed to get frame context for sending process message" << std::endl;
             LOG_ERROR_RENDER("❌ Failed to get frame context for sending process message");
         }
 
@@ -167,7 +165,6 @@ public:
 
         CEF_REQUIRE_RENDERER_THREAD();
 
-        std::cout << "🎯 overlay.close() called from overlay browser" << std::endl;
         LOG_DEBUG_RENDER("🎯 overlay.close() called from overlay browser");
 
         // Send overlay_close message via cefMessage
@@ -176,7 +173,6 @@ public:
             CefRefPtr<CefProcessMessage> message = CefProcessMessage::Create("overlay_close");
             context->GetFrame()->SendProcessMessage(PID_BROWSER, message);
 
-            std::cout << "✅ overlay.close() sent overlay_close message" << std::endl;
             LOG_DEBUG_RENDER("✅ overlay.close() sent overlay_close message");
         }
 
@@ -475,7 +471,7 @@ void SimpleRenderProcessHandler::OnContextCreated(
     CEF_REQUIRE_RENDERER_THREAD();
 
     LOG_DEBUG_RENDER("🔧 OnContextCreated called for browser ID: " + std::to_string(browser->GetIdentifier()));
-    LOG_DEBUG_RENDER("🔧 Frame URL: " + frame->GetURL().ToString());
+    LOG_DEBUG_RENDER("🔧 Frame URL: " + hodos::LogSafeUrl(frame->GetURL().ToString()));
 #ifdef _WIN32
     LOG_DEBUG_RENDER("🔧 Process ID: " + std::to_string(GetCurrentProcessId()));
     LOG_DEBUG_RENDER("🔧 Thread ID: " + std::to_string(GetCurrentThreadId()));
@@ -490,7 +486,7 @@ void SimpleRenderProcessHandler::OnContextCreated(
         std::lock_guard<std::mutex> lock(s_scriptCacheMutex);
         auto it = s_scriptCache.find(url);
         if (it != s_scriptCache.end() && !it->second.empty()) {
-            LOG_INFO_RENDER("💉 OnContextCreated: injecting scriptlets for " + url +
+            LOG_INFO_RENDER("💉 OnContextCreated: injecting scriptlets for " + hodos::LogSafeUrl(url) +
                 " (" + std::to_string(it->second.size()) + " chars)");
             frame->ExecuteJavaScript(it->second, url, 0);
             s_scriptCache.erase(it); // One-shot: don't re-inject on subframe contexts
@@ -614,28 +610,26 @@ void SimpleRenderProcessHandler::OnContextCreated(
         V8_PROPERTY_ATTRIBUTE_NONE);
 #else
     // macOS: Navigation handler is cross-platform, inject it
-    std::cout << "🔧 macOS: Injecting navigation API..." << std::endl;
     LOG_DEBUG_RENDER("🔧 macOS: Injecting navigation API...");
 
     CefRefPtr<CefV8Value> navigationObject = CefV8Value::CreateObject(nullptr, nullptr);
     if (!navigationObject) {
-        std::cout << "❌ Failed to create navigationObject!" << std::endl;
         LOG_ERROR_RENDER("❌ Failed to create navigationObject!");
     } else {
-        std::cout << "✅ navigationObject created" << std::endl;
+        LOG_DEBUG_RENDER(LogFmt() << "✅ navigationObject created");
     }
 
     bool setResult = hodosBrowser->SetValue("navigation", navigationObject, V8_PROPERTY_ATTRIBUTE_READONLY);
-    std::cout << "🔧 SetValue('navigation') result: " << setResult << std::endl;
+    LOG_DEBUG_RENDER(LogFmt() << "🔧 SetValue('navigation') result: " << setResult);
 
     CefRefPtr<NavigationHandler> navHandler = new NavigationHandler();
     CefRefPtr<CefV8Value> navFunction = CefV8Value::CreateFunction("navigate", navHandler);
 
     bool setFuncResult = navigationObject->SetValue("navigate", navFunction, V8_PROPERTY_ATTRIBUTE_NONE);
-    std::cout << "🔧 SetValue('navigate' function) result: " << setFuncResult << std::endl;
+    LOG_DEBUG_RENDER(LogFmt() << "🔧 SetValue('navigate' function) result: " << setFuncResult);
 
     LOG_DEBUG_RENDER("✅ Navigation API injection completed on macOS");
-    std::cout << "✅ Navigation API injection completed on macOS" << std::endl;
+    LOG_DEBUG_RENDER(LogFmt() << "✅ Navigation API injection completed on macOS");
 #endif
 
     // overlayPanel object removed - now using process-per-overlay architecture
@@ -794,7 +788,7 @@ void SimpleRenderProcessHandler::OnContextCreated(
             // dApp page: inject the transport bridge FIRST (the provider's methods
             // call window.__hodos_walletCall), then the window.CWI/yours/panda provider.
             frame->ExecuteJavaScript(WALLET_CALL_BRIDGE_SCRIPT, url, 0);
-            LOG_INFO_RENDER("💉 Injecting window.CWI / window.yours / window.panda shim for " + url);
+            LOG_INFO_RENDER("💉 Injecting window.CWI / window.yours / window.panda shim for " + hodos::LogSafeUrl(url));
             frame->ExecuteJavaScript(CWI_SHIM_SCRIPT, url, 0);
         }
     }
@@ -824,10 +818,10 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
     CEF_REQUIRE_RENDERER_THREAD();
 
     std::string message_name = message->GetName();
-    std::cout << "📨 Render process received message: " << message_name << std::endl;
-    std::cout << "🔍 Browser ID: " << browser->GetIdentifier() << std::endl;
-    std::cout << "🔍 Frame URL: " << frame->GetURL().ToString() << std::endl;
-    std::cout << "🔍 Source Process: " << source_process << std::endl;
+    LOG_DEBUG_RENDER(LogFmt() << "📨 Render process received message: " << message_name);
+    LOG_DEBUG_RENDER(LogFmt() << "🔍 Browser ID: " << browser->GetIdentifier());
+    LOG_DEBUG_RENDER(LogFmt() << "🔍 Frame URL: " << hodos::LogSafeUrl(frame->GetURL().ToString()));
+    LOG_DEBUG_RENDER(LogFmt() << "🔍 Source Process: " << source_process);
 
         if (message_name == "tab_list_response") {
             CefRefPtr<CefListValue> args = message->GetArgumentList();
@@ -1095,7 +1089,7 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
             if (!url.empty() && !script.empty()) {
                 std::lock_guard<std::mutex> lock(s_scriptCacheMutex);
                 s_scriptCache[url] = script;
-                LOG_INFO_RENDER("💉 Pre-cached scriptlets for " + url +
+                LOG_INFO_RENDER("💉 Pre-cached scriptlets for " + hodos::LogSafeUrl(url) +
                     " (" + std::to_string(script.size()) + " chars)");
             }
             return true;
@@ -1198,7 +1192,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
             CefRefPtr<CefListValue> args = message->GetArgumentList();
             std::string addressDataJson = args->GetString(0);
 
-            std::cout << "✅ Address generation response received: " << addressDataJson << std::endl;
             LOG_DEBUG_RENDER("✅ Address generation response received: " + addressDataJson);
 
             // Execute JavaScript to call the callback function directly
@@ -1212,9 +1205,9 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string responseJson = args->GetString(0);
 
-        std::cout << "✅ Identity status check response received: " << responseJson << std::endl;
-        std::cout << "🔍 Browser ID: " << browser->GetIdentifier() << std::endl;
-        std::cout << "🔍 Frame URL: " << frame->GetURL().ToString() << std::endl;
+        LOG_DEBUG_RENDER(LogFmt() << "✅ Identity status check response received: " << responseJson);
+        LOG_DEBUG_RENDER(LogFmt() << "🔍 Browser ID: " << browser->GetIdentifier());
+        LOG_DEBUG_RENDER(LogFmt() << "🔍 Frame URL: " << hodos::LogSafeUrl(frame->GetURL().ToString()));
 
         // Execute JavaScript to dispatch the response event
         std::string js = "window.dispatchEvent(new CustomEvent('cefMessageResponse', { detail: { message: 'identity_status_check_response', args: ['" + responseJson + "'] } }));";
@@ -1227,9 +1220,9 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string responseJson = args->GetString(0);
 
-        std::cout << "✅ Create identity response received: " << responseJson << std::endl;
-        std::cout << "🔍 Browser ID: " << browser->GetIdentifier() << std::endl;
-        std::cout << "🔍 Frame URL: " << frame->GetURL().ToString() << std::endl;
+        LOG_DEBUG_RENDER(LogFmt() << "✅ Create identity response received: " << responseJson);
+        LOG_DEBUG_RENDER(LogFmt() << "🔍 Browser ID: " << browser->GetIdentifier());
+        LOG_DEBUG_RENDER(LogFmt() << "🔍 Frame URL: " << hodos::LogSafeUrl(frame->GetURL().ToString()));
 
         // Execute JavaScript to dispatch the response event
         std::string js = "window.dispatchEvent(new CustomEvent('cefMessageResponse', { detail: { message: 'create_identity_response', args: ['" + responseJson + "'] } }));";
@@ -1242,9 +1235,9 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string responseJson = args->GetString(0);
 
-        std::cout << "✅ Mark identity backed up response received: " << responseJson << std::endl;
-        std::cout << "🔍 Browser ID: " << browser->GetIdentifier() << std::endl;
-        std::cout << "🔍 Frame URL: " << frame->GetURL().ToString() << std::endl;
+        LOG_DEBUG_RENDER(LogFmt() << "✅ Mark identity backed up response received: " << responseJson);
+        LOG_DEBUG_RENDER(LogFmt() << "🔍 Browser ID: " << browser->GetIdentifier());
+        LOG_DEBUG_RENDER(LogFmt() << "🔍 Frame URL: " << hodos::LogSafeUrl(frame->GetURL().ToString()));
 
         // Execute JavaScript to dispatch the response event
         std::string js = "window.dispatchEvent(new CustomEvent('cefMessageResponse', { detail: { message: 'mark_identity_backed_up_response', args: ['" + responseJson + "'] } }));";
@@ -1257,7 +1250,7 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string errorMessage = args->GetString(0);
 
-        std::cout << "❌ Address generation error received: " << errorMessage << std::endl;
+        LOG_DEBUG_RENDER(LogFmt() << "❌ Address generation error received: " << errorMessage);
 
         // Execute JavaScript to handle the error
         std::string js = "if (window.onAddressError) { window.onAddressError('" + errorMessage + "'); }";
@@ -1272,7 +1265,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
             CefRefPtr<CefListValue> args = message->GetArgumentList();
             std::string responseJson = args->GetString(0);
 
-            std::cout << "✅ Address generation response received: " << responseJson << std::endl;
             LOG_DEBUG_RENDER("✅ Address generation response received: " + responseJson);
 
             // Execute JavaScript to call the callback function directly
@@ -1286,7 +1278,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
             CefRefPtr<CefListValue> args = message->GetArgumentList();
             std::string errorJson = args->GetString(0);
 
-            std::cout << "❌ Address generation error received: " << errorJson << std::endl;
             LOG_DEBUG_RENDER("❌ Address generation error received: " + errorJson);
 
             // Execute JavaScript to call the error callback function directly
@@ -1300,12 +1291,12 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string responseJson = args->GetString(0);
 
-        std::cout << "✅ Create transaction response received: " << responseJson << std::endl;
-        std::cout << "🔍 Browser ID: " << browser->GetIdentifier() << std::endl;
-        std::cout << "🔍 Frame URL: " << frame->GetURL().ToString() << std::endl;
+        LOG_DEBUG_RENDER(LogFmt() << "✅ Create transaction response received: " << responseJson);
+        LOG_DEBUG_RENDER(LogFmt() << "🔍 Browser ID: " << browser->GetIdentifier());
+        LOG_DEBUG_RENDER(LogFmt() << "🔍 Frame URL: " << hodos::LogSafeUrl(frame->GetURL().ToString()));
         LOG_DEBUG_RENDER("✅ Create transaction response received: " + responseJson);
         LOG_DEBUG_RENDER("🔍 Browser ID: " + std::to_string(browser->GetIdentifier()));
-        LOG_DEBUG_RENDER("🔍 Frame URL: " + frame->GetURL().ToString());
+        LOG_DEBUG_RENDER("🔍 Frame URL: " + hodos::LogSafeUrl(frame->GetURL().ToString()));
 
         // Execute JavaScript to call the callback function directly
         std::string js = "if (window.onCreateTransactionResponse) { window.onCreateTransactionResponse(" + responseJson + "); }";
@@ -1318,7 +1309,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string errorMessage = args->GetString(0);
 
-        std::cout << "❌ Create transaction error received: " << errorMessage << std::endl;
         LOG_DEBUG_RENDER("❌ Create transaction error received: " + errorMessage);
 
         // Execute JavaScript to handle the error
@@ -1332,12 +1322,12 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string responseJson = args->GetString(0);
 
-        std::cout << "✅ Sign transaction response received: " << responseJson << std::endl;
-        std::cout << "🔍 Browser ID: " << browser->GetIdentifier() << std::endl;
-        std::cout << "🔍 Frame URL: " << frame->GetURL().ToString() << std::endl;
+        LOG_DEBUG_RENDER(LogFmt() << "✅ Sign transaction response received: " << responseJson);
+        LOG_DEBUG_RENDER(LogFmt() << "🔍 Browser ID: " << browser->GetIdentifier());
+        LOG_DEBUG_RENDER(LogFmt() << "🔍 Frame URL: " << hodos::LogSafeUrl(frame->GetURL().ToString()));
         LOG_DEBUG_RENDER("✅ Sign transaction response received: " + responseJson);
         LOG_DEBUG_RENDER("🔍 Browser ID: " + std::to_string(browser->GetIdentifier()));
-        LOG_DEBUG_RENDER("🔍 Frame URL: " + frame->GetURL().ToString());
+        LOG_DEBUG_RENDER("🔍 Frame URL: " + hodos::LogSafeUrl(frame->GetURL().ToString()));
 
         // Execute JavaScript to dispatch the response event
         std::string js = "window.dispatchEvent(new CustomEvent('cefMessageResponse', { detail: { message: 'sign_transaction_response', args: ['" + responseJson + "'] } }));";
@@ -1350,7 +1340,7 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string errorMessage = args->GetString(0);
 
-        std::cout << "❌ Sign transaction error received: " << errorMessage << std::endl;
+        LOG_DEBUG_RENDER(LogFmt() << "❌ Sign transaction error received: " << errorMessage);
 
         // Execute JavaScript to handle the error
         std::string js = "if (window.onSignTransactionError) { window.onSignTransactionError('" + errorMessage + "'); }";
@@ -1363,9 +1353,9 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string responseJson = args->GetString(0);
 
-        std::cout << "✅ Broadcast transaction response received: " << responseJson << std::endl;
-        std::cout << "🔍 Browser ID: " << browser->GetIdentifier() << std::endl;
-        std::cout << "🔍 Frame URL: " << frame->GetURL().ToString() << std::endl;
+        LOG_DEBUG_RENDER(LogFmt() << "✅ Broadcast transaction response received: " << responseJson);
+        LOG_DEBUG_RENDER(LogFmt() << "🔍 Browser ID: " << browser->GetIdentifier());
+        LOG_DEBUG_RENDER(LogFmt() << "🔍 Frame URL: " << hodos::LogSafeUrl(frame->GetURL().ToString()));
 
         // Execute JavaScript to dispatch the response event
         std::string js = "window.dispatchEvent(new CustomEvent('cefMessageResponse', { detail: { message: 'broadcast_transaction_response', args: ['" + responseJson + "'] } }));";
@@ -1378,7 +1368,7 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string errorMessage = args->GetString(0);
 
-        std::cout << "❌ Broadcast transaction error received: " << errorMessage << std::endl;
+        LOG_DEBUG_RENDER(LogFmt() << "❌ Broadcast transaction error received: " << errorMessage);
 
         // Execute JavaScript to handle the error
         std::string js = "if (window.onBroadcastTransactionError) { window.onBroadcastTransactionError('" + errorMessage + "'); }";
@@ -1391,36 +1381,36 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         try {
             CefRefPtr<CefListValue> args = message->GetArgumentList();
             if (!args || args->GetSize() == 0) {
-                std::cerr << "❌ send_transaction_response: No arguments" << std::endl;
+                LOG_ERROR_RENDER(LogFmt() << "❌ send_transaction_response: No arguments");
                 return true;
             }
 
             std::string responseJson = args->GetString(0);
-            std::cout << "✅ Send transaction response received (length: " << responseJson.length() << ")" << std::endl;
+            LOG_DEBUG_RENDER(LogFmt() << "✅ Send transaction response received (length: " << responseJson.length() << ")");
 
             // Execute JavaScript to call the callback function directly
             // Use JSON.parse() to safely parse the JSON string and avoid injection issues
             // Escape the JSON string to prevent JavaScript injection
             try {
                 std::string escapedJson = escapeJsonForJs(responseJson);
-                std::cout << "🔍 Escaped JSON (length: " << escapedJson.length() << ")" << std::endl;
+                LOG_DEBUG_RENDER(LogFmt() << "🔍 Escaped JSON (length: " << escapedJson.length() << ")");
 
                 std::string js = "if (window.onSendTransactionResponse) { try { window.onSendTransactionResponse(JSON.parse('" +
                                  escapedJson + "')); } catch(e) { console.error('Failed to parse transaction response:', e); } }";
 
-                std::cout << "🔍 Executing JavaScript (length: " << js.length() << ")" << std::endl;
+                LOG_DEBUG_RENDER(LogFmt() << "🔍 Executing JavaScript (length: " << js.length() << ")");
 
                 if (frame) {
                     frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-                    std::cout << "✅ JavaScript executed successfully" << std::endl;
+                    LOG_DEBUG_RENDER(LogFmt() << "✅ JavaScript executed successfully");
                 } else {
-                    std::cerr << "❌ Frame is null, cannot execute JavaScript" << std::endl;
+                    LOG_ERROR_RENDER(LogFmt() << "❌ Frame is null, cannot execute JavaScript");
                 }
             } catch (const std::exception& e) {
-                std::cerr << "❌ Failed to execute JavaScript for send_transaction_response: " << e.what() << std::endl;
+                LOG_ERROR_RENDER(LogFmt() << "❌ Failed to execute JavaScript for send_transaction_response: " << e.what());
             }
         } catch (const std::exception& e) {
-            std::cerr << "❌ Exception in send_transaction_response handler: " << e.what() << std::endl;
+            LOG_ERROR_RENDER(LogFmt() << "❌ Exception in send_transaction_response handler: " << e.what());
         }
 
         return true;
@@ -1430,7 +1420,7 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string errorMessage = args->GetString(0);
 
-        std::cout << "❌ Send transaction error received: " << errorMessage << std::endl;
+        LOG_DEBUG_RENDER(LogFmt() << "❌ Send transaction error received: " << errorMessage);
 
         // Execute JavaScript to handle the error
         std::string js = "if (window.onSendTransactionError) { window.onSendTransactionError('" + errorMessage + "'); }";
@@ -1443,9 +1433,9 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string responseJson = args->GetString(0);
 
-        std::cout << "✅ Get balance response received: " << responseJson << std::endl;
-        std::cout << "🔍 Browser ID: " << browser->GetIdentifier() << std::endl;
-        std::cout << "🔍 Frame URL: " << frame->GetURL().ToString() << std::endl;
+        LOG_DEBUG_RENDER(LogFmt() << "✅ Get balance response received: " << responseJson);
+        LOG_DEBUG_RENDER(LogFmt() << "🔍 Browser ID: " << browser->GetIdentifier());
+        LOG_DEBUG_RENDER(LogFmt() << "🔍 Frame URL: " << hodos::LogSafeUrl(frame->GetURL().ToString()));
 
         // Execute JavaScript to call the callback function directly
         std::string js = "if (window.onGetBalanceResponse) { window.onGetBalanceResponse(" + responseJson + "); }";
@@ -1458,10 +1448,14 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string errorMessage = args->GetString(0);
 
-        std::cout << "❌ Get balance error received: " << errorMessage << std::endl;
+        LOG_DEBUG_RENDER(LogFmt() << "❌ Get balance error received: " << errorMessage);
 
-        // Execute JavaScript to handle the error
-        std::string js = "if (window.onGetBalanceError) { window.onGetBalanceError('" + errorMessage + "'); }";
+        // P2a: errorMessage is a JSON envelope built from exception text, and it was being
+        // pasted between single quotes RAW -- one apostrophe or backslash in a what()
+        // string breaks out of the literal. Route it through the canonical encoder like
+        // every other injection site in this file.
+        std::string js = "if (window.onGetBalanceError) { window.onGetBalanceError(\""
+                       + escapeJsonForJs(errorMessage) + "\"); }";
         frame->ExecuteJavaScript(js, frame->GetURL(), 0);
 
         return true;
@@ -1471,9 +1465,9 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string responseJson = args->GetString(0);
 
-        std::cout << "✅ Get transaction history response received: " << responseJson << std::endl;
-        std::cout << "🔍 Browser ID: " << browser->GetIdentifier() << std::endl;
-        std::cout << "🔍 Frame URL: " << frame->GetURL().ToString() << std::endl;
+        LOG_DEBUG_RENDER(LogFmt() << "✅ Get transaction history response received: " << responseJson);
+        LOG_DEBUG_RENDER(LogFmt() << "🔍 Browser ID: " << browser->GetIdentifier());
+        LOG_DEBUG_RENDER(LogFmt() << "🔍 Frame URL: " << hodos::LogSafeUrl(frame->GetURL().ToString()));
 
         // Execute JavaScript to dispatch the response event
         std::string js = "window.dispatchEvent(new CustomEvent('cefMessageResponse', { detail: { message: 'get_transaction_history_response', args: ['" + responseJson + "'] } }));";
@@ -1486,7 +1480,7 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string errorMessage = args->GetString(0);
 
-        std::cout << "❌ Get transaction history error received: " << errorMessage << std::endl;
+        LOG_DEBUG_RENDER(LogFmt() << "❌ Get transaction history error received: " << errorMessage);
 
         // Execute JavaScript to handle the error
         std::string js = "if (window.onGetTransactionHistoryError) { window.onGetTransactionHistoryError('" + errorMessage + "'); }";
@@ -1502,7 +1496,7 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string settingsJson = args->GetString(0);
 
-        std::cout << "✅ Settings response received" << std::endl;
+        LOG_DEBUG_RENDER(LogFmt() << "✅ Settings response received");
 
         // Execute JavaScript to call the callback function directly
         std::string js = "if (window.onSettingsResponse) { window.onSettingsResponse(" + settingsJson + "); }";
@@ -1516,7 +1510,7 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string profilesJson = args->GetString(0);
 
-        std::cout << "👤 Profiles result received" << std::endl;
+        LOG_DEBUG_RENDER(LogFmt() << "👤 Profiles result received");
 
         std::string js = "if (window.onProfilesResult) { window.onProfilesResult(" + profilesJson + "); }";
         frame->ExecuteJavaScript(js, frame->GetURL(), 0);
@@ -1529,7 +1523,7 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string profilesJson = args->GetString(0);
 
-        std::cout << "📂 Import profiles result received" << std::endl;
+        LOG_DEBUG_RENDER(LogFmt() << "📂 Import profiles result received");
 
         std::string js = "if (window.onImportProfilesResult) { window.onImportProfilesResult(" + profilesJson + "); }";
         frame->ExecuteJavaScript(js, frame->GetURL(), 0);
@@ -1541,7 +1535,7 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string resultJson = args->GetString(0);
 
-        std::cout << "📦 Import complete" << std::endl;
+        LOG_DEBUG_RENDER(LogFmt() << "📦 Import complete");
 
         std::string js = "if (window.onImportComplete) { window.onImportComplete(" + resultJson + "); }";
         frame->ExecuteJavaScript(js, frame->GetURL(), 0);
@@ -1553,7 +1547,7 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string responseJson = args->GetString(0);
 
-        std::cout << "✅ Wallet status check response received: " << responseJson << std::endl;
+        LOG_DEBUG_RENDER(LogFmt() << "✅ Wallet status check response received: " << responseJson);
 
         // Execute JavaScript to call the callback function directly
         std::string js = "if (window.onWalletStatusResponse) { window.onWalletStatusResponse(" + responseJson + "); }";
@@ -1566,7 +1560,7 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string responseJson = args->GetString(0);
 
-        std::cout << "✅ Create wallet response received: " << responseJson << std::endl;
+        LOG_DEBUG_RENDER(LogFmt() << "✅ Create wallet response received: " << responseJson);
 
         // Execute JavaScript to call the callback function directly
         std::string js = "if (window.onCreateWalletResponse) { window.onCreateWalletResponse(" + responseJson + "); }";
@@ -1579,7 +1573,7 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string responseJson = args->GetString(0);
 
-        std::cout << "✅ Load wallet response received: " << responseJson << std::endl;
+        LOG_DEBUG_RENDER(LogFmt() << "✅ Load wallet response received: " << responseJson);
 
         // Execute JavaScript to call the callback function directly
         std::string js = "if (window.onLoadWalletResponse) { window.onLoadWalletResponse(" + responseJson + "); }";
@@ -1592,7 +1586,7 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string responseJson = args->GetString(0);
 
-        std::cout << "✅ Get wallet info response received: " << responseJson << std::endl;
+        LOG_DEBUG_RENDER(LogFmt() << "✅ Get wallet info response received: " << responseJson);
 
         // Execute JavaScript to call the callback function directly
         std::string js = "if (window.onGetWalletInfoResponse) { window.onGetWalletInfoResponse(" + responseJson + "); }";
@@ -1605,7 +1599,7 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string responseJson = args->GetString(0);
 
-        std::cout << "✅ Get all addresses response received: " << responseJson << std::endl;
+        LOG_DEBUG_RENDER(LogFmt() << "✅ Get all addresses response received: " << responseJson);
 
         // Execute JavaScript to call the callback function directly
         std::string js = "if (window.onGetAllAddressesResponse) { window.onGetAllAddressesResponse(" + responseJson + "); }";
@@ -1618,7 +1612,7 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string responseJson = args->GetString(0);
 
-        std::cout << "✅ Get current address response received: " << responseJson << std::endl;
+        LOG_DEBUG_RENDER(LogFmt() << "✅ Get current address response received: " << responseJson);
 
         // Execute JavaScript to call the callback function directly
         std::string js = "if (window.onGetCurrentAddressResponse) { window.onGetCurrentAddressResponse(" + responseJson + "); }";
@@ -1631,7 +1625,7 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string responseJson = args->GetString(0);
 
-        std::cout << "✅ Mark wallet backed up response received: " << responseJson << std::endl;
+        LOG_DEBUG_RENDER(LogFmt() << "✅ Mark wallet backed up response received: " << responseJson);
 
         // Execute JavaScript to call the callback function directly
         std::string js = "if (window.onMarkWalletBackedUpResponse) { window.onMarkWalletBackedUpResponse(" + responseJson + "); }";
@@ -1644,7 +1638,7 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string responseJson = args->GetString(0);
 
-        std::cout << "✅ Get addresses response received: " << responseJson << std::endl;
+        LOG_DEBUG_RENDER(LogFmt() << "✅ Get addresses response received: " << responseJson);
 
         // Execute JavaScript to call the callback function directly
         std::string js = "if (window.onGetAddressesResponse) { window.onGetAddressesResponse(" + responseJson + "); }";

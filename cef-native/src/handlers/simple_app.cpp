@@ -18,6 +18,7 @@
 #include "../../include/core/SettingsManager.h"
 #include "../../include/core/ProfileManager.h"
 #include "../../include/core/Logger.h"
+#include "../../include/core/LogSafeUrl.h"
 #include "../../include/core/WindowManager.h"
 #include "../../include/core/LayoutHelpers.h"
 #include "../../include/core/PortConfig.h"
@@ -53,18 +54,18 @@ extern bool g_picker_mode;  // pre-window profile picker (CHUNK 2)
 
 SimpleApp::SimpleApp()
     : render_process_handler_(new SimpleRenderProcessHandler()) {
-    std::cout << "🔧 SimpleApp constructor called!" << std::endl;
-    std::cout << "🔧 Render process handler created: " << (render_process_handler_ ? "true" : "false") << std::endl;
+    LOG_INFO_APP(LogFmt() << "🔧 SimpleApp constructor called!");
+    LOG_INFO_APP(LogFmt() << "🔧 Render process handler created: " << (render_process_handler_ ? "true" : "false"));
 }
 
 CefRefPtr<CefBrowserProcessHandler> SimpleApp::GetBrowserProcessHandler() {
-    std::cout << "✅ SimpleApp::GetBrowserProcessHandler CALLED" << std::endl;
+    LOG_INFO_APP(LogFmt() << "✅ SimpleApp::GetBrowserProcessHandler CALLED");
     return this;
 }
 
 CefRefPtr<CefRenderProcessHandler> SimpleApp::GetRenderProcessHandler() {
-    std::cout << "🔧 SimpleApp::GetRenderProcessHandler CALLED" << std::endl;
-    std::cout << "🔧 Returning render process handler: " << (render_process_handler_ ? "true" : "false") << std::endl;
+    LOG_INFO_APP(LogFmt() << "🔧 SimpleApp::GetRenderProcessHandler CALLED");
+    LOG_INFO_APP(LogFmt() << "🔧 Returning render process handler: " << (render_process_handler_ ? "true" : "false"));
     return render_process_handler_;
 }
 
@@ -191,7 +192,7 @@ void SimpleApp::OnContextInitialized() {
     }
 
 #ifdef _WIN32
-    std::cout << "✅ OnContextInitialized CALLED (Windows)" << std::endl;
+    LOG_INFO_APP(LogFmt() << "✅ OnContextInitialized CALLED (Windows)");
 
     LOG_INFO_APP("🚀 OnContextInitialized entered - g_header_hwnd=" + HwndStr(g_header_hwnd)
                  + " (IsWindow=" + std::to_string(IsWindow(g_header_hwnd) ? 1 : 0) + ")"
@@ -221,7 +222,7 @@ void SimpleApp::OnContextInitialized() {
     std::string header_url = g_picker_mode
         ? "http://127.0.0.1:5137/profile-picker?mode=window"
         : "http://127.0.0.1:5137";
-    std::cout << "Loading React header at: " << header_url << std::endl;
+    LOG_INFO_APP(LogFmt() << "Loading React header at: " << header_url);
 
     try {
         bool header_result = CefBrowserHost::CreateBrowser(
@@ -232,7 +233,7 @@ void SimpleApp::OnContextInitialized() {
             nullptr,
             CefRequestContext::GetGlobalContext()
         );
-        std::cout << "header browser created: " << (header_result ? "true" : "false") << std::endl;
+        LOG_INFO_APP(LogFmt() << "header browser created: " << (header_result ? "true" : "false"));
 
         LOG_INFO_APP(std::string("✅ Header browser creation result: ")
                      + (header_result ? "success" : "failed"));
@@ -299,7 +300,7 @@ void SimpleApp::OnContextInitialized() {
                                     activeTabId = tabId;
                                 }
                                 createdCount++;
-                                LOG_INFO_APP("📑 Restored tab " + std::to_string(tabId) + " (win " + std::to_string(winId) + "): " + url);
+                                LOG_INFO_APP("📑 Restored tab " + std::to_string(tabId) + " (win " + std::to_string(winId) + "): " + hodos::LogSafeUrl(url));
                             }
                             if (createdCount > 0 && activeTabId >= 0) {
                                 TabManager::GetInstance().SwitchToTab(activeTabId);
@@ -437,7 +438,6 @@ void SimpleApp::OnContextInitialized() {
     }  // end if (!g_picker_mode) — tabs / session restore / NTP
 
 #elif defined(__APPLE__)
-    std::cout << "✅ OnContextInitialized CALLED (macOS)" << std::endl;
     LOG_INFO_APP("✅ OnContextInitialized CALLED (macOS)");
 
     // On macOS, browsers are created manually in main() after windows are set up
@@ -454,12 +454,10 @@ void SimpleApp::OnContextInitialized() {
 // Chrome-style approach: Inject JavaScript directly into the overlay browser
 void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser) {
     if (!browser || !browser->GetMainFrame()) {
-        std::cout << "❌ Cannot inject API - browser or frame not available" << std::endl;
         LOG_ERROR_APP("❌ Cannot inject API - browser or frame not available");
         return;
     }
 
-    std::cout << "🔧 Injecting hodosBrowser API into browser ID: " << browser->GetIdentifier() << std::endl;
     LOG_DEBUG_APP("🔧 Injecting hodosBrowser API into browser ID: " + std::to_string(browser->GetIdentifier()));
 
     std::string jsCode = R"(
@@ -563,7 +561,7 @@ void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser) {
     )";
 
     browser->GetMainFrame()->ExecuteJavaScript(jsCode, "", 0);
-    std::cout << "🔧 Injected hodosBrowser API into browser ID: " << browser->GetIdentifier() << std::endl;
+    LOG_INFO_APP(LogFmt() << "🔧 Injected hodosBrowser API into browser ID: " << browser->GetIdentifier());
 
     // Also log to file
     LOG_DEBUG_APP("🔧 Injected hodosBrowser API into browser ID: " + std::to_string(browser->GetIdentifier()));
@@ -983,7 +981,6 @@ void HideWalletOverlay() {
 
 #ifdef _WIN32
 void CreateBackupOverlayWithSeparateProcess(HINSTANCE hInstance) {
-    std::cout << "💾 Creating backup overlay with separate process" << std::endl;
     LOG_DEBUG_APP("💾 Creating backup overlay with separate process");
 
     RECT mainRect;
@@ -1000,12 +997,11 @@ void CreateBackupOverlayWithSeparateProcess(HINSTANCE hInstance) {
         g_hwnd, nullptr, hInstance, nullptr);
 
     if (!backup_hwnd) {
-        std::cout << "❌ Failed to create backup overlay HWND. Error: " << GetLastError() << std::endl;
         LOG_ERROR_APP("❌ Failed to create backup overlay HWND. Error: " + std::to_string(GetLastError()));
         return;
     }
 
-    std::cout << "✅ Backup overlay HWND created: " << backup_hwnd << std::endl;
+    LOG_INFO_APP(LogFmt() << "✅ Backup overlay HWND created: " << backup_hwnd);
 
     // Store HWND for shutdown cleanup
     g_backup_overlay_hwnd = backup_hwnd;
@@ -1043,7 +1039,6 @@ void CreateBackupOverlayWithSeparateProcess(HINSTANCE hInstance) {
     );
 
     if (result) {
-        std::cout << "✅ Backup overlay browser created with subprocess" << std::endl;
         LOG_DEBUG_APP("✅ Backup overlay browser created with subprocess");
 
         LONG exStyle = GetWindowLong(backup_hwnd, GWL_EXSTYLE);
@@ -1051,7 +1046,6 @@ void CreateBackupOverlayWithSeparateProcess(HINSTANCE hInstance) {
         LOG_DEBUG_APP("💾 Mouse input ENABLED for backup overlay HWND: " + HwndStr(backup_hwnd));
 
     } else {
-        std::cout << "❌ Failed to create backup overlay browser" << std::endl;
         LOG_ERROR_APP("❌ Failed to create backup overlay browser");
     }
 }
@@ -1059,7 +1053,6 @@ void CreateBackupOverlayWithSeparateProcess(HINSTANCE hInstance) {
 
 #ifdef _WIN32
 void CreateBRC100AuthOverlayWithSeparateProcess(HINSTANCE hInstance) {
-    std::cout << "🔐 Creating BRC-100 auth overlay with separate process" << std::endl;
     LOG_DEBUG_APP("🔐 Creating BRC-100 auth overlay with separate process");
 
     // Get main window dimensions for positioning
@@ -1078,12 +1071,11 @@ void CreateBRC100AuthOverlayWithSeparateProcess(HINSTANCE hInstance) {
         g_hwnd, nullptr, hInstance, nullptr);
 
     if (!auth_hwnd) {
-        std::cout << "❌ Failed to create BRC-100 auth overlay HWND. Error: " << GetLastError() << std::endl;
         LOG_ERROR_APP("❌ Failed to create BRC-100 auth overlay HWND. Error: " + std::to_string(GetLastError()));
         return;
     }
 
-    std::cout << "✅ BRC-100 auth overlay HWND created: " << auth_hwnd << std::endl;
+    LOG_INFO_APP(LogFmt() << "✅ BRC-100 auth overlay HWND created: " << auth_hwnd);
 
     // Store HWND for shutdown cleanup
     g_brc100_auth_overlay_hwnd = auth_hwnd;
@@ -1124,7 +1116,6 @@ void CreateBRC100AuthOverlayWithSeparateProcess(HINSTANCE hInstance) {
     );
 
     if (result) {
-        std::cout << "✅ BRC-100 auth overlay browser created with subprocess" << std::endl;
         LOG_DEBUG_APP("✅ BRC-100 auth overlay browser created with subprocess");
 
         // Enable mouse input for BRC-100 auth overlay
@@ -1137,7 +1128,6 @@ void CreateBRC100AuthOverlayWithSeparateProcess(HINSTANCE hInstance) {
         UpdateWindow(auth_hwnd);
         LOG_DEBUG_APP("🔐 Forced repaint for BRC-100 auth overlay HWND: " + HwndStr(auth_hwnd));
     } else {
-        std::cout << "❌ Failed to create BRC-100 auth overlay browser" << std::endl;
         LOG_ERROR_APP("❌ Failed to create BRC-100 auth overlay browser");
     }
 }

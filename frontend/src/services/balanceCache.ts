@@ -31,6 +31,12 @@ export function getCachedBalance(): CachedBalance | null {
 }
 
 export function setCachedBalance(balance: number): void {
+  // P2a, belt-and-braces: refuse to cache a non-number. The bridge now rejects on a
+  // failed balance so this should be unreachable, but a cache that can be poisoned by
+  // one careless caller is the defect this pair of fixes exists to close -- and
+  // JSON.stringify silently DROPS an undefined value, so the poisoned entry reads back
+  // as a confident zero rather than as missing data.
+  if (typeof balance !== 'number' || !isFinite(balance)) return;
   try {
     const entry: CachedBalance = { balance, updatedAt: Date.now() };
     localStorage.setItem(BALANCE_KEY, JSON.stringify(entry));

@@ -1,0 +1,12 @@
+lines=9762742 bytes=2542306373 sessions=128 freopen_failed=127 profilemgr_init_cout=0
+LEVEL WARN            401 lines          41230 bytes (  0.0% of bytes)
+LEVEL DEBUG       9606433 lines     2516143028 bytes ( 99.0% of bytes)
+LEVEL INFO         143537 lines       16186115 bytes (  0.6% of bytes)
+LEVEL OTHER         12371 lines        9936000 bytes (  0.4% of bytes)
+PROC  BROWSER       9644917 lines
+PROC  UNKNOWN           470 lines
+PROC  OTHER           12371 lines
+PROC  MAIN           104984 lines
+PATTERN resource_request    1596204 lines      786957362 bytes ( 31.0%)
+PATTERN method_get          1221778 lines      106592861 bytes (  4.2%)
+PATTERN message_received    4185962 lines      440966852 bytes ( 17.3%)

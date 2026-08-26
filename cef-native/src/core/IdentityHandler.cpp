@@ -1,9 +1,24 @@
 #include "../../include/core/IdentityHandler.h"
+#include "../../include/core/Logger.h"
 #include "../../include/core/AppPaths.h"
 #include <fstream>
 #include <cstdlib>
 #include <cstdint>
 #include <filesystem>
+
+// beta.3 Phase 2b: these were std::cout / std::cerr, which reach NOTHING.
+//
+// This class runs in the RENDER process, where Logger::Initialize is never called -- so
+// Logger::Log falls through to the injected child-process sink and lands in cef_debug.log
+// (see include/core/ChildProcessLogSink.h). That is the only sink a sandboxed renderer can
+// reach; it cannot open the roaming app-data directory itself.
+//
+// ProcessType::RENDER (1) so the line is attributable to the right process.
+#define LOG_DEBUG_IDENT(msg)   Logger::Log(msg, 0, 1)
+#define LOG_INFO_IDENT(msg)    Logger::Log(msg, 1, 1)
+#define LOG_WARNING_IDENT(msg) Logger::Log(msg, 2, 1)
+#define LOG_ERROR_IDENT(msg)   Logger::Log(msg, 3, 1)
+
 
 namespace {
 
@@ -69,7 +84,7 @@ bool IdentityHandler::Execute(const CefString& name,
                                const CefV8ValueList& arguments,
                                CefRefPtr<CefV8Value>& retval,
                                CefString& exception) {
-    std::cout << "IdentityHandler started - Function: " << name.ToString() << std::endl;
+    LOG_DEBUG_IDENT(LogFmt() << "IdentityHandler started - Function: " << name.ToString());
     std::cout.flush();
 
 #ifdef _WIN32
@@ -92,7 +107,7 @@ bool IdentityHandler::Execute(const CefString& name,
 #endif
         std::ifstream identityFile(identityPath);
         if (identityFile.good()) {
-            std::cout << "Local identity file exists, reading from file" << std::endl;
+            LOG_DEBUG_IDENT(LogFmt() << "Local identity file exists, reading from file");
             try {
                 nlohmann::json identity;
                 identityFile >> identity;
@@ -102,12 +117,12 @@ bool IdentityHandler::Execute(const CefString& name,
                 retval = identityObject;
                 return true;
             } catch (const std::exception& e) {
-                std::cerr << "Error reading identity file: " << e.what() << std::endl;
+                LOG_ERROR_IDENT(LogFmt() << "Error reading identity file: " << e.what());
                 identityFile.close();
                 // Fall through to daemon check
             }
         } else {
-            std::cout << "No local identity file found, will check daemon" << std::endl;
+            LOG_DEBUG_IDENT(LogFmt() << "No local identity file found, will check daemon");
             identityFile.close();
         }
     }
@@ -116,20 +131,20 @@ bool IdentityHandler::Execute(const CefString& name,
 
     // Check if Go daemon is running
     if (!walletService.isConnected()) {
-        std::cerr << "Cannot connect to Go wallet daemon. Make sure it's running on port 31301." << std::endl;
+        LOG_ERROR_IDENT(LogFmt() << "Cannot connect to Go wallet daemon. Make sure it's running on port 31301.");
         exception = "Go wallet daemon is not running. Please start the wallet daemon first.";
         return false;
     }
 
     // Check daemon health
     if (!walletService.isHealthy()) {
-        std::cerr << "Go wallet daemon is not healthy" << std::endl;
+        LOG_ERROR_IDENT(LogFmt() << "Go wallet daemon is not healthy");
         exception = "Go wallet daemon is not responding properly.";
         return false;
     }
 
     if (name == "markBackedUp") {
-        std::cout << "Marking wallet as backed up via Go daemon" << std::endl;
+        LOG_DEBUG_IDENT(LogFmt() << "Marking wallet as backed up via Go daemon");
 
         if (walletService.markWalletBackedUp()) {
             retval = CefV8Value::CreateString("success");
@@ -145,19 +160,19 @@ bool IdentityHandler::Execute(const CefString& name,
         nlohmann::json walletInfo = walletService.getWalletInfo();
 
         if (walletInfo.empty()) {
-            std::cerr << "Failed to get wallet info from Go daemon" << std::endl;
+            LOG_ERROR_IDENT(LogFmt() << "Failed to get wallet info from Go daemon");
             exception = "Failed to retrieve wallet info from Go wallet daemon.";
             return false;
         }
 
-        std::cout << "Wallet info from Go daemon: " << walletInfo.dump() << std::endl;
+        LOG_DEBUG_IDENT(LogFmt() << "Wallet info from Go daemon: " << walletInfo.dump());
 
         CefRefPtr<CefV8Value> walletObject = jsonToV8(walletInfo);
         retval = walletObject;
 
         return true;
     } catch (const std::exception& e) {
-        std::cerr << "Error in IdentityHandler: " << e.what() << std::endl;
+        LOG_ERROR_IDENT(LogFmt() << "Error in IdentityHandler: " << e.what());
         exception = "Exception in IdentityHandler: " + std::string(e.what());
         return false;
     }

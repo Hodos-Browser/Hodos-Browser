@@ -81,6 +81,7 @@
 #include <nlohmann/json.hpp>
 
 #include "../../include/core/Logger.h"
+#include "../../include/core/LogSafeUrl.h"
 #include "../../include/core/WindowManager.h"
 
 // Convenience macros for easier logging
@@ -152,7 +153,7 @@ static Tab* GetZoomTargetTab() {
     }
 
     if (hodos::IsInternalFrontendUrl(url)) {
-        LOG_WARNING_BROWSER("Ignoring native zoom for internal frontend page: " + url);
+        LOG_WARNING_BROWSER("Ignoring native zoom for internal frontend page: " + hodos::LogSafeUrl(url));
         return nullptr;
     }
 
@@ -855,7 +856,10 @@ static void SendTabListToWindow(BrowserWindow* bw) {
     CefRefPtr<CefListValue> response_args = cef_response->GetArgumentList();
     response_args->SetString(0, json_str);
     bw->header_browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, cef_response);
-    LOG_DEBUG_BROWSER("📑 Tab list sent to window " + std::to_string(bw->window_id) + ": " + json_str);
+    // ⛔ json_str is the whole tab list: every open tab's URL **and page title**. Dumping it
+    // put a live snapshot of the user's browsing into the log on every tab change. Count only.
+    LOG_DEBUG_BROWSER("📑 Tab list sent to window " + std::to_string(bw->window_id) +
+                      " (" + std::to_string(json_str.size()) + " bytes)");
 
 #ifdef _WIN32
     // Also push to the tab-list overlay if it's open, so header-initiated tab
@@ -1005,7 +1009,7 @@ void SimpleHandler::OnAddressChange(CefRefPtr<CefBrowser> browser,
     if (tab_id != -1) {
         std::string url_str = url.ToString();
         TabManager::GetInstance().UpdateTabURL(tab_id, url_str);
-        LOG_DEBUG_BROWSER("🔗 Tab " + std::to_string(tab_id) + " URL updated to: " + url_str);
+        LOG_DEBUG_BROWSER("🔗 Tab " + std::to_string(tab_id) + " URL updated to: " + hodos::LogSafeUrl(url_str));
 
         // Notify ephemeral cookie manager of navigation (for third-party cookie lifecycle)
         Tab* tab = TabManager::GetInstance().GetTab(tab_id);
@@ -1280,7 +1284,7 @@ bool SimpleHandler::OnCertificateError(CefRefPtr<CefBrowser> browser,
     CEF_REQUIRE_UI_THREAD();
 
     std::string url = request_url.ToString();
-    LOG_WARNING_BROWSER("🔒 Certificate error on: " + url + " (code: " + std::to_string(cert_error) + ")");
+    LOG_WARNING_BROWSER("🔒 Certificate error on: " + hodos::LogSafeUrl(url) + " (code: " + std::to_string(cert_error) + ")");
 
     // Extract domain from URL
     std::string domain;
@@ -1386,7 +1390,8 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
                 url.find("about:") != 0 &&
                 !url.empty()) {
 
-                LOG_INFO_BROWSER("📚 Recording history: " + url + " [" + title + "]");
+                // P2: was full URL + page title at INFO -- a second browsing history in plaintext.
+                LOG_DEBUG_BROWSER("📚 Recording history: " + hodos::LogSafeUrl(url));
                 HistoryManager::GetInstance().AddVisit(url, title, 0);
             }
         }
@@ -1396,17 +1401,17 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
     if (role_ == "brc100auth") {
             LOG_DEBUG_BROWSER("🔐 BRC-100 AUTH Loading state: " + std::string(isLoading ? "loading..." : "done"));
             LOG_DEBUG_BROWSER("🔐 BRC-100 AUTH Browser ID: " + std::to_string(browser->GetIdentifier()));
-            LOG_DEBUG_BROWSER("🔐 BRC-100 AUTH URL: " + browser->GetMainFrame()->GetURL().ToString());
+            LOG_DEBUG_BROWSER("🔐 BRC-100 AUTH URL: " + hodos::LogSafeUrl(browser->GetMainFrame()->GetURL().ToString()));
             LOG_DEBUG_BROWSER("🔐 BRC-100 AUTH Can go back: " + std::string(canGoBack ? "true" : "false"));
             LOG_DEBUG_BROWSER("🔐 BRC-100 AUTH Can go forward: " + std::string(canGoForward ? "true" : "false"));
         }
 
     if (role_ == "overlay") {
-        LOG_DEBUG_BROWSER("📡 Overlay URL: " + browser->GetMainFrame()->GetURL().ToString());
+        LOG_DEBUG_BROWSER("📡 Overlay URL: " + hodos::LogSafeUrl(browser->GetMainFrame()->GetURL().ToString()));
     }
 
     if (role_ == "backup") {
-        LOG_DEBUG_BROWSER("📡 Backup URL: " + browser->GetMainFrame()->GetURL().ToString());
+        LOG_DEBUG_BROWSER("📡 Backup URL: " + hodos::LogSafeUrl(browser->GetMainFrame()->GetURL().ToString()));
     }
 
     // Deferred shield domain injection: when cookie panel finishes loading,
@@ -1449,7 +1454,7 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
             std::string js = "if (window.setBookmarkContext) { window.setBookmarkContext('" +
                 EscapeForSingleQuotedJs(url) + "', '" + EscapeForSingleQuotedJs(title) + "'); }";
             frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-            LOG_INFO_BROWSER("Deferred bookmark context injected after page load: " + url);
+            LOG_INFO_BROWSER("Deferred bookmark context injected after page load: " + hodos::LogSafeUrl(url));
 
             CefRefPtr<CefBrowser> retry_browser = browser;
             std::string retry_url = url;
@@ -1619,7 +1624,7 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
 
                         LOG_DEBUG_BROWSER("🎨 Cosmetic P1: css=" + std::to_string(cosmetic.cssSelectors.size()) +
                             " script=" + std::to_string(cosmetic.injectedScript.size()) +
-                            " generichide=" + std::to_string(cosmetic.generichide) + " url=" + pageUrl);
+                            " generichide=" + std::to_string(cosmetic.generichide) + " url=" + hodos::LogSafeUrl(pageUrl));
 
                         if (!cosmetic.cssSelectors.empty()) {
                             CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("inject_cosmetic_css");
@@ -1629,7 +1634,7 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
                         }
 
                         if (!cosmetic.injectedScript.empty()) {
-                            LOG_INFO_BROWSER("💉 Injecting scriptlets for " + pageUrl +
+                            LOG_INFO_BROWSER("💉 Injecting scriptlets for " + hodos::LogSafeUrl(pageUrl) +
                                 " (" + std::to_string(cosmetic.injectedScript.size()) + " chars)");
 
                             // Send scriptlets to renderer via IPC for injection
@@ -1871,7 +1876,7 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
     } else if (role_ == "brc100auth") {
         LOG_DEBUG_BROWSER("🔐 BRC-100 Auth browser initialized.");
         LOG_DEBUG_BROWSER("🔐 BRC-100 Auth browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
-        LOG_DEBUG_BROWSER("🔐 BRC-100 Auth browser main frame URL: " + browser->GetMainFrame()->GetURL().ToString());
+        LOG_DEBUG_BROWSER("🔐 BRC-100 Auth browser main frame URL: " + hodos::LogSafeUrl(browser->GetMainFrame()->GetURL().ToString()));
 
         // CRITICAL: Set focus so keyboard input works in React input fields
         browser->GetHost()->SetFocus(true);
@@ -2020,7 +2025,7 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
         }, browser_ref), 150);
     }
 
-    LOG_DEBUG_BROWSER("🧭 Browser Created → role: " + role_ + ", ID: " + std::to_string(browser->GetIdentifier()) + ", IsPopup: " + (browser->IsPopup() ? "true" : "false") + ", MainFrame URL: " + browser->GetMainFrame()->GetURL().ToString());
+    LOG_DEBUG_BROWSER("🧭 Browser Created → role: " + role_ + ", ID: " + std::to_string(browser->GetIdentifier()) + ", IsPopup: " + (browser->IsPopup() ? "true" : "false") + ", MainFrame URL: " + hodos::LogSafeUrl(browser->GetMainFrame()->GetURL().ToString()));
 }
 
 bool SimpleHandler::DoClose(CefRefPtr<CefBrowser> browser) {
@@ -2065,52 +2070,52 @@ void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
     }
 #endif
 
-    std::cout << "🔴 OnBeforeClose ENTERED" << std::endl;
-    std::cout << "  Role: " << role_ << std::endl;
-    std::cout << "  Browser ID: " << browser->GetIdentifier() << std::endl;
-    std::cout << "  IsPopup: " << (browser->IsPopup() ? "YES" : "NO") << std::endl;
+    LOG_INFO_BROWSER(LogFmt() << "🔴 OnBeforeClose ENTERED");
+    LOG_INFO_BROWSER(LogFmt() << "  Role: " << role_);
+    LOG_INFO_BROWSER(LogFmt() << "  Browser ID: " << browser->GetIdentifier());
+    LOG_INFO_BROWSER(LogFmt() << "  IsPopup: " << (browser->IsPopup() ? "YES" : "NO"));
 
     LOG_DEBUG_BROWSER("🔴 OnBeforeClose for role: " + role_ + ", Browser ID: " + std::to_string(browser->GetIdentifier()));
 
     // CRITICAL: Check if this is a popup (DevTools, etc.)
     if (browser->IsPopup()) {
-        std::cout << "  → Detected as popup, skipping cleanup" << std::endl;
+        LOG_INFO_BROWSER(LogFmt() << "  → Detected as popup, skipping cleanup");
         LOG_DEBUG_BROWSER("🔧 Popup browser (DevTools or other) closing - ignoring");
-        std::cout << "🔴 OnBeforeClose EXITING (popup)" << std::endl;
+        LOG_INFO_BROWSER(LogFmt() << "🔴 OnBeforeClose EXITING (popup)");
         return;
     }
 
-    std::cout << "  → Not a popup, checking if tab browser..." << std::endl;
+    LOG_INFO_BROWSER(LogFmt() << "  → Not a popup, checking if tab browser...");
 
     // Check if this is a tab browser (both platforms)
     int tab_id = ExtractTabIdFromRole(role_);
-    std::cout << "  → Extracted tab ID: " << tab_id << std::endl;
+    LOG_INFO_BROWSER(LogFmt() << "  → Extracted tab ID: " << tab_id);
 
     if (tab_id != -1) {
-        std::cout << "  → Is tab browser, calling OnTabBrowserClosed" << std::endl;
+        LOG_INFO_BROWSER(LogFmt() << "  → Is tab browser, calling OnTabBrowserClosed");
         TabManager::GetInstance().OnTabBrowserClosed(tab_id);
         LOG_DEBUG_BROWSER("📑 Tab browser closed callback: ID " + std::to_string(tab_id));
-        std::cout << "🔴 OnBeforeClose EXITING (tab)" << std::endl;
+        LOG_INFO_BROWSER(LogFmt() << "🔴 OnBeforeClose EXITING (tab)");
         return;
     }
 
-    std::cout << "  → Not a tab, checking overlays..." << std::endl;
+    LOG_INFO_BROWSER(LogFmt() << "  → Not a tab, checking overlays...");
 
     // Handle overlay browser cleanup via WindowManager
     BrowserWindow* owner_win = GetOwnerWindow();
     if (owner_win) {
         CefRefPtr<CefBrowser> existing = owner_win->GetBrowserForRole(role_);
         if (existing && existing->GetIdentifier() == browser->GetIdentifier()) {
-            std::cout << "  → Clearing " << role_ << " browser from BrowserWindow" << std::endl;
+            LOG_INFO_BROWSER(LogFmt() << "  → Clearing " << role_ << " browser from BrowserWindow");
             owner_win->ClearBrowserForRole(role_);
         } else {
-            std::cout << "  → No matching browser for role (might be DevTools)" << std::endl;
+            LOG_INFO_BROWSER(LogFmt() << "  → No matching browser for role (might be DevTools)");
         }
     } else {
-        std::cout << "  → No owner window found for window_id " << window_id_ << std::endl;
+        LOG_INFO_BROWSER(LogFmt() << "  → No owner window found for window_id " << window_id_);
     }
 
-    std::cout << "🔴 OnBeforeClose EXITING (overlay)" << std::endl;
+    LOG_INFO_BROWSER(LogFmt() << "🔴 OnBeforeClose EXITING (overlay)");
 }
 
 bool SimpleHandler::OnBeforePopup(
@@ -2162,7 +2167,7 @@ bool SimpleHandler::OnBeforePopup(
     // with window.opener preserved for postMessage (OAuth, payment flows, etc.).
     // Converting these to tabs breaks window.opener and kills auth callbacks.
     if (target_disposition == CEF_WOD_NEW_POPUP) {
-        LOG_INFO_BROWSER("Allowing popup as real window (window.opener preserved): " + url);
+        LOG_INFO_BROWSER("Allowing popup as real window (window.opener preserved): " + hodos::LogSafeUrl(url));
         return false;
     }
 
@@ -2696,7 +2701,8 @@ bool SimpleHandler::OnProcessMessageReceived(
         CefRefPtr<CefProcessMessage> cef_response = CefProcessMessage::Create("tab_list_response");
         cef_response->GetArgumentList()->SetString(0, json_str);
         browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, cef_response);
-        LOG_DEBUG_BROWSER("📑 Tab list sent to window " + std::to_string(wid) + " (on-demand): " + json_str);
+        LOG_DEBUG_BROWSER("📑 Tab list sent to window " + std::to_string(wid) + " (on-demand, " +
+                          std::to_string(json_str.size()) + " bytes)");
         return true;
     }
 
@@ -4072,7 +4078,7 @@ bool SimpleHandler::OnProcessMessageReceived(
     if (message_name == "create_wallet") {
         LOG_DEBUG_BROWSER("🆕 Create wallet requested");
         LOG_DEBUG_BROWSER("🆕 Browser ID: " + std::to_string(browser->GetIdentifier()));
-        LOG_DEBUG_BROWSER("🆕 Frame URL: " + browser->GetMainFrame()->GetURL().ToString());
+        LOG_DEBUG_BROWSER("🆕 Frame URL: " + hodos::LogSafeUrl(browser->GetMainFrame()->GetURL().ToString()));
 
         nlohmann::json response;
 
@@ -5938,7 +5944,7 @@ bool SimpleHandler::OnProcessMessageReceived(
             browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
             LOG_DEBUG_BROWSER("📤 Address data sent back to browser");
             LOG_DEBUG_BROWSER("🔍 Browser ID: " + std::to_string(browser->GetIdentifier()));
-            LOG_DEBUG_BROWSER("🔍 Frame URL: " + browser->GetMainFrame()->GetURL().ToString());
+            LOG_DEBUG_BROWSER("🔍 Frame URL: " + hodos::LogSafeUrl(browser->GetMainFrame()->GetURL().ToString()));
 
         } catch (const std::exception& e) {
             LOG_DEBUG_BROWSER("❌ Address generation failed: " + std::string(e.what()));
@@ -5972,7 +5978,7 @@ bool SimpleHandler::OnProcessMessageReceived(
             browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
             LOG_DEBUG_BROWSER("📤 Address data sent back to browser");
             LOG_DEBUG_BROWSER("🔍 Browser ID: " + std::to_string(browser->GetIdentifier()));
-            LOG_DEBUG_BROWSER("🔍 Frame URL: " + browser->GetMainFrame()->GetURL().ToString());
+            LOG_DEBUG_BROWSER("🔍 Frame URL: " + hodos::LogSafeUrl(browser->GetMainFrame()->GetURL().ToString()));
 
         } catch (const std::exception& e) {
             LOG_DEBUG_BROWSER("❌ Address generation failed: " + std::string(e.what()));
@@ -6124,39 +6130,77 @@ bool SimpleHandler::OnProcessMessageReceived(
     }
 
 
-        if (message_name == "get_balance") {
+    if (message_name == "get_balance") {
         LOG_DEBUG_BROWSER("💰 Get balance requested from browser ID: " + std::to_string(browser->GetIdentifier()));
 
-        try {
-            // Call WalletService to get balance (no arguments needed)
-            WalletService walletService;
+        // P2a-A2: the wallet call below is SYNCHRONOUS. Running it inline would run it on
+        // the browser-process UI thread -- the thread that drives EVERY browser in the
+        // process, ordinary tabs included. A wallet that accepts the connection and never
+        // answers therefore froze the whole browser for the length of the timeout, and the
+        // balance poller re-armed it, so it never self-healed.
+        //
+        // MEASURED pre-fix (MEASUREMENTS.md M5, two runs): CDP /json/list 31.8 s / 31.4 s
+        // against a 1 ms control, and 128 s to navigate an UNRELATED tab to example.com.
+        // That is the beta.1 "web pages stalled too" symptom.
+        //
+        // ⭐ The renderer contract was ALREADY asynchronous -- initWindowBridge.ts sends
+        // get_balance and waits for get_balance_response / get_balance_error with its own
+        // timeout -- so only the C++ side ever blocked. No JavaScript changes.
+        //
+        // ⛔ The lever is read ONCE, here, in the BROWSER process. Never move an env gate
+        // into a child: a sandboxed child does not reliably inherit the environment, and
+        // that assumption killed every renderer during the sandbox work (S2).
+        static const bool kForceSyncOnUiThread = [] {
+            const char* v = std::getenv("HODOS_WALLET_SYNC_UI");
+            return v && std::string(v) == "1";
+        }();
 
-            // Pass empty JSON object to satisfy the method signature
-            nlohmann::json emptyData = nlohmann::json::object();
-            nlohmann::json result = walletService.getBalance(emptyData);
+        // Captureless so it can be bound into a CEF task. Does the blocking wallet call,
+        // then hops the answer back to TID_UI -- CefBrowser is only safe to touch there.
+        auto fetchAndDeliver = [](CefRefPtr<CefBrowser> target) {
+            std::string payload;
+            bool ok = true;
+            try {
+                WalletService walletService;
+                payload = walletService.getBalance(nlohmann::json::object()).dump();
+            } catch (const std::exception& e) {
+                nlohmann::json err;
+                err["error"] = e.what();
+                payload = err.dump();
+                ok = false;
+            } catch (...) {
+                nlohmann::json err;
+                err["error"] = "unknown error";
+                payload = err.dump();
+                ok = false;
+            }
 
-            LOG_DEBUG_BROWSER("✅ Balance result: " + result.dump());
+            // P0-A8 convention, kept: length only. The dump carries the user's balance in
+            // satoshis and the BSV price, and this line ran ~2,551 times per production
+            // session straight into a plaintext log.
+            LOG_DEBUG_BROWSER(std::string("✅ Balance fetch ") + (ok ? "ok" : "failed")
+                              + " (" + std::to_string(payload.length()) + " bytes)");
 
-            // Send result back to the requesting browser
-            CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("get_balance_response");
-            CefRefPtr<CefListValue> responseArgs = response->GetArgumentList();
-            responseArgs->SetString(0, result.dump());
+            CefPostTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b, std::string p, bool good) {
+                // The browser may have closed while we were waiting on the wallet.
+                if (!b) return;
+                CefRefPtr<CefFrame> frame = b->GetMainFrame();
+                if (!frame) return;
+                CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create(
+                    good ? "get_balance_response" : "get_balance_error");
+                response->GetArgumentList()->SetString(0, p);
+                frame->SendProcessMessage(PID_RENDERER, response);
+            }, target, payload, ok));
+        };
 
-            browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
-            LOG_DEBUG_BROWSER("📤 Balance response sent back to browser");
-
-        } catch (const std::exception& e) {
-            LOG_DEBUG_BROWSER("❌ Get balance failed: " + std::string(e.what()));
-
-            // Send error response
-            nlohmann::json errorResponse;
-            errorResponse["error"] = e.what();
-
-            CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("get_balance_error");
-            CefRefPtr<CefListValue> responseArgs = response->GetArgumentList();
-            responseArgs->SetString(0, errorResponse.dump());
-
-            browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
+        if (kForceSyncOnUiThread) {
+            // 🔴 P2a-A2's negative control, on the SAME binary: restores the pre-fix
+            // blocking path so the freeze can be reproduced without swapping builds.
+            LOG_WARNING_BROWSER("⚠️ HODOS_WALLET_SYNC_UI=1 — balance runs ON the UI thread "
+                                "(P2a-A2 negative control; expect the browser to freeze)");
+            fetchAndDeliver(browser);
+        } else {
+            CefPostTask(TID_FILE_USER_BLOCKING, base::BindOnce(fetchAndDeliver, browser));
         }
 
         return true;
@@ -8142,7 +8186,7 @@ bool SimpleHandler::OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
             bool skipScriptlets = !AdblockCache::GetInstance().isScriptletsEnabled(navUrl);
             auto cosmetic = AdblockCache::GetInstance().fetchCosmeticResources(navUrl, skipScriptlets);
             if (!cosmetic.injectedScript.empty()) {
-                LOG_INFO_BROWSER("💉 OnBeforeBrowse: pre-caching scriptlets for " + navUrl +
+                LOG_INFO_BROWSER("💉 OnBeforeBrowse: pre-caching scriptlets for " + hodos::LogSafeUrl(navUrl) +
                     " (" + std::to_string(cosmetic.injectedScript.size()) + " chars)");
                 CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("preload_cosmetic_script");
                 CefRefPtr<CefListValue> args = msg->GetArgumentList();
@@ -8454,7 +8498,10 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
     std::string connection = request->GetHeaderByName("Connection");
     std::string upgrade = request->GetHeaderByName("Upgrade");
 
-    LOG_DEBUG_BROWSER("🌐 Resource request: " + url + " (role: " + role_ + ")");
+    // P2: DEBUG, so the level gate keeps this out of production entirely -- but redacted
+    // anyway so a dev log is not a browsing history either. 31% of the shipped 2.5 GB
+    // was this one line.
+    LOG_DEBUG_BROWSER("🌐 Resource request: " + hodos::LogSafeUrl(url) + " (role: " + role_ + ")");
     LOG_DEBUG_BROWSER("🌐 Method: " + method + ", Connection: " + connection + ", Upgrade: " + upgrade);
 
     // Production frontend serving: if frontend/ exists next to .exe,
@@ -9701,7 +9748,7 @@ bool SimpleHandler::OnContextMenuCommand(CefRefPtr<CefBrowser> browser,
         std::string url = browser->GetMainFrame()->GetURL().ToString();
         if (!url.empty()) {
             SettingsManager::GetInstance().SetHomepage(url);
-            LOG_INFO_BROWSER("🏠 Homepage set to: " + url);
+            LOG_INFO_BROWSER("🏠 Homepage set to: " + hodos::LogSafeUrl(url));
         }
         return true;
     }
@@ -9833,7 +9880,8 @@ bool SimpleHandler::OnContextMenuCommand(CefRefPtr<CefBrowser> browser,
 bool SimpleHandler::CanDownload(CefRefPtr<CefBrowser> browser,
                                 const CefString& url,
                                 const CefString& request_method) {
-    LOG_INFO_BROWSER("📥 Download requested: " + url.ToString());
+    // ⛔ A download URL routinely carries a signed, single-use token in its query string.
+    LOG_INFO_BROWSER("📥 Download requested: " + hodos::LogSafeUrl(url.ToString()));
     return true;
 }
 

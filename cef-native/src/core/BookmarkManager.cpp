@@ -1,5 +1,6 @@
 #include "../../include/core/BookmarkManager.h"
 #include "../../include/core/Logger.h"
+#include "../../include/core/LogSafeUrl.h"
 
 #include <nlohmann/json.hpp>
 #include <chrono>
@@ -373,7 +374,7 @@ std::string BookmarkManager::AddBookmark(const std::string& url,
         }
     }
 
-    LOG_INFO_BM("Added bookmark: " + url + " (id: " + std::to_string(bookmark_id) + ")");
+    LOG_INFO_BM("Added bookmark: " + hodos::LogSafeUrl(url) + " (id: " + std::to_string(bookmark_id) + ")");
 
     response["success"] = true;
     response["id"] = bookmark_id;

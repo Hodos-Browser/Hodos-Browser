@@ -172,6 +172,12 @@ inline bool EnforceDevSafeguard(const std::string& exe_path) {
         // NOT flip it into the dev namespace. Scrub it (updates getenv AND, on UCRT,
         // the environment block that child processes inherit) and continue in prod.
         if (dev_flag) {
+            // ⛔ std::cerr HERE IS DELIBERATE — do not "fix" it to Logger like the rest of
+            // the tree in beta.3 Phase 2b. EnforceDevSafeguard runs BEFORE
+            // Logger::Initialize (RunHodosMain calls it while resolving whether we may run
+            // at all), so a Logger call would go nowhere and the developer would see
+            // nothing. The audience is a human at a terminal, and the process may be about
+            // to refuse to start.
             std::cerr << "========================================================" << std::endl;
             std::cerr << "  DEV/PROD GUARD: HODOS_DEV=1 is set but this is NOT a dev" << std::endl;
             std::cerr << "  build. Ignoring the stray flag and using the PRODUCTION" << std::endl;

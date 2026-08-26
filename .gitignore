@@ -89,3 +89,11 @@ development-docs/0.4.0/chromium-rebuild/baseline_150/*.png
 development-docs/0.4.0/chromium-rebuild/.farbling_worker_probe_state.json
 
 bash.exe.stackdump
+
+# Artifacts written by cef-native/tests (logger_policy_test, logger_concurrency_test,
+# audit_log_test). They exercise real rotation and retention, so they write real files —
+# into the working directory of whichever shell ran hodos_tests.
+logger_*.log
+logger_*.log.*
+audit_test_*/
+logger_retention_dir/

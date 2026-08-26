@@ -59,6 +59,8 @@ std::string g_pendingModalDomain = "";
 #endif
 #include "../../include/core/SyncHttpClient.h"
 #include "../../include/core/Logger.h"
+#include "../../include/core/AuditLog.h"
+#include "../../include/core/LogSafeUrl.h"
 
 // Logging macros for HTTP interceptor
 #define LOG_DEBUG_HTTP(msg) Logger::Log(msg, 0, 2)
@@ -1012,6 +1014,17 @@ void OnWalletCallSuccess(int browserId,
                          bool wasAutoApprovedPayment,
                          const std::string& endpoint) {
     if (!wasAutoApprovedPayment) return;
+
+    // R-GOLD's audit half. The only record that a payment was auto-approved WITHOUT asking
+    // the user used to be the LOG_DEBUG_HTTP line at the bottom of this function -- which a
+    // production level gate silences and log rotation deletes. A payment the user never
+    // confirmed must leave a durable trace, so it also goes to the audit log.
+    //
+    // ⛔ Deliberately BEFORE the early returns below: whether the gold pill can be drawn
+    // depends on a header browser existing, and "the tab strip was not available" must never
+    // mean "the payment went unrecorded".
+    hodos::AuditEvent("payment.auto_approved", domain,
+                      "cents=" + std::to_string(cents) + " endpoint=" + endpoint);
 
     // OQ5 — session spend is now recorded in Rust at payment-decision time
     // (dispatch_payment on Silent / X-User-Approved replay) for both
@@ -3035,6 +3048,7 @@ static bool tryHandlePendingResponse(
         return false;
     }
 
+    hodos::AuditEvent("consent.prompt_shown", modalCtx.domain, "type=" + env.promptType);
     LOG_DEBUG_HTTP("🛡️ 202 PENDING intercepted — modal opened (requestId="
         + newRequestId + ", promptType=" + env.promptType + ", approvalId=" + env.approvalId
         + ", reason=" + env.engineReason + ", domain=" + modalCtx.domain + ")");
@@ -4051,7 +4065,7 @@ CefRefPtr<CefResourceHandler> HttpRequestInterceptor::GetResourceHandler(
 
     if (frame) {
         LOG_DEBUG_HTTP("🌐 Frame exists: YES");
-        LOG_DEBUG_HTTP("🌐 Frame URL: " + frame->GetURL().ToString());
+        LOG_DEBUG_HTTP("🌐 Frame URL: " + hodos::LogSafeUrl(frame->GetURL().ToString()));
         LOG_DEBUG_HTTP("🌐 Frame Name: " + frame->GetName().ToString());
         LOG_DEBUG_HTTP("🌐 Frame Identifier: " + frame->GetIdentifier().ToString());
         LOG_DEBUG_HTTP("🌐 Frame Is Main: " + std::string(frame->IsMain() ? "YES" : "NO"));
@@ -4064,7 +4078,7 @@ CefRefPtr<CefResourceHandler> HttpRequestInterceptor::GetResourceHandler(
         LOG_DEBUG_HTTP("🌐 Browser exists: YES");
         CefRefPtr<CefFrame> mainFrame = browser->GetMainFrame();
         if (mainFrame) {
-            LOG_DEBUG_HTTP("🌐 Main Frame URL: " + mainFrame->GetURL().ToString());
+            LOG_DEBUG_HTTP("🌐 Main Frame URL: " + hodos::LogSafeUrl(mainFrame->GetURL().ToString()));
             LOG_DEBUG_HTTP("🌐 Main Frame Name: " + mainFrame->GetName().ToString());
             LOG_DEBUG_HTTP("🌐 Main Frame Identifier: " + mainFrame->GetIdentifier().ToString());
         } else {
@@ -4075,7 +4089,7 @@ CefRefPtr<CefResourceHandler> HttpRequestInterceptor::GetResourceHandler(
     }
 
     // Log request information
-    LOG_DEBUG_HTTP("🌐 Request URL: " + request->GetURL().ToString());
+    LOG_DEBUG_HTTP("🌐 Request URL: " + hodos::LogSafeUrl(request->GetURL().ToString()));
     LOG_DEBUG_HTTP("🌐 Request Method: " + request->GetMethod().ToString());
     LOG_DEBUG_HTTP("🌐 Request Referrer URL: " + request->GetReferrerURL().ToString());
     LOG_DEBUG_HTTP("🌐 Request Referrer Policy: " + std::to_string(request->GetReferrerPolicy()));
@@ -4298,10 +4312,10 @@ public:
                 else { escaped += c; }
             }
             std::string js = "window.location.replace('" + escaped + "');";
-            LOG_INFO_HTTP("💰 BRC-121: location.replace " + url_);
+            LOG_INFO_HTTP("💰 BRC-121: location.replace " + hodos::LogSafeUrl(url_));
             frame->ExecuteJavaScript(js, frame->GetURL(), 0);
         } else {
-            LOG_INFO_HTTP("💰 BRC-121: reloading " + url_);
+            LOG_INFO_HTTP("💰 BRC-121: reloading " + hodos::LogSafeUrl(url_));
             frame->LoadURL(url_);
         }
     }
@@ -4768,7 +4782,7 @@ CefRefPtr<CefResourceHandler> InstallAsync402HandlerIfPending(
     if (!popPaidRetryContext(browserId, url, ctx)) {
         return nullptr;
     }
-    LOG_INFO_HTTP("💰 BRC-121: installing Async402ResourceHandler for " + url
+    LOG_INFO_HTTP("💰 BRC-121: installing Async402ResourceHandler for " + hodos::LogSafeUrl(url)
                   + " (browser " + std::to_string(browserId) + ")");
     return new Async402ResourceHandler(std::move(ctx), browser);
 }
@@ -5095,7 +5109,7 @@ void MarkBrc121PaymentApproved(const std::string& url) {
     std::string id = (it != s_brc121_pending_approvals.end()) ? it->second : std::string();
     if (it != s_brc121_pending_approvals.end()) s_brc121_pending_approvals.erase(it);
     s_brc121_armed_approvals[url] = id;
-    LOG_INFO_HTTP("💰 BRC-121: payment approved — armed replay approvalId for " + url);
+    LOG_INFO_HTTP("💰 BRC-121: payment approved — armed replay approvalId for " + hodos::LogSafeUrl(url));
 }
 
 // Phase 1 polish — failed-URL registry. RegisterBrc121FailedUrl is called

@@ -90,7 +90,8 @@ void WalletService::setBaseUrl(const std::string& url) {
 
 // ========== HTTP Request Implementation (libcurl) ==========
 
-nlohmann::json WalletService::makeHttpRequest(const std::string& method, const std::string& endpoint, const std::string& body) {
+nlohmann::json WalletService::makeHttpRequest(const std::string& method, const std::string& endpoint,
+                                              const std::string& body, int timeoutMs) {
     LOG_DEBUG_WALLET("🔍 HTTP " + method + " " + endpoint);
 
     CURL* curl = curl_easy_init();
@@ -126,9 +127,15 @@ nlohmann::json WalletService::makeHttpRequest(const std::string& method, const s
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_body);
 
-    // Set timeout
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    // P2a-A1: per-call budget. This used to be a flat 30 s for EVERY endpoint -- the same
+    // exposure Windows had from WinHTTP's default -- and because the call is synchronous on
+    // the CEF UI thread, a non-answering wallet froze the whole browser. macOS carries the
+    // identical defect; it was simply explicit here rather than inherited. MEASUREMENTS.md M5.
+    //
+    // _MS variants so a sub-second budget is expressible; the second-granularity CURLOPT_TIMEOUT
+    // would silently round 2000 ms to 2 s and 500 ms to 0 == "no timeout".
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(timeoutMs));
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 1000L);
 
     // Perform request
     CURLcode res = curl_easy_perform(curl);
@@ -251,15 +258,17 @@ nlohmann::json WalletService::signTransaction(const nlohmann::json& transactionD
 }
 
 nlohmann::json WalletService::broadcastTransaction(const nlohmann::json& transactionData) {
-    return makeHttpRequest("POST", "/processAction", transactionData.dump());
+    return makeHttpRequest("POST", "/processAction", transactionData.dump(),
+                           kWalletBroadcastTimeoutMs);
 }
 
 nlohmann::json WalletService::sendTransaction(const nlohmann::json& transactionData) {
-    return makeHttpRequest("POST", "/transaction/send", transactionData.dump());
+    return makeHttpRequest("POST", "/transaction/send", transactionData.dump(),
+                           kWalletBroadcastTimeoutMs);
 }
 
 nlohmann::json WalletService::getBalance(const nlohmann::json& balanceData) {
-    return makeHttpRequest("GET", "/wallet/balance", "");
+    return makeHttpRequest("GET", "/wallet/balance", "", kWalletBalanceTimeoutMs);
 }
 
 nlohmann::json WalletService::getTransactionHistory() {
