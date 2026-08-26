@@ -115,6 +115,16 @@ public:
     // CefDisplayHandler methods
     void OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString& title) override;
 
+    // Browser-process console channel. The 15 overlays are windowless (OSR) browsers with no
+    // devtools surface of their own and renderer-process logging is dead, so a page in an overlay
+    // has no way to report anything. This is that way: console output arrives here, in the browser
+    // process, tagged with the overlay's role.
+    bool OnConsoleMessage(CefRefPtr<CefBrowser> browser,
+                          cef_log_severity_t level,
+                          const CefString& message,
+                          const CefString& source,
+                          int line) override;
+
     bool OnCursorChange(CefRefPtr<CefBrowser> browser,
                         CefCursorHandle cursor,
                         cef_cursor_type_t type,

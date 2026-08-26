@@ -118,6 +118,29 @@ $Gates = @(
         ProbeExt = '.cpp'
     },
     [pscustomobject]@{
+        Id       = 'G8'
+        Name     = 'Raw (unconverted) coordinate assigned to a CefMouseEvent - the OSR overlay DPI bug'
+        Owner    = 'Phase 1 (WS1)'
+        # The ~15 overlays are WINDOWLESS CEF browsers. Their WndProcs receive PHYSICAL client
+        # pixels; CefMouseEvent's x/y are VIEW coordinates, and our view is LOGICAL
+        # (MyOverlayRenderHandler::GetViewRect divides by the DPI scale). Both are `int`, so
+        # nothing in the type system distinguishes them -- which is how 47 call sites shipped
+        # unconverted. MEASURED at 125%: the user aimed at one control and a DIFFERENT control
+        # received the click, and the bottom 20% of every overlay was dead.
+        # All 47 sites now go through hodos::ClientToViewPoint (include/core/OverlayMouse.h),
+        # which does not match this pattern. A new direct assignment is the regression.
+        # ⚠️ Windows only, deliberately. macOS assigns from NSView `location`, which is already
+        #    in logical points -- 62 such lines in cef_browser_shell_mac.mm are CORRECT. Adding
+        #    .mm here would produce a 62-violation baseline that hides the one line that matters.
+        Baseline = 0
+        Target   = 0
+        Paths    = @('cef-native')
+        Include  = @('*.cpp', '*.h')
+        Pattern  = '\w*[Ee]vent\.(x|y) *= *[^;]'
+        Probe    = 'mouse_event.x = pt.x;'
+        ProbeExt = '.cpp'
+    },
+    [pscustomobject]@{
         Id       = 'G5'
         Name     = 'Full wallet HTTP response bodies reaching a sink (the mnemonic-leak shape)'
         Owner    = 'Phase 0'

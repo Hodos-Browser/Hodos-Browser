@@ -35,6 +35,7 @@
 #include "include/handlers/simple_handler.h"
 #include "include/handlers/simple_render_process_handler.h"
 #include "include/handlers/simple_app.h"
+#include "include/core/OverlayMouse.h"
 #include "include/core/AppPaths.h"
 #include "include/core/ChildProcessLogSink.h"
 #include "include/core/WalletService.h"
@@ -87,6 +88,7 @@
 #include <atomic>
 #include <chrono>
 #include <sstream>
+#include <set>
 #include <memory>
 
 HWND g_hwnd = nullptr;
@@ -239,6 +241,11 @@ static HANDLE g_instance_mutex = nullptr;
 void LaunchAdblockProcess();   // Phase 1: CreateProcess only (non-blocking)
 void WaitForAdblockHealth();   // Phase 2: Poll /health with exponential backoff
 void StopAdblockServer();
+
+// Phase 1 diagnostics switch (HODOS_MOUSE_PROBE=1). Defined further down, next to the
+// mouse probe; forward-declared here because ShellWindowProc's DPI instrumentation sits
+// above that definition. Off by default, so none of it costs anything in a normal run.
+static bool MouseProbeEnabled();
 
 // Convenience macros for easier logging
 #define LOG_DEBUG(msg) Logger::Log(msg, 0, 0)
@@ -1130,6 +1137,19 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             int width = rect.right - rect.left;
             int height = rect.bottom - rect.top;
 
+            // Phase 1 diagnostic. This is where the header/tab/overlay relayout actually
+            // happens, and everything downstream of WM_DPICHANGED depends on it firing with
+            // the NEW dpi. If a monitor drag produces a dpichanged line with no size line
+            // after it — or a size line still carrying the old dpi — that is the bug.
+            if (MouseProbeEnabled()) {
+                std::ostringstream d;
+                d << "HODOS_PROBE wmsize client=" << width << "x" << height
+                  << " dpi=" << GetDpiForWindow(hwnd)
+                  << " headerPx=" << GetHeaderHeightPx(hwnd)
+                  << " wParam=" << wParam;  // 0=RESTORED 1=MINIMIZED 2=MAXIMIZED
+                LOG_INFO(d.str());
+            }
+
             // Picker mode: one full-window chooser browser, no tabs. Fill the
             // client with the header browser and skip the normal header/tab layout.
             if (g_picker_mode) {
@@ -1631,24 +1651,75 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             // Accept Windows' suggested rect when dragging between monitors with different DPI.
             // SetWindowPos triggers WM_SIZE which recalculates header/tab layout via GetHeaderHeightPx().
             RECT* suggested = reinterpret_cast<RECT*>(lParam);
+
+            // Phase 1 diagnostic: the owner reports that dragging between monitors of
+            // different scale does not re-lay-out until the window is maximized, and that
+            // it is INTERMITTENT. Intermittent means timing, and a timing claim argued from
+            // source is exactly what went wrong twice in Phase 0.9 — so measure it.
+            // Records: the DPI Windows is announcing, the DPI the window reports before and
+            // after, the rect we were handed, and the rect we actually ended up with.
+            RECT dbgBefore = {0, 0, 0, 0};
+            UINT dbgDpiBefore = 0;
+            const bool dbgOn = MouseProbeEnabled();
+            if (dbgOn) {
+                GetWindowRect(hwnd, &dbgBefore);
+                dbgDpiBefore = GetDpiForWindow(hwnd);
+            }
+
             SetWindowPos(hwnd, nullptr,
                 suggested->left, suggested->top,
                 suggested->right - suggested->left,
                 suggested->bottom - suggested->top,
                 SWP_NOZORDER | SWP_NOACTIVATE);
 
+            if (dbgOn) {
+                RECT dbgAfter = {0, 0, 0, 0};
+                GetWindowRect(hwnd, &dbgAfter);
+                std::ostringstream d;
+                d << "HODOS_PROBE dpichanged announced_dpi=" << LOWORD(wParam)
+                  << " dpi_before=" << dbgDpiBefore
+                  << " dpi_after=" << GetDpiForWindow(hwnd)
+                  << " rect_before=" << dbgBefore.left << "," << dbgBefore.top << " "
+                  << (dbgBefore.right - dbgBefore.left) << "x" << (dbgBefore.bottom - dbgBefore.top)
+                  << " suggested=" << suggested->left << "," << suggested->top << " "
+                  << (suggested->right - suggested->left) << "x" << (suggested->bottom - suggested->top)
+                  << " rect_after=" << dbgAfter.left << "," << dbgAfter.top << " "
+                  << (dbgAfter.right - dbgAfter.left) << "x" << (dbgAfter.bottom - dbgAfter.top)
+                  // ⚠️ Report the DELTA, not a boolean. The first version of this line tested
+                  // exact equality and printed applied=NO on every 96->120 transition — but
+                  // the difference was ONE pixel, Windows clamping 1033 to the monitor's
+                  // 1032 work-area height. A diagnostic that cries failure on a legitimate
+                  // clamp sends the next reader hunting a bug that is not there.
+                  << " delta=" << ((dbgAfter.right - dbgAfter.left) - (suggested->right - suggested->left))
+                  << "x" << ((dbgAfter.bottom - dbgAfter.top) - (suggested->bottom - suggested->top));
+                LOG_INFO(d.str());
+            }
+
             // Notify all CEF browsers in this window that screen info changed,
             // so they re-render at the new DPI scale factor.
             BrowserWindow* dpiBw = reinterpret_cast<BrowserWindow*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
             CefRefPtr<CefBrowser> hdrBrowser = dpiBw ? dpiBw->header_browser : SimpleHandler::GetHeaderBrowser();
+            // ⛔ NotifyScreenInfoChanged and WasResized must ALWAYS travel together here.
+            // MEASURED 2026-08-25 across ~12 monitor drags: WM_SIZE arrives ~6 ms BEFORE
+            // WM_DPICHANGED and already carries the new DPI. So the header is re-laid-out at
+            // the new pixel size while CEF still holds the OLD device_scale_factor; this
+            // handler then updates the scale but never asks for a re-layout, and its
+            // SetWindowPos requests a size ~1 px off what the window already is, which
+            // Windows clamps — so no further WM_SIZE follows. The header stays drawn at the
+            // new size with the old scale until something forces another WM_SIZE, which is
+            // why maximizing "fixed" it. A slow drag emits extra WM_SIZE traffic after the
+            // DPI change and self-corrects; a fast drag does not. That is the reported
+            // intermittency, and the reason it looked unreproducible.
             if (hdrBrowser) {
                 hdrBrowser->GetHost()->NotifyScreenInfoChanged();
+                hdrBrowser->GetHost()->WasResized();
             }
             int dpiWinId = dpiBw ? dpiBw->window_id : 0;
             std::vector<Tab*> dpiTabs = TabManager::GetInstance().GetAllTabs();
             for (Tab* tab : dpiTabs) {
                 if (tab && tab->window_id == dpiWinId && tab->browser) {
                     tab->browser->GetHost()->NotifyScreenInfoChanged();
+                    tab->browser->GetHost()->WasResized();  // see the header note above
                 }
             }
 
@@ -1663,13 +1734,29 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                         b->GetHost()->WasResized();
                     }
                 };
+                // ⛔ Keep this list exhaustive — every overlay browser, no exceptions.
+                // It previously covered 7 of 15. The omissions included the NOTIFICATION
+                // overlay, which hosts every permission, connect and payment modal: after a
+                // move between monitors of different scale it kept a stale
+                // device_scale_factor and rendered at the wrong size on the money path.
+                // WM_SIZE calls WasResized() for most of these, but WasResized only
+                // re-queries GetViewRect — only NotifyScreenInfoChanged re-queries
+                // GetScreenInfo, which is where the scale factor comes from.
                 notifyOverlay(SimpleHandler::GetSettingsBrowser());
                 notifyOverlay(SimpleHandler::GetWalletPanelBrowser());
+                notifyOverlay(SimpleHandler::GetWalletBrowser());
                 notifyOverlay(SimpleHandler::GetOmniboxBrowser());
                 notifyOverlay(SimpleHandler::GetCookiePanelBrowser());
                 notifyOverlay(SimpleHandler::GetDownloadPanelBrowser());
                 notifyOverlay(SimpleHandler::GetProfilePanelBrowser());
                 notifyOverlay(SimpleHandler::GetMenuBrowser());
+                notifyOverlay(SimpleHandler::GetNotificationBrowser());
+                notifyOverlay(SimpleHandler::GetBackupBrowser());
+                notifyOverlay(SimpleHandler::GetBRC100AuthBrowser());
+                notifyOverlay(SimpleHandler::GetSettingsMenuBrowser());
+                notifyOverlay(SimpleHandler::GetBookmarksPanelBrowser());
+                notifyOverlay(SimpleHandler::GetSiteInfoPanelBrowser());
+                notifyOverlay(SimpleHandler::GetTabListPanelBrowser());
             }
             return 0;
         }
@@ -1693,8 +1780,7 @@ LRESULT CALLBACK SettingsOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             // Forward mouse moves to CEF for hover states
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
 
             CefRefPtr<CefBrowser> settings_browser = SimpleHandler::GetSettingsBrowser();
@@ -1708,8 +1794,7 @@ LRESULT CALLBACK SettingsOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             SetCapture(hwnd);  // Capture mouse so we get WM_LBUTTONUP
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
 
             CefRefPtr<CefBrowser> settings_browser = SimpleHandler::GetSettingsBrowser();
@@ -1723,8 +1808,7 @@ LRESULT CALLBACK SettingsOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             ReleaseCapture();
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
 
             CefRefPtr<CefBrowser> settings_browser = SimpleHandler::GetSettingsBrowser();
@@ -1735,12 +1819,16 @@ LRESULT CALLBACK SettingsOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         }
 
         case WM_MOUSEWHEEL: {
+            // WM_MOUSEWHEEL delivers SCREEN coordinates — this site shipped without the
+            // ScreenToClient its seven siblings do, so it fed CEF a screen point. On a
+            // monitor left of the primary that point is NEGATIVE (this machine's second
+            // display starts at x = -1920).
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            ScreenToClient(hwnd, &pt);
             int delta = GET_WHEEL_DELTA_WPARAM(wParam);
 
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
 
             CefRefPtr<CefBrowser> settings_browser = SimpleHandler::GetSettingsBrowser();
@@ -1762,6 +1850,96 @@ LRESULT CALLBACK SettingsOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             break;
     }
     return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// beta.3 Phase 1 · P1-A1 mouse-coordinate probe — INSTRUMENTATION ONLY.
+//
+// Changes no behaviour: it logs what is already being sent, and injects a page-side
+// listener that reports what the DOM actually received. It exists to settle the one
+// question the whole phase turns on (PHASE_CONTRACT §11.1 W1):
+//
+//   Does libcef scale incoming OSR mouse coordinates by device_scale_factor, or does
+//   it take our number verbatim?
+//
+// Our overlays report a LOGICAL view size (GetViewRect divides by the DPI scale) but
+// feed PHYSICAL client pixels to SendMouse*Event. If the page sees our raw physical
+// number, the two disagree and that is the bug. If the page sees raw/scale, libcef is
+// already converting and the hypothesis is dead — in which case converting here would
+// SHIP a regression. So this is measured before anything is changed.
+//
+// Off unless HODOS_MOUSE_PROBE=1. Remove with the phase.
+// ─────────────────────────────────────────────────────────────────────────────
+static bool MouseProbeEnabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        char buf[8] = {0};
+        DWORD n = GetEnvironmentVariableA("HODOS_MOUSE_PROBE", buf, sizeof(buf));
+        cached = (n > 0 && buf[0] == '1') ? 1 : 0;
+    }
+    return cached == 1;
+}
+
+static void LogMouseProbe(const char* tag, HWND hwnd, CefRefPtr<CefBrowser> browser,
+                          int rawX, int rawY) {
+    if (!MouseProbeEnabled() || !browser || !hwnd) return;
+
+    UINT dpi = GetDpiForWindow(hwnd);
+    if (dpi == 0) dpi = 96;
+    float scale = static_cast<float>(dpi) / 96.0f;
+
+    RECT wr = {0, 0, 0, 0}; GetWindowRect(hwnd, &wr);
+    RECT cr = {0, 0, 0, 0}; GetClientRect(hwnd, &cr);
+    int physW = cr.right - cr.left;
+    int physH = cr.bottom - cr.top;
+
+    // Recomputed exactly the way MyOverlayRenderHandler::GetViewRect computes it,
+    // so the log line shows what CEF was told the view size is.
+    int viewW = static_cast<int>(physW / scale);
+    int viewH = static_cast<int>(physH / scale);
+
+    // What the coordinate becomes after conversion. ⚠️ Computed with the SAME function the
+    // real path uses — an earlier version divided by the scale here and truncated, while
+    // the real path rounds to nearest, so the log disagreed with the code by a pixel. A
+    // diagnostic that has its own arithmetic is a diagnostic that will mislead someone.
+    int wouldBeX = 0, wouldBeY = 0;
+    hodos::PhysicalToView(rawX, rawY, dpi, wouldBeX, wouldBeY);
+
+    std::ostringstream o;
+    o << "HODOS_PROBE native " << tag
+      << " sent=" << rawX << "," << rawY
+      << " dpi=" << dpi
+      << " scale=" << scale
+      << " would_be_if_converted=" << wouldBeX << "," << wouldBeY
+      << " client_phys=" << physW << "x" << physH
+      << " viewrect_reported=" << viewW << "x" << viewH
+      << " winrect=" << wr.left << "," << wr.top
+      << " " << (wr.right - wr.left) << "x" << (wr.bottom - wr.top);
+    LOG_INFO(o.str());
+
+    // Arm the page-side half once per browser. ⛔ It announces itself ("armed"): a
+    // probe that cannot prove it injected is worth nothing — without that line, an
+    // absence of dom reports is indistinguishable from an absence of logging.
+    static std::set<int> armed;
+    int bid = browser->GetIdentifier();
+    if (armed.count(bid)) return;
+    armed.insert(bid);
+
+    const char* js =
+        "if(!window.__hodosProbe){window.__hodosProbe=1;"
+        "document.addEventListener('mousedown',function(e){"
+        "var el=document.elementFromPoint(e.clientX,e.clientY);"
+        "var d=el?(el.id||el.getAttribute('aria-label')||(el.tagName+':'+(el.textContent||'').trim().slice(0,40))):'NONE';"
+        "var r=document.documentElement.getBoundingClientRect();"
+        "console.log('HODOS_PROBE dom mousedown client='+e.clientX+','+e.clientY"
+        "+' dpr='+window.devicePixelRatio"
+        "+' inner='+window.innerWidth+'x'+window.innerHeight"
+        "+' doc='+Math.round(r.width)+'x'+Math.round(r.height)"
+        "+' scrollY='+window.scrollY"
+        "+' el='+d);},true);"
+        "console.log('HODOS_PROBE armed dpr='+window.devicePixelRatio"
+        "+' inner='+window.innerWidth+'x'+window.innerHeight);}";
+    browser->GetMainFrame()->ExecuteJavaScript(js, "", 0);
 }
 
 // No mouse hook for wallet overlay — WM_ACTIVATE(WA_INACTIVE) handles click-outside
@@ -1798,12 +1976,12 @@ LRESULT CALLBACK WalletOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = EVENTFLAG_LEFT_MOUSE_BUTTON;
 
             CefRefPtr<CefBrowser> wallet_browser = getWalletBrowser();
             if (wallet_browser) {
+                LogMouseProbe("wallet", hwnd, wallet_browser, pt.x, pt.y);  // P1-A1, no-op unless HODOS_MOUSE_PROBE=1
                 wallet_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
             }
             return 0;
@@ -1812,8 +1990,7 @@ LRESULT CALLBACK WalletOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         case WM_LBUTTONUP: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
 
             CefRefPtr<CefBrowser> wallet_browser = getWalletBrowser();
@@ -1828,8 +2005,7 @@ LRESULT CALLBACK WalletOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = EVENTFLAG_RIGHT_MOUSE_BUTTON;
 
             CefRefPtr<CefBrowser> wallet_browser = getWalletBrowser();
@@ -1842,8 +2018,7 @@ LRESULT CALLBACK WalletOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         case WM_RBUTTONUP: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
 
             CefRefPtr<CefBrowser> wallet_browser = getWalletBrowser();
@@ -1922,8 +2097,7 @@ LRESULT CALLBACK WalletOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         case WM_MOUSEMOVE: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
 
             CefRefPtr<CefBrowser> wallet_browser = getWalletBrowser();
@@ -1940,8 +2114,7 @@ LRESULT CALLBACK WalletOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             ScreenToClient(hwnd, &clientPt);
             int delta = GET_WHEEL_DELTA_WPARAM(wParam);
             CefMouseEvent mouse_event;
-            mouse_event.x = clientPt.x;
-            mouse_event.y = clientPt.y;
+            hodos::ClientToViewPoint(hwnd, clientPt.x, clientPt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
 
             CefRefPtr<CefBrowser> wallet_browser = getWalletBrowser();
@@ -2016,8 +2189,7 @@ LRESULT CALLBACK BackupOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             SetFocus(hwnd);
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> backup_browser = SimpleHandler::GetBackupBrowser();
             if (backup_browser) {
@@ -2035,8 +2207,7 @@ LRESULT CALLBACK BackupOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             SetFocus(hwnd);
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> backup_browser = SimpleHandler::GetBackupBrowser();
             if (backup_browser) {
@@ -2045,6 +2216,24 @@ LRESULT CALLBACK BackupOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 LOG_DEBUG("🧠 Right-click sent to backup overlay browser");
             } else {
                 LOG_DEBUG("⚠️ No backup overlay browser to send right-click");
+            }
+            return 0;
+        }
+
+        case WM_MOUSEWHEEL: {
+            // Added in beta.3 Phase 1. This overlay shipped with NO wheel handler, so its
+            // content could not be scrolled by any means — on a short or scaled screen any
+            // control below the fold was simply unreachable.
+            // WM_MOUSEWHEEL carries SCREEN coordinates: convert to client, then to view.
+            POINT wheelPt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            ScreenToClient(hwnd, &wheelPt);
+            int wheelDelta = GET_WHEEL_DELTA_WPARAM(wParam);
+            CefMouseEvent wheel_event;
+            hodos::ClientToViewPoint(hwnd, wheelPt.x, wheelPt.y, wheel_event.x, wheel_event.y);
+            wheel_event.modifiers = 0;
+            CefRefPtr<CefBrowser> wheel_browser = SimpleHandler::GetBackupBrowser();
+            if (wheel_browser) {
+                wheel_browser->GetHost()->SendMouseWheelEvent(wheel_event, 0, wheelDelta);
             }
             return 0;
         }
@@ -2079,8 +2268,7 @@ LRESULT CALLBACK BRC100AuthOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
             SetFocus(hwnd);
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> auth_browser = SimpleHandler::GetBRC100AuthBrowser();
             if (auth_browser) {
@@ -2098,8 +2286,7 @@ LRESULT CALLBACK BRC100AuthOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
             SetFocus(hwnd);
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> auth_browser = SimpleHandler::GetBRC100AuthBrowser();
             if (auth_browser) {
@@ -2108,6 +2295,24 @@ LRESULT CALLBACK BRC100AuthOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
                 LOG_DEBUG("🧠 Right-click sent to BRC-100 auth overlay browser");
             } else {
                 LOG_DEBUG("⚠️ No BRC-100 auth overlay browser to send right-click");
+            }
+            return 0;
+        }
+
+        case WM_MOUSEWHEEL: {
+            // Added in beta.3 Phase 1. This overlay shipped with NO wheel handler, so its
+            // content could not be scrolled by any means — on a short or scaled screen any
+            // control below the fold was simply unreachable.
+            // WM_MOUSEWHEEL carries SCREEN coordinates: convert to client, then to view.
+            POINT wheelPt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            ScreenToClient(hwnd, &wheelPt);
+            int wheelDelta = GET_WHEEL_DELTA_WPARAM(wParam);
+            CefMouseEvent wheel_event;
+            hodos::ClientToViewPoint(hwnd, wheelPt.x, wheelPt.y, wheel_event.x, wheel_event.y);
+            wheel_event.modifiers = 0;
+            CefRefPtr<CefBrowser> wheel_browser = SimpleHandler::GetBRC100AuthBrowser();
+            if (wheel_browser) {
+                wheel_browser->GetHost()->SendMouseWheelEvent(wheel_event, 0, wheelDelta);
             }
             return 0;
         }
@@ -2141,11 +2346,11 @@ LRESULT CALLBACK NotificationOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
             SetFocus(hwnd);
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> notif_browser = SimpleHandler::GetNotificationBrowser();
             if (notif_browser) {
+                LogMouseProbe("notification", hwnd, notif_browser, pt.x, pt.y);  // P1-A1, no-op unless HODOS_MOUSE_PROBE=1
                 notif_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
                 notif_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
             }
@@ -2156,8 +2361,7 @@ LRESULT CALLBACK NotificationOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
             SetFocus(hwnd);
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> notif_browser = SimpleHandler::GetNotificationBrowser();
             if (notif_browser) {
@@ -2171,8 +2375,7 @@ LRESULT CALLBACK NotificationOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
             SetFocus(hwnd);
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> notif_browser = SimpleHandler::GetNotificationBrowser();
             if (notif_browser) {
@@ -2185,8 +2388,7 @@ LRESULT CALLBACK NotificationOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
         case WM_MOUSEMOVE: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> notif_browser = SimpleHandler::GetNotificationBrowser();
             if (notif_browser) {
@@ -2255,6 +2457,24 @@ LRESULT CALLBACK NotificationOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
             return 0;
         }
 
+        case WM_MOUSEWHEEL: {
+            // Added in beta.3 Phase 1. This overlay shipped with NO wheel handler, so its
+            // content could not be scrolled by any means — on a short or scaled screen any
+            // control below the fold was simply unreachable.
+            // WM_MOUSEWHEEL carries SCREEN coordinates: convert to client, then to view.
+            POINT wheelPt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            ScreenToClient(hwnd, &wheelPt);
+            int wheelDelta = GET_WHEEL_DELTA_WPARAM(wParam);
+            CefMouseEvent wheel_event;
+            hodos::ClientToViewPoint(hwnd, wheelPt.x, wheelPt.y, wheel_event.x, wheel_event.y);
+            wheel_event.modifiers = 0;
+            CefRefPtr<CefBrowser> wheel_browser = SimpleHandler::GetNotificationBrowser();
+            if (wheel_browser) {
+                wheel_browser->GetHost()->SendMouseWheelEvent(wheel_event, 0, wheelDelta);
+            }
+            return 0;
+        }
+
         case WM_CLOSE:
             DestroyWindow(hwnd);
             return 0;
@@ -2276,8 +2496,7 @@ LRESULT CALLBACK SettingsMenuOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
         case WM_MOUSEMOVE: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
 
             CefRefPtr<CefBrowser> menu_browser = SimpleHandler::GetSettingsMenuBrowser();
             if (menu_browser && menu_browser->GetHost()) {
@@ -2287,6 +2506,24 @@ LRESULT CALLBACK SettingsMenuOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
                 } else if (msg == WM_MOUSEMOVE) {
                     menu_browser->GetHost()->SendMouseMoveEvent(mouse_event, false);
                 }
+            }
+            return 0;
+        }
+
+        case WM_MOUSEWHEEL: {
+            // Added in beta.3 Phase 1. This overlay shipped with NO wheel handler, so its
+            // content could not be scrolled by any means — on a short or scaled screen any
+            // control below the fold was simply unreachable.
+            // WM_MOUSEWHEEL carries SCREEN coordinates: convert to client, then to view.
+            POINT wheelPt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            ScreenToClient(hwnd, &wheelPt);
+            int wheelDelta = GET_WHEEL_DELTA_WPARAM(wParam);
+            CefMouseEvent wheel_event;
+            hodos::ClientToViewPoint(hwnd, wheelPt.x, wheelPt.y, wheel_event.x, wheel_event.y);
+            wheel_event.modifiers = 0;
+            CefRefPtr<CefBrowser> wheel_browser = SimpleHandler::GetSettingsMenuBrowser();
+            if (wheel_browser) {
+                wheel_browser->GetHost()->SendMouseWheelEvent(wheel_event, 0, wheelDelta);
             }
             return 0;
         }
@@ -2305,6 +2542,16 @@ LRESULT CALLBACK SettingsMenuOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
 
 // Low-level mouse hook for omnibox click-outside detection
 LRESULT CALLBACK OmniboxMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    // A native file dialog steals activation, and the user's clicks inside it land
+    // OUTSIDE this overlay's rect — so the click-outside hook dismissed the very panel
+    // that opened the dialog. The WndProc close paths and WM_ACTIVATEAPP already honour
+    // this flag; the hooks never did (the gap recorded in REGRESSION_SET.md R-CLOSE).
+    // That is the reported "profile picture cannot be selected" symptom.
+    // g_file_dialog_active is set SYNCHRONOUSLY in C++ by SimpleHandler::OnFileDialog,
+    // before the dialog opens, so there is no race with the first click.
+    if (g_file_dialog_active) {
+        return CallNextHookEx(g_omnibox_mouse_hook, nCode, wParam, lParam);
+    }
     if (nCode == HC_ACTION) {
         // Check for mouse down events (left or right button)
         if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN) {
@@ -2343,8 +2590,7 @@ LRESULT CALLBACK OmniboxOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             // Forward mouse moves to CEF for hover states
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
 
             CefRefPtr<CefBrowser> omnibox_browser = SimpleHandler::GetOmniboxBrowser();
@@ -2358,8 +2604,7 @@ LRESULT CALLBACK OmniboxOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             LOG_DEBUG("🖱️ Omnibox Overlay received WM_LBUTTONDOWN");
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
 
             // Forward clicks to omnibox browser
@@ -2368,6 +2613,24 @@ LRESULT CALLBACK OmniboxOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 omnibox_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
                 omnibox_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
                 LOG_DEBUG("🧠 Left-click sent to omnibox overlay browser");
+            }
+            return 0;
+        }
+
+        case WM_MOUSEWHEEL: {
+            // Added in beta.3 Phase 1. This overlay shipped with NO wheel handler, so its
+            // content could not be scrolled by any means — on a short or scaled screen any
+            // control below the fold was simply unreachable.
+            // WM_MOUSEWHEEL carries SCREEN coordinates: convert to client, then to view.
+            POINT wheelPt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            ScreenToClient(hwnd, &wheelPt);
+            int wheelDelta = GET_WHEEL_DELTA_WPARAM(wParam);
+            CefMouseEvent wheel_event;
+            hodos::ClientToViewPoint(hwnd, wheelPt.x, wheelPt.y, wheel_event.x, wheel_event.y);
+            wheel_event.modifiers = 0;
+            CefRefPtr<CefBrowser> wheel_browser = SimpleHandler::GetOmniboxBrowser();
+            if (wheel_browser) {
+                wheel_browser->GetHost()->SendMouseWheelEvent(wheel_event, 0, wheelDelta);
             }
             return 0;
         }
@@ -2392,6 +2655,16 @@ LRESULT CALLBACK OmniboxOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
 
 // Settings Panel Mouse Hook for click-outside detection
 LRESULT CALLBACK SettingsPanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    // A native file dialog steals activation, and the user's clicks inside it land
+    // OUTSIDE this overlay's rect — so the click-outside hook dismissed the very panel
+    // that opened the dialog. The WndProc close paths and WM_ACTIVATEAPP already honour
+    // this flag; the hooks never did (the gap recorded in REGRESSION_SET.md R-CLOSE).
+    // That is the reported "profile picture cannot be selected" symptom.
+    // g_file_dialog_active is set SYNCHRONOUSLY in C++ by SimpleHandler::OnFileDialog,
+    // before the dialog opens, so there is no race with the first click.
+    if (g_file_dialog_active) {
+        return CallNextHookEx(g_settings_mouse_hook, nCode, wParam, lParam);
+    }
     if (nCode == HC_ACTION) {
         if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN) {
             if (g_settings_overlay_hwnd && IsWindow(g_settings_overlay_hwnd) && IsWindowVisible(g_settings_overlay_hwnd)) {
@@ -2424,6 +2697,16 @@ LRESULT CALLBACK SettingsPanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lPa
 
 // Cookie Panel Mouse Hook for click-outside detection
 LRESULT CALLBACK CookiePanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    // A native file dialog steals activation, and the user's clicks inside it land
+    // OUTSIDE this overlay's rect — so the click-outside hook dismissed the very panel
+    // that opened the dialog. The WndProc close paths and WM_ACTIVATEAPP already honour
+    // this flag; the hooks never did (the gap recorded in REGRESSION_SET.md R-CLOSE).
+    // That is the reported "profile picture cannot be selected" symptom.
+    // g_file_dialog_active is set SYNCHRONOUSLY in C++ by SimpleHandler::OnFileDialog,
+    // before the dialog opens, so there is no race with the first click.
+    if (g_file_dialog_active) {
+        return CallNextHookEx(g_cookie_panel_mouse_hook, nCode, wParam, lParam);
+    }
     if (nCode == HC_ACTION) {
         // Check for mouse down events (left or right button)
         if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN) {
@@ -2462,8 +2745,7 @@ LRESULT CALLBACK CookiePanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
             // Forward mouse moves to CEF for hover states
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
 
             CefRefPtr<CefBrowser> cookie_browser = SimpleHandler::GetCookiePanelBrowser();
@@ -2477,8 +2759,7 @@ LRESULT CALLBACK CookiePanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
             LOG_DEBUG("🖱️ Cookie Panel Overlay received WM_LBUTTONDOWN");
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
 
             // Forward clicks to cookie panel browser
@@ -2498,8 +2779,7 @@ LRESULT CALLBACK CookiePanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
             int delta = GET_WHEEL_DELTA_WPARAM(wParam);
 
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
 
             CefRefPtr<CefBrowser> cookie_browser = SimpleHandler::GetCookiePanelBrowser();
@@ -2530,6 +2810,16 @@ LRESULT CALLBACK CookiePanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
 // ========== DOWNLOAD PANEL OVERLAY ==========
 
 LRESULT CALLBACK DownloadPanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    // A native file dialog steals activation, and the user's clicks inside it land
+    // OUTSIDE this overlay's rect — so the click-outside hook dismissed the very panel
+    // that opened the dialog. The WndProc close paths and WM_ACTIVATEAPP already honour
+    // this flag; the hooks never did (the gap recorded in REGRESSION_SET.md R-CLOSE).
+    // That is the reported "profile picture cannot be selected" symptom.
+    // g_file_dialog_active is set SYNCHRONOUSLY in C++ by SimpleHandler::OnFileDialog,
+    // before the dialog opens, so there is no race with the first click.
+    if (g_file_dialog_active) {
+        return CallNextHookEx(g_download_panel_mouse_hook, nCode, wParam, lParam);
+    }
     if (nCode == HC_ACTION) {
         if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN) {
             if (g_download_panel_overlay_hwnd && IsWindow(g_download_panel_overlay_hwnd) && IsWindowVisible(g_download_panel_overlay_hwnd)) {
@@ -2551,6 +2841,16 @@ LRESULT CALLBACK DownloadPanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lPa
 // ========== BOOKMARKS PANEL OVERLAY ==========
 
 LRESULT CALLBACK BookmarksPanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    // A native file dialog steals activation, and the user's clicks inside it land
+    // OUTSIDE this overlay's rect — so the click-outside hook dismissed the very panel
+    // that opened the dialog. The WndProc close paths and WM_ACTIVATEAPP already honour
+    // this flag; the hooks never did (the gap recorded in REGRESSION_SET.md R-CLOSE).
+    // That is the reported "profile picture cannot be selected" symptom.
+    // g_file_dialog_active is set SYNCHRONOUSLY in C++ by SimpleHandler::OnFileDialog,
+    // before the dialog opens, so there is no race with the first click.
+    if (g_file_dialog_active) {
+        return CallNextHookEx(g_bookmarks_panel_mouse_hook, nCode, wParam, lParam);
+    }
     if (nCode == HC_ACTION) {
         if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN) {
             if (g_bookmarks_panel_overlay_hwnd && IsWindow(g_bookmarks_panel_overlay_hwnd) && IsWindowVisible(g_bookmarks_panel_overlay_hwnd)) {
@@ -2575,6 +2875,16 @@ LRESULT CALLBACK BookmarksPanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lP
 // path — which is exactly the fragile close the owner hit. Give it the same reliable
 // click-outside close.
 LRESULT CALLBACK TabListPanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    // A native file dialog steals activation, and the user's clicks inside it land
+    // OUTSIDE this overlay's rect — so the click-outside hook dismissed the very panel
+    // that opened the dialog. The WndProc close paths and WM_ACTIVATEAPP already honour
+    // this flag; the hooks never did (the gap recorded in REGRESSION_SET.md R-CLOSE).
+    // That is the reported "profile picture cannot be selected" symptom.
+    // g_file_dialog_active is set SYNCHRONOUSLY in C++ by SimpleHandler::OnFileDialog,
+    // before the dialog opens, so there is no race with the first click.
+    if (g_file_dialog_active) {
+        return CallNextHookEx(g_tablist_panel_mouse_hook, nCode, wParam, lParam);
+    }
     if (nCode == HC_ACTION) {
         if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN) {
             if (g_tablist_panel_overlay_hwnd && IsWindow(g_tablist_panel_overlay_hwnd) && IsWindowVisible(g_tablist_panel_overlay_hwnd)) {
@@ -2613,8 +2923,7 @@ LRESULT CALLBACK BookmarksPanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam
         case WM_MOUSEMOVE: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> bm_browser = SimpleHandler::GetBookmarksPanelBrowser();
             if (bm_browser) {
@@ -2627,8 +2936,7 @@ LRESULT CALLBACK BookmarksPanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam
             SetFocus(hwnd);
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = EVENTFLAG_LEFT_MOUSE_BUTTON;
             CefRefPtr<CefBrowser> bm_browser = SimpleHandler::GetBookmarksPanelBrowser();
             if (bm_browser) {
@@ -2640,8 +2948,7 @@ LRESULT CALLBACK BookmarksPanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam
         case WM_LBUTTONUP: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> bm_browser = SimpleHandler::GetBookmarksPanelBrowser();
             if (bm_browser) {
@@ -2712,8 +3019,7 @@ LRESULT CALLBACK BookmarksPanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam
             ScreenToClient(hwnd, &clientPt);
             int delta = GET_WHEEL_DELTA_WPARAM(wParam);
             CefMouseEvent mouse_event;
-            mouse_event.x = clientPt.x;
-            mouse_event.y = clientPt.y;
+            hodos::ClientToViewPoint(hwnd, clientPt.x, clientPt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> bm_browser = SimpleHandler::GetBookmarksPanelBrowser();
             if (bm_browser) {
@@ -2789,8 +3095,7 @@ LRESULT CALLBACK TabListPanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
         case WM_MOUSEMOVE: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> tl_browser = SimpleHandler::GetTabListPanelBrowser();
             if (tl_browser) {
@@ -2803,8 +3108,7 @@ LRESULT CALLBACK TabListPanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
             SetFocus(hwnd);
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = EVENTFLAG_LEFT_MOUSE_BUTTON;
             CefRefPtr<CefBrowser> tl_browser = SimpleHandler::GetTabListPanelBrowser();
             if (tl_browser) {
@@ -2816,8 +3120,7 @@ LRESULT CALLBACK TabListPanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
         case WM_LBUTTONUP: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> tl_browser = SimpleHandler::GetTabListPanelBrowser();
             if (tl_browser) {
@@ -2888,8 +3191,7 @@ LRESULT CALLBACK TabListPanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
             ScreenToClient(hwnd, &clientPt);
             int delta = GET_WHEEL_DELTA_WPARAM(wParam);
             CefMouseEvent mouse_event;
-            mouse_event.x = clientPt.x;
-            mouse_event.y = clientPt.y;
+            hodos::ClientToViewPoint(hwnd, clientPt.x, clientPt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> tl_browser = SimpleHandler::GetTabListPanelBrowser();
             if (tl_browser) {
@@ -2941,6 +3243,16 @@ LRESULT CALLBACK TabListPanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
 // ========== PROFILE PANEL OVERLAY ==========
 
 LRESULT CALLBACK ProfilePanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    // A native file dialog steals activation, and the user's clicks inside it land
+    // OUTSIDE this overlay's rect — so the click-outside hook dismissed the very panel
+    // that opened the dialog. The WndProc close paths and WM_ACTIVATEAPP already honour
+    // this flag; the hooks never did (the gap recorded in REGRESSION_SET.md R-CLOSE).
+    // That is the reported "profile picture cannot be selected" symptom.
+    // g_file_dialog_active is set SYNCHRONOUSLY in C++ by SimpleHandler::OnFileDialog,
+    // before the dialog opens, so there is no race with the first click.
+    if (g_file_dialog_active) {
+        return CallNextHookEx(g_profile_panel_mouse_hook, nCode, wParam, lParam);
+    }
     if (nCode == HC_ACTION) {
         if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN) {
             if (g_profile_panel_overlay_hwnd && IsWindow(g_profile_panel_overlay_hwnd) && IsWindowVisible(g_profile_panel_overlay_hwnd)) {
@@ -2969,8 +3281,7 @@ LRESULT CALLBACK DownloadPanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam,
         case WM_MOUSEMOVE: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> dl_browser = SimpleHandler::GetDownloadPanelBrowser();
             if (dl_browser) {
@@ -2982,8 +3293,7 @@ LRESULT CALLBACK DownloadPanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam,
         case WM_LBUTTONDOWN: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> dl_browser = SimpleHandler::GetDownloadPanelBrowser();
             if (dl_browser) {
@@ -2994,11 +3304,13 @@ LRESULT CALLBACK DownloadPanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam,
         }
 
         case WM_MOUSEWHEEL: {
+            // SCREEN coordinates — see the note on the settings overlay's wheel handler.
+            // This is the second of the two sites that shipped without ScreenToClient.
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            ScreenToClient(hwnd, &pt);
             int delta = GET_WHEEL_DELTA_WPARAM(wParam);
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> dl_browser = SimpleHandler::GetDownloadPanelBrowser();
             if (dl_browser) {
@@ -3026,6 +3338,16 @@ LRESULT CALLBACK DownloadPanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam,
 // mouse hook for click-outside (NOT the bookmarks MA_ACTIVATE/keyboard pattern).
 
 LRESULT CALLBACK SiteInfoPanelMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    // A native file dialog steals activation, and the user's clicks inside it land
+    // OUTSIDE this overlay's rect — so the click-outside hook dismissed the very panel
+    // that opened the dialog. The WndProc close paths and WM_ACTIVATEAPP already honour
+    // this flag; the hooks never did (the gap recorded in REGRESSION_SET.md R-CLOSE).
+    // That is the reported "profile picture cannot be selected" symptom.
+    // g_file_dialog_active is set SYNCHRONOUSLY in C++ by SimpleHandler::OnFileDialog,
+    // before the dialog opens, so there is no race with the first click.
+    if (g_file_dialog_active) {
+        return CallNextHookEx(g_siteinfo_panel_mouse_hook, nCode, wParam, lParam);
+    }
     if (nCode == HC_ACTION) {
         if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN) {
             if (g_siteinfo_panel_overlay_hwnd && IsWindow(g_siteinfo_panel_overlay_hwnd) && IsWindowVisible(g_siteinfo_panel_overlay_hwnd)) {
@@ -3052,8 +3374,7 @@ LRESULT CALLBACK SiteInfoPanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam,
         case WM_MOUSEMOVE: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> si_browser = SimpleHandler::GetSiteInfoPanelBrowser();
             if (si_browser) {
@@ -3065,8 +3386,7 @@ LRESULT CALLBACK SiteInfoPanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam,
         case WM_LBUTTONDOWN: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> si_browser = SimpleHandler::GetSiteInfoPanelBrowser();
             if (si_browser) {
@@ -3084,8 +3404,7 @@ LRESULT CALLBACK SiteInfoPanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam,
             ScreenToClient(hwnd, &clientPt);
             int delta = GET_WHEEL_DELTA_WPARAM(wParam);
             CefMouseEvent mouse_event;
-            mouse_event.x = clientPt.x;
-            mouse_event.y = clientPt.y;
+            hodos::ClientToViewPoint(hwnd, clientPt.x, clientPt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> si_browser = SimpleHandler::GetSiteInfoPanelBrowser();
             if (si_browser) {
@@ -3125,8 +3444,7 @@ LRESULT CALLBACK ProfilePanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
         case WM_MOUSEMOVE: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> profile_browser = SimpleHandler::GetProfilePanelBrowser();
             if (profile_browser) {
@@ -3139,8 +3457,7 @@ LRESULT CALLBACK ProfilePanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
             SetFocus(hwnd);
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = EVENTFLAG_LEFT_MOUSE_BUTTON;
             CefRefPtr<CefBrowser> profile_browser = SimpleHandler::GetProfilePanelBrowser();
             if (profile_browser) {
@@ -3152,8 +3469,7 @@ LRESULT CALLBACK ProfilePanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
         case WM_LBUTTONUP: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> profile_browser = SimpleHandler::GetProfilePanelBrowser();
             if (profile_browser) {
@@ -3166,8 +3482,7 @@ LRESULT CALLBACK ProfilePanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
             SetFocus(hwnd);
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = EVENTFLAG_RIGHT_MOUSE_BUTTON;
             CefRefPtr<CefBrowser> profile_browser = SimpleHandler::GetProfilePanelBrowser();
             if (profile_browser) {
@@ -3179,8 +3494,7 @@ LRESULT CALLBACK ProfilePanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
         case WM_RBUTTONUP: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> profile_browser = SimpleHandler::GetProfilePanelBrowser();
             if (profile_browser) {
@@ -3251,8 +3565,7 @@ LRESULT CALLBACK ProfilePanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
             ScreenToClient(hwnd, &clientPt);
             int delta = GET_WHEEL_DELTA_WPARAM(wParam);
             CefMouseEvent mouse_event;
-            mouse_event.x = clientPt.x;
-            mouse_event.y = clientPt.y;
+            hodos::ClientToViewPoint(hwnd, clientPt.x, clientPt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> profile_browser = SimpleHandler::GetProfilePanelBrowser();
             if (profile_browser) {
@@ -3307,6 +3620,16 @@ LRESULT CALLBACK ProfilePanelOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
 // ========== MENU OVERLAY ==========
 
 LRESULT CALLBACK MenuMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    // A native file dialog steals activation, and the user's clicks inside it land
+    // OUTSIDE this overlay's rect — so the click-outside hook dismissed the very panel
+    // that opened the dialog. The WndProc close paths and WM_ACTIVATEAPP already honour
+    // this flag; the hooks never did (the gap recorded in REGRESSION_SET.md R-CLOSE).
+    // That is the reported "profile picture cannot be selected" symptom.
+    // g_file_dialog_active is set SYNCHRONOUSLY in C++ by SimpleHandler::OnFileDialog,
+    // before the dialog opens, so there is no race with the first click.
+    if (g_file_dialog_active) {
+        return CallNextHookEx(g_menu_mouse_hook, nCode, wParam, lParam);
+    }
     if (nCode == HC_ACTION) {
         if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN) {
             if (g_menu_overlay_hwnd && IsWindow(g_menu_overlay_hwnd) && IsWindowVisible(g_menu_overlay_hwnd)) {
@@ -3335,8 +3658,7 @@ LRESULT CALLBACK MenuOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         case WM_MOUSEMOVE: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> menu_browser = SimpleHandler::GetMenuBrowser();
             if (menu_browser) {
@@ -3348,8 +3670,7 @@ LRESULT CALLBACK MenuOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         case WM_LBUTTONDOWN: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> menu_browser = SimpleHandler::GetMenuBrowser();
             if (menu_browser) {
@@ -3364,8 +3685,7 @@ LRESULT CALLBACK MenuOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             ScreenToClient(hwnd, &pt);
             int delta = GET_WHEEL_DELTA_WPARAM(wParam);
             CefMouseEvent mouse_event;
-            mouse_event.x = pt.x;
-            mouse_event.y = pt.y;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
             mouse_event.modifiers = 0;
             CefRefPtr<CefBrowser> menu_browser = SimpleHandler::GetMenuBrowser();
             if (menu_browser) {

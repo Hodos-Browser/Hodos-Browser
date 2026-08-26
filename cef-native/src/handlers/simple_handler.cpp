@@ -948,6 +948,25 @@ void SimpleHandler::OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString
 #endif
 }
 
+bool SimpleHandler::OnConsoleMessage(CefRefPtr<CefBrowser> browser,
+                                     cef_log_severity_t level,
+                                     const CefString& message,
+                                     const CefString& source,
+                                     int line) {
+    CEF_REQUIRE_UI_THREAD();
+
+    // The overlays are windowless browsers with no devtools of their own, and renderer-process
+    // logging does not reach our log. Without this, a page inside an overlay cannot report
+    // anything at all. Only diagnostic lines are surfaced, so ordinary page chatter from web
+    // content does not flood the log.
+    const std::string msg = message.ToString();
+    if (msg.rfind("HODOS_PROBE", 0) == 0) {
+        LOG_INFO_BROWSER("🧪 [" + role_ + "] " + msg);
+    }
+
+    return false;  // false = also let CEF handle it normally
+}
+
 bool SimpleHandler::OnCursorChange(CefRefPtr<CefBrowser> browser,
                                     CefCursorHandle cursor,
                                     cef_cursor_type_t type,
