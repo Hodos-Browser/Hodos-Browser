@@ -550,3 +550,18 @@ no exchange-rate conversion (which moves), and keeps `R-CAPS` literally true.
 - `bitcoin-sv/BRCs` — `wallet/0073.md`, `wallet/0116.md`.
 - `test-fixtures/manifest-dapp/` — the existing HTTPS connect-bundle fixture and its constraints.
 - `demos/README.md` — where runnable fixtures live and why.
+
+
+---
+
+## macOS evidence — round 2026-08-26 (Mac session)
+
+Narrative in `../MAC_RELAY_BETA3.md`, ROUND 2026-08-26 (Mac). Subject: `hodos_tests` built from
+HEAD `64478a8` on macOS arm64, `-DHODOS_BUILD_TESTS=ON`, ad-hoc signed in POST_BUILD.
+
+| ID | Verdict | 🎯 What was actually measured |
+|---|---|---|
+| `P0.8-M1` | ✅ `ManifestFetcher` stayed shared core | `find` shows no `ManifestFetcher_mac.*` anywhere; `grep '#ifdef\|#ifndef\|#if defined\|_WIN32\|__APPLE__\|#elif'` over **both** `src/core/ManifestFetcher.cpp` and `include/core/ManifestFetcher.h` returns **0 matches** — not merely "no `_mac` arm" but no platform macro of any kind. |
+| `P0.8-M2` | ✅ `HODOS_MANIFEST_FIXTURE_DIR` resolves on macOS | No `canonical fixture missing`. `tests/CMakeLists.txt:103` resolves to `/Users/matt/Hodos-Browser/cef-native/tests/../../demos/manifest-shapes`, which exists. `--gtest_filter='*Manifest*'` → **43 tests / 43 passed**. ⭐ **Negative control run:** renamed `demos/manifest-shapes` away and re-ran — `canonical fixture missing: …/bitgenius-live-capture.json` with `ManifestBrc73.A1_BitgeniusLiveCaptureParsesFourProtocols` and 3 siblings **FAILED**; directory restored. So the fixture tests genuinely read the fixtures and are capable of failing. |
+| `P0.8-M3` | ⚠️ Suite totals differ from Windows for a known reason | macOS **263 tests / 262 pass / 1 skip** vs Windows 286–295. Gap is `_WIN32`-only cases (`update_fs` 33, `overlay_mouse`). ⛔ Until this round the macOS suite did **not build at all** — Phase 1's `tests/overlay_mouse_test.cpp` includes the entirely-`#ifdef _WIN32` `OverlayMouse.h` and was added unconditionally at `tests/CMakeLists.txt:44`, so one bad TU took the whole target down and every number in this table was unobtainable. Fixed with the `update_fs_test.cpp` precedent. |
+| `P0.8-A9` (connect-bundle modal on macOS) | **NOT RUN** | All three sub-checks (card not clipped at either height; inner `overflowY:auto` regions scroll; **click-outside dismissal in the taller customize state**; buttons row reachable) are click-dependent, and this session cannot synthesise OS mouse input — `CGEventPost` is Accessibility-blocked (measured; positive control failed). Recorded as NOT RUN, not a pass. ⭐ Precondition for whoever runs it is **already satisfied**: `reset_test_state.py show` reports wallet `domain_permissions` = *(none)*, so bitgenius.net is unapproved and `request_gate.rs :: domain_trust_gate` will not short-circuit — no manual revoke needed. |

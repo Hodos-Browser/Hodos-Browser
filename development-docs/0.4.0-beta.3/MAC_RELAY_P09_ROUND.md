@@ -1,3 +1,151 @@
+# 📋 ROUND 2026-08-26 (Mac) — Phase 0.9. **The macOS arms WORK — I watched one run for the first time. But the permission this phase intercepts never fires on macOS, so A3 1–4 and A4 could not be exercised at all.**
+
+Answers A6. Dev stack only (wallet 31401 `HODOS_DEV=1`; prod 31301 never listening). Test state was
+**verified clean before testing**, per your prerequisite — see A0 below, which is where the first
+problem was.
+
+---
+
+## A0 — 🚨 `reset_test_state.py` had no macOS arm, so the prerequisite could not run here at all
+
+**MEASURED.** `python reset_test_state.py show` on macOS:
+
+```
+dev data dir not found: HodosBrowserDev
+```
+
+`DEV_ROOT`/`PROD_ROOT` were built from `%APPDATA%` unconditionally. `APPDATA` is unset on macOS, so
+`DEV_ROOT` collapsed to the bare relative string `"HodosBrowserDev"` and the guard exited. ⚠️ Worse,
+`PROD_ROOT` collapsed to the bare `"HodosBrowser"`, so the *refuse-to-touch-the-installed-browser*
+comparison was comparing two meaningless relative paths — the safety guard was nominal on macOS.
+
+This is very likely **why every Phase 0.9 item was still unrun on my side**: the phase's own
+prerequisite could not execute, and your instructions correctly say to stop if `verify` does not
+exit 0.
+
+**Fixed this round** (test-harness only, HARNESS §6): platform-aware root resolution —
+`~/Library/Application Support` on darwin, `%APPDATA%` on Windows, XDG elsewhere so the guard always
+resolves to real paths. Your two-level `Preferences` glob (`DEV_ROOT/*/*/Preferences`) was already the
+right depth for the macOS layout. Now:
+
+```
+=== dev root: /Users/matt/Library/Application Support/HodosBrowserDev ===
+-- loopback / local-network content settings --   (none — clean)
+-- wallet domain_permissions (GLOBAL) --          (none)
+...
+VERIFY PASSED     exit 0
+```
+
+⭐ Free bonus: `show` independently flagged `Profile_3.orphaned-1787767279 <-- ORPHAN (not in
+registry)`, which is the Phase 1 D5.2 orphan-sweep artifact from the same session. Two instruments,
+same fact.
+
+## A1 — 🚨 **Chromium 150 on macOS never raises the Local Network Access / Loopback permission.** `OnShowPermissionPrompt` is not called.
+
+**MEASURED**, on state proved clean (`verify` exit 0, zero stored loopback settings on every profile).
+
+Experiment: a real tab on `https://example.com` runs `fetch('http://127.0.0.1:8899/probe')` against a
+live loopback listener.
+
+```
+result: ok 404          ← the fetch SUCCEEDED, unprompted
+overlay targets after the fetch: none
+'OnShowPermissionPrompt' in debug_output.log: 0   (whole 423k-line file)
+'Network permission parked'                 : 0
+```
+
+**Why that absence is trustworthy** — the probe is positive-controlled two ways, because an absence
+that is really a broken instrument is this project's signature failure:
+
+1. **The probe line is unconditional.** `simple_handler.cpp:8819` logs `🔔 OnShowPermissionPrompt
+   origin=… mask=… mapped=[…]` *before* every early return except empty-host. If the handler ran at
+   all, it logged.
+2. **The sink was live at the time.** 16 `[BROWSER] [INFO]` lines were written in the preceding five
+   minutes; newest line timestamped `12:10:16.539`.
+3. ⭐ **And the handler demonstrably CAN fire on macOS** — see A2, where geolocation produced that
+   exact log line minutes later in the same run. So this is "LNA specifically does not fire", **not**
+   "the permission handler is unwired on macOS", and not "my grep was wrong".
+
+I have **not** established *why*, and I am not going to guess (HARNESS §8). Named next experiment for
+whoever picks this up: launch with `--enable-features=LocalNetworkAccessChecks` (or whatever the
+CEF 150 spelling is) and re-run the identical fetch; if the 🔔 line then appears with
+`mask=0x08000000`, it is a feature-flag default and the phase needs a launch-flag decision rather
+than a code change.
+
+## A2 — ✅ **The macOS arms in your A2 table are not just written — one of them ran, and I watched it.**
+
+**MEASURED.** Trigger: `navigator.geolocation.getCurrentPosition()` on `https://example.com`.
+
+```
+[2026-08-26 12:10:50.998] [BROWSER] [INFO] 🔔 OnShowPermissionPrompt origin=https://example.com/ mask=0x00000100 mapped=[location]
+```
+
+and a new CEF target appeared:
+
+```
+http://127.0.0.1:5137/brc100-auth?type=permission_request&domain=example.com&requestId=perm-1810185916-1&perm=location
+```
+
+That is `FireHodosPermissionPrompt`'s `#elif defined(__APPLE__)` arm calling the mac
+`CreateNotificationOverlay(type, domain, extraParams)` — **the first observed execution of that arm.**
+Overlay contents, read from its DOM:
+
+| what you asked to see | measured |
+|---|---|
+| Hodos gold browser logo | ✅ `img src="/Hodos_Gold_Browser_Icon.svg"` |
+| type emoji | ✅ `📍` (the location analogue of your `💻`) |
+| buttons | `["Allow this time", "Allow every visit", "Don't allow"]` — **three**, correct for a non-`noOnce` type |
+| view | 1440 × 794 css px, `devicePixelRatio` 2 |
+
+So the shared prompt component, the mac overlay creation path, the role, the query-param plumbing and
+the branding all work on macOS. ⛔ The **two-button `noOnce`** variant is loopback-specific and
+therefore still unexercised — that one is gated behind A1.
+
+⚠️ **Unrelated defect, MEASURED on a live consent surface:** the prompt fetched
+`https://www.google.com/s2/favicons?domain=example.com&sz=32`. That is
+`TICKET_consent_surface_fetches_third_party_favicon.md`, now confirmed firing on a real permission
+prompt on macOS — a consent surface telling Google which site is asking the user for permission.
+
+## A3 items 1–4 — **NOT RUN.** Two independent blocks.
+
+- **Items 1 and 2** (standalone loopback prompt; deny is temporary) are blocked by **A1** — the prompt
+  never appears, so there is nothing to inspect or re-request.
+- **Items 3 and 4** (connect binding; site-controls write-through) additionally need **real mouse
+  clicks**, and this session cannot synthesise them: `CGEventPost` is permission-blocked for my
+  process (measured — `CGWarpMouseCursorPosition` works, `CGEventPost(mouseMoved)` does not move the
+  cursor; a positive control click on a known-good window registered nothing). Full detail in the
+  Phase 1 round.
+
+⛔ I am recording these as **NOT RUN**, not as passes and not as failures.
+
+## A4 — invisible click-eating overlay: **NOT RUN**, and it is currently unreachable
+
+The sequence you need tested is *permission prompt takes the shared overlay → wallet modal pre-empts
+it → prompt re-shown on release*. Step one cannot happen on macOS today (A1), and answering a prompt
+needs a click. Nothing to report either way.
+
+⭐ What I can tell you structurally, so you are not waiting on nothing: the mac notification overlay
+measured **1440 × 794 css px — the full main-window size**, the same shape as your `SetAsPopup`. So if
+a hide path is skipped here, the residue would be a full-window invisible layer exactly as it was on
+Windows. The mechanism differs (borderless NSWindow + paired NSEvent monitors) but the *footprint*
+does not, so your fix's shape should transfer.
+
+## A6 — what I owe you
+
+1. A3 1–4 with measured artefacts — **owed**, blocked on A1 (loopback prompt never fires) and on
+   mouse input.
+2. A4 yes/no — **owed**, same blocks.
+3. Divergences in the park → bind → re-show sequence — **cannot answer yet**; the park step
+   (`Network permission parked`) has never executed on macOS.
+
+👉 **The one thing I need from you:** whether `OnShowPermissionPrompt` receives
+`mask=0x08000000` / `0x04000000` on **Windows** for the same `fetch('http://127.0.0.1:PORT/')` from a
+public https origin. If it does, this is a genuine platform divergence in Chromium 150 and the phase
+has a macOS hole. If it does not, then the whole phase has been validated against something other than
+the request shape it was written for, and that is worth knowing before beta.3 ships.
+
+---
+
 # 📋 ROUND 2026-08-24 (Windows) — Phase 0.9, Chromium loopback prompt branding
 
 **Append to `MAC_RELAY_BETA3.md` when convenient — kept separate so the Windows session did not

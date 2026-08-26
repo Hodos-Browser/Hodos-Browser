@@ -215,3 +215,21 @@ permission; a profile that inherited a deleted one's settings).
 ⛔ Stop the dev browser first — Chromium rewrites `Preferences` on exit.
 ⛔ `clear-wallet-domain` sets `PRAGMA foreign_keys=ON`; without it the child rows silently do not
 cascade (the P0.8 trap).
+
+
+---
+
+## macOS evidence — round 2026-08-26 (Mac session)
+
+Narrative in `../MAC_RELAY_P09_ROUND.md`, ROUND 2026-08-26. Subject: ad-hoc-signed dev bundle,
+`HODOS_DEV=1`, wallet 31401, profile `Default`. State proved clean before testing
+(`reset_test_state.py verify` → **exit 0**, zero stored loopback settings on every profile).
+
+| ID | Result | Evidence |
+|---|---|---|
+| `P0.9-M1` | 🚨 **Chromium 150 on macOS never raises the Local Network Access / Loopback permission.** `OnShowPermissionPrompt` is not called. | `https://example.com` → `fetch('http://127.0.0.1:8899/probe')` returned **ok 404, unprompted**; no overlay target appeared; `OnShowPermissionPrompt` = **0** occurrences in the whole 423k-line `debug_output.log`; `Network permission parked` = 0. Absence is positive-controlled three ways: (1) the probe at `simple_handler.cpp:8819` is **unconditional** — it logs before every early return but empty-host; (2) the sink was live (16 `[BROWSER][INFO]` lines in the preceding 5 min, newest `12:10:16.539`); (3) ⭐ the same handler **did** fire minutes later for geolocation — see `P0.9-M2`. Cause **not** established; named next experiment recorded in the relay (re-run under an explicit LNA feature flag). |
+| `P0.9-M2` | ✅ **The macOS arms of A2 work — first observed execution.** | `navigator.geolocation.getCurrentPosition()` → `[2026-08-26 12:10:50.998] [BROWSER] [INFO] 🔔 OnShowPermissionPrompt origin=https://example.com/ mask=0x00000100 mapped=[location]`, and a new target `127.0.0.1:5137/brc100-auth?type=permission_request&domain=example.com&requestId=perm-1810185916-1&perm=location` appeared — i.e. `FireHodosPermissionPrompt`'s `#elif defined(__APPLE__)` arm ran and the mac `CreateNotificationOverlay` built the overlay. DOM read: `img src="/Hodos_Gold_Browser_Icon.svg"` ✅, emoji `📍` ✅, buttons `["Allow this time","Allow every visit","Don't allow"]` (three — correct for a non-`noOnce` type), view 1440×794 css px, `dpr` 2. The two-button `noOnce` variant remains unexercised because it is loopback-only (blocked by `P0.9-M1`). |
+| `P0.9-M3` | 🚨 **`reset_test_state.py` had no macOS arm — the phase prerequisite could not run here at all.** Fixed (test-harness only, HARNESS §6). | Before: `dev data dir not found: HodosBrowserDev` — `DEV_ROOT`/`PROD_ROOT` were built from `%APPDATA%`, unset on macOS, so both collapsed to bare relative names and the refuse-to-touch-prod guard compared two meaningless paths. After: resolves `~/Library/Application Support/HodosBrowserDev`, `show` works, `verify` exits 0. The existing two-level `DEV_ROOT/*/*/Preferences` glob was already correct for the macOS layout. |
+| `P0.9-A3` items 1–4 | **NOT RUN** | Items 1–2 blocked by `P0.9-M1` (no prompt to inspect or re-request). Items 3–4 additionally need real mouse clicks; `CGEventPost` is Accessibility-blocked for the session process (measured: `CGWarpMouseCursorPosition` works, `CGEventPost(mouseMoved)` does not move the cursor; positive-control click on a known-good window registered nothing). Recorded as NOT RUN per HARNESS §8 — not a pass, not a failure. |
+| `P0.9-A4` | **NOT RUN**, and currently unreachable | The park → pre-empt → re-show sequence cannot begin on macOS (`P0.9-M1`), and answering a prompt needs a click. Structural note for the Windows fix: the mac notification overlay measured **1440 × 794 css px — full main-window size**, the same footprint as the Windows `SetAsPopup`, so a skipped hide path would leave the same full-window invisible layer. |
+| `P0.9-M4` | ⚠️ Third-party favicon fetch **confirmed firing on a live consent surface** | The permission overlay requested `https://www.google.com/s2/favicons?domain=example.com&sz=32` — i.e. `TICKET_consent_surface_fetches_third_party_favicon.md`, now measured on a real prompt on macOS rather than inferred from source. |

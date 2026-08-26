@@ -1798,3 +1798,26 @@ roles is safe by code reading (it is emitted only from `BRC100AuthOverlayRoot`, 
 `notification`/`brc100auth`), but it is on the money path (spend approval); the no-regression evidence is
 CODE_READING + unit, not a live approval run (money-path discipline — the browser was not driven this session).
 Step-by-step procedure (two-sided A/B: genuine approval succeeds / self-nav tab refused): **`P0.5-B1_SMOKE.md`** in this folder.
+
+---
+
+## macOS note — round 2026-08-26 (Mac session)
+
+**`P0.5-B1` T3 live approval smoke (`P0.5-B1_SMOKE.md`, two-sided A/B): NOT RUN.**
+
+The fix itself was re-verified present in the tree this session — the single Layer-2 choke at
+`simple_handler.cpp:2341` (`IsGrantApproveMessage(message_name) && !IsApprovalOverlayRole(role_)`),
+the pure predicates in `include/core/IpcAuth.h` (`:44`, `:57`), the two per-arm duplicates removed
+(`:5298`, `:5383` now reference the choke), and `tests/ipc_role_guard_test.cpp` GREEN as part of the
+263-case macOS run.
+
+⛔ But the **live** half — genuine overlay approval succeeds / self-navved tab refused with no grant
+written — was not executed. Both sides of that A/B need a real click on an overlay button, and this
+session could not synthesise OS mouse input: `CGEventPost` is Accessibility-blocked for the session
+process (measured — `CGWarpMouseCursorPosition` works, `CGEventPost(mouseMoved)` does not move the
+cursor, and a positive-control click on a known-good window registered nothing). Recorded as NOT RUN
+per HARNESS §8. The standing caveat is unchanged: no-regression evidence for `brc100_auth_response`
+remains **CODE_READING + unit**, not a live approval run.
+
+⭐ The dev stack was left running to make this cheap for whoever picks it up (wallet 31401,
+frontend 5137, dev bundle at `cef-native/build/bin`).

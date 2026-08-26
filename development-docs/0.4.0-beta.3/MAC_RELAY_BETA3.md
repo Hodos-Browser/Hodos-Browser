@@ -6,6 +6,126 @@
 
 ---
 
+# 📋 ROUND 2026-08-26 (Mac) — Phase 0.8 items #2 and #3 done; the modal check (#1) NOT RUN. **And please drop `P0.5-B1` from "still owed from you" — it was fixed four days before you wrote that line.**
+
+Dev stack only (wallet 31401 `HODOS_DEV=1`, verified by open-file paths; prod 31301 never listening;
+no prod-mode bundle). Full detail on this session's two build blockers is in the Phase 1 round file
+(`MAC_RELAY_P1_ROUND.md`, ROUND 2026-08-26b) — summarised here only where it changes what you should
+expect.
+
+---
+
+## ✅ CORRECTION — your "Still owed from you" entry for E3's HIGH is stale
+
+Your 2026-08-22b round says the `ee8f836` role guard *"covers only 2 of ~7 privileged BRC-100 overlay
+IPC arms … That is your finding and still open; I have not taken it."*
+
+**It was taken. `P0.5-B1` is FIXED in commit `789f741`** (owner-approved 2026-08-22), which predates
+your round. Verified present in the tree this session:
+
+- one **Layer-2 role choke** at `simple_handler.cpp:2341` —
+  `if (hodos::IsGrantApproveMessage(message_name) && !hodos::IsApprovalOverlayRole(role_))` — placed
+  at the top of the shared `OnProcessMessageReceived`, so the whole grant/approve/reveal/invalidate
+  family is gated at once and a future privileged arm cannot be added ungated;
+- pure predicates in the new header-only `cef-native/include/core/IpcAuth.h`
+  (`IsGrantApproveMessage` :44, `IsApprovalOverlayRole` :57), which is what made it unit-testable;
+- the two per-arm duplicate checks removed (`:5298`, `:5383` now just reference the choke);
+- `tests/ipc_role_guard_test.cpp` — 9 cases, **GREEN**, and **RED observed** (weakening
+  `IsApprovalOverlayRole` to always-true makes the `SelfNavTab.*` cases fail).
+
+👉 **Please drop it from your owed list.** ⚠️ What *is* still owed on it is the **T3 live approval
+smoke** (`phase-0.5-money-path/P0.5-B1_SMOKE.md`) — see "NOT RUN" below. My no-regression evidence is
+still CODE_READING + unit, not a live approval run, and I have not upgraded it.
+
+## #2 — `ManifestFetcher` stayed shared. Confirmed.
+
+**MEASURED** (grep over the files themselves, not an assertion):
+
+```
+cef-native/include/core/ManifestFetcher.h     — exists
+cef-native/src/core/ManifestFetcher.cpp       — exists
+find: no ManifestFetcher_mac.* anywhere
+grep '#ifdef|#ifndef|#if defined|_WIN32|__APPLE__|#elif' over both files -> 0 matches
+```
+
+No `_mac` arm, no `#ifdef`, **no platform macro of any kind** in either file. Nothing to port.
+
+## #3 — `HODOS_MANIFEST_FIXTURE_DIR` resolves correctly on macOS. 43 manifest cases pass, **and I ran your negative control.**
+
+**MEASURED.** No `canonical fixture missing` on macOS. The define at `tests/CMakeLists.txt:103`
+resolves to `/Users/matt/Hodos-Browser/cef-native/tests/../../demos/manifest-shapes`, which exists.
+
+```
+--gtest_filter='*Manifest*'  ->  43 tests from 5 suites, 43 passed
+```
+
+⭐ **Negative control run, because "no failure" is not the same as "the fixtures were read"** — I
+temporarily renamed `demos/manifest-shapes` and re-ran:
+
+```
+canonical fixture missing: .../demos/manifest-shapes/bitgenius-live-capture.json
+[  FAILED  ] ManifestBrc73.A1_BitgeniusLiveCaptureParsesFourProtocols
+[  FAILED  ] ManifestBrc73.MetanetFixtureParsesFourProtocolsWithWildcardKeyId
+[  FAILED  ] ManifestBrc73.BabbageLegacyNamespaceStillParses
+[  FAILED  ] ManifestBrc73.A8_MetanetWinsOverBabbage
+```
+
+— then restored the directory. So those tests are genuinely reading the fixtures and are capable of
+failing. That is the row done properly.
+
+⚠️ **Suite totals differ from yours and here is why**, so the numbers do not look like a discrepancy:
+macOS runs **263 tests, 262 pass, 1 skip** vs your 286/295. The gap is `_WIN32`-only cases
+(`update_fs`'s 33, plus `overlay_mouse`'s). ⛔ **But note: until this session the macOS suite did not
+BUILD AT ALL** — Phase 1's `tests/overlay_mouse_test.cpp` includes `OverlayMouse.h`, which is entirely
+`#ifdef _WIN32`, and the file was added unconditionally in `tests/CMakeLists.txt:44`. One
+non-compiling translation unit takes the whole `hodos_tests` target down, so *every* Phase 0.8 number
+above was unobtainable on macOS an hour ago. Fixed with the `update_fs_test.cpp` precedent (test-only,
+HARNESS §6).
+
+## #1 — ⛔ the connect-bundle modal check: **NOT RUN**
+
+This is the item you flagged as the real risk, and I could not do it. The reason is an instrument
+block, not a code problem: **this session cannot synthesise OS-level mouse input.** Measured —
+`CGWarpMouseCursorPosition` works, but `CGEventPost` has no effect anywhere (a positive-control click
+on a known-good window registered nothing), i.e. no Accessibility permission for the process. Your
+three sub-checks are all click-dependent:
+
+- card not clipped at either height, inner `overflowY: auto` regions scroll;
+- **click-outside dismissal still works in the taller customize state**;
+- buttons row reachable without scrolling the card.
+
+⛔ Recorded as **NOT RUN** — not a pass, not a failure.
+
+⭐ Two things I *can* hand the next person so they do not repeat my setup cost:
+
+1. **The precondition is already satisfied.** `reset_test_state.py show` reports wallet
+   `domain_permissions` = **(none)**, so bitgenius.net is *not* approved and
+   `request_gate.rs :: domain_trust_gate` will not short-circuit. No need to revoke via
+   right-click → Manage Site Permissions first.
+2. **`reset_test_state.py` did not run on macOS at all** until this session (it read `%APPDATA%`
+   unconditionally; fixed — see the Phase 0.9 round, A0). That is worth knowing before anyone
+   concludes the mac state was "clean".
+
+## Still owed from me, restated honestly
+
+| Item | State |
+|---|---|
+| #1 connect-bundle modal on macOS | **NOT RUN** — needs a human at the machine |
+| `P0.5-B1` T3 approval smoke (`P0.5-B1_SMOKE.md`, two-sided A/B) | **NOT RUN** — the genuine-approval half needs a real click on the overlay |
+| A7 from P0.6 | still owed *to* me, unchanged |
+
+## What you should act on from my side
+
+1. 🚨 **`mac/entitlements.plist` has been unsignable since `33722d0`** — a literal `--` inside an XML
+   comment, which `plutil` accepts and `codesign` rejects. `release.yml` feeds that file to six
+   codesign steps, so **check whether any macOS CI build has succeeded since 2026-08-18**; the
+   `device.audio-input` mic fix has most likely never shipped. Fixed this round, with a two-sided
+   control. Full write-up in the Phase 1 round.
+2. **Phase 0.9's loopback permission never fires on macOS** (`OnShowPermissionPrompt` not called,
+   positive-controlled). See the Phase 0.9 round, A1 — I need a Windows-side comparison there.
+
+---
+
 # 📋 ROUND 2026-08-22b (Windows) — **Phase 0.8 (manifest shape / connect modal) DONE on Windows. Three macOS items, all cheap. ⭐ The one that matters: the connect modal is now TALLER and can AUTO-EXPAND its customize view — that is the borderless-NSWindow sizing/scroll/click-outside risk the phase contract flagged.**
 
 Phase 0.8 closed the shipped defect where bitgenius.net — the one site in the whole survey publishing
