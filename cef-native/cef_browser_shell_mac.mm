@@ -4136,11 +4136,28 @@ bool WasProfilePanelJustHidden() {
     return (now - g_profile_panel_last_hide_time) < 0.3;
 }
 
+// ⛔ The overlay's NSWindow size and the CEF view size are ONE contract. The window is
+// what the user clicks; the view is the coordinate space the DOM receives. If they
+// disagree, every click lands on the wrong element, with the error growing the further
+// it is from the top-left — the macOS twin of the Windows P1 coordinate defect.
+//
+// MEASURED 2026-08-26: ShowProfilePanelOverlayMacOS resized the window to a hardcoded
+// 300x400 while CreateProfilePanelOverlayMacOS built a 380x520 view, so the FIRST open
+// was correct and every RE-open was 26.7% out horizontally and 30% vertically. Reported
+// by the owner as "I click Edit and it opens the profile instead" — at the bottom of the
+// panel that is ~120px of drift. Differential CGWindowList capture: opening the panel
+// added a 300x400 window whose DOM reported 380x520.
+//
+// These constants exist so the two paths cannot drift again. Do not inline them.
+static const CGFloat kProfilePanelWidth  = 380;
+static const CGFloat kProfilePanelHeight = 520;
+
 void ShowProfilePanelOverlayMacOS(int iconRightOffset) {
     if (g_profile_panel_overlay_window) {
         g_mac_profile_panel_icon_right_offset = iconRightOffset;
 
-        NSRect panelFrame = CalculateToolbarOverlayFrame(g_main_window, 300, 400, 96);
+        NSRect panelFrame = CalculateToolbarOverlayFrame(
+            g_main_window, kProfilePanelWidth, kProfilePanelHeight, 96);
         [g_profile_panel_overlay_window setFrame:panelFrame display:YES];
 
         [g_profile_panel_overlay_window makeKeyAndOrderFront:nil];
@@ -4153,8 +4170,8 @@ void CreateProfilePanelOverlayMacOS(int iconRightOffset) {
     LOG_INFO("Creating profile panel overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
     g_mac_profile_panel_icon_right_offset = iconRightOffset;
 
-    CGFloat panelWidth = 380;
-    CGFloat panelHeight = 520;
+    CGFloat panelWidth = kProfilePanelWidth;
+    CGFloat panelHeight = kProfilePanelHeight;
     NSRect panelFrame = CalculateToolbarOverlayFrame(g_main_window, panelWidth, panelHeight, 96);
 
     if (g_profile_panel_overlay_window) {

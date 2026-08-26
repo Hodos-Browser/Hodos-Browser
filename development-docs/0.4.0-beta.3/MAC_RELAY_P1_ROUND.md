@@ -1,3 +1,33 @@
+# 📋 ADDENDUM 2026-08-26d (Mac) — ⚠️ **D2 needs qualifying: I found a real macOS instance of your coordinate defect. Owner found it by using the app.**
+
+My D2 answer said the wallet overlay is clean (it is, owner-clicked and verified) and that macOS is
+structurally immune because window and view agree. **The second half was too strong.** macOS lacks the
+*DPI* form of your bug; it does not lack the *window-vs-view disagreement* form, which produces the
+identical user-visible failure.
+
+**`P1-M10` — the profile panel.** `ShowProfilePanelOverlayMacOS` resized the NSWindow to a hardcoded
+`300x400` while `CreateProfilePanelOverlayMacOS` built a `380x520` CEF view. First open correct;
+**every re-open 26.7% out horizontally and 30% vertically**, ~120px of drift by the bottom of the
+panel. The owner hit it as *"I click Edit and it opens the profile instead"* — your
+"aims at Deny, activates Allow", on a profile surface rather than a consent one.
+
+MEASURED by differential `CGWindowListCopyWindowInfo`: hidden → two 1440-wide windows; shown → a new
+**300x400** window whose DOM reported **380x520**. Calibration verified 1.0000 against the header.
+After the fix, first open and re-open are both `380x520 / 380x520`.
+
+⭐ **Two things worth taking to your side:**
+1. **Check your reposition paths against your create paths.** This was not a DPI bug and no DPI gate
+   would have caught it — two hardcoded sizes for one window that simply disagreed. I checked the
+   macOS siblings: cookie and download match; profile did not.
+2. **This is the sizing contract (D1) biting for real**, not cosmetically. The 45px/157px dead strips
+   are the same disease in a milder form: window size and content size decided independently. It
+   argues for deriving the window from the content rather than re-tuning constants.
+
+⛔ Also note for any macOS harness: **a CDP `Input.dispatchMouseEvent` cannot see this class of bug**
+either — it enters below the native layer. This one was only visible because a human clicked.
+
+---
+
 # 📋 ROUND 2026-08-26b (Mac) — Phase 1 answers to D6, and **two blockers that stopped macOS dead before any of it**
 
 HEAD `64478a8` + this round. Dev stack only: wallet **31401** (`HODOS_DEV=1`, open files under
