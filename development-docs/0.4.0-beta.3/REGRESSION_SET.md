@@ -95,6 +95,82 @@ Auto-update must never force a reinstall and must never brick an install.
 | 0 → 0.5 | 2026-08-18 | ⬜ deferred to P0.5 (owns this boundary) | ⬜ live app | ⬜ live app | ⬜ live app | ⬜ live app | 🟡 T1 only — manifest↔copy round-trip + RED; real N−1→N apply owed at RC |
 | 0.5 → 1 | | | | | | | |
 | 1 → 2 | | | | | | | |
-| 2 → 3 | | | | | | | |
+| 2 → 3 | 2026-08-26 | 🟢 **GREEN both halves** (see run log) | ⬜ needs a real payment | ⬜ live app, human | 🟢 T1 — 73 engine tests · ⬜ T2 e2e | ⬜ needs a payment | 🟡 T1 only (6 tests); real N−1→N owed at RC |
 | 3 → 4 | | | | | | | |
 | 4 → 5 | | | | | | | |
+
+---
+
+## Run log — 2 → 3 boundary (2026-08-26)
+
+Phase 2 changed wallet HTTP timeouts on the money path and moved the balance call off the UI
+thread, so this boundary matters more than a docs-only one would.
+
+### R-INTEXT — 🟢 GREEN, both halves, correct SUBJECT
+
+⛔ **This check was NOT RUNNABLE AS WRITTEN — at this or any previous boundary.** Its SUBJECT is
+*"Rust log: absence of `X-Requesting-Domain` for (a), presence with the exact page host for (b)"* —
+and nothing in `domain_trust_mw` ever logged it. Fixed: one `log::debug!` in
+`rust-wallet/src/main.rs :: domain_trust_mw` records path + requesting domain. DEBUG, so it never
+reaches a user (the wallet ships at `warn`), and **host only** — never path or query — matching the
+browser side's `LogSafeUrl` rule, because that line records which site the user is talking to.
+
+What Rust actually received in one session:
+
+```
+51 x requesting_domain=<none:internal>     <- wallet UI, startup, peerpay polling
+ 1 x requesting_domain=example.com         <- path=/getVersion, from the page
+```
+
+| | Observed |
+|---|---|
+| **(a) internal** | `window.__hodos_walletCall('/wallet/status')` from the first-party UI -> `OK`, **no** header, **no** modal |
+| **(b) external** | `window.CWI.getVersion()` from `https://example.com` -> header present carrying **exactly the page host** -> `202 PENDING` -> `domain_approval` modal, owner-observed on screen |
+
+Same target (`127.0.0.1`), opposite outcomes, discriminated only by the frame origin the renderer
+cannot forge. **Each half is the other's control**, which is what this check asks for.
+
+⭐ The owner clicked **Block/Deny** deliberately, not Approve: approving would make `example.com` a
+standing approved domain and render every future run of this check **vacuous** — the trap that made
+the P0.8 bitgenius test worthless. Verified it left no residue: `🔐 Domain example.com blocked
+in-memory for this session`, and **no `example.com` row in `domain_permissions`**. Matches the P0.9
+standard that prompt denials are temporary.
+
+### 🎯 Incidental: the audit log was observed firing for the first time
+
+Phase 2 shipped `audit-<pid>.log` with its wiring proven only by unit test and code read. The
+consent prompt above produced, live:
+
+```
+[2026-08-26 14:23:14.503] consent.prompt_shown | example.com | type=domain_approval
+```
+
+⚠️ The **`payment.auto_approved`** half is still unobserved — it needs a real payment.
+
+### R-PERIM — 🟢 T1 green, ⬜ T2 owed
+
+`cargo test -p hodos_permission_engine`: **73 tests, all passing** (40 + 33 across the two suites).
+That is the Matrix C decision logic, which is this check's stated SUBJECT ("the Rust decision, not
+the UI's appearance"). The end-to-end half — flipping each of the four perimeter preconditions in a
+live browser — is **not** run.
+
+### R-UPDATE — 🟡 T1 only, unchanged from the 0 -> 0.5 boundary
+
+6 update tests green in `hodos_tests` (+1 pre-existing skip, `UpdateStagerRig.StagesFromLocalFeed`).
+`scripts/test-apply-forward.ps1` / `test-apply-rollback.ps1` exist but drive a **real staged
+installer**; the genuine N−1 -> N apply remains owed at RC, as recorded at the previous boundary.
+
+⚠️ Phase 2 did **not** touch the update path, but it did change the log its operators read, and
+`SilentStateWriter` was one of the files whose process tag was wrong.
+
+### ⬜ NOT RUN — and why, stated plainly rather than left blank
+
+| Check | Why not |
+|---|---|
+| **R-GOLD** | Needs a **real auto-approved payment**. Cannot be faked: the point is that the pill appears without a modal, on the correct `Tab::id`. |
+| **R-CLOSE** | T3, human. Needs a native file dialog held open and the wallet overlay driven into an unsafe state, per flag, across three separate close paths. |
+| **R-COUNT** | Needs spending to just under the session cap, then a tab close/reopen. |
+
+⛔ These three most directly guard the money path, and Phase 2 changed money-path timeouts.
+**They are owed, not waived.** One real payment session would close R-GOLD, R-COUNT and the
+`payment.auto_approved` audit line together.

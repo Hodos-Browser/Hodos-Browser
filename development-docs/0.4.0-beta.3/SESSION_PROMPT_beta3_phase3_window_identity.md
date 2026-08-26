@@ -35,6 +35,12 @@ research and adversarial review, and no code until I sign off on the assessment.
 4. `development-docs/0.4.0-beta.3/MAC_RELAY_P2_ROUND.md` — what is owed from the Mac side. ⚠️ WS2 is
    **Windows-only** (§3: "macOS Spaces is a different mechanism and #3 has no macOS analogue"), so
    this phase adds nothing to the relay — but do not let the Mac asks go stale.
+5. `development-docs/0.4.0-beta.3/REGRESSION_SET.md` — **the 2 → 3 boundary was run; read its run
+   log.** R-INTEXT is 🟢 both halves and R-PERIM is 🟢 at T1 (73 engine tests). ⛔ **R-GOLD, R-CLOSE
+   and R-COUNT were NOT run** — they need a real payment and a human, and they are the three that
+   most directly guard the money path. They are **owed, not waived**; one real payment session
+   closes R-GOLD, R-COUNT and the still-unobserved `payment.auto_approved` audit line together.
+   ⭐ If the owner is at the machine for a Phase 3 check anyway, ask whether to fold that in.
 
 ## 1. What this phase is
 
@@ -155,8 +161,11 @@ code:
 
 - **`P2-A7` is NOT MET** — 8,208 torn lines in the production log, cause unestablished after three
   failed reproductions. Recorded, not fixed. Do not re-derive the refuted explanation.
-- **The audit log's two call sites** are proven by unit test and code read, not by a real payment.
-  If you make a payment for any reason this phase, check `audit-<pid>.log` and report it.
+- **The audit log's `consent.prompt_shown` half is now confirmed live** (2026-08-26, during the
+  2 → 3 boundary run):
+  `[14:23:14.503] consent.prompt_shown | example.com | type=domain_approval`.
+  ⚠️ **`payment.auto_approved` is still unobserved.** If you make a payment for any reason this
+  phase, check `audit-<pid>.log` and report it.
 - **`DPI_RESOLUTION_TEST_MATRIX.md` still has no overlay section** — last outstanding Phase 1
   kickoff deliverable. ⭐ Known to be short: fixed-size overlays are DPI-invariant, so only the
   header, the notification overlay and the wallet panel reflow.

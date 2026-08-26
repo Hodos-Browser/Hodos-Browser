@@ -68,6 +68,23 @@ async fn domain_trust_mw(
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
 
+    // R-INTEXT's SUBJECT, made observable.
+    //
+    // The standing regression set (development-docs/0.4.0-beta.3/REGRESSION_SET.md) asserts
+    // on "the Rust log: ABSENCE of X-Requesting-Domain for an internal call, PRESENCE with
+    // the exact page host for an external one", and says reading the C++ side alone proves
+    // nothing. That was not satisfiable: nothing here logged it, so the sprint's
+    // load-bearing invariant could not actually be run at a phase boundary.
+    //
+    // DEBUG, so it never reaches a user (the wallet ships at warn). Host only -- never the
+    // path or query -- matching the browser side's LogSafeUrl rule, because this line
+    // records which site the user is talking to.
+    log::debug!(
+        "R-INTEXT trust: path={} requesting_domain={}",
+        req.request().path(),
+        domain.as_deref().unwrap_or("<none:internal>")
+    );
+
     // Internal call → no gate.
     let domain = match domain {
         Some(d) => d,
