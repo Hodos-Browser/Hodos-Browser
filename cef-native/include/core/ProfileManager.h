@@ -83,6 +83,31 @@ public:
         return true;
     }
 
+    // Does this directory name look like an id GenerateProfileId() could hand out again?
+    //
+    // Only these can collide with a future profile, so only these are worth sweeping. Every
+    // user who deleted a profile before 2026-08-26 has one of these on disk, unlisted and
+    // full of the old profile's cookies and history — and the next profile they create is
+    // handed that same id and adopts it. See
+    // development-docs/0.4.0-beta.3/TICKET_deleted_profile_id_reused_over_orphaned_data.md
+    //
+    // ⛔ Deliberately strict. "Profile_4.orphaned-1756..." must NOT match, or every launch
+    // would rename the previous launch's rename, forever. Pure so it is testable without a
+    // filesystem.
+    static bool IsGeneratedProfileDirName(const std::string& name) {
+        static const char* kPrefixes[] = {"Profile_", "Profile "};  // "Profile N" is the legacy form
+        for (const char* prefix : kPrefixes) {
+            const std::string p(prefix);
+            if (name.size() <= p.size() || name.compare(0, p.size(), p) != 0) continue;
+            const std::string suffix = name.substr(p.size());
+            for (unsigned char c : suffix) {
+                if (c < '0' || c > '9') return false;  // anything but a bare number: not ours
+            }
+            return true;
+        }
+        return false;
+    }
+
     // Result of resolving which profile a process should open at startup.
     struct StartupResolution {
         std::string profileId;     // profile to open (ignored when showPicker)
@@ -143,6 +168,12 @@ private:
     ~ProfileManager() = default;
 
     void Load();
+
+    // Startup migration: rename directories that match a generated profile id but are not
+    // listed in profiles.json, so no future profile can be handed an id that lands on a
+    // previous profile's data. ⛔ RENAMES, never deletes — this runs unattended against data
+    // the user never chose to lose. Assumes mutex_ is held.
+    void SweepOrphanedProfileDirs();
     void Save();          // acquires the cross-process registry lock, then SaveUnlocked()
     void SaveUnlocked();  // atomic tmp+rename write; caller already holds the registry lock
     std::string GenerateProfileId();

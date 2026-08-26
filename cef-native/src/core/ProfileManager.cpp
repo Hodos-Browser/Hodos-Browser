@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <iostream>
 #include <vector>
+#include <set>
 #include <nlohmann/json.hpp>
 
 #ifdef _WIN32
@@ -153,10 +154,87 @@ bool ProfileManager::Initialize(const std::string& app_data_path) {
     }
 
     Load();
+    SweepOrphanedProfileDirs();
     initialized_ = true;
     
     std::cout << "✅ ProfileManager initialized with " << profiles_.size() << " profiles" << std::endl;
     return true;
+}
+
+void ProfileManager::SweepOrphanedProfileDirs() {
+    // Caller holds mutex_ and has already run Load(), so profiles_ is current.
+    std::error_code ec;
+    if (app_data_path_.empty() || !fs::exists(app_data_path_, ec)) return;
+
+    std::set<std::string> listed;
+    for (const auto& p : profiles_) {
+        listed.insert(p.path.empty() ? p.id : p.path);
+    }
+
+    // Positive evidence that a browser session actually RAN on this directory.
+    //
+    // ⚠️ This is what keeps the sweep off a profile another instance is creating right now:
+    // CreateProfile makes the directory (and copies settings.json into it) BEFORE the
+    // profile appears in profiles.json, so for a moment a legitimate new profile looks
+    // exactly like an orphan. None of these artifacts exist until Chromium has run on it.
+    // ⛔ settings.json is deliberately NOT in this list — it is copied at create time and
+    // would make a half-created profile look used.
+    static const char* kUsedMarkers[] = {
+        "Preferences", "History", "Cookies", "bookmarks.db", "Network", "Local Storage"
+    };
+
+    // Collect first, rename second — renaming entries while iterating a directory is not
+    // safe to assume.
+    std::vector<fs::path> candidates;
+    for (const auto& entry : fs::directory_iterator(app_data_path_, ec)) {
+        if (ec) break;
+        if (!entry.is_directory(ec)) continue;
+
+        const std::string name = entry.path().filename().string();
+        if (!IsGeneratedProfileDirName(name)) continue;   // excludes Default, logs, wallet, prior sweeps
+        if (listed.count(name)) continue;                 // a live profile
+
+        bool used = false;
+        for (const char* marker : kUsedMarkers) {
+            if (fs::exists(entry.path() / marker, ec)) { used = true; break; }
+        }
+        if (!used) continue;
+
+        candidates.push_back(entry.path());
+    }
+
+    if (candidates.empty()) return;
+
+    const std::string stamp = std::to_string(
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+
+    for (const auto& dir : candidates) {
+        const std::string name = dir.filename().string();
+
+        // ⛔ Never touch a directory a live instance holds. An unlisted-but-locked directory
+        // means another process is running a profile this profiles.json does not know about
+        // — a torn read, or a registry write we raced. Leave it and say so.
+        if (IsProfileLockedByAnotherInstance(dir.string())) {
+            LOG_WARNING_PM("👤 Orphan sweep: '" + name +
+                           "' is unlisted but LOCKED by a running instance — left alone");
+            continue;
+        }
+
+        std::error_code rec;
+        const fs::path dest = dir.string() + ".orphaned-" + stamp;
+        fs::rename(dir, dest, rec);
+        if (rec) {
+            // Another instance may have swept it, or it is busy. Harmless either way: the
+            // id stays taken, so nothing can be reissued over it.
+            LOG_WARNING_PM("👤 Orphan sweep: could not move '" + name + "' (" +
+                           rec.message() + ") — left in place");
+        } else {
+            LOG_INFO_PM("👤 Orphan sweep: '" + name + "' was unlisted but held profile data; "
+                        "moved to '" + dest.filename().string() +
+                        "' so a new profile cannot inherit it. Safe to delete by hand.");
+        }
+    }
 }
 
 void ProfileManager::Load() {

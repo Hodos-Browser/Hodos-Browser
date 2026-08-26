@@ -155,3 +155,38 @@ TEST(ResolveStartup, NoArgMultiPickerEnabledEntersPickerMode) {
     EXPECT_TRUE(r.showPicker);
     EXPECT_EQ(r.profileId, "Default");  // bypass target if the picker is skipped
 }
+
+// ── Orphan sweep: which directory names can collide with a future profile id ──
+// Every user who deleted a profile before 2026-08-26 has an unlisted Profile_<N> directory
+// full of the old profile's cookies. GenerateProfileId derives the next id from the LISTED
+// profiles, so that id gets handed out again and the new profile adopts the data. The
+// startup sweep renames those directories; this decides what it will look at.
+
+TEST(OrphanSweep, MatchesGeneratedProfileIds) {
+    EXPECT_TRUE(ProfileManager::IsGeneratedProfileDirName("Profile_1"));
+    EXPECT_TRUE(ProfileManager::IsGeneratedProfileDirName("Profile_4"));
+    EXPECT_TRUE(ProfileManager::IsGeneratedProfileDirName("Profile_12345"));
+    // Legacy space-separated form, still handled by GenerateProfileId.
+    EXPECT_TRUE(ProfileManager::IsGeneratedProfileDirName("Profile 2"));
+}
+
+// ⛔ The load-bearing case. If an already-swept directory matched, every launch would rename
+// the previous launch's rename and the names would grow without bound.
+TEST(OrphanSweep, DoesNotMatchAlreadySweptOrDeletedDirs) {
+    EXPECT_FALSE(ProfileManager::IsGeneratedProfileDirName("Profile_4.orphaned-1756200000"));
+    EXPECT_FALSE(ProfileManager::IsGeneratedProfileDirName("Profile_4.deleted-1756200000"));
+}
+
+// The sweep runs against the app-data ROOT, which holds more than profiles. Renaming any of
+// these would break the browser.
+TEST(OrphanSweep, DoesNotMatchNonProfileDirectories) {
+    EXPECT_FALSE(ProfileManager::IsGeneratedProfileDirName("Default"));
+    EXPECT_FALSE(ProfileManager::IsGeneratedProfileDirName("logs"));
+    EXPECT_FALSE(ProfileManager::IsGeneratedProfileDirName("wallet"));
+    EXPECT_FALSE(ProfileManager::IsGeneratedProfileDirName("adblock"));
+    EXPECT_FALSE(ProfileManager::IsGeneratedProfileDirName(""));
+    EXPECT_FALSE(ProfileManager::IsGeneratedProfileDirName("Profile_"));   // no number
+    EXPECT_FALSE(ProfileManager::IsGeneratedProfileDirName("Profile"));
+    EXPECT_FALSE(ProfileManager::IsGeneratedProfileDirName("Profile_x"));
+    EXPECT_FALSE(ProfileManager::IsGeneratedProfileDirName("MyProfile_1"));  // prefix only
+}
