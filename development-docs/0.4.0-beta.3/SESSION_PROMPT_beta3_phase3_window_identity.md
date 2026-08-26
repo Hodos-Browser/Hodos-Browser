@@ -154,8 +154,11 @@ code:
   `phase-1-overlay-input-dpi/`.
 - ⛔ Never commit `development-docs/X402_INTEGRATION.md` or
   `development-docs/Onchain-Backup-and-Sync/*` — the owner's parallel work. Stash/pop around a rebase.
-- ⚠️ **Phase 2's five commits are NOT pushed** at time of writing. Check `git log origin/0.4.0..HEAD`
-  before assuming the remote state, and rebase before pushing (Windows↔Mac deconfliction protocol).
+- ✅ **Phase 2 is pushed** — `origin/0.4.0` at `2e18b7a` as of 2026-08-26. ⚠️ The **Mac side pushes
+  to the same branch and did so three times during Phase 2**, including a retraction and a
+  cross-platform wallet fix. `git fetch` and check `git log HEAD..origin/0.4.0` before you assume
+  anything about the remote, and **rebase before pushing** (Windows↔Mac deconfliction protocol).
+  ⛔ Stash the owner's parallel work around every rebase.
 
 ## 7. Carried, not part of this phase
 
