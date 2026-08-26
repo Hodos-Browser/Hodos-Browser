@@ -208,8 +208,15 @@
   flex: 1;
 }
 
+/* Mirrors .wd-quad-br .wd-recent-card exactly. Without min-height:0 a flex item cannot
+   shrink below its content (min-height defaults to auto), so this card grew past its
+   quadrant to 536px while Recent Activity sat neatly inside one at 462px — measured.
+   That single missing pair of declarations is why the two borders were different heights.
+   Keep these three in step with the .wd-recent-card rule below. */
 .wd-quad-bl .wd-send-card {
   flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .wd-quad-tr .wd-receive-card {
@@ -723,7 +730,18 @@
   background: linear-gradient(135deg, #000000 0%, #1a1a2e 100%);
   border: 1px solid var(--wd-gold);
   border-radius: 12px;
-  padding: 20px;
+  padding: 16px;
+}
+
+/* Dashboard density — the send form must fit its quadrant on a normal laptop screen
+   without scrolling. Font sizes are deliberately untouched; only spacing changes.
+   ⚠️ .form-group's 20px margin-bottom comes from WalletPanel.css `.form-group`, which is
+   UNSCOPED and leaks into every page importing it. .transaction-form-content already
+   spaces its children with `gap: 14px`, so the two stack to 34px between every field.
+   Zero the leaked margin HERE ONLY — do not touch the global rule, the wallet overlay
+   panel's own form is laid out against it. */
+.wd-send-card .transaction-form-content > .form-group {
+  margin-bottom: 0;
 }
 
 /* Override TransactionForm styles in dashboard context */
@@ -738,8 +756,8 @@
 
 .wd-send-card .form-header {
   border-bottom-color: var(--wd-divider);
-  padding-bottom: 12px;
-  margin-bottom: 16px;
+  padding-bottom: 8px;
+  margin-bottom: 10px;
 }
 
 .wd-send-card .form-header h3 {
