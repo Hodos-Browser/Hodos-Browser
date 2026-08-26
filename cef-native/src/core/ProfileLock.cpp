@@ -49,6 +49,34 @@ void ReleaseProfileLock() {
     }
 }
 
+bool IsProfileLockedByAnotherInstance(const std::string& profile_path) {
+    std::string lock_file = profile_path + "\\profile.lock";
+
+    // OPEN_EXISTING, no sharing. The lock is held with FILE_FLAG_DELETE_ON_CLOSE, so the
+    // file exists only while an instance holds it.
+    HANDLE handle = CreateFileA(
+        lock_file.c_str(),
+        GENERIC_READ,
+        0,  // no sharing — a live holder makes this fail
+        NULL,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        NULL);
+
+    if (handle != INVALID_HANDLE_VALUE) {
+        CloseHandle(handle);  // we got it, so nobody holds it
+        return false;
+    }
+
+    const DWORD err = GetLastError();
+    if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
+        return false;  // no lock file at all — not in use
+    }
+    // ERROR_SHARING_VIOLATION, or anything we cannot interpret: treat as in use.
+    // Fail closed — a refused delete is recoverable, a deleted live profile is not.
+    return true;
+}
+
 #elif defined(__APPLE__) || defined(__linux__)
 
 #include <sys/file.h>
@@ -96,6 +124,29 @@ void ReleaseProfileLock() {
         close(g_profile_lock_fd);
         g_profile_lock_fd = -1;
     }
+}
+
+bool IsProfileLockedByAnotherInstance(const std::string& profile_path) {
+    std::string lock_file = profile_path + "/profile.lock";
+
+    // ⚠️ Unlike Windows, this lock file is NOT delete-on-close, so it survives a normal
+    // exit and its mere existence proves nothing. The lock itself is what matters, so the
+    // probe must try to TAKE it and release again.
+    int fd = open(lock_file.c_str(), O_WRONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return false;  // no lock file — never used, or already cleaned up
+    }
+
+    if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
+        flock(fd, LOCK_UN);  // release immediately — this is a probe, not an acquisition
+        close(fd);
+        return false;
+    }
+
+    close(fd);
+    // EWOULDBLOCK (held), or anything else we cannot interpret. Fail closed, matching the
+    // Windows arm: a refused delete is recoverable, a deleted live profile is not.
+    return true;
 }
 
 #endif

@@ -69,6 +69,26 @@ const ProfilePickerOverlayRoot: React.FC = () => {
 
     // Edit mode state
     const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
+    // Deleting a profile is destructive and has NO confirmation anywhere below this point:
+    // `profiles_delete` goes straight to ProfileManager::DeleteProfile. Moving delete onto
+    // the card removes the intent gate that edit-mode used to provide, so the gate has to be
+    // replaced rather than dropped — hence this inline confirm step. A profile was deleted by
+    // accident during P0.9 testing on 2026-08-24; that is what the current-profile guard in
+    // ProfileManager::DeleteProfile was added for.
+    const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+
+    // Why this profile cannot be deleted, or null if it can.
+    // ⛔ These MIRROR the three guards in ProfileManager::DeleteProfile — last profile,
+    // default profile, and the profile this window is running on. The React side previously
+    // checked only the first two, so the UI offered delete for the running profile, C++
+    // REFUSED it, and useProfiles' optimistic update removed it from the list until the
+    // re-emitted profiles_get_all put it back. Keep these in step with the C++ guards.
+    const deleteBlockedReason = (profileId: string): string | null => {
+        if (profiles.length <= 1) return 'This is your only profile';
+        if (profileId === defaultProfileId) return 'The default profile cannot be deleted';
+        if (profileId === currentProfile?.id) return "You're using this profile right now — switch to another first";
+        return null;
+    };
     const [editName, setEditName] = useState('');
     const [editColor, setEditColor] = useState('');
     const [editAvatarImage, setEditAvatarImage] = useState<string | null>(null);
@@ -539,19 +559,71 @@ const ProfilePickerOverlayRoot: React.FC = () => {
                                     Save
                                 </HodosButton>
                                 <Box sx={{ flex: 1 }} />
-                                <HodosButton
-                                    variant="icon"
-                                    size="small"
-                                    onClick={() => handleDeleteProfile(profile.id)}
-                                    disabled={profiles.length <= 1 || profile.id === defaultProfileId}
-                                    aria-label="Delete profile"
+                                {/* Same control as the card's delete. Was #4b5563 = 2.35:1 on
+                                    #111827 with title=null: present, disabled, and reported by the
+                                    owner as simply "not there" (2026-08-25). Now ≥3:1 and it says
+                                    WHY it is unavailable. It also mirrors all THREE C++ guards —
+                                    it previously missed the running-profile one. */}
+                                {/* ⚠️ The title lives on a WRAPPER, not on the button. A disabled
+                                    <button> does not fire mouse events, so a `title` on it never
+                                    renders a tooltip — the explanation would have been silently
+                                    dead exactly in the state that needs it. The wrapper still
+                                    receives hover, so the reason shows. */}
+                                <Box
+                                    component="span"
+                                    title={deleteBlockedReason(profile.id) || `Delete ${profile.name}`}
+                                    sx={{ display: 'inline-flex' }}
                                 >
-                                    <DeleteOutlineIcon sx={{
-                                        fontSize: 18,
-                                        color: (profiles.length <= 1 || profile.id === defaultProfileId) ? '#4b5563' : '#ef4444',
-                                    }} />
-                                </HodosButton>
+                                    <HodosButton
+                                        variant="icon"
+                                        size="small"
+                                        onClick={() => setConfirmDeleteId(profile.id)}
+                                        disabled={!!deleteBlockedReason(profile.id)}
+                                        aria-label={deleteBlockedReason(profile.id)
+                                            ? `Delete profile (unavailable: ${deleteBlockedReason(profile.id)})`
+                                            : 'Delete profile'}
+                                    >
+                                        <DeleteOutlineIcon sx={{
+                                            fontSize: 18,
+                                            color: deleteBlockedReason(profile.id) ? '#6b7280' : '#ef4444',
+                                        }} />
+                                    </HodosButton>
+                                </Box>
                             </Box>
+                        </Box>
+                    ) : profile.id === confirmDeleteId ? (
+                        /* Delete confirmation — replaces the card in place. Deliberately
+                           inline rather than a dialog: this panel is 380px wide and a modal
+                           over an overlay is the shape that caused the P0.9 paint-over bug. */
+                        <Box
+                            key={profile.id}
+                            sx={{
+                                display: 'flex', alignItems: 'center', gap: 1,
+                                p: 1, borderRadius: 1,
+                                bgcolor: '#2a1416', border: '1px solid #ef4444',
+                            }}
+                        >
+                            <Typography variant="body2" sx={{ flex: 1, color: '#f0f0f0' }}>
+                                Delete <strong>{profile.name}</strong>?
+                            </Typography>
+                            <HodosButton
+                                variant="secondary"
+                                size="small"
+                                onClick={(e?: React.MouseEvent) => { e?.stopPropagation(); setConfirmDeleteId(null); }}
+                            >
+                                Cancel
+                            </HodosButton>
+                            <HodosButton
+                                variant="primary"
+                                size="small"
+                                onClick={(e?: React.MouseEvent) => {
+                                    e?.stopPropagation();
+                                    handleDeleteProfile(profile.id);
+                                    setConfirmDeleteId(null);
+                                }}
+                            >
+                                Delete
+                            </HodosButton>
                         </Box>
                     ) : (
                         /* Normal Profile Card */
@@ -618,6 +690,39 @@ const ProfilePickerOverlayRoot: React.FC = () => {
                             >
                                 <EditIcon sx={{ fontSize: 14, color: '#9ca3af' }} />
                             </Box>
+                            {/* Delete, beside Edit. Reveals on row hover like Edit does. */}
+                            {(() => {
+                                const blocked = deleteBlockedReason(profile.id);
+                                return (
+                                    <Box
+                                        className="edit-btn"
+                                        title={blocked || `Delete ${profile.name}`}
+                                        aria-label={blocked ? `Delete profile (unavailable: ${blocked})` : 'Delete profile'}
+                                        aria-disabled={blocked ? true : undefined}
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            if (blocked) return;
+                                            setConfirmDeleteId(profile.id);
+                                        }}
+                                        sx={{
+                                            opacity: 0,
+                                            p: 0.5,
+                                            borderRadius: '50%',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            cursor: blocked ? 'default' : 'pointer',
+                                            '&:hover': { bgcolor: blocked ? 'transparent' : '#4c1d24' },
+                                        }}
+                                    >
+                                        {/* ⛔ #6b7280 disabled / #ef4444 enabled, on #111827 = 3.4:1 and 4.4:1.
+                                            The edit-form copy of this control shipped at #4b5563 — 2.35:1 —
+                                            which the owner reported as the button "not being there" at all
+                                            (2026-08-25). Do not dim these further without re-measuring;
+                                            3:1 is the WCAG floor for a UI control. */}
+                                        <DeleteOutlineIcon sx={{ fontSize: 14, color: blocked ? '#6b7280' : '#ef4444' }} />
+                                    </Box>
+                                );
+                            })()}
                         </Box>
                     )
                 ))}

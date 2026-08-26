@@ -1,4 +1,6 @@
 #include "../../include/core/ProfileManager.h"
+#include "../../include/core/ProfileLock.h"
+#include "../../include/core/Logger.h"
 #include <fstream>
 #include <sstream>
 #include <chrono>
@@ -26,6 +28,19 @@ extern char** environ;  // pass the real environment to `open`
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
+
+// ⛔ MEASURED 2026-08-26: this file's std::cout / std::cerr output reaches NO log — not
+// debug_output.log, not cef_debug.log. Zero occurrences of "📁 ProfileManager initializing",
+// a line that runs on every single startup. So every refusal below ("cannot delete the
+// default profile", "…the profile this window is running on") has been silent, and so was
+// the one warning an operator can act on (a deletion that did not finish).
+// The root cause is not fixed here — the rest of this file still uses std::cout and the
+// stdout-is-redirected claim in cef-native/CLAUDE.md needs re-checking under the CEF 150
+// bootstrap/DLL model. These macros are used on the DELETE path only, which is the path
+// that destroys user data and therefore must be observable.
+#define LOG_INFO_PM(msg)    Logger::Log(msg, 1, 2)
+#define LOG_WARNING_PM(msg) Logger::Log(msg, 2, 2)
+#define LOG_ERROR_PM(msg)   Logger::Log(msg, 3, 2)
 
 namespace {
 
@@ -391,13 +406,13 @@ bool ProfileManager::DeleteProfile(const std::string& id) {
 
     // Can't delete the last profile
     if (profiles_.size() <= 1) {
-        std::cerr << "❌ Cannot delete the last profile" << std::endl;
+        LOG_ERROR_PM("👤 Delete REFUSED: this is the last profile");
         return false;
     }
 
     // Can't delete the default profile
     if (id == defaultProfileId_) {
-        std::cerr << "❌ Cannot delete the default profile" << std::endl;
+        LOG_ERROR_PM("👤 Delete REFUSED for '" + id + "': it is the default profile");
         return false;
     }
 
@@ -415,8 +430,7 @@ bool ProfileManager::DeleteProfile(const std::string& id) {
     // ⚠️ Read currentProfileId_ DIRECTLY — GetCurrentProfileId() takes the same
     // mutex this function already holds and would deadlock.
     if (id == currentProfileId_) {
-        std::cerr << "❌ Cannot delete the profile this window is running on — "
-                     "switch to another profile first" << std::endl;
+        LOG_ERROR_PM("👤 Delete REFUSED for '" + id + "': this window is running it");
         return false;
     }
 
@@ -427,9 +441,56 @@ bool ProfileManager::DeleteProfile(const std::string& id) {
         return false;
     }
 
-    // Delete profile directory (optional - could move to trash instead)
     std::string profilePath = app_data_path_ + "/" + it->path;
-    // Note: Not deleting files for safety - user can manually delete
+
+    // ⛔ Is another INSTANCE running this profile? currentProfileId_ above only knows about
+    // this process; a second Hodos window running another profile is invisible to it. Since
+    // this function now destroys files, deleting a profile another window is using would
+    // pull data out from under a live browser. The lock file is the only thing that knows.
+    if (IsProfileLockedByAnotherInstance(profilePath)) {
+        LOG_ERROR_PM("👤 Delete REFUSED for '" + id + "': another Hodos window holds its profile.lock");
+        return false;
+    }
+
+    // ── Deleting the data. Changed 2026-08-26; this used to keep the files:
+    //      // Note: Not deleting files for safety - user can manually delete
+    //    That was the wrong trade for a privacy browser. A user deleting a profile is
+    //    usually deleting it to be rid of the browsing data, and we were silently keeping
+    //    every cookie, session and history entry forever (173.8 MB measured on one
+    //    abandoned profile) with no UI that ever mentioned them.
+    //
+    // ⭐ RENAME FIRST, then delete. The rename is atomic and instant; a recursive delete of
+    //    a few hundred MB is neither, and on Windows it routinely fails partway on a file
+    //    still held open. Deleting in place and failing halfway would leave the directory
+    //    PRESENT, still name-matchable by GenerateProfileId, and now half-gutted — the worst
+    //    of both. Renaming first makes "the id can never be reissued over live data"
+    //    independent of whether the delete succeeds.
+    // ⚠️ The suffix must not match "Profile_<N>", or GenerateProfileId could pick it up again.
+    std::error_code ec;
+    const std::string stashPath =
+        profilePath + ".deleted-" + std::to_string(
+            std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+
+    if (fs::exists(profilePath)) {
+        fs::rename(profilePath, stashPath, ec);
+        if (ec) {
+            // Could not even rename — the directory is busy. Do NOT fall through to a
+            // delete-in-place; abort while everything is still consistent.
+            LOG_ERROR_PM("👤 Delete REFUSED for '" + id + "': could not move its data (" + ec.message() + ")");
+            return false;
+        }
+
+        std::uintmax_t removed = fs::remove_all(stashPath, ec);
+        if (ec) {
+            // Best effort. The remains are under a name GenerateProfileId cannot match, so
+            // the security property holds; the leftovers are a disk-space matter only.
+            LOG_WARNING_PM("👤 Profile '" + id + "' unlisted and its data moved to " + stashPath +
+                           ", but removal did not complete (" + ec.message() + "). Safe to delete by hand.");
+        } else {
+            LOG_INFO_PM("🗑️ Deleted " + std::to_string(removed) + " file(s) for profile " + id);
+        }
+    }
 
     profiles_.erase(it);
 
@@ -440,7 +501,7 @@ bool ProfileManager::DeleteProfile(const std::string& id) {
     }
 
     Save();
-    std::cout << "✅ Deleted profile: " << id << std::endl;
+    LOG_INFO_PM("✅ Deleted profile: " + id);
     return true;
 }
 
