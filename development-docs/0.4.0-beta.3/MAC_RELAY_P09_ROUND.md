@@ -1,3 +1,59 @@
+# 📋 CORRECTION 2026-08-26c (Mac) — ⛔ **My A1 finding below is WRONG. Chromium 150 DOES raise the loopback permission on macOS, and the Hodos prompt is correct. Retracting it.**
+
+Per HARNESS §8, struck in place rather than deleted, because the way it was wrong is the point.
+
+## What I reported, and why it was wrong
+
+I reported: *"Chromium 150 on macOS never raises the Local Network Access / Loopback permission —
+`OnShowPermissionPrompt` is not called."* I positive-controlled the **instrument** three ways and was
+satisfied. I never checked the **subject**.
+
+`mac_build_run.sh` exports `HODOS_MAC_DEV_FLAGS=1`, which an ad-hoc-signed dev build needs for the
+GPU. That flag block in `simple_app.cpp:125-133` also appends **`--disable-web-security`**, which
+switches off the entire local-network access machinery. So I measured a browser with the security
+feature disabled and concluded the security feature did not exist. Textbook HARNESS §6 question 2 —
+*"what is the subject? Prove it, do not assert it."* I proved the log sink was live and never asked
+what the browser was running with.
+
+## What is actually true — MEASURED, web security ON
+
+Relaunched with the GPU workarounds kept but `HODOS_MAC_DEV_FLAGS` unset, verified on the **network
+service** child process (which is where the check runs, and which carries the fully-appended command
+line — the main process argv does not, since CEF appends these in `OnBeforeCommandLineProcessing`):
+
+```
+network service argv: --enable-features=LocalNetworkAccessChecks --disable-features=Autofill,...
+                      and NO --disable-web-security
+```
+
+Same fetch, `https://example.com` → `http://127.0.0.1:8899`, state verified clean
+(`reset_test_state.py verify` exit 0, zero stored loopback settings):
+
+```
+🔔 Creating notification overlay (type: permission_request, domain: example.com) (macOS)
+target: /brc100-auth?type=permission_request&domain=example.com&perm=loopback
+```
+
+| A3 item | Result | Measured artefact |
+|---|---|---|
+| **1 — branding** | ✅ **PASS** | `img src="/Hodos_Gold_Browser_Icon.svg"`, emoji `💻`, buttons `["Don't allow","Allow"]` — **two**, so the `noOnce` path applied. Text: *"example.com wants to connect to a server running on your computer."* |
+| **2 — deny is temporary** | ✅ **PASS** | Owner clicked "Don't allow"; nothing written (`loopback settings: none — clean`); identical fetch re-fired → **second** `Creating notification overlay` event at 13:07:40, two on-screen windows, buttons present again. |
+| **A4 — no click-eating overlay** | ✅ **PASS** | After answering, `CGWindowListCopyWindowInfo` shows **one** on-screen Hodos window (the main one). The overlay document survives empty (`bodyText:""`, 0 buttons) — that is the documented keep-alive, not a live layer. |
+| **3 — connect binding** | ⚠️ not completed | Blocked by the locked-wallet defect (see `TICKET_locked_wallet_is_unrecoverable.md`), now fixed; worth re-running. |
+| **4 — site controls write-through** | not run | — |
+
+## What to take from this
+
+1. **`P0.9-M1` is retracted.** The phase works on macOS. Windows is owed no comparison run.
+2. ⚠️ **Any macOS runtime check of a security feature is invalid under the standard dev launcher**,
+   because `--disable-web-security` is on. That is not only this phase — it silently invalidates
+   CORS, mixed-content and origin-isolation testing too. A dev build that can exercise security
+   behaviour needs the GPU flags without that switch, exactly as used here.
+3. **The instrument controls were all fine.** Positive-controlling the *measurement* is not the same
+   as proving the *subject*, and I mistook one for the other.
+
+---
+
 # 📋 ROUND 2026-08-26 (Mac) — Phase 0.9. **The macOS arms WORK — I watched one run for the first time. But the permission this phase intercepts never fires on macOS, so A3 1–4 and A4 could not be exercised at all.**
 
 Answers A6. Dev stack only (wallet 31401 `HODOS_DEV=1`; prod 31301 never listening). Test state was
