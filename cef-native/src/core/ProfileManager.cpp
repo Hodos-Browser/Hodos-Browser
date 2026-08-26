@@ -30,15 +30,20 @@ extern char** environ;  // pass the real environment to `open`
 using json = nlohmann::json;
 namespace fs = std::filesystem;
 
-// ⛔ MEASURED 2026-08-26: this file's std::cout / std::cerr output reaches NO log — not
+// ⛔ MEASURED 2026-08-26: this file's std::cout / std::cerr output reached NO log — not
 // debug_output.log, not cef_debug.log. Zero occurrences of "📁 ProfileManager initializing",
-// a line that runs on every single startup. So every refusal below ("cannot delete the
-// default profile", "…the profile this window is running on") has been silent, and so was
-// the one warning an operator can act on (a deletion that did not finish).
-// The root cause is not fixed here — the rest of this file still uses std::cout and the
-// stdout-is-redirected claim in cef-native/CLAUDE.md needs re-checking under the CEF 150
-// bootstrap/DLL model. These macros are used on the DELETE path only, which is the path
-// that destroys user data and therefore must be observable.
+// a line that runs on every single startup, across 2.5 GB and 128 sessions. Every refusal
+// below ("cannot delete the default profile", "…the profile this window is running on") was
+// silent, and so was the one warning an operator can act on (a deletion that did not finish).
+//
+// ROOT CAUSE, now established: Logger::Initialize holds the log file open, so the freopen
+// that was supposed to redirect stdout into it ALWAYS fails EACCES(13) and the fallback
+// reopens stdout on NUL. The claim in cef-native/CLAUDE.md that "stdout is redirected to the
+// same file anyway" was false and never was true — corrected there.
+//
+// FIXED in beta.3 Phase 2b: every site in this file now goes through Logger.
+// ⛔ Do not reintroduce std::cout here, and do not "fix" the blackhole by making the freopen
+// succeed — that puts two writers on one file.
 #define LOG_INFO_PM(msg)    Logger::Log(msg, 1, 2)
 #define LOG_WARNING_PM(msg) Logger::Log(msg, 2, 2)
 #define LOG_ERROR_PM(msg)   Logger::Log(msg, 3, 2)
@@ -77,8 +82,8 @@ public:
             if (!owned_) {
                 // Best-effort: proceed without the lock rather than block startup
                 // forever, but make the degraded (unlocked) window observable.
-                std::cerr << "⚠️ RegistryLock: profiles.json lock wait timed out; "
-                             "proceeding unlocked" << std::endl;
+                LOG_WARNING_PM("⚠️ RegistryLock: profiles.json lock wait timed out; "
+                               "proceeding unlocked");
             }
         }
 #elif defined(__APPLE__)
@@ -91,8 +96,8 @@ public:
             for (int i = 0; i < 10; ++i) {
                 if (flock(fd_, LOCK_EX | LOCK_NB) == 0) break;
                 if (i == 9) {
-                    std::cerr << "⚠️ RegistryLock: .profiles.lock timed out; "
-                                 "proceeding unlocked" << std::endl;
+                    LOG_WARNING_PM("⚠️ RegistryLock: .profiles.lock timed out; "
+                                   "proceeding unlocked");
                     close(fd_);
                     fd_ = -1;
                     break;
@@ -143,13 +148,13 @@ bool ProfileManager::Initialize(const std::string& app_data_path) {
     app_data_path_ = app_data_path;
     profiles_file_path_ = app_data_path + "/profiles.json";
 
-    std::cout << "📁 ProfileManager initializing with path: " << app_data_path_ << std::endl;
+    LOG_INFO_PM(LogFmt() << "📁 ProfileManager initializing with path: " << app_data_path_);
 
     // Ensure app data directory exists
     try {
         fs::create_directories(app_data_path_);
     } catch (const std::exception& e) {
-        std::cerr << "❌ Failed to create app data directory: " << e.what() << std::endl;
+        LOG_ERROR_PM(LogFmt() << "❌ Failed to create app data directory: " << e.what());
         return false;
     }
 
@@ -157,7 +162,7 @@ bool ProfileManager::Initialize(const std::string& app_data_path) {
     SweepOrphanedProfileDirs();
     initialized_ = true;
     
-    std::cout << "✅ ProfileManager initialized with " << profiles_.size() << " profiles" << std::endl;
+    LOG_INFO_PM(LogFmt() << "✅ ProfileManager initialized with " << profiles_.size() << " profiles");
     return true;
 }
 
@@ -244,7 +249,7 @@ void ProfileManager::Load() {
 
     // Check if profiles.json exists
     if (!fs::exists(profiles_file_path_)) {
-        std::cout << "📁 No profiles.json found, creating default profile" << std::endl;
+        LOG_INFO_PM(LogFmt() << "📁 No profiles.json found, creating default profile");
         
         // Create default profile
         ProfileInfo defaultProfile;
@@ -271,7 +276,7 @@ void ProfileManager::Load() {
     try {
         std::ifstream file(profiles_file_path_);
         if (!file.is_open()) {
-            std::cerr << "❌ Failed to open profiles.json" << std::endl;
+            LOG_ERROR_PM(LogFmt() << "❌ Failed to open profiles.json");
             return;
         }
 
@@ -304,7 +309,7 @@ void ProfileManager::Load() {
         showPickerOnStartup_ = j.value("showPickerOnStartup", true);  // CHUNK 2: default ON
         defaultProfileId_ = j.value("defaultProfileId", "Default");
 
-        std::cout << "📁 Loaded " << profiles_.size() << " profiles from profiles.json" << std::endl;
+        LOG_INFO_PM(LogFmt() << "📁 Loaded " << profiles_.size() << " profiles from profiles.json");
 
         // CHUNK 2 — one-time migration to v2: turn the startup picker ON for
         // existing users (v1 persisted it false by the old default). Runs once;
@@ -312,13 +317,12 @@ void ProfileManager::Load() {
         // manual edit) is respected and the flag is never auto-flipped again.
         if (loadedVersion < 2) {
             showPickerOnStartup_ = true;
-            std::cout << "🔁 Migrating profiles.json to v2: enabling startup picker"
-                      << std::endl;
+            LOG_INFO_PM("🔁 Migrating profiles.json to v2: enabling startup picker");
             SaveUnlocked();  // registry lock already held by this Load()
         }
 
     } catch (const std::exception& e) {
-        std::cerr << "❌ Error parsing profiles.json: " << e.what() << std::endl;
+        LOG_ERROR_PM(LogFmt() << "❌ Error parsing profiles.json: " << e.what());
     }
 
     // Ensure at least default profile exists
@@ -376,7 +380,7 @@ void ProfileManager::SaveUnlocked() {
         {
             std::ofstream file(tmpPath, std::ios::binary | std::ios::trunc);
             if (!file.is_open()) {
-                std::cerr << "❌ Error saving profiles.json: cannot open temp file" << std::endl;
+                LOG_ERROR_PM(LogFmt() << "❌ Error saving profiles.json: cannot open temp file");
                 return;
             }
             file << payload;
@@ -397,9 +401,9 @@ void ProfileManager::SaveUnlocked() {
             std::error_code rmEc;
             fs::remove(tmpPath, rmEc);
         }
-        std::cout << "💾 Saved profiles.json" << std::endl;
+        LOG_INFO_PM(LogFmt() << "💾 Saved profiles.json");
     } catch (const std::exception& e) {
-        std::cerr << "❌ Error saving profiles.json: " << e.what() << std::endl;
+        LOG_ERROR_PM(LogFmt() << "❌ Error saving profiles.json: " << e.what());
     }
 }
 
@@ -450,7 +454,7 @@ bool ProfileManager::CreateProfile(const std::string& name, const std::string& c
     try {
         fs::create_directories(profilePath);
     } catch (const std::exception& e) {
-        std::cerr << "Failed to create profile directory: " << e.what() << std::endl;
+        LOG_ERROR_PM(LogFmt() << "Failed to create profile directory: " << e.what());
         return false;
     }
 
@@ -469,13 +473,13 @@ bool ProfileManager::CreateProfile(const std::string& name, const std::string& c
         }
     } catch (const std::exception& e) {
         // Non-fatal — new profile will use defaults
-        std::cerr << "Note: Could not copy settings to new profile: " << e.what() << std::endl;
+        LOG_ERROR_PM(LogFmt() << "Note: Could not copy settings to new profile: " << e.what());
     }
 
     profiles_.push_back(profile);
     Save();
 
-    std::cout << "✅ Created profile: " << name << " (" << profile.id << ")" << std::endl;
+    LOG_INFO_PM(LogFmt() << "✅ Created profile: " << name << " (" << profile.id << ")");
     return true;
 }
 
@@ -687,7 +691,7 @@ bool ProfileManager::LaunchWithProfile(const std::string& profileId, bool linkPa
     // reaches a process-launch boundary (or, on macOS, the shell). Cross-platform
     // primary gate; the macOS branch below additionally avoids the shell entirely.
     if (!IsValidProfileId(profileId)) {
-        std::cerr << "❌ Refusing to launch: invalid profile id" << std::endl;
+        LOG_ERROR_PM(LogFmt() << "❌ Refusing to launch: invalid profile id");
         return false;
     }
     (void)linkParentExitHandle;  // consumed on Windows below; no-op on macOS/other
@@ -766,10 +770,10 @@ bool ProfileManager::LaunchWithProfile(const std::string& profileId, bool linkPa
     if (launched) {
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
-        std::cout << "🚀 Launched new instance with profile: " << profileId << std::endl;
+        LOG_INFO_PM(LogFmt() << "🚀 Launched new instance with profile: " << profileId);
         return true;
     } else {
-        std::cerr << "❌ Failed to launch new instance: " << GetLastError() << std::endl;
+        LOG_ERROR_PM(LogFmt() << "❌ Failed to launch new instance: " << GetLastError());
         return false;
     }
 #elif defined(__APPLE__)
@@ -778,7 +782,7 @@ bool ProfileManager::LaunchWithProfile(const std::string& profileId, bool linkPa
     char exePath[PATH_MAX];
     uint32_t size = sizeof(exePath);
     if (_NSGetExecutablePath(exePath, &size) != 0) {
-        std::cerr << "❌ Failed to get executable path" << std::endl;
+        LOG_ERROR_PM(LogFmt() << "❌ Failed to get executable path");
         return false;
     }
 
@@ -791,7 +795,7 @@ bool ProfileManager::LaunchWithProfile(const std::string& profileId, bool linkPa
 
     // Verify this looks like an .app bundle
     if (appPath.find(".app") == std::string::npos) {
-        std::cerr << "❌ Could not find .app bundle in path: " << appPath << std::endl;
+        LOG_ERROR_PM(LogFmt() << "❌ Could not find .app bundle in path: " << appPath);
         return false;
     }
 
@@ -825,7 +829,7 @@ bool ProfileManager::LaunchWithProfile(const std::string& profileId, bool linkPa
     int spawn_rc = posix_spawn(&pid, "/usr/bin/open", nullptr, nullptr,
                                const_cast<char* const*>(argv), environ);
     if (spawn_rc != 0) {
-        std::cerr << "❌ Failed to spawn /usr/bin/open: " << strerror(spawn_rc) << std::endl;
+        LOG_ERROR_PM(LogFmt() << "❌ Failed to spawn /usr/bin/open: " << strerror(spawn_rc));
         return false;
     }
     // `open` delegates to Launch Services and returns quickly. CEF's SIGCHLD
@@ -835,17 +839,17 @@ bool ProfileManager::LaunchWithProfile(const std::string& profileId, bool linkPa
     int status = 0;
     pid_t rc = waitpid(pid, &status, 0);
     if (rc < 0 && errno == ECHILD) {
-        std::cout << "🚀 Launched new instance with profile: " << profileId
-                  << " (reaped by SIGCHLD handler)" << std::endl;
+        LOG_INFO_PM(LogFmt() << "🚀 Launched new instance with profile: " << profileId
+                             << " (reaped by SIGCHLD handler)");
     } else if (rc > 0 && WIFEXITED(status) && WEXITSTATUS(status) != 0) {
-        std::cerr << "⚠️ open returned exit code " << WEXITSTATUS(status)
-                  << " for profile '" << profileId << "' — proceeding (Launch Services may still succeed)" << std::endl;
+        LOG_WARNING_PM(LogFmt() << "⚠️ open returned exit code " << WEXITSTATUS(status)
+                                << " for profile '" << profileId << "' — proceeding (Launch Services may still succeed)");
     } else {
-        std::cout << "🚀 Launched new instance with profile: " << profileId << std::endl;
+        LOG_INFO_PM(LogFmt() << "🚀 Launched new instance with profile: " << profileId);
     }
     return true;
 #else
-    std::cerr << "❌ LaunchWithProfile not implemented for this platform" << std::endl;
+    LOG_ERROR_PM(LogFmt() << "❌ LaunchWithProfile not implemented for this platform");
     return false;
 #endif
 }
@@ -942,8 +946,8 @@ std::string ProfileManager::GenerateProfileId() {
         }
     } catch (const std::exception& e) {
         // A scan failure must not hand back a possibly-colliding id silently.
-        std::cerr << "⚠️ Profile id scan failed (" << e.what()
-                  << ") — id may collide with an orphaned directory" << std::endl;
+        LOG_WARNING_PM(LogFmt() << "⚠️ Profile id scan failed (" << e.what()
+                                << ") — id may collide with an orphaned directory");
     }
 
     return "Profile_" + std::to_string(maxNum);

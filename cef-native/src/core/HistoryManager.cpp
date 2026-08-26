@@ -8,6 +8,7 @@
 
 #define LOG_DEBUG_HISTORY(msg) Logger::Log(msg, 0, 0)
 #define LOG_INFO_HISTORY(msg) Logger::Log(msg, 1, 0)
+#define LOG_WARNING_HISTORY(msg) Logger::Log(msg, 2, 0)
 #define LOG_ERROR_HISTORY(msg) Logger::Log(msg, 3, 0)
 
 HistoryManager& HistoryManager::GetInstance() {
@@ -325,7 +326,7 @@ std::vector<HistoryEntry> HistoryManager::SearchHistory(const HistorySearchParam
 
     // Try to open database if not already open
     if (!history_db_ && !OpenDatabase()) {
-        std::cerr << "⚠️ History database not available yet" << std::endl;
+        LOG_WARNING_HISTORY(LogFmt() << "⚠️ History database not available yet");
         return entries;
     }
 
@@ -362,7 +363,7 @@ std::vector<HistoryEntry> HistoryManager::SearchHistory(const HistorySearchParam
     int rc = sqlite3_prepare_v2(history_db_, sql.str().c_str(), -1, &stmt, nullptr);
 
     if (rc != SQLITE_OK) {
-        std::cerr << "❌ Failed to prepare search query: " << sqlite3_errmsg(history_db_) << std::endl;
+        LOG_ERROR_HISTORY(LogFmt() << "❌ Failed to prepare search query: " << sqlite3_errmsg(history_db_));
         return entries;
     }
 
@@ -405,7 +406,7 @@ std::vector<HistoryEntry> HistoryManager::SearchHistory(const HistorySearchParam
 
     sqlite3_finalize(stmt);
 
-    std::cout << "🔍 Search returned " << entries.size() << " entries" << std::endl;
+    LOG_INFO_HISTORY(LogFmt() << "🔍 Search returned " << entries.size() << " entries");
     return entries;
 }
 
@@ -622,7 +623,7 @@ std::vector<HistoryEntry> HistoryManager::GetTopSites(int limit) {
 bool HistoryManager::DeleteHistoryEntry(const std::string& url) {
     // Try to open database if not already open
     if (!history_db_ && !OpenDatabase()) {
-        std::cerr << "⚠️ History database not available yet" << std::endl;
+        LOG_WARNING_HISTORY(LogFmt() << "⚠️ History database not available yet");
         return false;
     }
 
@@ -636,7 +637,7 @@ bool HistoryManager::DeleteHistoryEntry(const std::string& url) {
 
     int rc = sqlite3_prepare_v2(history_db_, get_id_sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        std::cerr << "❌ Failed to query URL ID: " << sqlite3_errmsg(history_db_) << std::endl;
+        LOG_ERROR_HISTORY(LogFmt() << "❌ Failed to query URL ID: " << sqlite3_errmsg(history_db_));
         return false;
     }
 
@@ -649,7 +650,7 @@ bool HistoryManager::DeleteHistoryEntry(const std::string& url) {
     sqlite3_finalize(stmt);
 
     if (url_id < 0) {
-        std::cout << "⚠️ URL not found in history: " << url << std::endl;
+        LOG_INFO_HISTORY(LogFmt() << "⚠️ URL not found in history: " << url);
         return false;
     }
 
@@ -657,7 +658,7 @@ bool HistoryManager::DeleteHistoryEntry(const std::string& url) {
     const char* delete_visits_sql = "DELETE FROM visits WHERE url = ?";
     rc = sqlite3_prepare_v2(history_db_, delete_visits_sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        std::cerr << "❌ Failed to delete visits: " << sqlite3_errmsg(history_db_) << std::endl;
+        LOG_ERROR_HISTORY(LogFmt() << "❌ Failed to delete visits: " << sqlite3_errmsg(history_db_));
         return false;
     }
 
@@ -669,7 +670,7 @@ bool HistoryManager::DeleteHistoryEntry(const std::string& url) {
     const char* delete_url_sql = "DELETE FROM urls WHERE id = ?";
     rc = sqlite3_prepare_v2(history_db_, delete_url_sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        std::cerr << "❌ Failed to delete URL: " << sqlite3_errmsg(history_db_) << std::endl;
+        LOG_ERROR_HISTORY(LogFmt() << "❌ Failed to delete URL: " << sqlite3_errmsg(history_db_));
         return false;
     }
 
@@ -678,7 +679,7 @@ bool HistoryManager::DeleteHistoryEntry(const std::string& url) {
     sqlite3_finalize(stmt);
 
     if (rc == SQLITE_DONE) {
-        std::cout << "✅ Deleted history entry: " << url << std::endl;
+        LOG_INFO_HISTORY(LogFmt() << "✅ Deleted history entry: " << url);
         return true;
     }
 
@@ -688,7 +689,7 @@ bool HistoryManager::DeleteHistoryEntry(const std::string& url) {
 bool HistoryManager::DeleteAllHistory() {
     // Try to open database if not already open
     if (!history_db_ && !OpenDatabase()) {
-        std::cerr << "⚠️ History database not available yet" << std::endl;
+        LOG_WARNING_HISTORY(LogFmt() << "⚠️ History database not available yet");
         return false;
     }
 
@@ -706,19 +707,19 @@ bool HistoryManager::DeleteAllHistory() {
     int rc = sqlite3_exec(history_db_, delete_sql, nullptr, nullptr, &err_msg);
 
     if (rc != SQLITE_OK) {
-        std::cerr << "❌ Failed to clear history: " << err_msg << std::endl;
+        LOG_ERROR_HISTORY(LogFmt() << "❌ Failed to clear history: " << err_msg);
         sqlite3_free(err_msg);
         return false;
     }
 
-    std::cout << "✅ All history cleared" << std::endl;
+    LOG_INFO_HISTORY(LogFmt() << "✅ All history cleared");
     return true;
 }
 
 bool HistoryManager::DeleteHistoryRange(int64_t start_time, int64_t end_time) {
     // Try to open database if not already open
     if (!history_db_ && !OpenDatabase()) {
-        std::cerr << "⚠️ History database not available yet" << std::endl;
+        LOG_WARNING_HISTORY(LogFmt() << "⚠️ History database not available yet");
         return false;
     }
 
@@ -732,7 +733,7 @@ bool HistoryManager::DeleteHistoryRange(int64_t start_time, int64_t end_time) {
 
     int rc = sqlite3_prepare_v2(history_db_, delete_visits_sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        std::cerr << "❌ Failed to prepare delete range query: " << sqlite3_errmsg(history_db_) << std::endl;
+        LOG_ERROR_HISTORY(LogFmt() << "❌ Failed to prepare delete range query: " << sqlite3_errmsg(history_db_));
         return false;
     }
 
@@ -745,14 +746,14 @@ bool HistoryManager::DeleteHistoryRange(int64_t start_time, int64_t end_time) {
     const char* cleanup_sql = "DELETE FROM urls WHERE id NOT IN (SELECT DISTINCT url FROM visits)";
     rc = sqlite3_prepare_v2(history_db_, cleanup_sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        std::cerr << "❌ Failed to clean up orphaned URLs: " << sqlite3_errmsg(history_db_) << std::endl;
+        LOG_ERROR_HISTORY(LogFmt() << "❌ Failed to clean up orphaned URLs: " << sqlite3_errmsg(history_db_));
         return false;
     }
 
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
 
-    std::cout << "✅ History range cleared" << std::endl;
+    LOG_INFO_HISTORY(LogFmt() << "✅ History range cleared");
     return true;
 }
 

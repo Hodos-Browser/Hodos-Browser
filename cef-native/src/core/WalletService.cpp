@@ -50,7 +50,7 @@ WalletService::WalletService()
 }
 
 WalletService::~WalletService() {
-    std::cout << "🛑 WalletService destructor called - shutting down daemon..." << std::endl;
+    LOG_DEBUG_BROWSER(LogFmt() << "🛑 WalletService destructor called - shutting down daemon...");
     stopDaemon();
     cleanupConnection();
 }
@@ -64,7 +64,7 @@ bool WalletService::initializeConnection() {
                            0);
 
     if (!hSession_) {
-        std::cerr << "❌ Failed to initialize WinHTTP session. Error: " << GetLastError() << std::endl;
+        LOG_ERROR_BROWSER(LogFmt() << "❌ Failed to initialize WinHTTP session. Error: " << GetLastError());
         return false;
     }
 
@@ -78,7 +78,7 @@ bool WalletService::initializeConnection() {
 
     std::wstring wideUrl(baseUrl_.begin(), baseUrl_.end());
     if (!WinHttpCrackUrl(wideUrl.c_str(), 0, 0, &urlComp)) {
-        std::cerr << "❌ Failed to parse URL: " << baseUrl_ << std::endl;
+        LOG_ERROR_BROWSER(LogFmt() << "❌ Failed to parse URL: " << baseUrl_);
         return false;
     }
 
@@ -92,12 +92,12 @@ bool WalletService::initializeConnection() {
     // Connect to server
     hConnect_ = WinHttpConnect(hSession_, hostname.c_str(), port, 0);
     if (!hConnect_) {
-        std::cerr << "❌ Failed to connect to Rust wallet at " << baseUrl_ << std::endl;
+        LOG_ERROR_BROWSER(LogFmt() << "❌ Failed to connect to Rust wallet at " << baseUrl_);
         return false;
     }
 
     connected_ = true;
-    std::cout << "✅ Connected to Go wallet daemon at " << baseUrl_ << std::endl;
+    LOG_DEBUG_BROWSER(LogFmt() << "✅ Connected to Go wallet daemon at " << baseUrl_);
     return true;
 }
 
@@ -287,15 +287,15 @@ std::string WalletService::readResponse(HINTERNET hRequest) {
 }
 
 bool WalletService::isHealthy() {
-    std::cout << "🔍 Checking Rust wallet health..." << std::endl;
+    LOG_DEBUG_BROWSER(LogFmt() << "🔍 Checking Rust wallet health...");
 
     auto response = makeHttpRequest("GET", "/health");
 
     if (response.contains("status") && response["status"] == "ok") {
-        std::cout << "✅ Rust wallet is healthy" << std::endl;
+        LOG_DEBUG_BROWSER(LogFmt() << "✅ Rust wallet is healthy");
         return true;
     } else {
-        std::cerr << "❌ Rust wallet health check failed" << std::endl;
+        LOG_ERROR_BROWSER(LogFmt() << "❌ Rust wallet health check failed");
         return false;
     }
 }
@@ -385,60 +385,67 @@ nlohmann::json WalletService::getWalletStatus() {
     return fallbackResponse;
 }
 
+// ⛔ P0-A8 / gate G5: these functions must NOT log values read out of a wallet HTTP
+// response. Five such lines were removed in beta.3 P2b -- wallet version, backed-up flag,
+// address count, current address and newly generated address.
+//
+// They were harmless while std::cout went to NUL. Converting the blackhole to a REAL sink
+// is exactly what turns a dormant line into disclosure: a BSV address in a log kept for 30
+// days links the user to their on-chain activity, and G5 guards the SHAPE (a wallet
+// response reaching a sink) precisely so nobody has to re-litigate which field is safe.
+// The success/failure events are kept; the values are not.
 nlohmann::json WalletService::getWalletInfo() {
-    std::cout << "🔍 Getting wallet info from Rust wallet..." << std::endl;
+    LOG_DEBUG_BROWSER(LogFmt() << "🔍 Getting wallet info from Rust wallet...");
 
     auto response = makeHttpRequest("GET", "/wallet/info");
 
     if (response.contains("version")) {
-        std::cout << "✅ Wallet info retrieved successfully" << std::endl;
-        std::cout << "📁 Version: " << response["version"].get<std::string>() << std::endl;
-        std::cout << "🔑 Backed up: " << (response["backedUp"].get<bool>() ? "Yes" : "No") << std::endl;
+        LOG_INFO_BROWSER(LogFmt() << "✅ Wallet info retrieved successfully");
         return response;
     } else {
-        std::cerr << "❌ Failed to get wallet info from Rust wallet" << std::endl;
+        LOG_ERROR_BROWSER(LogFmt() << "❌ Failed to get wallet info from Rust wallet");
         return nlohmann::json::object();
     }
 }
 
 nlohmann::json WalletService::createWallet() {
-    std::cout << "🔍 Creating new wallet via Rust wallet..." << std::endl;
+    LOG_INFO_BROWSER(LogFmt() << "🔍 Creating new wallet via Rust wallet...");
 
     auto response = makeHttpRequest("POST", "/wallet/create");
 
     if (response.contains("success") && response["success"].get<bool>()) {
-        std::cout << "✅ Wallet created successfully" << std::endl;
+        LOG_INFO_BROWSER(LogFmt() << "✅ Wallet created successfully");
         return response;
     } else {
-        std::cerr << "❌ Failed to create wallet from Rust wallet" << std::endl;
+        LOG_ERROR_BROWSER(LogFmt() << "❌ Failed to create wallet from Rust wallet");
         return nlohmann::json::object();
     }
 }
 
 nlohmann::json WalletService::loadWallet() {
-    std::cout << "🔍 Loading wallet from Rust wallet..." << std::endl;
+    LOG_INFO_BROWSER(LogFmt() << "🔍 Loading wallet from Rust wallet...");
 
     auto response = makeHttpRequest("POST", "/wallet/load");
 
     if (response.contains("success") && response["success"].get<bool>()) {
-        std::cout << "✅ Wallet loaded successfully" << std::endl;
+        LOG_INFO_BROWSER(LogFmt() << "✅ Wallet loaded successfully");
         return response;
     } else {
-        std::cerr << "❌ Failed to load wallet from Rust wallet" << std::endl;
+        LOG_ERROR_BROWSER(LogFmt() << "❌ Failed to load wallet from Rust wallet");
         return nlohmann::json::object();
     }
 }
 
 bool WalletService::markWalletBackedUp() {
-    std::cout << "🔍 Marking wallet as backed up..." << std::endl;
+    LOG_INFO_BROWSER(LogFmt() << "🔍 Marking wallet as backed up...");
 
     auto response = makeHttpRequest("POST", "/wallet/markBackedUp");
 
     if (response.contains("success") && response["success"] == true) {
-        std::cout << "✅ Wallet marked as backed up successfully" << std::endl;
+        LOG_INFO_BROWSER(LogFmt() << "✅ Wallet marked as backed up successfully");
         return true;
     } else {
-        std::cerr << "❌ Failed to mark wallet as backed up" << std::endl;
+        LOG_ERROR_BROWSER(LogFmt() << "❌ Failed to mark wallet as backed up");
         return false;
     }
 }
@@ -446,46 +453,43 @@ bool WalletService::markWalletBackedUp() {
 // Address Management Methods
 
 nlohmann::json WalletService::getAllAddresses() {
-    std::cout << "🔍 Getting all addresses from Rust wallet..." << std::endl;
+    LOG_DEBUG_BROWSER(LogFmt() << "🔍 Getting all addresses from Rust wallet...");
 
     auto response = makeHttpRequest("GET", "/wallet/addresses");
 
     if (response.is_array()) {
-        std::cout << "✅ Addresses retrieved successfully" << std::endl;
-        std::cout << "📍 Address count: " << response.size() << std::endl;
+        LOG_INFO_BROWSER(LogFmt() << "✅ Addresses retrieved successfully");
         return response;
     } else {
-        std::cerr << "❌ Failed to get addresses from Rust wallet" << std::endl;
+        LOG_ERROR_BROWSER(LogFmt() << "❌ Failed to get addresses from Rust wallet");
         return nlohmann::json::array();
     }
 }
 
 nlohmann::json WalletService::getCurrentAddress() {
-    std::cout << "🔍 Getting current address from Rust wallet..." << std::endl;
+    LOG_DEBUG_BROWSER(LogFmt() << "🔍 Getting current address from Rust wallet...");
 
     auto response = makeHttpRequest("GET", "/wallet/address/current");
 
     if (response.contains("address")) {
-        std::cout << "✅ Current address retrieved successfully" << std::endl;
-        std::cout << "📍 Address: " << response["address"].get<std::string>() << std::endl;
+        LOG_INFO_BROWSER(LogFmt() << "✅ Current address retrieved successfully");
         return response;
     } else {
-        std::cerr << "❌ Failed to get current address from Rust wallet" << std::endl;
+        LOG_ERROR_BROWSER(LogFmt() << "❌ Failed to get current address from Rust wallet");
         return nlohmann::json::object();
     }
 }
 
 nlohmann::json WalletService::generateAddress() {
-    std::cout << "🔍 Generating new address from Rust wallet..." << std::endl;
+    LOG_INFO_BROWSER(LogFmt() << "🔍 Generating new address from Rust wallet...");
 
     auto response = makeHttpRequest("POST", "/wallet/address/generate");
 
     if (response.contains("address")) {
-        std::cout << "✅ Address generated successfully" << std::endl;
-        std::cout << "📍 New Address: " << response["address"].get<std::string>() << std::endl;
+        LOG_INFO_BROWSER(LogFmt() << "✅ Address generated successfully");
         return response;
     } else {
-        std::cerr << "❌ Failed to generate address from Rust wallet" << std::endl;
+        LOG_ERROR_BROWSER(LogFmt() << "❌ Failed to generate address from Rust wallet");
         return nlohmann::json::object();
     }
 }
@@ -604,19 +608,19 @@ nlohmann::json WalletService::getTransactionHistory() {
 
 bool WalletService::startDaemon() {
     if (daemonRunning_) {
-        std::cout << "🔄 Go daemon already running" << std::endl;
+        LOG_INFO_BROWSER(LogFmt() << "🔄 Go daemon already running");
         return true;
     }
 
-    std::cout << "🚀 Starting Go wallet daemon..." << std::endl;
+    LOG_INFO_BROWSER(LogFmt() << "🚀 Starting Go wallet daemon...");
 
     if (createDaemonProcess()) {
         daemonRunning_ = true;
         monitorThread_ = std::thread(&WalletService::monitorDaemon, this);
-        std::cout << "✅ Go daemon started successfully" << std::endl;
+        LOG_INFO_BROWSER(LogFmt() << "✅ Go daemon started successfully");
         return true;
     } else {
-        std::cerr << "❌ Failed to start Go daemon" << std::endl;
+        LOG_ERROR_BROWSER(LogFmt() << "❌ Failed to start Go daemon");
         return false;
     }
 }
@@ -626,7 +630,7 @@ void WalletService::stopDaemon() {
         return;
     }
 
-    std::cout << "🛑 Stopping Go wallet daemon..." << std::endl;
+    LOG_INFO_BROWSER(LogFmt() << "🛑 Stopping Go wallet daemon...");
 
     daemonRunning_ = false;
 
@@ -635,7 +639,7 @@ void WalletService::stopDaemon() {
     }
 
     cleanupDaemonProcess();
-    std::cout << "✅ Go daemon stopped" << std::endl;
+    LOG_INFO_BROWSER(LogFmt() << "✅ Go daemon stopped");
 }
 
 bool WalletService::isDaemonRunning() {
@@ -648,7 +652,7 @@ void WalletService::setDaemonPath(const std::string& path) {
 
 bool WalletService::createDaemonProcess() {
     if (daemonPath_.empty()) {
-        std::cerr << "❌ Daemon path not set" << std::endl;
+        LOG_ERROR_BROWSER(LogFmt() << "❌ Daemon path not set");
         return false;
     }
 
@@ -673,7 +677,7 @@ bool WalletService::createDaemonProcess() {
         &si,                    // Startup info
         &daemonProcess_)) {     // Process information
 
-        std::cerr << "❌ Failed to create daemon process. Error: " << GetLastError() << std::endl;
+        LOG_ERROR_BROWSER(LogFmt() << "❌ Failed to create daemon process. Error: " << GetLastError());
         return false;
     }
 
@@ -686,7 +690,7 @@ void WalletService::monitorDaemon() {
             DWORD exitCode;
             if (GetExitCodeProcess(daemonProcess_.hProcess, &exitCode)) {
                 if (exitCode != STILL_ACTIVE) {
-                    std::cerr << "⚠️ Go daemon process exited with code: " << exitCode << std::endl;
+                    LOG_WARNING_BROWSER(LogFmt() << "⚠️ Go daemon process exited with code: " << exitCode);
                     daemonRunning_ = false;
                     connected_ = false;
                     break;
@@ -721,7 +725,7 @@ BOOL WINAPI WalletService::ConsoleCtrlHandler(DWORD ctrlType) {
         case CTRL_BREAK_EVENT:
         case CTRL_CLOSE_EVENT:
         case CTRL_SHUTDOWN_EVENT:
-            std::cout << "\n🛑 Console shutdown signal received - cleaning up daemon..." << std::endl;
+            LOG_INFO_BROWSER(LogFmt() << "\n🛑 Console shutdown signal received - cleaning up daemon...");
             if (g_walletService) {
                 g_walletService->stopDaemon();
             }

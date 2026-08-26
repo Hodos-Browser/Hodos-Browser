@@ -5032,7 +5032,14 @@ static int RunHodosMain(HINSTANCE hInstance, int nCmdShow, void* sandbox_info,
             cef_log_dir.empty() ? std::string("debug.log")
                                 : cef_log_dir + "\\cef_debug.log");
     }
-    settings.log_severity = LOGSEVERITY_INFO;
+    // P2b: Chromium's own log, cef_debug.log, was a SECOND uncapped sink -- 55.4 MiB on the
+    // owner's machine, of which only 255 lines were ours. At INFO it also captures every
+    // console.log from page content, and Chromium appends `source: <full url>` to each, so
+    // it accumulated URLs with their query strings independently of anything Logger does.
+    //
+    // ⚠️ Dev keeps INFO: that is where our [RENDER] channel and page console output are
+    // actually read.
+    settings.log_severity = hodos::IsDevEnv() ? LOGSEVERITY_INFO : LOGSEVERITY_WARNING;
     settings.windowless_rendering_enabled = true;
 
     // Set base app data path

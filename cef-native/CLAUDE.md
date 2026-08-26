@@ -222,9 +222,43 @@ Both Windows launchers kill only the DEV instance, matched by **executable path*
 
 `Logger` is declared in `include/core/Logger.h` and implemented in `src/core/Logger.cpp` (static members + `Initialize`/`Log`/`Shutdown`/`IsInitialized`).
 
-**Log file location:** `%APPDATA%\HodosBrowser\logs\debug_output.log` (`HodosBrowserDev\logs\` under `HODOS_DEV=1`), resolved via `AppPaths::GetLogDir()`. It is deliberately **outside** the install root: the browser holds the log open for writing, and a log inside `{app}` broke the silent-update backup hash of the `{app}` tree. It falls back to a relative `debug_output.log` only if `APPDATA` is unavailable. `stdout`/`stderr` are `freopen`'d to the same file.
+**Log file location:** `%APPDATA%\HodosBrowser\logs\debug_output-<pid>.log` (`HodosBrowserDev\logs\` under `HODOS_DEV=1`), resolved via `AppPaths::GetLogDir()`. It is deliberately **outside** the install root: the browser holds the log open for writing, and a log inside `{app}` broke the silent-update backup hash of the `{app}` tree. It falls back to a relative `debug_output.log` only if `APPDATA` is unavailable.
 
-Use the `Logger` macros — **never `std::cout` or `printf` directly** (stdout is redirected to the same file anyway).
+⭐ **One file per process** (beta.3 P2b). `GetLogDir()` is **not** per-profile and `ProfileManager::LaunchWithProfile` spawns a **separate process per profile**, so two running profiles share this directory. A single file that two processes both rotate — close, rename, delete, reopen — is a race in which one process renames the file the other is writing to.
+
+### 🚨 `std::cout` reaches NOTHING. It never did.
+
+⛔ The line that used to sit here — *"stdout is redirected to the same file anyway"* — was **false on every build ever shipped**, and it steered authors straight at a sink that discards their output.
+
+`Logger::Initialize` opens the log **first** and holds it. The `freopen_s` that follows therefore cannot get a second writer and fails **`EACCES(13)`** — measured in **127 of 128 sessions** in the production log — and because a failed `freopen_s` closes the stream first, the fallback deliberately reopens `stdout`/`stderr` on **`NUL`**.
+
+Consequence, measured: `📁 ProfileManager initializing` — a line that runs on **every** startup — appears **zero** times in 2.5 GB. Every profile-delete refusal, every `Failed to connect to Rust wallet`, every registry-lock timeout was silent.
+
+**Fixed in beta.3 Phase 2b**: ~200 call sites across `ProfileManager`, `WalletService`, `HistoryManager`, `simple_app`, `simple_handler`, `simple_render_process_handler` and the three V8 handlers now go through `Logger`. Use `LogFmt` to keep a streaming expression intact:
+
+```cpp
+LOG_ERROR_PM(LogFmt() << "Failed for " << id << ": " << e.what());
+```
+
+⛔ **Do not fix the blackhole by making the `freopen` succeed.** That puts two writers on one file — `Logger`'s `ofstream` and the CRT's `stdout` — a data race on the log we are trying to make trustworthy.
+
+⚠️ **One deliberate exception:** `AppPaths.h :: EnforceDevSafeguard` still writes to `std::cerr`, because it runs **before** `Logger::Initialize` and its audience is a developer at a terminal watching the process refuse to start. It is commented as such.
+
+Use the `Logger` macros — **never `std::cout` or `printf` directly.**
+
+### Levels, rotation and retention (beta.3 P2b)
+
+| | |
+|---|---|
+| Production minimum level | **INFO** (`Logger::SetMinLevel`). ⛔ Not WARNING — measured over 50 days that would keep **401 lines and zero errors**, satisfying "smaller" by destroying the log |
+| Dev minimum level | DEBUG |
+| Rotation | 10 MB × 5 per process (`Logger::SetRotation`) |
+| Retention | 30 days, 200 MB across the directory, whichever bites first (`Logger::PruneOldLogs`, run at startup) |
+| URL policy | **`hodos::LogSafeUrl()` at every level** (`include/core/LogSafeUrl.h`). Query and fragment always dropped; path dropped for ordinary hosts; path kept for loopback (our own UI) |
+
+⛔ **The level gate does not make URLs safe.** 77,911 INFO/WARN lines carried a full URL, ~87,000 of them `HistoryManager` narrating every visit **with the page title**. Redaction is a separate, independently necessary change; the per-visit narration was deleted outright.
+
+⛔ **`Logger` is not the audit trail.** The gold-pill auto-approve, the 202-PENDING consent prompt and the permission cascade were all `LOG_DEBUG_*`, so the gate silences them and retention then deletes them. Those decisions also go to **`audit-<pid>.log`** via `hodos::AuditEvent()` (`include/core/AuditLog.h`), which `PruneOldLogs` never touches — it only matches `debug_output*`.
 
 ```cpp
 // Levels map to LogLevel: 0=DEBUG, 1=INFO, 2=WARNING, 3=ERROR_LEVEL

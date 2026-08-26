@@ -23,6 +23,36 @@ enum class ProcessType {
     BROWSER = 2
 };
 
+/// Lets a `std::cout << a << b << c` chain become a Logger call without rewriting the
+/// expression.
+///
+/// WHY. Dozens of call sites logged through std::cout — which, measured, reaches NOTHING:
+/// Logger::Initialize holds the log file open, so the freopen that would have redirected
+/// stdout ALWAYS fails EACCES(13) and the fallback reopens stdout on NUL. Every one of
+/// those lines has been written into a bin since the first build. Converting them by hand
+/// means retyping each chain as string concatenation and getting the types right —
+/// `"n=" + count` does not compile, `"e=" + e.what()` does the wrong thing — which is a lot
+/// of opportunities to introduce a bug while fixing a logging defect.
+///
+///     LOG_ERROR_PM(LogFmt() << "Failed for " << id << ": " << e.what());
+///
+/// ⛔ Do NOT "fix" the blackhole by making the freopen succeed instead. That would put two
+/// writers on one file — Logger's ofstream and the CRT's stdout — which is a data race on
+/// the log we are trying to make trustworthy.
+class LogFmt {
+public:
+    template <typename T>
+    LogFmt& operator<<(const T& value) {
+        ss_ << value;
+        return *this;
+    }
+    operator std::string() const { return ss_.str(); }
+    std::string str() const { return ss_.str(); }
+
+private:
+    std::ostringstream ss_;
+};
+
 // Centralized Logger class (header-only for cross-compilation)
 class Logger {
 private:

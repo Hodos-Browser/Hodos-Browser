@@ -1401,17 +1401,17 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
     if (role_ == "brc100auth") {
             LOG_DEBUG_BROWSER("🔐 BRC-100 AUTH Loading state: " + std::string(isLoading ? "loading..." : "done"));
             LOG_DEBUG_BROWSER("🔐 BRC-100 AUTH Browser ID: " + std::to_string(browser->GetIdentifier()));
-            LOG_DEBUG_BROWSER("🔐 BRC-100 AUTH URL: " + browser->GetMainFrame()->GetURL().ToString());
+            LOG_DEBUG_BROWSER("🔐 BRC-100 AUTH URL: " + hodos::LogSafeUrl(browser->GetMainFrame()->GetURL().ToString()));
             LOG_DEBUG_BROWSER("🔐 BRC-100 AUTH Can go back: " + std::string(canGoBack ? "true" : "false"));
             LOG_DEBUG_BROWSER("🔐 BRC-100 AUTH Can go forward: " + std::string(canGoForward ? "true" : "false"));
         }
 
     if (role_ == "overlay") {
-        LOG_DEBUG_BROWSER("📡 Overlay URL: " + browser->GetMainFrame()->GetURL().ToString());
+        LOG_DEBUG_BROWSER("📡 Overlay URL: " + hodos::LogSafeUrl(browser->GetMainFrame()->GetURL().ToString()));
     }
 
     if (role_ == "backup") {
-        LOG_DEBUG_BROWSER("📡 Backup URL: " + browser->GetMainFrame()->GetURL().ToString());
+        LOG_DEBUG_BROWSER("📡 Backup URL: " + hodos::LogSafeUrl(browser->GetMainFrame()->GetURL().ToString()));
     }
 
     // Deferred shield domain injection: when cookie panel finishes loading,
@@ -1876,7 +1876,7 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
     } else if (role_ == "brc100auth") {
         LOG_DEBUG_BROWSER("🔐 BRC-100 Auth browser initialized.");
         LOG_DEBUG_BROWSER("🔐 BRC-100 Auth browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
-        LOG_DEBUG_BROWSER("🔐 BRC-100 Auth browser main frame URL: " + browser->GetMainFrame()->GetURL().ToString());
+        LOG_DEBUG_BROWSER("🔐 BRC-100 Auth browser main frame URL: " + hodos::LogSafeUrl(browser->GetMainFrame()->GetURL().ToString()));
 
         // CRITICAL: Set focus so keyboard input works in React input fields
         browser->GetHost()->SetFocus(true);
@@ -2025,7 +2025,7 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
         }, browser_ref), 150);
     }
 
-    LOG_DEBUG_BROWSER("🧭 Browser Created → role: " + role_ + ", ID: " + std::to_string(browser->GetIdentifier()) + ", IsPopup: " + (browser->IsPopup() ? "true" : "false") + ", MainFrame URL: " + browser->GetMainFrame()->GetURL().ToString());
+    LOG_DEBUG_BROWSER("🧭 Browser Created → role: " + role_ + ", ID: " + std::to_string(browser->GetIdentifier()) + ", IsPopup: " + (browser->IsPopup() ? "true" : "false") + ", MainFrame URL: " + hodos::LogSafeUrl(browser->GetMainFrame()->GetURL().ToString()));
 }
 
 bool SimpleHandler::DoClose(CefRefPtr<CefBrowser> browser) {
@@ -2070,52 +2070,52 @@ void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
     }
 #endif
 
-    std::cout << "🔴 OnBeforeClose ENTERED" << std::endl;
-    std::cout << "  Role: " << role_ << std::endl;
-    std::cout << "  Browser ID: " << browser->GetIdentifier() << std::endl;
-    std::cout << "  IsPopup: " << (browser->IsPopup() ? "YES" : "NO") << std::endl;
+    LOG_INFO_BROWSER(LogFmt() << "🔴 OnBeforeClose ENTERED");
+    LOG_INFO_BROWSER(LogFmt() << "  Role: " << role_);
+    LOG_INFO_BROWSER(LogFmt() << "  Browser ID: " << browser->GetIdentifier());
+    LOG_INFO_BROWSER(LogFmt() << "  IsPopup: " << (browser->IsPopup() ? "YES" : "NO"));
 
     LOG_DEBUG_BROWSER("🔴 OnBeforeClose for role: " + role_ + ", Browser ID: " + std::to_string(browser->GetIdentifier()));
 
     // CRITICAL: Check if this is a popup (DevTools, etc.)
     if (browser->IsPopup()) {
-        std::cout << "  → Detected as popup, skipping cleanup" << std::endl;
+        LOG_INFO_BROWSER(LogFmt() << "  → Detected as popup, skipping cleanup");
         LOG_DEBUG_BROWSER("🔧 Popup browser (DevTools or other) closing - ignoring");
-        std::cout << "🔴 OnBeforeClose EXITING (popup)" << std::endl;
+        LOG_INFO_BROWSER(LogFmt() << "🔴 OnBeforeClose EXITING (popup)");
         return;
     }
 
-    std::cout << "  → Not a popup, checking if tab browser..." << std::endl;
+    LOG_INFO_BROWSER(LogFmt() << "  → Not a popup, checking if tab browser...");
 
     // Check if this is a tab browser (both platforms)
     int tab_id = ExtractTabIdFromRole(role_);
-    std::cout << "  → Extracted tab ID: " << tab_id << std::endl;
+    LOG_INFO_BROWSER(LogFmt() << "  → Extracted tab ID: " << tab_id);
 
     if (tab_id != -1) {
-        std::cout << "  → Is tab browser, calling OnTabBrowserClosed" << std::endl;
+        LOG_INFO_BROWSER(LogFmt() << "  → Is tab browser, calling OnTabBrowserClosed");
         TabManager::GetInstance().OnTabBrowserClosed(tab_id);
         LOG_DEBUG_BROWSER("📑 Tab browser closed callback: ID " + std::to_string(tab_id));
-        std::cout << "🔴 OnBeforeClose EXITING (tab)" << std::endl;
+        LOG_INFO_BROWSER(LogFmt() << "🔴 OnBeforeClose EXITING (tab)");
         return;
     }
 
-    std::cout << "  → Not a tab, checking overlays..." << std::endl;
+    LOG_INFO_BROWSER(LogFmt() << "  → Not a tab, checking overlays...");
 
     // Handle overlay browser cleanup via WindowManager
     BrowserWindow* owner_win = GetOwnerWindow();
     if (owner_win) {
         CefRefPtr<CefBrowser> existing = owner_win->GetBrowserForRole(role_);
         if (existing && existing->GetIdentifier() == browser->GetIdentifier()) {
-            std::cout << "  → Clearing " << role_ << " browser from BrowserWindow" << std::endl;
+            LOG_INFO_BROWSER(LogFmt() << "  → Clearing " << role_ << " browser from BrowserWindow");
             owner_win->ClearBrowserForRole(role_);
         } else {
-            std::cout << "  → No matching browser for role (might be DevTools)" << std::endl;
+            LOG_INFO_BROWSER(LogFmt() << "  → No matching browser for role (might be DevTools)");
         }
     } else {
-        std::cout << "  → No owner window found for window_id " << window_id_ << std::endl;
+        LOG_INFO_BROWSER(LogFmt() << "  → No owner window found for window_id " << window_id_);
     }
 
-    std::cout << "🔴 OnBeforeClose EXITING (overlay)" << std::endl;
+    LOG_INFO_BROWSER(LogFmt() << "🔴 OnBeforeClose EXITING (overlay)");
 }
 
 bool SimpleHandler::OnBeforePopup(
@@ -4078,7 +4078,7 @@ bool SimpleHandler::OnProcessMessageReceived(
     if (message_name == "create_wallet") {
         LOG_DEBUG_BROWSER("🆕 Create wallet requested");
         LOG_DEBUG_BROWSER("🆕 Browser ID: " + std::to_string(browser->GetIdentifier()));
-        LOG_DEBUG_BROWSER("🆕 Frame URL: " + browser->GetMainFrame()->GetURL().ToString());
+        LOG_DEBUG_BROWSER("🆕 Frame URL: " + hodos::LogSafeUrl(browser->GetMainFrame()->GetURL().ToString()));
 
         nlohmann::json response;
 
@@ -5944,7 +5944,7 @@ bool SimpleHandler::OnProcessMessageReceived(
             browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
             LOG_DEBUG_BROWSER("📤 Address data sent back to browser");
             LOG_DEBUG_BROWSER("🔍 Browser ID: " + std::to_string(browser->GetIdentifier()));
-            LOG_DEBUG_BROWSER("🔍 Frame URL: " + browser->GetMainFrame()->GetURL().ToString());
+            LOG_DEBUG_BROWSER("🔍 Frame URL: " + hodos::LogSafeUrl(browser->GetMainFrame()->GetURL().ToString()));
 
         } catch (const std::exception& e) {
             LOG_DEBUG_BROWSER("❌ Address generation failed: " + std::string(e.what()));
@@ -5978,7 +5978,7 @@ bool SimpleHandler::OnProcessMessageReceived(
             browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
             LOG_DEBUG_BROWSER("📤 Address data sent back to browser");
             LOG_DEBUG_BROWSER("🔍 Browser ID: " + std::to_string(browser->GetIdentifier()));
-            LOG_DEBUG_BROWSER("🔍 Frame URL: " + browser->GetMainFrame()->GetURL().ToString());
+            LOG_DEBUG_BROWSER("🔍 Frame URL: " + hodos::LogSafeUrl(browser->GetMainFrame()->GetURL().ToString()));
 
         } catch (const std::exception& e) {
             LOG_DEBUG_BROWSER("❌ Address generation failed: " + std::string(e.what()));

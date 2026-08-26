@@ -4065,7 +4065,7 @@ CefRefPtr<CefResourceHandler> HttpRequestInterceptor::GetResourceHandler(
 
     if (frame) {
         LOG_DEBUG_HTTP("🌐 Frame exists: YES");
-        LOG_DEBUG_HTTP("🌐 Frame URL: " + frame->GetURL().ToString());
+        LOG_DEBUG_HTTP("🌐 Frame URL: " + hodos::LogSafeUrl(frame->GetURL().ToString()));
         LOG_DEBUG_HTTP("🌐 Frame Name: " + frame->GetName().ToString());
         LOG_DEBUG_HTTP("🌐 Frame Identifier: " + frame->GetIdentifier().ToString());
         LOG_DEBUG_HTTP("🌐 Frame Is Main: " + std::string(frame->IsMain() ? "YES" : "NO"));
@@ -4078,7 +4078,7 @@ CefRefPtr<CefResourceHandler> HttpRequestInterceptor::GetResourceHandler(
         LOG_DEBUG_HTTP("🌐 Browser exists: YES");
         CefRefPtr<CefFrame> mainFrame = browser->GetMainFrame();
         if (mainFrame) {
-            LOG_DEBUG_HTTP("🌐 Main Frame URL: " + mainFrame->GetURL().ToString());
+            LOG_DEBUG_HTTP("🌐 Main Frame URL: " + hodos::LogSafeUrl(mainFrame->GetURL().ToString()));
             LOG_DEBUG_HTTP("🌐 Main Frame Name: " + mainFrame->GetName().ToString());
             LOG_DEBUG_HTTP("🌐 Main Frame Identifier: " + mainFrame->GetIdentifier().ToString());
         } else {
@@ -4089,7 +4089,7 @@ CefRefPtr<CefResourceHandler> HttpRequestInterceptor::GetResourceHandler(
     }
 
     // Log request information
-    LOG_DEBUG_HTTP("🌐 Request URL: " + request->GetURL().ToString());
+    LOG_DEBUG_HTTP("🌐 Request URL: " + hodos::LogSafeUrl(request->GetURL().ToString()));
     LOG_DEBUG_HTTP("🌐 Request Method: " + request->GetMethod().ToString());
     LOG_DEBUG_HTTP("🌐 Request Referrer URL: " + request->GetReferrerURL().ToString());
     LOG_DEBUG_HTTP("🌐 Request Referrer Policy: " + std::to_string(request->GetReferrerPolicy()));
