@@ -181,6 +181,58 @@ pub fn dpapi_decrypt(_encrypted: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 // =============================================================================
+// Retrying store — the OS credential store is not optional
+// =============================================================================
+
+/// Attempts before a credential-store write is reported as failed.
+pub const STORE_ATTEMPTS: u32 = 5;
+
+/// Store the mnemonic in the OS credential store, retrying transient failures.
+///
+/// ⛔ WHY THIS EXISTS. `dpapi_encrypt` used to be called once, at wallet creation, with
+/// its error swallowed and `None` written to `wallets.mnemonic_dpapi` — the wallet was
+/// created anyway. That produces a wallet which can NEVER auto-unlock, because the only
+/// repair path (`store_dpapi_blob`) needs the mnemonic, which needs an unlock, which
+/// needs the blob. MEASURED 2026-08-26: the macOS dev wallet created 2026-06-25 has been
+/// in exactly that state ever since — 61 consecutive `getPublicKey` failures with
+/// "Wallet is locked", and no site could ever connect. Nothing surfaced it.
+///
+/// The failure that caused it is believed to be the pre-`deff765` shared Keychain service
+/// name: dev and production both used "HodosBrowser", and the ad-hoc-signed dev binary was
+/// refused access to an item owned by the Developer-ID-signed production app. That name
+/// collision is fixed; this retry is the belt to its braces, and covers the genuinely
+/// transient cases (credential store busy, locked, momentarily unavailable) that can hit a
+/// real user on a properly signed install.
+///
+/// ⚠️ A failure here must be reported to the caller, never swallowed. Callers decide
+/// whether to refuse the operation, but none of them may silently continue.
+pub fn dpapi_encrypt_retrying(plaintext: &[u8]) -> Result<Vec<u8>, String> {
+    let mut last_err = String::new();
+    for attempt in 1..=STORE_ATTEMPTS {
+        match dpapi_encrypt(plaintext) {
+            Ok(blob) => {
+                if attempt > 1 {
+                    log::info!("   Credential-store write succeeded on attempt {}/{}", attempt, STORE_ATTEMPTS);
+                }
+                return Ok(blob);
+            }
+            Err(e) => {
+                log::warn!("   Credential-store write failed (attempt {}/{}): {}", attempt, STORE_ATTEMPTS, e);
+                last_err = e;
+                if attempt < STORE_ATTEMPTS {
+                    // 50ms, 100ms, 200ms, 400ms — bounded at well under a second total.
+                    std::thread::sleep(std::time::Duration::from_millis(50u64 << (attempt - 1)));
+                }
+            }
+        }
+    }
+    Err(format!(
+        "credential-store write failed after {} attempts: {}",
+        STORE_ATTEMPTS, last_err
+    ))
+}
+
+// =============================================================================
 // Linux / other platforms — stub (wallet still works, just no auto-unlock)
 // =============================================================================
 
@@ -217,12 +269,33 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn test_keychain_round_trip() {
+        // ⛔ THIS TEST WRITES TO THE REAL KEYCHAIN. Read before removing a guard.
+        //
+        // As originally written it called dpapi_encrypt() with HODOS_DEV unset, so
+        // keychain_service() resolved to "HodosBrowser" — the PRODUCTION service. It then
+        // delete_generic_password()'d the user's real entry and replaced it with the test
+        // mnemonic below, leaving no cleanup. A developer running `cargo test` on macOS
+        // would have destroyed their production wallet's auto-unlock AND left it pointing
+        // at a foreign mnemonic. Found 2026-08-26 while diagnosing a locked dev wallet.
+        //
+        // Three guards now: opt-in, dev namespace only, and cleanup.
+        if std::env::var("HODOS_KEYCHAIN_TEST").unwrap_or_default() != "1" {
+            eprintln!("skipped: set HODOS_KEYCHAIN_TEST=1 to run (writes to the real Keychain)");
+            return;
+        }
+        std::env::set_var("HODOS_DEV", "1");
+        assert_eq!(keychain_service(), "HodosBrowserDev",
+                   "refusing to run against the production Keychain service");
+
         let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
         let sentinel = dpapi_encrypt(mnemonic.as_bytes()).expect("keychain store should succeed");
         assert_eq!(sentinel, KEYCHAIN_SENTINEL);
 
         let retrieved = dpapi_decrypt(&sentinel).expect("keychain retrieve should succeed");
         assert_eq!(retrieved, mnemonic.as_bytes());
+
+        let _ = security_framework::passwords::delete_generic_password(
+            keychain_service(), KEYCHAIN_ACCOUNT);
     }
 
     #[test]

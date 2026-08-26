@@ -213,9 +213,18 @@ export default function WalletPanelPage() {
   }, [preventClose]);
 
   useEffect(() => {
-    // If localStorage says wallet exists, trust it and skip the fetch
-    if (cachedExists) return;
-
+    // ⛔ Do NOT skip this fetch when localStorage says a wallet exists.
+    //
+    // It used to early-return on `cachedExists`, which meant that once the panel had ever
+    // seen a wallet, it stopped asking the backend for status — so it never learned the
+    // wallet was LOCKED and rendered the balance view instead of the PIN screen. The unlock
+    // UI below was unreachable, and a locked wallet could not be unlocked at all.
+    // Invisible on Windows, where DPAPI auto-unlocks so the wallet is never locked.
+    // MEASURED 2026-08-26: /wallet/status returned {"exists":true,"locked":true} three times
+    // while this panel showed a $0.00 balance.
+    //
+    // `cachedExists` still seeds `initialStatus` above, so the first paint is unchanged and
+    // there is no loading flash — this fetch only corrects it.
     console.log('[WalletPanel] Fetching wallet status from backend...');
     walletFetch('/wallet/status')
       .then(r => r.json())

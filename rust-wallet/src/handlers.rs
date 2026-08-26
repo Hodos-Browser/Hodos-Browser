@@ -3039,7 +3039,9 @@ pub async fn wallet_unlock(
                     if let Ok(mnemonic) = db.get_cached_mnemonic() {
                         let mnemonic_owned = mnemonic.to_string();
                         let wallet_id = wallet.id.unwrap_or(1);
-                        let _ = db.store_dpapi_blob(wallet_id, &mnemonic_owned);
+                        if let Err(e) = db.store_dpapi_blob(wallet_id, &mnemonic_owned) {
+                                    log::error!("   Auto-unlock repair failed ({}): {} — the wallet will still ask for a PIN next start", "unlock", e);
+                                }
                     }
                 }
             }

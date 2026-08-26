@@ -213,18 +213,26 @@ impl WalletDatabase {
     /// Store a DPAPI-encrypted copy of the mnemonic for an existing wallet.
     /// Used to backfill DPAPI for wallets created before DPAPI support was added.
     pub fn store_dpapi_blob(&self, wallet_id: i64, mnemonic: &str) -> Result<()> {
-        match crate::crypto::dpapi::dpapi_encrypt(mnemonic.as_bytes()) {
+        // ⛔ Do NOT return Ok on failure. This is the repair path for a wallet that is
+        // already locked-forever; reporting success when the write failed is how the user
+        // ends up entering a PIN, believing it is fixed, and finding it locked again next
+        // launch. Callers log it; the wallet stays usable for this session either way.
+        match crate::crypto::dpapi::dpapi_encrypt_retrying(mnemonic.as_bytes()) {
             Ok(blob) => {
                 self.conn.execute(
                     "UPDATE wallets SET mnemonic_dpapi = ?1 WHERE id = ?2",
                     rusqlite::params![blob, wallet_id],
                 )?;
-                log::info!("   ✅ DPAPI blob stored for wallet {}", wallet_id);
+                log::info!("   ✅ Wallet key stored in OS credential store (wallet {})", wallet_id);
                 Ok(())
             }
             Err(e) => {
-                log::warn!("   ⚠️  DPAPI encryption unavailable: {}", e);
-                Ok(()) // Non-fatal — wallet still works with PIN
+                log::error!("   ❌ Could not store the wallet key: {} — this wallet will \
+                             still require a PIN on every start", e);
+                Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                    Some(format!("credential-store write failed: {}", e)),
+                ))
             }
         }
     }

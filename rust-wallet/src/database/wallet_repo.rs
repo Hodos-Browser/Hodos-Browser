@@ -3,7 +3,7 @@
 //! Handles CRUD operations for wallets in the database.
 
 use rusqlite::{Connection, Result};
-use log::info;
+use log::{info, error};
 use bip39::{Mnemonic, Language};
 use std::time::{SystemTime, UNIX_EPOCH};
 use rand::RngCore;
@@ -49,15 +49,23 @@ impl<'a> WalletRepository<'a> {
             (mnemonic_phrase.clone(), None)
         };
 
-        // Encrypt with DPAPI for auto-unlock (non-fatal if unavailable)
-        let dpapi_blob = match crate::crypto::dpapi::dpapi_encrypt(mnemonic_phrase.as_bytes()) {
+        // Store the mnemonic in the OS credential store. ⛔ NOT optional, and NOT non-fatal.
+        // A wallet created without this can never auto-unlock and cannot repair itself
+        // (see dpapi::dpapi_encrypt_retrying). Refuse to create a wallet we know is broken;
+        // the caller surfaces the error and the user can retry.
+        let dpapi_blob = match crate::crypto::dpapi::dpapi_encrypt_retrying(mnemonic_phrase.as_bytes()) {
             Ok(blob) => {
-                info!("   ✅ DPAPI encryption succeeded ({} bytes)", blob.len());
+                info!("   ✅ Mnemonic stored in OS credential store ({} bytes)", blob.len());
                 Some(blob)
             }
             Err(e) => {
-                info!("   ⚠️  DPAPI encryption unavailable: {} — wallet will require PIN on startup", e);
-                None
+                error!("   ❌ Wallet NOT created: {}", e);
+                return Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                    Some(format!(
+                        "Could not save the wallet key to the system credential store, so the \
+                         wallet was not created. {}", e)),
+                ));
             }
         };
 
@@ -187,15 +195,20 @@ impl<'a> WalletRepository<'a> {
             (phrase.clone(), None)
         };
 
-        // Encrypt with DPAPI for auto-unlock (non-fatal if unavailable)
-        let dpapi_blob = match crate::crypto::dpapi::dpapi_encrypt(phrase.as_bytes()) {
+        // Same contract as wallet creation above: the credential-store write is mandatory,
+        // because a wallet whose blob is missing is locked forever with no repair path.
+        let dpapi_blob = match crate::crypto::dpapi::dpapi_encrypt_retrying(phrase.as_bytes()) {
             Ok(blob) => {
-                info!("   ✅ DPAPI encryption succeeded ({} bytes)", blob.len());
+                info!("   ✅ Mnemonic stored in OS credential store ({} bytes)", blob.len());
                 Some(blob)
             }
             Err(e) => {
-                info!("   ⚠️  DPAPI encryption unavailable: {} — wallet will require PIN on startup", e);
-                None
+                error!("   ❌ Mnemonic re-encrypt aborted: {}", e);
+                return Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                    Some(format!(
+                        "Could not save the wallet key to the system credential store. {}", e)),
+                ));
             }
         };
 
