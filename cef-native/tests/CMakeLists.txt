@@ -47,6 +47,10 @@ add_executable(hodos_tests
     ipc_role_guard_test.cpp             # P0.5 B1 — self-nav grant gate: family + approval-overlay role (header-only)
     qr_payload_classify_test.cpp        # P0.6 — QR scheme allowlist + amount-injection guard (header-only)
     site_permission_mapping_test.cpp    # P0.9 — CEF-bit -> Hodos-type boundary + frozen stored ids (header-only)
+    logger_concurrency_test.cpp         # P2-A7 — Logger write lock; NC disables it on the SAME binary
+    logger_policy_test.cpp              # P2-A3/A6 — level gate + rotation + retention, each with its control
+    log_safe_url_test.cpp               # P2-A5 — URL redaction (header-only), cases taken from the shipped log
+    audit_log_test.cpp                  # P2 — the money/consent trail that survives debug-log retention
 
     # Production sources under test (built into the test exe directly).
     # (Phase 2.6-H removed permission_engine_test / permission_gate_test along
@@ -65,6 +69,7 @@ add_executable(hodos_tests
     ../src/core/SilentStateWriter.cpp     # #1 — silent-eligibility mirror
     ../src/core/FarblingPolicy.cpp        # C2 — farbling seed/key derivation
     ../src/core/Logger.cpp
+    ../src/core/AuditLog.cpp
 )
 
 # SyncHttpClient pulls platform HTTP libs; UpdateStager pulls Windows trust libs.

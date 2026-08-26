@@ -18,6 +18,7 @@
 #include "../../include/core/SettingsManager.h"
 #include "../../include/core/ProfileManager.h"
 #include "../../include/core/Logger.h"
+#include "../../include/core/LogSafeUrl.h"
 #include "../../include/core/WindowManager.h"
 #include "../../include/core/LayoutHelpers.h"
 #include "../../include/core/PortConfig.h"
@@ -299,7 +300,7 @@ void SimpleApp::OnContextInitialized() {
                                     activeTabId = tabId;
                                 }
                                 createdCount++;
-                                LOG_INFO_APP("📑 Restored tab " + std::to_string(tabId) + " (win " + std::to_string(winId) + "): " + url);
+                                LOG_INFO_APP("📑 Restored tab " + std::to_string(tabId) + " (win " + std::to_string(winId) + "): " + hodos::LogSafeUrl(url));
                             }
                             if (createdCount > 0 && activeTabId >= 0) {
                                 TabManager::GetInstance().SwitchToTab(activeTabId);

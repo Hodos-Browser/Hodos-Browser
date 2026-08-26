@@ -107,7 +107,7 @@ outcome, different mechanism. This is ask **D5.1** in `MAC_RELAY_P1_ROUND.md` an
 
 ---
 
-## M2 — 🚨 NEW: `Logger` has no lock, and the log is measurably torn
+## M2 — 🚨 NEW: the log is measurably torn. ⛔ **CAUSE NOT ESTABLISHED — my first answer was wrong.**
 
 `grep -n "mutex\|lock_guard\|atomic"` over `include/core/Logger.h` + `src/core/Logger.cpp` →
 **nothing**. `Logger::Log` does an unsynchronised `logFile << logEntry << std::endl` and is called
@@ -125,8 +125,59 @@ timedtext?v=oDyyp0NGmcI&ei=…&expire=1785792827&sparams=…
 (The remaining ~4,163 non-conforming lines are empty.)
 
 ⭐ This matters beyond tidiness: §4 of the session prompt notes the log is the **only** record of
-several safeguards. A log with a data race can silently lose or mangle exactly the line you later
-need, and the tearing is invisible unless you go looking for it.
+several safeguards. A log that mangles lines can lose exactly the line you later need, and the
+tearing is invisible unless you go looking for it.
+
+### M2.1 — ⛔ CORRECTION, 2026-08-26: the *cause* above was an INFERENCE, and it does not survive
+
+The 8,208 fragments are **measured**. "Because `Logger` has no lock" was **my inference**, recorded
+in the same breath as the measurement — the exact mistake §3 of the session prompt warns about, made
+in the paragraph that quotes the warning.
+
+**Full context of a fragment, untruncated** — this is the shape:
+
+```
+[09:19:35.239] [BROWSER] [DEBUG] 🌐 Resource request: https://x.com/i/api/2/badge_count/...(role: tab_1)
+[09:19:35.239] [BROWSER] [DEBUG] 🌐 Method: GET, Connection: , Upgrade:
+2/badge_count/badge_count.json?supports_ntab_urt=1&include_xchat_count=1 (role: tab_1)
+[09:19:35.239] [BROWSER] [DEBUG] 🌐 Method: GET, Connection: , Upgrade:
+```
+
+A second `Resource request:` line lost its **~90-byte head** — the timestamp, tags and
+`https://x.com/i/api/`. So it is a genuine partial-write interleave, not a truncation.
+
+**Three attempts to reproduce it with the lock disabled, all ZERO torn lines:**
+
+| Attempt | Shape | Torn |
+|---|---|---|
+| 8 threads × 400 lines, 200-byte payload | ~1,600 lines | **0** |
+| 8 threads × 400 lines, **8 KB** payload (exceeds the stream buffer) | ~1,600 lines | **0** |
+| 8 threads × 12,000 lines, production-shaped 130-byte payload | **96,000 lines** | **0** |
+
+MSVC's CRT locks the underlying `FILE*`, so a single insertion is not where the window is.
+
+⛔ **Two of my own negative controls in this phase were vacuous before I caught them.** The first
+"passed" only because the classifier counted `Logger`'s own two bookkeeping lines as torn — it was
+failing correct code and passing broken code at the same time.
+
+**Hypotheses considered and their status:**
+
+| Hypothesis | Status |
+|---|---|
+| Intra-process unsynchronised `ofstream` writes | ⛔ **not reproduced** at 96,000 lines |
+| Two browser processes appending to one file (`GetLogDir()` is **not** per-profile, and 2 profiles exist) | ⚠️ **weakened**: only **133 backwards timestamp jumps in 9.8 M lines (0.001 %)**, all sub-second — the signature of thread scheduling, not of two independent long-running writers |
+| Crash/kill mid-flush | ⚠️ unlikely: ~64 fragments per session is far too many |
+
+**Where this leaves the fix.** The lock is kept, and justified on its own terms: unsynchronised
+concurrent writes to one `std::ofstream` are a **data race — undefined behaviour by the standard**,
+whatever MSVC's CRT happens to do, and macOS is a different runtime. ⛔ But it must **not** be
+claimed to fix the torn lines. `P2-A7` is **NOT MET** — there is no negative control, so by this
+sprint's own rule the row is not done.
+
+⚠️ **Live consequence for `P2-A6` (rotation).** `AppPaths::GetLogDir()` is `%APPDATA%\<ns>\logs` —
+**not per-profile** — while `ProfileManager::LaunchWithProfile` spawns a **separate process** per
+profile. Whatever tore these lines, **two processes rotating and renaming one shared log file is a
+real hazard**, and rotation must not be designed as if there were a single writer.
 
 ---
 

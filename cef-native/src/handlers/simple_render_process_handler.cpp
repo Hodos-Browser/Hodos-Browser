@@ -17,6 +17,7 @@
 #include <map>
 
 #include "../../include/core/Logger.h"
+#include "../../include/core/LogSafeUrl.h"
 #include "../../include/core/FingerprintProtection.h"
 #include "../../include/core/CWIShimScript.h"
 
@@ -490,7 +491,7 @@ void SimpleRenderProcessHandler::OnContextCreated(
         std::lock_guard<std::mutex> lock(s_scriptCacheMutex);
         auto it = s_scriptCache.find(url);
         if (it != s_scriptCache.end() && !it->second.empty()) {
-            LOG_INFO_RENDER("💉 OnContextCreated: injecting scriptlets for " + url +
+            LOG_INFO_RENDER("💉 OnContextCreated: injecting scriptlets for " + hodos::LogSafeUrl(url) +
                 " (" + std::to_string(it->second.size()) + " chars)");
             frame->ExecuteJavaScript(it->second, url, 0);
             s_scriptCache.erase(it); // One-shot: don't re-inject on subframe contexts
@@ -794,7 +795,7 @@ void SimpleRenderProcessHandler::OnContextCreated(
             // dApp page: inject the transport bridge FIRST (the provider's methods
             // call window.__hodos_walletCall), then the window.CWI/yours/panda provider.
             frame->ExecuteJavaScript(WALLET_CALL_BRIDGE_SCRIPT, url, 0);
-            LOG_INFO_RENDER("💉 Injecting window.CWI / window.yours / window.panda shim for " + url);
+            LOG_INFO_RENDER("💉 Injecting window.CWI / window.yours / window.panda shim for " + hodos::LogSafeUrl(url));
             frame->ExecuteJavaScript(CWI_SHIM_SCRIPT, url, 0);
         }
     }
@@ -1095,7 +1096,7 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
             if (!url.empty() && !script.empty()) {
                 std::lock_guard<std::mutex> lock(s_scriptCacheMutex);
                 s_scriptCache[url] = script;
-                LOG_INFO_RENDER("💉 Pre-cached scriptlets for " + url +
+                LOG_INFO_RENDER("💉 Pre-cached scriptlets for " + hodos::LogSafeUrl(url) +
                     " (" + std::to_string(script.size()) + " chars)");
             }
             return true;

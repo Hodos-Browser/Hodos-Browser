@@ -1,4 +1,5 @@
 #include "../../include/core/TabManager.h"
+#include "../../include/core/LogSafeUrl.h"
 #include "../../include/core/EphemeralCookieManager.h"
 #include "../../include/core/WindowManager.h"
 #include "../../include/handlers/simple_handler.h"
@@ -507,7 +508,7 @@ void TabManager::UpdateTabURL(int tab_id, const std::string& url) {
     Tab* tab = GetTab(tab_id);
     if (tab) {
         tab->url = url;
-        LOG(INFO) << "Tab " << tab_id << " URL updated to: " << url;
+        LOG(INFO) << "Tab " << tab_id << " URL updated to: " << hodos::LogSafeUrl(url);
     }
 }
 

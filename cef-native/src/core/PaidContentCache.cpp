@@ -9,6 +9,7 @@
 #include <sstream>
 
 #include "../../include/core/Logger.h"
+#include "../../include/core/LogSafeUrl.h"
 
 // Logging — module ID 12 = PaidContentCache (12 unused; pick a free slot).
 #define LOG_INFO_PCC(msg) Logger::Log(msg, 1, 12)
@@ -277,7 +278,7 @@ void PaidContentCache::Put(const std::string& url,
             return;
         }
 
-        LOG_INFO_PCC("PaidContentCache PUT: " + url +
+        LOG_INFO_PCC("PaidContentCache PUT: " + hodos::LogSafeUrl(url) +
                      " (" + std::to_string(byte_size) + " bytes)" +
                      (expires_at_ms.has_value()
                           ? " expires=" + std::to_string(*expires_at_ms)

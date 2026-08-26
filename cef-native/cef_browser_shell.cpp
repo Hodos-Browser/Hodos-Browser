@@ -67,6 +67,7 @@
 #include "update-helper/splash.h"   // A1: shell-side "Hodos is updating…" splash before backup
 #endif
 #include "include/core/Logger.h"
+#include "include/core/AuditLog.h"
 #include <shellapi.h>
 #include <objbase.h>   // CoInitializeEx for taskbar profile integration
 #include <shobjidl.h>  // SetCurrentProcessExplicitAppUserModelID
@@ -4909,16 +4910,63 @@ static int RunHodosMain(HINSTANCE hInstance, int nCmdShow, void* sandbox_info,
     // update never applies (Stage-2 real-build test finding). GetLogDir() is %APPDATA%\
     // <ns>\logs (roaming, next to the wallet's logs). Falls back to the relative name
     // only if APPDATA is unavailable.
+    // P2 retention policy (owner decision, 2026-08-26): "just delete them -- they are just
+    // logs." Bounded by size AND age, whichever bites first. The audit trail that must NOT
+    // be deleted on this schedule lives in its own file; this one is debug chatter.
+    constexpr std::size_t kLogMaxBytesPerFile = 10u * 1024u * 1024u;   // 10 MB
+    constexpr int         kLogKeepFiles       = 5;                     // -> 50 MB per process
+    constexpr int         kLogMaxAgeDays      = 30;
+    constexpr std::size_t kLogMaxTotalBytes   = 200u * 1024u * 1024u;  // whole log dir
+
     std::string logPath = "debug_output.log";
+    std::string resolvedLogDir;
     {
         const std::string logDir = AppPaths::GetLogDir();
         if (!logDir.empty()) {
             std::error_code lec;
             std::filesystem::create_directories(std::filesystem::u8path(logDir), lec);
-            if (!lec) logPath = logDir + "\\debug_output.log";
+            if (!lec) {
+                resolvedLogDir = logDir;
+                // P2-A6: ONE FILE PER PROCESS. GetLogDir() is NOT per-profile, and
+                // ProfileManager::LaunchWithProfile spawns a SEPARATE process per profile,
+                // so two running profiles share this directory. A single file that two
+                // processes both rotate — close, rename, delete, reopen — is a race with
+                // real consequences: one process renames the file the other is writing to.
+                // Per-process files remove the sharing entirely and leave retention (a
+                // directory-wide sweep) as the only cross-process operation.
+                logPath = logDir + "\\debug_output-" +
+                          std::to_string(static_cast<unsigned long>(GetCurrentProcessId())) +
+                          ".log";
+            }
         }
     }
+
+    // P2 (WS1b(b)): production writes INFO and above; dev keeps the DEBUG firehose.
+    //
+    // Until beta.3 there was no gate at all, so DEBUG shipped to users — 99.0 % of a 2.5 GB
+    // log that grew ~91 MB/day and was never pruned, containing every URL visited in
+    // plaintext. ⛔ Do NOT "tidy" this down to WARNING: measured over 50 days of real use,
+    // WARNING would have kept 401 lines and ZERO errors. It satisfies "the log got smaller"
+    // by destroying the log. See phase-2-logging-syncio/MEASUREMENTS.md M8.
+    Logger::SetMinLevel(hodos::IsDevEnv() ? LogLevel::DEBUG : LogLevel::INFO);
+    Logger::SetRotation(kLogMaxBytesPerFile, kLogKeepFiles);
     Logger::Initialize(ProcessType::MAIN, logPath);
+
+    // Retention, per the owner's decision: bounded by BOTH age and total size, whichever
+    // bites first. This is also what clears the pre-beta.3 unbounded `debug_output.log`
+    // that existing installs are still carrying. Runs after Initialize so the live file is
+    // known and can never be pruned out from under us.
+    if (!resolvedLogDir.empty()) {
+        // The audit log lives beside the debug log but is deliberately NOT subject to its
+        // retention: PruneOldLogs only ever touches files named debug_output*. That
+        // separation is the entire point — see include/core/AuditLog.h.
+        hodos::InitAuditLog(resolvedLogDir);
+
+        const int pruned = Logger::PruneOldLogs(resolvedLogDir, kLogMaxAgeDays, kLogMaxTotalBytes);
+        if (pruned > 0) {
+            LOG_INFO("Log retention: removed " + std::to_string(pruned) + " stale log file(s)");
+        }
+    }
     LOG_INFO(elapsed() + "STARTUP: Logger initialized");
 
     LOG_INFO("=== NEW SESSION STARTED ===");
