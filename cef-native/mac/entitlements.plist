@@ -19,9 +19,18 @@
     <true/>
     <!-- ⚠️ device.microphone above is the App SANDBOX key and does NOT satisfy the
          hardened-runtime TCC policy. A hardened-runtime app (release.yml signs with
-         --options runtime) needs device.audio-input, or tccd refuses to even show the
-         mic prompt and Chromium delivers a silent all-zero track (beta.3 §B1 diagnosis,
-         2026-08-18). Keep BOTH keys: sandbox key is harmless, audio-input is load-bearing. -->
+         the "options runtime" codesign flag) needs device.audio-input, or tccd refuses
+         to even show the mic prompt and Chromium delivers a silent all-zero track
+         (beta.3 §B1 diagnosis, 2026-08-18). Keep BOTH keys: the sandbox key is
+         harmless, audio-input is load-bearing.
+
+         ⛔ NEVER write a literal double-hyphen inside a comment in this file. It is
+         illegal XML, `plutil -lint` accepts it anyway, and codesign's much stricter
+         AMFIUnserializeXML rejects the WHOLE file with
+             "Failed to parse entitlements: AMFIUnserializeXML: syntax error near line N"
+         which leaves every macOS bundle UNSIGNED — dev builds SIGKILL (exit 137) and
+         release.yml's six signing steps fail. Measured 2026-08-26: this exact mistake
+         shipped in 33722d0 and broke macOS signing for eight days. -->
     <key>com.apple.security.device.audio-input</key>
     <true/>
 </dict>

@@ -36,8 +36,27 @@ import sqlite3
 import sys
 import time
 
-DEV_ROOT = os.path.join(os.environ.get("APPDATA", ""), "HodosBrowserDev")
-PROD_ROOT = os.path.join(os.environ.get("APPDATA", ""), "HodosBrowser")
+def _roots():
+    """Resolve the dev/prod data directories for this platform.
+
+    ⛔ MEASURED 2026-08-26 (macOS): this file previously read %APPDATA% unconditionally.
+    APPDATA is unset on macOS, so DEV_ROOT collapsed to the bare relative name
+    "HodosBrowserDev", `show` died with "dev data dir not found", and the macOS side
+    could not run this phase's PREREQUISITE at all — which is why every Phase 0.9 item
+    was still unrun there. Worse for the safety guard: PROD_ROOT collapsed to the bare
+    "HodosBrowser", so the refuse-to-touch-prod comparison was meaningless on macOS.
+    Test-harness only, HARNESS §6.
+    """
+    if sys.platform == "darwin":
+        base = os.path.expanduser("~/Library/Application Support")
+    elif os.name == "nt":
+        base = os.environ.get("APPDATA", "")
+    else:  # linux / other — XDG-ish, kept so the guard still resolves to real paths
+        base = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+    return os.path.join(base, "HodosBrowserDev"), os.path.join(base, "HodosBrowser")
+
+
+DEV_ROOT, PROD_ROOT = _roots()
 NETWORK_KEYS = ("loopback_network", "local_network", "local_network_access")
 SETTING = {1: "ALLOW", 2: "BLOCK", 3: "ASK"}
 

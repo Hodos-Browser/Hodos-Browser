@@ -33,6 +33,39 @@ cp -r "HodosBrowser Helper.app" \
       "HodosBrowser Helper (Renderer).app" \
       HodosBrowser.app/Contents/Frameworks/
 
+# Embed Sparkle.framework if it is present.
+#
+# ⛔ MEASURED 2026-08-26: this step did not exist, and its absence is not benign. CMakeLists
+# links Sparkle whenever ../external/Sparkle.framework exists at CONFIGURE time (CMakeLists
+# :482-489), but only release.yml (:862-894) ever copied it into the bundle. So on any machine
+# that has the framework — e.g. after the 2026-08-18 Sparkle 2.9.6 work left it in external/ —
+# the dev bundle builds and signs cleanly and then dies at launch with
+#     dyld: Library not loaded: @rpath/Sparkle.framework/Versions/B/Sparkle ... Abort trap: 6
+# The symlink fix-ups below are required for the same reason CI does them: a real file or
+# directory at the framework root makes codesign fail with "unsealed contents".
+SPARKLE_SRC="$SCRIPT_DIR/../external/Sparkle.framework"
+SPARKLE_FW="HodosBrowser.app/Contents/Frameworks/Sparkle.framework"
+if [ -d "$SPARKLE_SRC" ]; then
+    echo "Embedding Sparkle.framework..."
+    rm -rf "$SPARKLE_FW"
+    ditto "$SPARKLE_SRC" "$SPARKLE_FW"
+    if [ -d "$SPARKLE_FW/Versions/B" ]; then
+        rm -rf "$SPARKLE_FW/Versions/Current"
+        ln -s B "$SPARKLE_FW/Versions/Current"
+    fi
+    # XPC services are only for sandboxed apps; Sparkle 2 falls back to its in-process
+    # path when they are absent. Mirrors release.yml.
+    rm -rf "$SPARKLE_FW/Versions/B/XPCServices"
+    for item in Autoupdate Sparkle Updater.app XPCServices Headers Resources Modules PrivateHeaders; do
+        rm -rf "$SPARKLE_FW/$item"
+        if [ -e "$SPARKLE_FW/Versions/Current/$item" ]; then
+            ln -s "Versions/Current/$item" "$SPARKLE_FW/$item"
+        fi
+    done
+else
+    echo "Sparkle.framework not present in external/ — skipping (auto-update compiled out)"
+fi
+
 # Ad-hoc sign with entitlements (required for macOS TCC: camera, mic, etc.)
 echo "Code signing with entitlements..."
 ENTITLEMENTS="$SCRIPT_DIR/mac/entitlements.plist"
@@ -47,6 +80,11 @@ for helper in \
 done
 codesign --force --sign - \
     "HodosBrowser.app/Contents/Frameworks/Chromium Embedded Framework.framework"
+if [ -d "$SPARKLE_FW/Versions/B" ]; then
+    codesign --force --sign - "$SPARKLE_FW/Versions/B/Autoupdate"
+    codesign --force --sign - "$SPARKLE_FW/Versions/B/Updater.app"
+    codesign --force --sign - "$SPARKLE_FW"
+fi
 codesign --force --sign - --entitlements "$ENTITLEMENTS" \
     "HodosBrowser.app"
 

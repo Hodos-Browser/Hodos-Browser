@@ -7,6 +7,15 @@
 // These tests are deliberately CEF-free and window-free (the JsStringEscape.h precedent),
 // so they run in hodos_tests without a browser, a message loop or a monitor.
 
+// The code under test — hodos::PhysicalToView in include/core/OverlayMouse.h — is itself
+// entirely #ifdef _WIN32: the conversion exists because the Windows overlay WndProcs forward
+// PHYSICAL client pixels by hand. macOS overlays take their coordinates from NSView, which
+// are already logical, so there is no macOS equivalent to test. This whole file is scoped to
+// match the code it tests — an empty TU elsewhere — mirroring update_fs_test.cpp.
+// Test-only, HARNESS §6. Without this guard hodos_tests does not COMPILE on macOS, which
+// takes the entire suite (all ~295 cases) down, not just this file.
+#ifdef _WIN32
+
 #include <gtest/gtest.h>
 
 #include "../include/core/OverlayMouse.h"
@@ -94,3 +103,5 @@ TEST(OverlayMouse, ZeroDpiFailsSafeToIdentity) {
     EXPECT_EQ(Convert(200, 400, 0).x, 200);
     EXPECT_EQ(Convert(200, 400, 0).y, 400);
 }
+
+#endif  // _WIN32
