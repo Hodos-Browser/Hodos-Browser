@@ -336,6 +336,37 @@ codebase: "minimum code" is **not** "take shortcuts", and it does **not** licens
 handling in a wallet. And the source's "match existing style even if you'd do it differently"
 was **dropped** — it collides with invariant 9 and the CEF input patterns.
 
+### 7c-iii. Prior art before design — ✅ **ADOPTED 2026-08-30** *(owner)*
+
+`CLAUDE.md` working rule 5. A scoping-stage obligation as much as a coding one:
+
+> **These problems are not new to the world, only to us.** Before designing anything non-trivial, read
+> how the people who hit it first did it, and **say in the design what you found and why we are or are
+> not following it.**
+
+The full source list lives in the root `CLAUDE.md` working rule 5 (it is standing behaviour, not a
+scoping-only rule). In summary:
+
+| Domain | Prior art |
+|---|---|
+| BSV protocol / wallet | **BRC docs first** → BSV Association **SDKs + `wallet-toolbox`** (TypeScript, Go) → ⭐ **BDK / `rust-bitcoin`** for the Rust gap → **Bitcoin BIPs** for lineage |
+| Browser engine / privacy / security | **Chromium upstream** · **Brave** · ⭐ **Tor Browser** (the canonical fingerprinting threat model) · **Mullvad Browser** · **Firefox/Gecko** · **Safari/WebKit** · **LibreWolf** · **ungoogled-chromium** |
+| Browser frontend / UI interaction | **Vivaldi** |
+
+⛔ **"Look at", not "copy".** We do not default to their answer; we make sure we know it before
+choosing ours. ⭐ **Where implementations disagree with each other, that is the real design question** —
+report it as such rather than picking one silently.
+⛔ **Port patterns and semantics, never code** — a general rule, not a licence workaround. A pattern
+understood and re-implemented survives the next engine bump; a copied block does not.
+⚠️ **Licence discipline:** read for approach and semantics. Brave / Firefox / LibreWolf are MPL-2.0
+(per-file copyleft); **Vivaldi's UI layer is source-available, not open source**; Chromium is BSD-3;
+WebKit is LGPL/BSD. Same standing rule as the `go-private-backup-cache` review — never vendor.
+
+⭐ **Consequence for stage 2 (Telescope):** a question that needs prior art is a **research task**, and
+the telescope output must say so and give the reading list. It must **not** be written up as a
+two-option decision for the owner. That mistake was made and corrected on 2026-08-30 — see
+`0.4.0-beta.4/RESUME_beta4.md` §3.
+
 ### 7c-ii. Product intent vs project intent — ✅ **ADOPTED 2026-08-30** *(owner, 2026-08-30)*
 
 Folded into `CLAUDE.md` rule 1. Stated here because it is a **scoping** distinction first:
@@ -423,4 +454,5 @@ before relying on it.
 | Date | Change |
 |---|---|
 | 2026-08-29 | Opened. Four stages, self-scoping controls, anti-drift rules. Research (a) and (b) landed; adoption list in §7 proposed, not in force. Research (c) in flight. |
-| 2026-08-30 | Research (c) folded in (§7b-ii). **§7c adopted** into the root `CLAUDE.md` as five working rules, including "minimum code that solves the problem" *(owner request)*. **§7c-ii added** — product vs project intent, and the rule to ask rather than infer *(owner)*. Karpathy repo and post read directly and recorded in §6. **§8 added** — PM skills: do not install, with reasons. |
+| 2026-08-30 | Research (c) folded in (§7b-ii). **§7c adopted** into the root `CLAUDE.md` as working rules, including "minimum code that solves the problem" *(owner request)*. **§7c-ii added** — product vs project intent, and the rule to ask rather than infer *(owner)*. Karpathy repo and post read directly and recorded in §6. **§8 added** — PM skills: do not install, with reasons. |
+| 2026-08-30 | **§7c-iii added** *(owner)* — prior art before design: BRC docs + BSV Association SDKs/`wallet-toolbox` for protocol work, Brave for privacy/security, Vivaldi for frontend interaction. Look at, don't copy. ⛔ **Process correction in the same pass:** a question needing prior art is a **research task with a reading list**, not a two-option decision put to the owner. beta.4's two M0 questions were rewritten accordingly. |

@@ -518,6 +518,69 @@ subsystem* and wrong for the scattered remainder.
 
 ---
 
+## M10 — 🎯 📏 MEASURED: what actually names a taskbar button. Two candidates refuted.
+
+The single most useful sequence in this phase, because **two of the three candidates were things
+this project already believed**, and one of them I had implemented and committed.
+
+| # | Candidate | Verdict | How it was settled |
+|---|---|---|---|
+| 1 | The exe's **version resource** (`FileDescription`) | ⛔ **REFUTED** | 📏 Measured on **both** binaries: dev `FileDescription = "Hodos Browser"`, installed `= "Hodos Browser"`, `chrome.exe = "Google Chrome"`. Taskbar still read **"HodosBrowser.exe"**. ⇒ Windows falls back to the exe **FILENAME**, not its description. `SPRINT_PLAN.md` §2's "⛔ it is NOT the version resource" was right; this is the first time there is a *measurement* behind it rather than an assertion |
+| 2 | **Registry** — `HKCU\Software\Classes\AppUserModelId\<aumid>` with `ApplicationName` | ⛔ **REFUTED, and it was already committed** | 📏 Key verified **absent** before launch, **present** after, with `ApplicationName = "Hodos Browser"` and an icon path. 👤 Owner right-clicked the dev taskbar button: **still "HodosBrowser.exe"**. That key drives **toast notifications**, not the taskbar. Implementation removed |
+| 3 | A **shortcut** declaring the same AUMID | ✅ **CONFIRMED** | 📏 Created `.lnk` with `System.AppUserModel.ID = HodosBrowser.Dev` named **"Hodos Browser DEVTEST"**, restarted the browser on the same binary. 👤 Owner: button read **"Hodos Browser DEVTEST"** |
+
+⭐ **Why the test string was deliberately ugly.** Naming the test shortcut "Hodos Browser" would have
+produced a result consistent with **all three** candidates and proved none of them — the classic
+false green. "Hodos Browser DEVTEST" exists nowhere else on the machine, so the button could only
+have got it from the shortcut. Cheap discipline, worth reusing.
+
+⭐ **Confirmed a second time, on the real path.** With the code change in, launching `--profile=Profile_1`
+wrote `Hodos Browser - Test_1.lnk` carrying `HodosBrowser.Dev.Profile_1` (verified equal to the
+process AUMID in the log), and 👤 the owner read **"Hodos Browser - Test_1"** off the taskbar.
+
+### 🔧 Correction to M3: the hash is per-USER, not per-path
+
+M3 said `Chromium.OYX4LNTP4DA5GSWHROKEK3C7BM` was *"`Chromium` + base32 hash of the install
+directory"*. 📏 **Wrong.** The owner's Start Menu contains:
+
+```
+Maxthon.lnk   AUMID=Maxthon_Id.OYX4LNTP4DA5GSWHROKEK3C7BM
+```
+
+**Same suffix, different application, different install path.** ⇒ it is Chromium's *user-specific*
+registry suffix, derived from the Windows account SID, not from the path. M3 was labelled 🧠 CLAIM,
+which is the only reason this is a correction and not a defect — but it is a reminder that a
+plausible derivation is not a measured one. The root-cause narrative in M7 is **unaffected**: the pin
+still carries a Chromium-era identity the process no longer claims.
+
+## M11 — 👤 The generated shortcut is inert in a dev build, and the owner found it
+
+👤 The owner clicked the newly-created `Hodos Browser - Test_1` shortcut and got a *"profile in
+use"*-style error dialog, and asked whether it was a regression.
+
+📏 **It was not.** No `debug_output-*.log` was created for that launch at all — the newest log
+predated the click — so the process died **before `Logger::Initialize`**. Exactly one thing runs that
+early: `AppPaths::EnforceDevSafeguard`, whose caller shows a `MessageBoxA` and returns 1
+(`cef_browser_shell.cpp:4920`).
+
+⇒ A `.lnk` **cannot carry an environment variable**. A shortcut to `build\bin\Release\HodosBrowser.exe`
+therefore launches without `HODOS_DEV=1`, and the safeguard correctly refuses rather than let a dev
+build open the production database.
+
+⚠️ Checked and cleared first, rather than assumed: the shortcut passes `--profile="Profile_1"` **with
+quotes**, and `ProfileManager::ParseProfileArgument` handles the quoted form
+(`ProfileManager.cpp:888-893`). Not the cause — and the process never reached the parser anyway.
+
+⇒ **Fix: `EnsureProfileShortcut` now returns early when `IsDevEnv()`.** Guarded inside the function,
+not at the call site, so a future caller cannot reintroduce it. 📏 Verified: relaunching
+`--profile=Profile_1` created **no** shortcut and logged *"Dev build — skipping profile shortcut …
+(a .lnk cannot set HODOS_DEV=1, so it could never launch)"*.
+
+⭐ **This is a defect the owner found by using the thing**, in a path no test covered — the shortcut
+was written by dev builds, for dev builds, and could never work.
+
+---
+
 ## Open questions carried into the contract
 
 | # | Question | Status | Answered by |

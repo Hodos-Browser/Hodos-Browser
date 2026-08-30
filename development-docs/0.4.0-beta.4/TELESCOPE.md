@@ -92,19 +92,24 @@ about permissions are how permission surfaces quietly widen.
 
 ### M0 — the edge context. Run this first, and keep it small.
 
-> **In plain terms:** before splitting the work across four separate sessions, run **one short
-> session** that settles the two questions those four would otherwise each answer differently — what
-> "this output is a token" gets saved as (**E1**), and what restore does with an output it cannot
-> identify (**E3 / decision D-1**). Four sessions answering these independently produce four
-> incompatible answers. `RESUME_beta4.md` §3 states both in non-technical language.
+> **In plain terms:** before splitting the work across four separate sessions, run **one session** on
+> the two questions those four would otherwise each answer differently — what "this output is a
+> token" gets saved as (**E1 / RQ-1**), and what restore does with an output it cannot identify
+> (**E3 / RQ-2**). Four sessions answering these independently produce four incompatible answers.
+>
+> ⛔ **Owner correction, 2026-08-30: both are RESEARCH TASKS, not decisions M0 makes.** M0 researches
+> and presents; the owner decides. **RQ-1 is the top design question of the release** and is
+> answered by reading BRC docs + `wallet-toolbox` (TypeScript and Go) + the other BSV SDKs — not from
+> first principles. **RQ-2 requires a good / bad / ugly outcome matrix** and is decided in the sprint
+> planning session, not in M0. Full instructions: `RESUME_beta4.md` §3.
 
 | | |
 |---|---|
-| **Job** | Settle **E1** (what "classified" persists as, against BRC-147/165) and produce the **E3** decision brief for the owner |
-| **Reads** | `README.md`, this file, `REGRESSION_ADDITIONS.md`, BRC-147 + BRC-165, `output_repo.rs`, `basket_repo.rs`, `domain_permission_repo.rs` |
+| **Job** | ⛔ **Research** RQ-1 (what "classified" persists as) and RQ-2 (restore behaviour), and present both for owner decision. **M0 does not decide either.** |
+| **Reads** | `README.md`, `RESUME_beta4.md` §3, this file, `REGRESSION_ADDITIONS.md` · **BRC 46/99/147/150/165** · ⭐ **the BSV Association's `wallet-toolbox`, TypeScript *and* Go, plus the other BSV SDKs** · then `output_repo.rs`, `basket_repo.rs`, `domain_permission_repo.rs` |
 | **Does NOT read** | Any sprint folder in full. `IMPLEMENTATION_PLAN.md`. `RESEARCH_FINDINGS.md` |
-| **Output** | One short doc: the persistence decision with its reason, and the E3 question stated for the owner |
-| **Exit** | That doc exists and the owner has answered E3. **Nothing else.** |
+| **Output** | Two research docs: **(RQ-1)** what the ecosystem does, where implementations disagree, what we should do and why · **(RQ-2)** ⭐ a **good / bad / ugly outcome matrix** per candidate restore behaviour, in plain language |
+| **Exit** | Both research outputs exist and the owner has seen the RQ-2 matrix. **Nothing else.** |
 
 ⭐ **Why M0 exists at all.** E1 and E3 are the only decisions that are *cheaper to make once* than to
 make twice. Everything else genuinely belongs inside a sprint. Resist the urge to grow M0 — a context
@@ -172,7 +177,7 @@ Each of these **stops the pass** until answered. Each is stated as one question 
 
 | # | Decision | Blocks | When |
 |---|---|---|---|
-| **D-1** | **E3** — on restore, does an unclassifiable output present as held-but-unclassified, or is restore blocked until it can be classified? | S1's rule shape, S4's recovery UX | **M0**, before M1 starts |
+| **D-1** | **RQ-2** — what restore does with an output it cannot identify. ⛔ **Decided in the sprint planning session, from a good/bad/ugly matrix M0 researches.** Not a two-option pick | S1's rule shape, S4's recovery UX | Sprint planning, after M0's research |
 | **D-2** | The **exposure question** — does an ordinary incoming 1-sat payment become a tracked default-basket row without a recovery scan? | Sizing, not design. Answer by **experiment** | M1, early |
 | **D-3** | **Is the OpNS overlay PoC in the release**, or a parallel public artifact? | S3's size | Before M3 |
 | **D-4** | **S2.6's gate question** — do wallets need BSV20/21 code at all? | Whether 2.6 stays a review | M2, at 2.6 |

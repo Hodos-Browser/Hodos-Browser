@@ -8,7 +8,7 @@ Build with a production-focused mindset. Do not take shortcuts. If you get stuck
 
 ## Working rules — every session, not only sprint phases
 
-Five standing rules. They are short on purpose. Adopted 2026-08-30; provenance and the items we deliberately **declined** are in `development-docs/SCOPING_PROCESS.md` §6–§7.
+Six standing rules. They are short on purpose. Adopted 2026-08-30; provenance and the items we deliberately **declined** are in `development-docs/SCOPING_PROCESS.md` §6–§7.
 
 1. **Don't assume. Don't hide confusion. Ask.**
    State your assumptions explicitly. If a request has more than one reasonable reading, **present the readings and ask — do not pick one silently.** If something is unclear, stop and name exactly what is confusing. This applies to *intent* as much as to code: a request carries both **product** intent (what should be true for the user, and why) and **project** intent (order, dependencies, what is in this release vs the next). ⛔ **If either is ambiguous, ask before building.** Guessing which one was meant is the most expensive kind of wrong, because the work looks finished.
@@ -25,7 +25,57 @@ Five standing rules. They are short on purpose. Adopted 2026-08-30; provenance a
 4. **Read the docs for an API you have not used here before.**
    A call into CEF, Win32, AppKit or our own fork patches that this repo does not already use elsewhere gets its documentation read — and cited in the phase contract — before the diff is accepted. Do not infer a signature from what looks plausible. `FarblingPolicy.h`'s hand-rolled `RegistrableDomainFromUrl` is the live example of an API that must not be independently re-derived.
 
-5. ⛔ **The instrument is not edited by the change it measures.**
+5. ⭐ **Look at how it has already been solved, before designing it.**
+   These problems are not new to the world, only to us. Before designing anything non-trivial, go and read how the people who hit it first did it — and **say in the design what you found and why we are or are not following it.**
+
+   Organised **by our stack**, so nobody reads nine browsers to answer one question. Full record and the lookup ledger: `development-docs/PRIOR_ART.md`.
+
+   **`rust-wallet/` — BSV protocol & wallet behaviour**
+
+   | Source | Good for |
+   |---|---|
+   | **BRC documentation** — always first | What the spec *requires* vs what it leaves to the implementer |
+   | **BSV Association SDKs + `wallet-toolbox`** | ⭐ **The authoritative answer.** How a conforming wallet actually behaves. **TypeScript and Go** are richest. ⚠️ No Rust implementation — port patterns, never code |
+   | **Bitcoin BIPs** | Protocol lineage only — BRC-42/43 descend from BIP32, and BIP text is often better argued than the BRC that followed |
+   | **BDK / `rust-bitcoin`** | ⛔ **BTC, not BSV. Narrow use only — see the warning below.** |
+
+   > ⛔ **BTC-library warning.** `rust-bitcoin` and BDK are **Bitcoin Core** libraries. BSV diverged, and the divergences are exactly the kind that produce confident, wrong assumptions:
+   >
+   > - **no SegWit, no Taproot/Schnorr** on BSV — BDK's whole model is descriptor-based (`wpkh`, `wsh`, `tr`) and none of it applies;
+   > - **key derivation is different in kind** — BSV uses BRC-42/43 invoice-number derivation, **not** output descriptors;
+   > - **no RBF** (first-seen-rule), different dust and standardness rules, no practical transaction-size cap, restored opcodes;
+   > - **different SPV model** — BSV uses merkle proofs / BEEF (BRC-62/74).
+   >
+   > ⭐ **Use it for exactly one thing:** the *data-model* idea of "a UTXO that exists but is deliberately not selectable" (BDK's unspendable set / coin-selection separation). That is a wallet-architecture pattern, not chain semantics, and it is the closest Rust prior art for the sprint-1 classification seam.
+   > **Everything else: assume it does not transfer until proven.** ⛔ **`wallet-toolbox` always outranks it** — where they disagree, BSV-native wins.
+
+   **`cef-native/` — engine, privacy & security**
+
+   | Source | Good for |
+   |---|---|
+   | **Chromium upstream** | The source of truth. Our patches diverge from it and every engine bump re-litigates them — know what upstream does before deciding to differ |
+   | **Brave** | ⭐ **Closest to us in intent, and the origin of our approach.** Brave coined *farbling* and shipped randomisation first (prior academic work: PriVaricator, FPRandom). Firefox and Safari adopted it later |
+   | **Tor Browser** | ⭐ **The threat model, and the opposing strategy.** Its design document is the canonical statement of *what fingerprinting defence is defending against*. ⚠️ Note Tor's own answer is **uniformity** (everyone looks identical), which is the **opposite** of farbling's **randomisation** (everyone looks different, every time). Two strategies, same threat — reading both is how you tell which residuals actually matter |
+   | **Mullvad Browser** | Tor's hardening *without* the Tor network — the closest analogue to "a privacy browser that is not Tor" |
+   | **Firefox / Gecko** | An independent engine reaching different answers. Also the standards-conformance reference |
+   | **Safari / WebKit** | ITP, and the most aggressive tracking prevention shipped at scale. Platform reference on macOS |
+   | **LibreWolf** | Which Firefox defaults a privacy project actually changes, and why |
+   | **ungoogled-chromium** | De-Googling patch sets — directly comparable to our fork's maintenance burden across bumps |
+
+   **`frontend/` — browser UI & interaction**
+
+   | Source | Good for |
+   |---|---|
+   | **Vivaldi** | Chrome-level UI over a Chromium base — closest to what we do |
+   | **Brave / Firefox** | Permission and consent surfaces, which are security UI as much as UI |
+
+   ⛔ **This is "look at", not "copy".** We do not default to their answer; we make sure we know it before choosing ours. A design that reinvents a solved problem without saying why is not finished.
+   ⭐ **Where sources disagree with each other, that IS the design question** — report the disagreement rather than silently picking a side. Brave-vs-Tor on randomisation-vs-uniformity is the worked example.
+   ⛔ **Port patterns and semantics, never code.** A general rule, not a licence workaround — a pattern understood and re-implemented survives our next engine bump; a copied block does not.
+   ⚠️ **Licence discipline:** Brave / Firefox / LibreWolf / Tor Browser are MPL-2.0 (per-file copyleft); **Vivaldi's UI layer is source-available, not open source**; Chromium is BSD-3; WebKit is LGPL/BSD. Confirm before anything beyond reading — the standing rule from the `go-private-backup-cache` review applies to all of these.
+   ⭐ **Log what you looked at** in `development-docs/PRIOR_ART.md` — one row, one minute. It is how we learn which sources are actually worth the trip.
+
+6. ⛔ **The instrument is not edited by the change it measures.**
    `scripts/preflight.ps1` gate patterns, gate baselines, and `REGRESSION_SET.md` are **not** touched in the same change that implements the code they measure. Loosening a pattern or raising a baseline is its own commit, with the reason written in `HARNESS.md` §4, and it re-runs `-NegativeControl`. This project has already shipped a preflight that reported PASS while running zero checks.
 
 ## Scoping a sprint or release — `development-docs/SCOPING_PROCESS.md`

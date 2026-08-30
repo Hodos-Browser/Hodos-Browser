@@ -38,11 +38,24 @@
 //                         on how many profiles happen to exist;
 //   2. installer .iss   — [Icons] declare the SAME string, so shortcut and process
 //                         agree (they must be byte-identical or the mismatch persists);
-//   3. RegisterAumidDisplayName — because a PER-PROFILE AUMID can never match a
-//                         shortcut (there is no shortcut per profile), and the owner
-//                         confirmed the second profile's button ALSO read
-//                         "hodosbrowser.exe". Registering the name is the documented
-//                         mechanism for naming a shortcut-less AUMID.
+//   3. EnsureProfileShortcut — because a PER-PROFILE AUMID matches none of the
+//                         installer's shortcuts, and the owner confirmed the second
+//                         profile's button ALSO read "hodosbrowser.exe". Each
+//                         non-Default profile therefore gets its own shortcut
+//                         declaring its own AUMID. This is what Chrome does
+//                         (Chrome.UserData.Profile1 was observed on the owner's box).
+//
+// ⛔ MEASURED REFUTATION, 2026-08-30 — do not "simplify" this back to a registry write.
+// This step was FIRST implemented as RegisterAumidDisplayName, writing ApplicationName
+// under HKCU\Software\Classes\AppUserModelId\<aumid>. The key was written correctly and
+// verified present — and the taskbar IGNORED IT: the button still read
+// "HodosBrowser.exe". That key drives toast notifications, NOT the taskbar. Replacing it
+// with a matching shortcut named "Hodos Browser DEVTEST" made the button read
+// "Hodos Browser DEVTEST" immediately, on the same binary. The shortcut is the mechanism.
+//
+// ⛔ AND IT IS NOT THE VERSION RESOURCE either — also measured, twice. FileDescription is
+// already "Hodos Browser" on BOTH the dev and the installed exe, and the taskbar still
+// read "HodosBrowser.exe". Windows falls back to the exe FILENAME, not its description.
 //
 // ⚠️ Existing pinned shortcuts carry the OLD identity and will stop grouping once.
 // Owner decision (beta.3 Phase 3, Q4): OPTION A — release-note "re-pin once". We do
@@ -127,33 +140,34 @@ inline std::optional<std::wstring> ComputeAumid(bool isDev,
 
 namespace hodos {
 
-// Register a display name for `aumid` under
-// HKCU\Software\Classes\AppUserModelId\<aumid>.
-//
-// WHY THIS IS NEEDED AND A SHORTCUT IS NOT ENOUGH. Windows names a taskbar button by
-// finding a shortcut that declares the same AUMID. That works for the Default profile
-// (installer/hodos-browser.iss now declares "HodosBrowser" on both [Icons] entries),
-// but a per-profile identity like "HodosBrowser.Profile_1" can never match a shortcut
-// because no per-profile shortcut exists. Without this registration those windows keep
-// falling back to the exe filename — which the owner confirmed on 2026-08-29.
-//
-// Chrome solves the same problem by writing a real shortcut per profile. We register
-// the name instead: no Start Menu clutter, and one value per profile.
-//
-// ⚠️ HKCU, per-user, never HKLM — this must work for a per-user install and must not
-// need elevation. Best-effort: a failure is logged and never fatal. An unnamed taskbar
-// button is a cosmetic regression; refusing to start is not an acceptable trade.
-//
-// ⚠️ Leaves state behind. Must be removed on uninstall and on profile deletion, or it
-// becomes orphaned registry data of the kind
-// TICKET_deleted_profile_id_reused_over_orphaned_data.md describes.
-bool RegisterAumidDisplayName(const std::wstring& aumid,
-                              const std::wstring& displayName,
-                              const std::wstring& iconPath);
+// Filename (no directory) of the Start Menu shortcut that names `profileName`'s taskbar
+// button. Exposed so the delete path and any test can derive the same name.
+std::wstring ProfileShortcutFileName(const std::string& profileName);
 
-// Remove a previously registered AUMID display name. Used on profile deletion.
-// Best-effort; returns false if the key was absent or could not be removed.
-bool UnregisterAumidDisplayName(const std::wstring& aumid);
+// Ensure a Start Menu shortcut exists declaring `aumid`, so Windows has a name for the
+// taskbar button of a window carrying that identity.
+//
+// WHY A SHORTCUT AND NOT A REGISTRY VALUE — measured, see the header block above.
+// Windows names a taskbar button from a shortcut that declares the same AUMID. The
+// Default profile is covered by installer/hodos-browser.iss's [Icons], which declare
+// "HodosBrowser". Every OTHER profile carries "HodosBrowser.<id>", which matches nothing
+// the installer wrote — so it needs its own shortcut. Chrome does exactly this.
+//
+// ⚠️ USER-VISIBLE: this puts an entry in the Start Menu, one per non-Default profile.
+// That is a deliberate trade (and a small feature — you can launch a profile directly).
+// ⛔ Never call this for the Default profile: the installer already owns that shortcut,
+// and writing a second one would create a duplicate Start Menu entry.
+//
+// Best-effort: a failure is logged and never fatal. An unnamed taskbar button is a
+// cosmetic regression; refusing to start over it is not an acceptable trade.
+bool EnsureProfileShortcut(const std::wstring& aumid,
+                           const std::string& profileId,
+                           const std::string& profileName);
+
+// Remove a profile's Start Menu shortcut. Called when a profile is deleted, so we do not
+// leave an entry launching a profile that no longer exists — the orphaned-state problem
+// TICKET_deleted_profile_id_reused_over_orphaned_data.md describes.
+bool RemoveProfileShortcut(const std::string& profileName);
 
 }  // namespace hodos
 

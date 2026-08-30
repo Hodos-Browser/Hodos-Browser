@@ -107,10 +107,17 @@ almost nothing, and a guard whose regression row was never seen failing beforeha
 
 ## Owed to the microscope pass — do not answer here
 
+> ⭐ **RQ-1 is the top design question of this sprint, and it is a RESEARCH task.** ⛔ Do not answer it
+> from first principles. Per `CLAUDE.md` working rule 5: read the **BRC documentation** (46, 99, 147,
+> 150, 165), then the BSV Association's **`wallet-toolbox` in TypeScript *and* Go**, then the other
+> **BSV SDKs**. Report where implementations agree — that is the convention — and ⭐ **where they
+> disagree, because that is the real design question.** ⚠️ There is no Rust implementation; we port
+> **patterns and semantics, never code.** Full instructions: `../RESUME_beta4.md` §3.
+
 | Question | Why it needs the code in front of you |
 |---|---|
+| ⭐ **RQ-1 — what "classified" persists as: reuse baskets, or sit beside them?** | ⛔ **Research first** (see box above). Baskets carry BRC-99/165 semantics we implement only partially (`domain_basket_permissions` is one-domain-one-basket-binary; the spec scopes by axis with values in tags). Overloading them may be wrong — and the ecosystem has already made this choice, so find out what it chose before we do. |
 | Where exactly the seam sits — ingest only, or ingest + a reconcile verification pass | Depends on whether reconcile can introduce rows that bypass ingest. A code answer, not a preference. |
-| What "classified" persists as — reuse baskets, or sit beside them? | Baskets carry BRC-99/165 semantics we implement only partially (`domain_basket_permissions` is one-domain-one-basket-binary; the spec scopes by axis with values in tags). Overloading them may be wrong. |
 | How an already-populated wallet's existing outputs get classified | Migration. May be "on next reconcile"; may need a one-time pass. |
 | Whether the beta.3 `satoshis > 1` floor is removed once the guard lands | Cheap either way. Defence in depth vs one obvious rule. |
 | Whether a T0 static gate on unguarded UTXO-selecting paths is worth adding | ⛔ If yes, **baseline it with `preflight.ps1` itself**, never a hand grep — `HARNESS.md` §9 records two gates whose hand counts were wrong. |

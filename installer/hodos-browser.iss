@@ -137,27 +137,28 @@ begin
   Result := ExpandConstant('{userappdata}\HodosBrowser');
 end;
 
-// Remove every AppUserModelId display-name key this app registered at startup.
-// There is one per profile ('HodosBrowser', 'HodosBrowser.Profile_1', ...), so the
-// exact set is unknown at install time and the subkeys must be enumerated.
-// ⛔ Matches on the 'HodosBrowser' prefix ONLY — AppUserModelId is a shared namespace
-// and deleting the parent key would remove other applications' registrations.
-// ⚠️ Deliberately does NOT touch 'HodosBrowser.Dev*': those belong to a developer's
-// dev build, which this uninstaller does not own.
-procedure CleanAumidRegistrations();
+// Remove the per-profile Start Menu shortcuts the app writes at startup
+// (hodos::EnsureProfileShortcut). There is one per NON-Default profile, named
+// "Hodos Browser - <profile name>.lnk", so the exact set is unknown at install time and
+// the folder must be enumerated. Without this, uninstalling leaves Start Menu entries
+// that launch a browser which is no longer installed.
+// ⛔ The [Icons] entries ("Hodos Browser.lnk", "Uninstall Hodos Browser.lnk") are owned
+// by Inno and removed automatically — this must NOT try to delete those.
+procedure CleanProfileShortcuts();
 var
-  Names: TArrayOfString;
-  I: Integer;
-  Name: String;
+  Dir: String;
+  Rec: TFindRec;
 begin
-  if not RegGetSubkeyNames(HKEY_CURRENT_USER, 'Software\Classes\AppUserModelId', Names) then
-    exit;
-  for I := 0 to GetArrayLength(Names) - 1 do
+  Dir := ExpandConstant('{userprograms}');
+  if FindFirst(Dir + '\Hodos Browser - *.lnk', Rec) then
   begin
-    Name := Names[I];
-    if (Pos('HodosBrowser', Name) = 1) and (Pos('HodosBrowser.Dev', Name) <> 1) then
-      RegDeleteKeyIncludingSubkeys(HKEY_CURRENT_USER,
-        'Software\Classes\AppUserModelId\' + Name);
+    try
+      repeat
+        DeleteFile(Dir + '\' + Rec.Name);
+      until not FindNext(Rec);
+    finally
+      FindClose(Rec);
+    end;
   end;
 end;
 
@@ -286,12 +287,11 @@ begin
     // Always clean WinSparkle registry entries
     RegDeleteKeyIncludingSubkeys(HKEY_CURRENT_USER, 'Software\Marston Enterprises\Hodos Browser');
 
-    // Always clean the AppUserModelID display-name registrations written at startup
-    // by hodos::RegisterAumidDisplayName (see cef-native/include/core/AumidPolicy.h).
-    // These name the taskbar button for identities that no shortcut declares — one
-    // per profile, so the set is not known at install time and must be enumerated.
-    // Leaving them behind would be exactly the orphaned-state problem described in
-    // TICKET_deleted_profile_id_reused_over_orphaned_data.md.
-    CleanAumidRegistrations();
+    // Always clean the per-profile Start Menu shortcuts written at startup by
+    // hodos::EnsureProfileShortcut (see cef-native/include/core/AumidPolicy.h). These
+    // name each profile's taskbar button; one per non-Default profile, so the set is not
+    // known at install time. Leaving them behind is the orphaned-state problem described
+    // in TICKET_deleted_profile_id_reused_over_orphaned_data.md.
+    CleanProfileShortcuts();
   end;
 end;

@@ -31,37 +31,65 @@ Everything else is read **when you get to that sprint**, not before.
 
 `TELESCOPE.md` calls it **"M0, the edge context."** That is jargon for something simple:
 
-> **Before splitting the work up between four separate sessions, run one small session that settles
-> the two questions those four sessions would otherwise each answer differently.**
+> **Before splitting the work up between four separate sessions, run one session on the two questions
+> those four sessions would otherwise each answer differently.**
 
 The four sprints get one fresh session each, deliberately kept apart so no session has to hold the
 whole release in its head. But two questions sit *between* sprints, and if each session answers them
-on its own you get four incompatible answers. So one short session goes first and settles them.
+on its own you get four incompatible answers.
 
-**The two questions:**
+⛔ **Owner correction, 2026-08-30: both of these are RESEARCH TASKS, not decisions to be made on the
+spot.** M0's job is to **research them and present them for decision** — not to settle them. Neither
+was answerable in the telescope session and neither should be answered from first principles now.
 
-| | Plain version | Why it can't wait |
+### ⭐ RQ-1 — What does "this output is a token" get saved as? *(the top design question)*
+
+**The question.** When the wallet decides an output is a token rather than spendable money, **where
+does that fact get stored, and in what form?** Sprint 1 has to build this. Sprint 2 then implements
+the ordinals spec, which has its own rules for how tokens are filed. If sprint 1 guesses and the spec
+disagrees, sprint 2 rewrites the one thing the release's safety rests on.
+
+⛔ **Do not design this from first principles. Go and find out how it is already done, and why.**
+
+**Research instructions — this is the deliverable:**
+
+| # | Read | Looking for |
 |---|---|---|
-| **1. What does "this output is a token" get saved as?** | When the wallet decides an output is a token and not spendable money, **where does that fact get stored, and in what form?** Sprint 1 has to invent this. Sprint 2 then implements the actual ordinals spec, which has its own rules for how tokens get filed. If sprint 1 guesses and sprint 2's spec disagrees, sprint 2 rewrites the one thing the whole release's safety rests on. | It is cheap to check the spec now and expensive to migrate later |
-| **2. D-1 — what should happen on restore when the wallet can't tell what an output is?** | ⭐ **This one is yours to decide, not ours.** Restoring a wallet from a seed phrase is the moment the wallet knows least. If it finds an output it cannot classify, there are two options — see below | It changes what sprint 1 builds *and* what sprint 4's recovery does |
+| 1 | **BRC documentation** — 46, 99, 147, 150, 165 in particular | What the spec *requires* to be persisted, versus what it leaves to the implementer |
+| 2 | **BSV Association `wallet-toolbox`** — the **TypeScript** and **Go** implementations | How a conforming wallet actually stores basket/token classification. This is the closest thing to a reference answer that exists |
+| 3 | **The other BSV SDKs**, across languages | Where they agree, that is the convention. ⭐ **Where they disagree, that is the real design question**, and it should be reported as such |
+| 4 | Our own code — `output_repo.rs`, `basket_repo.rs`, `domain_permission_repo.rs` | What we already have, and how far it is from the above |
 
-### ⭐ D-1, the decision waiting for you
+⚠️ **There is no Rust implementation of wallet-toolbox.** We are porting **patterns and semantics**,
+never code. That is also why this needs research rather than a library call.
 
-When restore finds an output it cannot classify, it can either:
+**The output:** a short document saying what the ecosystem does, where implementations disagree, what
+we should do, **and why** — with the trade-offs visible. Then the owner decides.
 
-| Option | What the user sees | Risk |
-|---|---|---|
-| **A. Show it as "held, unidentified"** — not spendable, but visible | Their balance shows the money they can spend, and separately "1 item we could not identify" | The user sees something they may not understand |
-| **B. Block the restore until it can be classified** | Restore refuses to finish | ⛔ A user who cannot finish restoring their wallet is worse off than one with a confusing line item |
+### ⭐ RQ-2 (was "D-1") — What happens on restore when the wallet cannot identify an output?
 
-**Recommendation: A.** The rule the release is built on is *fail closed* — never spend what you
-cannot identify. Option A satisfies that and still shows the user everything they own. Option B
-fails closed on the wrong thing: it protects the asset by withholding the wallet.
+**The question.** Restoring from a seed phrase is the moment the wallet knows least. If it finds an
+output it cannot classify, what should happen?
 
-⚠️ The failure this guards against is real and silent: an output that is safe from being spent
-**and** invisible to the user has effectively been lost, and the user finds out much later. That is
-why `R-RESTORE` in `REGRESSION_ADDITIONS.md` is written as **two checks that are each other's
-control** — one proves it can't be spent, the other proves it didn't disappear.
+⛔ **Owner correction, 2026-08-30: this needs a full conversation and a good / bad / ugly outcome
+matrix, not a two-option recommendation.** My earlier framing (two options, pick A) was too thin for
+the decision it is carrying. **It belongs in the sprint planning session, with the research done
+first.**
+
+**What M0 must produce for it:**
+
+| Required | Meaning |
+|---|---|
+| ⭐ **A good / bad / ugly outcome matrix** | For **each** candidate behaviour: what the good case looks like, what the bad case looks like, and **what the ugly case looks like** — the one where the user loses something and does not find out for months |
+| The candidate behaviours | At least: show as held-but-unidentified · block the restore · classify-later-on-reconcile · something the ecosystem does that we have not thought of |
+| ⭐ **How other wallets handle it** | Per rule 5. `wallet-toolbox`'s recovery path, the BSV SDKs, and any BRC that speaks to recovery. **Somebody has hit this already** |
+| The user-facing consequence of each | Stated in plain language, not in terms of database state |
+
+**Why it matters this much:** the two failure modes are opposites and a naive fix for one causes the
+other. An output that is **silently spendable** breaks the release's core rule at the worst possible
+moment. An output that is **silently dropped** is safe from spending and effectively lost — the user
+finds out much later, if ever. That is why `R-RESTORE` in `REGRESSION_ADDITIONS.md` is written as
+**two checks that are each other's control**.
 
 ## 4. Decisions on record — ⛔ do not relitigate
 
@@ -79,7 +107,8 @@ control** — one proves it can't be spent, the other proves it didn't disappear
 
 | # | Owed | Who / when |
 |---|---|---|
-| 1 | ⭐ **D-1** — the restore decision in §3 | **Owner.** Before the microscope pass |
+| 1 | ⭐ **RQ-1** — research what "classified" persists as, against BRC docs + `wallet-toolbox` (TS and Go) + the other BSV SDKs. ⛔ **Research task, not a decision** | M0, before any sprint work |
+| 1b | ⭐ **RQ-2** — research restore behaviour and produce the **good / bad / ugly outcome matrix**. ⛔ **Owner decides in the sprint planning session, after the research** | M0 researches; owner decides |
 | 2 | **The exposure question** — does an ordinary incoming 1-sat payment become a tracked default-basket row without a recovery scan? ⚠️ **Answer by running something.** It has been read twice already | Sprint 1, early |
 | 3 | Six files under `0.4.0-beta.3/` still carry pre-move folder paths — five session prompts (archaeology) and the dust ticket's Links section (**live, genuinely owed**) | Whoever next touches beta.3 |
 | 4 | `../SCOPING_PROCESS.md` §7a, §7b, §7b-ii — ~19 proposed adoptions, **one decision each**, none in force | Owner, when there is time. Not urgent |
@@ -122,13 +151,21 @@ Also: root `CLAUDE.md` — now carries the five working rules and points at `SCO
 ```
 Read development-docs/0.4.0-beta.4/RESUME_beta4.md in full, then README.md and TELESCOPE.md.
 
-beta.3 has shipped. Start the beta.4 microscope pass with M0 — the small edge session described
-in RESUME §3. Settle question 1 (what "classified" persists as, checked against BRC-147 and
-BRC-165) and bring me D-1 with a recommendation.
+beta.3 has shipped. Start the beta.4 microscope pass with M0 — the edge session described in
+RESUME §3. M0 owns two RESEARCH questions and nothing else:
 
-Constraints: do not re-scope, the order and the four decisions in RESUME §4 are settled. Keep M0
-small — it owns two questions and nothing else. Stop when its output doc exists and I have
-answered D-1.
+  RQ-1  What "classified" persists as. Research it — BRC docs (46/99/147/150/165), then the BSV
+        Association's wallet-toolbox in TypeScript AND Go, then the other BSV SDKs. Report where
+        implementations agree (that's the convention) and where they disagree (that's the real
+        design question). There is no Rust implementation — we port patterns, never code.
+
+  RQ-2  What restore does with an output it cannot identify. Research how other wallets handle it,
+        then produce a good / bad / ugly outcome matrix per candidate behaviour, in plain language.
+        Do NOT recommend a two-option answer. I decide this in the sprint planning session.
+
+Constraints: do not re-scope — the order and the decisions in RESUME §4 are settled. Do not design
+either question from first principles; go and read how it is already done (CLAUDE.md working rule 5).
+Stop when both research outputs exist and I have seen the RQ-2 matrix.
 ```
 
 ---

@@ -75,6 +75,34 @@ proving nothing. It must be two windows of the **same** profile, i.e. one proces
 ⚠️ And confirm the second launch actually forwards on macOS rather than starting a second process —
 if macOS starts a second process, you do not have this defect at all and that is a useful answer.
 
+## ⛔ M2.5 — Two naming mechanisms REFUTED by measurement. Nothing owed to you; recorded so it is not re-tried.
+
+Windows-only in effect, but the **method** is the point and it cost most of a session, so it is
+here rather than only in the phase docs.
+
+The taskbar read "HodosBrowser.exe". Three candidate mechanisms; **two were implemented or asserted
+and then measured to be wrong**:
+
+| Candidate | Verdict | Evidence |
+|---|---|---|
+| The exe's **version resource** (`FileDescription`) | ⛔ **NOT IT** | `FileDescription` is already `"Hodos Browser"` on **both** the dev and the installed exe — measured — and the taskbar still read the filename. Windows falls back to the exe **FILENAME**, not its description. (This one was already flagged "do not fix again"; now there is a measurement behind the warning.) |
+| A **registry** value — `HKCU\Software\Classes\AppUserModelId\<aumid>\ApplicationName` | ⛔ **NOT IT.** I implemented it, shipped it into a commit, and it does nothing | Key verified written (`ApplicationName = "Hodos Browser"`). Taskbar unchanged: still "HodosBrowser.exe". That key drives **toast notifications**. Ripped out. |
+| A **shortcut** declaring the AUMID | ✅ **THIS IS IT** | Created a `.lnk` with `System.AppUserModel.ID = HodosBrowser.Dev`, named `"Hodos Browser DEVTEST"`, restarted → the button read **"Hodos Browser DEVTEST"** immediately. Unambiguous: that string exists nowhere else. |
+
+⭐ **Why the DEVTEST name mattered.** A test that made the button read "Hodos Browser" would have been
+consistent with *three* different mechanisms (shortcut, registry, version resource) and proved none of
+them. A deliberately weird string could only have come from the shortcut. Worth stealing as a habit.
+
+⇒ Windows now writes **one Start Menu shortcut per non-Default profile**, declaring that profile's
+AUMID — which is what Chrome does. ⛔ **Skipped in dev builds**: a `.lnk` cannot carry an environment
+variable, so a shortcut to `build/bin/Release` launches without `HODOS_DEV=1` and the dev safeguard
+correctly refuses. Found by the owner clicking one.
+
+🍎 **Does any of this apply to you? Probably not, and I am not asking you to check.** macOS has no
+AUMID and no taskbar-button identity; the Dock keys off the `.app` bundle. `SPRINT_PLAN.md` §3 already
+says #3 has no macOS analogue. Raise it only if you know of a Dock-grouping or per-profile-naming
+equivalent that is currently wrong.
+
 ## 📏 M3 — Scale, in case you go looking
 
 Measured on the **Windows** tree by `scripts/preflight.ps1` (gate `G11`, baseline **60**): the

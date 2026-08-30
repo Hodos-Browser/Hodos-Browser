@@ -5200,15 +5200,20 @@ static int RunHodosMain(HINSTANCE hInstance, int nCmdShow, void* sandbox_info,
         LOG_INFO("AUMID set: " + std::string(aumid->begin(), aumid->end()) +
                  " (profile " + (profileId.empty() ? "<unresolved>" : profileId) + ")");
 
-        // Give that identity a human-readable name. Required because a per-profile
-        // AUMID matches no shortcut and would otherwise keep falling back to the exe
-        // filename — the second half of the reported bug. Best-effort by design.
-        wchar_t exePath[MAX_PATH] = {0};
-        std::wstring iconPath;
-        if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) > 0) {
-            iconPath = exePath;
+        // Give that identity a name Windows can display. A per-profile AUMID matches
+        // none of the installer's shortcuts, so without its own shortcut the button
+        // falls back to the exe FILENAME — the second half of the reported bug, and the
+        // half the owner confirmed on 2026-08-29.
+        //
+        // ⛔ A registry value under HKCU\...\AppUserModelId does NOT do this. That was
+        // implemented, verified written, and MEASURED not to work (2026-08-30). Only a
+        // matching shortcut names the button. See AumidPolicy.h.
+        //
+        // Default is skipped inside EnsureProfileShortcut: the installer owns that one.
+        if (!g_picker_mode && profileId != "Default" && !profileId.empty()) {
+            hodos::EnsureProfileShortcut(*aumid, profileId,
+                                         ProfileManager::GetInstance().GetCurrentProfile().name);
         }
-        hodos::RegisterAumidDisplayName(*aumid, hodos::kAumidDisplayName, iconPath);
     } else {
         LOG_WARNING("AUMID not set — taskbar button will fall back to the exe filename");
     }

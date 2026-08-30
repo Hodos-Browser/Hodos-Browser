@@ -1,6 +1,7 @@
 #include "../../include/core/ProfileManager.h"
 #include "../../include/core/ProfileLock.h"
 #include "../../include/core/Logger.h"
+#include "../../include/core/AumidPolicy.h"
 #include <fstream>
 #include <sstream>
 #include <chrono>
@@ -524,6 +525,9 @@ bool ProfileManager::DeleteProfile(const std::string& id) {
     }
 
     std::string profilePath = app_data_path_ + "/" + it->path;
+    // Captured before the erase below invalidates `it`. Used to remove this profile's
+    // Start Menu shortcut once the deletion has actually succeeded.
+    const std::string profileName = it->name;
 
     // ⛔ Is another INSTANCE running this profile? currentProfileId_ above only knows about
     // this process; a second Hodos window running another profile is invisible to it. Since
@@ -583,6 +587,16 @@ bool ProfileManager::DeleteProfile(const std::string& id) {
     }
 
     Save();
+
+#ifdef _WIN32
+    // Remove the Start Menu shortcut that named this profile's taskbar button
+    // (hodos::EnsureProfileShortcut writes it at startup). Done only after the profile is
+    // genuinely gone — every failure path above returns early, so a refused delete never
+    // removes a shortcut for a profile that still exists. Best-effort: a shortcut we
+    // cannot delete is Start Menu clutter, not a reason to report the delete as failed.
+    hodos::RemoveProfileShortcut(profileName);
+#endif
+
     LOG_INFO_PM("✅ Deleted profile: " + id);
     return true;
 }
