@@ -6,6 +6,19 @@
 
 Build with a production-focused mindset. Do not take shortcuts. If you get stuck do research on proper implementation plans/debugging steps.
 
+## Scoping a sprint or release — `development-docs/SCOPING_PROCESS.md`
+
+**Before a sprint exists, `SCOPING_PROCESS.md` is the procedure.** Four stages — **Scope → Telescope → Microscope → Telescope (close)** — with defined outputs, exit conditions, a loop limit, and explicit human decision points. The `sprint-scoper` agent (`.claude/agents/sprint-scoper.md`) owns it.
+
+⛔ **It does not apply to small work.** A single ticket, a two-file change, or a sprint with no cross-sprint edges does not get a four-stage run — that is the over-planning it exists to prevent. Skip to the phase kickoff below.
+
+Two rules from it that apply to **every** session, not only scoping ones:
+
+- ⛔ **When two options are close, put both in one message with a recommendation and ask.** Do not iterate silently, and do not fan out agents to make a coin-flip decision.
+- ⛔ **Stop at the exit condition.** Deliverables exist and open questions are answered ⇒ stop. Development sometimes just requires building, testing and adapting.
+
+It sits **before** the phase kickoff below, and **beneath** `development-docs/<sprint>/HARNESS.md` — the scoping process never lowers a harness standard.
+
 ## Phase kickoff workflow (mandatory before any sprint-phase implementation)
 
 Sprint phases live in `development-docs/<sprint>/phase-*/` folders. Before writing **any code** for a phase, run a brief kickoff review:
@@ -495,6 +508,8 @@ Every outgoing transaction includes a **1000-satoshi service fee** output sent t
 
 | Folder | Purpose |
 |--------|---------|
+| `development-docs/SCOPING_PROCESS.md` | The four-stage scoping procedure (Scope → Telescope → Microscope → Telescope-close). Owned by the `sprint-scoper` agent. See the section near the top of this file |
+| `development-docs/0.4.0-beta.4/` | **Current sprint — the wallet asset layer.** Four sprints in a settled order: UTXO safety guard → 1Sat Ordinals → OpNS naming → on-chain backup & sync. Start at its `README.md`, then `TELESCOPE.md`. ⛔ Its harness is **inherited by reference** from `0.4.0-beta.3/HARNESS.md`; beta.4's additions are in `HARNESS_DELTA.md` / `REGRESSION_ADDITIONS.md` only |
 | `development-docs/architecture/` | Cross-layer architecture — the flows no single layer's `CLAUDE.md` owns. Rewritten against code 2026-08-03 (the prior contents described the deleted C++ permission engine). Three docs: `AUTO_APPROVE_ENGINE.md` (permission decision flow + Matrix C branch order), `IPC_BRIDGE.md` (the `wallet_call` process-message contract), `WALLET_API_MAP.md` (which endpoints are gated by which Rust dispatcher, and the shim surface). Inventory stays in the layer docs; these three carry only cross-layer flow. |
 | `development-docs/FUTURE_AUTO_APPROVE_ENGINE_ARCHITECTURE.md` | The original "engine in Rust" vision doc. Largely **realized** by Phase 2.6 — read it as history, not as a plan |
 | `development-docs/Final-MVP-Sprint/` | Sprint: testing, optimization, security, macOS port |

@@ -12,7 +12,7 @@ Two pieces were split out and are live:
 
 | Topic | Now lives at |
 |---|---|
-| 1Sat Ordinals + BSV21 | **`development-docs/1SatOrdinals-BSV21/`** — its own sprint. Read `BSV-Tokens/` first; the trust ratings are in that README. |
+| 1Sat Ordinals + BSV21 | **`development-docs/0.4.0-beta.4/sprint-2-1sat-ordinals/`** — now beta.4 sprint 2 (moved 2026-08-29). Read `BSV-Tokens/` first; the trust ratings are in that README. |
 | Demo example sites | **`demos/README.md`** (repo root) — runnable code, not docs |
 | Demo *videos* | **`Marston Enterprises/Hodos/Marketing/Videos/README.md`** — outside this repo. No video files in this repo, ever. |
 

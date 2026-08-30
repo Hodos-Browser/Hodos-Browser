@@ -5,6 +5,12 @@
 below need research and measurement before they become tickets. **We update the BRC as we
 implement, test and learn — the draft follows the code, not the other way around.**
 
+> **[2026-08-23]** `IMPLEMENTATION_PLAN.md` (this folder) is now the working plan, built from the
+> eight `research/` reports and revised after critique. Where text below is marked
+> *[superseded ...]* the plan wins; unmarked text stands. The core rule is unchanged: **the BRC
+> draft follows the code.** Nothing below is deleted — history and decision records are annotated
+> in [brackets], not erased.
+
 > **What this is.** Today `rust-wallet/src/backup.rs` writes the whole (stripped) wallet state as one
 > PushDrop token on every backup. This work changes that to a **linked chain of snapshots and
 > deltas** at the same deterministic address, and uses that chain as the **cross-device sync log**.
@@ -14,8 +20,10 @@ implement, test and learn — the draft follows the code, not the other way arou
 > **Where the design lives:** `Marston Enterprises/Standards/BRCs/drafts/wallet-backup-and-sync-onchain/`
 > — `wallet-backup-and-sync-onchain.md` (the BRC, revised 2026-08-19) and `DELTA_ANALYSIS.md` (why, with
 > the numbers and the decisions on record).
-> **Current implementation doc:** `../ONCHAIN_BACKUP_SYSTEM.md` — the five strips, triggers,
-> dirty-flag, recovery flow. Still accurate for what ships today; this work builds on it, doesn't
+> **Current implementation doc:** `../../ONCHAIN_BACKUP_SYSTEM.md` — the five strips, triggers,
+> dirty-flag, recovery flow. ~~Still accurate for what ships today~~ *[superseded 2026-08-23: that
+> doc has ≥ 6 verified factual errors — IMPLEMENTATION_PLAN.md §6.1. Cite code lines, not the doc,
+> until it is rewritten post-Phase 2.]* This work builds on the shipped system, doesn't
 > replace it.
 
 ---
@@ -34,9 +42,14 @@ write; poll on a timer and right before any spend; every token says which device
 
 ## Work item 0 — BRC-38 compatibility assessment. **Do this first. It gates everything else.**
 
+**[2026-08-23: DONE — report B2. Decision gate: (a) amendment preferred and pursued, (b) envelope
+ships now — IMPLEMENTATION_PLAN.md D1. Corrections from B2: we serialize 19 SQL tables (21 payload
+members), not 18; the only tier-1 orphan is the single field `wallets.current_index`, not five
+tables.]**
+
 **Why it's first.** The BRC now says the backup payload SHOULD be a **BRC-38** document (Ty Everett's
 *User Wallet Data Format*, written 2026 — no longer "reserved"). Our schema was *based on*
-wallet-toolbox but has drifted: we back up 18 tables (`../ONCHAIN_BACKUP_SYSTEM.md` § Included
+wallet-toolbox but has drifted: we back up 18 tables (`../../ONCHAIN_BACKUP_SYSTEM.md` § Included
 Tables), BRC-38 defines exactly 13 and **MUSTs that list with no extension slot**. If the gap is
 small, the rest of this plan proceeds as written. If it's large, **that is a big problem with a lot
 of work**, and the sprint has to start by identifying it clearly and planning from that — not
@@ -56,11 +69,15 @@ discovering it halfway through item 3. Matt, 2026-08-19.
 
 So: `wallet` / `domain_permissions` / `cert_field_permissions` → tier 3, fine outside BRC-38.
 `credentials` → tier 2, needs a labelled home. The "five tables with nowhere to go" becomes **one
-table that matters and four that don't.**
+table that matters and four that don't.** *[2026-08-23: B2 measured the gap smaller still — all 13
+BRC-38 tables + `user` + `sourceStorage` exist in our schema with zero missing columns; the only
+tier-1 orphan is `wallets.current_index` (plan D1).]*
 
 **BRC-38 as written has no tiers and no ignore rule** — § 6 MUSTs every row of every table, § 10 MUSTs
 importers preserve everything, `tables` MUST be exactly the 13. The only flex is § 5.4 (omit absent
-fields) and "MAY choose not to *activate* `activeStorage`/`syncStates`." So BRC-38 is the **tier-1
+fields) and "MAY choose not to *activate* `activeStorage`/`syncStates`" *[2026-08-23: §10's
+actual words: importers "MAY treat the following as operationally sensitive and choose whether
+to activate them immediately after import" (0038.md §10, verified at c1d12f2)]*. So BRC-38 is the **tier-1
 + most-of-tier-2 payload**, and what's missing around it is: the preserve-unknown rule, tier 3, and
 the capability declaration below.
 
@@ -98,23 +115,79 @@ Known before we start (from reading, not running):
 Also out of item 0: the list of **field-level adapters** needed (our column ↔ 38 column), and
 whether *import* from a foreign BRC-38 document is in scope for this sprint or the next.
 
+## Work item 0b — delta-format prior art. **Added 2026-08-22; gates item 3's delta format.**
+
+**[2026-08-23: DONE — reports C1/C2/C3; decisions D2/D3/D10 in IMPLEMENTATION_PLAN.md. Premise
+corrections from the reports: the backup-cache blob is opaque ("Nothing in this package interprets
+blob contents"), so their rail imposes no constraint on our chunk format; the server enforces only
+`seq` contiguity — `prevSha256` is stored verbatim, never validated (accurate phrase:
+"client-verified hash chain over ciphertext"); and "toolbox sync IS BRC-38/39" is imprecise — sync
+moves raw rows per BRC-40, 38/39 are file formats, the shared merge engine is the overlap (plan
+D10).]**
+
+**Why this exists.** Two things became public this week:
+
+1. **deggen's [`go-private-backup-cache`](https://github.com/bsv-blockchain/go-private-backup-cache)**
+   (bsv-blockchain org, created 08-15, pushed 08-21; his answer in the HandCash-goes-non-custodial
+   recovery thread) is a live **off-chain delta rail**: wallets push their DB as client-side-encrypted
+   **delta chunks**, per-device append logs with contiguous `seq` + `prevSha256` chaining, generations
+   with client-driven compaction (snapshot N+1, delete N-2). Same problem statement as ours, nearly
+   verbatim (BRC-29 derivation metadata is unrecoverable from seed alone).
+2. **Ty Everett publicly stated** (Metanet Meetup 2026-08-21, clip x.com/hbgnostic/status/2091192000376951142)
+   that wallet-toolbox remote-storage sync **is BRC-38/39**: "synchronize and download all of my data
+   out of remote wallet toolbox storage… put it into another one or run it myself."
+
+So a delta format for wallet state **already exists in running code**, on the rail ours is the
+on-chain sibling of. Item 3 must not invent a delta format in a vacuum.
+
+**Deliverable, before item 3 freezes anything:**
+
+- **(a) Read wallet-toolbox's sync machinery** — what a sync chunk actually is on the wire
+  (`SyncChunk` et al.), how it relates to **BRC-40** (*User Wallet Data Synchronization*), what the
+  chunk boundary and merge/replay rules are, and how it maps to the BRC-38 table list from item 0.
+- **(b) Read `go-private-backup-cache`'s clients** (`client/client.go`, `ts-client/`
+  `@bsv/backup-cache-client`) — is the blob toolbox-native (BRC-40-shaped?) or opaque/client-defined?
+  Note the log semantics we'd share: contiguous seq, parent hash, generations-as-snapshots.
+- **(c) Decision on record: adopt / adapt / diverge-with-reasons** for our token payload (item 2's
+  header + item 3's changeset format). **If the chunk formats align, one wallet pushes the same
+  encrypted chunks to either rail** — his HTTP log or our chain — and our BRC becomes the transport
+  sibling of a running service instead of a competitor. That also answers item 7's "adopt what
+  already works or lead" for the delta layer before implementation starts.
+
+Caution: the repo has **no license** (same pattern as the 1sat stack) — read for format and
+semantics; do not vendor code. Analysis on record:
+`Marston Enterprises/Standards/BRCs/drafts/wallet-backup-and-sync-onchain/` + memory
+`project_onchain_backup_delta_design`.
+
 ## Work items — recommended order
 
 Ordered so that each step is independently shippable and measurable. 1 is the biggest single win
-and the smallest change; do it first regardless of the rest.
+and the smallest change; ~~do it first regardless of the rest~~ *[superseded 2026-08-23: the test
+harness comes first — IMPLEMENTATION_PLAN.md Phase 1, per retrospective constraint 13 (never ship
+recovery-affecting changes without a round-trip test). Item 1 lands as Phase 3.]*
+
+*[2026-08-23 item → phase map: 0 → done (plan D1); 0b → done (D2/D3); 1 → Phase 3; 2 → Phase 4
+(extended: intent record, recency check, `prev_payload_sha256`, hard size cap); 3 → Phase 5;
+4 → Phase 6; 5 → Phase 7; 6 → Phase 8 (H8a front-loaded to Phases 1–2); 7 → Phase 8. New Phases 1
+(test harness) and 2 (payload completeness on the current format) precede all of them.]*
 
 | # | Item | Size | Why this order |
 |---|---|---|---|
 | **0** | **BRC-38 compatibility assessment + decision gate** (above) | S–M | Gates the payload format for everything below |
-| **1** | **Strip inscription bytes** from token rows — back up outpoint + basket + tags + `custom_instructions` + derivation; re-hydrate `locking_script` by outpoint on recovery | S | Same "pure cache, re-fetch" rule the five existing strips already apply. Takes a 200-image-ordinal wallet from ~3 MB → ~100 KB *before* deltas. Becomes strip rule 6 in `prepare_backup_payload()` |
+| **0b** | **Delta-format prior art** — wallet-toolbox sync chunks (BRC-40?) + `go-private-backup-cache` blob shape (above) | S | Gates item 3's delta format; if chunks align, the same encrypted chunks feed both rails |
+| **1** | **Strip inscription bytes** from token rows — back up outpoint + basket + tags + `custom_instructions` + derivation; re-hydrate `locking_script` by outpoint on recovery | S | Same "pure cache, re-fetch" rule the five existing strips already apply. Takes a 200-image-ordinal wallet from ~3 MB → ~100 KB *before* deltas. Becomes strip rule 6 in ~~`prepare_backup_payload()`~~ `compress_for_onchain` *[2026-08-23: the named function does not exist — A1 §2 item 4; plan Phase 3]* |
 | **2** | **Token header** — `version \| kind \| seq \| parent_txid \| device_id` on every PushDrop backup token; snapshot-only at first (kind = 0), so the chain exists before deltas do | S | Lets 3 and 5 be added without a format break. Recovery already walks the address; it now follows parents |
-| **3** | **Deltas** — row-level changeset producer (diff current payload vs last backed-up), snapshot-on-ratio rule (0.5× / 20 deltas / 16 KB cap), recovery replays snapshot + deltas | M | The normative format in the BRC (§ 7). Resolves the draft's old Open Question #2 |
+| **3** | **Deltas** — row-level changeset producer (diff current payload vs last backed-up), snapshot-on-ratio rule (0.5× / 20 deltas / 16 KB cap), recovery replays snapshot + deltas | M | The normative format in the BRC (§ 7). Resolves the draft's old Open Question #2 *[2026-08-23: format decided by plan D2 — BRC-38 portable row forms + per-table `deletes`, BRC-40 merge semantics; the 0.5× / 20 / 16 KB constants all stay provisional until H3/H9 measure real deltas (plan §3.2)]* |
 | **4** | **Size-class padding** — pad payloads to 1 / 4 / 16 KB classes | S | Deltas make size ≈ activity; one line of code, one line in the BRC |
 | **5** | **Multi-device sync** — `device_id` assignment + label in settings; poll on timer; **poll before any spend / reserve**; read-before-write; fork detection + re-read-re-write | M–L | This is the part that needs the most testing. See "Open questions" |
 | **6** | **Measure and redo the BRC cost table** with real payloads for profiles A / B / C | S | The current draft numbers are *estimates*; the BRC says so and must be corrected from data |
 | **7** | **Cross-wallet proof — export/import against real wallets** (below) | M | Proves the portability model with other people's wallets, not just ours. Either we adopt what already works or we lead |
 
 ## Work item 7 — cross-wallet proof (Matt, 2026-08-19)
+
+**[2026-08-23: stands → plan Phase 8. A2 verified the import backend is live, not rotted (the
+shared `collect_payload` / `import_to_db_with_ids` machinery runs daily on the on-chain path; only
+the UI is hidden); the four landmines are enumerated in plan Phase 8.]**
 
 **Goal.** Prove the method with *other* wallets: export a Yours wallet / BSV Browser / MetaNet Client
 database and import it into Hodos; import them into each other; export Hodos and import it into
@@ -197,26 +270,37 @@ that's a fair thing to say publicly, because it's the case for a standard.
   the cost of an attacker littering the address.
 - **Snapshot trigger is a ratio + count, not a calendar.** Self-tunes for static vs busy wallets.
 
+*[2026-08-23: all five stand after the research pass; "no extra signature" is additionally
+supported by C2's finding that BRC-40 delegates auth to the transport session — the GCM tag is the
+on-chain equivalent (plan §4.1).]*
+
 ## Open questions — research before ticketing
 
 1. **"Check before every action" — user-visible latency?** A poll = one WoC / indexer query for the
    backup address + fetch of any new token. Probably tens to a few hundred ms. Questions: do it
    synchronously before a spend (correct, slower) or optimistic with a conflict check at broadcast
    (faster, more complex)? Can we cache "chain tip unchanged since last poll" cheaply? **Measure
-   first** (test T5 below) — don't design around a guess.
+   first** (test T5 below) — don't design around a guess. *[2026-08-23: decided by H11's measured
+   p50/p95 numbers — plan §5, Phase 7.]*
 2. **Fork tie-break.** Two devices write in the same broadcast window → two children of one parent.
    The BRC says re-read-and-re-write. Is a deterministic tie-break (lower `device_id` wins) also
    needed so both devices converge on the same branch without a third round? Probably yes; decide
-   after T4.
+   after T4. *[2026-08-23: stands — decided after H4 (T4) data, not before; plan Phase 7.]*
 3. **Delta producer state.** Diffing needs "what did I last back up." Keep the last payload locally
    (simple, doubles storage) or a per-row hash map (smaller, more code)? If local state is lost →
-   write a snapshot. Fine either way; pick by measurement.
+   write a snapshot. Fine either way; pick by measurement. *[2026-08-23: simple
+   last-payload copy first, measure later — plan §3.3.]*
 4. **Indexer dependence.** Recovery and polling both read through WoC today. A 20-delta chain is
-   21 fetches. Acceptable for recovery; is it for a pre-spend poll? Ties to Q1.
+   21 fetches. Acceptable for recovery; is it for a pre-spend poll? Ties to Q1. *[2026-08-23: H7/H11 measure
+   it — plan §5.]*
 5. **Interaction with `sync_states`.** The table exists for multi-device already. Does the chain
    *replace* it or *feed* it? Read `sync_states` usage before deciding.
+   *[2026-08-23: answered — 0 rows in both live DBs, nothing writes it; the chain replaces it for
+   our devices; the table is carried in the payload, not activated (plan D9).]*
 6. **Chunking + deltas.** Large snapshots chunk today; deltas shouldn't need to (16 KB cap). Confirm
-   the chunk header composes with the new token header.
+   the chunk header composes with the new token header. *[2026-08-23: superseded — no chunking
+   exists in code (the draft described chunking that does not ship); Phase 4 adds a hard
+   pre-broadcast size cap that fails closed, chunking honestly deferred (plan §6.1 item 6).]*
 7. **Handover / deconfliction — the "user puts a seed into a second wallet" problem.** Not this
    sprint's scope to *solve*, but this sprint's scope to *not make worse*. Two wallets (ours and a
    vendor's, or two of ours) with one seed, not syncing, both spending = double-spends and a user
@@ -229,6 +313,8 @@ that's a fair thing to say publicly, because it's the case for a standard.
    another wallet may be live. These cost almost nothing and save developers the headaches later.
    Belongs in a separate **Wallet Portability / Handover BRC** (outline TBD — see
    `Standards/BRCs/README.md`); record here so item 5 leaves room for the hooks.
+   *[2026-08-23: stands — out of scope except the three cheap gates, kept and asserted in H1/H9
+   (plan §1 non-goals).]*
 
 ## Tests — these are the deliverable, not the code
 
@@ -248,21 +334,26 @@ the BRC.
 T1, T3 and T6 can run on one machine and should come first. T4 and T5 need two devices and are the
 ones with the most unknowns.
 
+*[2026-08-23: T1–T7 are mapped into the plan's H-test harness, kept and made stricter — T1→H1,
+T2→H10, T3→H8, T4→H4, T5→H11, T6→H13, T7→H12 (plan §5). T8–T11 (item 7) kept verbatim for
+Phase 8. The harness adds H2 (schema drift gate), H3 (delta replay property), H5 (crash matrix),
+H6 (corruption), H7 (boundary restore), H9 (90-day soak).]*
+
 ## Files this will touch (from reading, not yet confirmed by doing)
 
-- `rust-wallet/src/backup.rs` — `collect_payload()`, `prepare_backup_payload()` (strip rule 6),
+- `rust-wallet/src/backup.rs` — `collect_payload()`, ~~`prepare_backup_payload()`~~ `compress_for_onchain` *(strip rule 6 — the named function does not exist; A1 §2 item 4)*,
   `serialize_for_onchain()` / `deserialize_from_onchain()` (token header), new delta producer,
   recovery chain walk
 - `rust-wallet/src/monitor/task_backup.rs` — triggers, snapshot-on-ratio rule, polling
 - `rust-wallet/src/database/` — last-backed-up state for diffing; `device_id` in settings;
   `sync_states` interaction
 - wherever the pre-spend path lives in `createAction` / `send_transaction` — the poll hook (Q1)
-- `../ONCHAIN_BACKUP_SYSTEM.md` — update once items land
+- `../../ONCHAIN_BACKUP_SYSTEM.md` — update once items land
 
 ## Related
 
 - BRC draft + analysis: `Marston Enterprises/Standards/BRCs/drafts/wallet-backup-and-sync-onchain/`
 - The revocation-registry design that prompted this ("write deltas, not snapshots"):
   `Marston Enterprises/Standards/BRCs/drafts/bbs-unlinkable-credentials/NOTES.md`
-- `../ONCHAIN_BACKUP_SYSTEM.md` — current implementation
-- `../Wallet-Hardening/` — where the backup's threat model was last discussed
+- `../../ONCHAIN_BACKUP_SYSTEM.md` — current implementation
+- `../../Wallet-Hardening/` — where the backup's threat model was last discussed

@@ -256,7 +256,8 @@ Standalone, research-heavy, security-sensitive. Scope against §2's wall **befor
 
 ## 4. Order
 
-**WS1b(a) → WS5(a) → WS6 → WS1 → WS1b(b) → WS2 → WS3 → WS5(b) → WS4.**
+**WS1b(a) → WS5(a) → WS6 → WS1 → WS1b(b) → WS2 → WS2(cont.) → WS3 → WS5(b) → WS4.**
+*(phases 0 → 0.5 → 0.6 → 1 → 2 → 3 → **3.5** → 4 → 5 → 6; 3.5 added 2026-08-30)*
 
 ⭐ **Changed 2026-08-18 (second revision), after `TICKET_loopback_host_form_wallet_routing.md` was
 filed and verified.** WS1b splits and its first half stays at the front; WS5 splits and its first
@@ -269,7 +270,8 @@ half slots in behind it.
 | **0.6 — WS6** | QR scanner: accept `bsv:` payment URIs | 🚨 A real BSV payment QR on a live site cannot be scanned. Root cause is four characters of a regex, already fully evidenced from the owner's production log — no investigation left. Smallest fix in the sprint, and it unblocks an actual payment. |
 | **1 — WS1** | Overlay input & DPI | Money-path correctness — cursor offset in the wallet overlay during a send. |
 | **2 — WS1b(b)** | Logger level gate, rotation, retention, sync-I/O review | The 1.58 GB plaintext-history problem. Serious but **not** self-blocking. |
-| **3 — WS2** | Window / instance / focus identity | #3 is solved at the desk (~1 day). #5 is an unbounded deep dive — take #3, defer #5. |
+| **3 — WS2** | Window / instance / focus identity | ⛔ **REVISED 2026-08-30 after the kickoff — the row below is the original and did not survive verification.** ~~#3 is solved at the desk (~1 day). #5 is an unbounded deep dive — take #3, defer #5.~~ **#3 was NOT solved at the desk**: half (a) is refuted as the cause (the owner has 2 profiles, so the branch already runs — 61 log lines prove it), and the real cause is that our identity changed under the user on 2026-07-06 and matches no shortcut. The fix is **three** parts, not two — gate + shortcuts + AUMID display-name registration — and it must ship as one change or it orphans pinned icons. **#5 is neither "unbounded" nor "two call sites"**: the mechanism is confirmed, the owner observed a **second** symptom (video fullscreen crossing windows), and the real shape is a half-finished multi-window migration. See `phase-3-window-identity/`. |
+| **3.5 — WS2 (cont.)** | Layout is window-scoped | ⭐ **ADDED 2026-08-30 by owner decision.** The densest cluster of #5's defect — `ShellWindowProc`'s layout arms + 12 overlay `ScalePx` sites — where one coherent change and one test story cover many sites. ⛔ Explicitly **not** `SaveSession`/`ShutdownApplication`, which are correct as global. The scattered remainder goes to beta.4, held by the `P3-G11` ratchet. See `phase-3.5-layout-window-scoping/`. |
 | **4 — WS3** | Tab & peripheral parity | Menu work is cross-platform; mic/camera is Mac-blocked on B1. |
 | **5 — WS5(b)** | Loopback compatibility: W0 + W1 + W2' + W3 | Fixes the user-visible interop bug **and** closes the cross-wallet routing hole (MetaNet Client answering for us — verified live). Placed after the reported-defect work because it rewrites a predicate every request passes through. |
 | **6 — WS4** | Chrome import | Last: most able to balloon, and its value is capped by a constraint we do not control. **First candidate to cut.** |
