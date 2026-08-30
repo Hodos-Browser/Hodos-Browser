@@ -30,6 +30,16 @@ public:
     // Unique identifier for this window
     int window_id;
 
+    // Is THIS window showing HTML5 video fullscreen (header hidden, tabs expanded)?
+    //
+    // ⛔ Was a process-global `g_is_fullscreen`, which made "window A fullscreen,
+    // window B normal" a state the browser could not represent. Fullscreening a video
+    // in one window therefore hid the OTHER window's header and resized its tabs to
+    // this window's rect — visibly wrong across two monitors. Owner-observed
+    // 2026-08-26; see development-docs/0.4.0-beta.3/phase-3-window-identity/
+    // MEASUREMENTS.md M9.3.
+    bool is_fullscreen = false;
+
     // ---- Platform window handles ----
 #ifdef _WIN32
     HWND hwnd = nullptr;              // Main shell window (WS_OVERLAPPEDWINDOW)

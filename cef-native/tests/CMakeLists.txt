@@ -51,6 +51,7 @@ add_executable(hodos_tests
     logger_policy_test.cpp              # P2-A3/A6 — level gate + rotation + retention, each with its control
     log_safe_url_test.cpp               # P2-A5 — URL redaction (header-only), cases taken from the shipped log
     audit_log_test.cpp                  # P2 — the money/consent trail that survives debug-log retention
+    aumid_policy_test.cpp               # P3-A1 — AUMID decision (header-only pure half); NC = reintroduce the profile-count gate
 
     # Production sources under test (built into the test exe directly).
     # (Phase 2.6-H removed permission_engine_test / permission_gate_test along

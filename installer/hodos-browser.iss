@@ -78,9 +78,16 @@ Source: "{#StagingDir}\locales\*"; DestDir: "{app}\locales"; Flags: ignoreversio
 Source: "{#StagingDir}\frontend\*"; DestDir: "{app}\frontend"; Flags: ignoreversion recursesubdirs
 
 [Icons]
-Name: "{group}\Hodos Browser"; Filename: "{app}\HodosBrowser.exe"
+; AppUserModelID — ⛔ MUST stay byte-identical to hodos::kAumidBaseProd in
+; cef-native/include/core/AumidPolicy.h. Windows matches a running window to its
+; shortcut by comparing these strings; if the two drift apart they become different
+; applications again, the window stops grouping with the pinned icon, and the taskbar
+; button falls back to reading "HodosBrowser.exe". That was the beta.3 Phase 3 bug —
+; the process declared an identity and no shortcut declared the same one.
+; The uninstaller entry is deliberately left WITHOUT one: it is a different app.
+Name: "{group}\Hodos Browser"; Filename: "{app}\HodosBrowser.exe"; AppUserModelID: "HodosBrowser"
 Name: "{group}\{cm:UninstallProgram,Hodos Browser}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\Hodos Browser"; Filename: "{app}\HodosBrowser.exe"; Tasks: desktopicon
+Name: "{autodesktop}\Hodos Browser"; Filename: "{app}\HodosBrowser.exe"; Tasks: desktopicon; AppUserModelID: "HodosBrowser"
 
 [Run]
 ; Add Windows Firewall rules to prevent the "allow network access" prompt on first launch
@@ -128,6 +135,30 @@ end;
 function GetAppDataPath(): String;
 begin
   Result := ExpandConstant('{userappdata}\HodosBrowser');
+end;
+
+// Remove every AppUserModelId display-name key this app registered at startup.
+// There is one per profile ('HodosBrowser', 'HodosBrowser.Profile_1', ...), so the
+// exact set is unknown at install time and the subkeys must be enumerated.
+// ⛔ Matches on the 'HodosBrowser' prefix ONLY — AppUserModelId is a shared namespace
+// and deleting the parent key would remove other applications' registrations.
+// ⚠️ Deliberately does NOT touch 'HodosBrowser.Dev*': those belong to a developer's
+// dev build, which this uninstaller does not own.
+procedure CleanAumidRegistrations();
+var
+  Names: TArrayOfString;
+  I: Integer;
+  Name: String;
+begin
+  if not RegGetSubkeyNames(HKEY_CURRENT_USER, 'Software\Classes\AppUserModelId', Names) then
+    exit;
+  for I := 0 to GetArrayLength(Names) - 1 do
+  begin
+    Name := Names[I];
+    if (Pos('HodosBrowser', Name) = 1) and (Pos('HodosBrowser.Dev', Name) <> 1) then
+      RegDeleteKeyIncludingSubkeys(HKEY_CURRENT_USER,
+        'Software\Classes\AppUserModelId\' + Name);
+  end;
 end;
 
 function WalletExists(): Boolean;
@@ -254,5 +285,13 @@ begin
 
     // Always clean WinSparkle registry entries
     RegDeleteKeyIncludingSubkeys(HKEY_CURRENT_USER, 'Software\Marston Enterprises\Hodos Browser');
+
+    // Always clean the AppUserModelID display-name registrations written at startup
+    // by hodos::RegisterAumidDisplayName (see cef-native/include/core/AumidPolicy.h).
+    // These name the taskbar button for identities that no shortcut declares — one
+    // per profile, so the set is not known at install time and must be enumerated.
+    // Leaving them behind would be exactly the orphaned-state problem described in
+    // TICKET_deleted_profile_id_reused_over_orphaned_data.md.
+    CleanAumidRegistrations();
   end;
 end;

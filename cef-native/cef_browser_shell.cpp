@@ -40,6 +40,7 @@
 #include "include/core/ChildProcessLogSink.h"
 #include "include/core/WalletService.h"
 #include "include/core/PortConfig.h"
+#include "include/core/AumidPolicy.h"
 #include "include/core/TabManager.h"
 #include "include/core/HistoryManager.h"
 #include "include/core/CookieBlockManager.h"
@@ -180,7 +181,9 @@ int g_peerpay_count = 0;
 int g_peerpay_amount = 0;
 
 // Fullscreen state tracking
-bool g_is_fullscreen = false;
+// ⛔ REMOVED (beta.3 Phase 3): `bool g_is_fullscreen` — one flag for the whole process
+// made "window A fullscreen, window B normal" unrepresentable. It now lives on
+// BrowserWindow::is_fullscreen, one per window. Do not reintroduce a global here.
 
 // Shutdown state: set when app is shutting down, checked by OnBeforeClose
 // to call PostQuitMessage only after all browsers have fully closed.
@@ -270,25 +273,52 @@ void DebugLog(const std::string& message) {
 }
 
 // Handle fullscreen mode transitions (called from SimpleHandler::OnFullscreenModeChange)
-void HandleFullscreenChange(bool fullscreen) {
-    g_is_fullscreen = fullscreen;
+// Apply a fullscreen state change to THE WINDOW THAT CHANGED — never to the process.
+//
+// ⛔ This took only `bool fullscreen` and operated on five process globals:
+// g_is_fullscreen, g_hwnd, g_header_hwnd, TabManager::GetAllTabs() and
+// SimpleHandler::GetHeaderBrowser(). Its caller, SimpleHandler::OnFullscreenModeChange,
+// is HANDED the browser that went fullscreen and threw it away. Because a second launch
+// of the same profile opens a second window in the SAME process, fullscreening a video
+// in either window hid the PRIMARY window's header and resized EVERY tab in EVERY
+// window to the primary window's client rect — which is why it looked wrong when the
+// two windows were on different-sized monitors. Owner-observed 2026-08-26; see
+// development-docs/0.4.0-beta.3/phase-3-window-identity/MEASUREMENTS.md M9.3.
+//
+// `win` is the window whose browser reported the change. Null is not fatal: log and do
+// nothing, which is strictly better than acting on an arbitrary other window.
+void HandleFullscreenChange(BrowserWindow* win, bool fullscreen) {
+    if (!win) {
+        LOG_WARNING("🖥️ Fullscreen change with no owning window — ignoring");
+        return;
+    }
+    win->is_fullscreen = fullscreen;
 
-    if (!g_hwnd || !IsWindow(g_hwnd)) return;
+    HWND winHwnd = win->hwnd;
+    HWND headerHwnd = win->header_hwnd;
+    if (!winHwnd || !IsWindow(winHwnd)) return;
 
     RECT rect;
-    GetClientRect(g_hwnd, &rect);
+    GetClientRect(winHwnd, &rect);
     int width = rect.right - rect.left;
     int height = rect.bottom - rect.top;
 
+    // Only THIS window's tabs. GetAllTabs() is process-wide and would drag the other
+    // window's tabs into this window's geometry.
+    std::vector<Tab*> windowTabs;
+    for (Tab* t : TabManager::GetInstance().GetAllTabs()) {
+        if (t && t->window_id == win->window_id) windowTabs.push_back(t);
+    }
+
     if (fullscreen) {
-        LOG_DEBUG("🖥️ Entering fullscreen — hiding header, expanding tabs");
-        // Hide header
-        if (g_header_hwnd && IsWindow(g_header_hwnd)) {
-            ShowWindow(g_header_hwnd, SW_HIDE);
+        LOG_DEBUG("🖥️ Entering fullscreen (window " + std::to_string(win->window_id) +
+                  ") — hiding header, expanding tabs");
+        // Hide THIS window's header
+        if (headerHwnd && IsWindow(headerHwnd)) {
+            ShowWindow(headerHwnd, SW_HIDE);
         }
-        // Expand all tab windows to fill entire client area
-        std::vector<Tab*> tabs = TabManager::GetInstance().GetAllTabs();
-        for (Tab* tab : tabs) {
+        // Expand this window's tab windows to fill its entire client area
+        for (Tab* tab : windowTabs) {
             if (tab && tab->hwnd && IsWindow(tab->hwnd)) {
                 SetWindowPos(tab->hwnd, nullptr, 0, 0, width, height,
                             SWP_NOZORDER | SWP_NOACTIVATE);
@@ -303,21 +333,22 @@ void HandleFullscreenChange(bool fullscreen) {
             }
         }
     } else {
-        LOG_DEBUG("🖥️ Exiting fullscreen — restoring header and tab layout");
-        // Show header
-        if (g_header_hwnd && IsWindow(g_header_hwnd)) {
-            ShowWindow(g_header_hwnd, SW_SHOW);
+        LOG_DEBUG("🖥️ Exiting fullscreen (window " + std::to_string(win->window_id) +
+                  ") — restoring header and tab layout");
+        // Show THIS window's header
+        if (headerHwnd && IsWindow(headerHwnd)) {
+            ShowWindow(headerHwnd, SW_SHOW);
         }
         // Restore normal layout with resize border inset (same as WM_SIZE)
         const int rb = 5; // resize border — must match WM_NCHITTEST/WM_SIZE
-        int shellHeight = GetHeaderHeightPx(g_hwnd);
+        int shellHeight = GetHeaderHeightPx(winHwnd);
         int contentWidth = width - 2 * rb;
         int webviewHeight = height - shellHeight - 2 * rb;
 
-        if (g_header_hwnd && IsWindow(g_header_hwnd)) {
-            SetWindowPos(g_header_hwnd, nullptr, rb, rb, contentWidth, shellHeight,
+        if (headerHwnd && IsWindow(headerHwnd)) {
+            SetWindowPos(headerHwnd, nullptr, rb, rb, contentWidth, shellHeight,
                 SWP_NOZORDER | SWP_NOACTIVATE);
-            CefRefPtr<CefBrowser> header_browser = SimpleHandler::GetHeaderBrowser();
+            CefRefPtr<CefBrowser> header_browser = win->header_browser;
             if (header_browser) {
                 HWND header_cef_hwnd = header_browser->GetHost()->GetWindowHandle();
                 if (header_cef_hwnd && IsWindow(header_cef_hwnd)) {
@@ -327,9 +358,8 @@ void HandleFullscreenChange(bool fullscreen) {
                 }
             }
         }
-        // Restore all tab windows below header
-        std::vector<Tab*> tabs = TabManager::GetInstance().GetAllTabs();
-        for (Tab* tab : tabs) {
+        // Restore this window's tab windows below its header
+        for (Tab* tab : windowTabs) {
             if (tab && tab->hwnd && IsWindow(tab->hwnd)) {
                 SetWindowPos(tab->hwnd, nullptr, rb, rb + shellHeight, contentWidth, webviewHeight,
                             SWP_NOZORDER | SWP_NOACTIVATE);
@@ -1170,9 +1200,17 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 return 0;
             }
 
-            // If in fullscreen mode, keep tabs filling entire window
-            if (g_is_fullscreen) {
-                std::vector<Tab*> fsTabs = TabManager::GetInstance().GetAllTabs();
+            // If THIS window is in fullscreen mode, keep ITS tabs filling it.
+            // ⛔ Was `g_is_fullscreen` + GetAllTabs(): a resize of either window
+            // re-expanded every tab in every window whenever any window was
+            // fullscreen. `hwnd` is the window this message is for — use it.
+            BrowserWindow* fsWin =
+                reinterpret_cast<BrowserWindow*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+            if (fsWin && fsWin->is_fullscreen) {
+                std::vector<Tab*> fsTabs;
+                for (Tab* t : TabManager::GetInstance().GetAllTabs()) {
+                    if (t && t->window_id == fsWin->window_id) fsTabs.push_back(t);
+                }
                 for (Tab* tab : fsTabs) {
                     if (tab && tab->hwnd && IsWindow(tab->hwnd)) {
                         SetWindowPos(tab->hwnd, nullptr, 0, 0, width, height,
@@ -5145,19 +5183,33 @@ static int RunHodosMain(HINSTANCE hInstance, int nCmdShow, void* sandbox_info,
                     std::to_string(GetLastError()) + ") — auto-update gate may be degraded");
     }
 
-    // Set process AUMID early (before window creation) so Windows gives dev vs
-    // prod (and multi-profile) DISTINCT taskbar buttons. A dev build ALWAYS gets a
-    // ".Dev" identity — even single-profile — so it never merges with the installed
-    // build's taskbar button; prod keeps its existing (set-only-when-multi-profile)
-    // behavior. The picker owns no profile -> keep the base AUMID.
-    if (!g_picker_mode && (hodos::IsDevEnv() || ProfileManager::GetInstance().GetAllProfiles().size() > 1)) {
-        std::wstring aumid = hodos::IsDevEnv() ? L"HodosBrowser.Dev" : L"HodosBrowser";
-        if (profileId != "Default") {
-            std::wstring pw(profileId.begin(), profileId.end());
-            aumid += L"." + pw;
+    // Set process AUMID early (before window creation) so Windows can match this
+    // process to its shortcut and give dev vs prod (and per-profile) DISTINCT,
+    // correctly-NAMED taskbar buttons.
+    //
+    // ⛔ The old gate here was `IsDevEnv() || GetAllProfiles().size() > 1`, so a
+    // production single-profile launch set NO identity at all — and, worse, a user's
+    // identity CHANGED the moment they created a second profile, orphaning their
+    // pinned taskbar icon. That is the measured cause of the "HodosBrowser.exe"
+    // taskbar bug; see AumidPolicy.h for the full sequence and the evidence.
+    // The decision now lives in a pure, unit-tested function (P3-A1) and is taken
+    // unconditionally, so identity no longer depends on how many profiles exist.
+    if (auto aumid = hodos::ComputeAumid(hodos::IsDevEnv(), g_picker_mode, profileId)) {
+        SetCurrentProcessExplicitAppUserModelID(aumid->c_str());
+        LOG_INFO("AUMID set: " + std::string(aumid->begin(), aumid->end()) +
+                 " (profile " + (profileId.empty() ? "<unresolved>" : profileId) + ")");
+
+        // Give that identity a human-readable name. Required because a per-profile
+        // AUMID matches no shortcut and would otherwise keep falling back to the exe
+        // filename — the second half of the reported bug. Best-effort by design.
+        wchar_t exePath[MAX_PATH] = {0};
+        std::wstring iconPath;
+        if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) > 0) {
+            iconPath = exePath;
         }
-        SetCurrentProcessExplicitAppUserModelID(aumid.c_str());
-        LOG_INFO("AUMID set: " + std::string(hodos::IsDevEnv() ? "dev " : "") + profileId);
+        hodos::RegisterAumidDisplayName(*aumid, hodos::kAumidDisplayName, iconPath);
+    } else {
+        LOG_WARNING("AUMID not set — taskbar button will fall back to the exe filename");
     }
 
     // Data directory. Picker mode uses a NEUTRAL cache derived from the resolved

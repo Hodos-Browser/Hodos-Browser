@@ -381,6 +381,8 @@ elseif(WIN32)
         src/core/ProfileLock.cpp
         include/core/TaskbarProfile.h
         src/core/TaskbarProfile.cpp
+        include/core/AumidPolicy.h
+        src/core/AumidPolicy.cpp
         include/core/SingleInstance.h
         src/core/SingleInstance.cpp
         include/core/ProfileImporter.h

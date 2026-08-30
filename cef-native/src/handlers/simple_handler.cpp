@@ -1062,13 +1062,19 @@ void SimpleHandler::OnFaviconURLChange(CefRefPtr<CefBrowser> browser,
 }
 
 // Forward declaration for fullscreen handler in cef_browser_shell.cpp
-extern void HandleFullscreenChange(bool fullscreen);
+extern void HandleFullscreenChange(BrowserWindow* win, bool fullscreen);
 
 void SimpleHandler::OnFullscreenModeChange(CefRefPtr<CefBrowser> browser,
                                            bool fullscreen) {
     CEF_REQUIRE_UI_THREAD();
-    LOG_DEBUG_BROWSER(std::string("🖥️ Fullscreen mode change: ") + (fullscreen ? "ENTER" : "EXIT") + " (role: " + role_ + ")");
-    HandleFullscreenChange(fullscreen);
+    // ⛔ `browser` used to be discarded here, so the change was applied to the PRIMARY
+    // window rather than the one whose video went fullscreen — hiding the other
+    // window's header and resizing its tabs. Resolve the owning window and pass it.
+    BrowserWindow* win = GetOwnerWindow();
+    LOG_DEBUG_BROWSER(std::string("🖥️ Fullscreen mode change: ") + (fullscreen ? "ENTER" : "EXIT") +
+                      " (role: " + role_ + ", window " +
+                      (win ? std::to_string(win->window_id) : std::string("<none>")) + ")");
+    HandleFullscreenChange(win, fullscreen);
 }
 
 void SimpleHandler::OnLoadError(CefRefPtr<CefBrowser> browser,
@@ -3304,25 +3310,36 @@ bool SimpleHandler::OnProcessMessageReceived(
             }
             SendCurrentZoomToMenuOverlay(GetMenuBrowser());
         } else if (action == "fullscreen") {
-            // Toggle fullscreen via Windows API
+            // Toggle fullscreen via Windows API, on THIS window — not the primary one.
+            // ⛔ Was `g_hwnd` + `g_is_fullscreen`, so the menu's fullscreen item in a
+            // second window resized the FIRST window.
+            //
+            // ⚠️ KNOWN PRE-EXISTING DEFECT, DELIBERATELY NOT FIXED HERE: this branch
+            // reads the fullscreen flag but never WRITES it, so the toggle only ever
+            // takes the "enter" arm unless an HTML5 video happened to set the flag.
+            // Behaviour is preserved exactly as-is — this phase is about *which window*
+            // is acted on, and silently changing what the menu item does would be a
+            // scope breach (CLAUDE.md invariant #13). Filed separately.
 #ifdef _WIN32
-            extern HWND g_hwnd;
-            extern bool g_is_fullscreen;
-            if (!g_is_fullscreen) {
+            BrowserWindow* fsWin = GetOwnerWindow();
+            HWND fsHwnd = fsWin ? fsWin->hwnd : nullptr;
+            if (!fsHwnd || !IsWindow(fsHwnd)) {
+                LOG_WARNING_BROWSER("🖥️ Menu fullscreen: no owning window — ignoring");
+            } else if (!(fsWin && fsWin->is_fullscreen)) {
                 // Enter fullscreen
-                HMONITOR hMon = MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST);
+                HMONITOR hMon = MonitorFromWindow(fsHwnd, MONITOR_DEFAULTTONEAREST);
                 MONITORINFO mi = { sizeof(mi) };
                 GetMonitorInfo(hMon, &mi);
-                SetWindowLong(g_hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
-                SetWindowPos(g_hwnd, HWND_TOP,
+                SetWindowLong(fsHwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+                SetWindowPos(fsHwnd, HWND_TOP,
                     mi.rcMonitor.left, mi.rcMonitor.top,
                     mi.rcMonitor.right - mi.rcMonitor.left,
                     mi.rcMonitor.bottom - mi.rcMonitor.top,
                     SWP_FRAMECHANGED);
             } else {
                 // Exit fullscreen
-                SetWindowLong(g_hwnd, GWL_STYLE, WS_POPUP | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_VISIBLE);
-                SetWindowPos(g_hwnd, nullptr, 0, 0, 0, 0,
+                SetWindowLong(fsHwnd, GWL_STYLE, WS_POPUP | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_VISIBLE);
+                SetWindowPos(fsHwnd, nullptr, 0, 0, 0, 0,
                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
             }
 #elif defined(__APPLE__)
@@ -9076,15 +9093,27 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
 #else
             if (event.modifiers & EVENTFLAG_CONTROL_DOWN) {
 #endif
-                // Send find_show to header browser so React can show the find bar
-                CefRefPtr<CefBrowser> header = SimpleHandler::GetHeaderBrowser();
+                // Send find_show to THIS WINDOW's header so React shows the find bar
+                // in the window the user actually pressed Ctrl+F in.
+                //
+                // ⛔ This used SimpleHandler::GetHeaderBrowser(), which resolves
+                // WindowManager::GetPrimaryWindow() — a process global. A second
+                // launch of the same profile does not start a second process; it
+                // forwards over a named pipe and opens a second WINDOW in the running
+                // one. So Ctrl+F in the second window sent find_show to the FIRST
+                // window's header and then SetFocus(true) RAISED that window —
+                // switching virtual desktops to do it, while the window the user was
+                // typing in did nothing. Owner-observed 2026-08-26.
+                BrowserWindow* win = GetOwnerWindow();
+                CefRefPtr<CefBrowser> header = win ? win->header_browser : nullptr;
                 if (header) {
                     CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("find_show");
                     header->GetMainFrame()->SendProcessMessage(PID_RENDERER, msg);
-                }
-                // Move CEF focus to header browser so keyboard input reaches the find bar
-                if (header) {
+                    // Move CEF focus to the header so keyboard input reaches the find bar.
                     header->GetHost()->SetFocus(true);
+                } else {
+                    LOG_WARNING_BROWSER("⌨️ Ctrl+F: no owning window for role " + role_ +
+                                        " — find bar not shown");
                 }
                 return true;
             }
@@ -9098,11 +9127,17 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
             if (event.modifiers & EVENTFLAG_CONTROL_DOWN) {
 #endif
                 LOG_INFO_BROWSER("⌨️ Ctrl+L: Focus address bar");
-                CefRefPtr<CefBrowser> header = SimpleHandler::GetHeaderBrowser();
+                // Same defect as Ctrl+F above: resolve THIS window's header, not the
+                // primary window's, or Ctrl+L in a second window focuses the first
+                // window's address bar and raises it.
+                BrowserWindow* win = GetOwnerWindow();
+                CefRefPtr<CefBrowser> header = win ? win->header_browser : nullptr;
                 if (header) {
                     CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("focus_address_bar");
                     header->GetMainFrame()->SendProcessMessage(PID_RENDERER, msg);
                     header->GetHost()->SetFocus(true);
+                } else {
+                    LOG_WARNING_BROWSER("⌨️ Ctrl+L: no owning window for role " + role_);
                 }
                 return true;
             }

@@ -344,8 +344,26 @@ void DebugLog(const std::string& message) {
 // Handle fullscreen mode transitions (called from SimpleHandler::OnFullscreenModeChange)
 // Uses presentation options to cover the screen (like Chrome's "tab fullscreen")
 // rather than a native macOS Space transition via toggleFullScreen.
-void HandleFullscreenChange(bool fullscreen) {
+//
+// ⚠️ `win` was added in beta.3 Phase 3 so this keeps linking against the shared caller
+// in simple_handler.cpp, which now resolves the owning window. On Windows that fixed a
+// real bug: fullscreening a video in one window hid the OTHER window's header and
+// resized its tabs (owner-observed 2026-08-26).
+//
+// ⛔ THE macOS BODY BELOW IS **NOT** FIXED — it still drives the process-global
+// g_main_window / g_header_view / g_webview_view and TabManager::GetActiveTab(), so on
+// a Mac with two windows it has the same defect Windows just had. That is DELIBERATE,
+// not an oversight: WS2 is Windows-only by SPRINT_PLAN.md §3, the macOS window model is
+// structurally different (NSWindow + presentation options, not HWND + child windows),
+// and it cannot be tested from Windows. Making a blind cross-platform change here is
+// exactly the failure this project keeps paying for. Filed for macOS assessment; see
+// development-docs/0.4.0-beta.4/tickets/TICKET_window_scoped_work_uses_process_globals.md.
+void HandleFullscreenChange(BrowserWindow* win, bool fullscreen) {
     LOG_INFO("HandleFullscreenChange: " + std::string(fullscreen ? "ENTER" : "EXIT"));
+
+    // Record the state on the window even though the layout below is not yet
+    // window-scoped, so the two platforms agree on where this state LIVES.
+    if (win) win->is_fullscreen = fullscreen;
 
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!g_main_window || !g_header_view || !g_webview_view) return;
