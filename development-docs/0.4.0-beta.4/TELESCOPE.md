@@ -92,6 +92,12 @@ about permissions are how permission surfaces quietly widen.
 
 ### M0 — the edge context. Run this first, and keep it small.
 
+> **In plain terms:** before splitting the work across four separate sessions, run **one short
+> session** that settles the two questions those four would otherwise each answer differently — what
+> "this output is a token" gets saved as (**E1**), and what restore does with an output it cannot
+> identify (**E3 / decision D-1**). Four sessions answering these independently produce four
+> incompatible answers. `RESUME_beta4.md` §3 states both in non-technical language.
+
 | | |
 |---|---|
 | **Job** | Settle **E1** (what "classified" persists as, against BRC-147/165) and produce the **E3** decision brief for the owner |

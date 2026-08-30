@@ -218,9 +218,29 @@ Recorded here because both are the kind of thing that gets repeated as fact if i
    repo claiming to carry his "internal rules from a leak" has no corroboration; treat it as
    fabricated. **None** of his own repositories carries a `CLAUDE.md` or `AGENTS.md`. What survives is
    a small set of behavioural rules from his own posts, and one shipped harness (`autoresearch`).
+   ⭐ **Read directly 2026-08-30, so it is on record rather than second-hand.** The repo is
+   `multica-ai/andrej-karpathy-skills` (~209k stars; author Jiayuan, formerly `forrestchang`). Its
+   `CLAUDE.md` is **65 lines, four principles**, and it says of itself that it is *"derived from
+   Andrej Karpathy's observations"* — it is **not his file**. Verdict: **principles 1, 2 and 3 are
+   genuinely good and are now adopted** (§7c). Principle 4 — *"give it success criteria and watch it
+   go"* — is **declined**, see below. Two of its bullet points are actively wrong here and were
+   dropped: *"no error handling for impossible scenarios"* (wrong for a wallet) and *"match existing
+   style, even if you'd do it differently"* (collides with invariant 9). ⚠️ Its own framing line is
+   honest and worth keeping in mind: *"These guidelines bias toward caution over speed. For trivial
+   tasks, use judgment."*
+
+   ⚠️ **The underlying Karpathy post is not recoverable by any fetcher.** x.com returns HTTP 402, and
+   xcancel was shut down by a cease-and-desist on 2026-08-24. Four passages are quoted verbatim and
+   consistently across independent sources and are all we rely on. ⭐ **Three of those four are
+   complaints about model behaviour, not instructions** — the "methodology" is the packager's
+   inversion of the complaints. That inversion is reasonable; judge it on its merits, not the byline.
+
 2. **The PM skill families are not installed on this machine**, and the agent definition that lists
    26 of them is referencing skills that do not exist locally. Research (a) read the real upstream
    sources instead. ⚠️ Do not assume a skill exists because an agent's tool list names it.
+
+   ⚠️ **Naming trap: `pm-*` here means PRODUCT manager, not PROJECT manager.** Everything about the
+   name suggests otherwise. See §7c-ii — we need both intents, and the skill families cover only one.
 3. **Two defects in our own test tooling**, found by research (c) and **not independently verified by
    this session** — filed as tickets rather than acted on:
    - the six `frontend/e2e/*.spec.ts` specs run **stock Playwright Chromium against a mocked bridge**,
@@ -296,19 +316,45 @@ Splitting the set is what makes both halves honest. A standing set nobody can ru
    `HARNESS.md` §7's ID scheme already supports this and nothing exploits it.
 5. ⛔ **A blank boundary cell is INCOMPLETE**, not a pass.
 
-### 7c. Into the root `CLAUDE.md` (standing behaviour, every session)
+### 7c. Into the root `CLAUDE.md` — ✅ **ADOPTED 2026-08-30**
 
-| # | Item | Source |
+Live in `CLAUDE.md` § "Working rules". No longer proposals.
+
+| # | Item | Source | Landed as |
+|---|---|---|---|
+| C1 | Read the docs for an unfamiliar API before using it — do not infer the signature | (b) | Rule 4 |
+| C2 | **State assumptions; present readings; stop when confused** rather than guessing | (b) + owner | Rule 1 |
+| C3 | ⭐ **Minimum code that solves the problem. Nothing speculative.** | (b) + owner request | Rule 2 |
+| C4 | **Surgical diffs** — every changed line traces to the request | (b) | Rule 3 |
+| C5 | The instrument rule — the harness is not edited by the change it measures | (b) | Rule 5 |
+
+⭐ C4 generalises three warnings the root `CLAUDE.md` already carried ad hoc — the gold pill,
+`FingerprintProtection.h`, `ManifestFetcher`. One rule replaced three special cases.
+
+⚠️ **Two guardrails were written in with C3**, because the source's phrasing is wrong for this
+codebase: "minimum code" is **not** "take shortcuts", and it does **not** license thinner error
+handling in a wallet. And the source's "match existing style even if you'd do it differently"
+was **dropped** — it collides with invariant 9 and the CEF input patterns.
+
+### 7c-ii. Product intent vs project intent — ✅ **ADOPTED 2026-08-30** *(owner, 2026-08-30)*
+
+Folded into `CLAUDE.md` rule 1. Stated here because it is a **scoping** distinction first:
+
+| Intent | The question it answers | Who usually holds it |
 |---|---|---|
-| C1 | Read the docs for an unfamiliar API before using it — do not infer the signature | (b) |
-| C2 | **State assumptions; stop when confused** rather than proceeding on a guess | (b) |
-| C3 | **No unrequested abstraction** | (b) |
-| C4 | **Surgical diffs** — change what the task requires and no more | (b) |
-| C5 | The instrument rule (B5's standing-behaviour half) | (b) |
+| **Product** | *What should be true for the user, and why?* | Product manager |
+| **Project** | *In what order, with what dependencies, in which release, by when?* | Project manager |
 
-⭐ C3 and C4 generalise three warnings the root `CLAUDE.md` already carries ad hoc — the gold pill,
-`FingerprintProtection.h`, `ManifestFetcher`. Adopting them replaces three special cases with one
-rule.
+This process does **both**, and never says so. Stage 1 (Scope) and stage 2 (Telescope) are largely
+**project** work — order, dependencies, cross-sprint edges, decision points. The "what the feature
+requires" line in §3 is **product** work. A sprint doc that nails the order and never says what the
+user gets is as incomplete as one that does the reverse.
+
+⛔ **The rule: when either intent is ambiguous, ask. Do not infer one from the other.**
+"Add ordinals support" is product intent with the project intent missing (which release? before or
+after the guard?). "Do sprint 2 next" is project intent with the product intent missing (what does
+the user get, and how do we know it worked?). ⭐ **Guessing looks like progress and is the most
+expensive kind of wrong**, because the work arrives finished and aimed at the wrong target.
 
 ### 7d. ⛔ Explicitly rejected — with the mismatch stated
 
@@ -332,8 +378,49 @@ three times it was not true. **Keep it; do not expect to import it.**
 
 ---
 
-## 8. Change log
+## 8. Do we install the PM skills? — ⛔ **No.** *(decided 2026-08-30)*
+
+**The state, verified:** two marketplaces are installed (`b-open-io`, `claude-plugins-official`).
+**Neither contains any `pm-*` skill.** Nothing named `pm-execution`, `pm-product-discovery`,
+`pm-product-strategy`, `pm-market-research`, `pm-data-analytics` or `pm-go-to-market` exists anywhere
+under `~/.claude`. Installing them would mean **adding a third-party marketplace** (research (a)
+found the real sources upstream: `phuryn/pm-skills`, `product-on-purpose/pm-skills`).
+
+**Decision: don't.** Reasons, in order:
+
+1. ⭐ **We already extracted the value.** Research (a) read the upstream files and found roughly six
+   adoptable items out of the whole family. They are in §7a and §7b. **Installing the packages now
+   would add ~26 skills to get things we already have written down.**
+2. **Most of it does not apply.** Over half is market, discovery and stakeholder apparatus that has
+   no referent in an engineering phase — see §7d for the item-by-item mismatch.
+3. ⛔ **One of them is actively unsafe here.** `pm-execution:test-scenarios`' own worked example
+   would pass with the component stubbed. In a project whose named failure mode is tests that cannot
+   fail, that is not a neutral addition.
+4. **Third-party marketplaces are a supply-chain decision**, not a convenience one, and this repo's
+   own dependency policy is freeze-at-the-moment-we-took-control.
+
+**Revisit if:** we want product-discovery work specifically (customer interviews, feature
+prioritisation, opportunity trees) — that is the half we correctly did not import, and it is real
+work, just not *scoping* work.
+
+### The broken reference, and how to fix it
+
+⚠️ `bopen-tools/agents/project-manager.md` declares 26 `pm-*` skills that do not exist locally, so
+that agent's tool list is broken **today** — the skills silently are not there.
+
+| Option | Effect |
+|---|---|
+| ⭐ **Leave it** (recommended) | Costs us nothing. We do not use that agent for this work, and the scoping process does not depend on it |
+| Report upstream | It is a `bopen-tools` defect, not ours. Worth mentioning if we are in there anyway |
+| Install the marketplaces to satisfy it | ⛔ Fixes a symptom we do not feel, at the cost above |
+
+⛔ **The transferable lesson is worth more than the fix:** an agent's declared tool list is a
+*claim*, not proof the tool exists. Same family as every other false green in this project — verify
+before relying on it.
+
+## 9. Change log
 
 | Date | Change |
 |---|---|
 | 2026-08-29 | Opened. Four stages, self-scoping controls, anti-drift rules. Research (a) and (b) landed; adoption list in §7 proposed, not in force. Research (c) in flight. |
+| 2026-08-30 | Research (c) folded in (§7b-ii). **§7c adopted** into the root `CLAUDE.md` as five working rules, including "minimum code that solves the problem" *(owner request)*. **§7c-ii added** — product vs project intent, and the rule to ask rather than infer *(owner)*. Karpathy repo and post read directly and recorded in §6. **§8 added** — PM skills: do not install, with reasons. |

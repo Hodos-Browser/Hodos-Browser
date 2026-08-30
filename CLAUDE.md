@@ -6,6 +6,28 @@
 
 Build with a production-focused mindset. Do not take shortcuts. If you get stuck do research on proper implementation plans/debugging steps.
 
+## Working rules — every session, not only sprint phases
+
+Five standing rules. They are short on purpose. Adopted 2026-08-30; provenance and the items we deliberately **declined** are in `development-docs/SCOPING_PROCESS.md` §6–§7.
+
+1. **Don't assume. Don't hide confusion. Ask.**
+   State your assumptions explicitly. If a request has more than one reasonable reading, **present the readings and ask — do not pick one silently.** If something is unclear, stop and name exactly what is confusing. This applies to *intent* as much as to code: a request carries both **product** intent (what should be true for the user, and why) and **project** intent (order, dependencies, what is in this release vs the next). ⛔ **If either is ambiguous, ask before building.** Guessing which one was meant is the most expensive kind of wrong, because the work looks finished.
+
+2. ⭐ **Minimum code that solves the problem. Nothing speculative.**
+   No features beyond what was asked. No abstraction for single-use code. No configurability nobody requested. If you wrote 200 lines and 50 would do, rewrite it.
+   ⚠️ **This is not "take shortcuts", and it does not override the line above it.** It means no *unrequested* scope — not less rigour, fewer tests, or thinner error handling. This is a browser that moves real money: handling a failure path you were asked to handle is the requirement, not gold-plating. When the two pull against each other, **rigour wins and you say so.**
+
+3. **Surgical changes. Every changed line traces to the request.**
+   Don't "improve" adjacent code, comments or formatting you did not come for. Don't refactor what isn't broken. Remove imports and helpers **your** change orphaned; **report** unrelated dead code rather than deleting it.
+   ⛔ This generalises three warnings already in this file — the gold pill "must survive every refactor", `FingerprintProtection.h` "never delete while tidying", `ManifestFetcher` "do not relax it back". Those are three instances of this one rule.
+   ⚠️ It does **not** mean "match existing style even if wrong" — invariant 9's platform-conditional requirements and the CEF input patterns below still win.
+
+4. **Read the docs for an API you have not used here before.**
+   A call into CEF, Win32, AppKit or our own fork patches that this repo does not already use elsewhere gets its documentation read — and cited in the phase contract — before the diff is accepted. Do not infer a signature from what looks plausible. `FarblingPolicy.h`'s hand-rolled `RegistrableDomainFromUrl` is the live example of an API that must not be independently re-derived.
+
+5. ⛔ **The instrument is not edited by the change it measures.**
+   `scripts/preflight.ps1` gate patterns, gate baselines, and `REGRESSION_SET.md` are **not** touched in the same change that implements the code they measure. Loosening a pattern or raising a baseline is its own commit, with the reason written in `HARNESS.md` §4, and it re-runs `-NegativeControl`. This project has already shipped a preflight that reported PASS while running zero checks.
+
 ## Scoping a sprint or release — `development-docs/SCOPING_PROCESS.md`
 
 **Before a sprint exists, `SCOPING_PROCESS.md` is the procedure.** Four stages — **Scope → Telescope → Microscope → Telescope (close)** — with defined outputs, exit conditions, a loop limit, and explicit human decision points. The `sprint-scoper` agent (`.claude/agents/sprint-scoper.md`) owns it.

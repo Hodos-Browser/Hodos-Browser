@@ -3314,18 +3314,24 @@ bool SimpleHandler::OnProcessMessageReceived(
             // ⛔ Was `g_hwnd` + `g_is_fullscreen`, so the menu's fullscreen item in a
             // second window resized the FIRST window.
             //
-            // ⚠️ KNOWN PRE-EXISTING DEFECT, DELIBERATELY NOT FIXED HERE: this branch
-            // reads the fullscreen flag but never WRITES it, so the toggle only ever
-            // takes the "enter" arm unless an HTML5 video happened to set the flag.
-            // Behaviour is preserved exactly as-is — this phase is about *which window*
-            // is acted on, and silently changing what the menu item does would be a
-            // scope breach (CLAUDE.md invariant #13). Filed separately.
+            // 🐛 ALSO FIXED HERE [P3-A11]: this arm read the fullscreen flag but never
+            // WROTE it, so the button was a ONE-WAY TRAP — it could enter fullscreen
+            // and never leave. Worse, the flag it read was shared with HTML5 video
+            // fullscreen, so the only way it ever took the "exit" arm was if a video
+            // happened to be fullscreen at the time.
+            //
+            // ⛔ The one-line fix (just set the shared flag) would have been WRONG: the
+            // WM_SIZE handler expands tabs over the full client area whenever the
+            // content-fullscreen flag is set, so setting one flag for both kinds would
+            // make the menu button start covering the header too. The two states are
+            // genuinely independent and are now two fields — which is the model macOS
+            // has always used (g_content_fullscreen / g_native_fullscreen).
 #ifdef _WIN32
             BrowserWindow* fsWin = GetOwnerWindow();
             HWND fsHwnd = fsWin ? fsWin->hwnd : nullptr;
             if (!fsHwnd || !IsWindow(fsHwnd)) {
                 LOG_WARNING_BROWSER("🖥️ Menu fullscreen: no owning window — ignoring");
-            } else if (!(fsWin && fsWin->is_fullscreen)) {
+            } else if (!fsWin->is_window_fullscreen) {
                 // Enter fullscreen
                 HMONITOR hMon = MonitorFromWindow(fsHwnd, MONITOR_DEFAULTTONEAREST);
                 MONITORINFO mi = { sizeof(mi) };
@@ -3336,11 +3342,17 @@ bool SimpleHandler::OnProcessMessageReceived(
                     mi.rcMonitor.right - mi.rcMonitor.left,
                     mi.rcMonitor.bottom - mi.rcMonitor.top,
                     SWP_FRAMECHANGED);
+                fsWin->is_window_fullscreen = true;
+                LOG_INFO_BROWSER("🖥️ Menu fullscreen: ENTER (window " +
+                                 std::to_string(fsWin->window_id) + ")");
             } else {
                 // Exit fullscreen
                 SetWindowLong(fsHwnd, GWL_STYLE, WS_POPUP | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_VISIBLE);
                 SetWindowPos(fsHwnd, nullptr, 0, 0, 0, 0,
                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+                fsWin->is_window_fullscreen = false;
+                LOG_INFO_BROWSER("🖥️ Menu fullscreen: EXIT (window " +
+                                 std::to_string(fsWin->window_id) + ")");
             }
 #elif defined(__APPLE__)
             extern void ToggleMainWindowFullscreen();

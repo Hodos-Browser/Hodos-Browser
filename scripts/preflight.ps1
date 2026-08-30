@@ -157,6 +157,51 @@ $Gates = @(
         Pattern  = '(debugLog *<<|LOG_[A-Z_]+ *\()[^;]*\b(responseBody|response)\b'
         Probe    = 'debugLog << "   Response: " << responseBody << std::endl;'
         ProbeExt = '.cpp'
+    },
+    [pscustomobject]@{
+        Id       = 'G11'
+        Name     = 'Window-scoped work resolved through a process-global (the wrong-window bug)'
+        Owner    = 'Phase 3 (WS2); baseline lowered by Phase 3.5, driven to target by beta.4'
+        # A second launch of the SAME profile does not start a second process -- it forwards
+        # over a named pipe and opens a second WINDOW in the running one. So any code that
+        # asks a process-global "which window am I?" can act on the wrong one. MEASURED
+        # symptoms, both owner-observed 2026-08-26: Ctrl+F in the second window opened the
+        # find bar in the FIRST and raised it (switching virtual desktops), and HTML5 video
+        # fullscreen in either window hid the OTHER window's header and resized its tabs to
+        # the primary window's rect.
+        #
+        # The correct APIs already exist and are already used in ~18 places:
+        #   GetOwnerWindow()->hwnd / ->header_browser, TabManager::GetActiveTabForWindow(id),
+        #   and, inside a WndProc, GetWindowLongPtr(hwnd, GWLP_USERDATA).
+        # This is a HALF-FINISHED MIGRATION, not a missing capability -- which is exactly why
+        # a ratchet is the right instrument: it cannot be finished in one phase, and it must
+        # not be allowed to grow while it waits.
+        #
+        # ⛔ NOT every global is wrong. g_file_dialog_active and g_wallet_overlay_prevent_close
+        # are genuinely process-wide and are deliberately NOT matched here. Likewise SaveSession
+        # and ShutdownApplication legitimately enumerate ALL tabs in ALL windows. The test is
+        # never "is it global" but "does this have one value per process, or one per window?"
+        #
+        # ⚠️ Baseline MUST be set by running this script, never from the hand counts in
+        # phase-3-window-identity/MEASUREMENTS.md M9.4 -- those counted raw lines (including
+        # `extern` declarations) and overstated the defect by ~25%. Same lesson as G2/G5.
+        # ⚠️ Windows only: cef_browser_shell_mac.mm has a structurally different window model
+        # and would produce a large baseline that hides the lines that matter (the G8 lesson).
+        #
+        # Baseline MEASURED BY THIS SCRIPT 2026-08-30: 60. ⭐ The hand count in M9.4 predicted
+        # ~19 on the tab axis and did not account for the 18 static Get*Browser() accessors all
+        # routing through GetPrimaryWindow(). Third time this sprint a hand count has been wrong
+        # where the tool was right -- which is the whole reason HARNESS.md §9 requires this.
+        # Phase 3 fixed the two REPORTED symptoms (Ctrl+F/Ctrl+L, fullscreen) but those sites
+        # used GetHeaderBrowser()/g_is_fullscreen, not the two patterns matched here, so the
+        # count is unchanged by Phase 3 -- that is expected, not a failure to fix anything.
+        Baseline = 60
+        Target   = 0
+        Paths    = @('cef-native/src/handlers', 'cef-native/src/core')
+        Include  = @('*.cpp', '__preflight_probe.cpp')
+        Pattern  = '(GetPrimaryWindow *\(\)|TabManager::GetInstance\(\)\.GetActiveTab *\(\))'
+        Probe    = 'auto* t = TabManager::GetInstance().GetActiveTab();'
+        ProbeExt = '.cpp'
     }
 )
 

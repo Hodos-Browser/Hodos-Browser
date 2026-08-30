@@ -30,15 +30,30 @@ public:
     // Unique identifier for this window
     int window_id;
 
-    // Is THIS window showing HTML5 video fullscreen (header hidden, tabs expanded)?
+    // ---- Fullscreen state — TWO INDEPENDENT KINDS, deliberately not one flag ----
     //
-    // ⛔ Was a process-global `g_is_fullscreen`, which made "window A fullscreen,
-    // window B normal" a state the browser could not represent. Fullscreening a video
-    // in one window therefore hid the OTHER window's header and resized its tabs to
-    // this window's rect — visibly wrong across two monitors. Owner-observed
-    // 2026-08-26; see development-docs/0.4.0-beta.3/phase-3-window-identity/
-    // MEASUREMENTS.md M9.3.
-    bool is_fullscreen = false;
+    // ⛔ Both were a single process-global `bool g_is_fullscreen`, which was wrong
+    // twice over:
+    //
+    //   1. ONE PER PROCESS — so "window A fullscreen, window B normal" could not be
+    //      represented. Fullscreening a video in one window hid the OTHER window's
+    //      header and resized its tabs to this window's rect, visibly wrong across two
+    //      monitors. Owner-observed 2026-08-26 (MEASUREMENTS.md M9.3).
+    //   2. ONE FLAG FOR TWO DIFFERENT THINGS — HTML5 video fullscreen (hide header,
+    //      expand tabs) and the menu's window fullscreen (borderless WS_POPUP over the
+    //      monitor) are separate states that can coexist. Conflating them is why the
+    //      menu button could never exit (MEASUREMENTS.md M10).
+    //
+    // ⭐ macOS already models these separately (g_content_fullscreen /
+    // g_native_fullscreen in cef_browser_shell_mac.mm). Windows now matches.
+
+    // HTML5 video fullscreen: header hidden, tabs expanded to the full client area.
+    // Driven by CEF's OnFullscreenModeChange.
+    bool is_content_fullscreen = false;
+
+    // Window-level fullscreen: borderless WS_POPUP covering the monitor. Driven by the
+    // three-dot menu's expand button. Does NOT hide the header.
+    bool is_window_fullscreen = false;
 
     // ---- Platform window handles ----
 #ifdef _WIN32

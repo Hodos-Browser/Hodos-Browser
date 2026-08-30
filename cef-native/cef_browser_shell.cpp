@@ -183,7 +183,8 @@ int g_peerpay_amount = 0;
 // Fullscreen state tracking
 // ⛔ REMOVED (beta.3 Phase 3): `bool g_is_fullscreen` — one flag for the whole process
 // made "window A fullscreen, window B normal" unrepresentable. It now lives on
-// BrowserWindow::is_fullscreen, one per window. Do not reintroduce a global here.
+// BrowserWindow::is_content_fullscreen / is_window_fullscreen, one pair per window.
+// Do not reintroduce a global here.
 
 // Shutdown state: set when app is shutting down, checked by OnBeforeClose
 // to call PostQuitMessage only after all browsers have fully closed.
@@ -292,7 +293,7 @@ void HandleFullscreenChange(BrowserWindow* win, bool fullscreen) {
         LOG_WARNING("🖥️ Fullscreen change with no owning window — ignoring");
         return;
     }
-    win->is_fullscreen = fullscreen;
+    win->is_content_fullscreen = fullscreen;
 
     HWND winHwnd = win->hwnd;
     HWND headerHwnd = win->header_hwnd;
@@ -1206,7 +1207,7 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             // fullscreen. `hwnd` is the window this message is for — use it.
             BrowserWindow* fsWin =
                 reinterpret_cast<BrowserWindow*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
-            if (fsWin && fsWin->is_fullscreen) {
+            if (fsWin && fsWin->is_content_fullscreen) {
                 std::vector<Tab*> fsTabs;
                 for (Tab* t : TabManager::GetInstance().GetAllTabs()) {
                     if (t && t->window_id == fsWin->window_id) fsTabs.push_back(t);

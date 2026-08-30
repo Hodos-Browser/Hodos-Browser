@@ -179,7 +179,11 @@ To be filled in at the end of the microscope pass, not now. Two structural rules
 
 ## Reading order for a fresh session
 
+⛔ **Resuming after a gap? Start at `RESUME_beta4.md`** — it carries the current state, the decisions
+on record, what is still owed, and a paste-able restart prompt.
+
 ```
+0. RESUME_beta4.md         ← if you are picking this up cold
 1. TELESCOPE.md            ← how the four sprints interact, and how to run the microscope pass
 2. SPRINT_PLAN.md          ← the sprint-level breakdown
 3. ../0.4.0-beta.3/HARNESS.md + REGRESSION_SET.md   ← the standard

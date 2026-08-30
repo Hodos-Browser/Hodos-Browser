@@ -363,7 +363,7 @@ void HandleFullscreenChange(BrowserWindow* win, bool fullscreen) {
 
     // Record the state on the window even though the layout below is not yet
     // window-scoped, so the two platforms agree on where this state LIVES.
-    if (win) win->is_fullscreen = fullscreen;
+    if (win) win->is_content_fullscreen = fullscreen;
 
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!g_main_window || !g_header_view || !g_webview_view) return;
