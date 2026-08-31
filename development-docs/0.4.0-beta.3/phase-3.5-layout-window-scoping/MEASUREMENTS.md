@@ -557,3 +557,75 @@ wallet in B **brought B forward**, rather than merely failing to push it back.
 your own fixes. This fix was committed, pushed, and reported as complete on the strength of two
 overlays out of nine. The check that caught it took four minutes and was only run because the next
 step was going to be *"owner, please test this"*.
+
+## K22 — 🚨 👤 OWNER-OBSERVED 2026-08-31, ⛔ NOT YET MEASURED: the **dismiss** path has the same defect
+
+👤 Owner, running the `Z1` acceptance test on `4dbdf61`: *"the wallet opens correctly and window B
+stays up, but when I click outside the wallet modal to close the overlay, whole window B minimizes or
+goes behind window A (vanishes)."*
+
+⇒ **The phase fixed the SHOW path and left the DISMISS path.** `Z1`/`Z2`/`Z4`/`A3`/`A7` are still
+green — the owner confirmed the show half by hand across all four panels — but the symptom the phase
+exists to remove is **still reachable**, one interaction later.
+
+### ⛔ Which discriminator is unknown, and the owner's own words say so
+
+👤 *"minimizes **or** goes behind"*. Those are visually identical and have different causes — the `Z`
+column exists precisely to separate them (K9.1, where a `-32000` sighting sent this phase after a
+phantom). ⛔ **Do not write "behind" into any document until it is measured.** Needed:
+
+| Discriminator | Meaning |
+|---|---|
+| `Rect` reads `-32000,-32000`, or `IsIconic` true | **MINIMIZED** — something calls `ShowWindow(SW_MINIMIZE)` or the window manager iconifies it |
+| B's `Z` > A's `Z`, rect unchanged | **BEHIND** — the mirror of the show-path defect |
+
+### ⛔ My synthetic reproduction FAILED, and the reason is a real SUBJECT difference
+
+📏 `hideprobe.ps1` opened the wallet in B, then called `SetForegroundWindow(B)` — the activation
+change a click on B's content produces. Result: **the wallet never closed at all**, and B stayed at
+`Z2` above A at `Z3` for 8 s.
+
+📖 Cause of the failed repro, from `cef_browser_shell.cpp :: WalletOverlayWndProc`:
+
+```cpp
+case WM_ACTIVATE:  // ... LOWORD(wParam) == WA_INACTIVE
+    if (g_wallet_overlay_prevent_close || g_file_dialog_active) {
+        LOG_INFO("Wallet overlay lost activation but prevent-close active - keeping open");
+        return 0;                      // <-- my run took THIS branch
+    }
+    HideWalletOverlay();
+```
+
+`g_wallet_overlay_prevent_close` is set to `true` **at creation** and cleared only when React reaches
+a safe state (live wallet / loading / locked). ⚠️ **The dev profile this session drove has no wallet
+in that state, so the flag never cleared and the overlay could not be dismissed.** The owner's profile
+does, so they reach a branch this session's rig cannot.
+
+⭐ **That is an instrument limitation worth keeping, not a footnote:** a CDP-driven probe can open
+every overlay in this product, but it cannot *dismiss the wallet* unless the wallet is genuinely
+usable. The dismiss half of R-CLOSE needs a real profile.
+
+### 🧠 CANDIDATE CAUSE — 📖 a code reading, NOT established
+
+`HideWalletOverlay` does `ShowWindow(g_wallet_overlay_hwnd, SW_HIDE)` and then returns **CEF** focus
+to the right window's header (`walletFocusWin->header_browser->GetHost()->SetFocus(true)` — it does
+resolve the requesting window correctly). But CEF focus is not Win32 **activation**, and hiding a
+window hands activation to the next window in the z-order — which for an overlay **owned by A** is
+naturally **A**.
+
+⇒ the mirror of K11: the show path raises A's owner group and we now correct for it; the **hide** path
+hands activation back to A and **nothing corrects for it**. That is consistent with "B vanishes when
+the overlay closes", and it predicts **BEHIND**, not minimized.
+
+⛔ **It is a reading and it may be wrong** — the owner's report explicitly allows "minimizes", which
+this mechanism does *not* explain. If the measurement says minimized, this candidate is refuted and
+the cause is somewhere else entirely. Both outcomes are informative; that is why the discriminator is
+being measured before anything is written as fact.
+
+### What this costs the phase
+
+🔴 New row **`P3.5-Z5`** (§5.0). ⛔ The phase can no longer be described as "closed but for the
+regression set" — its headline symptom is reachable on a path the evidence table never covered,
+because every row in it tests **opening** an overlay and none tests **closing** one.
+⭐ That is the same shape as K21 (a fix verified on 2 of 9 overlays): the table's coverage, not its
+rigour, was the gap.

@@ -259,7 +259,7 @@ Standalone, research-heavy, security-sensitive. Scope against §2's wall **befor
 **WS1b(a) → WS5(a) → WS6 → WS1 → WS1b(b) → WS2 → WS2(cont.) → WS3 → WS5(b) → WS4.**
 *(phases 0 → 0.5 → 0.6 → 1 → 2 → 3 → **3.5** → 4 → 5 → 6 → **7 → 8 → 9 → 10**;
 3.5 added 2026-08-30; 7–10 are the ticket consolidation added 2026-08-31 — see §4.1)*
-**✅ 0 · 0.5 · 0.6 · 1 · 2 · 3 · 3.5 complete** (3.5 landed `4f87f78`, 2026-08-31 — ⬜ regression set still owed at the 3.5 → 4 boundary). **⬜ 4 · 5 · 6 · 7 · 8 · 9 · 10.**
+**✅ 0 · 0.5 · 0.6 · 1 · 2 · 3 complete. 🟡 3.5 SHOW path landed, DISMISS path OPEN** — the owner's acceptance run found the same vanishing-window symptom when an overlay is **closed** (`P3.5-Z5`, K22). ⬜ Regression set still owed at the 3.5 → 4 boundary. **⬜ 4 · 5 · 6 · 7 · 8 · 9 · 10.**
 
 ⭐ **Changed 2026-08-18 (second revision), after `TICKET_loopback_host_form_wallet_routing.md` was
 filed and verified.** WS1b splits and its first half stays at the front; WS5 splits and its first
@@ -284,7 +284,7 @@ half slots in behind it.
 
 ### 4.1 Phase count, how to add one, and the ticket bundles ⭐ ADDED 2026-08-31
 
-**How many phases.** **Ten slots, seven done.** `0 · 0.5 · 0.6 · 1 · 2 · 3 · 3.5` are ✅ complete;
+**How many phases.** **Ten slots, six done + 3.5 nearly.** `0 · 0.5 · 0.6 · 1 · 2 · 3` are ✅ complete, **3.5 has one open row** (`Z5`);
 `4 · 5 · 6` were always planned;
 `7 · 8 · 9 · 10` are the ticket consolidation added here.
 
