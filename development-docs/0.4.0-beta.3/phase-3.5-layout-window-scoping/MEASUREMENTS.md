@@ -629,3 +629,65 @@ regression set" — its headline symptom is reachable on a path the evidence tab
 because every row in it tests **opening** an overlay and none tests **closing** one.
 ⭐ That is the same shape as K21 (a fix verified on 2 of 9 overlays): the table's coverage, not its
 rigour, was the gap.
+
+## K23 — 📏 MEASURED (👤 owner-run RED, assistant-run GREEN): `P3.5-Z5` — it is **BEHIND**, and it takes the keyboard too
+
+### The RED, owner-run on `4dbdf61`, 200 ms sampling
+
+```
+16:22:12   B@Z10  A@Z11                          baseline, B in front
+16:22:15   wallet Vis=True  Z1 FOCUS   B@Z10  A@Z11    wallet opens, B stays in front
+16:22:17   wallet Vis=False            A@Z10 FOCUS  B@Z11
+```
+
+⛔ **Not minimized.** B reads `80,80 1820x932` in **every** sample and never `-32000`; `IsIconic`
+is false throughout. → **BEHIND**, and the candidate in K22 is confirmed.
+
+⭐ **The `Fg` column decided the fix.** Two candidate fixes were equally consistent with the z-order
+data alone — *"always restore the requesting window"* vs *"restore it only if it was the one being
+activated"*. The measurement shows activation lands on **A**, so the conditional variant would
+**never have fired**. It was refuted by one column, before any code was written.
+🎯 That column was added to `winprobe.ps1` specifically because the two fixes were indistinguishable
+without it.
+
+### ⛔ I could not reproduce this reliably, and the attempts are recorded rather than hidden
+
+Three runs of `hideprobe.ps1`, three different outcomes:
+
+| Attempt | `SetForegroundWindow(B)` | Result |
+|---|---|---|
+| 1 | refused (foreground lock) — wallet never even closed | not reproduced |
+| 2 | refused; wallet closed anyway | B dropped behind A — symptom matched, **but the user action did not** |
+| 3 | succeeded, but foreground landed on **A** | not reproduced |
+
+⛔ **An instrument that gives three answers is not measuring the subject** (the K8 family again). The
+owner's run is the authoritative RED for this row; mine is not. ⚠️ Attempt 2 is the dangerous one — it
+produced the *right symptom for the wrong reason*, and had it been accepted, a fix could have been
+"verified" against a reproduction in which activation never moved at all.
+
+### 📖 Cause — and the code had already decided the right answer
+
+Hiding a window that holds activation makes Windows pick a successor, and for a window **owned by the
+primary** the successor is the primary. ⭐ But all four `Hide*Overlay` functions **already resolve the
+window the overlay belonged to** (`walletFocusWin`, `tlFocusWin`, `bmFocusWin`, `profFocusWin`) and
+return **CEF** focus to that window's header. CEF focus is not Win32 activation, so the two silently
+disagreed: window B's header believed it had focus while window A held the keyboard and the top of the
+z-order.
+
+⇒ the fix is not a new policy. `RestoreTargetWindowAfterOverlayHide` makes the Win32 half agree with
+the intent the surrounding code already expressed. Applied to the same **four** overlays as K21 — the
+ones that take activation because they have text input.
+
+### 📏 The GREEN, post-fix
+
+```
+16:26:09   A@Z10 FOCUS   B@Z11                        baseline: A in front AND focused
+16:26:23   wallet Vis=True Z1 FOCUS   B@Z10  A@Z11    wallet opens in B, B raised
+16:26:29   wallet Vis=False           B@Z10 FOCUS  A@Z11
+```
+
+⇒ exactly inverted from the RED: B keeps **both** the top of the z-order and the keyboard.
+⚠️ **Driven via the toggle path**, not the click-outside path the owner used. Both funnel through
+`HideWalletOverlay`, so the fix covers both by construction — but *by construction* is a code
+argument, and the owner's re-run of the click-outside path is what settles the row.
+📏 Tab-list open+close also exercised: no hang, no loop, no repeated activation.

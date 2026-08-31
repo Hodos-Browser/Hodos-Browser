@@ -591,6 +591,26 @@ static void RaiseTargetWindowAfterOverlayShow(BrowserWindow* targetWin) {
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
+// P3.5-Z5 — the DISMISS half of the same defect, and the mirror of the function above.
+//
+// Hiding a window that holds activation makes Windows pick a successor, and for a window
+// OWNED by the primary the successor is the primary. So dismissing an overlay opened in a
+// secondary window pulled the primary in front — and took the keyboard with it.
+//
+// 📏 MEASURED 2026-08-31 by the owner (K23), 200 ms sampling, wallet dismissed in window B:
+//     wallet Vis=True   Z1 FOCUS      B@Z10  A@Z11     <- wallet holds the keyboard
+//     wallet Vis=False                A@Z10  FOCUS  B@Z11
+//                                     ^ A took BOTH the keyboard and the top
+//
+// ⭐ Every Hide*Overlay already resolves the window the overlay belonged to and returns CEF
+// focus to that window's header. This is not a new policy — it makes the Win32 half agree
+// with the intent the surrounding code already expresses. Before this, CEF focus said "window
+// B's header" while Win32 activation said "window A", and the two silently disagreed.
+static void RestoreTargetWindowAfterOverlayHide(BrowserWindow* targetWin) {
+    if (!targetWin || !targetWin->hwnd || !IsWindow(targetWin->hwnd)) return;
+    SetForegroundWindow(targetWin->hwnd);
+}
+
 void CreateSettingsOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRightOffset) {
     LOG_INFO_APP("Creating settings overlay with iconRightOffset=" + std::to_string(iconRightOffset));
 
@@ -1005,6 +1025,9 @@ void HideWalletOverlay() {
     if (header_browser) {
         header_browser->GetHost()->SetFocus(true);
     }
+
+    // P3.5-Z5: give the requesting window Win32 activation too, not just CEF focus.
+    RestoreTargetWindowAfterOverlayHide(walletFocusWin);
 
     LOG_INFO_APP("Wallet overlay hidden");
 }
@@ -2651,6 +2674,9 @@ void HideTabListPanelOverlay() {
         header_browser->GetHost()->SetFocus(true);
     }
 
+    // P3.5-Z5: give the requesting window Win32 activation too, not just CEF focus.
+    RestoreTargetWindowAfterOverlayHide(tlFocusWin);
+
     LOG_INFO_APP("Tab-list panel overlay hidden");
 }
 
@@ -2909,6 +2935,9 @@ void HideBookmarksPanelOverlay() {
     if (header_browser) {
         header_browser->GetHost()->SetFocus(true);
     }
+
+    // P3.5-Z5: give the requesting window Win32 activation too, not just CEF focus.
+    RestoreTargetWindowAfterOverlayHide(bmFocusWin);
 
     LOG_INFO_APP("Bookmarks panel overlay hidden");
 }
@@ -3414,5 +3443,8 @@ void HideProfilePanelOverlay() {
     if (header_browser) {
         header_browser->GetHost()->SetFocus(true);
     }
+
+    // P3.5-Z5: give the requesting window Win32 activation too, not just CEF focus.
+    RestoreTargetWindowAfterOverlayHide(profFocusWin);
 }
 #endif // _WIN32

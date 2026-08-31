@@ -25,6 +25,9 @@ Add-Type -Namespace HP -Name W -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
 [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, System.Text.StringBuilder s, int n);
 [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+[DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+[DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+[DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
 [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
 [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr p);
 [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
@@ -65,8 +68,20 @@ $A=$shells|Where-Object{$_.Rect -like '0,0 *'}|Select-Object -First 1
 $B=$shells|Where-Object{$_.Hwnd -ne $A.Hwnd}|Select-Object -First 1
 Write-Host ("A={0}  B={1}" -f $A.Hwnd,$B.Hwnd)
 Write-Host "DISMISS: activating window B (what clicking B's content does) ..."
+# A background console cannot just call SetForegroundWindow -- Windows' foreground lock
+# refuses it, and a refused call reproduced the SYMPTOM without reproducing the USER ACTION,
+# which would have made a fix look verified when activation never moved. Attaching to the
+# current foreground thread lifts the lock, so B is genuinely activated the way a click does.
+$fgThread = 0
+[void][HP.W]::GetWindowThreadProcessId([HP.W]::GetForegroundWindow(), [ref]$fgThread)
+$myThread = [HP.W]::GetCurrentThreadId()
+$attached = [HP.W]::AttachThreadInput($myThread, $fgThread, $true)
 $ok=[HP.W]::SetForegroundWindow($B.H)
+[void][HP.W]::BringWindowToTop($B.H)
+if ($attached) { [void][HP.W]::AttachThreadInput($myThread, $fgThread, $false) }
+Start-Sleep -Milliseconds 400
 $fg=[HP.W]::GetForegroundWindow()
+Write-Host ("  AttachThreadInput={0}" -f $attached)
 Write-Host ("  SetForegroundWindow returned {0}; foreground is now 0x{1:X} (B={2})" -f $ok,[int64]$fg,$B.Hwnd)
 if(-not $ok -or $fg -ne $B.H){ Write-Host "  WARNING: the foreground lock refused this. The result below is NOT the owner's action." }
 for($i=1;$i -le [int]($AfterSeconds/2);$i++){ Start-Sleep -Seconds 2; Dump "AFTER dismiss +$($i*2)s" }

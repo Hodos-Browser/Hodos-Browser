@@ -45,6 +45,10 @@ Add-Type -Namespace P35 -Name Win -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
 [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr h, System.Text.StringBuilder s, int n);
 [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr h);
+// P3.5-Z5: which window holds ACTIVATION decides the shape of the dismiss-path fix --
+// "always restore the requesting window" vs "only when the user did not deliberately
+// activate another one". Without this column both fixes look equally defensible.
+[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
 [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, System.Text.StringBuilder s, int n);
 public struct RECT { public int Left, Top, Right, Bottom; }
 '@
@@ -119,6 +123,7 @@ function Get-Sample {
             Vis   = [P35.Win]::IsWindowVisible($h)
             Rect  = ('{0},{1} {2}x{3}' -f $r.Left, $r.Top, ($r.Right-$r.Left), ($r.Bottom-$r.Top))
             Dpi   = [P35.Win]::GetDpiForWindow($h)
+            Fg    = if ($h -eq [P35.Win]::GetForegroundWindow()) { 'FOCUS' } else { '' }
         })
         return $true
     }
