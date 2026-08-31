@@ -1,5 +1,7 @@
 # Consent surfaces fetch favicons from google.com
 
+**Status:** 🔴 **OPEN — still live, verified 2026-08-31.** `BRC100AuthOverlayRoot.tsx` still fetches `https://www.google.com/s2/favicons?domain=<site>`, so every consent prompt tells Google which site the user is connecting a wallet to, at the moment of the privacy decision. Labelled 2026-08-31 (had no status line).
+
 **Opened 2026-08-24** (noticed while building the Phase 0.9 prompt). **Status:** 🔵 OPEN. Pre-existing,
 not introduced by 0.9.
 

@@ -1,5 +1,7 @@
 # Browser chrome scales but its window doesn't — header content is clipped
 
+**Status:** ❔ **NEEDS OWNER REVIEW** — is it superseded by Phase 1's DPI work, or genuinely distinct? Labelled 2026-08-31 by the triage pass; see `TICKET_TRIAGE_2026-08-31.md`.
+
 **Found:** 2026-08-25 by the owner, during the Phase 1 (WS1) test session, on the 125% display.
 **Reported:** *"the bottom of the header section disappears behind the webview"* — reproduced by
 Ctrl+scroll **and independently by the Windows Text size accessibility setting.**

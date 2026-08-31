@@ -2,7 +2,7 @@
 
 **Filed:** 2026-08-18, from an owner report against a live payment page
 **Severity:** user-facing — a real BSV payment QR cannot be scanned, on both scan paths
-**Status:** OPEN — beta.3, **WS6 / Phase 0.6**. Cheap, evidence-complete, no unknowns.
+**Status:** ✅ **CLOSED** — fixed in Phase 0.6, `e2fae9d` (QR scanner accepts `bsv:` URIs + amount-injection guard). Verified 2026-08-31: the `bitcoin:`/`bsv:` allowlist is present in `QRPayloadClassify.h`. ⛔ This read OPEN for days after being fixed — see `TICKET_TRIAGE_2026-08-31.md`.
 **Verdict on the owner's question:** ⭐ **Fix ours. Do not ask PaiyBit to change anything.**
 
 ---

@@ -2,7 +2,7 @@
 
 **Filed:** 2026-08-17, while investigating "my installed browser just stopped working"
 **Severity:** 🚨 **privacy** + unbounded disk growth + a plausible performance/hang mechanism
-**Status:** OPEN — **beta.3 candidate, high**
+**Status:** ✅ **CLOSED** — fixed in Phase 2b, `fa0c143` + `c3604f9` (level gate, rotation, retention, URL redaction). Verified 2026-08-31. ⛔ This read "OPEN — beta.3 candidate, high" after being fixed — see `TICKET_TRIAGE_2026-08-31.md`.
 **Affects:** every installed user, every release to date
 
 ---

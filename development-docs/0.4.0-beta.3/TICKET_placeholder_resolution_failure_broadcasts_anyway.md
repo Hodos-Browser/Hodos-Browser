@@ -1,5 +1,7 @@
 # A failed placeholder→txid resolution is swallowed, and the transaction broadcasts anyway
 
+**Status:** 🔴 **OPEN — verified 2026-08-31.** The proof placeholders are still present in `rust-wallet/src/handlers.rs`. Labelled 2026-08-31 (had no status line).
+
 **Filed 2026-08-22**, out of Phase 0.7. **Reasoned from code, not measured** — see §4 before
 treating this as a shipping defect.
 

@@ -1,5 +1,7 @@
 # A deleted profile's id is reissued over its orphaned data directory
 
+**Status:** ✅ **CLOSED** — Phase 1, `84997eb` + `47d9a06`. Startup sweep renames orphans to `.orphaned-<stamp>`; `DeleteProfile` renames-then-deletes so a freed id can never land on live data. ⚠️ The macOS marker-depth gap from the P1 relay is a SEPARATE item. Labelled 2026-08-31 (had no status line).
+
 **Found:** 2026-08-26, during the Phase 1 (WS1) test session, by deleting a profile and then
 reading the log and the disk.
 > ## ⚠️ RE-SCOPED 2026-08-26 — the original advice in this ticket was WRONG

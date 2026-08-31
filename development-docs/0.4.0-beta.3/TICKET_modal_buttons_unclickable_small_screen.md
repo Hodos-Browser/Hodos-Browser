@@ -1,5 +1,7 @@
 # Modal buttons are unclickable on a small screen, clickable on a large monitor
 
+**Status:** 🔴 **OPEN — verified 2026-08-31.** Phase 1's `a3d8202` touched **only** `WalletDashboard.css`, a different surface; the modal is untouched. Labelled 2026-08-31 (had no status line).
+
 **Reported by the owner 2026-08-21**, during the bitgenius.net connect test.
 **For the DPI phase (Phase 1 — overlay/DPI).** Owner-observed, not yet instrumented.
 

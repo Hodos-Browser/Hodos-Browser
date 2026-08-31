@@ -1,5 +1,7 @@
 # A manifest's description can misdescribe the protocol it is attached to
 
+**Status:** ❔ **NEEDS OWNER REVIEW** — unclear whether P0.8's BRC-73 work closed it. Labelled 2026-08-31 by the triage pass; see `TICKET_TRIAGE_2026-08-31.md`.
+
 **Filed 2026-08-23**, out of beta.3 Phase 0.8's live testing. Owner-spotted while reading the
 bitgenius connect modal. **Deferred by the owner — recorded, not scheduled.**
 

@@ -1,5 +1,7 @@
 # Brand the remaining 21 permission prompts
 
+**Status:** 🔴 **OPEN** — 21 prompts, inventory in `PROMPT_BRANDING_INVENTORY.md`. Filed `9aae090`. Labelled 2026-08-31 (had no status line).
+
 **Opened 2026-08-24** after Phase 0.9. **Status:** 🔵 SCHEDULED — ⛔ **blocked on Phase 1 (DPI)**, see §2.
 **Inventory:** `PROMPT_BRANDING_INVENTORY.md`. **Precedents:** `phase-0.9-chromium-prompt-branding/PHASE_CONTRACT.md` §7.
 

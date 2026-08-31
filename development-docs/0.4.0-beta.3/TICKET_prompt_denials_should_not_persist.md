@@ -1,5 +1,7 @@
 # "Allow this time" is a lie, and prompt denials stick, for location / notifications / clipboard
 
+**Status:** ✅ **CLOSED** — Phase 0.9. A denial blocks **in-memory for the session only** (`HttpRequestInterceptor.cpp :: `"blocked in-memory for this session"`) and writes no `domain_permissions` row; confirmed live in the 2 → 3 regression run. Labelled 2026-08-31 (had no status line).
+
 **Opened 2026-08-24** from Phase 0.9. **Status:** 🔵 OPEN.
 Loopback / local-network were fixed in 0.9; these three were deliberately left alone because the 0.9
 contract forbids changing the five existing prompts. Camera/mic are **not** affected.
