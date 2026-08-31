@@ -568,6 +568,29 @@ void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser) {
 }
 
 #ifdef _WIN32
+// P3.5-Z1/Z2/Z4 — keep the requesting window in front when one of its dropdowns opens.
+//
+// Every overlay HWND is created CreateWindowEx(..., g_hwnd, ...) — OWNED by the primary
+// window, with ownership fixed at creation. Showing an owned window via
+// SetWindowPos(HWND_TOPMOST, …, SWP_SHOWWINDOW) raises its owner's z-order group, so
+// opening any dropdown from a secondary window dropped that window BEHIND the primary and
+// it disappeared from view (the primary is usually maximised, so it occludes completely).
+//
+// 📏 MEASURED before this fix existed (MEASUREMENTS.md K11), three arms driven against the
+// live HWNDs from outside the process: owner=primary → the drop; owner=requesting window →
+// no drop; owner=primary again → the drop returns. Re-owning the overlay is therefore also
+// a fix, but K12 measured that an owned window is DESTROYED with its owner, which would
+// trade this bug for an overlay-lifetime bug (R-CLOSE). Asserting the requesting window's
+// z-order after the show does not touch lifetime at all.
+//
+// The overlay stays visible because it is WS_EX_TOPMOST: HWND_TOP places targetWin at the
+// top of the NON-topmost band, still below every topmost window (P3.5-Z2).
+static void RaiseTargetWindowAfterOverlayShow(BrowserWindow* targetWin) {
+    if (!targetWin || !targetWin->hwnd || !IsWindow(targetWin->hwnd)) return;
+    SetWindowPos(targetWin->hwnd, HWND_TOP, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
 void CreateSettingsOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRightOffset) {
     LOG_INFO_APP("Creating settings overlay with iconRightOffset=" + std::to_string(iconRightOffset));
 
@@ -897,6 +920,10 @@ void ShowWalletOverlay(int iconRightOffset, BrowserWindow* targetWin) {
     SetWindowPos(g_wallet_overlay_hwnd, HWND_TOPMOST,
         overlayX, overlayY, panelWidth, panelHeight,
         SWP_SHOWWINDOW | SWP_NOACTIVATE);
+
+        // P3.5-Z1: the show above raises this overlay's OWNER (the primary window), which
+        // pushes the requesting window behind it. Put the requesting window back in front.
+        RaiseTargetWindowAfterOverlayShow(targetWin);
 
     // Remove WS_EX_TRANSPARENT to enable mouse input
     LONG exStyle = GetWindowLong(g_wallet_overlay_hwnd, GWL_EXSTYLE);
@@ -1372,7 +1399,7 @@ void CreateSettingsMenuOverlay(HINSTANCE hInstance) {
     }
 }
 
-void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately) {
+void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately, BrowserWindow* targetWin) {
     LOG_INFO_APP("🔍 Creating omnibox overlay with keep-alive pattern (showImmediately=" +
                  std::string(showImmediately ? "true" : "false") + ")");
 
@@ -1380,27 +1407,34 @@ void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately) {
     if (g_omnibox_overlay_hwnd && IsWindow(g_omnibox_overlay_hwnd)) {
         LOG_INFO_APP("🔍 Omnibox overlay already exists");
         if (showImmediately) {
-            ShowOmniboxOverlay();
+            ShowOmniboxOverlay(targetWin);
         }
         return;
     }
 
+    // P3.5-A7: position against the window that asked, not the primary. 📏 Measured pre-fix
+    // (MEASUREMENTS.md K9.2): typing in window B created the overlay at A-relative 160,109
+    // and only the subsequent Show corrected it to B-relative 240,189. Same fallback shape
+    // as Show*Overlay so a null targetWin still behaves exactly as before.
+    HWND posHwnd = (targetWin && targetWin->hwnd) ? targetWin->hwnd : g_hwnd;
+    HWND posHeader = (targetWin && targetWin->header_hwnd) ? targetWin->header_hwnd : g_header_hwnd;
+
     // Get main window dimensions
     RECT mainRect;
-    GetWindowRect(g_hwnd, &mainRect);
+    GetWindowRect(posHwnd, &mainRect);
 
     // Get header dimensions
     RECT headerRect;
-    GetWindowRect(g_header_hwnd, &headerRect);
+    GetWindowRect(posHeader, &headerRect);
 
     // Calculate position from header geometry
     // Tab bar height: 40px, Toolbar height: 54px (total 94px)
     // Address bar left offset: 8px padding + (3 buttons * 34px) + (3 gaps * 6px) = 128px
     // Address bar right offset: similar for 3 right buttons = ~128px from right edge
-    int overlayX = mainRect.left + ScalePx(160, g_hwnd);
-    int overlayY = headerRect.top + ScalePx(104, g_hwnd);  // Flush below toolbar
-    int overlayWidth = (headerRect.right - headerRect.left) - ScalePx(152, g_hwnd) - ScalePx(152, g_hwnd);
-    int overlayHeight = ScalePx(350, g_hwnd);  // Max height, will be dynamically adjusted by content later
+    int overlayX = mainRect.left + ScalePx(160, posHwnd);
+    int overlayY = headerRect.top + ScalePx(104, posHwnd);  // Flush below toolbar
+    int overlayWidth = (headerRect.right - headerRect.left) - ScalePx(152, posHwnd) - ScalePx(152, posHwnd);
+    int overlayHeight = ScalePx(350, posHwnd);  // Max height, will be dynamically adjusted by content later
 
     LOG_INFO_APP("🔍 Creating omnibox overlay at position: (" + std::to_string(overlayX) + ", " +
                  std::to_string(overlayY) + ") size: " + std::to_string(overlayWidth) + "x" +
@@ -1430,6 +1464,10 @@ void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately) {
     SetWindowPos(omnibox_hwnd, HWND_TOPMOST,
         overlayX, overlayY, overlayWidth, overlayHeight,
         flags);
+
+    // P3.5-Z1: the drop was measured on CREATE as well as on show (K9.3), so the create
+    // path owes the same correction. Harmless when the overlay is created hidden.
+    RaiseTargetWindowAfterOverlayShow(targetWin);
 
     // Store HWND globally
     g_omnibox_overlay_hwnd = omnibox_hwnd;
@@ -1512,6 +1550,10 @@ void ShowOmniboxOverlay(BrowserWindow* targetWin) {
     SetWindowPos(g_omnibox_overlay_hwnd, HWND_TOPMOST,
         overlayX, overlayY, overlayWidth, overlayHeight,
         SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+        // P3.5-Z1: the show above raises this overlay's OWNER (the primary window), which
+        // pushes the requesting window behind it. Put the requesting window back in front.
+        RaiseTargetWindowAfterOverlayShow(targetWin);
 
     // Remove WS_EX_TRANSPARENT to enable mouse input
     LONG exStyle = GetWindowLong(g_omnibox_overlay_hwnd, GWL_EXSTYLE);
@@ -1777,6 +1819,10 @@ void ShowCookiePanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
         overlayX, overlayY, panelWidth, panelHeight,
         SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
+        // P3.5-Z1: the show above raises this overlay's OWNER (the primary window), which
+        // pushes the requesting window behind it. Put the requesting window back in front.
+        RaiseTargetWindowAfterOverlayShow(targetWin);
+
     // Remove WS_EX_TRANSPARENT to enable mouse input
     LONG exStyle = GetWindowLong(g_cookie_panel_overlay_hwnd, GWL_EXSTYLE);
     SetWindowLong(g_cookie_panel_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
@@ -2040,6 +2086,10 @@ void ShowDownloadPanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
         overlayX, overlayY, panelWidth, panelHeight,
         SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
+        // P3.5-Z1: the show above raises this overlay's OWNER (the primary window), which
+        // pushes the requesting window behind it. Put the requesting window back in front.
+        RaiseTargetWindowAfterOverlayShow(targetWin);
+
     // Remove WS_EX_TRANSPARENT to enable mouse input
     LONG exStyle = GetWindowLong(g_download_panel_overlay_hwnd, GWL_EXSTYLE);
     SetWindowLong(g_download_panel_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
@@ -2284,6 +2334,10 @@ void ShowSiteInfoPanelOverlay(int iconLeftOffset, BrowserWindow* targetWin) {
         overlayX, overlayY, panelWidth, panelHeight,
         SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
+        // P3.5-Z1: the show above raises this overlay's OWNER (the primary window), which
+        // pushes the requesting window behind it. Put the requesting window back in front.
+        RaiseTargetWindowAfterOverlayShow(targetWin);
+
     LONG exStyle = GetWindowLong(g_siteinfo_panel_overlay_hwnd, GWL_EXSTYLE);
     SetWindowLong(g_siteinfo_panel_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
 
@@ -2523,6 +2577,10 @@ void ShowTabListPanelOverlay(int iconLeftOffset, BrowserWindow* targetWin) {
     SetWindowPos(g_tablist_panel_overlay_hwnd, HWND_TOPMOST,
         overlayX, overlayY, panelWidth, panelHeight,
         SWP_SHOWWINDOW | SWP_NOACTIVATE);
+
+        // P3.5-Z1: the show above raises this overlay's OWNER (the primary window), which
+        // pushes the requesting window behind it. Put the requesting window back in front.
+        RaiseTargetWindowAfterOverlayShow(targetWin);
 
     LONG exStyle = GetWindowLong(g_tablist_panel_overlay_hwnd, GWL_EXSTYLE);
     SetWindowLong(g_tablist_panel_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
@@ -2779,6 +2837,10 @@ void ShowBookmarksPanelOverlay(int iconLeftOffset, BrowserWindow* targetWin) {
         overlayX, overlayY, panelWidth, panelHeight,
         SWP_SHOWWINDOW | SWP_NOACTIVATE);
 
+        // P3.5-Z1: the show above raises this overlay's OWNER (the primary window), which
+        // pushes the requesting window behind it. Put the requesting window back in front.
+        RaiseTargetWindowAfterOverlayShow(targetWin);
+
     LONG exStyle = GetWindowLong(g_bookmarks_panel_overlay_hwnd, GWL_EXSTYLE);
     SetWindowLong(g_bookmarks_panel_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
 
@@ -3018,6 +3080,10 @@ void ShowMenuOverlay(int iconRightOffset, BrowserWindow* targetWin) {
     SetWindowPos(g_menu_overlay_hwnd, HWND_TOPMOST,
         overlayX, overlayY, panelWidth, panelHeight,
         SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+        // P3.5-Z1: the show above raises this overlay's OWNER (the primary window), which
+        // pushes the requesting window behind it. Put the requesting window back in front.
+        RaiseTargetWindowAfterOverlayShow(targetWin);
 
     LONG exStyle = GetWindowLong(g_menu_overlay_hwnd, GWL_EXSTYLE);
     SetWindowLong(g_menu_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
@@ -3267,6 +3333,10 @@ void ShowProfilePanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
     SetWindowPos(g_profile_panel_overlay_hwnd, HWND_TOPMOST,
         overlayX, overlayY, panelWidth, panelHeight,
         SWP_SHOWWINDOW | SWP_NOACTIVATE);
+
+        // P3.5-Z1: the show above raises this overlay's OWNER (the primary window), which
+        // pushes the requesting window behind it. Put the requesting window back in front.
+        RaiseTargetWindowAfterOverlayShow(targetWin);
 
     LONG exStyle = GetWindowLong(g_profile_panel_overlay_hwnd, GWL_EXSTYLE);
     SetWindowLong(g_profile_panel_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);

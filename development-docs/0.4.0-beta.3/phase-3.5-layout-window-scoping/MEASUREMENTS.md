@@ -287,3 +287,209 @@ touches overlay positioning, never overlay lifetime."*
 
 ⇒ 🔴 **Owner decision required** before any code: this defect is more user-visible than the 12
 `ScalePx` sites, but taking it widens the phase past its own stated fence.
+
+---
+
+# Execute round — 2026-08-31 afternoon, at `a6e9db9` + the P3.5 fix
+
+**Method change worth recording.** Every row below was driven over **CDP** (`p35drive.py`) instead of
+by hand. That is not a shortcut — it is what made the rows *observable*. K8.3 established that any
+console the observer touches steals focus and fires `HideAllOverlays`, so the action and the probe
+cannot both come from the desktop input queue. Driving the action out-of-band lets `winprobe.ps1`
+sample continuously through it. ⭐ `p35drive.py send` posts the **same** `cefMessage` IPC from the
+**same** browser a React `onClick` does, so `GetOwnerWindow()` resolves identically; most rows in fact
+dispatch a real DOM `.click()` on the real button, which is the production path exactly.
+⚠️ It does **not** reproduce the window activation a real click also causes — every row therefore
+reads the `Z` column from a sample taken **before** the action as its own baseline.
+
+⛔ **SUBJECT for every row:** one dev browser process, two windows made with **Ctrl+N**
+(`winprobe.ps1` → `SUBJECT: PASS`). The owner's installed browser (68 processes) ran untouched
+throughout; every process query matched by **exe path**.
+
+---
+
+## K10 — 🎯 📏 MEASURED: `P3.5-Z4` — the Z-order defect is **NOT** omnibox-specific
+
+Ran pre-fix on the unmodified build (pid 49284). Menu dropdown opened from **window B's** header:
+
+| # | t | Menu overlay | Z-order | Reading |
+|---|---|---|---|---|
+| 1 | 12:12:13 | absent (`Vis=False`) | **B**(11) above **A**(12) | baseline, B in front |
+| 2 | 12:12:26 | `Vis=True` at `1609,219` | **A**(11) above **B**(12) | B drops behind A |
+
+📏 `1609,219` is **B-relative** (B at `110,110`; `110+109 = 219`), which independently confirms the
+header being driven was B's. ⇒ `P3.5-Z4` **RED, observed.**
+
+⭐ **New fact K9 could not see:** the menu overlay is **pre-warmed at startup**, so no `Create` ran —
+only `Show`. The drop therefore fires on the **show path alone**, and is not create-related at all.
+
+## K11 — 🚨 📏 MEASURED: the cause is **ESTABLISHED**, not a candidate — and no product code was needed
+
+K9.3 recorded the ownership theory as a candidate and said the decisive experiment was the fix
+itself. ⛔ **That was wrong, and expensively so.** 📏 `ShowMenuOverlay` contains no `SetFocus`,
+no `SetForegroundWindow` — the entire show path reduces to one Win32 call:
+
+```cpp
+SetWindowPos(overlay, HWND_TOPMOST, x,y,w,h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+```
+
+So the hypothesis is testable **from outside the process, against the live overlay HWNDs, before
+writing anything** (`zexp.ps1`). Three arms, overlay geometry identical in all three, only the
+**owner** differing:
+
+| Arm | `GWLP_HWNDPARENT` | Before show | After show | |
+|---|---|---|---|---|
+| 1 — as shipped | A | B(11) A(12) | **A(11) B(12)** | the defect |
+| 2 — candidate fix | B | B(11) A(12) | **B(11) A(12)** | drop gone |
+| 3 — negative control | A | B(11) A(12) | **A(11) B(12)** | drop returns |
+
+⇒ Showing a window **owned by A** raises A's owner-group above B. Arm 3 is the negative control and
+it is what makes arms 1–2 mean anything.
+
+⭐ **The lesson, because this sprint keeps paying for it:** "the fix is the only experiment" was a
+*belief*, not a measurement. The real test cost one script and no build. Ask what the smallest
+external reproduction is **before** accepting that a code change is the only way to learn something.
+
+## K12 — 🚨 📏 MEASURED: the R-CLOSE hazard of the re-own fix is **REAL** (`zexp2.ps1` ARM 5)
+
+Overlay re-owned to B, then B destroyed:
+
+```
+IsWindow(overlay) before closing B : True
+IsWindow(B)       after  closing B : False
+IsWindow(overlay) after  closing B : False   <-- destroyed with its owner
+```
+
+⇒ the re-own fix would leave `g_menu_overlay_hwnd` **dangling**. It is recoverable — the `IsWindow()`
+guard re-creates the overlay on the next open (new HWND observed) — but re-creation goes through the
+window-blind `Create` path, so it lands back on the primary. **Measured before any code was written,
+which is why the phase never had to find out the expensive way.**
+
+## K13 — 📏 MEASURED: a **fourth** arm the contract never considered, and the one that shipped
+
+Keep ownership on the primary; assert the requesting window's z-order **after** the show:
+
+```
+before show           B(11) A(12)
+after  show           A(11) B(12)     <- the drop still happens
+after  B->HWND_TOP    B(11) A(12)     <- corrected
+```
+
+⇒ closes `Z1` with **zero** lifetime exposure. 👤 Owner chose this arm over re-owning
+(2026-08-31), so `PHASE_CONTRACT.md` §4's *"positioning, never lifetime"* fence holds after all.
+
+## K14 — 🚨 📏 MEASURED: **K7 was WRONG — the mixed-DPI rig already exists**
+
+K7 recorded *"all three monitors read 96 dpi ⇒ no mixed-DPI rig"*, which would have made `P3.5-A3`
+**SKIPPED ⇒ INCOMPLETE** and deferred the 12 `ScalePx` sites to beta.4. It was an instrument bug.
+
+📏 Re-measured from a process that calls `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)`
+**first** (`dpiprobe.ps1`, which asserts its own awareness before printing anything):
+
+```
+\\.\DISPLAY22  1920x1080 @ 0,0        96 dpi  100%   PRIMARY
+\\.\DISPLAY21  1920x1080 @ 1920,0     96 dpi  100%
+\\.\DISPLAY24  1920x1200 @ -1920,0   120 dpi  125%   laptop panel
+```
+
+⛔ **Windows lies to a DPI-unaware process**: it reports 96 for every monitor *and* divides the rects
+by the scale factor. That is exactly why K7 read the laptop as `1536x960 @ 96` — `1920 ÷ 1.25 = 1536`.
+⭐ **The tell was in K7's own output and nobody read it**: two monitors at a round `1920x1080` and one
+at an odd `1536x960` is a scale factor, not a panel. 👤 Caught only because the owner asked what DPI
+meant and whether their screens should match.
+
+⚠️ **Fourth instrument bug in this phase's own tooling** (after the two in K8 and the `-WatchSeconds`
+gap), and the third whose output looked clean. `dpiprobe.ps1` now refuses to print if
+`GetAwarenessFromDpiAwarenessContext` is not `PER_MONITOR`.
+
+## K15 — 📏 MEASURED: `P3.5-A3` RED then GREEN, on the rig K14 uncovered
+
+Window B moved to `\\.\DISPLAY24` (125 %), A left on the primary (100 %). 📏 **Both** headers report
+the same `iconRightOffset = 36` CSS px (B's `devicePixelRatio` is `1.25`, so its own scaling is
+already correct — the defect is entirely in the C++ conversion). Measured as
+`headerRight − overlayRight`, which by construction *is* the scaled icon offset:
+
+| | A @ 100 % | B @ 125 % | |
+|---|---|---|---|
+| 🔴 **pre-fix** | **36** | **36** | identical ⇒ the defect. `ScalePx(36, g_hwnd)` = ×1.0 |
+| 🟢 **post-fix** | **36** | **45** | `36 × 1.25 = 45`. A unchanged ⇒ the control arm holds |
+
+📏 Panel size on B was `350x563` **pre-fix** — `ScalePx(280/450, posHwnd)` — confirming K5's reading
+that every `Show*Overlay` was already window-scaled and the pre-scaled icon offset was the sole
+residual.
+
+## K16 — 📏 MEASURED: post-fix results for `Z1`, `Z2`, `Z4`, `A7`, `Z3`
+
+New build, pid 58960, A at `0,0 1920x1032`, B at `80,80 1820x932`:
+
+| Row | Observation |
+|---|---|
+| `Z1`/`Z4` | Menu shown at `1579,189` (B-relative) → **B stays Z10, A Z11.** Shield panel at `1137,189` → **B stays Z10.** Two overlay classes, no drop |
+| `Z2` | Overlay at **Z1** in both samples, above B at Z10 — still topmost, not merely "nothing raised" |
+| `A7` | First omnibox of the session (true `Create` path — no `CEFOmniboxOverlayWindow` existed) created at **`240,189`** = B-relative (`80+160`, `80+109`). 🔴 Pre-fix K9.2 measured `160,109` = A-relative |
+| `Z3` | Menu **`Vis=True` at `1609,219` (B-relative)** at the instant B was destroyed; owner still A; `IsWindow(overlay) = True` after. Reopening in A moved the **same HWND `0xC20AC0`** to A-relative `1599,109`, and its document was live (`New Tab │ Cmd+T │ History │ …`, 4 buttons) |
+
+⭐ `Z3` needed a probe that waits *before* sampling (`z3probe.ps1 -WaitSeconds`), because the console
+must already exist when the dropdown is opened — otherwise K8.3's focus loss hides it first.
+
+## K17 — 🎫 📏 MEASURED: `P3.5-A4` is **RED for a pre-existing reason**, and it is a real defect
+
+Two windows, distinct external tabs (`example.com`, `iana.org`), quit both:
+
+```
+📋 Session saved: 1 tabs across 1 windows
+```
+
+📏 `session.json` contained **only** `example.com` — the second window's tab was lost. 📏 Relaunch
+restored that one tab correctly, so the restore machinery itself works.
+
+📖 Cause, read from **unmodified** code (this phase's diff touches none of it):
+`ShellWindowProc`'s `WM_CLOSE` arm calls `ShutdownApplication()` — and hence `SaveSession()` — only
+when `windowCount <= 1`. The secondary and primary-transfer arms **close that window's tabs first**.
+⇒ by the time `SaveSession` runs, every window but the last has already lost its tabs, so the v2
+`windows[]` array it builds can never hold more than one.
+
+⇒ **The do-not-convert half of `A4` is GREEN** — `SaveSession`/`ShutdownApplication` still enumerate
+all windows and were not touched. **Its stated acceptance criterion is RED**, for a defect that
+predates this phase. 🎫 Filed for beta.4; ⛔ not fixed here (it is a shutdown-ordering change, not a
+window-scoping one).
+
+⚠️ **The row could not run at all at first**: `browser.restoreSessionOnStart` was **off** in the dev
+profile and `SaveSession` returned early with *"Session restore disabled"*. A quieter harness would
+have read the missing `session.json` as a failure of the feature. ⭐ Check the setting the feature is
+gated on before reading its output.
+
+## K18 — 🎫 📏 MEASURED, incidental: two more pre-existing multi-window defects
+
+Both observed while running the rows above. ⛔ Neither is fixed here — the first is named in
+`PHASE_CONTRACT.md` §7 as out of scope, the second is new.
+
+1. **Menu → Exit closes the *primary*, not the window you clicked in.** 📏 `exit` from window B's
+   header closed window A and left B running. 📖 `simple_handler.cpp` — both the `exit` IPC and
+   `menu_action`'s `"exit"` arm do `PostMessage(g_hwnd, WM_CLOSE, 0, 0)`. This is exactly the
+   *"scattered `PostMessage(g_hwnd, WM_CLOSE)` and friends"* the contract fences to beta.4 — now with
+   an observation attached rather than a code reading.
+2. **Closing the primary destroys every overlay.** 📏 After A closed, **all 14** overlay HWNDs were
+   gone from the surviving window's process enumeration, while `TransferPrimaryWindow` had already
+   copied those now-dead handles into the new primary's `BrowserWindow`. 📖 Cause: overlays are owned
+   by `g_hwnd` at creation and Windows destroys owned windows with their owner; the transfer moves
+   *handles*, never *ownership*.
+   ✅ **It self-heals**: 📏 the next `menu_show` in the surviving window hit the `IsWindow()` guard,
+   re-created the overlay (new HWND `0x2609BA`) and positioned it correctly against that window
+   (`1639,249` = its own header right − 41 − 280, its own top + 109). ⇒ user-visible cost is one
+   subprocess re-spawn, not a broken overlay. 🎫 beta.4, with the full per-window migration.
+
+## K19 — 📏 MEASURED: re-verified on the **shipping** binary, after the orphan cleanup
+
+The rows in K15/K16 ran on a build made *before* 10 `extern HWND g_hwnd;` declarations — orphaned by
+the `ScalePx` conversion — were removed (working rule #3). A declaration removal cannot change
+semantics and the build proves each block still compiles, but "cannot change semantics" is exactly the
+sort of claim this sprint keeps paying for, so the headline rows were re-run on the final binary
+(pid from the post-cleanup build):
+
+| Row | Final-binary observation |
+|---|---|
+| `Z1`/`Z4` | Baseline had A **above** B (Z10 vs Z11) this time; after `menu_show` in B the menu appeared at `1579,189` (B-relative) and **B moved to Z10, A to Z11**. ⭐ A stronger reading than the earlier run — B did not merely *stay* in front, it was *brought* to the front from behind |
+| `A7` | Omnibox first-open in B created at **`240,189`** = B-relative |
+| `A3` | Menu in B @125 % → gap **45**; menu in A @100 % → gap **36**. Both arms |
+

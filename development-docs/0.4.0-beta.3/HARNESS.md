@@ -76,6 +76,30 @@ fixes it drives the baseline to its target.
 - Residual violations at a non-zero target are **listed by file:line in the owning contract**, with why
   each is allowed. An unexplained residual is a defect, not a baseline.
 
+### ⛔ `G11` did **not** move in Phase 3.5, and that is not a phase that failed — 2026-08-31
+
+Phase 3.5 shipped its window-scoping fix and `G11` stayed at **60**. Recorded here because the rule
+above only demands a written reason for *raising* a baseline, and the gap that leaves is worse: a
+later reader sees a phase whose stated deliverable was `G11↓`, sees an unchanged baseline, and
+concludes the work did not land. Two measured reasons (`phase-3.5-layout-window-scoping/MEASUREMENTS.md`
+K4), neither of them a judgement call:
+
+1. **Paths.** `G11.Paths = @('cef-native/src/handlers', 'cef-native/src/core')`. The file the phase is
+   mostly about, `cef-native/cef_browser_shell.cpp`, sits at `cef-native/` and is in **neither**.
+2. **Pattern.** `G11.Pattern` matches `GetPrimaryWindow()` / `GetActiveTab()`. It matches **no**
+   `g_hwnd`, `g_header_hwnd` or `g_*_overlay_hwnd` — so even the 12 `ScalePx(x, g_hwnd)` sites the
+   phase converted are invisible to it, in a file it *does* scan.
+
+⛔ **Widening the paths or the pattern so the gate covers this code was deliberately NOT done**, per
+working rule #6 — that is editing the instrument inside the change it measures, and this project has
+already shipped a preflight that reported PASS while running zero checks. If it is wanted, it is its
+own commit, after the fix, with its own `-NegativeControl` run and a re-measured baseline.
+
+⚠️ **Known stale text, left alone on purpose:** `G11`'s description in `scripts/preflight.ps1` still
+reads *"baseline lowered by Phase 3.5"*. It was written when the phase was planned and K4 measured it
+false. Correcting it is an edit to the instrument and therefore belongs in that same separate commit,
+not in the change it describes.
+
 ## 5. Execution loop
 
 ```

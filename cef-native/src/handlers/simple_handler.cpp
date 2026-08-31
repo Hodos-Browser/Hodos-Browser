@@ -343,6 +343,14 @@ BrowserWindow* SimpleHandler::GetOwnerWindow() const {
     return WindowManager::GetInstance().GetWindow(window_id_);
 }
 
+#ifdef _WIN32
+HWND SimpleHandler::OwnerHwndForScaling() const {
+    extern HWND g_hwnd;
+    BrowserWindow* win = GetOwnerWindow();
+    return (win && win->hwnd) ? win->hwnd : g_hwnd;
+}
+#endif
+
 SimpleHandler* SimpleHandler::GetHandlerForBrowser(int browser_id) {
     auto it = browser_handler_map_.find(browser_id);
     return (it != browser_handler_map_.end()) ? it->second : nullptr;
@@ -2848,10 +2856,10 @@ bool SimpleHandler::OnProcessMessageReceived(
 
     if (message_name == "omnibox_create") {
 #ifdef _WIN32
-        extern void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately);
+        extern void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately, BrowserWindow* targetWin);
         extern HINSTANCE g_hInstance;
         // Create overlay but don't show it (showImmediately = false)
-        CreateOmniboxOverlay(g_hInstance, false);
+        CreateOmniboxOverlay(g_hInstance, false, GetOwnerWindow());
         LOG_DEBUG_BROWSER("🔍 Omnibox overlay created (hidden) for preemptive loading");
 #else
         LOG_DEBUG_BROWSER("🔍 Omnibox not implemented on macOS");
@@ -2861,9 +2869,9 @@ bool SimpleHandler::OnProcessMessageReceived(
 
     if (message_name == "omnibox_create_or_show") {
 #ifdef _WIN32
-        extern void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately);
+        extern void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately, BrowserWindow* targetWin);
         extern HINSTANCE g_hInstance;
-        CreateOmniboxOverlay(g_hInstance, true);
+        CreateOmniboxOverlay(g_hInstance, true, GetOwnerWindow());
         LOG_DEBUG_BROWSER("🔍 Omnibox overlay create_or_show triggered");
 #else
         LOG_DEBUG_BROWSER("🔍 Omnibox not implemented on macOS");
@@ -2876,14 +2884,14 @@ bool SimpleHandler::OnProcessMessageReceived(
         std::string query = args->GetSize() > 0 ? args->GetString(0).ToString() : "";
 
 #ifdef _WIN32
-        extern void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately);
+        extern void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately, BrowserWindow* targetWin);
         extern void ShowOmniboxOverlay(BrowserWindow* targetWin = nullptr);
         extern HWND g_omnibox_overlay_hwnd;
         extern HINSTANCE g_hInstance;
 
         // Create if doesn't exist, otherwise show (positioned relative to requesting window)
         if (!g_omnibox_overlay_hwnd || !IsWindow(g_omnibox_overlay_hwnd)) {
-            CreateOmniboxOverlay(g_hInstance, true);
+            CreateOmniboxOverlay(g_hInstance, true, GetOwnerWindow());
         } else {
             ShowOmniboxOverlay(GetOwnerWindow());
         }
@@ -2932,8 +2940,11 @@ bool SimpleHandler::OnProcessMessageReceived(
         }
 #ifdef _WIN32
         // React sends CSS pixels — scale to physical pixels for Win32 positioning
-        extern HWND g_hwnd;
-        if (g_hwnd) iconRightOffset = ScalePx(iconRightOffset, g_hwnd);
+        // P3.5-A3: CSS px -> physical px must use the DPI of the window that ASKED,
+        // not the primary's. They differ whenever the two sit on monitors at different
+        // scale factors; measured pre-fix as an identical 36px gap at 100% and 125%.
+        HWND scaleHwnd = OwnerHwndForScaling();
+        if (scaleHwnd) iconRightOffset = ScalePx(iconRightOffset, scaleHwnd);
 #endif
         if (cp_args->GetSize() > 1) {
             shieldDomain = cp_args->GetString(1).ToString();
@@ -3095,8 +3106,11 @@ bool SimpleHandler::OnProcessMessageReceived(
             try { iconRightOffset = std::stoi(pp_args->GetString(0).ToString()); } catch(...) {}
         }
 #ifdef _WIN32
-        extern HWND g_hwnd;
-        if (g_hwnd) iconRightOffset = ScalePx(iconRightOffset, g_hwnd);
+        // P3.5-A3: CSS px -> physical px must use the DPI of the window that ASKED,
+        // not the primary's. They differ whenever the two sit on monitors at different
+        // scale factors; measured pre-fix as an identical 36px gap at 100% and 125%.
+        HWND scaleHwnd = OwnerHwndForScaling();
+        if (scaleHwnd) iconRightOffset = ScalePx(iconRightOffset, scaleHwnd);
 #endif
 
 #ifdef _WIN32
@@ -3164,8 +3178,11 @@ bool SimpleHandler::OnProcessMessageReceived(
             try { iconRightOffset = std::stoi(menu_args->GetString(0).ToString()); } catch(...) {}
         }
 #ifdef _WIN32
-        extern HWND g_hwnd;
-        if (g_hwnd) iconRightOffset = ScalePx(iconRightOffset, g_hwnd);
+        // P3.5-A3: CSS px -> physical px must use the DPI of the window that ASKED,
+        // not the primary's. They differ whenever the two sit on monitors at different
+        // scale factors; measured pre-fix as an identical 36px gap at 100% and 125%.
+        HWND scaleHwnd = OwnerHwndForScaling();
+        if (scaleHwnd) iconRightOffset = ScalePx(iconRightOffset, scaleHwnd);
 #endif
 
 #ifdef _WIN32
@@ -3375,13 +3392,16 @@ bool SimpleHandler::OnProcessMessageReceived(
             extern void ShowBookmarksPanelOverlay(int iconLeftOffset, BrowserWindow* targetWin);
             extern HWND g_bookmarks_panel_overlay_hwnd;
             extern HINSTANCE g_hInstance;
-            extern HWND g_hwnd;
             // Current-page context from the active tab (the menu overlay can't supply it).
             Tab* bmActiveTab = TabManager::GetInstance().GetActiveTab();
             pending_bookmark_url_ = bmActiveTab ? bmActiveTab->url : "";
             pending_bookmark_title_ = bmActiveTab ? bmActiveTab->title : "";
             // Approximate anchor near the (left-of-address-bar) bookmark button.
-            int bmDefOff = g_hwnd ? ScalePx(140, g_hwnd) : 140;
+            // P3.5-A3: anchor offset scaled with the requesting window's DPI. The menu
+            // overlay's handler is retargeted to that window on show, so GetOwnerWindow()
+            // here resolves the window the user opened the menu in.
+            HWND bmScaleHwnd = OwnerHwndForScaling();
+            int bmDefOff = bmScaleHwnd ? ScalePx(140, bmScaleHwnd) : 140;
             if (!g_bookmarks_panel_overlay_hwnd || !IsWindow(g_bookmarks_panel_overlay_hwnd)) {
                 CreateBookmarksPanelOverlay(g_hInstance, true, bmDefOff);
             } else {
@@ -5902,8 +5922,11 @@ bool SimpleHandler::OnProcessMessageReceived(
         }
 #ifdef _WIN32
         // React sends CSS pixels — scale to physical pixels for Win32 positioning
-        extern HWND g_hwnd;
-        if (g_hwnd) iconRightOffset = ScalePx(iconRightOffset, g_hwnd);
+        // P3.5-A3: CSS px -> physical px must use the DPI of the window that ASKED,
+        // not the primary's. They differ whenever the two sit on monitors at different
+        // scale factors; measured pre-fix as an identical 36px gap at 100% and 125%.
+        HWND scaleHwnd = OwnerHwndForScaling();
+        if (scaleHwnd) iconRightOffset = ScalePx(iconRightOffset, scaleHwnd);
 #endif
         LOG_DEBUG_BROWSER("Toggle wallet panel with iconRightOffset=" + std::to_string(iconRightOffset) +
             " peerpayCount=" + std::to_string(peerpayCount) + " peerpayAmount=" + std::to_string(peerpayAmount));
@@ -7442,8 +7465,11 @@ bool SimpleHandler::OnProcessMessageReceived(
             try { iconRightOffset = std::stoi(dp_args->GetString(0).ToString()); } catch(...) {}
         }
 #ifdef _WIN32
-        extern HWND g_hwnd;
-        if (g_hwnd) iconRightOffset = ScalePx(iconRightOffset, g_hwnd);
+        // P3.5-A3: CSS px -> physical px must use the DPI of the window that ASKED,
+        // not the primary's. They differ whenever the two sit on monitors at different
+        // scale factors; measured pre-fix as an identical 36px gap at 100% and 125%.
+        HWND scaleHwnd = OwnerHwndForScaling();
+        if (scaleHwnd) iconRightOffset = ScalePx(iconRightOffset, scaleHwnd);
 #endif
 
 #ifdef _WIN32
@@ -7500,8 +7526,11 @@ bool SimpleHandler::OnProcessMessageReceived(
         pending_bookmark_title_ = bmTitle;
 
 #ifdef _WIN32
-        extern HWND g_hwnd;
-        if (g_hwnd) iconLeftOffset = ScalePx(iconLeftOffset, g_hwnd);
+        // P3.5-A3: CSS px -> physical px must use the DPI of the window that ASKED,
+        // not the primary's. They differ whenever the two sit on monitors at different
+        // scale factors; measured pre-fix as an identical 36px gap at 100% and 125%.
+        HWND scaleHwnd = OwnerHwndForScaling();
+        if (scaleHwnd) iconLeftOffset = ScalePx(iconLeftOffset, scaleHwnd);
 
         extern void CreateBookmarksPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconLeftOffset);
         extern void ShowBookmarksPanelOverlay(int iconLeftOffset, BrowserWindow* targetWin);
@@ -7607,8 +7636,11 @@ bool SimpleHandler::OnProcessMessageReceived(
             try { iconLeftOffset = std::stoi(tl_args->GetString(0).ToString()); } catch(...) {}
         }
 #ifdef _WIN32
-        extern HWND g_hwnd;
-        if (g_hwnd) iconLeftOffset = ScalePx(iconLeftOffset, g_hwnd);
+        // P3.5-A3: CSS px -> physical px must use the DPI of the window that ASKED,
+        // not the primary's. They differ whenever the two sit on monitors at different
+        // scale factors; measured pre-fix as an identical 36px gap at 100% and 125%.
+        HWND scaleHwnd = OwnerHwndForScaling();
+        if (scaleHwnd) iconLeftOffset = ScalePx(iconLeftOffset, scaleHwnd);
         extern void CreateTabListPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconLeftOffset);
         extern void ShowTabListPanelOverlay(int iconLeftOffset, BrowserWindow* targetWin);
         extern void HideTabListPanelOverlay();
@@ -7706,8 +7738,11 @@ bool SimpleHandler::OnProcessMessageReceived(
         pending_siteinfo_security_ = siSecurity;
 
 #ifdef _WIN32
-        extern HWND g_hwnd;
-        if (g_hwnd) iconLeftOffset = ScalePx(iconLeftOffset, g_hwnd);
+        // P3.5-A3: CSS px -> physical px must use the DPI of the window that ASKED,
+        // not the primary's. They differ whenever the two sit on monitors at different
+        // scale factors; measured pre-fix as an identical 36px gap at 100% and 125%.
+        HWND scaleHwnd = OwnerHwndForScaling();
+        if (scaleHwnd) iconLeftOffset = ScalePx(iconLeftOffset, scaleHwnd);
 
         extern void CreateSiteInfoPanelOverlay(HINSTANCE hInstance, bool showImmediately, int iconLeftOffset);
         extern void ShowSiteInfoPanelOverlay(int iconLeftOffset, BrowserWindow* targetWin);
@@ -7804,14 +7839,18 @@ bool SimpleHandler::OnProcessMessageReceived(
             try { cssH = std::stoi(rs_args->GetString(0).ToString()); } catch(...) {}
         }
         extern HWND g_siteinfo_panel_overlay_hwnd;
-        extern HWND g_hwnd;
         if (cssH > 0 && g_siteinfo_panel_overlay_hwnd && IsWindow(g_siteinfo_panel_overlay_hwnd)
             && IsWindowVisible(g_siteinfo_panel_overlay_hwnd)) {
-            int physH = ScalePx(cssH, g_hwnd);
+            // P3.5-A3: the hub's auto-size is CSS px from React, so it scales with the
+            // requesting window's DPI. mainR moves with it -- the clamp is "keep the panel
+            // inside THAT window", and mixing this window's DPI with the primary's rect
+            // would make the bottom clamp incoherent.
+            HWND siScaleHwnd = OwnerHwndForScaling();
+            int physH = ScalePx(cssH, siScaleHwnd);
             RECT cur; GetWindowRect(g_siteinfo_panel_overlay_hwnd, &cur);
-            RECT mainR; GetWindowRect(g_hwnd, &mainR);
-            int minH = ScalePx(120, g_hwnd);
-            int maxH = mainR.bottom - cur.top - ScalePx(12, g_hwnd);
+            RECT mainR; GetWindowRect(siScaleHwnd, &mainR);
+            int minH = ScalePx(120, siScaleHwnd);
+            int maxH = mainR.bottom - cur.top - ScalePx(12, siScaleHwnd);
             if (physH < minH) physH = minH;
             if (maxH > minH && physH > maxH) physH = maxH;
             if (physH != (cur.bottom - cur.top)) {

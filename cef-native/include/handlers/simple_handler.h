@@ -301,6 +301,14 @@ public:
     // Get the BrowserWindow that owns this handler
     BrowserWindow* GetOwnerWindow() const;
 
+#ifdef _WIN32
+    // P3.5-A3 — the HWND whose DPI must be used to turn React's CSS px into physical px.
+    // React reports CSS px against ITS OWN window's device scale, so scaling with the
+    // primary window's DPI is wrong whenever the two sit on monitors at different scale
+    // factors. Falls back to the primary window when the owner cannot be resolved.
+    HWND OwnerHwndForScaling() const;
+#endif
+
     // Get this handler's window id
     int GetWindowId() const { return window_id_; }
 

@@ -41,7 +41,12 @@
     void CreateBRC100AuthOverlayWithSeparateProcess(HINSTANCE hInstance);
     void CreateNotificationOverlay(HINSTANCE hInstance, const std::string& type, const std::string& domain, const std::string& extraParams = "");
     void CreateSettingsMenuOverlay(HINSTANCE hInstance);
-    void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately = true);
+    // P3.5-A7: the omnibox is the one overlay whose Create path is still reachable in a
+    // normal session (the other eight dropdowns are pre-warmed hidden at startup, so their
+    // Create arm never runs for a user). It therefore needs the requesting window, exactly
+    // as Show*Overlay already does.
+    void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately = true,
+                              BrowserWindow* targetWin = nullptr);
     void ShowOmniboxOverlay(BrowserWindow* targetWin = nullptr);
     void HideOmniboxOverlay();
 
