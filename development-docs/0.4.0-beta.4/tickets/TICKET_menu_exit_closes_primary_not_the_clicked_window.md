@@ -35,14 +35,22 @@ code reading and became an observation.
 
 ## Why it matters
 
-The user clicks Exit in window B and window A vanishes instead — including whatever they had open in
-it. If A held the tabs they cared about, the loss is immediate and there is no undo. It is also the
-mechanism by which the app has **no application-wide quit at all**: after Exit, the app is still
-running, so a user who wanted to quit clicks Exit again and closes a second window.
+⛔ **This is NOT the window X button.** Clicking X closes only that window, correctly, in Hodos —
+📏 verified (`ShellWindowProc`'s `WM_CLOSE` secondary arm closes just that window's tabs). This ticket
+is only about the **`Exit` item in the three-dot menu** (`MenuOverlay.tsx`, label `"Exit"`).
 
-⚠️ **It compounds a second defect.** Because there is no quit-all, the only path that reaches
-`ShutdownApplication()` is closing the last window — which is precisely why multi-window session
-restore loses everything but that window (sibling ticket).
+The user clicks Exit in window B and window **A** vanishes instead — including whatever they had open
+in it. If A held the tabs they cared about, the loss is immediate and there is no undo. B, the window
+they were actually looking at, is still there, so the action reads as "nothing happened, and something
+else broke".
+
+It is wrong under **either** reading of what Exit should mean, which is why the fix is not blocked on
+settling that:
+
+| If `Exit` means | Correct behaviour | What happens today |
+|---|---|---|
+| quit the application | close **all** windows | closes one window, the wrong one |
+| close this window | close **B** | closes **A** |
 
 ## How exposed are we — answer this first
 
@@ -61,7 +69,8 @@ right HWND is all that is needed — the receiving side needs no change.
 
 ## Proposed fix
 
-**The floor** (one line each, two sites): resolve the owning window instead of `g_hwnd`.
+**The floor** (one line each, two sites — the `exit` IPC and `menu_action`'s `"exit"` arm): resolve
+the owning window instead of `g_hwnd`.
 
 ```cpp
 BrowserWindow* win = GetOwnerWindow();
@@ -69,17 +78,18 @@ HWND target = (win && win->hwnd) ? win->hwnd : g_hwnd;
 PostMessage(target, WM_CLOSE, 0, 0);
 ```
 
-⚠️ **But decide the product question first, because the floor may be the wrong answer.** "Exit"
-conventionally means *quit the application*, not *close this window* — Chrome and Firefox both quit
-everything. If that is the intent, the fix is not "post to the right window" but "add a real quit-all
-path that closes every window", and the menu item stays application-wide. The floor above turns Exit
-into a duplicate of the window's X button, which is arguably a worse UI than the bug.
+That makes Exit close the window it was clicked in, which is 👤 **the owner's stated expectation
+(2026-08-31)** and is unambiguously better than today under either reading above.
 
-⇒ 👤 **Owner decision needed** before coding: is Exit *quit the app* or *close this window*?
-The sibling session-restore ticket wants the former.
+⚠️ **One product question is left open, and it does not block the floor:** a menu item labelled
+*Exit* next to an X button that does the same thing is redundant — `Exit` in a browser's ⋮ menu
+conventionally means *quit the whole application*. ⛔ **Do not settle this from memory.** Per working
+rule #5, check what Chrome/Firefox/Vivaldi actually do with their menu Exit/Quit item before choosing,
+and record it in `PRIOR_ART.md`. An earlier draft of this ticket asserted Chrome's behaviour without
+checking and was wrong about it.
 
 ## Related
 
 - `development-docs/0.4.0-beta.3/phase-3.5-layout-window-scoping/MEASUREMENTS.md` **K18.1** — the run.
 - `TICKET_window_scoped_work_uses_process_globals.md` — the parent pattern.
-- `TICKET_multiwindow_session_restore_loses_all_but_last_window.md` — depends on the quit-all path.
+- `TICKET_multiwindow_session_restore_loses_all_but_last_window.md` — related, but ⛔ **not** blocked on this one; see its own Proposed fix.

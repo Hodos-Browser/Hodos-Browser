@@ -493,3 +493,18 @@ sort of claim this sprint keeps paying for, so the headline rows were re-run on 
 | `A7` | Omnibox first-open in B created at **`240,189`** = B-relative |
 | `A3` | Menu in B @125 % → gap **45**; menu in A @100 % → gap **36**. Both arms |
 
+## K20 — 👤 OWNER, 2026-08-31: there is no mixed-DPI case on the Mac in normal use
+
+Recorded so a future macOS parity pass does not stand up a rig it does not need. 👤 *"No DPI exist on
+the mac, I can plug it into one of these monitors when needed but normally I just have that mac laptop
+by itself."*
+
+⇒ the Mac is normally a **single display**, so the cross-DPI condition `P3.5-A3` reproduces
+(two windows, two scale factors, one process) **does not arise there in normal use**. It becomes
+reachable only when the laptop is docked to one of the Windows box's monitors.
+
+⛔ **This is not a statement that macOS is unaffected.** The macOS overlay model is different in kind
+— borderless `NSWindow`s positioned by `Create*OverlayMacOS`, not `WS_POPUP` windows owned by
+`g_hwnd` — so **neither** the Z-order defect nor the `ScalePx` defect transfers by argument. Phase 3.5
+makes no macOS claim and changed no macOS code. If a Mac parity pass is ever scoped, it starts by
+asking whether an owned-window z-order group even exists in AppKit, not by porting this fix.

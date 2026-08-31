@@ -86,25 +86,33 @@ existing teardown starts".
 
 ## Proposed fix
 
-**The floor.** Call `SaveSession()` once at the *start* of an application-wide quit, before any
-window's tabs are closed — i.e. on the first `WM_CLOSE` that is going to end the process, not the
-last. That needs a notion of "the app is quitting" distinct from "this window is closing", which
-`g_app_shutting_down` almost is.
+⭐ **The structural difference is *when* the session is written, not what writes it.** Hodos snapshots
+the whole session **once**, at shutdown. By then only one window still has tabs. A browser that saves
+the session **continuously** — updating it as windows and tabs open and close — never has this
+problem, because the file is already correct before the first window closes.
 
-⚠️ **The hard part is that there is no application-wide quit today** — see the sibling ticket on
-`PostMessage(g_hwnd, WM_CLOSE)`: menu → Exit closes only the primary window. Closing N windows is N
-independent user actions, and after each one the surviving windows are legitimately still running. So
-"save at the start of quit" has no unambiguous trigger until a real quit-all path exists.
+**The floor.** Update the persisted session on each window close as well as at shutdown, so a window
+that closes early contributes its tabs before they are discarded. `SaveSession()` needs no change; it
+is only ever called too late.
 
-**The system.** Give the app a genuine quit-all command (menu → Exit closes *all* windows), have it
-snapshot the session first, then tear down. That also fixes the sibling ticket. Until then, a cheaper
-partial: have each window's `WM_CLOSE` merge its own tabs into a persisted session file rather than
-writing the whole file once at the end — worse in that a closed-on-purpose window would linger in the
-restore set, which is a product question, not a technical one.
+⚠️ **This raises a product question that must be answered first, because it decides the shape:**
+if the user *deliberately* closes window B and then quits, should B come back on next launch?
+
+| Answer | Implication |
+|---|---|
+| No — restore only what was open at quit | Then a per-close save must also *remove* that window. Closing B is a deliberate discard, and "Recently closed" is where it should live instead |
+| Yes — restore everything from the session | Simpler to implement, but a window the user closed on purpose reappears, which most people read as a bug |
+
+⛔ **Do not settle this from memory** — per working rule #5, check what Chrome and Firefox actually do
+with a window closed mid-session, and record it in `PRIOR_ART.md`. An earlier draft of this ticket
+guessed and was wrong.
+
+⛔ **Not blocked on the `Exit` ticket.** An earlier draft claimed this fix depended on adding an
+application-wide quit path. It does not: saving per window close fixes it regardless of what `Exit`
+ends up meaning.
 
 ## Related
 
 - `development-docs/0.4.0-beta.3/phase-3.5-layout-window-scoping/MEASUREMENTS.md` **K17** — the run.
 - `TICKET_window_scoped_work_uses_process_globals.md` — the parent window-scoping ticket.
-- `TICKET_menu_exit_closes_primary_not_the_clicked_window.md` — the missing quit-all path, which this
-  fix depends on.
+- `TICKET_menu_exit_closes_primary_not_the_clicked_window.md` — the other multi-window quit defect. Related, **not** a dependency.
