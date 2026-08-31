@@ -46,6 +46,33 @@ HWND thisHeaderHwnd = bw ? bw->header_hwnd : g_header_hwnd;
 ⇒ `ShellWindowProc` receives `HWND hwnd` — **the window the message is for** — as its first
 parameter. Like `OnFullscreenModeChange`, the correct context is **already in hand and discarded**.
 
+### 1.1 📏 Measured site inventory — 2026-08-31, so this need not be re-derived
+
+`ShellWindowProc` splits into arms that are **already correct** and arms that are not. The correct
+ones are listed too, because the fix is to make the rest look like them.
+
+| Arm | State |
+|---|---|
+| `WM_ACTIVATE` (L~1492), `WM_ACTIVATEAPP` (L~1503), `WM_CLOSE` (L~1553), `WM_DPICHANGED` (L~1740) | ✅ **Already resolve `bw` from `GetWindowLongPtr(hwnd, GWLP_USERDATA)`.** Leave alone |
+| `WM_SIZE` header/tab layout (L~1244) | ✅ Already `bw ? bw->header_hwnd : g_header_hwnd` |
+| `WM_SIZE` fullscreen re-expand (L~1209) | ✅ Fixed in Phase 3 (`fsWin`) |
+| 🔴 `WM_SIZE` **picker arm** (L~1188) | Uses `g_header_hwnd` + `SimpleHandler::GetHeaderBrowser()` |
+| 🔴 **Overlay reposition block** (L~1300–1470) | **27 global references** across **7 overlays** |
+
+The overlay block is the dense cluster and the reason this phase exists. It touches:
+`g_settings_overlay_hwnd`, `g_cookie_panel_overlay_hwnd`, `g_download_panel_overlay_hwnd`,
+`g_siteinfo_panel_overlay_hwnd`, `g_wallet_overlay_hwnd`, `g_backup_overlay_hwnd`,
+`g_notification_overlay_hwnd` — plus `g_header_hwnd`, `g_hwnd`, and the `g_*_icon_*_offset` globals.
+
+⭐ **Every one of these already exists on `BrowserWindow`** (`settings_overlay_hwnd`,
+`cookie_panel_overlay_hwnd`, `settings_icon_right_offset`, …). The edit is `g_x` → `bw->x` after one
+`bw` resolution at the top of the block, which is exactly the owner's *"it's a pattern"* read.
+
+⚠️ **Do NOT mechanically convert `ScalePx(…, hwnd)` inside this block — it is already CORRECT.**
+The block mixes right and wrong: `mainRect` and every `ScalePx` already use the message's own `hwnd`,
+while the header/overlay handles use globals. A blanket find-and-replace would damage the correct half.
+That mixture is the signature of the half-finished migration and the main hazard of this phase.
+
 **Also in scope:** the **12 `ScalePx(x, g_hwnd)`** sites (`simple_handler.cpp` overlay-show handlers,
 `LayoutHelpers.h :: ScalePx`). They take DPI from the **primary** window, so a dropdown opened in a
 window on a **different-DPI monitor** is scaled wrong. They are overlay *layout*, so they belong
