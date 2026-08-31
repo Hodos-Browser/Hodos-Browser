@@ -3,6 +3,7 @@
 **Filed:** 2026-08-17, during 0.4.0 archiving
 **Severity:** reproducibility — the source ref for the engine we ship can move
 **Status:** OPEN — beta.3, cheap
+**Sprint:** 📌 Phase 9 (release readiness) — bundled 2026-08-31.
 **Effort:** minutes (push two tags), plus a convention note
 
 ---

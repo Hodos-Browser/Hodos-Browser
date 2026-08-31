@@ -3,6 +3,7 @@
 **Filed:** 2026-08-17, during the DevOps-CICD doc review
 **Severity:** 🚨 **auto-update brick risk on macOS 11** — blocks promoting the 0.4.0 line to Sparkle
 **Status:** OPEN — **candidate blocker for promoting 0.4.0**
+**Sprint:** 📌 **Phase 9 (release readiness)** — bundled 2026-08-31. 🚦 **Must close before PROMOTION**, which is a different constraint from phase order: 0.4.0 cannot ship without it.
 **⛔ Production code untouched.** Per CLAUDE.md invariant #13 the evidence points at
 `scripts/generate-appcast.py` being wrong, so this is filed for approval rather than fixed.
 

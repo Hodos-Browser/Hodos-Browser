@@ -1,6 +1,7 @@
 # Quiet mode grants protocol + basket access beyond what the manifest declared
 
 **Status:** 🔴 **OPEN — verified 2026-08-31.** V25 made the default *configurable*; `migrations.rs :: migrate_v24_to_v25` states narrowing quiet mode to what a manifest declared is "the open follow-up". Labelled 2026-08-31 (had no status line).
+**Sprint:** 📌 Phase 7 (consent surface) — bundled 2026-08-31.
 
 **Filed 2026-08-23**, out of beta.3 Phase 0.8's live testing. Surfaced by the owner asking what
 happens when a manifest declares something the engine does not model. **Phase 0.8 shipped the UI

@@ -7,6 +7,7 @@ selection is a **permanently destroyed asset**... treat this with the same serio
 privacy-perimeter gates") while no code enforces it.
 
 **Status: OPEN. Added to beta.3 at the owner's instruction** (2026-08-29) because path 1 below is
+**Sprint:** 📌 **Phase 8 (money-path correctness) — but ⛔ SHOULD NOT WAIT.** Bundled 2026-08-31 (`SPRINT_PLAN.md` §4.1), and flagged there as one of four that should move: **path 1 is an automatic daily task**, so it needs no user action to permanently destroy a 1-sat asset. Recommended before or alongside Phase 4.
 automatic and needs no user action. The full classification guard is scoped as beta.4 sprint 1; this
 ticket is the **minimal defensive floor** only.
 

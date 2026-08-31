@@ -4,6 +4,7 @@
 **Severity:** ~~🚨 **can SILENTLY abort silent auto-update** (confirmed mechanism)~~ → see §0 —
 **wallet financial data written into the install root, outside every logging control**
 **Status:** 🟡 CODE COMPLETE (Phase 0, 2026-08-18) — T2/T3 rows owed
+**Sprint:** 📌 **Phase 9 (release readiness)** — but ⭐ **fold the owed T2/T3 rows into the Phase 3 install session instead.** Both need a REAL install, and Phase 3 changed the installer (`[Icons]` now declare an AUMID), so `P3-A7` already re-owes the "nothing new inside `{app}`" assertion. Testing separately means installing twice.
 **Present in:** beta.1 **and beta.2** (`WalletService.cpp` is byte-identical between the two tags)
 
 ---

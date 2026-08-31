@@ -1,6 +1,7 @@
 # TICKET — the connect modal has two views of one consent, and they drift
 
 **Status:** ❔ **NEEDS OWNER REVIEW** — P0.8 rewrote much of this surface — is the drift closed, or just moved? Labelled 2026-08-31 by the triage pass; see `TICKET_TRIAGE_2026-08-31.md`.
+**Sprint:** 📌 Phase 7 (consent surface) — bundled 2026-08-31.
 
 **Filed** 2026-08-23, beta.3 Phase 0.8 live testing. **Owner-raised.**
 **Severity** MEDIUM — no known exploit; the failure mode is a user consenting to

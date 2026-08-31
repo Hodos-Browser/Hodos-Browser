@@ -2,6 +2,7 @@
 
 **Opened 2026-08-24**, found while wiring the loopback prompt in Phase 0.9.
 **Status:** 🔵 OPEN. Affects **location, notifications, clipboard** — shipped today.
+**Sprint:** 📌 Phase 7 (consent surface) — bundled 2026-08-31.
 Camera/mic are **not** affected. Loopback/local-network were fixed in 0.9.
 
 ## The defect

@@ -3,6 +3,7 @@
 **Filed:** 2026-08-17, answering "did we update dependencies after CEF 150?"
 **Severity:** process gap — no CVE/freshness path on a money-handling binary
 **Status:** OPEN — beta.3, cheap
+**Sprint:** 📌 Phase 9 (release readiness) — bundled 2026-08-31.
 **Effort:** a documented cadence + one review pass
 
 ---

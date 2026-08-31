@@ -1,6 +1,7 @@
 # Long-lived surfaces snapshot their state at browser start and are never told it changed
 
 **Status:** ❔ **NEEDS OWNER REVIEW** — filed unscheduled; scope unclear. Labelled 2026-08-31 by the triage pass; see `TICKET_TRIAGE_2026-08-31.md`.
+**Sprint:** 📌 Phase 10 (UI/layout leftovers) — bundled 2026-08-31.
 
 **Found:** 2026-08-25, by the owner, during the Phase 1 (WS1) test session.
 **Reported symptom:** *"I changed the avatar on another profile. It did take, but it didn't refresh

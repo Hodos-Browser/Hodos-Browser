@@ -3,6 +3,7 @@
 **Filed:** 2026-08-17 (found while sourcing the beta.2 farbling rotation token)
 **Severity:** security — an unauthenticated local control channel over the browser, in shipped builds
 **Status:** OPEN — beta.3 candidate
+**Sprint:** 📌 Phase 9 (release readiness) — bundled 2026-08-31.
 **Design already exists:** `development-docs/0.4.0/DEVTOOLS_SECURITY_DESIGN.md` (2026-08-04)
 
 ---

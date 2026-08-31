@@ -3,6 +3,7 @@
 **Filed:** 2026-08-26, during beta.3 Phase 2a (`phase-2-logging-syncio/PHASE_CONTRACT.md`)
 **Severity:** ⚠️ correctness — spurious user-visible failures; **not** money-losing
 **Status:** OPEN — `getBalance` fixed, the rest of the pattern is not
+**Sprint:** 📌 Phase 8 (money-path correctness) — bundled 2026-08-31. ⛔ Read its "NOT fixed and why" first: deduping `sendTransaction` would collapse two payments into one.
 
 ---
 

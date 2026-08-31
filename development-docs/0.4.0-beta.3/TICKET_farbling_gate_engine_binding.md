@@ -3,6 +3,7 @@
 **Filed:** 2026-08-17, during the beta.2 release run
 **Severity:** gate weakness, not a shipped-product defect
 **Status:** OPEN — beta.3
+**Sprint:** 📌 Phase 9 (release readiness) — bundled 2026-08-31.
 **Owner decision needed:** no. This is a straight fix; only the sequencing is a choice.
 
 ---

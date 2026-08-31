@@ -257,7 +257,9 @@ Standalone, research-heavy, security-sensitive. Scope against §2's wall **befor
 ## 4. Order
 
 **WS1b(a) → WS5(a) → WS6 → WS1 → WS1b(b) → WS2 → WS2(cont.) → WS3 → WS5(b) → WS4.**
-*(phases 0 → 0.5 → 0.6 → 1 → 2 → 3 → **3.5** → 4 → 5 → 6; 3.5 added 2026-08-30)*
+*(phases 0 → 0.5 → 0.6 → 1 → 2 → 3 → **3.5** → 4 → 5 → 6 → **7 → 8 → 9 → 10**;
+3.5 added 2026-08-30; 7–10 are the ticket consolidation added 2026-08-31 — see §4.1)*
+**✅ 0 · 0.5 · 0.6 · 1 · 2 · 3 complete. 🚧 3.5 contracted, not started. ⬜ 4 · 5 · 6 · 7 · 8 · 9 · 10.**
 
 ⭐ **Changed 2026-08-18 (second revision), after `TICKET_loopback_host_form_wallet_routing.md` was
 filed and verified.** WS1b splits and its first half stays at the front; WS5 splits and its first
@@ -275,6 +277,61 @@ half slots in behind it.
 | **4 — WS3** | Tab & peripheral parity | Menu work is cross-platform; mic/camera is Mac-blocked on B1. |
 | **5 — WS5(b)** | Loopback compatibility: W0 + W1 + W2' + W3 | Fixes the user-visible interop bug **and** closes the cross-wallet routing hole (MetaNet Client answering for us — verified live). Placed after the reported-defect work because it rewrites a predicate every request passes through. |
 | **6 — WS4** | Chrome import | Last: most able to balloon, and its value is capped by a constraint we do not control. **First candidate to cut.** |
+| **7 — consent surface** | The permission/consent UX tickets | ⭐ **ADDED 2026-08-31** — see §4.1 |
+| **8 — money-path correctness** | Asset-safety tickets | ⭐ ADDED 2026-08-31 — see §4.1 |
+| **9 — release readiness** | Promotion blockers + DevOps hygiene | ⭐ ADDED 2026-08-31 — see §4.1 |
+| **10 — UI/layout leftovers** | The remaining visual defects | ⭐ ADDED 2026-08-31 — see §4.1 |
+
+### 4.1 Phase count, how to add one, and the ticket bundles ⭐ ADDED 2026-08-31
+
+**How many phases.** **Ten slots, six done.** `0 · 0.5 · 0.6 · 1 · 2 · 3` are ✅ complete;
+**`3.5` is contracted and inventoried but NOT started**; `4 · 5 · 6` were always planned;
+`7 · 8 · 9 · 10` are the ticket consolidation added here.
+
+**How to add a phase — three steps, no ceremony:**
+
+1. Add a row to the order table above and to the arrow line under §4.
+2. Create `phase-<n>-<slug>/PHASE_CONTRACT.md` from `PHASE_CONTRACT_TEMPLATE.md` — the seven
+   sections in `HARNESS.md` §1, none optional.
+3. Write a `SESSION_PROMPT_beta3_phase<n>_<slug>.md` so the phase can start in a fresh context.
+   (`SCOPING_PROCESS.md`: each stage reads the previous stage's **output file**, not its reasoning.)
+
+⭐ **The policy, in the owner's words (2026-08-31):** *"work through our current phases and then
+consolidate these tickets at the end."* We add items faster than we close them; that is accepted and
+is the owner's to manage. ⛔ So phases 7–10 are a **holding pattern, not a queue anyone pulls from** —
+and per `0.4.0-beta.4/tickets/README.md`, a ticket is not work until the owner assigns it.
+
+#### The bundles
+
+| Phase | Tickets | Logic |
+|---|---|---|
+| **7 — consent surface** | `consent_surface_fetches_third_party_favicon` · `quiet_mode_wider_than_manifest` · `brand_remaining_permission_prompts` (21) · `site_permission_dual_store` · ❔`connect_modal_two_views_drift` · ❔`manifest_description_can_misdescribe_protocol` | All one surface: what the user is shown when deciding to trust a site. Shared test setup, and `feedback_consent_surface_needs_human_eyes` applies to every row |
+| **8 — money-path correctness** | `token_outputs_destroyed_by_dust_paths` 🚨 · `placeholder_resolution_failure_broadcasts_anyway` · `bridge_single_slot_callbacks_race` (remainder) | Asset safety. ⛔ All three need the same care as Phase 0.5 and none may be done casually |
+| **9 — release readiness** | `appcast_missing_minimum_system_version` 🚦 · `farbling_gate_engine_binding` · `engine_pins_are_branches_not_tags` · `dependency_freshness_review` · `cdp_port_open_in_release` · `stray_log_in_install_root` (owed T2/T3) | Everything that gates **promotion** rather than behaviour. Mostly cheap; several are one sitting together |
+| **10 — UI/layout leftovers** | `modal_buttons_unclickable_small_screen` · ❔`chrome_ui_scales_but_its_window_does_not` · ❔`longlived_surfaces_snapshot_state_at_startup` · ❔`disable_features_autofill_is_a_noop` · Phase 1's overlay dead strip · the DPI matrix overlay section | The visual residue. ⚠️ Two of these may collapse into Phase 3.5 instead — see below |
+
+#### ⛔ Four that should NOT wait for the end
+
+Asked for explicitly. These have a reason to move, and the reason is not "it feels important":
+
+| Ticket | Where it belongs instead | Why |
+|---|---|---|
+| 🚨 `token_outputs_destroyed_by_dust_paths` | **Before or alongside Phase 4** | Its **path 1 is an automatic daily task**. It needs no user action to permanently destroy a 1-sat asset. Every day it waits is a day the task runs. The owner already pulled it into beta.3 for this reason; leaving it in Phase 8 quietly undoes that |
+| 🚦 `appcast_missing_minimum_system_version` | Phase 9, but **must close before promotion**, not before the sprint ends | It is a **promotion blocker**. If 0.4.0 ships without it, the sprint's output cannot be released — the phase order is irrelevant to that constraint |
+| `stray_log_in_install_root` (owed T2/T3) | **Fold into the Phase 3 install session** | Both need a **real install**, and Phase 3 *changed the installer* (`[Icons]` now declare an AUMID). `P3-A7` already re-owes the "nothing new inside `{app}`" assertion. Testing them separately means installing twice |
+| `modal_buttons_unclickable_small_screen` + ❔`chrome_ui_scales_but_its_window_does_not` | **Phase 3.5**, not Phase 10 | Same subsystem (layout/DPI) and the *same T3 setup* — two windows, two monitors, the mixed-DPI matrix cell. `P3.5-A3` already requires that rig. Doing them in Phase 10 means building it twice |
+
+⭐ **The pattern worth noticing:** three of the four move for the same reason — **they share a test
+rig with work already scheduled.** The expensive part of this sprint is not the code, it is standing
+up a human at two monitors with a real install. Group by rig, not by topic.
+
+#### 🙋 One thing to confirm
+
+⚠️ **Phase 3.5 is contracted, inventoried, and not started**, and the owner has said they will kick
+off **Phase 4** next. That is a legitimate priority call — Phase 4 is user-facing parity work and 3.5
+is internal correctness — but it should be a **decision, not a drift**. Either is fine; 3.5's contract
+and site inventory keep indefinitely. ⛔ What must not happen is 3.5 being *assumed* done because
+Phase 3 closed.
 
 **Why 0 and 0.5 lead.** Phase 0 removes a secret from disk; Phase 0.5 restores the approval gate to a
 fund-moving endpoint that currently has none. Both are small, both are independent of everything
