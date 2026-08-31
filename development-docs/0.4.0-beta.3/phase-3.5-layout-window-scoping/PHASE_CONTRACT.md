@@ -18,6 +18,58 @@ many sites at once. Everything still scattered after this goes to the beta.4 tic
 fix"*. For this subsystem it largely is. ⛔ For the rest it is not, which is why the rest is a
 separate ticket and not this phase.
 
+## 0.1 ⛔ RE-SCOPE — 2026-08-31, after measurement. This section SUPERSEDES §1.1's verdicts and §5.
+
+Written after the kickoff measured the tree (`MEASUREMENTS.md` K1–K9). **Three of this contract's
+original claims were refuted by measurement, and one defect it never named turned out to be the
+worst one.** Amended per `HARNESS.md` §1 ("scope changes amend the contract in the same commit").
+
+| Original scope item | Verdict after measurement |
+|---|---|
+| 🔴 overlay-reposition block, *"27 refs / 7 overlays"* | ⛔ **DROPPED.** Count is **47 / 9** (K1), and the block is **unreachable for secondary windows** — a primary-only guard sits 3 lines above it, so `g_x == bw->x` by construction and `P3.5-A1`'s RED **cannot be observed** (K3). The conversion is a no-op refactor and its test is vacuous |
+| 🔴 `WM_SIZE` picker arm | ⛔ **DROPPED.** One picker window per process by construction (K2) — correct as a global |
+| 12 × `ScalePx(x, g_hwnd)` | ✅ **KEPT** (K5). Still 📖 a code reading; its mixed-DPI reproduction has **not** been run (K7 — no mixed-DPI rig exists on the machine) |
+| `P3.5-G11↓` | ⛔ **NOT SATISFIABLE.** `G11` scans neither this file nor these patterns (K4). Baseline stays **60**, reason recorded in `HARNESS.md` §4 |
+| — *(not in the original contract)* | 🚨 **ADDED: the Z-order defect** (K9). Opening a dropdown from window B sends **B behind A**. 👤 Owner-observed, 📏 owner-run measurement, single monitor. **The most user-visible defect this phase has found** |
+
+### 0.1.1 📏 Why "just run the startup overlay creation again for window B" does not work
+
+👤 Owner's question, 2026-08-31: *"can we also just call the whole startup process again to fix it
+with what we already have?"* ⭐ **The instinct is right — per-window overlays are the correct end
+state, and `BrowserWindow`'s 14 overlay fields exist for exactly that.** But it cannot be reached by
+re-calling today's functions:
+
+📏 All 14 `Create*Overlay` functions are **hard-bound to the primary window** — 23 `GetPrimaryWindow()`
+calls in `simple_app.cpp`, and every creator ends with the same two lines:
+
+```cpp
+g_cookie_panel_overlay_hwnd = cookie_panel_hwnd;                       // process global
+BrowserWindow* mainWin = WindowManager::GetInstance().GetPrimaryWindow();
+if (mainWin) mainWin->cookie_panel_overlay_hwnd = g_...;               // ...and the PRIMARY's struct
+```
+
+⇒ calling them again for window B would (a) **overwrite every global with B's HWNDs**, orphaning A's
+overlay HWNDs *and* their CEF browser subprocesses, and (b) write B's handles into **A's**
+`BrowserWindow`. Making them per-window means changing all 14 creators to take a `BrowserWindow*` and
+stop touching globals — **that is the full migration, i.e. the beta.4 ticket. It is bigger than
+re-owning, not smaller.**
+
+### 0.1.2 The re-scoped phase
+
+**IN:**
+1. **Z-order fix** — an overlay shown for window B must not send B behind A (K9).
+2. **12 `ScalePx(x, g_hwnd)`** sites → the owning window (K5).
+3. **Omnibox create-path positioning** (K9.2) — the one live F4 instance, and ~free once (1) is done.
+
+**OUT:** the reposition block, the picker arm, `SaveSession`/`ShutdownApplication`, `G11` lowering,
+the 14-creator per-window migration (§0.1.1), and both fenced tickets from §1.2 unless the phase
+finishes early.
+
+⚠️ **R-CLOSE is now in play and §4 must be read as amended.** Re-owning a window is **not** a pure
+positioning change — an owned window is destroyed with its owner, so an overlay re-owned to B dies
+when B closes while `g_*_overlay_hwnd` still points at it (K9.4). This phase can no longer claim it
+"touches positioning, never lifetime", and it owes an explicit overlay-lifetime test.
+
 ## 1. The scope, established by measurement — 📏 and 📖
 
 `TabManager::GetAllTabs()`'s call sites in `cef_browser_shell.cpp` split into **three groups**, and
@@ -123,7 +175,34 @@ any other window.
 | **R-UPDATE** | A staged update still applies | `ShutdownApplication` is explicitly **not** converted (§1) — and it is on the shutdown path the updater depends on |
 | **R-INTEXT / R-PERIM** | Trust boundary + perimeter gates | Untouched. Listed because `simple_handler.cpp` is edited for the `ScalePx` sites |
 
-## 5. Evidence table
+## 5.0 ⭐ EVIDENCE TABLE — AMENDED 2026-08-31. This table is authoritative; §5 below is superseded.
+
+⛔ No empty RED or SUBJECT cells. A green result is reported with its red half or not at all.
+🎯 **Standing SUBJECT for every T3 row:** two windows of the **same profile made with Ctrl+N** ⇒
+**ONE process**, asserted by `winprobe.ps1` (`SUBJECT: PASS`) before the row is read. Two *profiles*
+are two processes and would pass every row while proving nothing.
+⛔ **`winprobe.ps1 -WatchSeconds N` is mandatory for any row involving a visible overlay.** One-shot
+mode cannot see one: overlays hide on focus loss, and clicking the console to run the probe *is*
+focus loss (K8.3).
+
+| ID | 🟢 GREEN | 🔴 RED — must be *seen* to fail | 🎯 SUBJECT | Tier | Result |
+|---|---|---|---|---|---|
+| `P3.5-Z1` | 🚨 **The phase's headline row.** Opening a dropdown in window B leaves B **above** A in Z-order; B stays visible | ✅ **ALREADY OBSERVED PRE-FIX, 2026-08-31 11:20** (K9): B fell from Z10→Z12 at overlay create **and** again at show, on the owner's machine, one process, two Ctrl+N windows | The **`Z` column**, not visibility. ⛔ "B disappeared" is ambiguous — `Z` separates *behind* from *minimized/hidden*, which look identical on screen. B's rect must stay `80,80 1820x932`, never `-32000` | T3 | 🔴 RED seen |
+| `P3.5-Z2` | ⭐ **Z1's two-sided partner.** The overlay is still **above the window it belongs to** — opened in B it is visible over B, not buried | Re-own the overlay but drop it from topmost → Z1 passes and Z2 fails. ⛔ Without this, "never raise anything" passes Z1 | The overlay's `Z` vs **B's** `Z`, same sample | T3 | ⬜ |
+| `P3.5-Z3` | 🚨 **The R-CLOSE row this re-scope owes** (K9.4). With a dropdown open in B, closing **B** must not destroy or orphan the overlay that A still needs; opening the same dropdown in A afterwards works | Close B with the overlay open, then open that dropdown in A. Pre-fix this is safe (overlay owned by A); **post-fix it is the new risk** — if it goes blank/dead, the fix traded a Z-order bug for a lifetime bug | `g_*_overlay_hwnd` still valid (`IsWindow`) **and** the overlay renders in A | T3 | ⬜ |
+| `P3.5-Z4` | The Z-order defect is **all 14 overlays**, not just the omnibox — the menu or shield dropdown opened in B also drops B | Open menu/shield in B pre-fix; B must fall in `Z` exactly as the omnibox did | A second overlay class in the probe output | T3 | ⬜ **UNMEASURED — do not generalise K9 in writing until run** |
+| `P3.5-A3` | A dropdown opened in window B uses **B's** DPI | 🔴 **Reproduce pre-fix first** on a mixed-DPI pair: same dropdown in a 100 % and a 150 % window; pre-fix the header-right-edge→panel-right-edge gap is **identical**, post-fix it differs by ~1.5× | ⚠️ **Never reproduced, and 📏 no mixed-DPI rig exists** — all three monitors read 96 dpi (K7). Needs a Windows scale change first. If not run: **SKIPPED ⇒ INCOMPLETE**, and the 12 sites defer to beta.4 | T3 | ⬜ |
+| `P3.5-A7` | Omnibox **create** path positions against the requesting window | ✅ **ALREADY OBSERVED PRE-FIX** (K9.2): created at `160,109` = A-relative while typing in B; `Show` then corrected it to `240,189` = B-relative | The rect at `Vis=False` (create), **not** the rect once shown — `Show` masks it | T3 | 🔴 RED seen |
+| `P3.5-A4` | 🚫 **Do-not-convert control.** `SaveSession`/`ShutdownApplication` still enumerate **all** tabs in **all** windows | Two windows with distinct tabs → quit → reopen; every tab from both returns. Convert one to per-window → tabs lost, row goes RED | The restored tab set across both windows | T2 + T3 | ⬜ |
+| ~~`P3.5-A1`~~ | ⛔ **RETIRED — vacuous** (K3). The reposition block is unreachable for secondary windows, so its RED cannot be observed | — | — | — | ⛔ void |
+| ~~`P3.5-A2`~~ | ⛔ **RETIRED** with A1 — it was A1's partner | — | — | — | ⛔ void |
+| ~~`P3.5-G11↓`~~ | ⛔ **RETIRED — not satisfiable** (K4). `G11` scans neither `cef_browser_shell.cpp` nor these patterns. Baseline stays 60 with a written reason in `HARNESS.md` §4 | — | — | — | ⛔ void |
+| `P3.5-A5` / `A6` | 🎫 The two fenced tickets (§1.2) | unchanged | unchanged | T3 | ⬜ **droppable — the re-scope makes this likely** |
+
+⭐ **Two rows are already RED before any code exists** (`Z1`, `A7`). That is the correct order and it
+is the first time this sprint a fix has started from an observed failure rather than a code reading.
+
+## 5. Evidence table  ⛔ SUPERSEDED by §5.0 — kept for provenance
 
 ⛔ No empty RED or SUBJECT cells. A green result is reported with its red half or not at all.
 
