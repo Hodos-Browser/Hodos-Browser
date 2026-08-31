@@ -1,9 +1,15 @@
 // cef-native/src/core/AumidPolicy.cpp
 //
-// Windows-only half of the AUMID policy: making sure a per-profile identity has a
-// shortcut that declares it, because that — and NOT a registry value, and NOT the exe's
-// version resource — is what names a taskbar button. Both alternatives were tried and
-// measured to fail; see the header for the evidence.
+// Windows-only half of the AUMID policy.
+//
+// What names a taskbar button is a SHORTCUT declaring the same AUMID — not a registry
+// value, and not the exe's version resource. Both alternatives were implemented or
+// asserted and then measured to fail; see the header for the evidence.
+//
+// ⚠️ This file no longer WRITES such shortcuts. The owner rejected per-profile Start Menu
+// entries on 2026-08-31 (one entry, "Hodos Browser", opening the picker). What is left
+// here is the cleanup path plus the record of what was learned — see the block above
+// RemoveProfileShortcut.
 
 #include "../../include/core/AumidPolicy.h"
 
@@ -79,97 +85,29 @@ std::wstring ProfileShortcutFileName(const std::string& profileName) {
     return std::wstring(kAumidDisplayName) + L" - " + safe + L".lnk";
 }
 
-bool EnsureProfileShortcut(const std::wstring& aumid,
-                           const std::string& profileId,
-                           const std::string& profileName) {
-    if (aumid.empty() || profileId.empty()) return false;
-
-    // The installer owns the Default profile's shortcut. Writing our own would duplicate
-    // the Start Menu entry, and the duplicate would not be removed on uninstall.
-    if (profileId == "Default") return false;
-
-    // ⛔ NEVER in a dev build. A .lnk cannot carry an environment variable, so a shortcut
-    // to build\bin\Release\HodosBrowser.exe launches WITHOUT HODOS_DEV=1 and the dev
-    // safeguard correctly refuses to start — the user gets a "DEV SAFEGUARD" dialog.
-    // Found the honest way: the owner clicked one on 2026-08-30 and got exactly that.
-    // So in dev these shortcuts are INERT BY CONSTRUCTION, and creating them only
-    // litters the developer's Start Menu with entries that can never work.
-    // ⚠️ Guarded HERE rather than at the call site so a future caller cannot reintroduce
-    // it. The production path is unaffected: an installed build needs no env var.
-    if (IsDevEnv()) {
-        LOG_INFO_AUMID("Dev build — skipping profile shortcut for " + ForLog(aumid) +
-                       " (a .lnk cannot set HODOS_DEV=1, so it could never launch)");
-        return false;
-    }
-
-    const std::wstring dir = StartMenuProgramsDir();
-    if (dir.empty()) {
-        LOG_WARNING_AUMID("Could not resolve the Start Menu Programs folder");
-        return false;
-    }
-    const std::wstring lnkPath = dir + L"\\" + ProfileShortcutFileName(profileName);
-
-    wchar_t exePath[MAX_PATH] = {0};
-    if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) == 0) {
-        LOG_WARNING_AUMID("Could not resolve the executable path");
-        return false;
-    }
-
-    // ⚠️ COM is initialised by the caller (WinMain does CoInitializeEx for taskbar work).
-    // Do not initialise it here — a second, mismatched apartment on the UI thread is a
-    // subtle way to break the shell integration this file exists to support.
-    IShellLinkW* link = nullptr;
-    HRESULT hr = CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
-                                  IID_PPV_ARGS(&link));
-    if (FAILED(hr) || !link) {
-        LOG_WARNING_AUMID("CoCreateInstance(ShellLink) failed, hr=" + std::to_string(hr));
-        return false;
-    }
-
-    const std::wstring args = L"--profile=\"" + Widen(profileId) + L"\"";
-    link->SetPath(exePath);
-    link->SetArguments(args.c_str());
-    link->SetIconLocation(exePath, 0);
-    link->SetDescription((std::wstring(kAumidDisplayName) + L" — " +
-                          Widen(profileName)).c_str());
-
-    // THE POINT OF THE WHOLE FUNCTION: stamp the AUMID so Windows can match this shortcut
-    // to the running window and take the button's name from it.
-    bool ok = false;
-    IPropertyStore* store = nullptr;
-    if (SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&store))) && store) {
-        PROPVARIANT pv;
-        if (SUCCEEDED(InitPropVariantFromString(aumid.c_str(), &pv))) {
-            if (SUCCEEDED(store->SetValue(PKEY_AppUserModel_ID, pv)) &&
-                SUCCEEDED(store->Commit())) {
-                ok = true;
-            }
-            PropVariantClear(&pv);
-        }
-        store->Release();
-    }
-
-    if (ok) {
-        IPersistFile* file = nullptr;
-        if (SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&file))) && file) {
-            ok = SUCCEEDED(file->Save(lnkPath.c_str(), TRUE));
-            file->Release();
-        } else {
-            ok = false;
-        }
-    }
-
-    link->Release();
-
-    if (ok) {
-        LOG_INFO_AUMID("Profile shortcut ensured for " + ForLog(aumid) + " -> " +
-                       ForLog(lnkPath));
-    } else {
-        LOG_WARNING_AUMID("Failed to write profile shortcut for " + ForLog(aumid) +
-                          " — its taskbar button will fall back to the exe filename");
-    }
-    return ok;
-}
+// ⛔ EnsureProfileShortcut was REMOVED 2026-08-31 at the owner's decision.
+//
+// It wrote one Start Menu shortcut per non-Default profile, which is what names that
+// profile's taskbar button (the mechanism is real -- see the header, and it was confirmed
+// live). The owner rejected the UX, not the mechanism:
+//
+//   "the start menu should just say Hodos Browser, nothing else and then that opens the
+//    profile picker if the user has more than one profile"
+//
+// The picker is already the front door: ResolveStartup returns picker mode for a
+// no-argument launch whenever more than one profile exists, so the single installer
+// shortcut already does the right thing.
+//
+// ⚠️ What is NOT solved by removing it: a non-Default window's taskbar button still has
+// no shortcut to take its name from and falls back to the exe filename. The owner does
+// want the profile name shown there. That needs a WINDOW-level mechanism
+// (PKEY_AppUserModel_RelaunchDisplayNameResource / RelaunchCommand on the window's
+// property store) rather than a shortcut. UNVERIFIED -- and this file has already been
+// wrong twice about what names a taskbar button, so it gets measured before it gets
+// written. Tracked as P3-A5d.
+//
+// RemoveProfileShortcut is KEPT: it cleans up shortcuts written by the intermediate
+// build on a developer machine. Nothing shipped with the creation path.
 
 bool RemoveProfileShortcut(const std::string& profileName) {
     const std::wstring dir = StartMenuProgramsDir();

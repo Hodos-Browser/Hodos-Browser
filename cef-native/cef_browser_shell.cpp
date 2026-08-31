@@ -5200,20 +5200,18 @@ static int RunHodosMain(HINSTANCE hInstance, int nCmdShow, void* sandbox_info,
         LOG_INFO("AUMID set: " + std::string(aumid->begin(), aumid->end()) +
                  " (profile " + (profileId.empty() ? "<unresolved>" : profileId) + ")");
 
-        // Give that identity a name Windows can display. A per-profile AUMID matches
-        // none of the installer's shortcuts, so without its own shortcut the button
-        // falls back to the exe FILENAME — the second half of the reported bug, and the
-        // half the owner confirmed on 2026-08-29.
+        // ⛔ NO per-profile Start Menu shortcut is written here. A previous revision did
+        // (it is what names a per-profile taskbar button — see AumidPolicy.h) and the
+        // OWNER REJECTED IT on 2026-08-31: the Start Menu must carry exactly ONE entry,
+        // "Hodos Browser", which opens the profile picker. Per-profile entries are
+        // clutter, and the picker is already the front door — ResolveStartup returns
+        // picker mode for a no-argument launch whenever >1 profile exists.
         //
-        // ⛔ A registry value under HKCU\...\AppUserModelId does NOT do this. That was
-        // implemented, verified written, and MEASURED not to work (2026-08-30). Only a
-        // matching shortcut names the button. See AumidPolicy.h.
-        //
-        // Default is skipped inside EnsureProfileShortcut: the installer owns that one.
-        if (!g_picker_mode && profileId != "Default" && !profileId.empty()) {
-            hodos::EnsureProfileShortcut(*aumid, profileId,
-                                         ProfileManager::GetInstance().GetCurrentProfile().name);
-        }
+        // ⚠️ CONSEQUENCE, recorded rather than hidden: a non-Default window's taskbar
+        // button therefore has no shortcut to take its name from, and falls back to the
+        // exe filename. Naming it needs a WINDOW-level mechanism instead
+        // (PKEY_AppUserModel_Relaunch* — candidate, UNVERIFIED). Tracked in the phase
+        // contract as P3-A5d; ⛔ do not re-add a Start Menu shortcut to solve it.
     } else {
         LOG_WARNING("AUMID not set — taskbar button will fall back to the exe filename");
     }

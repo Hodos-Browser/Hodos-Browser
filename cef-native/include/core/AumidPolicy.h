@@ -144,29 +144,35 @@ namespace hodos {
 // button. Exposed so the delete path and any test can derive the same name.
 std::wstring ProfileShortcutFileName(const std::string& profileName);
 
-// Ensure a Start Menu shortcut exists declaring `aumid`, so Windows has a name for the
-// taskbar button of a window carrying that identity.
+// ⛔ THERE IS NO EnsureProfileShortcut. Removed 2026-08-31 by owner decision.
 //
-// WHY A SHORTCUT AND NOT A REGISTRY VALUE — measured, see the header block above.
-// Windows names a taskbar button from a shortcut that declares the same AUMID. The
-// Default profile is covered by installer/hodos-browser.iss's [Icons], which declare
-// "HodosBrowser". Every OTHER profile carries "HodosBrowser.<id>", which matches nothing
-// the installer wrote — so it needs its own shortcut. Chrome does exactly this.
+// Writing one Start Menu shortcut per non-Default profile DOES name that profile's
+// taskbar button — the mechanism is real and was confirmed live. The owner rejected the
+// **UX**, not the mechanism:
 //
-// ⚠️ USER-VISIBLE: this puts an entry in the Start Menu, one per non-Default profile.
-// That is a deliberate trade (and a small feature — you can launch a profile directly).
-// ⛔ Never call this for the Default profile: the installer already owns that shortcut,
-// and writing a second one would create a duplicate Start Menu entry.
+//   "the start menu should just say Hodos Browser, nothing else and then that opens the
+//    profile picker if the user has more than one profile"
 //
-// Best-effort: a failure is logged and never fatal. An unnamed taskbar button is a
-// cosmetic regression; refusing to start over it is not an acceptable trade.
-bool EnsureProfileShortcut(const std::wstring& aumid,
-                           const std::string& profileId,
-                           const std::string& profileName);
+// ⭐ That already works: `ProfileManager::ResolveStartup` returns picker mode for a
+// no-argument launch whenever more than one profile exists, and the installer's single
+// `{group}\Hodos Browser` shortcut passes no argument. Nothing to build for that half.
+//
+// ⚠️ STILL OPEN — the owner also wants the profile NAME shown on a window's taskbar
+// button ("Hodos Browser - <name>", including for Default "where needed"). Without a
+// shortcut there is nothing for Windows to take that name from, so it needs a
+// WINDOW-level mechanism instead:
+//     PKEY_AppUserModel_RelaunchDisplayNameResource + …_RelaunchCommand + …_RelaunchIconResource
+// set on the window's own property store (SHGetPropertyStoreForWindow).
+// 🧠 CANDIDATE, **UNVERIFIED** — and note `…DisplayNameResource` is documented to take an
+// indirect resource reference ("path\app.exe,-101"), not necessarily a plain string.
+// ⛔ This file has already been wrong TWICE about what names a taskbar button (the exe
+// version resource, then the AppUserModelId registry key). Measure it before writing it.
+// Tracked as P3-A5d in the phase contract.
 
-// Remove a profile's Start Menu shortcut. Called when a profile is deleted, so we do not
-// leave an entry launching a profile that no longer exists — the orphaned-state problem
-// TICKET_deleted_profile_id_reused_over_orphaned_data.md describes.
+// Remove a profile's Start Menu shortcut.
+// ⚠️ Kept although nothing creates these any more: it cleans up after the intermediate
+// build that did, on a developer machine. Nothing was ever shipped with the creation path.
+// Also called on profile deletion, so a stale entry can never outlive its profile.
 bool RemoveProfileShortcut(const std::string& profileName);
 
 }  // namespace hodos
