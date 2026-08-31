@@ -79,6 +79,26 @@ window on a **different-DPI monitor** is scaled wrong. They are overlay *layout*
 here. 📖 Code reading — ⛔ **this defect has never been reproduced**; `P3.5-A3` is written to
 reproduce it **first**.
 
+### 1.2 ⭐ Two tickets joined this phase — fenced, because they share the RIG, not the CODE
+
+Assigned here 2026-08-31 (`SPRINT_PLAN.md` §4.1). Be precise about **why**, because getting this
+wrong is how a phase bloats:
+
+| Ticket | Shares the code? | Shares the rig? |
+|---|---|---|
+| `TICKET_chrome_ui_scales_but_its_window_does_not` | 🟡 **Probably** — window sizing vs DPI is this subsystem | ✅ yes |
+| `TICKET_modal_buttons_unclickable_small_screen` | ❌ **No** — React/CSS inside an overlay, not `ShellWindowProc` | ✅ yes |
+
+⇒ They are here because `P3.5-A3` already stands up the expensive thing: **a human at two monitors at
+different scale factors.** Standing that rig up twice is the waste worth avoiding — that is the whole
+argument, and it is not an argument that they are the same work.
+
+⛔ **Therefore: the conversion lands FIRST and separately.** These two are a distinct commit (or two),
+after the conversion is green. ⛔ Do **not** blend a React/CSS fix into the `g_x → bw->x` diff — a
+mixed commit makes the conversion impossible to revert cleanly (§8 promises exactly that).
+⚠️ If the conversion consumes the phase, **these two go back to Phase 10 and the phase still closes.**
+They are the droppable half; the conversion is not.
+
 ## 2. Goal
 
 An action in one window — resize, fullscreen, DPI change, opening a dropdown — changes **nothing** in
@@ -113,6 +133,8 @@ any other window.
 | `P3.5-A2` | ⭐ **A1's two-sided partner.** Window B's own resize actually *works* — B's header and tabs track B | Skip B's layout entirely → A1 passes and A2 fails. ⛔ Without this row, "never lay anything out" is a passing fix | Window B's own rects, measured | T3 | ⬜ |
 | `P3.5-A3` | A dropdown overlay opened in window B uses **B's** DPI | 🔴 **Reproduce the defect FIRST**, pre-fix, on a mixed-DPI pair (matrix cell #9): open the same dropdown in a 100 % window and a 150 % window; pre-fix the offsets must be **identical** (both scaled by the primary) and post-fix they must **differ** | ⚠️ **Never reproduced.** If the pre-fix arm shows them already differing, the `ScalePx` claim is **wrong** and these 12 sites leave this phase | T3 | ⬜ |
 | `P3.5-A4` | 🚫 **The do-not-convert control.** `SaveSession` and `ShutdownApplication` still enumerate **all** tabs across **all** windows | Open two windows with distinct tabs, quit, reopen → every tab from **both** returns. Convert one of them to per-window → tabs from the second window are lost, and this row goes RED | The restored session's tab set, across both windows. ⭐ This row exists because the *correct* fix for four sites is the *wrong* fix for three | T2 + T3 | ⬜ |
+| `P3.5-A5` | 🎫 `chrome_ui_scales_but_its_window_does_not` — window and content agree on scale | ❔ **First settle whether Phase 1's DPI work superseded it** — the ticket predates it and was never re-checked. If it did, the row closes as already-fixed with that evidence, which is a legitimate outcome | The window vs its rendered content on a non-primary-DPI monitor | T3 | ⬜ |
+| `P3.5-A6` | 🎫 `modal_buttons_unclickable_small_screen` — modal action buttons are reachable at the smallest supported viewport | 🔴 Reproduce first at a small viewport; the buttons must be **observed** unreachable before any fix. ⛔ Phase 1's `a3d8202` touched only `WalletDashboard.css` — a *different* surface — so do not assume it is related | The **modal**, not the wallet dashboard. React/CSS, not `ShellWindowProc` | T3 | ⬜ |
 | `P3.5-G11↓` | `P3-G11`'s baseline is lowered by exactly the sites this phase converted; residuals listed with reasons | Re-run `preflight.ps1 -NegativeControl -Only G11` → still fires on an injected violation at the new baseline | ⚠️ Baseline re-measured **by the tool**, never from M9.4's hand counts (`HARNESS.md` §9) | T0 | ⬜ |
 
 **Two-sided pairings.** `A1`/`A2` — *A is untouched* vs *B actually worked*; a fix that lays out

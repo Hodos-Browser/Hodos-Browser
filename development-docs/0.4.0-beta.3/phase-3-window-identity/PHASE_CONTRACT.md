@@ -116,7 +116,16 @@ Likewise `P3-A1` (the decision is right) is paired with `P3-A2`/`P3-A3` (the dec
 reaches Windows) — the whole point of M3/M4 is that we may be computing a correct AUMID that
 nothing downstream honours.
 
-### 4.1 🚨 How a production single-profile build gets tested — the honest answer
+### 4.1 🗂️ DEFERRED to the install batch — decided 2026-08-31
+
+⛔ **`P3-A4`, `P3-A5`'s production half, `P3-A6` and `P3-A7` do not run in this phase.** The owner
+batched every install-dependent row into **`../INSTALL_TEST_BATCH.md`** (rows I1–I7), to be run
+once before the RC. They are **OWED, not waived** — this phase closes with them visibly outstanding
+rather than by quietly reclassifying them.
+
+The reasoning below still stands and is why they cannot be run any other way.
+
+### 4.2 🚨 How a production single-profile build gets tested — the honest answer
 
 The prompt is right that this is the hard part, and the honest answer is **it cannot be tested from
 `build/bin/Release`**: the dev safeguard refuses without `HODOS_DEV=1`, and `HODOS_DEV=1` takes the

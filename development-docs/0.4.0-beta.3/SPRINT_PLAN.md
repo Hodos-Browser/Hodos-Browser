@@ -318,12 +318,31 @@ Asked for explicitly. These have a reason to move, and the reason is not "it fee
 |---|---|---|
 | 🚨 `token_outputs_destroyed_by_dust_paths` | **Before or alongside Phase 4** | Its **path 1 is an automatic daily task**. It needs no user action to permanently destroy a 1-sat asset. Every day it waits is a day the task runs. The owner already pulled it into beta.3 for this reason; leaving it in Phase 8 quietly undoes that |
 | 🚦 `appcast_missing_minimum_system_version` | Phase 9, but **must close before promotion**, not before the sprint ends | It is a **promotion blocker**. If 0.4.0 ships without it, the sprint's output cannot be released — the phase order is irrelevant to that constraint |
-| `stray_log_in_install_root` (owed T2/T3) | **Fold into the Phase 3 install session** | Both need a **real install**, and Phase 3 *changed the installer* (`[Icons]` now declare an AUMID). `P3-A7` already re-owes the "nothing new inside `{app}`" assertion. Testing them separately means installing twice |
+| `stray_log_in_install_root` (owed T2/T3) | ⇒ **`INSTALL_TEST_BATCH.md` row I5** | Both need a **real install**, and Phase 3 *changed the installer*. Superseded by the batching decision below — it now runs once, with every other install-dependent row |
 | `modal_buttons_unclickable_small_screen` + ❔`chrome_ui_scales_but_its_window_does_not` | **Phase 3.5**, not Phase 10 | Same subsystem (layout/DPI) and the *same T3 setup* — two windows, two monitors, the mixed-DPI matrix cell. `P3.5-A3` already requires that rig. Doing them in Phase 10 means building it twice |
 
 ⭐ **The pattern worth noticing:** three of the four move for the same reason — **they share a test
 rig with work already scheduled.** The expensive part of this sprint is not the code, it is standing
 up a human at two monitors with a real install. Group by rig, not by topic.
+
+#### 🗂️ Install-dependent rows are BATCHED — decided 2026-08-31
+
+> *"Lets just wait on the install tests, I know that is not best practices but we can keep track of it
+> and do everything that requires install tests at the end to save time."* — owner
+
+⇒ **`INSTALL_TEST_BATCH.md`** is the register. Build → install → test → uninstall is the sprint's most
+expensive loop and several phases each owe one or two rows of it; batching turns N installs into one.
+
+⛔ **This is only safe because the register exists.** The failure mode is silent loss — a row deferred
+with no home never runs. Rules: every deferral is written down **with the phase that owes it**, keeps
+its negative control, and is **OWED, never waived**. A phase does not get to look finished by moving a
+row there; its sign-off still cites the row and its state stays visibly owed.
+
+⚠️ **The batch cannot slip past the RC.** `P3-A6` and R-UPDATE are about *upgrading users who already
+have Hodos installed* — the one population that cannot be re-tested after shipping.
+
+⇒ Affects `P3-A4`, `P3-A6`, `P3-A7`/R-UPDATE, the `{app}`-cleanliness assertion,
+`stray_log_in_install_root`'s T2/T3, `appcast_missing_minimum_system_version`, and the uninstall sweep.
 
 #### 🙋 One thing to confirm
 
