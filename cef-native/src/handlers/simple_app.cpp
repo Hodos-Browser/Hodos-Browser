@@ -921,9 +921,6 @@ void ShowWalletOverlay(int iconRightOffset, BrowserWindow* targetWin) {
         overlayX, overlayY, panelWidth, panelHeight,
         SWP_SHOWWINDOW | SWP_NOACTIVATE);
 
-        // P3.5-Z1: the show above raises this overlay's OWNER (the primary window), which
-        // pushes the requesting window behind it. Put the requesting window back in front.
-        RaiseTargetWindowAfterOverlayShow(targetWin);
 
     // Remove WS_EX_TRANSPARENT to enable mouse input
     LONG exStyle = GetWindowLong(g_wallet_overlay_hwnd, GWL_EXSTYLE);
@@ -955,6 +952,13 @@ void ShowWalletOverlay(int iconRightOffset, BrowserWindow* targetWin) {
         wallet_browser->GetMainFrame()->ExecuteJavaScript(js, "", 0);
     }
     // The flag is only set at CREATION time (before React loads).
+
+    // P3.5-Z1: this overlay takes ACTIVATION (it has text input), and activating a window
+    // owned by the primary drags the primary's whole z-order group in front. Measured: the
+    // correction ran, and 225 ms later SetForegroundWindow undid it. So it has to come AFTER
+    // the activation, not before. SWP_NOACTIVATE leaves activation on the overlay, so the
+    // overlay's own WM_ACTIVATE close guard is unaffected.
+    RaiseTargetWindowAfterOverlayShow(targetWin);
 
     LOG_INFO_APP("Wallet overlay shown");
 }
@@ -2578,9 +2582,6 @@ void ShowTabListPanelOverlay(int iconLeftOffset, BrowserWindow* targetWin) {
         overlayX, overlayY, panelWidth, panelHeight,
         SWP_SHOWWINDOW | SWP_NOACTIVATE);
 
-        // P3.5-Z1: the show above raises this overlay's OWNER (the primary window), which
-        // pushes the requesting window behind it. Put the requesting window back in front.
-        RaiseTargetWindowAfterOverlayShow(targetWin);
 
     LONG exStyle = GetWindowLong(g_tablist_panel_overlay_hwnd, GWL_EXSTYLE);
     SetWindowLong(g_tablist_panel_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
@@ -2606,6 +2607,13 @@ void ShowTabListPanelOverlay(int iconLeftOffset, BrowserWindow* targetWin) {
                 tl_browser->GetMainFrame()->GetURL(), 0);
         }
     }
+
+    // P3.5-Z1: this overlay takes ACTIVATION (it has text input), and activating a window
+    // owned by the primary drags the primary's whole z-order group in front. Measured: the
+    // correction ran, and 225 ms later SetForegroundWindow undid it. So it has to come AFTER
+    // the activation, not before. SWP_NOACTIVATE leaves activation on the overlay, so the
+    // overlay's own WM_ACTIVATE close guard is unaffected.
+    RaiseTargetWindowAfterOverlayShow(targetWin);
 
     LOG_INFO_APP("Tab-list panel overlay shown");
 }
@@ -2837,9 +2845,6 @@ void ShowBookmarksPanelOverlay(int iconLeftOffset, BrowserWindow* targetWin) {
         overlayX, overlayY, panelWidth, panelHeight,
         SWP_SHOWWINDOW | SWP_NOACTIVATE);
 
-        // P3.5-Z1: the show above raises this overlay's OWNER (the primary window), which
-        // pushes the requesting window behind it. Put the requesting window back in front.
-        RaiseTargetWindowAfterOverlayShow(targetWin);
 
     LONG exStyle = GetWindowLong(g_bookmarks_panel_overlay_hwnd, GWL_EXSTYLE);
     SetWindowLong(g_bookmarks_panel_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
@@ -2859,6 +2864,13 @@ void ShowBookmarksPanelOverlay(int iconLeftOffset, BrowserWindow* targetWin) {
         bm_browser->GetHost()->SetFocus(true);
         bm_browser->GetHost()->Invalidate(PET_VIEW);
     }
+
+    // P3.5-Z1: this overlay takes ACTIVATION (it has text input), and activating a window
+    // owned by the primary drags the primary's whole z-order group in front. Measured: the
+    // correction ran, and 225 ms later SetForegroundWindow undid it. So it has to come AFTER
+    // the activation, not before. SWP_NOACTIVATE leaves activation on the overlay, so the
+    // overlay's own WM_ACTIVATE close guard is unaffected.
+    RaiseTargetWindowAfterOverlayShow(targetWin);
 
     LOG_INFO_APP("Bookmarks panel overlay shown");
 }
@@ -3334,9 +3346,6 @@ void ShowProfilePanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
         overlayX, overlayY, panelWidth, panelHeight,
         SWP_SHOWWINDOW | SWP_NOACTIVATE);
 
-        // P3.5-Z1: the show above raises this overlay's OWNER (the primary window), which
-        // pushes the requesting window behind it. Put the requesting window back in front.
-        RaiseTargetWindowAfterOverlayShow(targetWin);
 
     LONG exStyle = GetWindowLong(g_profile_panel_overlay_hwnd, GWL_EXSTYLE);
     SetWindowLong(g_profile_panel_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
@@ -3359,6 +3368,13 @@ void ShowProfilePanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
         profile_browser->GetHost()->SetFocus(true);
         profile_browser->GetHost()->Invalidate(PET_VIEW);
     }
+
+    // P3.5-Z1: this overlay takes ACTIVATION (it has text input), and activating a window
+    // owned by the primary drags the primary's whole z-order group in front. Measured: the
+    // correction ran, and 225 ms later SetForegroundWindow undid it. So it has to come AFTER
+    // the activation, not before. SWP_NOACTIVATE leaves activation on the overlay, so the
+    // overlay's own WM_ACTIVATE close guard is unaffected.
+    RaiseTargetWindowAfterOverlayShow(targetWin);
 
     LOG_INFO_APP("Profile panel overlay shown");
 }

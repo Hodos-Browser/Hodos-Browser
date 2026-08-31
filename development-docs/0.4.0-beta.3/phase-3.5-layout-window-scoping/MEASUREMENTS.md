@@ -508,3 +508,52 @@ reachable only when the laptop is docked to one of the Windows box's monitors.
 `g_hwnd` — so **neither** the Z-order defect nor the `ScalePx` defect transfers by argument. Phase 3.5
 makes no macOS claim and changed no macOS code. If a Mac parity pass is ever scoped, it starts by
 asking whether an owned-window z-order group even exists in AppKit, not by porting this fix.
+
+## K21 — 🚨 📏 MEASURED: the shipped fix was a **no-op for 4 of the 9 overlays**, including the wallet
+
+Found by checking my own fix before asking the owner to test it — **after** it had been committed,
+verified and pushed. `4f87f78` closed `Z1` for five overlays and did nothing for four.
+
+📏 **The evidence, from one watch run** (200 ms sampling), wallet opened in window B:
+
+```
+15:16:38.627   wallet Vis=True     B@Z11  A@Z12      <- the correction ran, B in front
+15:16:38.852   (225 ms later)      A@Z11  B@Z12      <- B drops behind A anyway
+```
+
+📖 Cause: `ShowWalletOverlay` ends with **`SetForegroundWindow(g_wallet_overlay_hwnd)`** — it is one of
+the overlays that takes **activation**, because it has text input (PIN entry). Activating a window
+**owned by the primary** drags the primary's whole z-order group to the front, and that happens
+*after* the correction, so the correction is simply undone.
+
+📏 **Four** `Show*Overlay` functions call `SetForegroundWindow`, and they are exactly the four with
+text input: **wallet, tab-list, bookmarks, profile**. The other five (omnibox, shield/cookie,
+download, site-info, menu) use `SWP_NOACTIVATE` and never take focus — those were correct.
+
+⭐⭐ **Why it survived the evidence table:** `Z1` and `Z4` were run against the **menu** and the
+**shield**, and both are in the working five. The rows were green and the SUBJECT was right; the
+*sample* of overlays was not. ⛔ A two-overlay sample was treated as "all 14" because K10 had
+generalised from one overlay to two. **`Z4` asked "is it all overlays?" and the answer turned out to
+be "the defect is, and so was the gap in the fix."**
+
+**Fix:** move `RaiseTargetWindowAfterOverlayShow(targetWin)` to **after** the `SetForegroundWindow`
+in those four, leaving the other five where they are. `SWP_NOACTIVATE` keeps activation on the
+overlay, so the wallet's `WM_ACTIVATE(WA_INACTIVE)` close guard is unaffected — 📏 verified, the
+wallet stayed open through the raise.
+
+📏 **Post-fix, all four, one process, B at `80,80` inside A at `0,0`:**
+
+| Overlay | Rect (B-relative: `B.top + 109 = 189`) | B vs A |
+|---|---|---|
+| wallet | `1500,181` | **B Z10 → above** A Z11 |
+| tab-list | `205,189` | B Z10, A Z11 |
+| bookmarks | `245,189` | B Z10, A Z11 |
+| profile | `1425,189` | B Z10, A Z11 |
+
+⭐ Note the wallet arm is the **strongest reading in the phase**: A started *above* B, and opening the
+wallet in B **brought B forward**, rather than merely failing to push it back.
+
+⭐⭐ **The lesson, and it is the sprint's own:** `feedback_own_work_is_the_weakest_link` says to panel
+your own fixes. This fix was committed, pushed, and reported as complete on the strength of two
+overlays out of nine. The check that caught it took four minutes and was only run because the next
+step was going to be *"owner, please test this"*.
