@@ -9,6 +9,9 @@
 #include "include/cef_frame.h"
 #include "include/cef_process_message.h"
 #include "include/cef_request_context.h"
+#include "include/cef_task.h"                 // P3.5-Z5: deferred foreground restore
+#include "include/base/cef_callback.h"        //   (cef_closure_task.h needs both of these)
+#include "include/wrapper/cef_closure_task.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -608,7 +611,23 @@ static void RaiseTargetWindowAfterOverlayShow(BrowserWindow* targetWin) {
 // B's header" while Win32 activation said "window A", and the two silently disagreed.
 static void RestoreTargetWindowAfterOverlayHide(BrowserWindow* targetWin) {
     if (!targetWin || !targetWin->hwnd || !IsWindow(targetWin->hwnd)) return;
-    SetForegroundWindow(targetWin->hwnd);
+    HWND target = targetWin->hwnd;
+    // ⛔ This MUST be deferred, not called inline, and the reason is the whole bug.
+    //
+    // The wallet is dismissed from inside WalletOverlayWndProc's WM_ACTIVATE(WA_INACTIVE)
+    // handler — i.e. while Windows is part-way through an activation change. The transfer to
+    // the overlay's OWNER (the primary window) completes after that handler returns, so a
+    // SetForegroundWindow issued from inside it is silently overwritten.
+    //
+    // 📏 MEASURED 2026-09-01, owner-run, one watch containing both cases:
+    //     11:02:10.9  wallet closed     -> A@Z10 FOCUS  B@Z11   inline fix had NO effect
+    //     11:02:24.4  bookmarks closed  -> B@Z10 FOCUS  A@Z11   inline fix WORKED
+    // Same function shape, same edit, opposite results — because bookmarks closes from a
+    // WH_MOUSE_LL hook callback, outside any activation change, and the wallet does not.
+    // ⭐ That split is what identified the mechanism; neither result alone would have.
+    CefPostDelayedTask(TID_UI, base::BindOnce([](HWND h) {
+        if (h && IsWindow(h) && !IsIconic(h)) SetForegroundWindow(h);
+    }, target), 50);
 }
 
 void CreateSettingsOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRightOffset) {

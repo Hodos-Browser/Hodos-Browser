@@ -691,3 +691,47 @@ ones that take activation because they have text input.
 `HideWalletOverlay`, so the fix covers both by construction — but *by construction* is a code
 argument, and the owner's re-run of the click-outside path is what settles the row.
 📏 Tab-list open+close also exercised: no hang, no loop, no repeated activation.
+
+## K24 — 📏 MEASURED (👤 owner-run): the K23 fix worked for **bookmarks** and **not** the wallet — and the split is the mechanism
+
+👤 One owner watch, 2026-09-01, containing both cases on the **same binary** with the **same edit**
+applied to both functions:
+
+```
+11:02:09.3   wallet    Vis=True  Z1 FOCUS   B@Z10  A@Z11
+11:02:10.9   wallet    Vis=False            A@Z10 FOCUS  B@Z11    ❌ STILL BROKEN
+11:02:23.3   bookmarks Vis=True  Z1 FOCUS   B@Z10  A@Z11
+11:02:24.4   bookmarks Vis=False            B@Z10 FOCUS  A@Z11    ✅ FIXED
+```
+
+⭐⭐ **Neither result alone would have identified anything. The pair does.** Same helper, same call
+site shape, opposite outcomes ⇒ the difference is not the fix, it is **how each overlay is
+dismissed**:
+
+| Overlay | Dismiss path | Inline `SetForegroundWindow` |
+|---|---|---|
+| bookmarks, tab-list, profile | `WH_MOUSE_LL` hook callback — ordinary code, no activation change in flight | ✅ works |
+| **wallet** | `WalletOverlayWndProc :: WM_ACTIVATE(WA_INACTIVE)` — **inside** an activation change | ❌ silently overwritten |
+
+📖 Win32: activation transfer to the overlay's **owner** completes *after* the `WM_ACTIVATE`
+handler returns, so anything the handler does to activation is undone by the system a moment later.
+
+**Fix:** make `RestoreTargetWindowAfterOverlayHide` **defer** the restore —
+`CefPostDelayedTask(TID_UI, …, 50)`, the pattern the shell already uses for the overlay pre-warm —
+so it lands after the transfer settles. The HWND is captured by value and re-validated with
+`IsWindow`/`IsIconic` inside the task, because the window can close during the delay.
+
+⚠️ **Known trade-off, stated rather than discovered later:** the restore is **unconditional**. If a
+user dismisses the wallet by deliberately clicking the *primary* window, they will be pulled back to
+the secondary after ~50 ms. ⛔ Not fixed, because that case has **not been observed** — fixing it
+speculatively means plumbing `WM_ACTIVATE`'s `lParam` (the window *gaining* activation) through
+`HideWalletOverlay`, which is real complexity for a hypothetical. ⭐ If it is ever reported, `lParam`
+is the discriminator and it is already available at the call site.
+
+### ⛔ My verification of this row is still WEAK, and it is labelled that way
+
+📏 `hideprobe.ps1` post-fix: the wallet closed and B stayed above A. But `SetForegroundWindow`
+was **refused by the foreground lock again**, and B was already in front, so *"stayed in front"*
+carries almost no information. ⇒ **the owner's re-run is the evidence for `Z5`; mine is not.**
+Four attempts now, none reliable — recorded so nobody later mistakes this probe for a working
+instrument.
