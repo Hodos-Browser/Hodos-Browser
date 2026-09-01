@@ -363,6 +363,18 @@ export const TabBar: React.FC<TabBarProps> = ({
                 onSwitchTab(tab.id);
               }
             }}
+            onContextMenu={(e) => {
+              // Right-click deliberately does NOT switch tabs (handlePointerDown ignores
+              // non-primary buttons), so the menu can be opened on a BACKGROUND tab —
+              // which is the case every action has to get right.
+              e.preventDefault();
+              e.stopPropagation();
+              window.cefMessage?.send('tab_context_menu_show', [
+                tab.id,
+                Math.round(e.clientX),
+                Math.round(e.clientY),
+              ]);
+            }}
             tabRef={setTabRef(index)}
             isDragged={isDragged}
             dropIndicator={dropIndicator}

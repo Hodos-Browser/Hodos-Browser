@@ -18,6 +18,8 @@ interface TabComponentProps {
   isDragged?: boolean;
   dropIndicator?: 'left' | 'right' | null;
   onPointerDown?: (e: React.PointerEvent) => void;
+  /** Right-click → tab context menu (overlay #15). */
+  onContextMenu?: (e: React.MouseEvent) => void;
 }
 
 export const TabComponent: React.FC<TabComponentProps> = ({
@@ -30,6 +32,7 @@ export const TabComponent: React.FC<TabComponentProps> = ({
   isDragged,
   dropIndicator,
   onPointerDown,
+  onContextMenu,
 }) => {
   // Timeout loading spinner after 8 seconds — some sites (investing.com, yahoo.com)
   // have persistent connections that keep CEF's isLoading=true indefinitely
@@ -51,6 +54,7 @@ export const TabComponent: React.FC<TabComponentProps> = ({
       ref={tabRef}
       onClick={onClick}
       onPointerDown={onPointerDown}
+      onContextMenu={onContextMenu}
       onMouseDown={(e: React.MouseEvent) => {
         // Prevent bubbling to TabBar's window-drag handler so clicking
         // any tab (active or inactive) never triggers window_start_drag.

@@ -181,6 +181,98 @@ static void SendCurrentZoomToMenuOverlay(CefRefPtr<CefBrowser> menu_browser) {
     menu_browser->GetMainFrame()->ExecuteJavaScript(js, menu_browser->GetMainFrame()->GetURL(), 0);
 }
 
+// ===== Tab context menu (overlay #15) — P4 =====
+//
+// ⛔ The tab that was right-clicked is remembered HERE, from the moment the menu opens
+// until an item is clicked. It is NEVER re-derived from GetActiveTab() at action time:
+// right-clicking a BACKGROUND tab must act on that tab, and the active tab is exactly
+// what it is not. That substitution is the defect P4-A2 exists to catch.
+//
+// ⛔ This is a `Tab::id`, not a `CefBrowser::GetIdentifier()`. The two are different ID
+// schemes (see TabManager::GetTabIdForBrowserIdentifier); the header sends the Tab::id
+// it already renders, and the action handler resolves it with TabManager::GetTab().
+static int s_tabmenu_target_tab_id = -1;
+
+// The two bulk-close items are disabled when there is nothing to close, so the menu never
+// offers an action that would do nothing. Pushed into the overlay the way the three-dot
+// menu's zoom level is, and re-pushed from OnAfterCreated because on the very first open
+// the overlay's browser does not exist yet.
+static bool s_tabmenu_has_others = false;
+static bool s_tabmenu_has_right = false;
+
+static void SendTabMenuContext(CefRefPtr<CefBrowser> tabmenu_browser) {
+    if (!tabmenu_browser || !tabmenu_browser->GetMainFrame()) {
+        return;
+    }
+    std::string js = "if (window.setTabMenuContext) { window.setTabMenuContext(" +
+                     std::string(s_tabmenu_has_others ? "true" : "false") + ", " +
+                     std::string(s_tabmenu_has_right ? "true" : "false") + "); }";
+    tabmenu_browser->GetMainFrame()->ExecuteJavaScript(js, tabmenu_browser->GetMainFrame()->GetURL(), 0);
+}
+
+// One window's tabs, in display order. Every tab-menu action is scoped to the window the
+// right-clicked tab belongs to — never to the active window (P4-A4).
+static std::vector<Tab*> TabsInWindow(int window_id) {
+    std::vector<Tab*> out;
+    for (Tab* t : TabManager::GetInstance().GetAllTabs()) {
+        if (t->window_id == window_id) out.push_back(t);
+    }
+    return out;
+}
+
+// Reads an IPC argument as an int whichever numeric shape the V8 bridge chose for it.
+// CefListValue::GetInt returns 0 for a VTYPE_DOUBLE entry, and a silent 0 here would
+// target "no tab" rather than fail loudly.
+static int ArgAsInt(CefRefPtr<CefListValue> args, size_t i, int fallback) {
+    if (!args || i >= args->GetSize()) return fallback;
+    switch (args->GetType(i)) {
+        case VTYPE_INT:    return args->GetInt(i);
+        case VTYPE_DOUBLE: return static_cast<int>(args->GetDouble(i));
+        case VTYPE_STRING:
+            try { return std::stoi(args->GetString(i).ToString()); } catch (...) { return fallback; }
+        default: return fallback;
+    }
+}
+
+// Creates a tab in a SPECIFIC window (CreateNewTabWithUrl uses the active one, which is
+// the wrong window when the menu was opened in a background window).
+static int CreateTabInWindow(int window_id, const std::string& url) {
+    BrowserWindow* win = WindowManager::GetInstance().GetWindow(window_id);
+    if (!win) return -1;
+#ifdef _WIN32
+    HWND parentHwnd = win->hwnd;
+    if (!parentHwnd || !IsWindow(parentHwnd)) return -1;
+    RECT rect;
+    GetClientRect(parentHwnd, &rect);
+    int width = rect.right - rect.left;
+    int height = rect.bottom - rect.top;
+    int shellHeight = GetHeaderHeightPx(parentHwnd);
+    return TabManager::GetInstance().CreateTab(url, parentHwnd, 0, shellHeight,
+                                               width, height - shellHeight, window_id);
+#else
+    void* parentView = win->webview_view;
+    if (!parentView) return -1;
+    ViewDimensions dims = GetViewDimensions(parentView);
+    return TabManager::GetInstance().CreateTab(url, parentView, 0, 0,
+                                               dims.width, dims.height, window_id);
+#endif
+}
+
+// Moves new_id to sit immediately after after_id in that window's display order.
+// ReorderTabs takes a subset and keeps other windows' tabs where they are.
+static void InsertTabAfter(int window_id, int after_id, int new_id) {
+    std::vector<int> order;
+    for (Tab* t : TabsInWindow(window_id)) {
+        if (t->id == new_id) continue;
+        order.push_back(t->id);
+        if (t->id == after_id) order.push_back(new_id);
+    }
+    if (std::find(order.begin(), order.end(), new_id) == order.end()) {
+        order.push_back(new_id);  // anchor vanished mid-flight — append rather than drop
+    }
+    TabManager::GetInstance().ReorderTabs(order);
+}
+
 // Global backup modal state management
 static bool g_backupModalShown = false;
 
@@ -454,6 +546,7 @@ std::map<int, SimpleHandler*> SimpleHandler::browser_handler_map_;
 CefRefPtr<CefBrowser> SimpleHandler::download_panel_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::profile_panel_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::menu_browser_ = nullptr;
+CefRefPtr<CefBrowser> SimpleHandler::tabmenu_browser_ = nullptr;
 std::string SimpleHandler::pending_shield_domain_;
 std::string SimpleHandler::pending_bookmark_url_;
 std::string SimpleHandler::pending_bookmark_title_;
@@ -816,6 +909,9 @@ CefRefPtr<CefBrowser> SimpleHandler::GetProfilePanelBrowser() {
 CefRefPtr<CefBrowser> SimpleHandler::GetMenuBrowser() {
     auto* win = WindowManager::GetInstance().GetPrimaryWindow();
     return win ? win->menu_browser : nullptr;
+}
+CefRefPtr<CefBrowser> SimpleHandler::GetTabMenuBrowser() {
+    return tabmenu_browser_;
 }
 
 void SimpleHandler::TriggerDeferredPanel(const std::string& panel) {
@@ -2037,6 +2133,22 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
                 b->GetHost()->Invalidate(PET_VIEW);
             }
         }, browser_ref), 150);
+    } else if (role_ == "tabmenu") {
+        LOG_DEBUG_BROWSER("📑 Tab context menu overlay browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
+
+        tabmenu_browser_ = browser;
+        browser->GetHost()->SetFocus(true);
+
+        // ⛔ No context push on a timer here. On first open React has not mounted yet, so
+        // any delayed inject is a guess at how long Vite takes. The overlay pulls its
+        // context itself via tab_context_menu_request_context when its effect runs.
+        CefRefPtr<CefBrowser> browser_ref = browser;
+        CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
+            if (b && b->GetHost()) {
+                b->GetHost()->WasResized();
+                b->GetHost()->Invalidate(PET_VIEW);
+            }
+        }, browser_ref), 150);
     }
 
     LOG_DEBUG_BROWSER("🧭 Browser Created → role: " + role_ + ", ID: " + std::to_string(browser->GetIdentifier()) + ", IsPopup: " + (browser->IsPopup() ? "true" : "false") + ", MainFrame URL: " + hodos::LogSafeUrl(browser->GetMainFrame()->GetURL().ToString()));
@@ -2114,6 +2226,14 @@ void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
     }
 
     LOG_INFO_BROWSER(LogFmt() << "  → Not a tab, checking overlays...");
+
+    // The tab-menu overlay's ref is a process static, not a per-window slot, so the
+    // WindowManager cleanup below cannot reach it.
+    if (role_ == "tabmenu" && tabmenu_browser_ &&
+        tabmenu_browser_->GetIdentifier() == browser->GetIdentifier()) {
+        tabmenu_browser_ = nullptr;
+        LOG_INFO_BROWSER("  → Cleared tabmenu browser static");
+    }
 
     // Handle overlay browser cleanup via WindowManager
     BrowserWindow* owner_win = GetOwnerWindow();
@@ -3437,6 +3557,193 @@ bool SimpleHandler::OnProcessMessageReceived(
             }
             LOG_DEBUG_BROWSER("Bookmarks panel opened from menu (macOS)");
 #endif
+        }
+
+        return true;
+    }
+
+    // ========== TAB CONTEXT MENU (overlay #15) — P4 ==========
+
+    if (message_name == "tab_context_menu_show") {
+        CefRefPtr<CefListValue> tm_args = message->GetArgumentList();
+        int tabId   = ArgAsInt(tm_args, 0, -1);
+        int anchorX = ArgAsInt(tm_args, 1, 0);
+        int anchorY = ArgAsInt(tm_args, 2, 0);
+
+        Tab* target = TabManager::GetInstance().GetTab(tabId);
+        if (!target) {
+            LOG_WARNING_BROWSER("📑 Tab context menu: unknown tab id " + std::to_string(tabId) +
+                                " — not opening");
+            return true;
+        }
+
+        s_tabmenu_target_tab_id = tabId;
+
+        // Context for the two bulk-close items, computed against the tab's OWN window.
+        std::vector<Tab*> siblings = TabsInWindow(target->window_id);
+        size_t idx = siblings.size();
+        for (size_t i = 0; i < siblings.size(); i++) {
+            if (siblings[i]->id == tabId) { idx = i; break; }
+        }
+        s_tabmenu_has_others = siblings.size() > 1;
+        s_tabmenu_has_right  = (idx != siblings.size()) && (idx + 1 < siblings.size());
+
+        LOG_INFO_BROWSER("📑 Tab context menu open on tab " + std::to_string(tabId) +
+                         " (window " + std::to_string(target->window_id) +
+                         ", index " + std::to_string(idx) +
+                         " of " + std::to_string(siblings.size()) + ")");
+
+#ifdef _WIN32
+        // P3.5-A3: CSS px -> physical px against the DPI of the window that ASKED. The
+        // menu is anchored to the cursor, so getting this wrong on a mixed-DPI desktop
+        // puts the menu somewhere other than the tab that was clicked.
+        BrowserWindow* tmWin = WindowManager::GetInstance().GetWindow(target->window_id);
+        HWND scaleHwnd = (tmWin && tmWin->hwnd) ? tmWin->hwnd : OwnerHwndForScaling();
+        if (scaleHwnd) {
+            anchorX = ScalePx(anchorX, scaleHwnd);
+            anchorY = ScalePx(anchorY, scaleHwnd);
+        }
+
+        extern void CreateTabContextMenuOverlay(HINSTANCE hInstance, bool showImmediately,
+                                                int anchorX, int anchorY, BrowserWindow* targetWin);
+        extern void ShowTabContextMenuOverlay(int anchorX, int anchorY, BrowserWindow* targetWin);
+        extern HWND g_tabmenu_overlay_hwnd;
+        extern HINSTANCE g_hInstance;
+
+        if (!g_tabmenu_overlay_hwnd || !IsWindow(g_tabmenu_overlay_hwnd)) {
+            CreateTabContextMenuOverlay(g_hInstance, true, anchorX, anchorY, tmWin);
+        } else {
+            ShowTabContextMenuOverlay(anchorX, anchorY, tmWin);
+        }
+        SendTabMenuContext(GetTabMenuBrowser());
+#elif defined(__APPLE__)
+        // 🍎 Not built here. The macOS creation function is relayed in
+        // MAC_RELAY_P35_P4_ROUND.md (M3), per invariant #9. Windows has 15 overlays,
+        // macOS has 14 — nothing is broken meanwhile; macOS simply has no tab menu.
+        LOG_DEBUG_BROWSER("📑 Tab context menu: no macOS implementation yet");
+#endif
+        return true;
+    }
+
+    // Sent by the overlay the moment its React effect registers the receiver. Answering
+    // the browser that asked (rather than looking one up) means this is correct on the
+    // first open, before the ref has been filed against the primary window.
+    if (message_name == "tab_context_menu_request_context") {
+        SendTabMenuContext(browser);
+        return true;
+    }
+
+    if (message_name == "tab_context_menu_hide") {
+#ifdef _WIN32
+        extern void HideTabContextMenuOverlay();
+        HideTabContextMenuOverlay();
+#endif
+        return true;
+    }
+
+    if (message_name == "tab_context_menu_action") {
+        CefRefPtr<CefListValue> tm_args = message->GetArgumentList();
+        std::string action = tm_args->GetSize() > 0 ? tm_args->GetString(0).ToString() : "";
+
+#ifdef _WIN32
+        extern void HideTabContextMenuOverlay();
+        HideTabContextMenuOverlay();
+#endif
+
+        // ⛔ The target is the REMEMBERED right-clicked tab. Substituting GetActiveTab()
+        // here is P4-A2's RED and it is invisible on the happy path, because the
+        // right-clicked tab usually IS the active one.
+        const int targetId = s_tabmenu_target_tab_id;
+        Tab* target = TabManager::GetInstance().GetTab(targetId);
+        if (!target) {
+            LOG_WARNING_BROWSER("📑 Tab menu action '" + action + "': target tab " +
+                                std::to_string(targetId) + " no longer exists");
+            return true;
+        }
+        const int winId = target->window_id;
+
+        // P4-A2 SUBJECT: the tab id actually acted on, read from TabManager.
+        LOG_INFO_BROWSER("📑 Tab menu action '" + action + "' on tab " +
+                         std::to_string(targetId) + " (window " + std::to_string(winId) + ")");
+
+        if (action == "reload") {
+            if (target->browser) {
+                target->browser->Reload();
+            } else {
+                LOG_WARNING_BROWSER("📑 Tab menu reload: tab " + std::to_string(targetId) +
+                                    " has no browser yet");
+            }
+        } else if (action == "bookmark") {
+            std::string result = BookmarkManager::GetInstance().AddBookmark(
+                target->url, target->title, -1, std::vector<std::string>());
+            LOG_INFO_BROWSER("📑 Tab menu bookmark for tab " + std::to_string(targetId) +
+                             ": " + result);
+        } else if (action == "duplicate" || action == "new_tab_right") {
+            // Both open next to the right-clicked tab rather than at the end of the strip
+            // — the position is the point of "new tab to the right", and a duplicate that
+            // lands eight tabs away is not recognisably a duplicate.
+            const std::string url = (action == "duplicate") ? target->url : std::string();
+            int newId = CreateTabInWindow(winId, url);
+            if (newId > 0) {
+                InsertTabAfter(winId, targetId, newId);
+                LOG_INFO_BROWSER("📑 Tab menu " + action + ": new tab " +
+                                 std::to_string(newId) + " inserted after " +
+                                 std::to_string(targetId));
+            } else {
+                LOG_WARNING_BROWSER("📑 Tab menu " + action + ": tab creation failed in window " +
+                                    std::to_string(winId));
+            }
+            NotifyWindowTabListChanged(winId);
+        } else if (action == "close_others" || action == "close_right") {
+            // ⚠️ Collect IDs FIRST. CloseTab can erase from TabManager's map synchronously
+            // (a tab whose browser has not been created yet), which invalidates every Tab*
+            // held across the loop.
+            std::vector<Tab*> siblings = TabsInWindow(winId);
+            size_t idx = siblings.size();
+            for (size_t i = 0; i < siblings.size(); i++) {
+                if (siblings[i]->id == targetId) { idx = i; break; }
+            }
+            std::vector<int> doomed;
+            for (size_t i = 0; i < siblings.size(); i++) {
+                if (siblings[i]->id == targetId) continue;
+                if (action == "close_right" && !(idx != siblings.size() && i > idx)) continue;
+                doomed.push_back(siblings[i]->id);
+            }
+
+            // The surviving tab becomes active for close_others, matching Chrome and
+            // avoiding a cascade of intermediate switches as each active tab closes.
+            if (action == "close_others" && !doomed.empty()) {
+                TabManager::GetInstance().SwitchToTab(targetId);
+            }
+
+            // ⚠️ R-COUNT: each CloseTab fires ClearRustPaymentSessionForBrowser for that
+            // tab's browser. This is the first path that fires it N times in a row.
+            for (int id : doomed) {
+                TabManager::GetInstance().CloseTab(id);
+            }
+            LOG_INFO_BROWSER("📑 Tab menu " + action + ": closed " +
+                             std::to_string(doomed.size()) + " tab(s) in window " +
+                             std::to_string(winId));
+
+            // P4-A5: never leave a window with no tabs. Neither item can close the target,
+            // so this should be unreachable — it is enforced rather than argued, mirroring
+            // the same guard on the tab_close path.
+            bool windowHasTabs = false;
+            for (Tab* t : TabManager::GetInstance().GetAllTabs()) {
+                if (t->window_id == winId) { windowHasTabs = true; break; }
+            }
+            if (!windowHasTabs) {
+                LOG_WARNING_BROWSER("📑 Tab menu " + action + " emptied window " +
+                                    std::to_string(winId) + " — creating NTP");
+                CreateTabInWindow(winId, "");
+                NotifyWindowTabListChanged(winId);
+            }
+            // ⛔ No notify on the normal path. CloseBrowser is asynchronous, so a list
+            // sent from here still contains every tab that is about to close. The
+            // authoritative push now happens in TabManager::OnTabBrowserClosed, once each
+            // tab actually stops existing.
+        } else {
+            LOG_WARNING_BROWSER("📑 Tab menu: unknown action '" + action + "'");
         }
 
         return true;

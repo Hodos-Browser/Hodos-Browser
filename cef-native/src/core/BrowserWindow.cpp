@@ -21,6 +21,7 @@ void BrowserWindow::SetBrowserForRole(const std::string& role, CefRefPtr<CefBrow
     else if (role == "bookmarkspanel") bookmarks_panel_browser = browser;
     else if (role == "siteinfopanel") siteinfo_panel_browser = browser;
     else if (role == "tablistpanel") tablist_panel_browser = browser;
+    else if (role == "tabmenu")      tabmenu_browser = browser;
 }
 
 CefRefPtr<CefBrowser> BrowserWindow::GetBrowserForRole(const std::string& role) const {
@@ -42,6 +43,7 @@ CefRefPtr<CefBrowser> BrowserWindow::GetBrowserForRole(const std::string& role) 
     if (role == "bookmarkspanel")    return bookmarks_panel_browser;
     if (role == "siteinfopanel")     return siteinfo_panel_browser;
     if (role == "tablistpanel")      return tablist_panel_browser;
+    if (role == "tabmenu")           return tabmenu_browser;
     return nullptr;
 }
 

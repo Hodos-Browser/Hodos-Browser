@@ -629,15 +629,20 @@ void ReleaseOverlaysOwnedBy(HWND closing, HWND newOwner) {
     extern HWND g_siteinfo_panel_overlay_hwnd;
     extern HWND g_profile_panel_overlay_hwnd;
     extern HWND g_menu_overlay_hwnd;
+    extern HWND g_tabmenu_overlay_hwnd;
 
-    // All 14 overlays. The HWNDs are only re-owned, never reassigned, so the globals
+    // All 15 overlays. The HWNDs are only re-owned, never reassigned, so the globals
     // themselves stay valid and this list is read-only.
+    // ⛔ A new overlay that is not in this list is NOT protected when its window closes —
+    // it is destroyed with the owner (K12) and its g_*_overlay_hwnd dangles. Add it here
+    // in the same change that creates it.
     HWND overlays[] = {
         g_settings_overlay_hwnd, g_wallet_overlay_hwnd, g_backup_overlay_hwnd,
         g_brc100_auth_overlay_hwnd, g_notification_overlay_hwnd, g_settings_menu_overlay_hwnd,
         g_omnibox_overlay_hwnd, g_cookie_panel_overlay_hwnd, g_download_panel_overlay_hwnd,
         g_bookmarks_panel_overlay_hwnd, g_tablist_panel_overlay_hwnd,
         g_siteinfo_panel_overlay_hwnd, g_profile_panel_overlay_hwnd, g_menu_overlay_hwnd,
+        g_tabmenu_overlay_hwnd,
     };
     int moved = 0;
     for (HWND ov : overlays) {
@@ -3222,6 +3227,247 @@ void HideMenuOverlay() {
 
     BrowserWindow* menuFocusWin = WindowManager::GetInstance().GetWindow(menuTargetWinId);
     CefRefPtr<CefBrowser> header_browser = menuFocusWin ? menuFocusWin->header_browser : SimpleHandler::GetHeaderBrowser();
+    if (header_browser) {
+        header_browser->GetHost()->SetFocus(true);
+    }
+}
+
+// ==================== TAB CONTEXT MENU OVERLAY (#15) ====================
+//
+// P4-A1. Unlike every other dropdown here this one is anchored to a CURSOR position
+// rather than a toolbar icon, because it must track the tab that was right-clicked.
+// anchorX/anchorY arrive as physical pixels relative to the requesting window's
+// header, already scaled by the caller against the DPI of the window that asked
+// (P3.5-A3 — scaling against the primary is wrong on a mixed-DPI desktop).
+//
+// ⚠️ P4-A4: this trio takes the Show*(…, targetWin) shape and positions against
+// targetWin's HWNDs, never g_hwnd. Positioning against the primary is exactly how
+// Phase 3.5's defect gets reintroduced. The HWND is also listed in
+// ReleaseOverlaysOwnedBy() so it is handed back before its owner window is destroyed.
+
+void ShowTabContextMenuOverlay(int anchorX, int anchorY, BrowserWindow* targetWin = nullptr);
+void HideTabContextMenuOverlay();
+
+// Menu geometry in CSS px. The React side pins each row to 32px and the divider block
+// to 9px so this stays an exact fit rather than a guess with dead space at the bottom:
+// 6 rows (192) + 1 divider (9) + container padding (2 x 4) = 209.
+static const int kTabMenuWidthDip = 240;
+static const int kTabMenuHeightDip = 209;
+
+// Computes the overlay rect for a given anchor, clamped inside the target window.
+static void ComputeTabMenuRect(HWND posHwnd, HWND posHeader, int anchorX, int anchorY,
+                               int* outX, int* outY, int* outW, int* outH) {
+    RECT headerRect;
+    GetWindowRect(posHeader, &headerRect);
+    RECT mainRect;
+    GetWindowRect(posHwnd, &mainRect);
+
+    int panelWidth = ScalePx(kTabMenuWidthDip, posHwnd);
+    int panelHeight = ScalePx(kTabMenuHeightDip, posHwnd);
+
+    int overlayX = headerRect.left + anchorX;
+    int overlayY = headerRect.top + anchorY;
+
+    // Keep the menu inside the window it belongs to. Flipping left off the right
+    // edge is what a native context menu does; clamping down is enough vertically
+    // because the anchor is always in the tab strip at the very top.
+    if (overlayX + panelWidth > mainRect.right) {
+        overlayX = mainRect.right - panelWidth;
+    }
+    if (overlayX < mainRect.left) overlayX = mainRect.left;
+    if (overlayY + panelHeight > mainRect.bottom) {
+        overlayY = mainRect.bottom - panelHeight;
+    }
+    if (overlayY < mainRect.top) overlayY = mainRect.top;
+
+    *outX = overlayX; *outY = overlayY; *outW = panelWidth; *outH = panelHeight;
+}
+
+void CreateTabContextMenuOverlay(HINSTANCE hInstance, bool showImmediately,
+                                 int anchorX, int anchorY, BrowserWindow* targetWin) {
+    LOG_INFO_APP("Creating tab context menu overlay (showImmediately=" +
+                 std::string(showImmediately ? "true" : "false") + ", anchor=" +
+                 std::to_string(anchorX) + "," + std::to_string(anchorY) + ")");
+
+    extern HWND g_tabmenu_overlay_hwnd;
+    if (g_tabmenu_overlay_hwnd && IsWindow(g_tabmenu_overlay_hwnd)) {
+        LOG_INFO_APP("Tab context menu overlay already exists");
+        if (showImmediately) {
+            ShowTabContextMenuOverlay(anchorX, anchorY, targetWin);
+        }
+        return;
+    }
+
+    extern HWND g_hwnd;
+    extern HWND g_header_hwnd;
+    HWND posHwnd = (targetWin && targetWin->hwnd) ? targetWin->hwnd : g_hwnd;
+    HWND posHeader = (targetWin && targetWin->header_hwnd) ? targetWin->header_hwnd : g_header_hwnd;
+
+    int overlayX, overlayY, panelWidth, panelHeight;
+    ComputeTabMenuRect(posHwnd, posHeader, anchorX, anchorY,
+                       &overlayX, &overlayY, &panelWidth, &panelHeight);
+
+    // Owner is the requesting window from the moment of creation (the omnibox does the
+    // same since P3.5-A7) — a menu created owned by the primary would drag the primary
+    // forward on its very first open in a secondary window.
+    HWND tabmenu_hwnd = CreateWindowEx(
+        WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+        L"CEFTabMenuOverlayWindow",
+        L"Tab Context Menu Overlay",
+        WS_POPUP,
+        overlayX, overlayY, panelWidth, panelHeight,
+        posHwnd, nullptr, hInstance, nullptr);
+
+    if (!tabmenu_hwnd) {
+        LOG_ERROR_APP("Failed to create tab context menu overlay HWND. Error: " +
+                      std::to_string(GetLastError()));
+        return;
+    }
+
+    UINT flags = SWP_NOACTIVATE;
+    flags |= showImmediately ? SWP_SHOWWINDOW : SWP_HIDEWINDOW;
+    SetWindowPos(tabmenu_hwnd, HWND_TOPMOST, overlayX, overlayY, panelWidth, panelHeight, flags);
+
+    g_tabmenu_overlay_hwnd = tabmenu_hwnd;
+
+    LOG_INFO_APP("Tab context menu overlay HWND created: " +
+                 std::to_string(reinterpret_cast<intptr_t>(tabmenu_hwnd)));
+
+    CefWindowInfo window_info;
+    window_info.windowless_rendering_enabled = true;
+    window_info.SetAsPopup(tabmenu_hwnd, "TabMenuOverlay");
+
+    CefBrowserSettings settings;
+    settings.windowless_frame_rate = 30;
+    settings.background_color = CefColorSetARGB(0, 0, 0, 0);
+    settings.javascript = STATE_ENABLED;
+
+    // ⚠️ window_id 0 deliberately, as every other overlay does: OnAfterCreated stores the
+    // browser ref on GetOwnerWindow(), and GetTabMenuBrowser() reads it back off the
+    // PRIMARY window. Constructing this with the requesting window's id would file the ref
+    // where the getter never looks, and the WndProc's mouse forwarding would go dead.
+    // Which window the menu acts in is decided by the target tab, not by this id.
+    CefRefPtr<SimpleHandler> tabmenu_handler(new SimpleHandler("tabmenu"));
+    CefRefPtr<MyOverlayRenderHandler> render_handler =
+        new MyOverlayRenderHandler(tabmenu_hwnd, panelWidth, panelHeight);
+    tabmenu_handler->SetRenderHandler(render_handler);
+
+    bool result = CefBrowserHost::CreateBrowser(
+        window_info, tabmenu_handler,
+        "http://127.0.0.1:5137/tab-context-menu",
+        settings, nullptr,
+        CefRequestContext::GetGlobalContext());
+
+    if (result) {
+        LOG_INFO_APP("Tab context menu overlay browser created with subprocess");
+
+        if (showImmediately) {
+            extern HHOOK g_tabmenu_mouse_hook;
+            extern LRESULT CALLBACK TabMenuMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+            if (!g_tabmenu_mouse_hook) {
+                g_tabmenu_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, TabMenuMouseHookProc, nullptr, 0);
+                if (g_tabmenu_mouse_hook) {
+                    LOG_INFO_APP("Tab context menu mouse hook installed for click-outside detection");
+                }
+            }
+
+            LONG exStyle = GetWindowLong(tabmenu_hwnd, GWL_EXSTYLE);
+            SetWindowLong(tabmenu_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+        }
+    } else {
+        LOG_ERROR_APP("Failed to create tab context menu overlay browser");
+    }
+}
+
+void ShowTabContextMenuOverlay(int anchorX, int anchorY, BrowserWindow* targetWin) {
+    extern HWND g_tabmenu_overlay_hwnd;
+    if (!g_tabmenu_overlay_hwnd || !IsWindow(g_tabmenu_overlay_hwnd)) {
+        LOG_WARNING_APP("Cannot show tab context menu overlay - HWND does not exist");
+        return;
+    }
+
+    extern HHOOK g_tabmenu_mouse_hook;
+    extern LRESULT CALLBACK TabMenuMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+    if (!g_tabmenu_mouse_hook) {
+        g_tabmenu_mouse_hook = SetWindowsHookEx(WH_MOUSE_LL, TabMenuMouseHookProc, nullptr, 0);
+    }
+
+    extern HWND g_hwnd;
+    extern HWND g_header_hwnd;
+    HWND posHwnd = (targetWin && targetWin->hwnd) ? targetWin->hwnd : g_hwnd;
+    HWND posHeader = (targetWin && targetWin->header_hwnd) ? targetWin->header_hwnd : g_header_hwnd;
+
+    int overlayX, overlayY, panelWidth, panelHeight;
+    ComputeTabMenuRect(posHwnd, posHeader, anchorX, anchorY,
+                       &overlayX, &overlayY, &panelWidth, &panelHeight);
+
+    // P3.5-Z1: hand the overlay to the window that asked BEFORE showing it, so the
+    // primary is never pulled forward in the first place.
+    OwnOverlayToRequestingWindow(g_tabmenu_overlay_hwnd, targetWin);
+    SetWindowPos(g_tabmenu_overlay_hwnd, HWND_TOPMOST,
+        overlayX, overlayY, panelWidth, panelHeight,
+        SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+    LONG exStyle = GetWindowLong(g_tabmenu_overlay_hwnd, GWL_EXSTYLE);
+    SetWindowLong(g_tabmenu_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+
+    // Retarget the overlay handler's window_id so its action IPC is attributed to the
+    // requesting window (the tab id decides what is acted on, but the window id is what
+    // the tab-list refresh is sent to).
+    CefRefPtr<CefBrowser> tabmenu_browser = SimpleHandler::GetTabMenuBrowser();
+    if (tabmenu_browser) {
+        int targetWindowId = targetWin ? targetWin->window_id : 0;
+        SimpleHandler* handler = SimpleHandler::GetHandlerForBrowser(tabmenu_browser->GetIdentifier());
+        if (handler) {
+            handler->SetWindowId(targetWindowId);
+        }
+
+        if (tabmenu_browser->GetHost()) {
+            tabmenu_browser->GetHost()->NotifyScreenInfoChanged();
+            tabmenu_browser->GetHost()->WasResized();
+            tabmenu_browser->GetHost()->Invalidate(PET_VIEW);
+        }
+    }
+
+    LOG_INFO_APP("Tab context menu overlay shown at " + std::to_string(overlayX) + "," +
+                 std::to_string(overlayY));
+}
+
+void HideTabContextMenuOverlay() {
+    extern HWND g_tabmenu_overlay_hwnd;
+    if (!g_tabmenu_overlay_hwnd || !IsWindow(g_tabmenu_overlay_hwnd)) {
+        return;
+    }
+
+    LOG_INFO_APP("Hiding tab context menu overlay");
+
+    extern HHOOK g_tabmenu_mouse_hook;
+    if (g_tabmenu_mouse_hook) {
+        UnhookWindowsHookEx(g_tabmenu_mouse_hook);
+        g_tabmenu_mouse_hook = nullptr;
+    }
+
+    CefRefPtr<CefBrowser> tabmenu_browser = SimpleHandler::GetTabMenuBrowser();
+    if (tabmenu_browser) {
+        tabmenu_browser->GetHost()->SetFocus(false);
+    }
+
+    // ⛔ Read the window to hand focus back to from the overlay's CURRENT Win32 owner,
+    // not from the handler's window_id. On the very first open the browser does not exist
+    // yet, so the show path's retarget never ran and the handler still says "window 0" —
+    // which would return focus to the PRIMARY after using the menu in a secondary window.
+    // The owner is correct from creation onward because both the create and show paths
+    // set it to the requesting window.
+    BrowserWindow* focusWin = WindowManager::GetInstance().GetWindowByHwnd(
+        reinterpret_cast<HWND>(GetWindowLongPtr(g_tabmenu_overlay_hwnd, GWLP_HWNDPARENT)));
+
+    ShowWindow(g_tabmenu_overlay_hwnd, SW_HIDE);
+    // P3.5-Z5: off screen, so hand ownership back to the primary. Keeps the overlay
+    // safe if the requesting window is closed later (K12).
+    ReturnOverlayOwnershipToPrimary(g_tabmenu_overlay_hwnd);
+
+    CefRefPtr<CefBrowser> header_browser =
+        focusWin ? focusWin->header_browser : SimpleHandler::GetHeaderBrowser();
     if (header_browser) {
         header_browser->GetHost()->SetFocus(true);
     }

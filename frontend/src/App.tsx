@@ -19,6 +19,7 @@ const SiteInfoOverlayRoot = React.lazy(() => import('./pages/SiteInfoOverlayRoot
 const TabListOverlayRoot = React.lazy(() => import('./pages/TabListOverlayRoot'));
 const ProfilePickerOverlayRoot = React.lazy(() => import('./pages/ProfilePickerOverlayRoot'));
 const MenuOverlayRoot = React.lazy(() => import('./pages/MenuOverlayRoot'));
+const TabContextMenuOverlayRoot = React.lazy(() => import('./pages/TabContextMenuOverlayRoot'));
 const HistoryPage = React.lazy(() => import('./pages/HistoryPage'));
 const SettingsPage = React.lazy(() => import('./pages/SettingsPage'));
 const CertErrorPage = React.lazy(() => import('./pages/CertErrorPage'));
@@ -185,6 +186,7 @@ const App = () => {
           <Route path="/tab-list" element={<TabListOverlayRoot />} />
           <Route path="/profile-picker" element={<ProfilePickerOverlayRoot />} />
           <Route path="/menu" element={<MenuOverlayRoot />} />
+          <Route path="/tab-context-menu" element={<TabContextMenuOverlayRoot />} />
         </Routes>
       </React.Suspense>
 

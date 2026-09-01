@@ -325,7 +325,11 @@ g_hwnd  (main shell — WS_OVERLAPPEDWINDOW, WndProc = ShellWindowProc)
                           comment. Kept for API compat + teardown.
 ```
 
-**14 overlay HWNDs** (WS_POPUP, owned by `g_hwnd`, NOT children; all OSR browsers):
+**15 overlay HWNDs** (WS_POPUP; all OSR browsers). ⚠️ Ownership is **not** fixed to `g_hwnd` since
+Phase 3.5 — it follows the requesting window while an overlay is on screen and returns to the primary
+on hide (`OwnOverlayToRequestingWindow` / `ReturnOverlayOwnershipToPrimary` / `ReleaseOverlaysOwnedBy`
+in `simple_app.cpp`). ⛔ A new overlay must be added to `ReleaseOverlaysOwnedBy`'s list or it is
+destroyed with its owner window:
 
 | HWND global | Handler role | WndProc | Click-outside mouse hook |
 |-------------|--------------|---------|--------------------------|
@@ -343,20 +347,24 @@ g_hwnd  (main shell — WS_OVERLAPPEDWINDOW, WndProc = ShellWindowProc)
 | `g_siteinfo_panel_overlay_hwnd` | `siteinfopanel` | `SiteInfoPanelOverlayWndProc` | `SiteInfoPanelMouseHookProc` |
 | `g_profile_panel_overlay_hwnd` | `profilepanel` | `ProfilePanelOverlayWndProc` | `ProfilePanelMouseHookProc` |
 | `g_menu_overlay_hwnd` | `menu` | `MenuOverlayWndProc` | `MenuMouseHookProc` |
+| `g_tabmenu_overlay_hwnd` | `tabmenu` | `TabMenuOverlayWndProc` | `TabMenuMouseHookProc` |
 
-That is 14 overlay HWNDs, 14 overlay WndProcs (+ `ShellWindowProc` for the main window) and **9** `WH_MOUSE_LL` click-outside hook procs, all in `cef_browser_shell.cpp`. Note the asymmetry: `BrowserWindow.h` declares **10** `HHOOK` slots — `wallet_mouse_hook` has a slot but no corresponding hook proc, because the wallet overlay closes via its `WM_ACTIVATE` path instead.
+That is 15 overlay HWNDs, 15 overlay WndProcs (+ `ShellWindowProc` for the main window) and **10** `WH_MOUSE_LL` click-outside hook procs, all in `cef_browser_shell.cpp`. Note the asymmetry: `BrowserWindow.h` declares **10** `HHOOK` slots — `wallet_mouse_hook` has a slot but no corresponding hook proc, because the wallet overlay closes via its `WM_ACTIVATE` path instead.
 
 ### Overlay creation functions
 
-**Windows — 14, all in `src/handlers/simple_app.cpp`:**
-`CreateSettingsOverlayWithSeparateProcess`, `CreateWalletOverlay`, `CreateBackupOverlayWithSeparateProcess`, `CreateBRC100AuthOverlayWithSeparateProcess`, `CreateNotificationOverlay`, `CreateSettingsMenuOverlay`, `CreateOmniboxOverlay`, `CreateCookiePanelOverlay`, `CreateDownloadPanelOverlay`, `CreateSiteInfoPanelOverlay`, `CreateTabListPanelOverlay`, `CreateBookmarksPanelOverlay`, `CreateMenuOverlay`, `CreateProfilePanelOverlay`.
+**Windows — 15, all in `src/handlers/simple_app.cpp`:**
+`CreateSettingsOverlayWithSeparateProcess`, `CreateWalletOverlay`, `CreateBackupOverlayWithSeparateProcess`, `CreateBRC100AuthOverlayWithSeparateProcess`, `CreateNotificationOverlay`, `CreateSettingsMenuOverlay`, `CreateOmniboxOverlay`, `CreateCookiePanelOverlay`, `CreateDownloadPanelOverlay`, `CreateSiteInfoPanelOverlay`, `CreateTabListPanelOverlay`, `CreateBookmarksPanelOverlay`, `CreateMenuOverlay`, `CreateProfilePanelOverlay`, `CreateTabContextMenuOverlay`.
 
 Most also have a `Show…Overlay(offset, targetWin)` / `Hide…Overlay()` pair in the same file (wallet, omnibox, cookie, download, siteinfo, tablist, bookmarks, menu, profile). Settings / backup / brc100auth / notification / settings_menu are create-and-show only.
 
 **macOS — 14, all in `cef_browser_shell_mac.mm`** (NSPanel-based, not `WS_POPUP`):
 `CreateSettingsOverlayWithSeparateProcess`, `CreateWalletOverlayWithSeparateProcess`, `CreateBackupOverlayWithSeparateProcess`, `CreateBRC100AuthOverlayWithSeparateProcess`, `CreateNotificationOverlay`, `CreateSettingsMenuOverlay`, `CreateCookiePanelOverlayWithSeparateProcess`, `CreateOmniboxOverlayMacOS`, `CreateDownloadPanelOverlayMacOS`, `CreateProfilePanelOverlayMacOS`, `CreateBookmarksPanelOverlayMacOS`, `CreateSiteInfoPanelOverlayMacOS`, `CreateTabListPanelOverlayMacOS`, `CreateMenuOverlayMac` (plus a `CreateMenuOverlay(void*, bool, int)` shim matching the Windows signature).
 
-Windows and macOS are at **parity: 14 overlays each**.
+⛔ **Windows and macOS are NO LONGER at parity: Windows 15, macOS 14.** beta.3 Phase 4 added the tab
+context menu (`CreateTabContextMenuOverlay`) on Windows only; the macOS creation function is relayed
+in `development-docs/0.4.0-beta.3/MAC_RELAY_P35_P4_ROUND.md` (M3) per invariant #9 and has not been
+written. Nothing is broken meanwhile — macOS simply has no tab context menu.
 
 ### Rendering Modes
 
@@ -376,7 +384,13 @@ Windows and macOS are at **parity: 14 overlays each**.
 
 `BrowserWindow` (`src/core/BrowserWindow.cpp :: SetBrowserForRole` / `GetBrowserForRole`) maps **18** role strings to `CefRefPtr<CefBrowser>` slots:
 
-`header`, `webview`, `wallet_panel`, `overlay`, `settings`, `wallet`, `backup`, `brc100auth`, `notification`, `settings_menu`, `omnibox`, `cookiepanel`, `downloadpanel`, `profilepanel`, `menu`, `bookmarkspanel`, `siteinfopanel`, `tablistpanel`.
+`header`, `webview`, `wallet_panel`, `overlay`, `settings`, `wallet`, `backup`, `brc100auth`, `notification`, `settings_menu`, `omnibox`, `cookiepanel`, `downloadpanel`, `profilepanel`, `menu`, `bookmarkspanel`, `siteinfopanel`, `tablistpanel`, `tabmenu`.
+
+> ⚠️ `tabmenu` has a role slot for consistency (and so shutdown's `ForceCloseRemainingBrowsers` can
+> find it), but `SimpleHandler::GetTabMenuBrowser()` reads a **process static**, not this slot. The
+> tab-menu overlay is one browser per process; routing it through `GetPrimaryWindow()` asks a
+> per-window question about a per-process thing, which is the shape gate `G11` counts — it caught
+> exactly that at 61/60 when this overlay was first written.
 
 Tab browsers use the dynamic role `tab_<id>` and are **not** stored in these slots — `SimpleHandler` matches them by the `"tab_"` prefix (`simple_handler.cpp`, `role_.rfind("tab_", 0) == 0`).
 
@@ -393,9 +407,9 @@ Cross-browser communication (e.g. header find bar → tab search) always routes 
 
 | File | Purpose |
 |------|---------|
-| `cef_browser_shell.cpp` | Windows bootstrap entry `RunWinMain` -> `RunHodosMain` (was `WinMain` pre-150); `ShellWindowProc`; all HWND globals; 14 overlay WndProcs + 9 mouse hooks; `Logger::Initialize` + stdout/stderr redirection; dev safeguard |
+| `cef_browser_shell.cpp` | Windows bootstrap entry `RunWinMain` -> `RunHodosMain` (was `WinMain` pre-150); `ShellWindowProc`; all HWND globals; 15 overlay WndProcs + 10 mouse hooks; `Logger::Initialize` + stdout/stderr redirection; dev safeguard |
 | `cef_browser_shell_mac.mm` | macOS entry `main`; NSWindow/NSView hierarchy; 14 overlay creation functions; event forwarding; multi-window support |
-| `src/handlers/simple_app.cpp` | `SimpleApp` (`OnContextInitialized`, `OnBeforeChildProcessLaunch`, `OnBeforeCommandLineProcessing`, `SetWindowHandles`, `SetMacOSWindow`); `InjectHodosBrowserAPI`; all 14 Windows overlay create/show/hide functions |
+| `src/handlers/simple_app.cpp` | `SimpleApp` (`OnContextInitialized`, `OnBeforeChildProcessLaunch`, `OnBeforeCommandLineProcessing`, `SetWindowHandles`, `SetMacOSWindow`); `InjectHodosBrowserAPI`; all 15 Windows overlay create/show/hide functions |
 | `src/handlers/simple_handler.cpp` | Browser-process message routing, overlay management, context menus, downloads, find-in-page |
 | `src/handlers/simple_render_process_handler.cpp` | V8 injection: `CefMessageSendHandler` + 4 more V8 handlers, injects `window.hodosBrowser` |
 | `mac/process_helper_mac.mm` | macOS helper-process entry (5 helper bundles built from `HODOS_HELPER_SRCS`) |
@@ -418,18 +432,18 @@ Cross-browser communication (e.g. header find bar → tab search) always routes 
 
 | File | Identifiers |
 |------|-------------|
-| `cef_browser_shell.cpp` | `RunWinMain` (exported bootstrap entry), `RunHodosMain`, `VerifyCodeSigningAndLoad`, `ShellWindowProc`, `g_hwnd`, `g_header_hwnd`, `g_webview_hwnd`, `g_hResourceModule`, the 14 overlay HWNDs, 14 overlay WndProcs, 9 `…MouseHookProc` click-outside hooks, `Logger::Initialize` + log-path resolution, dev safeguard |
+| `cef_browser_shell.cpp` | `RunWinMain` (exported bootstrap entry), `RunHodosMain`, `VerifyCodeSigningAndLoad`, `ShellWindowProc`, `g_hwnd`, `g_header_hwnd`, `g_webview_hwnd`, `g_hResourceModule`, the 15 overlay HWNDs, 15 overlay WndProcs, 10 `…MouseHookProc` click-outside hooks, `Logger::Initialize` + log-path resolution, dev safeguard |
 | `cef_browser_shell_mac.mm` | `main`, 14 macOS overlay creation functions, NSWindow/NSView hierarchy, `Logger::Initialize` |
 | `src/handlers/simple_render_process_handler.cpp` | `SimpleRenderProcessHandler::OnContextCreated`, and 5 V8 handler classes: `CefMessageSendHandler`, `OverlayCloseHandler`, `OmniboxCloseHandler`, `HistoryV8Handler`, `GoogleSuggestV8Handler` |
 | `include/core/JsStringEscape.h` | `escapeJsonForJs` — the canonical JS-string-literal encoder (header-only; moved out of `simple_render_process_handler.cpp`, which now `#include`s it) |
 | `src/handlers/simple_handler.cpp` | `OnProcessMessageReceived`, `OnAfterCreated`, `OnBeforeClose`, `GetResourceRequestHandler`, `CefDownloadHandler` (`CanDownload`, `OnBeforeDownload`, `OnDownloadUpdated`), `DownloadInfo` struct, `active_downloads_` map, `NotifyDownloadStateChanged`, `CefFindHandler::OnFindResult`, find IPC (`find_text`, `find_stop`), helpers `CreateNewTabWithUrl()` / `CopyTextToClipboard()` |
-| `src/handlers/simple_app.cpp` | `SimpleApp::OnContextInitialized`, `InjectHodosBrowserAPI`, and the 14 `Create…Overlay` functions (+ their `Show…`/`Hide…` pairs) |
+| `src/handlers/simple_app.cpp` | `SimpleApp::OnContextInitialized`, `InjectHodosBrowserAPI`, the 15 `Create…Overlay` functions (+ their `Show…`/`Hide…` pairs), and the overlay-ownership helpers `OwnOverlayToRequestingWindow` / `ReturnOverlayOwnershipToPrimary` / `ReleaseOverlaysOwnedBy` |
 | `src/core/HttpRequestInterceptor.cpp` | `HttpRequestInterceptor::isWalletEndpoint`, `DomainPermissionCache`, `WalletStatusCache`, `BSVPriceCache`, `AsyncWalletResourceHandler`, `AsyncHTTPClient`, `Async402ResourceHandler` + `Async402HTTPClient`, free functions `TryHandleBrc121_402` / `InstallAsync402HandlerIfPending`, structs `PaidRetryContext`, `PendingEnvelope`, `PendingReload`, `Brc121FailedEntry`, `CertDisclosureInfo`, `ProtocolScope`, `BasketScope`. **`DomainVerifier` was removed** — replaced by the DB-backed `DomainPermissionCache`. |
 | `include/core/PortConfig.h` | `hodos::IsDevEnv`, `WalletPort`, `AdblockPort`, `WalletUrl`, `AdblockUrl`, `IsWalletHostPort` — the only sanctioned source of backend ports |
 | `include/core/AppPaths.h` | `GetAppDirName()` (dev/prod namespace), `GetLogDir()`, `GetInstanceMutexNameW()`, dev/prod safeguard logic |
 | `include/core/Logger.h` + `src/core/Logger.cpp` | `Logger`, `LogLevel` (DEBUG/INFO/WARNING/ERROR_LEVEL), `ProcessType` (MAIN/RENDER/BROWSER) |
 | `src/core/HistoryManager.cpp` | Browser history SQLite database; singleton with `Initialize`, `AddVisit`, `GetHistory`, `GetHistorySimple`, `SearchHistory`, `SearchHistoryWithFrecency`, `GetTopSites`, `DeleteHistoryEntry`, `DeleteAllHistory`, `DeleteHistoryRange`, Chromium-time converters |
-| `src/core/BrowserWindow.cpp` | `SetBrowserForRole` / `GetBrowserForRole` / `ClearBrowserForRole` — 18 role slots |
+| `src/core/BrowserWindow.cpp` | `SetBrowserForRole` / `GetBrowserForRole` / `ClearBrowserForRole` — 19 role slots |
 
 > **Removed:** `src/core/BRC100Bridge.cpp` no longer exists (only a stale `.obj` lingers in `build/`). Outbound HTTP to the Rust wallet now goes through `SyncHttpClient` (`include/core/SyncHttpClient.h`, WinHTTP / libcurl), `WalletService`, and the async handlers inside `HttpRequestInterceptor.cpp`.
 

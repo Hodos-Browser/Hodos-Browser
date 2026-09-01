@@ -5,7 +5,7 @@
 
 ## Overview
 
-This module contains the six C++/Objective-C++ source files that implement the CEF handler interfaces — the "brain" of the browser shell. `SimpleApp` manages CEF initialization and overlay window creation. `SimpleHandler` implements 12 CEF client interfaces and dispatches **169 IPC message types** from React to C++/Rust. `SimpleRenderProcessHandler` injects the `window.hodosBrowser` / `window.cefMessage` JavaScript APIs and routes **95 IPC response messages** back to React. `MyOverlayRenderHandler` provides platform-specific off-screen rendering for all overlay windows.
+This module contains the six C++/Objective-C++ source files that implement the CEF handler interfaces — the "brain" of the browser shell. `SimpleApp` manages CEF initialization and overlay window creation. `SimpleHandler` implements 12 CEF client interfaces and dispatches **173 IPC message types** from React to C++/Rust. `SimpleRenderProcessHandler` injects the `window.hodosBrowser` / `window.cefMessage` JavaScript APIs and routes **95 IPC response messages** back to React. `MyOverlayRenderHandler` provides platform-specific off-screen rendering for all overlay windows.
 
 All files are cross-platform (Windows + macOS) with `#ifdef _WIN32` / `#elif defined(__APPLE__)` conditionals, except the two `.mm` files which are macOS-only translation units. Headers live in `cef-native/include/handlers/`.
 
@@ -15,7 +15,7 @@ All files are cross-platform (Windows + macOS) with `#ifdef _WIN32` / `#elif def
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `simple_handler.cpp` | 9306 | **Largest file in the project.** Browser-process CEF client implementing 12 interfaces (CefClient, CefLifeSpanHandler, CefDisplayHandler, CefLoadHandler, CefRequestHandler, CefContextMenuHandler, CefDialogHandler, CefKeyboardHandler, CefPermissionHandler, CefDownloadHandler, CefFindHandler, CefJSDialogHandler). Central IPC dispatcher for 169 message types (`OnProcessMessageReceived`, lines 1897–7416). Handles tab creation, navigation, window chrome, overlay lifecycle, wallet operations, downloads, find-in-page, keyboard shortcuts, context menus, HTTP request interception (paid-content cache, ad blocking, cookie filtering, wallet routing), certificate error handling, bookmarks, cookie blocking, site permissions, profile management, browser import, QR scanning, and multi-window tab coordination. |
+| `simple_handler.cpp` | 9306 | **Largest file in the project.** Browser-process CEF client implementing 12 interfaces (CefClient, CefLifeSpanHandler, CefDisplayHandler, CefLoadHandler, CefRequestHandler, CefContextMenuHandler, CefDialogHandler, CefKeyboardHandler, CefPermissionHandler, CefDownloadHandler, CefFindHandler, CefJSDialogHandler). Central IPC dispatcher for 173 message types (`OnProcessMessageReceived`, lines 1897–7416). Handles tab creation, navigation, window chrome, overlay lifecycle, wallet operations, downloads, find-in-page, keyboard shortcuts, context menus, HTTP request interception (paid-content cache, ad blocking, cookie filtering, wallet routing), certificate error handling, bookmarks, cookie blocking, site permissions, profile management, browser import, QR scanning, and multi-window tab coordination. |
 | `simple_app.cpp` | 3356 | CEF application entry point (inherits `CefApp` + `CefBrowserProcessHandler` + `CefRenderProcessHandler`). Configures command-line switches, propagates the active profile to child processes, creates the header browser, restores multi-window sessions from `session.json` (v1 flat + v2 `windows[]` formats), and contains all **14 Windows overlay creation functions**. Everything from line 571 to EOF is inside a single `#ifdef _WIN32` block — macOS equivalents live in `cef_browser_shell_mac.mm`. |
 | `simple_render_process_handler.cpp` | 2340 | Render-process handler. Injects `window.hodosBrowser.*` and `window.cefMessage` V8 APIs in `OnContextCreated()`. Contains 5 V8 handler classes. Pre-caches and injects adblock scriptlets, a `window.chrome` bot-detection stub, the wallet IPC bridge, and the `window.CWI`/`yours`/`panda` shim. Routes 95 IPC response messages from browser process back to JavaScript via `frame->ExecuteJavaScript()`. |
 | `my_overlay_render_handler.cpp` | 393 | Windows off-screen rendering for overlays. Uses GDI `CreateDIBSection` + `UpdateLayeredWindow` with per-pixel alpha blending. Dynamic bitmap reallocation on resize. Reports true per-monitor DPI via `GetDpiForWindow()`. Removes `WS_EX_TRANSPARENT` after first paint to enable mouse input. |
@@ -82,7 +82,7 @@ CEF application object. Singleton created in `main()`.
 - `SimpleApp::SetWindowHandles()` (Windows) / `SimpleApp::SetMacOSWindow()` (macOS) — stores platform window references
 - `SimpleApp::OnContextInitialized()` — clears session-only SSL cert exceptions, creates the header browser, then either (a) shows the profile picker only, when `g_picker_mode` is set, or (b) restores the session from `session.json` — v2 multi-window (`windows[]` with per-window `tabs`, `activeTabIndex`, `x`/`y`/`width`/`height`) or v1 flat tab list — falling back to a fresh NTP tab.
 
-**14 Overlay creation functions** (Windows only — the whole block is inside `#ifdef _WIN32`). Sizes are **logical px** passed through `ScalePx(n, g_hwnd)` for per-monitor DPI; full-window overlays take `GetWindowRect(g_hwnd)` verbatim:
+**15 Overlay creation functions** (Windows only — the whole block is inside `#ifdef _WIN32`). Sizes are **logical px** passed through `ScalePx(n, g_hwnd)` for per-monitor DPI; full-window overlays take `GetWindowRect(g_hwnd)` verbatim:
 
 | Function | Overlay | Size (logical) | Pattern |
 |----------|---------|----------------|---------|
@@ -99,9 +99,10 @@ CEF application object. Singleton created in `main()`.
 | `CreateTabListPanelOverlay()` / `Show` / `Hide` | Tab list / tab search | 340 × 480 | Keep-alive, anchored by **left** offset; clipboard + DOM paste (search input) |
 | `CreateBookmarksPanelOverlay()` / `Show` / `Hide` | Bookmarks | 380 × 480 | Keep-alive, anchored by **left** offset; clipboard + DOM paste (search input) |
 | `CreateMenuOverlay()` / `Show` / `Hide` | Hamburger menu | 280 × 450 | Keep-alive, handler retarget |
+| `CreateTabContextMenuOverlay()` / `Show` / `Hide` | Tab context menu (#15) | 240 × 209 | Keep-alive; anchored to the **cursor**, not a toolbar icon — the only one of the 15 that is. Owner = requesting window from creation. Geometry is an exact fit for 6 × 32 px rows + 1 divider + padding, pinned on both sides (`kTabMenuHeightDip` ↔ `ROW_HEIGHT` in `TabContextMenuOverlayRoot.tsx`) |
 | `CreateProfilePanelOverlay()` / `Show` / `Hide` | Profile picker | 380 × 520 | Keep-alive, enables focus; clipboard + DOM paste (name edit) |
 
-macOS overlay creation is in `cef_browser_shell_mac.mm` (14 `Create*Overlay*` functions there, plus a `CreateMenuOverlay` compat shim with the Windows signature). Names differ — the macOS side uses the `…MacOS` / `…WithSeparateProcess` suffixes, not the bare Windows names.
+⛔ macOS is at **14**, Windows at **15** — the tab context menu is Windows-only and is relayed, not written (see the parent doc). macOS overlay creation is in `cef_browser_shell_mac.mm` (14 `Create*Overlay*` functions there, plus a `CreateMenuOverlay` compat shim with the Windows signature). Names differ — the macOS side uses the `…MacOS` / `…WithSeparateProcess` suffixes, not the bare Windows names.
 
 > Windows uses `CreateWalletOverlay()`; there is **no** `CreateWalletOverlayWithSeparateProcess()` on Windows — that name is macOS-only. Both call sites in `simple_handler.cpp` are `#ifdef`-split accordingly.
 
@@ -142,16 +143,20 @@ Off-screen rendering for all overlay windows. One instance per overlay.
 
 ## IPC Message Categories — browser process
 
-**169 live message names** dispatched in `SimpleHandler::OnProcessMessageReceived()` (lines 1897–7416). Two additional names — `overlay_hide_NEVER_CALLED_12345` and `overlay_hide_NEVER_CALLED_67890` — are guarded by `if (false && …)` and are dead code; they are **not** counted below.
+**173 live message names** dispatched in `SimpleHandler::OnProcessMessageReceived()` (lines 1897–7416). Two additional names — `overlay_hide_NEVER_CALLED_12345` and `overlay_hide_NEVER_CALLED_67890` — are guarded by `if (false && …)` and are dead code; they are **not** counted below.
 
 | Category | Messages | Count |
 |----------|----------|-------|
 | Tab management | `tab_create`, `tab_close`, `tab_switch`, `tab_reorder`, `tab_ghost_show`, `tab_ghost_hide`, `tab_tearoff`, `get_tab_list`, `get_recently_closed`, `reopen_recently_closed` | 10 |
+
+> ⚠️ The tab context menu's four messages are counted under **Overlay panels**, not here — they are
+> overlay lifecycle plus one action dispatcher, and the tab they act on is remembered in C++
+> (`s_tabmenu_target_tab_id`) rather than carried on the action message.
 | Navigation | `navigate`, `navigate_back`, `navigate_forward`, `navigate_reload`, `cert_error_proceed`, `cert_error_go_back` | 6 |
 | Window chrome | `window_close`, `window_maximize`, `window_minimize`, `window_start_drag` | 4 |
 | Omnibox | `omnibox_create`, `omnibox_create_or_show`, `omnibox_show`, `omnibox_hide`, `omnibox_update_query`, `omnibox_select`, `omnibox_autocomplete` | 7 |
 | Overlay lifecycle | `overlay_show_wallet`, `overlay_show_settings`, `overlay_show_settings_menu`, `overlay_show_brc100_auth`, `overlay_show_backup`, `overlay_close`, `overlay_hide`, `overlay_input`, `toggle_wallet_panel` | 9 |
-| Overlay panels | `cookie_panel_show/hide`, `profile_panel_show/hide`, `menu_show/hide/action`, `download_panel_show/hide`, `bookmarks_panel_show/hide`, `siteinfo_panel_show/hide/resize`, `tablist_panel_show/hide` | 16 |
+| Overlay panels | `cookie_panel_show/hide`, `profile_panel_show/hide`, `menu_show/hide/action`, `download_panel_show/hide`, `bookmarks_panel_show/hide`, `siteinfo_panel_show/hide/resize`, `tablist_panel_show/hide`, `tab_context_menu_show/hide/action/request_context` | 20 |
 | Wallet operations | `wallet_call` (Phase 2.5 IPC bridge), `wallet_status_check`, `create_wallet`, `get_wallet_info`, `load_wallet`, `get_balance`, `send_transaction`, `address_generate`, `get_addresses`, `get_all_addresses`, `get_current_address`, `mark_wallet_backed_up`, `wallet_prevent_close`, `wallet_allow_close`, `wallet_delete_cancel`, `wallet_payment_dismissed`, `get_backup_modal_state`, `set_backup_modal_state`, `open_wallet_permissions` | 19 |
 | Transactions | `create_transaction`, `sign_transaction`, `broadcast_transaction`, `get_transaction_history` | 4 |
 | Settings & profiles | `settings_get_all`, `settings_set`, `settings_update_all`, `settings_close`, `test_settings_message`, `profiles_get_all`, `profiles_create`, `profiles_rename`, `profiles_delete`, `profiles_switch`, `profiles_set_avatar`, `profiles_set_color`, `profiles_set_default` | 13 |
@@ -169,7 +174,7 @@ Off-screen rendering for all overlay windows. One instance per overlay.
 | Paid content cache | `paid_cache_clear`, `paid_cache_get_size` | 2 |
 | QR scanning | `qr_scan_request`, `qr_found` | 2 |
 | Search & analytics | `google_suggest_request`, `get_most_visited`, `get_session_blocked_total` | 3 |
-| **Total** | | **169** |
+| **Total** | | **173** |
 
 ## IPC Message Categories — render process
 

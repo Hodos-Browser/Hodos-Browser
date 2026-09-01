@@ -171,6 +171,7 @@ public:
     CefRefPtr<CefBrowser> bookmarks_panel_browser;
     CefRefPtr<CefBrowser> siteinfo_panel_browser;
     CefRefPtr<CefBrowser> tablist_panel_browser;
+    CefRefPtr<CefBrowser> tabmenu_browser;
 
     // ---- Browser ref accessors by role string ----
     void SetBrowserForRole(const std::string& role, CefRefPtr<CefBrowser> browser);

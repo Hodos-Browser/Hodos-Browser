@@ -274,6 +274,22 @@ void TabManager::OnTabBrowserClosed(int tab_id) {
             LOG(INFO) << "Last tab closed in window " << closed_window_id << " — closing window";
             PostMessage(bw->hwnd, WM_CLOSE, 0, 0);
         }
+    } else {
+        // 🐛 P4-A5: THIS is where a tab stops existing, and until now it was the one
+        // lifecycle event that did not tell the frontend. Create, reorder and move all
+        // notify at their completion point; close notified from the CALLER, before
+        // CloseBrowser had done anything, so the list it sent still contained the tab.
+        //
+        // Nobody noticed because the single-tab path is saved by an optimistic removal in
+        // useTabManager.closeTab — React deletes the one tab the user clicked and waits.
+        // Phase 4's "close other tabs" closes N at once with no optimistic path, and
+        // 📏 measured the strip still showing all 4 tabs 17.5 s after the click, until
+        // React's own periodic refresh happened to run.
+        //
+        // ⛔ Fixed here rather than by posting a delayed notify from the caller: a delayed
+        // re-send would still show the closed tabs first and then correct itself, which is
+        // a patch the user can see (P3.5 K25).
+        SimpleHandler::NotifyWindowTabListChanged(closed_window_id);
     }
 }
 

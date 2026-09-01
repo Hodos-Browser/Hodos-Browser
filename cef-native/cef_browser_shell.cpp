@@ -119,6 +119,10 @@ HWND g_menu_overlay_hwnd = nullptr;
 HWND g_bookmarks_panel_overlay_hwnd = nullptr;
 HWND g_siteinfo_panel_overlay_hwnd = nullptr;
 HWND g_tablist_panel_overlay_hwnd = nullptr;
+// Overlay #15 — the tab context menu (P4-A1). A right-click on a tab lands in the
+// HEADER browser, not a tab browser, so CEF's page context menu (MENU_ID_USER_FIRST)
+// cannot serve it; per CLAUDE.md's UI rule a dropdown is an overlay.
+HWND g_tabmenu_overlay_hwnd = nullptr;
 
 // File dialog guard — prevents overlay close when a native file dialog is open
 bool g_file_dialog_active = false;
@@ -161,6 +165,7 @@ HHOOK g_menu_mouse_hook = nullptr;
 HHOOK g_bookmarks_panel_mouse_hook = nullptr;
 HHOOK g_siteinfo_panel_mouse_hook = nullptr;
 HHOOK g_tablist_panel_mouse_hook = nullptr;
+HHOOK g_tabmenu_mouse_hook = nullptr;
 
 // Stored icon right offsets for repositioning overlays on WM_SIZE/WM_MOVE
 // (physical pixel distance from icon's right edge to header's right edge)
@@ -831,6 +836,17 @@ void ShutdownApplication() {
         g_menu_overlay_hwnd = nullptr;
     }
 
+    if (g_tabmenu_overlay_hwnd && IsWindow(g_tabmenu_overlay_hwnd)) {
+        LOG_INFO("Destroying tab context menu overlay window...");
+        if (g_tabmenu_mouse_hook) {
+            UnhookWindowsHookEx(g_tabmenu_mouse_hook);
+            g_tabmenu_mouse_hook = nullptr;
+            LOG_INFO("Tab context menu mouse hook removed during shutdown");
+        }
+        DestroyWindow(g_tabmenu_overlay_hwnd);
+        g_tabmenu_overlay_hwnd = nullptr;
+    }
+
     // F5 gap-b: the single-instance pipe listener is deliberately NOT stopped here anymore.
     // It keeps serving "shutting_down" through the whole teardown (g_shutting_down is set),
     // holding the pipe name until StopListenerThread() runs in main() cleanup right AFTER
@@ -860,6 +876,7 @@ void HideAllOverlays() {
     extern void HideMenuOverlay();
     extern void HideProfilePanelOverlay();
     extern void HideSiteInfoPanelOverlay();
+    extern void HideTabContextMenuOverlay();
 
     if (g_omnibox_overlay_hwnd && IsWindow(g_omnibox_overlay_hwnd) && IsWindowVisible(g_omnibox_overlay_hwnd))
         HideOmniboxOverlay();
@@ -873,6 +890,8 @@ void HideAllOverlays() {
         HideMenuOverlay();
     if (g_profile_panel_overlay_hwnd && IsWindow(g_profile_panel_overlay_hwnd) && IsWindowVisible(g_profile_panel_overlay_hwnd))
         HideProfilePanelOverlay();
+    if (g_tabmenu_overlay_hwnd && IsWindow(g_tabmenu_overlay_hwnd) && IsWindowVisible(g_tabmenu_overlay_hwnd))
+        HideTabContextMenuOverlay();
 
     // Non-keep-alive overlays: just hide (they'll be repositioned on next show)
     if (g_settings_overlay_hwnd && IsWindow(g_settings_overlay_hwnd) && IsWindowVisible(g_settings_overlay_hwnd)) {
@@ -3761,6 +3780,79 @@ LRESULT CALLBACK MenuOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
+// ==================== TAB CONTEXT MENU OVERLAY (#15) ====================
+// Same shape as the three-dot menu above: click-outside dismissal via a low-level
+// mouse hook, and a non-activating WndProc that forwards mouse events into the OSR
+// browser. Kept as its own pair rather than parameterising MenuOverlayWndProc so the
+// two menus stay independently dismissable.
+
+LRESULT CALLBACK TabMenuMouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    // Same file-dialog exemption as every other dropdown hook (REGRESSION_SET R-CLOSE).
+    if (g_file_dialog_active) {
+        return CallNextHookEx(g_tabmenu_mouse_hook, nCode, wParam, lParam);
+    }
+    if (nCode == HC_ACTION) {
+        if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN) {
+            if (g_tabmenu_overlay_hwnd && IsWindow(g_tabmenu_overlay_hwnd) &&
+                IsWindowVisible(g_tabmenu_overlay_hwnd)) {
+                MSLLHOOKSTRUCT* mouseInfo = (MSLLHOOKSTRUCT*)lParam;
+                POINT clickPoint = mouseInfo->pt;
+                RECT overlayRect;
+                GetWindowRect(g_tabmenu_overlay_hwnd, &overlayRect);
+                if (!PtInRect(&overlayRect, clickPoint)) {
+                    LOG_DEBUG("Click detected outside tab context menu bounds - dismissing");
+                    extern void HideTabContextMenuOverlay();
+                    HideTabContextMenuOverlay();
+                }
+            }
+        }
+    }
+    return CallNextHookEx(g_tabmenu_mouse_hook, nCode, wParam, lParam);
+}
+
+LRESULT CALLBACK TabMenuOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_MOUSEACTIVATE:
+            return MA_NOACTIVATE;
+
+        case WM_MOUSEMOVE: {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
+            mouse_event.modifiers = 0;
+            CefRefPtr<CefBrowser> tabmenu_browser = SimpleHandler::GetTabMenuBrowser();
+            if (tabmenu_browser) {
+                tabmenu_browser->GetHost()->SendMouseMoveEvent(mouse_event, false);
+            }
+            return 0;
+        }
+
+        case WM_LBUTTONDOWN: {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            CefMouseEvent mouse_event;
+            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
+            mouse_event.modifiers = 0;
+            CefRefPtr<CefBrowser> tabmenu_browser = SimpleHandler::GetTabMenuBrowser();
+            if (tabmenu_browser) {
+                tabmenu_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
+                tabmenu_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
+            }
+            return 0;
+        }
+
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+
+        case WM_DESTROY:
+            return 0;
+
+        case WM_WINDOWPOSCHANGING:
+            break;
+    }
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
 // Lightweight health check — returns true if GET /health responds with "ok".
 // Uses a short timeout so it fails fast when nothing is listening.
 // timeoutMs defaults to 500ms for polling; use 200ms for pre-launch "already running?" checks.
@@ -5665,6 +5757,16 @@ static int RunHodosMain(HINSTANCE hInstance, int nCmdShow, void* sandbox_info,
 
     if (!RegisterClass(&menuOverlayClass)) {
         LOG_DEBUG("Failed to register menu overlay window class. Error: " + std::to_string(GetLastError()));
+    }
+
+    // Register Tab context menu overlay window class (overlay #15)
+    WNDCLASS tabMenuOverlayClass = {};
+    tabMenuOverlayClass.lpfnWndProc = TabMenuOverlayWndProc;
+    tabMenuOverlayClass.hInstance = hInstance;
+    tabMenuOverlayClass.lpszClassName = L"CEFTabMenuOverlayWindow";
+
+    if (!RegisterClass(&tabMenuOverlayClass)) {
+        LOG_DEBUG("Failed to register tab menu overlay window class. Error: " + std::to_string(GetLastError()));
     }
 
     LOG_INFO(elapsed() + "STARTUP: Creating main window...");

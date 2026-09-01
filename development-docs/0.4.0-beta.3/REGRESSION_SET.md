@@ -236,3 +236,78 @@ Phase 3.5 changed **overlay ownership**, so the risk it carried was to R-CLOSE. 
 measured directly and the overlay survived. The gaps listed above are **pre-existing and identical to
 the previous two boundaries** — they are not new debt created by this phase, and none of them is
 blocked on it.
+
+---
+
+# Boundary run: 4 → 5, 2026-09-01 — 🟡 INCOMPLETE
+
+Run after beta.3 Phase 4 (tab context menu, overlay #15) on the landing binary.
+⛔ Recorded **INCOMPLETE**, not PASS: two checks need a real payment and three need a real mouse.
+
+### What Phase 4 actually put at risk
+
+Three of the six checks, and it is worth being precise about which:
+
+| Check | Why this phase touched it |
+|---|---|
+| **R-COUNT** | *Close other tabs* / *close to the right* close **many** tabs at once. Each `CloseTab` fires `ClearRustPaymentSessionForBrowser`. This is the **first** path that ever fired it N times in a row |
+| **R-CLOSE** | A 15th overlay is a 15th close path, and a new overlay is the easiest place to reintroduce Phase 3.5's defect |
+| **R-GOLD** | every action resolves a *specific* tab, and `Tab::id` ≠ `CefBrowser::GetIdentifier()` |
+
+### R-INTEXT — 🟢 external half re-observed on this build
+
+📏 From `https://example.com/S1`, `window.__hodos_walletCall` → Rust log:
+`🛡️ engine Prompt (domain-trust) minted approval id=21de4bfd… for domain=example.com
+endpoint=/getVersion type=DomainApproval reason=new_domain_no_manifest`
+
+⭐ Carries **exactly the page host**, and the SUBJECT is the engine's decision, not a rendered modal.
+⚠️ The injected RED was not re-run (it needs a code change); the internal/external halves remain each
+other's control, as at the 3.5 → 4 boundary.
+
+### R-COUNT — 🟡 PARTIAL, and this is the check Phase 4 stressed
+
+📏 `close_right` closing **4** tabs produced exactly **4** `POST /wallet/session/close`, all 200, with
+**4 distinct** `browser_id`s (12, 16, 13, 14). The surviving tabs' ids are absent.
+⭐ The discriminating observation is **4, not 1** — a bulk path that cleared once (say, for the active
+browser) would have produced a single POST.
+
+⛔ **Not the whole check.** The counters were at **zero**; what is measured is that the clearing fires
+once per closed tab with the right ids, **not** that a non-zero counter was reset. The value half
+needs a real spend. → `phase-4-tab-peripheral-parity/MEASUREMENTS.md` M8.
+
+### R-CLOSE — 🟡 PARTIAL, one arm newly covered, three still owed
+
+✅ **New this boundary:** the 15th overlay was verified to take the Phase 3.5 shape rather than
+reintroduce its defect — `Show*Overlay(offset, targetWin)`, positioned against the requesting
+window's HWNDs, ownership handed over on show and back on hide, and **added to
+`ReleaseOverlaysOwnedBy`'s list** (which enumerates its overlays by name, so a 15th absent from it
+would be unprotected). 📏 `winprobe` across open **and** dismiss: the secondary window stayed at
+`Z11`, above the primary at `Z12`, in all three samples (M4).
+
+⬜ **Still owed, unchanged from the 0→0.5, 2→3 and 3.5→4 boundaries** — pre-existing, not new debt:
+- the `g_file_dialog_active` arm;
+- a clean GREEN/RED pair on `g_wallet_overlay_prevent_close`;
+- the **`WH_MOUSE_LL`** third path — ⚠️ now including the new `TabMenuMouseHookProc`, which
+  **has not been executed**: `SendInput` mouse clicks are dropped in the agent environment, so every
+  Phase 4 result was driven over CDP and never reached the overlay's WndProc or its mouse hook.
+
+### R-PERIM — 🟢 T1, ⬜ T2 e2e owed
+
+📏 `preflight.ps1 -Full` → `T1a cargo test - rust-wallet` **PASS**. Unchanged.
+
+### R-GOLD — ⬜ NOT RUN, same reason as every prior boundary
+
+Needs a real auto-approved payment. ⚠️ Phase 4 raises the stakes slightly: six new actions each
+resolve a specific `Tab::id`, and the gold pill is keyed on the same id. The identity translation was
+verified indirectly (every action logged the right-clicked `Tab::id`, and the A2 RED showed what the
+wrong one looks like), but the pill itself was not observed.
+
+### R-UPDATE — 🟡 T1 only, unchanged. Real N−1 → N apply still owed at RC.
+
+### ⭐ What this boundary establishes
+
+The risk Phase 4 carried was **R-CLOSE** (a new overlay) and **R-COUNT** (bulk close). Both were
+measured directly: the overlay inherits Phase 3.5's ownership handling, and the bulk close fires the
+session clear once per tab with the right browser ids. The remaining gaps are the same three that
+have been owed since the 0 → 0.5 boundary, plus one genuinely new one — the new overlay's mouse
+path, which needs a human with a mouse and is listed as owner item **O1/O2** in the phase contract.

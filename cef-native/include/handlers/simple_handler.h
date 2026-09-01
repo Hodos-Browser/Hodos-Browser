@@ -91,6 +91,14 @@ public:
     static CefRefPtr<CefBrowser> GetTabListPanelBrowser();
     static CefRefPtr<CefBrowser> GetProfilePanelBrowser();
     static CefRefPtr<CefBrowser> GetMenuBrowser();
+    // ⛔ Deliberately NOT `GetPrimaryWindow()->tabmenu_browser` like the 18 accessors
+    // above it. The tab-menu overlay is ONE browser per process, so filing it under
+    // "the primary window" and reading it back from there asks a per-window question
+    // about a per-process thing — which is the exact shape gate G11 is counting down,
+    // and G11 caught this at 61/60 when it was first written that way. Which window
+    // the menu acts in comes from the target tab and the overlay's Win32 owner, never
+    // from here.
+    static CefRefPtr<CefBrowser> GetTabMenuBrowser();
     static std::string pending_panel_;
     static std::string pending_shield_domain_;
     // Deferred current-page context for the bookmarks overlay (mirrors
@@ -346,6 +354,9 @@ private:
     static CefRefPtr<CefBrowser> download_panel_browser_;
     static CefRefPtr<CefBrowser> profile_panel_browser_;
     static CefRefPtr<CefBrowser> menu_browser_;
+    // The tab context menu overlay (#15). Assigned in OnAfterCreated, cleared in
+    // OnBeforeClose — see GetTabMenuBrowser() above for why this one is a static.
+    static CefRefPtr<CefBrowser> tabmenu_browser_;
 
     /**
      * @brief Extract tab ID from role string (format: "tab_1", "tab_2", etc.)
