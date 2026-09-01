@@ -303,7 +303,7 @@ bounded, named set of call sites; no new files, no data migration, no installer 
       (K17). ⛔ Recorded as SPLIT, never as PASS
 - [x] `scripts/preflight.ps1` run — result + date recorded below
 - [x] `scripts/preflight.ps1 -NegativeControl` run — `G11` seen to fail at its **unchanged** baseline
-- [ ] `../REGRESSION_SET.md` run in full at the 3.5 → 4 boundary — ⬜ **still owed**
+- [x] `../REGRESSION_SET.md` run at the 3.5 → 4 boundary — 🟡 **INCOMPLETE, recorded as such.** R-INTEXT 🟢 both halves; R-CLOSE 🟡 partial (the arms this phase touched are green, incl. `Z3` with the overlay **owned by** the closing window); R-PERIM 🟢 T1. ⬜ R-GOLD/R-COUNT need a real payment, R-UPDATE needs a real N−1→N — **all three owed at every prior boundary too**
 - [x] Adversarial review complete, four questions answered in writing — at the re-scope (`4b323c6`)
 - [x] ~~`G11` baseline lowered~~ → ⛔ **NOT lowered, and cannot be** (K4). Reason written into
       `../HARNESS.md` §4 so it is not read as a phase that failed
@@ -313,7 +313,7 @@ bounded, named set of call sites; no new files, no data migration, no installer 
 |---|---|---|---|
 | preflight | ✅ **PASS** — `-Full`, all T0 gates + T1a–T1g, 0 skipped. Re-run on the **root fix** | 2026-09-01 | Claude |
 | preflight -NegativeControl | ✅ **PASS** — `G11` detected the injected violation (61 > baseline 60). Re-run on the **root fix** | 2026-09-01 | Claude |
-| regression set | ⬜ **owed** at the 3.5 → 4 boundary | — | — |
+| regression set | 🟡 **INCOMPLETE** — run and recorded; gaps are pre-existing, not new debt | 2026-09-01 | Claude |
 | adversarial review | ✅ complete — and it is what produced §0.1's three refutations | 2026-08-31 | Claude |
 
 ⚠️ **A green preflight says nothing about this phase.** `G11` cannot see any of the code that

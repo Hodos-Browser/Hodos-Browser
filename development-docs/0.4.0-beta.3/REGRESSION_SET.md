@@ -96,7 +96,7 @@ Auto-update must never force a reinstall and must never brick an install.
 | 0.5 → 1 | | | | | | | |
 | 1 → 2 | | | | | | | |
 | 2 → 3 | 2026-08-26 | 🟢 **GREEN both halves** (see run log) | ⬜ needs a real payment | ⬜ live app, human | 🟢 T1 — 73 engine tests · ⬜ T2 e2e | ⬜ needs a payment | 🟡 T1 only (6 tests); real N−1→N owed at RC |
-| 3 → 4 | | | | | | | |
+| 3 → 4 | 2026-09-01 | 🟢 **GREEN both halves** (run log) | ⬜ needs a real payment | 🟡 **PARTIAL** — the arms this phase touched are green; file-dialog arm + a clean prevent-close pair still owed | 🟢 T1 (preflight `T1a`) · ⬜ T2 e2e | ⬜ needs a payment | 🟡 T1 only; real N−1→N owed at RC |
 | 4 → 5 | | | | | | | |
 
 ---
@@ -174,3 +174,65 @@ installer**; the genuine N−1 -> N apply remains owed at RC, as recorded at the
 ⛔ These three most directly guard the money path, and Phase 2 changed money-path timeouts.
 **They are owed, not waived.** One real payment session would close R-GOLD, R-COUNT and the
 `payment.auto_approved` audit line together.
+
+---
+
+## Run log — 3 → 4 boundary (2026-09-01)
+
+Run after Phase 3.5 landed its **root** fix (overlay ownership follows the requesting window,
+`3237068`). ⭐ The check that mattered most at this boundary is **R-CLOSE**, because 3.5 is the first
+phase to change overlay *lifetime* rather than only positioning.
+
+### R-INTEXT — 🟢 GREEN, both halves, correct SUBJECT
+
+📏 Driven over CDP, asserted against the **Rust** log (the decision, not the UI):
+
+| | Observed |
+|---|---|
+| **(a) internal** | `window.__hodos_walletCall('/wallet/status')` from the first-party UI → `"GET /wallet/status HTTP/1.1" 200`, no gate, no 202 |
+| **(b) external** | `window.CWI.getVersion()` from `https://example.com` → `🛡️ engine Prompt (domain-trust) minted approval id=a5cb040a… for domain=example.com endpoint=/getVersion type=DomainApproval reason=new_domain_no_manifest` |
+
+⭐ (b) carries **exactly the page host**, and the decision is the engine's `Prompt`, not a rendered
+modal. ⚠️ The *injected* RED (force internal-as-external and vice versa) was **not** re-run here — it
+needs a code change. The two halves are each other's control per this document's own framing.
+
+### R-CLOSE — 🟡 PARTIAL, and honestly so
+
+✅ **Covered, on this build, and these are the parts Phase 3.5 changed:**
+- 📏 `P3.5-Z3` run directly: the menu overlay was `Vis=True` and **owned by the secondary window**
+  when that window was destroyed → `IsWindow(overlay)` still true, all 14 overlays present (K26).
+- 📏 Product log: `Re-owned 1 overlay(s) off a closing window` — the new safety net firing in situ.
+- 📏 Click-outside close path exercised for wallet, profile and tab-list (`Hiding … — lost activation
+  (click-outside)`), and the guard toggles observed both ways (`close prevention ENABLED` /
+  `DISABLED`).
+
+⬜ **Still owed, unchanged from the 0→0.5 and 2→3 boundaries:**
+- the **`g_file_dialog_active`** arm — needs a native file dialog held open;
+- a clean **GREEN/RED pair** on `g_wallet_overlay_prevent_close`. ⚠️ Two attempts to drive it failed
+  on **sequencing**, not on the product: the first set the flag 2.6 s *after* the overlay had already
+  been dismissed, and the second could not reliably force the overlay's own `WM_ACTIVATE`. Recorded
+  as a probe limitation. ⛔ Not claimed as passed.
+- the **`WH_MOUSE_LL`** third path.
+
+### R-PERIM — 🟢 T1, ⬜ T2 e2e owed
+
+📏 `preflight.ps1 -Full` → `T1a cargo test - rust-wallet` **PASS**, which is where the permission
+engine's unit suite lives. Unchanged from the 2→3 boundary: the end-to-end T2 arm is still owed.
+
+### R-GOLD / R-COUNT — ⬜ NOT RUN, same reason as every prior boundary
+
+Both need a **real auto-approved payment**. ⛔ Cannot be faked: R-GOLD's whole point is that the pill
+appears with no modal, on the correct `Tab::id`; R-COUNT needs a spend to just under the session cap
+followed by a tab close/reopen. One payment closes both **and** the unobserved
+`payment.auto_approved` audit line.
+
+### R-UPDATE — 🟡 T1 only, unchanged
+
+Real N−1 → N apply still owed at RC.
+
+### ⭐ What this boundary actually establishes
+
+Phase 3.5 changed **overlay ownership**, so the risk it carried was to R-CLOSE. That risk was
+measured directly and the overlay survived. The gaps listed above are **pre-existing and identical to
+the previous two boundaries** — they are not new debt created by this phase, and none of them is
+blocked on it.
