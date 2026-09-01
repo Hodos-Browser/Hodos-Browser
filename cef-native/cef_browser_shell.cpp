@@ -1573,6 +1573,13 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 LOG_INFO("🛑 Primary window " + std::to_string(wid) + " closing - transferring to window " + std::to_string(nextWid));
                 TransferPrimaryWindow(nextWid);
 
+                // P3.5-Z5: overlay ownership follows the window that asked for it, so any
+                // overlay still on screen belongs to THIS window and would be destroyed with
+                // it (K12). Hand them to the new primary — g_hwnd is already the survivor,
+                // TransferPrimaryWindow reassigned it above.
+                extern void ReleaseOverlaysOwnedBy(HWND closing, HWND newOwner);
+                ReleaseOverlaysOwnedBy(hwnd, g_hwnd);
+
                 // Now close this window like a secondary
                 std::vector<Tab*> allTabs = TabManager::GetInstance().GetAllTabs();
                 for (Tab* tab : allTabs) {
@@ -1592,6 +1599,13 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             } else {
                 // Secondary window — close only this window's tabs and clean up
                 LOG_INFO("🛑 Window " + std::to_string(wid) + " received WM_CLOSE - closing window...");
+
+                // P3.5-Z5: same safety net for a secondary window — an overlay it currently
+                // owns must go back to the primary before this HWND is destroyed.
+                {
+                    extern void ReleaseOverlaysOwnedBy(HWND closing, HWND newOwner);
+                    ReleaseOverlaysOwnedBy(hwnd, g_hwnd);
+                }
 
                 std::vector<Tab*> allTabs = TabManager::GetInstance().GetAllTabs();
                 for (Tab* tab : allTabs) {

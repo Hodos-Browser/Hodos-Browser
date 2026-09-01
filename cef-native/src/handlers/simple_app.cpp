@@ -571,63 +571,84 @@ void InjectHodosBrowserAPI(CefRefPtr<CefBrowser> browser) {
 }
 
 #ifdef _WIN32
-// P3.5-Z1/Z2/Z4 — keep the requesting window in front when one of its dropdowns opens.
+// P3.5-Z1/Z2/Z4/Z5 — overlay ownership follows the window that asked for the overlay.
 //
-// Every overlay HWND is created CreateWindowEx(..., g_hwnd, ...) — OWNED by the primary
-// window, with ownership fixed at creation. Showing an owned window via
-// SetWindowPos(HWND_TOPMOST, …, SWP_SHOWWINDOW) raises its owner's z-order group, so
-// opening any dropdown from a secondary window dropped that window BEHIND the primary and
-// it disappeared from view (the primary is usually maximised, so it occludes completely).
+// THE CAUSE. Every overlay HWND is created CreateWindowEx(..., g_hwnd, ...) — owned by the
+// PRIMARY window. Win32 keeps an owner and its owned windows together, so with a secondary
+// window in front:
+//   * showing an overlay pulled the PRIMARY up over the secondary, and
+//   * hiding one that held focus handed activation back to the PRIMARY.
+// Both are the same root: ownership was decided once, at creation, and never followed the
+// window the overlay was actually serving.
 //
-// 📏 MEASURED before this fix existed (MEASUREMENTS.md K11), three arms driven against the
-// live HWNDs from outside the process: owner=primary → the drop; owner=requesting window →
-// no drop; owner=primary again → the drop returns. Re-owning the overlay is therefore also
-// a fix, but K12 measured that an owned window is DESTROYED with its owner, which would
-// trade this bug for an overlay-lifetime bug (R-CLOSE). Asserting the requesting window's
-// z-order after the show does not touch lifetime at all.
+// 📏 MEASURED 2026-08-31 (K11), three arms driven against the live HWNDs from outside the
+// process, before any product code existed:
+//     owner = primary            -> the drop
+//     owner = requesting window  -> NO DROP AT ALL
+//     owner = primary again      -> the drop returns          (negative control)
 //
-// The overlay stays visible because it is WS_EX_TOPMOST: HWND_TOP places targetWin at the
-// top of the NON-topmost band, still below every topmost window (P3.5-Z2).
-static void RaiseTargetWindowAfterOverlayShow(BrowserWindow* targetWin) {
-    if (!targetWin || !targetWin->hwnd || !IsWindow(targetWin->hwnd)) return;
-    SetWindowPos(targetWin->hwnd, HWND_TOP, 0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+// ⛔ This replaces two earlier helpers that corrected the z-order *after* the wrong thing had
+// already happened. They worked, and 👤 the owner correctly called them a symptom fix: K25
+// measured the secondary window genuinely losing its place for ~50–230 ms and being dragged
+// back, which is visible as a flicker. Deleting them — rather than extending them — is the
+// honest test that they were patches.
+//
+// ⚠️ OWNERSHIP IS TEMPORARY, and that is what makes this safe. K12 measured that an overlay
+// owned by a window is DESTROYED with that window. So the overlay belongs to the requesting
+// window only while it is on screen: handed over on show, handed back on hide, and handed
+// back by ReleaseOverlaysOwnedBy() if the window closes while it is still open. Whenever an
+// overlay is not visible it is owned by the primary, which is when a window close is likely.
+static void OwnOverlayToRequestingWindow(HWND overlay, BrowserWindow* targetWin) {
+    if (!overlay || !IsWindow(overlay)) return;
+    HWND newOwner = (targetWin && targetWin->hwnd && IsWindow(targetWin->hwnd))
+                        ? targetWin->hwnd : g_hwnd;
+    if (!newOwner || !IsWindow(newOwner)) return;
+    if (GetWindowLongPtr(overlay, GWLP_HWNDPARENT) == reinterpret_cast<LONG_PTR>(newOwner)) return;
+    SetWindowLongPtr(overlay, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(newOwner));
 }
 
-// P3.5-Z5 — the DISMISS half of the same defect, and the mirror of the function above.
-//
-// Hiding a window that holds activation makes Windows pick a successor, and for a window
-// OWNED by the primary the successor is the primary. So dismissing an overlay opened in a
-// secondary window pulled the primary in front — and took the keyboard with it.
-//
-// 📏 MEASURED 2026-08-31 by the owner (K23), 200 ms sampling, wallet dismissed in window B:
-//     wallet Vis=True   Z1 FOCUS      B@Z10  A@Z11     <- wallet holds the keyboard
-//     wallet Vis=False                A@Z10  FOCUS  B@Z11
-//                                     ^ A took BOTH the keyboard and the top
-//
-// ⭐ Every Hide*Overlay already resolves the window the overlay belonged to and returns CEF
-// focus to that window's header. This is not a new policy — it makes the Win32 half agree
-// with the intent the surrounding code already expresses. Before this, CEF focus said "window
-// B's header" while Win32 activation said "window A", and the two silently disagreed.
-static void RestoreTargetWindowAfterOverlayHide(BrowserWindow* targetWin) {
-    if (!targetWin || !targetWin->hwnd || !IsWindow(targetWin->hwnd)) return;
-    HWND target = targetWin->hwnd;
-    // ⛔ This MUST be deferred, not called inline, and the reason is the whole bug.
-    //
-    // The wallet is dismissed from inside WalletOverlayWndProc's WM_ACTIVATE(WA_INACTIVE)
-    // handler — i.e. while Windows is part-way through an activation change. The transfer to
-    // the overlay's OWNER (the primary window) completes after that handler returns, so a
-    // SetForegroundWindow issued from inside it is silently overwritten.
-    //
-    // 📏 MEASURED 2026-09-01, owner-run, one watch containing both cases:
-    //     11:02:10.9  wallet closed     -> A@Z10 FOCUS  B@Z11   inline fix had NO effect
-    //     11:02:24.4  bookmarks closed  -> B@Z10 FOCUS  A@Z11   inline fix WORKED
-    // Same function shape, same edit, opposite results — because bookmarks closes from a
-    // WH_MOUSE_LL hook callback, outside any activation change, and the wallet does not.
-    // ⭐ That split is what identified the mechanism; neither result alone would have.
-    CefPostDelayedTask(TID_UI, base::BindOnce([](HWND h) {
-        if (h && IsWindow(h) && !IsIconic(h)) SetForegroundWindow(h);
-    }, target), 50);
+static void ReturnOverlayOwnershipToPrimary(HWND overlay) {
+    if (!overlay || !IsWindow(overlay) || !g_hwnd || !IsWindow(g_hwnd)) return;
+    if (GetWindowLongPtr(overlay, GWLP_HWNDPARENT) == reinterpret_cast<LONG_PTR>(g_hwnd)) return;
+    SetWindowLongPtr(overlay, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(g_hwnd));
+}
+
+// Safety net for the one case the show/hide pair cannot cover: a window closed while one of
+// its overlays is still on screen. Without this the overlay would be destroyed with it and
+// every g_*_overlay_hwnd pointing at it would dangle (K12).
+// ⚠️ Also re-owns overlays that were owned by a closing PRIMARY, which is why it takes the
+// new owner explicitly — call it AFTER TransferPrimaryWindow so g_hwnd is already the
+// survivor.
+void ReleaseOverlaysOwnedBy(HWND closing, HWND newOwner) {
+    if (!closing || !newOwner || !IsWindow(newOwner) || closing == newOwner) return;
+    // Declared here rather than at file scope: several of these globals are defined further
+    // down this translation unit, and the surrounding code already reaches them this way.
+    extern HWND g_download_panel_overlay_hwnd;
+    extern HWND g_bookmarks_panel_overlay_hwnd;
+    extern HWND g_tablist_panel_overlay_hwnd;
+    extern HWND g_siteinfo_panel_overlay_hwnd;
+    extern HWND g_profile_panel_overlay_hwnd;
+    extern HWND g_menu_overlay_hwnd;
+
+    // All 14 overlays. The HWNDs are only re-owned, never reassigned, so the globals
+    // themselves stay valid and this list is read-only.
+    HWND overlays[] = {
+        g_settings_overlay_hwnd, g_wallet_overlay_hwnd, g_backup_overlay_hwnd,
+        g_brc100_auth_overlay_hwnd, g_notification_overlay_hwnd, g_settings_menu_overlay_hwnd,
+        g_omnibox_overlay_hwnd, g_cookie_panel_overlay_hwnd, g_download_panel_overlay_hwnd,
+        g_bookmarks_panel_overlay_hwnd, g_tablist_panel_overlay_hwnd,
+        g_siteinfo_panel_overlay_hwnd, g_profile_panel_overlay_hwnd, g_menu_overlay_hwnd,
+    };
+    int moved = 0;
+    for (HWND ov : overlays) {
+        if (!ov || !IsWindow(ov)) continue;
+        if (GetWindowLongPtr(ov, GWLP_HWNDPARENT) != reinterpret_cast<LONG_PTR>(closing)) continue;
+        SetWindowLongPtr(ov, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(newOwner));
+        moved++;
+    }
+    if (moved > 0) {
+        LOG_INFO_APP("Re-owned " + std::to_string(moved) + " overlay(s) off a closing window");
+    }
 }
 
 void CreateSettingsOverlayWithSeparateProcess(HINSTANCE hInstance, int iconRightOffset) {
@@ -956,6 +977,9 @@ void ShowWalletOverlay(int iconRightOffset, BrowserWindow* targetWin) {
     }
 
     // Position and show with SWP_NOACTIVATE first — no focus dance yet
+    // P3.5-Z1: hand the overlay to the window that asked, BEFORE showing it, so the
+    // primary is never pulled forward in the first place.
+    OwnOverlayToRequestingWindow(g_wallet_overlay_hwnd, targetWin);
     SetWindowPos(g_wallet_overlay_hwnd, HWND_TOPMOST,
         overlayX, overlayY, panelWidth, panelHeight,
         SWP_SHOWWINDOW | SWP_NOACTIVATE);
@@ -992,12 +1016,6 @@ void ShowWalletOverlay(int iconRightOffset, BrowserWindow* targetWin) {
     }
     // The flag is only set at CREATION time (before React loads).
 
-    // P3.5-Z1: this overlay takes ACTIVATION (it has text input), and activating a window
-    // owned by the primary drags the primary's whole z-order group in front. Measured: the
-    // correction ran, and 225 ms later SetForegroundWindow undid it. So it has to come AFTER
-    // the activation, not before. SWP_NOACTIVATE leaves activation on the overlay, so the
-    // overlay's own WM_ACTIVATE close guard is unaffected.
-    RaiseTargetWindowAfterOverlayShow(targetWin);
 
     LOG_INFO_APP("Wallet overlay shown");
 }
@@ -1033,6 +1051,9 @@ void HideWalletOverlay() {
 
     // Hide window (keep-alive — don't destroy!)
     ShowWindow(g_wallet_overlay_hwnd, SW_HIDE);
+    // P3.5-Z5: off screen, so hand ownership back to the primary. Keeps the overlay
+    // safe if the requesting window is closed later (K12).
+    ReturnOverlayOwnershipToPrimary(g_wallet_overlay_hwnd);
 
     // Clear prevent-close flag
     extern bool g_wallet_overlay_prevent_close;
@@ -1045,8 +1066,6 @@ void HideWalletOverlay() {
         header_browser->GetHost()->SetFocus(true);
     }
 
-    // P3.5-Z5: give the requesting window Win32 activation too, not just CEF focus.
-    RestoreTargetWindowAfterOverlayHide(walletFocusWin);
 
     LOG_INFO_APP("Wallet overlay hidden");
 }
@@ -1493,7 +1512,9 @@ void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately, BrowserWind
         L"Omnibox Overlay",
         WS_POPUP,
         overlayX, overlayY, overlayWidth, overlayHeight,
-        g_hwnd, nullptr, hInstance, nullptr);
+        // P3.5-Z1: the omnibox is the one overlay whose Create path a user still reaches,
+        // so it is created owned by the requesting window rather than the primary.
+        posHwnd, nullptr, hInstance, nullptr);
 
     if (!omnibox_hwnd) {
         LOG_ERROR_APP("❌ Failed to create omnibox overlay HWND. Error: " + std::to_string(GetLastError()));
@@ -1511,9 +1532,6 @@ void CreateOmniboxOverlay(HINSTANCE hInstance, bool showImmediately, BrowserWind
         overlayX, overlayY, overlayWidth, overlayHeight,
         flags);
 
-    // P3.5-Z1: the drop was measured on CREATE as well as on show (K9.3), so the create
-    // path owes the same correction. Harmless when the overlay is created hidden.
-    RaiseTargetWindowAfterOverlayShow(targetWin);
 
     // Store HWND globally
     g_omnibox_overlay_hwnd = omnibox_hwnd;
@@ -1593,13 +1611,13 @@ void ShowOmniboxOverlay(BrowserWindow* targetWin) {
     int overlayHeight = ScalePx(350, posHwnd);
 
     // Force position and show with SWP_NOACTIVATE
+    // P3.5-Z1: hand the overlay to the window that asked, BEFORE showing it, so the
+    // primary is never pulled forward in the first place.
+    OwnOverlayToRequestingWindow(g_omnibox_overlay_hwnd, targetWin);
     SetWindowPos(g_omnibox_overlay_hwnd, HWND_TOPMOST,
         overlayX, overlayY, overlayWidth, overlayHeight,
         SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
-        // P3.5-Z1: the show above raises this overlay's OWNER (the primary window), which
-        // pushes the requesting window behind it. Put the requesting window back in front.
-        RaiseTargetWindowAfterOverlayShow(targetWin);
 
     // Remove WS_EX_TRANSPARENT to enable mouse input
     LONG exStyle = GetWindowLong(g_omnibox_overlay_hwnd, GWL_EXSTYLE);
@@ -1657,6 +1675,9 @@ void HideOmniboxOverlay() {
 
     // Hide window (keep-alive - don't destroy)
     ShowWindow(g_omnibox_overlay_hwnd, SW_HIDE);
+    // P3.5-Z5: off screen, so hand ownership back to the primary. Keeps the overlay
+    // safe if the requesting window is closed later (K12).
+    ReturnOverlayOwnershipToPrimary(g_omnibox_overlay_hwnd);
 
     // Return focus to the correct window's header browser
     // The omnibox handler's window_id tells us which window to refocus
@@ -1861,13 +1882,13 @@ void ShowCookiePanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
     }
 
     // Force position and show with SWP_NOACTIVATE
+    // P3.5-Z1: hand the overlay to the window that asked, BEFORE showing it, so the
+    // primary is never pulled forward in the first place.
+    OwnOverlayToRequestingWindow(g_cookie_panel_overlay_hwnd, targetWin);
     SetWindowPos(g_cookie_panel_overlay_hwnd, HWND_TOPMOST,
         overlayX, overlayY, panelWidth, panelHeight,
         SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
-        // P3.5-Z1: the show above raises this overlay's OWNER (the primary window), which
-        // pushes the requesting window behind it. Put the requesting window back in front.
-        RaiseTargetWindowAfterOverlayShow(targetWin);
 
     // Remove WS_EX_TRANSPARENT to enable mouse input
     LONG exStyle = GetWindowLong(g_cookie_panel_overlay_hwnd, GWL_EXSTYLE);
@@ -1924,6 +1945,9 @@ void HideCookiePanelOverlay() {
 
     // Hide window (keep-alive - don't destroy)
     ShowWindow(g_cookie_panel_overlay_hwnd, SW_HIDE);
+    // P3.5-Z5: off screen, so hand ownership back to the primary. Keeps the overlay
+    // safe if the requesting window is closed later (K12).
+    ReturnOverlayOwnershipToPrimary(g_cookie_panel_overlay_hwnd);
 
     // Return focus to the correct window's header browser
     BrowserWindow* focusWin = WindowManager::GetInstance().GetWindow(targetWinId);
@@ -2128,13 +2152,13 @@ void ShowDownloadPanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
     }
 
     // Force position and show with SWP_NOACTIVATE
+    // P3.5-Z1: hand the overlay to the window that asked, BEFORE showing it, so the
+    // primary is never pulled forward in the first place.
+    OwnOverlayToRequestingWindow(g_download_panel_overlay_hwnd, targetWin);
     SetWindowPos(g_download_panel_overlay_hwnd, HWND_TOPMOST,
         overlayX, overlayY, panelWidth, panelHeight,
         SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
-        // P3.5-Z1: the show above raises this overlay's OWNER (the primary window), which
-        // pushes the requesting window behind it. Put the requesting window back in front.
-        RaiseTargetWindowAfterOverlayShow(targetWin);
 
     // Remove WS_EX_TRANSPARENT to enable mouse input
     LONG exStyle = GetWindowLong(g_download_panel_overlay_hwnd, GWL_EXSTYLE);
@@ -2189,6 +2213,9 @@ void HideDownloadPanelOverlay() {
 
     // Hide window (keep-alive - don't destroy)
     ShowWindow(g_download_panel_overlay_hwnd, SW_HIDE);
+    // P3.5-Z5: off screen, so hand ownership back to the primary. Keeps the overlay
+    // safe if the requesting window is closed later (K12).
+    ReturnOverlayOwnershipToPrimary(g_download_panel_overlay_hwnd);
 
     // Return focus to the correct window's header browser
     BrowserWindow* dlFocusWin = WindowManager::GetInstance().GetWindow(dlTargetWinId);
@@ -2376,13 +2403,13 @@ void ShowSiteInfoPanelOverlay(int iconLeftOffset, BrowserWindow* targetWin) {
         if (panelHeight < ScalePx(280, posHwnd)) panelHeight = ScalePx(280, posHwnd);
     }
 
+    // P3.5-Z1: hand the overlay to the window that asked, BEFORE showing it, so the
+    // primary is never pulled forward in the first place.
+    OwnOverlayToRequestingWindow(g_siteinfo_panel_overlay_hwnd, targetWin);
     SetWindowPos(g_siteinfo_panel_overlay_hwnd, HWND_TOPMOST,
         overlayX, overlayY, panelWidth, panelHeight,
         SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
-        // P3.5-Z1: the show above raises this overlay's OWNER (the primary window), which
-        // pushes the requesting window behind it. Put the requesting window back in front.
-        RaiseTargetWindowAfterOverlayShow(targetWin);
 
     LONG exStyle = GetWindowLong(g_siteinfo_panel_overlay_hwnd, GWL_EXSTYLE);
     SetWindowLong(g_siteinfo_panel_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
@@ -2433,6 +2460,9 @@ void HideSiteInfoPanelOverlay() {
     }
 
     ShowWindow(g_siteinfo_panel_overlay_hwnd, SW_HIDE);
+    // P3.5-Z5: off screen, so hand ownership back to the primary. Keeps the overlay
+    // safe if the requesting window is closed later (K12).
+    ReturnOverlayOwnershipToPrimary(g_siteinfo_panel_overlay_hwnd);
 
     BrowserWindow* siFocusWin = WindowManager::GetInstance().GetWindow(siTargetWinId);
     CefRefPtr<CefBrowser> header_browser = siFocusWin ? siFocusWin->header_browser : SimpleHandler::GetHeaderBrowser();
@@ -2620,6 +2650,9 @@ void ShowTabListPanelOverlay(int iconLeftOffset, BrowserWindow* targetWin) {
         if (handler) handler->SetWindowId(targetWindowId);
     }
 
+    // P3.5-Z1: hand the overlay to the window that asked, BEFORE showing it, so the
+    // primary is never pulled forward in the first place.
+    OwnOverlayToRequestingWindow(g_tablist_panel_overlay_hwnd, targetWin);
     SetWindowPos(g_tablist_panel_overlay_hwnd, HWND_TOPMOST,
         overlayX, overlayY, panelWidth, panelHeight,
         SWP_SHOWWINDOW | SWP_NOACTIVATE);
@@ -2650,12 +2683,6 @@ void ShowTabListPanelOverlay(int iconLeftOffset, BrowserWindow* targetWin) {
         }
     }
 
-    // P3.5-Z1: this overlay takes ACTIVATION (it has text input), and activating a window
-    // owned by the primary drags the primary's whole z-order group in front. Measured: the
-    // correction ran, and 225 ms later SetForegroundWindow undid it. So it has to come AFTER
-    // the activation, not before. SWP_NOACTIVATE leaves activation on the overlay, so the
-    // overlay's own WM_ACTIVATE close guard is unaffected.
-    RaiseTargetWindowAfterOverlayShow(targetWin);
 
     LOG_INFO_APP("Tab-list panel overlay shown");
 }
@@ -2686,6 +2713,9 @@ void HideTabListPanelOverlay() {
     }
 
     ShowWindow(g_tablist_panel_overlay_hwnd, SW_HIDE);
+    // P3.5-Z5: off screen, so hand ownership back to the primary. Keeps the overlay
+    // safe if the requesting window is closed later (K12).
+    ReturnOverlayOwnershipToPrimary(g_tablist_panel_overlay_hwnd);
 
     BrowserWindow* tlFocusWin = WindowManager::GetInstance().GetWindow(tlTargetWinId);
     CefRefPtr<CefBrowser> header_browser = tlFocusWin ? tlFocusWin->header_browser : SimpleHandler::GetHeaderBrowser();
@@ -2693,8 +2723,6 @@ void HideTabListPanelOverlay() {
         header_browser->GetHost()->SetFocus(true);
     }
 
-    // P3.5-Z5: give the requesting window Win32 activation too, not just CEF focus.
-    RestoreTargetWindowAfterOverlayHide(tlFocusWin);
 
     LOG_INFO_APP("Tab-list panel overlay hidden");
 }
@@ -2886,6 +2914,9 @@ void ShowBookmarksPanelOverlay(int iconLeftOffset, BrowserWindow* targetWin) {
         if (handler) handler->SetWindowId(targetWindowId);
     }
 
+    // P3.5-Z1: hand the overlay to the window that asked, BEFORE showing it, so the
+    // primary is never pulled forward in the first place.
+    OwnOverlayToRequestingWindow(g_bookmarks_panel_overlay_hwnd, targetWin);
     SetWindowPos(g_bookmarks_panel_overlay_hwnd, HWND_TOPMOST,
         overlayX, overlayY, panelWidth, panelHeight,
         SWP_SHOWWINDOW | SWP_NOACTIVATE);
@@ -2910,12 +2941,6 @@ void ShowBookmarksPanelOverlay(int iconLeftOffset, BrowserWindow* targetWin) {
         bm_browser->GetHost()->Invalidate(PET_VIEW);
     }
 
-    // P3.5-Z1: this overlay takes ACTIVATION (it has text input), and activating a window
-    // owned by the primary drags the primary's whole z-order group in front. Measured: the
-    // correction ran, and 225 ms later SetForegroundWindow undid it. So it has to come AFTER
-    // the activation, not before. SWP_NOACTIVATE leaves activation on the overlay, so the
-    // overlay's own WM_ACTIVATE close guard is unaffected.
-    RaiseTargetWindowAfterOverlayShow(targetWin);
 
     LOG_INFO_APP("Bookmarks panel overlay shown");
 }
@@ -2948,6 +2973,9 @@ void HideBookmarksPanelOverlay() {
     }
 
     ShowWindow(g_bookmarks_panel_overlay_hwnd, SW_HIDE);
+    // P3.5-Z5: off screen, so hand ownership back to the primary. Keeps the overlay
+    // safe if the requesting window is closed later (K12).
+    ReturnOverlayOwnershipToPrimary(g_bookmarks_panel_overlay_hwnd);
 
     BrowserWindow* bmFocusWin = WindowManager::GetInstance().GetWindow(bmTargetWinId);
     CefRefPtr<CefBrowser> header_browser = bmFocusWin ? bmFocusWin->header_browser : SimpleHandler::GetHeaderBrowser();
@@ -2955,8 +2983,6 @@ void HideBookmarksPanelOverlay() {
         header_browser->GetHost()->SetFocus(true);
     }
 
-    // P3.5-Z5: give the requesting window Win32 activation too, not just CEF focus.
-    RestoreTargetWindowAfterOverlayHide(bmFocusWin);
 
     LOG_INFO_APP("Bookmarks panel overlay hidden");
 }
@@ -3137,13 +3163,13 @@ void ShowMenuOverlay(int iconRightOffset, BrowserWindow* targetWin) {
         if (panelHeight < ScalePx(200, posHwnd)) panelHeight = ScalePx(200, posHwnd);
     }
 
+    // P3.5-Z1: hand the overlay to the window that asked, BEFORE showing it, so the
+    // primary is never pulled forward in the first place.
+    OwnOverlayToRequestingWindow(g_menu_overlay_hwnd, targetWin);
     SetWindowPos(g_menu_overlay_hwnd, HWND_TOPMOST,
         overlayX, overlayY, panelWidth, panelHeight,
         SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
-        // P3.5-Z1: the show above raises this overlay's OWNER (the primary window), which
-        // pushes the requesting window behind it. Put the requesting window back in front.
-        RaiseTargetWindowAfterOverlayShow(targetWin);
 
     LONG exStyle = GetWindowLong(g_menu_overlay_hwnd, GWL_EXSTYLE);
     SetWindowLong(g_menu_overlay_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
@@ -3190,6 +3216,9 @@ void HideMenuOverlay() {
     }
 
     ShowWindow(g_menu_overlay_hwnd, SW_HIDE);
+    // P3.5-Z5: off screen, so hand ownership back to the primary. Keeps the overlay
+    // safe if the requesting window is closed later (K12).
+    ReturnOverlayOwnershipToPrimary(g_menu_overlay_hwnd);
 
     BrowserWindow* menuFocusWin = WindowManager::GetInstance().GetWindow(menuTargetWinId);
     CefRefPtr<CefBrowser> header_browser = menuFocusWin ? menuFocusWin->header_browser : SimpleHandler::GetHeaderBrowser();
@@ -3390,6 +3419,9 @@ void ShowProfilePanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
     }
 
     // Position with SWP_NOACTIVATE first, then single SetForegroundWindow
+    // P3.5-Z1: hand the overlay to the window that asked, BEFORE showing it, so the
+    // primary is never pulled forward in the first place.
+    OwnOverlayToRequestingWindow(g_profile_panel_overlay_hwnd, targetWin);
     SetWindowPos(g_profile_panel_overlay_hwnd, HWND_TOPMOST,
         overlayX, overlayY, panelWidth, panelHeight,
         SWP_SHOWWINDOW | SWP_NOACTIVATE);
@@ -3417,12 +3449,6 @@ void ShowProfilePanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
         profile_browser->GetHost()->Invalidate(PET_VIEW);
     }
 
-    // P3.5-Z1: this overlay takes ACTIVATION (it has text input), and activating a window
-    // owned by the primary drags the primary's whole z-order group in front. Measured: the
-    // correction ran, and 225 ms later SetForegroundWindow undid it. So it has to come AFTER
-    // the activation, not before. SWP_NOACTIVATE leaves activation on the overlay, so the
-    // overlay's own WM_ACTIVATE close guard is unaffected.
-    RaiseTargetWindowAfterOverlayShow(targetWin);
 
     LOG_INFO_APP("Profile panel overlay shown");
 }
@@ -3456,6 +3482,9 @@ void HideProfilePanelOverlay() {
     }
 
     ShowWindow(g_profile_panel_overlay_hwnd, SW_HIDE);
+    // P3.5-Z5: off screen, so hand ownership back to the primary. Keeps the overlay
+    // safe if the requesting window is closed later (K12).
+    ReturnOverlayOwnershipToPrimary(g_profile_panel_overlay_hwnd);
 
     BrowserWindow* profFocusWin = WindowManager::GetInstance().GetWindow(profTargetWinId);
     CefRefPtr<CefBrowser> header_browser = profFocusWin ? profFocusWin->header_browser : SimpleHandler::GetHeaderBrowser();
@@ -3463,7 +3492,5 @@ void HideProfilePanelOverlay() {
         header_browser->GetHost()->SetFocus(true);
     }
 
-    // P3.5-Z5: give the requesting window Win32 activation too, not just CEF focus.
-    RestoreTargetWindowAfterOverlayHide(profFocusWin);
 }
 #endif // _WIN32

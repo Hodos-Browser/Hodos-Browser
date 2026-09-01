@@ -781,3 +781,47 @@ overlay owned by the primary whenever it is not on screen, which is whenever a w
 ⛔ **Do not read level 1 as wasted.** It closed the user-visible vanishing bug, and both of its
 helpers become dead code under level 2 — which is the honest test of whether a fix was a patch: it is
 deleted, not extended, when the cause is addressed.
+
+## K26 — 📏 MEASURED: the root fix (level 2). Ownership follows the window; both patches deleted
+
+👤 Owner chose level 2 from K25's table. Implemented as **temporary** ownership:
+`OwnOverlayToRequestingWindow` on show, `ReturnOverlayOwnershipToPrimary` on hide, plus
+`ReleaseOverlaysOwnedBy(closing, newOwner)` from both `WM_CLOSE` arms as the safety net.
+⛔ `RaiseTargetWindowAfterOverlayShow` and `RestoreTargetWindowAfterOverlayHide` are **deleted**,
+along with all 13 call sites — a patch that survives the real fix was not a patch.
+
+### 📏 No intermediate drop — the flicker's cause is gone, not compensated for
+
+```
+11:21:00.4   baseline            A@Z10  B@Z11
+11:21:13.9   wallet Vis=True     B@Z10  A@Z11
+11:21:21.1   wallet Vis=False    B@Z10  A@Z11
+```
+
+⭐ Compare K25, same action on level 1: there the log contained an explicit `A@Z10 FOCUS / B@Z11`
+sample **between** open and close, and B was dragged back 233 ms later. That sample is now **absent
+entirely** — no state exists in which the primary is in front. ⚠️ Sampling is 200 ms, so a blip
+shorter than that could still hide; but the level-1 flicker measured 233 ms and was captured every
+time, and this is not.
+
+### 🚨 📏 `P3.5-Z3` re-run, and it is now a REAL test rather than a pass-by-construction
+
+The earlier `Z3` green (K16) was weak: the overlay was owned by the primary anyway, so B's
+destruction could not have harmed it. Under dynamic ownership the hazard is live, and it was
+exercised directly:
+
+```
+overlay = 0x630580  Vis=True  1579,189   (menu, open in B)
+overlay OWNER = 0x8E0B9E   <-- window B, the window about to be destroyed
+IsWindow(overlay) BEFORE closing B : True
+IsWindow(B)       AFTER  closing B : False
+IsWindow(overlay) AFTER  closing B : True   <== SURVIVED
+```
+
+📏 All 14 overlays still present afterwards. ⇒ `ReleaseOverlaysOwnedBy` demonstrably hands the
+overlay back before `DestroyWindow`, and K12's destruction result is now prevented rather than
+avoided.
+
+⭐ **Incidental:** the same safety net is called from the primary-transfer arm, so it also addresses
+K18.2 (closing the primary destroyed all 14 overlays). Not claimed as fixed — it has not been
+re-measured on that path.
