@@ -23,7 +23,7 @@ See root [CLAUDE.md](/CLAUDE.md) for overlay architecture rules, close preventio
 | `OmniboxOverlayRoot.tsx` | 308 | Address bar autocomplete dropdown: history matches + search suggestions with favicon icons. |
 | `DownloadsOverlayRoot.tsx` | 219 | Downloads panel: active/completed downloads with progress bars, pause/resume/cancel, open/show-in-folder. |
 | `MenuOverlayRoot.tsx` | 218 | Three-dot menu dropdown: new tab, history, bookmarks, downloads, zoom, print, find, devtools, settings, about, exit. |
-| `TabContextMenuOverlayRoot.tsx` | 152 | Tab context menu dropdown (overlay #15): reload, duplicate, new tab to the right, bookmark tab, close other tabs, close tabs to the right. ⚠️ Deliberately does **not** know the tab id — C++ remembers the right-clicked tab from open to click, so "which tab" has one source of truth. Row height is pinned at 32 px because C++ sizes the HWND from it. |
+| `TabContextMenuOverlayRoot.tsx` | 168 | Tab context menu dropdown (overlay #15): reload, duplicate, new tab to the right, bookmark tab, **mute/unmute tab**, close other tabs, close tabs to the right. ⚠️ Deliberately does **not** know the tab id — C++ remembers the right-clicked tab from open to click, so "which tab" has one source of truth. Row height is pinned at 32 px because C++ sizes the HWND from it. |
 | `CertErrorPage.tsx` | 214 | SSL certificate error interstitial: warning display, "go back" / "proceed (unsafe)" actions. |
 | `SendPage.tsx` | 145 | Legacy transaction send page (balance, send form, transaction history). |
 | `SettingsPage.tsx` | 131 | Full-page settings with sidebar navigation (general, privacy, downloads, wallet, about). |

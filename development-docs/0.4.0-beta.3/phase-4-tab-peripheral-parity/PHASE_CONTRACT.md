@@ -1,6 +1,6 @@
 # Phase 4 — tab context menu & peripheral parity · PHASE CONTRACT
 
-**Workstream:** WS3 · **Opened:** 2026-09-01 · **Status:** 🟢 **LANDED 2026-09-01** — 7 rows GREEN, `P4-A6` 🟡 PARTIAL, `P4-B2` relayed
+**Workstream:** WS3 · **Opened:** 2026-09-01 · **Status:** 🟢 **LANDED 2026-09-01** — 10 rows GREEN, `P4-A6` 🟡 PARTIAL, `P4-B2` relayed. ⬅ *mute tab added after landing, 👤 owner-caught*
 **Owner:** Matthew · **Platform:** Windows (macOS relayed, not claimed)
 **Standard:** `../HARNESS.md`. Inherits the beta.3 harness in full.
 
@@ -37,28 +37,39 @@ reintroduce the whole of 3.5.
 | New tab to the right | `tab_create` + existing `TabManager::ReorderTabs`, needs an insert index |
 | Close other tabs | loop `TabManager::CloseTab` |
 | Close tabs to the right | loop `TabManager::CloseTab` |
+| **Mute tab** ⬅ *added 2026-09-01* | `CefBrowserHost::SetAudioMuted` + `IsAudioMuted` (already used on the close path) |
 
 **IN — peripheral:** mic/camera **verification** on Windows (`OnRequestMediaAccessPermission` already
 exists and honours `SitePermissionStore`). 📖 *"Reported working"* is a claim, not a measurement.
 
 **OUT — 👤 owner decision, deferred to a follow-up ticket:**
+
+> 🚨 **CORRECTED 2026-09-01.** This section originally also listed **mute tab**, and that was a
+> **kickoff grouping error, not a considered exclusion.** Pin, mute-tab and mute-site were presented
+> to the owner as one group "needs model changes"; the owner deferred the group. 📏 Re-measured:
+> mute-tab needed no such change and was separable — the deferral ticket's own *"Proposed fix"*
+> section already said so (*"The floor — mute tab only… does not touch session restore at all"*).
+> 👤 The **owner caught this**, asking why the item their user had asked for was missing.
+> ⇒ mute tab is **IN** and shipped (`P4-A7` / `P4-A8`). Pin and mute-site remain out, for the reasons
+> below, which were re-verified rather than re-asserted.
+
 - ⛔ **Pin** — 📏 `Tab` (`include/core/Tab.h`) has **no `pinned` field**. Needs a model change,
   pinned-first ordering, and `session.json` persistence — which drags in the session-restore code
   that already carries a known defect (`P3.5-A4` / K17).
-- ⛔ **Mute tab / mute site** — 📏 no `muted` field either. CEF's `SetAudioMuted` is available (already
-  used on the shutdown path), but per-domain mute needs storage; extend `SitePermissionStore`, ⛔ do
-  **not** create a parallel store.
+- ⛔ **Mute site** (per-**domain**) — genuinely blocked: needs persistent per-host storage. Extend
+  `SitePermissionStore`; ⛔ do **not** create a parallel store (`TICKET_site_permission_dual_store.md`).
+  ⚠️ Distinct from the per-**tab** mute now shipped: that one is session-lived and stores nothing.
 - ⛔ **macOS** — unverifiable from the Windows box. Relayed, never claimed.
 
 ## 2. Goal
 
-Right-clicking a tab offers the six actions above, each acting on **the tab that was right-clicked**,
+Right-clicking a tab offers the **seven** actions above, each acting on **the tab that was right-clicked**,
 in **the window it belongs to**.
 
 ## 3. Done means
 
 - [ ] Right-click on a tab opens a menu anchored to that tab.
-- [ ] Each of the six actions acts on the **right-clicked** tab, including when it is not the active one.
+- [x] Each of the seven actions acts on the **right-clicked** tab, including when it is not the active one.
 - [ ] The actions behave correctly in a **secondary** window and disturb nothing in the primary.
 - [ ] Closing the last tab still auto-creates an NTP rather than leaving an empty window.
 - [ ] Mic/camera allow / block / ask are **measured** on Windows against a live `getUserMedia` page.
@@ -87,6 +98,9 @@ of which tab is selected.
 | `P4-A4` | Right-clicking a tab in a **secondary** window acts there and leaves the primary untouched | Resolve the window via `g_hwnd` → the action lands in the primary. ⭐ This is Phase 3.5's defect class; the row exists because a new overlay is the easiest place to reintroduce it | `winprobe.ps1`: the acting window's tab set **and** its Z-order | T3 | 🟢 GREEN (M4) — acts in window 1, A untouched at 5 tabs, B stayed at Z11 in all 3 samples. ⚠️ Z-order only; focus half → O3 |
 | `P4-A5` | *Close others* / *close to the right* never leave an empty window | Close-others on a window's only tab, and on a window where the right-clicked tab **is** the last one → an NTP must appear | Tab count after, per window | T3 | 🟢 GREEN (M5) — both bulk items disabled + inert on a 1-tab window; close-others on the last tab left 1, never 0 |
 | `P4-A6` | ⚠️ Bulk close does not corrupt per-session counters (**R-COUNT**) | Spend, then *close others* → counters for the closed tabs reset, and the surviving tab's do not | `PermissionService.session_counters`, not a UI total | T2 | 🟡 PARTIAL (M8) — 4 tabs closed ⇒ 4 `session/close` POSTs, 4 distinct browser_ids. Counters were ZERO; the value half needs a real spend → O4 |
+| `P4-A7` | *Mute tab* silences the **right-clicked** tab and the label round-trips (Mute ⇄ Unmute) | Shares `A2`'s RED — the `GetActiveTab()` substitution was built and run, and this action resolves through the same remembered target | The `Tab::id` in the log **and** `actual=` read back from `IsAudioMuted()` — not the menu label | T3 | 🟢 GREEN (M15) |
+| `P4-A8` | The tab strip shows a muted glyph on exactly the muted tabs, and it survives navigation | 🔴 Stop reading the mute state in the tab-list JSON → the tab is genuinely muted and the strip shows nothing. ⚠️ Must be injected in **BOTH** builders; injecting one was silently healed by the other (M16) | The glyph in the DOM vs the C++ mute log — not the menu label, which is only visible while open | T3 | 🟢 GREEN (M16) — RED built + run twice |
+| `P4-A9` | A muted tab stays muted across a navigation | 🔴 **Was RED on the first implementation** — 📏 CEF's mute is per-document, so mute cleared on any navigation, same-origin or cross-origin (M14) | `IsAudioMuted()` after the load, via the menu's `muted=` field | T3 | 🟢 GREEN (M14) — defect found and fixed |
 | `P4-B1` | Mic/camera honour the stored Allow / Block / Ask | Flip the stored state per site and observe the **opposite** outcome each way. ⛔ Three states, three observations | The **CEF callback result** and the stored row, not just whether a prompt appeared | T3 | 🟢 GREEN (M9) — allow→`Continue()`/`RESOLVED tracks=2`; block→`Cancel()`/`NotAllowedError`; ask→prompt/pending |
 | `P4-B2` | 🍎 macOS mic/camera | ⛔ **NOT RUN — cannot be run from this box.** ✅ Relayed 2026-09-01 (`MAC_RELAY_P35_P4_ROUND.md` M4). ⚠️ macOS has an OS layer we do not — **TCC**: a site allowed in `SitePermissionStore` still fails without bundle entitlements, a failure mode with no Windows analogue. ⛔ Never marked passed on the strength of the Windows run | — | — | ⬜ relayed, not claimed |
 
@@ -156,6 +170,7 @@ Owner items, in the order they are worth doing — see `MEASUREMENTS.md` M11:
 | **O3** | Open the menu in a **second** window and watch whether the first window jumps forward | Phase 3.5's defect reintroduced on the activation axis (the Z-order axis is measured GREEN) |
 | **O4** | One real payment, then *close other tabs* | closes `P4-A6`'s value half, **R-GOLD**, and the unobserved `payment.auto_approved` audit line together |
 | **O5** | 🍎 macOS | relayed only — Windows now has **15** overlays, macOS has 14 |
+| **O6** | ⭐ Play something noisy (YouTube), mute the tab, **listen** | ⛔ Every mute check reads `IsAudioMuted()` and the DOM. *"The flag is set"* is not *"the sound stopped"* — nobody has heard it |
 
 ---
 

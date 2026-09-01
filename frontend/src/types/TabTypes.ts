@@ -11,6 +11,10 @@ export interface Tab {
   isLoading: boolean;
   favicon?: string;
   hasCertError?: boolean;
+  /** Per-tab audio mute. Read from CEF's `IsAudioMuted()` on every tab-list push —
+   *  the browser host owns this state, we never mirror it. Session-lived: it survives
+   *  navigating the tab and dies with the tab. */
+  muted?: boolean;
   paymentIndicator?: {
     amount: string;
     timestamp: number;

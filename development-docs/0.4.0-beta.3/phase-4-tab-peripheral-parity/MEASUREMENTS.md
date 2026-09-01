@@ -271,3 +271,102 @@ background tab.
    shows the new row on reopen. Same call as the bookmarks panel's own add, so this is pre-existing
    overlay refresh behaviour, not something this phase introduced. In normal use the panel is opened
    *after* bookmarking, which loads fresh.
+
+---
+
+# Addendum — **Mute tab** added 2026-09-01, after the phase had landed
+
+👤 **Owner question:** *"the initial prompt was a user asking for 'mute tab' — why is it not in there?"*
+
+⛔ **Answer: my grouping error at kickoff, not a considered exclusion.** I presented pin + mute-tab +
+mute-site to the owner as one group called "needs model changes", the owner deferred the *group*, and
+`TICKET_tab_pin_and_mute_need_model_changes.md` inherited my grouping. Two of the three genuinely
+need model work; **mute tab did not**, and the ticket's own "Proposed fix" section says so — *"The
+floor — mute tab only… self-contained and does not touch session restore at all."*
+
+## M13 — 📏 MEASURED before writing any code
+
+| Claim | Evidence |
+|---|---|
+| CEF exposes both halves | `cef_browser.h:1003` `SetAudioMuted(bool)`, `:1010` `IsAudioMuted()`, UI-thread only |
+| We already use it | `TabManager.cpp:204` + `TabManager_mac.mm:208` mute on the close path |
+| Pin **is** genuinely blocked | `Tab` has no `pinned`; needs pinned-first ordering in `ReorderTabs` + `session.json`, which carries an open defect |
+| Mute **site** is genuinely blocked | needs per-domain storage — extend `SitePermissionStore`, ⛔ never a parallel store |
+
+⇒ mute-tab was separable. Built it; pin and mute-site stay ticketed.
+
+## M14 — 🚨 📏 MEASURED: my first design was WRONG, and the measurement is what caught it
+
+I told the owner mute needed **no `Tab::muted` field** because *"`IsAudioMuted()` IS the state"*, and
+reasoned that navigation is `LoadURL` on the same browser so a mute would survive it. 📖 That was a
+**claim from code reading**, and it is false.
+
+```
+mute tab 2                    -> menu open on tab 2 (…, muted=true)
+navigate SAME-origin          -> menu open on tab 2 (…, muted=false)   <== mute GONE
+navigate CROSS-origin         -> muted=false                            <== also gone
+```
+📏 Same CDP target id across the navigation and **no `OnBeforeClose`** — so the `CefBrowser` was *not*
+recreated, yet `IsAudioMuted()` reads false. ⇒ **the CEF mute is per-document; the user's intent is
+per-tab.** Without a fix the feature breaks the first time the user clicks a link in a muted tab —
+silently, and exactly when they care.
+
+⭐ **The ticket was right that a model field is needed — for a reason neither it nor I had stated.**
+Its stated reason was *persistence across restart*; the real one is *re-application across
+navigation*. Two different problems that happen to want the same field.
+
+**Fixed:** `Tab::muted` holds the intent, `OnLoadingStateChange` re-applies `SetAudioMuted(true)` on
+load completion when intent and mechanism disagree. The tab-list JSON and the menu label both report
+**intent**; the toggle log prints `intent=` and `actual=` side by side, which is what makes a future
+divergence visible instead of silent.
+
+📏 **Re-measured after the fix** — glyph state across a full sequence:
+```
+after mute:             [false, true, false]
+after SAME-origin nav:  [false, true, false]   🔇 Re-applied mute to tab 2 after navigation
+after CROSS-origin nav: [false, true, false]   🔇 Re-applied mute to tab 2 after navigation
+after unmute:           [false, false, false]  intent=false actual=false
+```
+
+## M15 — 📏 MEASURED: `P4-A7` — the toggle acts on the right-clicked tab
+
+3 tabs; **active is index 2**, right-click **index 1** (background).
+
+| | Evidence |
+|---|---|
+| 🟢 GREEN | `menu open on tab 2 (window 0, index 1 of 3, muted=false)` → `mute_toggle on tab 2: intent=true actual=true` |
+| Label round-trip | reopening the menu on that tab reads **"Unmute tab"**; the log shows `muted=true` |
+| Reverses | `mute_toggle on tab 2: intent=false actual=false`, glyph clears |
+| 🔴 RED | shared with `P4-A2` — the `GetActiveTab()` substitution was built and run, and every action including this one resolves through the same remembered `s_tabmenu_target_tab_id` |
+
+🎯 SUBJECT: the `Tab::id` in the C++ log **and** `actual=` read back from CEF — not the label.
+
+## M16 — 🚨 📏 MEASURED: `P4-A8` RED **observed**, and the first RED attempt was itself instructive
+
+The indicator exists because mute has no other visible state: the menu label is only readable while
+the menu is open, so without a glyph you mute a tab and can never tell which tabs are silenced.
+
+**RED attempt 1 — injected `muted = false` into ONE builder (the push).** Result: the menu label went
+stale correctly (`muted=false` logged while the tab was genuinely muted), **but the glyph still
+appeared.** ⭐ Because the *other* builder — the on-demand `get_tab_list` arm — was untouched and
+healed it on the frontend's next poll.
+
+⇒ 📏 **empirical proof that the two-builder trap is real**: had the real implementation added `muted`
+to only one builder, the indicator would have been inconsistent rather than absent, which is far
+harder to notice. Both builders now carry the field and both carry the warning comment.
+
+**RED attempt 2 — injected both.** Clean:
+```
+📑 Tab menu mute_toggle on tab 2: false -> true      <- genuinely muted
+muted glyphs: [false, false, false]                  <- strip shows nothing, on any tab
+```
+🟢 Reverted, rebuilt, re-confirmed: `[false, true, false]`, held through a full poll cycle.
+
+## M17 — ⛔ What mute deliberately does NOT do
+
+| | |
+|---|---|
+| **No "tab is making noise" speaker** | 📏 this CEF build exposes **no `OnAudioStateChanged`** (`grep` over `cef-binaries/include`). Chrome's speaker icon needs an audio-state signal we do not have. Showing a *muted* glyph only is the honest subset — it is user-driven, so a push on toggle keeps it accurate |
+| **No persistence across restart** | session-lived by design; `session.json` carries an open defect and is out of scope (contract §7) |
+| **Not per-domain** | "mute site" still needs storage and stays ticketed |
+| ⬜ **Not verified: does it actually silence audio?** | Every check above reads `IsAudioMuted()` and the UI. ⛔ **Nobody has listened to a noisy page with this on.** That is owner item **O6** — the `SetAudioMuted` call is CEF's own and is already used on the close path, but "the flag is set" is not "the sound stopped" |

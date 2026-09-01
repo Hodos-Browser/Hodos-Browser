@@ -70,6 +70,16 @@ struct Tab {
     bool can_go_back;
     bool can_go_forward;
 
+    // User's per-tab audio-mute INTENT (P4-A7/A8).
+    // ⛔ This is NOT a mirror of CefBrowserHost::IsAudioMuted() for convenience — it exists
+    // because 📏 the CEF mute does NOT survive a navigation. Measured 2026-09-01: mute a tab,
+    // navigate it (same-origin OR cross-origin, same CefBrowser, no OnBeforeClose), and
+    // IsAudioMuted() reads back false. So the mechanism is per-document while the user's
+    // intent is per-tab, and something has to re-apply it — SimpleHandler::OnLoadingStateChange
+    // does, on load completion.
+    // Session-lived by design: not written to session.json, so it dies with the tab.
+    bool muted;
+
     // SSL certificate error state (from OnCertificateError)
     bool has_cert_error;
 
@@ -99,6 +109,7 @@ struct Tab {
           is_closing(false),
           can_go_back(false),
           can_go_forward(false),
+          muted(false),
           has_cert_error(false),
           created_at(std::chrono::system_clock::now()),
           last_accessed(std::chrono::system_clock::now()) {
@@ -124,6 +135,7 @@ struct Tab {
           is_closing(false),
           can_go_back(false),
           can_go_forward(false),
+          muted(false),
           has_cert_error(false),
           created_at(std::chrono::system_clock::now()),
           last_accessed(std::chrono::system_clock::now()) {

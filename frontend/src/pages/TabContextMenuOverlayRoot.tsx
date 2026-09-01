@@ -6,17 +6,19 @@ import AddIcon from '@mui/icons-material/Add';
 import BookmarkBorderIcon from '@mui/icons-material/BookmarkBorder';
 import CloseIcon from '@mui/icons-material/Close';
 import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
+import VolumeOffIcon from '@mui/icons-material/VolumeOff';
+import VolumeUpIcon from '@mui/icons-material/VolumeUp';
 import { tokens } from '../theme/tokens';
 
 declare global {
   interface Window {
-    setTabMenuContext?: (hasOthers: boolean, hasRight: boolean) => void;
+    setTabMenuContext?: (hasOthers: boolean, hasRight: boolean, isMuted: boolean) => void;
   }
 }
 
 // ⚠️ Row and divider heights are pinned here because C++ sizes the overlay HWND from
-// them (kTabMenuWidthDip / kTabMenuHeightDip in simple_app.cpp): 6 rows (6 x 32) +
-// one divider (9) + container padding (2 x 4) = 209. Changing either without changing
+// them (kTabMenuWidthDip / kTabMenuHeightDip in simple_app.cpp): 7 rows (7 x 32) +
+// one divider (9) + container padding (2 x 4) = 241. Changing either without changing
 // the other leaves dead space at the bottom of the menu, or clips the last row.
 const ROW_HEIGHT = 32;
 
@@ -73,11 +75,15 @@ const TabContextMenuOverlayRoot: React.FC = () => {
   // menu that fails to receive its context offers less rather than more.
   const [hasOthers, setHasOthers] = useState(false);
   const [hasRight, setHasRight] = useState(false);
+  // Mute is a toggle, so the label depends on the right-clicked tab's CURRENT state,
+  // which C++ reads from CEF each time the menu opens.
+  const [isMuted, setIsMuted] = useState(false);
 
   useEffect(() => {
-    window.setTabMenuContext = (others: boolean, right: boolean) => {
+    window.setTabMenuContext = (others: boolean, right: boolean, muted: boolean) => {
       setHasOthers(others);
       setHasRight(right);
+      setIsMuted(muted);
     };
     // ⛔ Ask for the context instead of waiting to be told. On the FIRST right-click of a
     // session the overlay's browser is created by the very IPC that shows it, so C++'s
@@ -144,6 +150,11 @@ const TabContextMenuOverlayRoot: React.FC = () => {
         icon={<BookmarkBorderIcon sx={{ fontSize: 18 }} />}
         label="Bookmark tab"
         onClick={() => handleAction('bookmark')}
+      />
+      <MenuItemRow
+        icon={isMuted ? <VolumeOffIcon sx={{ fontSize: 18 }} /> : <VolumeUpIcon sx={{ fontSize: 18 }} />}
+        label={isMuted ? 'Unmute tab' : 'Mute tab'}
+        onClick={() => handleAction('mute_toggle')}
       />
 
       <Divider sx={{ borderColor: tokens.borderDefault, my: 0.5 }} />

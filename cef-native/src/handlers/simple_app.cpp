@@ -3250,9 +3250,11 @@ void HideTabContextMenuOverlay();
 
 // Menu geometry in CSS px. The React side pins each row to 32px and the divider block
 // to 9px so this stays an exact fit rather than a guess with dead space at the bottom:
-// 6 rows (192) + 1 divider (9) + container padding (2 x 4) = 209.
+// 7 rows (224) + 1 divider (9) + container padding (2 x 4) = 241.
+// ⚠️ Both halves are pinned on purpose — `ROW_HEIGHT` in `TabContextMenuOverlayRoot.tsx`
+// carries the matching note. Adding a menu item without changing this clips the last row.
 static const int kTabMenuWidthDip = 240;
-static const int kTabMenuHeightDip = 209;
+static const int kTabMenuHeightDip = 241;
 
 // Computes the overlay rect for a given anchor, clamped inside the target window.
 static void ComputeTabMenuRect(HWND posHwnd, HWND posHeader, int anchorX, int anchorY,

@@ -3,6 +3,7 @@ import { Box, Typography } from '@mui/material';
 import CloseIcon from '@mui/icons-material/Close';
 import { HodosButton } from './HodosButton';
 import PublicIcon from '@mui/icons-material/Public';
+import VolumeOffIcon from '@mui/icons-material/VolumeOff';
 import { tokens } from '../theme/tokens';
 import CircularProgress from '@mui/material/CircularProgress';
 import type { Tab } from '../types/TabTypes';
@@ -167,6 +168,17 @@ export const TabComponent: React.FC<TabComponentProps> = ({
             <PublicIcon sx={{ fontSize: 14, color: '#6b7280' }} />
           )}
         </Box>
+
+        {/* Muted indicator — P4-A8. Without this you can mute a tab and have no way to
+             see which tabs are silenced; the menu label is only visible while the menu is
+             open. ⚠️ Reflects CEF's own IsAudioMuted(), pushed on every tab-list update.
+             ⛔ This is NOT Chrome's "this tab is making noise" speaker — that needs an
+             audio-state signal this CEF build does not expose. Muted-only is honest. */}
+        {tab.muted && (
+          <Box sx={{ flexShrink: 0, display: 'flex', alignItems: 'center' }} title="Tab muted">
+            <VolumeOffIcon sx={{ fontSize: 13, color: '#9ca3af' }} />
+          </Box>
+        )}
 
         {/* Tab Title */}
         <Typography

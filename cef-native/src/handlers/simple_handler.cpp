@@ -199,6 +199,10 @@ static int s_tabmenu_target_tab_id = -1;
 // the overlay's browser does not exist yet.
 static bool s_tabmenu_has_others = false;
 static bool s_tabmenu_has_right = false;
+// Mute is a TOGGLE, so the menu has to know the current state to label itself. ⛔ Read from
+// CEF at open time, never remembered across opens — a remembered flag is what P4-A8's RED
+// makes go stale the moment anything else mutes the tab.
+static bool s_tabmenu_is_muted = false;
 
 static void SendTabMenuContext(CefRefPtr<CefBrowser> tabmenu_browser) {
     if (!tabmenu_browser || !tabmenu_browser->GetMainFrame()) {
@@ -206,7 +210,8 @@ static void SendTabMenuContext(CefRefPtr<CefBrowser> tabmenu_browser) {
     }
     std::string js = "if (window.setTabMenuContext) { window.setTabMenuContext(" +
                      std::string(s_tabmenu_has_others ? "true" : "false") + ", " +
-                     std::string(s_tabmenu_has_right ? "true" : "false") + "); }";
+                     std::string(s_tabmenu_has_right ? "true" : "false") + ", " +
+                     std::string(s_tabmenu_is_muted ? "true" : "false") + "); }";
     tabmenu_browser->GetMainFrame()->ExecuteJavaScript(js, tabmenu_browser->GetMainFrame()->GetURL(), 0);
 }
 
@@ -948,6 +953,17 @@ static void SendTabListToWindow(BrowserWindow* bw) {
         tab_json["isActive"] = (tab->id == activeForWindow);
         tab_json["isLoading"] = tab->is_loading;
         tab_json["hasCertError"] = tab->has_cert_error;
+        // 🎯 P4-A8: the user's INTENT, not CefBrowserHost::IsAudioMuted().
+        // ⛔ Reporting the mechanism was the first implementation and it was WRONG:
+        // 📏 IsAudioMuted() reads false again after any navigation, so the indicator
+        // vanished the moment the user clicked a link in a tab they had muted. The
+        // mechanism is per-document, the intent is per-tab; OnLoadingStateChange
+        // re-applies the mechanism on load completion.
+        // ⚠️ TWO builders emit this JSON — this one (the push) and the `get_tab_list`
+        // arm in OnProcessMessageReceived. Change both or neither: measured during
+        // P4-A8's RED, injecting only this one was silently healed by the other on the
+        // frontend's next poll.
+        tab_json["muted"] = tab->muted;
         if (!tab->favicon_url.empty()) {
             tab_json["favicon"] = tab->favicon_url;
         }
@@ -1478,6 +1494,20 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
         // Duplicate fetch here was removed — F10 perf fix.
     }
 #endif
+
+    // 🐛 P4-A9: re-apply the user's mute after every load. 📏 MEASURED 2026-09-01: CEF's
+    // SetAudioMuted does NOT survive a navigation — mute a tab, navigate it (same-origin
+    // or cross-origin; same CefBrowser, no OnBeforeClose fires) and IsAudioMuted() reads
+    // back false. The mute is per-document, the user's intent is per-tab. Without this the
+    // feature silently breaks the first time the user clicks a link in a muted tab.
+    if (!isLoading && tab_id != -1) {
+        Tab* mtab = TabManager::GetInstance().GetTab(tab_id);
+        if (mtab && mtab->muted && browser->GetHost() && !browser->GetHost()->IsAudioMuted()) {
+            browser->GetHost()->SetAudioMuted(true);
+            LOG_INFO_BROWSER("🔇 Re-applied mute to tab " + std::to_string(tab_id) +
+                             " after navigation");
+        }
+    }
 
     // Track history when page finishes loading (for tabs - both platforms)
     if (!isLoading && tab_id != -1) {
@@ -2825,6 +2855,8 @@ bool SimpleHandler::OnProcessMessageReceived(
             tab_json["isActive"] = (tab->id == activeForWindow);
             tab_json["isLoading"] = tab->is_loading;
             tab_json["hasCertError"] = tab->has_cert_error;
+            // ⚠️ Mirrors SendTabListToWindow above — change both or neither.
+            tab_json["muted"] = tab->muted;
             if (!tab->favicon_url.empty()) {
                 tab_json["favicon"] = tab->favicon_url;
             }
@@ -3587,11 +3619,13 @@ bool SimpleHandler::OnProcessMessageReceived(
         }
         s_tabmenu_has_others = siblings.size() > 1;
         s_tabmenu_has_right  = (idx != siblings.size()) && (idx + 1 < siblings.size());
+        s_tabmenu_is_muted   = target->muted;
 
         LOG_INFO_BROWSER("📑 Tab context menu open on tab " + std::to_string(tabId) +
                          " (window " + std::to_string(target->window_id) +
                          ", index " + std::to_string(idx) +
-                         " of " + std::to_string(siblings.size()) + ")");
+                         " of " + std::to_string(siblings.size()) +
+                         ", muted=" + std::string(s_tabmenu_is_muted ? "true" : "false") + ")");
 
 #ifdef _WIN32
         // P3.5-A3: CSS px -> physical px against the DPI of the window that ASKED. The
@@ -3678,6 +3712,31 @@ bool SimpleHandler::OnProcessMessageReceived(
                 target->url, target->title, -1, std::vector<std::string>());
             LOG_INFO_BROWSER("📑 Tab menu bookmark for tab " + std::to_string(targetId) +
                              ": " + result);
+        } else if (action == "mute_toggle") {
+            // Per-TAB mute, session-lived by design: `SetAudioMuted` lives on the browser
+            // host, navigation is LoadURL on that same browser, so a mute survives navigating
+            // the tab and dies with it. 📏 That is the question the deferral ticket left
+            // explicitly unverified. Per-DOMAIN mute is a different feature and still needs
+            // storage — extend SitePermissionStore, do not add a parallel store.
+            // Toggle the INTENT, then make the mechanism match it.
+            target->muted = !target->muted;
+            if (target->browser && target->browser->GetHost()) {
+                CefRefPtr<CefBrowserHost> host = target->browser->GetHost();
+                host->SetAudioMuted(target->muted);
+                // 🎯 Read the mechanism back rather than assuming the write took. Logging
+                // intent AND actual is what makes a divergence visible instead of silent —
+                // it is how the navigation reset below was found in the first place.
+                LOG_INFO_BROWSER("📑 Tab menu mute_toggle on tab " + std::to_string(targetId) +
+                                 ": intent=" + std::string(target->muted ? "true" : "false") +
+                                 " actual=" + std::string(host->IsAudioMuted() ? "true" : "false"));
+            } else {
+                LOG_WARNING_BROWSER("📑 Tab menu mute_toggle: tab " + std::to_string(targetId) +
+                                    " has no browser yet; intent recorded as " +
+                                    std::string(target->muted ? "true" : "false"));
+            }
+            // Push the list so the tab strip's indicator updates now. Mute only ever changes
+            // because the user asked, so there is no page-driven state to race with.
+            NotifyWindowTabListChanged(winId);
         } else if (action == "duplicate" || action == "new_tab_right") {
             // Both open next to the right-clicked tab rather than at the end of the strip
             // — the position is the point of "new tab to the right", and a duplicate that
