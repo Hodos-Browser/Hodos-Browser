@@ -825,3 +825,35 @@ avoided.
 ⭐ **Incidental:** the same safety net is called from the primary-transfer arm, so it also addresses
 K18.2 (closing the primary destroyed all 14 overlays). Not claimed as fixed — it has not been
 re-measured on that path.
+
+## K27 — 👤 📏 OWNER-CONFIRMED 2026-09-01: `P3.5-Z5` GREEN, and every other row re-verified on the root fix
+
+### The owner's run — the primary never appears in front, in any sample
+
+```
+11:30:07.1   baseline                       B@Z10  A@Z11
+11:30:10.2   wallet    Vis=True  Z1 FOCUS   B@Z10  A@Z11
+11:30:10.9   wallet    Vis=False            B@Z10 FOCUS  A@Z11
+11:30:13.1   bookmarks Vis=True  Z1 FOCUS   B@Z10  A@Z11
+11:30:13.9   bookmarks Vis=False            B@Z10 FOCUS  A@Z11
+```
+
+👤 *"Looks much better."* ⭐ **A is at `Z11` in all five samples — it never reaches `Z10` at all.**
+Compare K25 on level 1, where a sample with `A@Z10 FOCUS` sat between open and close. The drop is
+**absent**, not corrected, on both the wallet (WM_ACTIVATE dismiss) and bookmarks (mouse-hook
+dismiss). ⇒ `P3.5-Z5` **GREEN**.
+
+### Rows re-verified on the root-fix binary, because the change touched them
+
+⛔ The earlier greens were measured on the level-1 code. Ownership now changes at show/hide **and at
+creation** for the omnibox, so the rows were re-run rather than assumed to carry over:
+
+| Row | Re-measured | Result |
+|---|---|---|
+| `A7` | omnibox first-open from the secondary window (B at `110,110`) | created at **`270,219`** = `110+160, 110+109`, B-relative ✅. B stayed above A |
+| `A3` | menu on the 125 % monitor vs the 100 % monitor | gap **45** vs **36** ✅ — unchanged by the ownership work |
+| `Z3` | menu **owned by B** and `Vis=True` when B was destroyed | overlay **survived**, all 14 present ✅ (K26) |
+
+⭐ `A7` mattered most here: `CreateOmniboxOverlay` now passes `posHwnd` rather than `g_hwnd` as the
+owner, so the omnibox is the one overlay **created** owned by the requesting window. That is a real
+change to the create path and it would have been careless to carry the old green forward.
