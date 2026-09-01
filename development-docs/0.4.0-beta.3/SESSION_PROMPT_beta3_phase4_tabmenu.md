@@ -83,7 +83,7 @@ counters reset per tab close. That path has never been run at N>1 (`P4-A6`).
 - ⚠️ **A dev browser is RUNNING** with **two windows** (primary at `0,0 1920x1032`, secondary at
   `110,110`). ⛔ The linker fails **`LNK1104`** while it runs — **stop it by EXE PATH before building**,
   never by process name:
-  `Get-CimInstance Win32_Process -Filter "Name='HodosBrowser.exe'" | Where-Object { $_.ExecutablePath -like '*cef-nativeuildin\Release*' } | Stop-Process -Force`
+  `Get-CimInstance Win32_Process -Filter "Name='HodosBrowser.exe'" | Where-Object { $_.ExecutablePath -like '*cef-native\build\bin\Release*' } | Stop-Process -Force`
 - ⛔ The owner's **installed** browser is running (~70 processes under `%LOCALAPPDATA%\HodosBrowser`,
   wallet on **31301**). **Never touch it. Match by exe path, never by process name** — both builds ship
   the same image name.
