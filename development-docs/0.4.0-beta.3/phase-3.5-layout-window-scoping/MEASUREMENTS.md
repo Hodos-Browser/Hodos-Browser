@@ -735,3 +735,49 @@ was **refused by the foreground lock again**, and B was already in front, so *"s
 carries almost no information. ⇒ **the owner's re-run is the evidence for `Z5`; mine is not.**
 Four attempts now, none reliable — recorded so nobody later mistakes this probe for a working
 instrument.
+
+## K25 — 👤 OWNER, 2026-09-01: *"we are fixing the symptom and not the root"* — and the log agrees
+
+👤 *"Browser B does not go invisible now. But it does have a funny looking refresh, it looks like it
+goes away and then comes back... This seems like we are fixing the symptom and not the root of the
+problem. It is not terrible but it is noticable."*
+
+📏 **Measured, and it is not a repaint artifact — the window really does lose its place:**
+
+```
+11:12:00.471   wallet closed    A@Z10 FOCUS   B@Z11     <- B still goes BEHIND
+11:12:00.704   (+233 ms)        B@Z10 FOCUS   A@Z11     <- the deferred restore drags it back
+```
+
+⇒ the drop is **not prevented**; it happens and is then undone. Sampling is 200 ms and the deferred
+task is 50 ms, so the true visible interval is somewhere in **~50–230 ms** — comfortably long enough
+to see, which is exactly what the owner reports.
+
+⭐⭐ **The owner's read is correct and worth stating as the finding, not as feedback:** every fix in
+this phase so far — `RaiseTargetWindowAfterOverlayShow` and `RestoreTargetWindowAfterOverlayHide`
+alike — is a **correction applied after the wrong thing has already happened.** Both exist only
+because the overlay is owned by the primary window.
+
+### 🎯 The actual root, and it was measured on day one
+
+📏 K11 ARM 2 already established it: with the overlay **owned by the requesting window**, the drop
+does not occur at all — there is nothing to correct, on either the show or the hide path, because the
+primary is never promoted in the first place. The z-order asserts exist purely to compensate for an
+ownership choice made at `CreateWindowEx` time.
+
+⚠️ It was rejected for a **measured** reason, not a guess: K12 showed an overlay owned by B is
+**destroyed when B closes**. But that objection applies to *permanent* re-owning. Re-owning only for
+the duration of a show — to the requesting window on show, back to the primary on hide — keeps the
+overlay owned by the primary whenever it is not on screen, which is whenever a window close is likely.
+
+⇒ three levels exist, and this phase has so far taken the cheapest:
+
+| Level | What | Cost | Flicker |
+|---|---|---|---|
+| 1 — **shipped** | correct the z-order after the fact | done | ❌ ~50–230 ms visible |
+| 2 | re-own to the requesting window on show, back to the primary on hide | 1 build + `Z3` re-run | ✅ none — cause removed |
+| 3 | per-window overlays (14 creators take a `BrowserWindow*`) | the beta.4 migration (§0.1.1) | ✅ none |
+
+⛔ **Do not read level 1 as wasted.** It closed the user-visible vanishing bug, and both of its
+helpers become dead code under level 2 — which is the honest test of whether a fix was a patch: it is
+deleted, not extended, when the cause is addressed.
