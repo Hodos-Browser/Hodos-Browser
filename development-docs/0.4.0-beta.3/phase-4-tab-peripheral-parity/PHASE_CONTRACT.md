@@ -88,7 +88,7 @@ of which tab is selected.
 | `P4-A5` | *Close others* / *close to the right* never leave an empty window | Close-others on a window's only tab, and on a window where the right-clicked tab **is** the last one → an NTP must appear | Tab count after, per window | T3 | ⬜ |
 | `P4-A6` | ⚠️ Bulk close does not corrupt per-session counters (**R-COUNT**) | Spend, then *close others* → counters for the closed tabs reset, and the surviving tab's do not | `PermissionService.session_counters`, not a UI total | T2 | ⬜ |
 | `P4-B1` | Mic/camera honour the stored Allow / Block / Ask | Flip the stored state per site and observe the **opposite** outcome each way. ⛔ Three states, three observations | The **CEF callback result** and the stored row, not just whether a prompt appeared | T3 | ⬜ |
-| `P4-B2` | 🍎 macOS mic/camera | ⛔ **NOT RUN — cannot be run from this box.** Relayed. Never reported as passed | — | — | ⬜ relay |
+| `P4-B2` | 🍎 macOS mic/camera | ⛔ **NOT RUN — cannot be run from this box.** ✅ Relayed 2026-09-01 (`MAC_RELAY_P35_P4_ROUND.md` M4). ⚠️ macOS has an OS layer we do not — **TCC**: a site allowed in `SitePermissionStore` still fails without bundle entitlements, a failure mode with no Windows analogue. ⛔ Never marked passed on the strength of the Windows run | — | — | ⬜ relay |
 
 ## 6. Blast radius
 
@@ -98,6 +98,20 @@ of which tab is selected.
 | **Bulk close** | `A5` + `A6`. Closing N tabs is the only genuinely new *behaviour* in this phase |
 | **A 15th overlay** | Follow the `Show*/Hide*` pattern exactly, or Phase 3.5's fix does not apply. `A4` is the control |
 | **Testing is again mostly T3** | Accepted. The CDP + `winprobe` rig from Phase 3.5 is reusable as-is |
+
+## 6.1 🍎 What this phase owes macOS — relayed, not built
+
+⚠️ **A 15th overlay breaks a parity line that is currently true.** `cef-native/CLAUDE.md` records
+Windows and macOS at **14 overlays each**, and invariant #9 requires a macOS creation function in
+`cef_browser_shell_mac.mm` for any new overlay. Windows will have 15.
+
+✅ **Relayed 2026-09-01** (`MAC_RELAY_P35_P4_ROUND.md` M3). ⛔ **Not written from here** — a
+cross-platform overlay authored on a Windows box and never executed is the failure mode this project
+keeps paying for (same call as the Phase 3 round).
+
+⭐ Nothing is broken meanwhile: Windows simply has a menu macOS does not. ⚠️ But the parity line in
+`cef-native/CLAUDE.md` goes **stale the moment this phase lands** — update it in the landing commit
+rather than leaving a doc asserting 14/14 when it is 15/14.
 
 ## 7. Out of scope
 

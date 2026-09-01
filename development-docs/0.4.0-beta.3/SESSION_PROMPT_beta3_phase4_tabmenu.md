@@ -120,7 +120,9 @@ its pre-session value. ⛔ The shipped default was never checked — read `Setti
 2. every evidence row in `PHASE_CONTRACT.md` §5 GREEN with its RED **observed**;
 3. `P4-B1` mic/camera **measured** on Windows across all three stored states — ⛔ *"reported working"*
    is what this row exists to replace;
-4. `P4-B2` macOS written into the Mac relay, never claimed;
+4. `P4-B2` macOS — ✅ **already relayed** (`MAC_RELAY_P35_P4_ROUND.md`); never claimed from here;
+4b. ⚠️ **update `cef-native/CLAUDE.md`'s overlay parity line in the landing commit** — it says
+    Windows and macOS have **14 each**, and this phase makes Windows **15**;
 5. preflight + `-NegativeControl`, and the 4 → 5 regression boundary;
 6. what stays manual, said plainly.
 
