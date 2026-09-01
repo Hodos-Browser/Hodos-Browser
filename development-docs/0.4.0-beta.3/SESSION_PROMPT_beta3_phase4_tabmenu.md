@@ -78,21 +78,29 @@ counters reset per tab close. That path has never been run at N>1 (`P4-A6`).
 - 📏 **A mixed-DPI rig exists**: the laptop (`\\.\DISPLAY24`) is 1920×1200 at **125 %**. ⛔ Any probe
   must call `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)` first or Windows lies to it.
 
-# 6.1 Machine state, as left on 2026-09-01
+# 6.1 Machine state — as left 2026-09-01
 
-- ⚠️ **A dev browser is RUNNING** with **two windows** (primary at `0,0 1920x1032`, secondary at
-  `110,110`). ⛔ The linker fails **`LNK1104`** while it runs — **stop it by EXE PATH before building**,
-  never by process name:
-  `Get-CimInstance Win32_Process -Filter "Name='HodosBrowser.exe'" | Where-Object { $_.ExecutablePath -like '*cef-native\build\bin\Release*' } | Stop-Process -Force`
-- ⛔ The owner's **installed** browser is running (~70 processes under `%LOCALAPPDATA%\HodosBrowser`,
-  wallet on **31301**). **Never touch it. Match by exe path, never by process name** — both builds ship
-  the same image name.
-- Dev wallet **31401** running · Vite **5137** running · dev CDP **9322** (`--profile=Default` bypasses
-  the picker; CDP is off entirely in picker mode).
-- ⚠️ `browser.restoreSessionOnStart` was flipped **on** for a Phase 3.5 test and **reverted to `false`**
-  afterwards — its pre-session value. ⛔ The shipped default was never checked; if you need it, check
-  `SettingsManager`, not `useSettings.ts`'s frontend fallback.
-- ⚠️ `cargo build` fails *"Access is denied"* while the dev wallet runs — stop that too if you touch Rust.
+✅ **The dev environment is STOPPED.** Dev browser, dev adblock, dev wallet and Vite were all shut
+down deliberately at the end of the previous session so this one starts clean. Nothing to kill first.
+
+**To bring it up (all three, in this order):**
+1. `.\dev-wallet.ps1` — sets `HODOS_DEV=1`, wallet on **31401**
+2. `cd frontend && npm run dev` — Vite on **5137**
+3. Launch the browser with PowerShell `Start-Process` after `$env:HODOS_DEV='1'`, args
+   `--profile=Default` (bypasses the picker; dev CDP is then on **9322**).
+   ⛔ A detached bash `&` launch comes up **minimized**. ⛔ Never launch the exe directly without
+   `HODOS_DEV=1` — the dev safeguard blocks it, by design.
+
+⛔ **The owner's INSTALLED browser is running** (~70 processes under `%LOCALAPPDATA%\HodosBrowser`,
+wallet on **31301**). **Never touch it. Match by exe path, never by process name** — both builds ship
+the same image name `HodosBrowser.exe`. To stop only the dev build:
+`Get-CimInstance Win32_Process -Filter "Name='HodosBrowser.exe'" | Where-Object { $_.ExecutablePath -like '*cef-native\build\bin\Release*' } | Stop-Process -Force`
+
+⚠️ The linker fails **`LNK1104`** while the dev browser runs, and `cargo build` fails *"Access is
+denied"* while the dev wallet runs — stop them before building.
+⚠️ `browser.restoreSessionOnStart` was flipped on for a Phase 3.5 test and **reverted to `false`**,
+its pre-session value. ⛔ The shipped default was never checked — read `SettingsManager`, not
+`useSettings.ts`'s frontend fallback.
 
 # 7. 🚨 The four ways this sprint got fooled — all four are live for this phase
 
@@ -118,10 +126,16 @@ counters reset per tab close. That path has never been run at N>1 (`P4-A6`).
 
 # 9. Carried, not this phase
 
-- 🚨 `TICKET_token_outputs_destroyed_by_dust_paths` — ⛔ **flagged twice and still open.** Its path 1
-  is an **automatic daily task** that permanently destroys 1-sat assets with no user action.
-  `SPRINT_PLAN.md` marks it *"before or alongside Phase 4"*. 👤 The owner chose Phase 4 first on
-  2026-09-01 with this stated. **Raise it again at the 4 → 5 boundary.**
+- 📌 `TICKET_token_outputs_destroyed_by_dust_paths` — 👤 **owner decision 2026-09-01: stays in Phase 8
+  (money-path correctness). Do NOT interrupt Phase 4 for it.** ⚠️ The previous session flagged this
+  twice as near-urgent on the strength of its *mechanism* (an automatic daily task that destroys
+  1-sat outputs with no user action) — that framing **overstated it**, and the ticket's own severity
+  section is the correction: *"the population today is probably near zero, because we ship no ordinal
+  support"*. ⭐ **The real deadline is an event, not a date: it must close before beta.4's 1Sat
+  Ordinals sprint begins**, because that is when the population stops being zero. Phase 8 clears that
+  comfortably. ⚠️ One question in the ticket is still **unverified** and decides whether it should
+  move up — *does an ordinary incoming 1-sat payment become a tracked default-basket row without a
+  recovery scan?* ~20 minutes of code reading; answer it at the **start of Phase 8**, not now.
 - 🔴 R-GOLD, R-COUNT and the unobserved `payment.auto_approved` audit line — one real payment
   (teragun) closes all three. Needs the owner.
 - 🎫 New beta.4 tickets from 3.5: multi-window session restore loses all but the last window · menu
