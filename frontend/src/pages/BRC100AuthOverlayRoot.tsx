@@ -526,6 +526,11 @@ const BRC100AuthOverlayRoot: React.FC = () => {
   }
   const [manifestData, setManifestData] = useState<ManifestData | null>(null);
   const [manifestShowCustomize, setManifestShowCustomize] = useState<boolean>(false);
+  // beta.3 Phase 7a — the Level-2 counterparty footnote is collapsed by default.
+  // ⛔ Reset in applyParams like every other per-prompt field: P0.8 defect 5 was
+  // the previous site's choice still on screen for the next site, because this
+  // overlay is keep-alive and its state was written as if freshly mounted.
+  const [manifestPartiesOpen, setManifestPartiesOpen] = useState<boolean>(false);
   const [manifestSelectedProtocols, setManifestSelectedProtocols] = useState<Set<number>>(new Set());
   const [manifestSelectedBaskets, setManifestSelectedBaskets] = useState<Set<number>>(new Set());
   const [manifestSelectedCertificates, setManifestSelectedCertificates] = useState<Set<number>>(new Set());
@@ -692,6 +697,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     // Reset every time so a previous site's manifest doesn't leak in.
     setManifestData(null);
     setManifestShowCustomize(false);
+    setManifestPartiesOpen(false);
     setManifestLimitsOpen(false);
     setManifestAllowIdentityKey(savedDefaultIdentityKeyRef.current);
     const manifestParam = params.get('manifest');
@@ -1503,6 +1509,29 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     maxWidth: '440px',
     width: '90%',
     fontFamily: FONT_FAMILY,
+    // ⛔ beta.3 Phase 7a — THE BACKSTOP, and it is a safety property, not styling.
+    // Without these two lines the card grows to its content, and a flex item
+    // centred in a shorter container overflows BOTH ends with no scrollbar
+    // (the backdrop is overflow:hidden), so the overflow is unreachable rather
+    // than merely below the fold. Measured at base 887c2cd: 10 declared
+    // protocols put Decline/Customize/Connect into a 2-pixel strip that was
+    // still clickable and no longer legible — a user choosing between refuse,
+    // review and grant with nothing to tell them apart (MEASUREMENTS.md M2).
+    //
+    // ⚠️ This is SHARED BY EVERY CONSENT BRANCH in this file (~12 modals), which
+    // is the point: collapsing one branch's long section fixes that branch,
+    // this fixes the class. Do not move it onto a single branch, and do not
+    // delete it because "the content fits now" — the content has grown twice.
+    // 🚨 THE 88px IS ARITHMETIC, NOT A MARGIN YOU MAY ROUND. This card is
+    // content-box (no border-box reset), so `max-height` caps the CONTENT box
+    // and the padding sits OUTSIDE it. `calc(100vh - 32px)` was measured
+    // producing a 1056px border box in a 1032px viewport — the cap engaged and
+    // the buttons still went off-screen. 88 = 32 (breathing room, 16 top +
+    // 16 bottom) + 56 (this card's own `padding: '28px 32px'`, top + bottom).
+    // ⛔ If you change `padding` above, change this number in the same edit, or
+    // re-run `phase-7a-modal-viewport/verify.py` and watch it go red.
+    maxHeight: 'calc(100vh - 88px)',
+    overflowY: 'auto',
   };
 
   // ── No wallet notification ──
@@ -2670,7 +2699,28 @@ const BRC100AuthOverlayRoot: React.FC = () => {
 
                 ⛔ Renders for EVERY securityLevel === 2 protocol, including
                 the ones naming no counterparty — those are the WIDEST case
-                and hiding them would understate the grant. */}
+                and hiding them would understate the grant.
+
+                ⭐ beta.3 Phase 7a — COLLAPSED BY DEFAULT (P7a-A3). This block
+                was the modal's one uncapped growth region: one row per Level-2
+                protocol, no cap, no scroll. At 10 declared protocols it pushed
+                Decline/Customize/Connect to a 2-pixel strip that was still
+                clickable and no longer readable (MEASUREMENTS.md M2 — the
+                owner's live report, reproduced on a 1920×1080 display at 100%).
+
+                ⛔ Collapsed, NOT capped-and-scrolled. `InfoIcon` renders its
+                tooltip position:absolute OUTSIDE the icon's box, so an
+                `overflow` on this container would clip the per-entry tooltips —
+                and those tooltips are where "what is a counterparty" is
+                explained. That would trade disclosure for layout, which this
+                phase's contract §3 forbids. Collapsing bounds the height with
+                no overflow anywhere. Owner decision, 2026-09-02.
+
+                ⚠️ BRC-116 §4.1 requires the wallet to IDENTIFY the counterparty
+                for a Level 2 protocol. The heading therefore always states that
+                these permissions exist AND how many, on screen, unconditionally
+                — only the identifiers themselves are one click away. Do not
+                reduce the header to a bare chevron. */}
             {manifestData.protocols.some((p) => p.securityLevel === 2) && (
               <div style={{
                 border: '1px solid #e5e7eb',
@@ -2682,14 +2732,50 @@ const BRC100AuthOverlayRoot: React.FC = () => {
                   fontSize: '12px',
                   fontWeight: 600,
                   color: COLORS.textDark,
-                  marginBottom: '6px',
+                  marginBottom: manifestPartiesOpen ? '6px' : '0',
                   display: 'flex',
                   alignItems: 'center',
                 }}>
-                  Who these are with
+                  <span
+                    onClick={() => setManifestPartiesOpen(!manifestPartiesOpen)}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      cursor: 'pointer',
+                      userSelect: 'none',
+                      flex: 1,
+                      minWidth: 0,
+                    }}
+                  >
+                    <span style={{ fontSize: '10px', marginRight: '6px', flexShrink: 0 }}>
+                      {manifestPartiesOpen ? '▼' : '▶'}
+                    </span>
+                    {/* ⛔ P0.8 lesson 6: keep label text in ONE span. This row is
+                        display:flex, so every child becomes its own flex item and
+                        a split label shatters across lines. */}
+                    <span>
+                      Who these are with ({manifestData.protocols.filter((p) => p.securityLevel === 2).length})
+                    </span>
+                  </span>
+                  {/* Outside the toggle span on purpose — reading the tooltip
+                      must not collapse the section under the pointer. */}
                   <InfoIcon tooltip="Some permissions are limited to operations with one particular party. This is who — an identifier, not a choice you need to make. Fewer parties is narrower, and narrower is safer." />
+                  <span
+                    onClick={() => setManifestPartiesOpen(!manifestPartiesOpen)}
+                    style={{
+                      fontSize: '11px',
+                      color: COLORS.textMuted,
+                      cursor: 'pointer',
+                      userSelect: 'none',
+                      marginLeft: '8px',
+                      flexShrink: 0,
+                      fontWeight: 400,
+                    }}
+                  >
+                    {manifestPartiesOpen ? 'Hide' : 'Show'}
+                  </span>
                 </div>
-                {manifestData.protocols.map((p, i) => {
+                {manifestPartiesOpen && manifestData.protocols.map((p, i) => {
                   if (p.securityLevel !== 2) return null;
                   const cp = describeCounterparty(p.counterparty);
                   return (
