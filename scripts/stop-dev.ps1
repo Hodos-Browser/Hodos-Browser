@@ -57,7 +57,15 @@ foreach ($t in $targets) {
         # Belt and braces: it must ALSO be inside this repo. Guards against a second checkout.
         $_.ExecutablePath.StartsWith($repoFull, [StringComparison]::OrdinalIgnoreCase)
     })
-    $other = @($all | Where-Object { $dev.ProcessId -notcontains $_.ProcessId })
+    # ⛔ Project the ids into a real array FIRST. Under Set-StrictMode, `$dev.ProcessId` on an
+    # EMPTY array throws "The property 'ProcessId' cannot be found on this object" — which happens
+    # whenever a dev process is already gone but the installed one is still running (the adblock
+    # engine dies with the dev browser via the job object, so this is the normal case on the second
+    # run, not an edge case). 📏 Hit on 2026-09-01: it aborted the script mid-way, after the browser
+    # and wallet had been stopped. It failed SAFE — it throws before killing anything in that arm —
+    # but had adblock been first in $targets, nothing would have been stopped at all.
+    $devIds = @($dev | ForEach-Object { $_.ProcessId })
+    $other  = @($all | Where-Object { $devIds -notcontains $_.ProcessId })
 
     Write-Host ("{0,-13} : {1} running, {2} dev, {3} spared" -f $t.Label, $all.Count, $dev.Count, $other.Count)
 
