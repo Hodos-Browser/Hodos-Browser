@@ -41,6 +41,7 @@ add_executable(hodos_tests
     silent_state_writer_test.cpp        # #1 — silent-eligibility mirror pure helpers
     farbling_policy_test.cpp            # C2 — eTLD+1 keying, seed persistence, HMAC
     port_config_origin_test.cpp         # P0.5 C1 (row X4) — scheme-anchored origin derivation
+    wallet_origin_test.cpp              # P5 W0/W1 — the wallet-traffic gate; legacy predicate is the NC
     overlay_mouse_test.cpp              # P1-A3 — physical->view mouse conversion for OSR overlays
     payment_cost_test.cpp               # P0.5 finding 6 — body shapes + the sendMax fail-closed rule
     wallet_ssrf_guard_test.cpp          # P0.5 E1 — wallet_call SSRF: URL anchor + method validation

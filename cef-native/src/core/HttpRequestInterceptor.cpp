@@ -3865,23 +3865,21 @@ CefRefPtr<CefResourceHandler> HttpRequestInterceptor::GetResourceHandler(
     // hodos::WalletPortStr() (31301 prod / 31401 dev) — never a hardcoded literal.
     std::string originalUrl = url;
 
-    // Handle localhost/127.0.0.1 port redirection (string ops instead of regex — F5 perf fix)
-    auto redirectPort = [&](const std::string& host, const std::string& target) {
-        size_t pos = url.find(host);
-        if (pos == std::string::npos) return;
-        if (url.find(target) != std::string::npos) return;  // Already correct port
-        // Find the 4-digit port after the host prefix
-        size_t portStart = pos + host.length();
-        size_t portEnd = portStart;
-        while (portEnd < url.length() && url[portEnd] >= '0' && url[portEnd] <= '9') portEnd++;
-        if (portEnd > portStart && (portEnd - portStart) <= 5) {
-            url.replace(pos, portEnd - pos, target);
+    // Handle localhost/127.0.0.1 port redirection.
+    //
+    // beta.3 Phase 5 — this was a whole-URL search-and-replace and is now scoped
+    // to the authority. ⭐ The full reasoning, and the measured exploit chain it
+    // closes, are at hodos::RepointLoopbackToWallet (PortConfig.h). Do not
+    // re-inline this: the reader (OriginFromUrl) and the writer must share one
+    // notion of where the host is.
+    {
+        const std::string repointed = hodos::RepointLoopbackToWallet(url);
+        if (repointed != url) {
+            url = repointed;
             LOG_DEBUG_HTTP("🌐 Port redirection: " + originalUrl + " -> " + url);
             request->SetURL(url);
         }
-    };
-    redirectPort("localhost:", "localhost:" + hodos::WalletPortStr());
-    redirectPort("127.0.0.1:", "127.0.0.1:" + hodos::WalletPortStr());
+    }
 
     // The wallet speaks HTTP only. redirectPort rewrites host:port but NOT the
     // scheme, and a dApp hardcoded to a foreign bridge may well use https — the
@@ -3892,7 +3890,7 @@ CefRefPtr<CefResourceHandler> HttpRequestInterceptor::GetResourceHandler(
     //
     // ⛔ Downgrade ONLY once the URL is already OUR wallet host:port, never
     // before — this must not become a general https->http rewrite.
-    if (url.rfind("https://", 0) == 0 && hodos::IsWalletHostPort(url)) {
+    if (url.rfind("https://", 0) == 0 && hodos::IsOurWalletOrigin(url)) {
         url = "http://" + url.substr(8);
         LOG_DEBUG_HTTP("🌐 Scheme downgrade for local wallet: " + originalUrl + " -> " + url);
         request->SetURL(url);
@@ -3905,7 +3903,10 @@ CefRefPtr<CefResourceHandler> HttpRequestInterceptor::GetResourceHandler(
     // DO NOT redirect auth requests to external app backends!
     if (url.find("/.well-known/auth") != std::string::npos) {
         // Check if this is a request to localhost or 127.0.0.1 (wallet auth)
-        bool isLocalhost = (url.find("localhost") != std::string::npos || url.find("127.0.0.1") != std::string::npos);
+        // P5 — on the parsed authority. The old test searched the whole URL, so
+        // an app's own https://myapp.example/.well-known/auth?next=localhost was
+        // re-pointed at OUR wallet, hijacking the site's BRC-104 handshake.
+        bool isLocalhost = hodos::IsLoopbackAuthority(hodos::OriginFromUrl(url));
 
         if (isLocalhost) {
             LOG_DEBUG_HTTP("🌐 BRC-104 /.well-known/auth request to localhost detected, redirecting to local wallet");
@@ -3943,7 +3944,7 @@ CefRefPtr<CefResourceHandler> HttpRequestInterceptor::GetResourceHandler(
     }
 
     // Check if this is a Babbage messagebox request that needs redirection
-    if (url.find("messagebox.babbage.systems") != std::string::npos) {
+    if (hodos::IsMessageboxOrigin(url)) {   // P5 — host match, not URL text
         LOG_DEBUG_HTTP("🌐 ===== MESSAGEBOX REQUEST DETECTED =====");
         LOG_DEBUG_HTTP("🌐 Method: " + method);
         LOG_DEBUG_HTTP("🌐 Full URL: " + url);
@@ -5243,7 +5244,17 @@ bool HttpRequestInterceptor::isWalletEndpoint(const std::string& url) {
     // NOT for `/health` — unscoped it would hijack the health endpoint of every
     // ordinary website the user visits and route it to the wallet. This arm must
     // stay host-qualified.
-    if (hodos::IsWalletHostPort(url) && url.find("/health") != std::string::npos) {
+    //
+    // 🚨 beta.3 Phase 5 — until now that scoping DID NOT HOLD, and the comment
+    // above asserted a protection the code did not provide. `IsWalletHostPort`
+    // was a whole-URL find(), and `redirectPort` (above) would MANUFACTURE the
+    // qualifying text out of a page-controlled query string first. Both halves
+    // are now parsed: the authority must be a loopback host on our port, and the
+    // path is the normalized one actix will route on. Adjudicated in
+    // phase-0.5-money-path/ADVERSARIAL_PANEL_2_2026-08-20.md findings #28/#34;
+    // the chain was reproduced live in phase-5 MEASUREMENTS.md M2.
+    if (hodos::IsOurWalletOrigin(url) &&
+        hodos::RequestPathForMatching(url).find("/health") != std::string::npos) {
         return true;
     }
 
@@ -5306,8 +5317,9 @@ bool HttpRequestInterceptor::isWalletEndpoint(const std::string& url) {
 
 bool HttpRequestInterceptor::isSocketIOConnection(const std::string& url) {
     // Check if this is a Socket.IO connection to our daemon or Babbage messagebox
-    bool isLocalhost = hodos::IsWalletHostPort(url);
-    bool isBabbageMessagebox = url.find("messagebox.babbage.systems/socket.io/") != std::string::npos;
+    bool isLocalhost = hodos::IsOurWalletOrigin(url);   // P5 — authority, not URL text
+    bool isBabbageMessagebox = hodos::IsMessageboxOrigin(url) &&
+        hodos::RequestPathForMatching(url).find("/socket.io/") != std::string::npos;
     bool isSocketIO = url.find("/socket.io/") != std::string::npos;
 
     LOG_DEBUG_HTTP("🌐 Checking Socket.IO connection: " + url + " - localhost: " + (isLocalhost ? "true" : "false") + ", babbage: " + (isBabbageMessagebox ? "true" : "false") + ", socket.io: " + (isSocketIO ? "true" : "false"));

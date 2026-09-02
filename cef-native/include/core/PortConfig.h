@@ -155,24 +155,36 @@ inline bool IsValidWalletMethod(const std::string& method) {
 // (no AddCustomScheme / OnRegisterCustomSchemes anywhere), so no frame can carry
 // it — and if one ever could, "hodos://evil.com/" must not be privileged. Fails
 // closed here while IsInternalFrontendUrl below keeps its historical prefix arm.
-inline std::string OriginFromUrl(const std::string& url) {
-    size_t authStart = std::string::npos;
-    if (url.rfind("http://", 0) == 0)        authStart = 7;
-    else if (url.rfind("https://", 0) == 0)  authStart = 8;
-    if (authStart == std::string::npos) return std::string();
+// The authority's [start, end) span within `url`, with userinfo already skipped.
+// Returns false when the URL carries no real scheme.
+//
+// ⭐ ONE derivation of "where is the authority". OriginFromUrl reads it and
+// RepointLoopbackToWallet rewrites through it, so the reader and the writer
+// cannot disagree about which bytes are the host — the failure mode CLAUDE.md
+// warns about for RegistrableDomainFromUrl.
+inline bool AuthoritySpan(const std::string& url, size_t& start, size_t& end) {
+    if (url.rfind("http://", 0) == 0)        start = 7;
+    else if (url.rfind("https://", 0) == 0)  start = 8;
+    else return false;
 
-    size_t authEnd = url.size();
-    for (size_t i = authStart; i < url.size(); ++i) {
+    end = url.size();
+    for (size_t i = start; i < url.size(); ++i) {
         const char c = url[i];
-        if (c == '/' || c == '?' || c == '#') { authEnd = i; break; }
+        if (c == '/' || c == '?' || c == '#') { end = i; break; }
     }
-    std::string authority = url.substr(authStart, authEnd - authStart);
 
     // Userinfo: everything through the LAST '@' is credentials, not the host.
-    const size_t at = authority.rfind('@');
-    if (at != std::string::npos) authority = authority.substr(at + 1);
+    if (end > start) {
+        const size_t at = url.rfind('@', end - 1);
+        if (at != std::string::npos && at >= start && at < end) start = at + 1;
+    }
+    return true;
+}
 
-    return authority;  // may be empty ("http:///x") — caller must fail closed
+inline std::string OriginFromUrl(const std::string& url) {
+    size_t start = 0, end = 0;
+    if (!AuthoritySpan(url, start, end)) return std::string();
+    return url.substr(start, end - start);  // may be empty ("http:///x")
 }
 
 // Host-terminated match: `host` exactly, or `host` followed by ':' + port.
@@ -321,6 +333,222 @@ inline std::string RequestPathForMatching(const std::string& target) {
 inline bool IsLoopbackHostPort(const std::string& url, const std::string& port) {
     return url.find("localhost:" + port) != std::string::npos
         || url.find("127.0.0.1:" + port) != std::string::npos;
+}
+
+// ---------------------------------------------------------------------------
+// beta.3 Phase 5 (W0) — THE wallet-traffic predicate. One derivation.
+//
+// ⭐ READ THIS BEFORE CHANGING ANY PREDICATE BELOW. The C++ interception layer
+// is not only a permission gate — it is the component that marks traffic as
+// UNTRUSTED. `domain_trust_mw` (rust-wallet/src/main.rs) reads
+// X-Requesting-Domain, and a MISSING header means "internal, fully trusted,
+// ungated". C++ attaches that header only for traffic it recognises as coming
+// from a page.
+//
+// ⇒ A matcher that fails to match does NOT leave traffic ungated. It leaves it
+//   TRUSTED. Every narrowing here is a PRIVILEGE CHANGE.
+//
+// That inverts the usual instinct, and it produces the two rules these
+// predicates are built on:
+//
+//   1. BE BROAD ABOUT WHAT COUNTS AS LOOPBACK. Accept everything Chromium will
+//      actually route to this machine. A strict `host == "localhost"` test is
+//      NARROWER than the substring gate it replaces:
+//      "http://x.localhost:31401/createAction" contains "localhost:31401", so it
+//      is intercepted TODAY. Chromium resolves the whole *.localhost tree to
+//      loopback (RFC 6761), so the request still reaches the wallet — but
+//      unstamped, i.e. as a first-party call. That is a privilege escalation
+//      shipped by a "cleanup".
+//
+//   2. BE STRICT ABOUT WHERE IN THE URL YOU LOOK. Only the authority. The old
+//      whole-URL find() admitted any URL merely CONTAINING the host:port,
+//      including in a query string the page author controls.
+//      MEASURED 2026-09-02 from a live page (phase-5 MEASUREMENTS.md M2):
+//      fetch('https://example.com/getNetwork?x=127.0.0.1:3321') was intercepted,
+//      had its own query rewritten by redirectPort, was silently downgraded
+//      https->http, and was answered by our wallet. example.com was never
+//      contacted.
+//
+// ⛔ Built on OriginFromUrl + this file's own string parsing, NOT on
+// CefParseURL. cef-native/tests/CMakeLists.txt does not link libcef, so a
+// CefParseURL wrapper would be un-unit-testable — which is the exact reason the
+// ticket moved this out of PortConfig.h in the first place. It belongs here
+// after all, because the pure parser it needed already lives here.
+
+// Split an authority into host and port. Understands the bracketed IPv6 form.
+// A malformed bracketed authority yields an empty host, which fails closed in
+// every caller below.
+inline void SplitAuthority(const std::string& authority,
+                           std::string& host, std::string& port) {
+    host.clear();
+    port.clear();
+    if (authority.empty()) return;
+
+    size_t colon;
+    if (authority[0] == '[') {
+        const size_t close = authority.find(']');
+        if (close == std::string::npos) return;      // malformed -> no host
+        host = authority.substr(0, close + 1);       // brackets kept: "[::1]"
+        colon = authority.find(':', close + 1);
+    } else {
+        colon = authority.find(':');
+        host = authority.substr(0, colon == std::string::npos ? authority.size() : colon);
+    }
+    if (colon != std::string::npos) port = authority.substr(colon + 1);
+}
+
+// "Will Chromium route this host to THIS machine?" — deliberately BROAD, per
+// rule 1 above.
+//
+// ⚠️ Relies on the host already being URL-CANONICAL, which it is: every caller
+// derives it from CefRequest::GetURL(), and GURL canonicalises the host before
+// we ever see it — lowercasing it, and normalising every IPv4 spelling
+// (decimal "2130706433", octal, hex) to dotted-quad. Without that guarantee the
+// digits-and-dots test below would be bypassable. The tolower is belt-and-braces
+// for any future caller that does not come from GetURL().
+//
+// ⛔ Do NOT narrow this to exact equality. See rule 1 — `AuthorityHasHost` above
+// is the NARROW predicate and exists for the opposite job (granting privilege,
+// where failing closed is correct). Broad for stamping, narrow for granting.
+// They are different functions on purpose; do not "unify" them.
+inline bool IsLoopbackHost(const std::string& host_in) {
+    if (host_in.empty()) return false;
+    std::string host = host_in;
+    for (char& c : host) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+
+    if (host == "localhost" || host == "[::1]" || host == "::1") return true;
+
+    // RFC 6761: the entire *.localhost tree resolves to loopback in Chromium.
+    static const std::string kDotLocalhost = ".localhost";
+    if (host.size() > kDotLocalhost.size() &&
+        host.compare(host.size() - kDotLocalhost.size(),
+                     kDotLocalhost.size(), kDotLocalhost) == 0) {
+        return true;
+    }
+
+    // 127.0.0.0/8. Digits and dots only, so "127.0.0.1.evil.com" and
+    // "127.evil.com" are correctly refused — they are ordinary hostnames that
+    // merely start with the text.
+    if (host.compare(0, 4, "127.") == 0) {
+        for (char c : host) {
+            if ((c < '0' || c > '9') && c != '.') return false;
+        }
+        return true;
+    }
+    return false;
+}
+
+inline bool IsLoopbackAuthority(const std::string& authority) {
+    std::string host, port;
+    SplitAuthority(authority, host, port);
+    return IsLoopbackHost(host);
+}
+
+// The foreign BRC-100 bridge ports we deliberately answer for, so a dApp
+// hardcoded to another wallet still reaches Hodos.
+//
+// ⛔ 8080 was REMOVED here in Phase 5 (owner decision, 2026-09-02). It is in no
+// BRC, no MetaNet client and no App Lab path; `git log -S 'localhost:8080'`
+// traces it to a single "initial commit from old repo". It IS the default port
+// of Spring Boot, Tomcat, http-server and many Docker images, and because the
+// path table carries bare substrings like /health, /encrypt and /getVersion, a
+// developer's own server on 8080 was being answered by the wallet. Do not
+// re-add it.
+inline bool IsCompatBridgePort(const std::string& port) {
+    return port == "3321"      // MetaNet Client
+        || port == "2121";     // HandCash local bridge
+}
+
+// True iff `url`'s AUTHORITY is a loopback host on our wallet port.
+// Replaces the unanchored IsWalletHostPort at every decision site.
+inline bool IsOurWalletOrigin(const std::string& url) {
+    std::string host, port;
+    SplitAuthority(OriginFromUrl(url), host, port);
+    return IsLoopbackHost(host) && port == WalletPortStr();
+}
+
+// ⭐ THE gate predicate: is this request addressed to a wallet on this machine —
+// ours, or a foreign bridge we answer for?
+inline bool IsWalletOrigin(const std::string& url) {
+    std::string host, port;
+    SplitAuthority(OriginFromUrl(url), host, port);
+    if (!IsLoopbackHost(host)) return false;
+    return port == WalletPortStr() || IsCompatBridgePort(port);
+}
+
+// The Babbage MessageBox relay, matched on the HOST rather than anywhere in the
+// URL text. Behaviour for the real relay is unchanged; what stops matching is
+// "https://evil.example/?x=messagebox.babbage.systems", which today skips the
+// cookie filter and the BRC-121 402 response check by impersonating relay
+// traffic.
+inline bool IsMessageboxOrigin(const std::string& url) {
+    std::string host, port;
+    SplitAuthority(OriginFromUrl(url), host, port);
+    return host == "messagebox.babbage.systems";
+}
+
+// BRC-104 authentication endpoint, matched on the PATH.
+//
+// ⭐ Minimal narrowing on purpose: the defect was that the old test searched the
+// whole URL including the query, so "/x?y=/.well-known/auth" matched.
+// RequestPathForMatching cuts the query and fragment first, so this keeps the
+// old find()-anywhere-in-the-PATH semantics and fixes only the query injection.
+// Whether the request is then re-pointed at OUR wallet is a separate decision,
+// made on the authority — see HttpRequestInterceptor's /.well-known/auth arm.
+inline bool IsWellKnownAuthRequest(const std::string& url) {
+    return RequestPathForMatching(url).find("/.well-known/auth") != std::string::npos;
+}
+
+// beta.3 Phase 5 — re-point a foreign loopback bridge URL at OUR wallet port,
+// rewriting ONLY the authority. Returns the URL unchanged if there is nothing to
+// do.
+//
+// 🚨 This replaces a whole-URL search-and-replace that could MANUFACTURE the
+// wallet host:port out of text the page controls. MEASURED 2026-09-02 (phase-5
+// MEASUREMENTS.md M2), the old lambda turned
+//   https://example.com/getNetwork?x=127.0.0.1:3321
+// into
+//   https://example.com/getNetwork?x=127.0.0.1:31401
+// which then satisfied the very predicate that was supposed to prove the request
+// was ours — after which the request was downgraded to http:// and answered by
+// our wallet, with example.com never contacted.
+//
+// ⭐ Behaviour for real traffic is deliberately UNCHANGED: any loopback host on
+// any explicit port that is not already ours is re-pointed, which is what the
+// BRC-104 arm relies on for a local wallet on a non-standard port. The only
+// difference is that the port must be in the authority.
+inline std::string RepointLoopbackToWallet(const std::string& url) {
+    size_t start = 0, end = 0;
+    if (!AuthoritySpan(url, start, end)) return url;
+
+    const std::string authority = url.substr(start, end - start);
+    std::string host, port;
+    SplitAuthority(authority, host, port);
+
+    if (!IsLoopbackHost(host)) return url;
+    if (port.empty()) return url;               // no explicit port — not a bridge
+    if (port == WalletPortStr()) return url;    // already ours
+    for (char c : port) {                       // a non-numeric port is malformed
+        if (c < '0' || c > '9') return url;
+    }
+    if (port.size() > 5) return url;
+
+    return url.substr(0, start) + host + ":" + WalletPortStr() + url.substr(end);
+}
+
+// beta.3 Phase 5 (W3) — the SHADOW predicate: the six-term gate exactly as it
+// stood before this phase, kept solely so the new gate's disagreements can be
+// logged and inspected. ⛔ Not a decision site. It is retired with
+// IsWalletHostPort / IsLoopbackHostPort in beta.4 (ticket W8).
+inline bool LegacyWalletGateMatch(const std::string& url) {
+    return IsWalletHostPort(url)
+        || IsLoopbackHostPort(url, "3321")
+        || IsLoopbackHostPort(url, "2121")
+        || IsLoopbackHostPort(url, "8080")
+        || url.find("messagebox.babbage.systems") != std::string::npos
+        || url.find("/.well-known/auth") != std::string::npos;
 }
 
 }  // namespace hodos

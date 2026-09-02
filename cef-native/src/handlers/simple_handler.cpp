@@ -8956,7 +8956,13 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
     // Trusted internal overlays (wallet, settings, backup) talking directly to the Rust wallet
     // bypass ALL resource handlers — let CEF's native network stack handle them.
     // This avoids CefURLRequest forwarding issues on macOS.
-    if (hodos::IsWalletHostPort(url) &&
+    // P5 — anchored to the authority, like every other site. ⚠️ This one GRANTS
+    // privilege (it skips all handlers), so the broadening that IsLoopbackHost
+    // brings is worth naming: it additionally admits *.localhost and 127.x forms.
+    // That is not a widening in practice — the arm also requires an overlay
+    // role_, and our own overlays only ever load our own URLs — while the
+    // anchoring removes the real defect, a query string reaching this branch.
+    if (hodos::IsOurWalletOrigin(url) &&
         (role_ == "wallet" || role_ == "wallet_panel" || role_ == "settings" || role_ == "backup")) {
         LOG_DEBUG_BROWSER("🔒 Trusted overlay direct wallet request — bypassing all handlers");
         return nullptr;
@@ -9069,14 +9075,35 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
     //   http://localhost:3321/getVersion  -> intercepted, re-pointed at 31401
     //   http://127.0.0.1:3321/getVersion  -> NOT intercepted at all
     // Same port, same path, only the host form differed — and the site reported
-    // "Bridge unavailable". hodos::IsLoopbackHostPort checks both; do not go back
-    // to a literal.
-    if (hodos::IsWalletHostPort(url) ||
-        hodos::IsLoopbackHostPort(url, "3321") ||   // MetaNet Client
-        hodos::IsLoopbackHostPort(url, "2121") ||   // HandCash local bridge
-        hodos::IsLoopbackHostPort(url, "8080") ||
-        url.find("messagebox.babbage.systems") != std::string::npos ||
-        url.find("/.well-known/auth") != std::string::npos) {
+    // "Bridge unavailable". Both spellings must always move in lockstep.
+    //
+    // beta.3 Phase 5 (W1) — that fix closed the host-FORM gap but left every arm
+    // an unanchored whole-URL find(). One predicate now answers the question, on
+    // the parsed AUTHORITY, and it is deliberately BROADER on hosts than a strict
+    // equality test would be. ⭐ The reasoning is load-bearing and is written out
+    // in full at hodos::IsLoopbackHost (PortConfig.h): an un-intercepted request
+    // is not ungated, it is TRUSTED, so narrowing a matcher here is a privilege
+    // change. Read that comment before touching this line.
+    const bool is_wallet_traffic = hodos::IsWalletOrigin(url) ||
+                                   hodos::IsMessageboxOrigin(url) ||
+                                   hodos::IsWellKnownAuthRequest(url);
+
+    // W3 — shadow comparison. The old six-term gate still runs, decides nothing,
+    // and its disagreements are logged at WARNING so a real-world regression is
+    // loud rather than silent. Expected disagreements are one-sided: URLs that
+    // merely CONTAINED a host:port (which we now correctly drop) and the retired
+    // 8080 arm. A "new=yes old=no" line is the interesting one — it means the
+    // broadening admitted something, and it should be a *.localhost or 127.x form.
+    // ⛔ Host only, never path or query — same rule as LogSafeUrl.
+    if (hodos::LegacyWalletGateMatch(url) != is_wallet_traffic) {
+        LOG_WARNING_BROWSER("🔀 P5 gate disagreement: new=" +
+                            std::string(is_wallet_traffic ? "yes" : "no") +
+                            " old=" + (is_wallet_traffic ? "no" : "yes") +
+                            " authority=" + hodos::OriginFromUrl(url) +
+                            " role=" + role_);
+    }
+
+    if (is_wallet_traffic) {
         LOG_DEBUG_BROWSER("🌐 Intercepting wallet request from browser role: " + role_);
         return new HttpRequestInterceptor();
     }
