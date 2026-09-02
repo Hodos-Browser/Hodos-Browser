@@ -202,6 +202,45 @@ $Gates = @(
         Pattern  = '(GetPrimaryWindow *\(\)|TabManager::GetInstance\(\)\.GetActiveTab *\(\))'
         Probe    = 'auto* t = TabManager::GetInstance().GetActiveTab();'
         ProbeExt = '.cpp'
+    },
+    [pscustomobject]@{
+        Id       = 'G12'
+        Name     = 'Unanchored host:port URL matchers on the wallet trust boundary'
+        Owner    = 'Phase 5'
+        # G2's sibling. G2 owns the FRONTEND port (5137); this owns every other
+        # host:port matcher -- our wallet port and the foreign bridge ports.
+        #
+        # Why it exists: an unanchored find() over the whole URL admits any URL that
+        # merely CONTAINS the host:port, including in a query string the page author
+        # controls. MEASURED 2026-09-02 in a running browser
+        # (phase-5-loopback-routing/MEASUREMENTS.md M2): a page's own request to
+        # example.com was rewritten, downgraded https->http, and answered by our
+        # wallet, because the page put the text in its own query.
+        #
+        # ⛔ And the reason this is a TRUST gate rather than a tidiness gate: C++ is
+        # what stamps X-Requesting-Domain, and Rust reads a MISSING header as
+        # internal + fully trusted. A matcher that misses does not leave traffic
+        # ungated, it leaves it TRUSTED. Correct form is a parsed authority --
+        # hodos::IsWalletOrigin / IsOurWalletOrigin (include/core/PortConfig.h).
+        #
+        # Baseline 4, measured by THIS script 2026-09-02, all in PortConfig.h and all
+        # deliberate: IsWalletHostPort (2 lines) and IsLoopbackHostPort (2 lines) are
+        # kept ONLY to back hodos::LegacyWalletGateMatch, the W3 shadow predicate that
+        # decides nothing and exists so the new gate's disagreements can be logged.
+        # They are retired together in beta.4 (ticket W8), which is what drives this
+        # to its target of 0. Residuals are named in
+        # phase-5-loopback-routing/PHASE_CONTRACT.md section 6.
+        Baseline = 4
+        Target   = 0
+        Paths    = @('cef-native/src', 'cef-native/include')
+        Include  = @('*.cpp', '*.mm', '*.h')
+        Pattern  = '(find|rfind)\("(http://)?(127\.0\.0\.1|localhost):'
+        # A prefix check -- rfind(X, 0) == 0, or find(X) != 0 -- is the CORRECT form
+        # and must not be flagged. Same rule as G2. 5137 belongs to G2; excluding it
+        # here keeps one owner per defect and stops a single fix moving two baselines.
+        Exclude  = '(rfind\([^)]*, *0\)|find\([^)]*\) *!= *0|:5137)'
+        Probe    = 'bool probe = url.find("127.0.0.1:31301") != std::string::npos;'
+        ProbeExt = '.cpp'
     }
 )
 

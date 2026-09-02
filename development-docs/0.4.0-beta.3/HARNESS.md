@@ -171,10 +171,24 @@ wrong reason.**
 | `G3` | F8 secret-log gate, Rust | **0** | 0 | ported from `test.yml` | — |
 | `G4` | F8 secret-log gate, C++ | **0** | 0 | ported from `test.yml` | — |
 | `G5` | full wallet HTTP response bodies reaching a sink | ~~15~~ → **0** | 0 | Phase 0 | ✅ Phase 0, 2026-08-18 |
+| `G12` | unanchored host:port URL matchers on the wallet trust boundary | **4** | 0 | Phase 5 | — (driven to 0 by beta.4 W8) |
 
 ⭐ `G2` deliberately **does not** flag a prefix check — `rfind(X, 0) == 0` or `find(X) != 0`. Those
 are the correct form; flagging them would teach the wrong lesson. Only unanchored substring searches
 count.
+
+⭐ `G12` was **added by Phase 5, 2026-09-02**, and is G2's sibling: G2 owns the frontend port
+(`:5137`), G12 owns every other host:port matcher — our wallet port and the foreign bridge ports. It
+is a **trust** gate, not a tidiness one: C++ is what stamps `X-Requesting-Domain`, and Rust reads a
+missing header as internal and fully trusted, so a matcher that misses leaves traffic *trusted*.
+Baseline **4**, measured by `preflight.ps1` itself per the rule above, and all four are deliberate —
+`IsWalletHostPort` and `IsLoopbackHostPort` survive only to back `LegacyWalletGateMatch`, the W3
+shadow predicate that decides nothing. Beta.4's W8 retires all three and drives this to 0.
+⚠️ It catches the *literal* form, which is where the defect is written: it would have flagged the
+pre-Phase-0.5 `url.find("localhost:3321")` gate. A call site routing through a helper is covered by
+the helper's own violation — one owner per defect, not N.
+⛔ Added in its **own commit**, after the fix it measures had already landed (`1743b20`), per
+working rule #6, and re-run with `-NegativeControl` (detected `5 > 4`).
 
 ⭐ `G5` exists because `G1` alone is not enough. `G1` going to 0 removes today's sinks; `G5` keeps
 catching the *shape* — a full wallet response body reaching any sink — if it later reappears through
