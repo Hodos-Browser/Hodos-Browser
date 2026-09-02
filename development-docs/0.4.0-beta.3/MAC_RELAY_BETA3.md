@@ -6,6 +6,78 @@
 
 ---
 
+# 📋 ROUND 2026-09-02 (Windows) — **Phase 5 landed** · a BRC-100 conformance bug fixed on the Rust side that affects you for free · Phase 4 detail still owed
+
+Windows is **through Phase 5**. Sprint order `0 · 0.5 · 0.6 · 1 · 2 · 3 · 3.5 · 4 · 5` ✅ complete;
+**Phase 6 (Chrome import) is next.**
+
+## 1. Phase 5 — loopback routing & trust boundary · `c4603e1` `1743b20` `36f7a66` `9e92aab` `f8e1517`
+
+Round file with the full detail: **`MAC_RELAY_P5_ROUND.md`**. The short version:
+
+- The resource-dispatch gate is now **one parsed predicate** — `hodos::IsWalletOrigin()` — built on
+  `OriginFromUrl` + `AuthorityHasHost` in `PortConfig.h`. ⛔ **Not** `CefParseURL`: `hodos_tests`
+  links no libcef, which settles ticket §11 Q4 as *no*.
+- ⭐ **Read `hodos::IsLoopbackHost`'s comment before touching any predicate there.** The matcher is
+  deliberately **BROAD** on hosts (`127.0.0.0/8`, `[::1]`, `localhost`, **and `*.localhost`**) and
+  **STRICT** on position (authority only). Narrowing it is a *privilege escalation*: C++ is what
+  stamps `X-Requesting-Domain`, and Rust reads a missing header as internal + fully trusted.
+- `redirectPort` is anchored to the authority. 🚨 It previously rewrote page-controlled query text and
+  could **manufacture** the wallet host:port — reproduced live, including a silent https→http
+  downgrade of an unrelated origin (`MEASUREMENTS.md` M2).
+- **Port 8080 dropped** (owner decision). New gate `G12`, baseline 4, target 0 at beta.4's W8.
+- 📏 **§WS5(b)'s cross-wallet routing hole is REFUTED** — Phase 0.5 already closed it. All four
+  addressing forms reach our wallet correctly labelled.
+- ✅ **Ticket §11 Q1 settled after 15 days:** a `CefResourceHandler` **does** take over `https://`
+  loopback pre-TLS on Windows. No cert interstitial. ⚠️ **Not established on macOS — that is your R2.**
+
+### 🍎 What we need from Mac (both in `MAC_RELAY_P5_ROUND.md` §M2)
+
+| | |
+|---|---|
+| **R1** | Does any wallet listen on `127.0.0.1:3321` / `:2121` there? (`lsof -nP -iTCP -sTCP:LISTEN`) |
+| **R2** | Does a resource handler take over `https://` loopback pre-TLS on macOS? If TLS fires first, the fallback is ticket §8.1 — stop matching 2121 |
+
+⭐ `wallet_origin_test.cpp` is new and links no libcef, so it should build and pass on Mac unmodified.
+If it does not, that is the first thing to report.
+
+## 2. 🚨 `/signAction` was not BRC-100 shaped — **fixed `047c3bb`, and it lands on Mac for free**
+
+Not a phase; a live partner failure (`beta.zanaadu.com`) diagnosed and fixed the same day.
+Ticket: `TICKET_signaction_response_not_brc100_shape.md`.
+
+`@bsv/sdk`'s `SignActionResult` is `{ txid?, tx?: AtomicBEEF /* Byte[] */, sendWithResults? }`. We
+returned **`rawTx` as a hex string**, so every conforming client read `result.tx` and got `undefined`
+— *after* the money was spent and the transaction broadcast. `CreateActionResponse.tx` in the same
+file was always right; only `signAction` drifted.
+
+- Fixed by adding `tx: Option<Vec<u8>>`; `rawTx` kept and deprecated (removing it would break
+  `create_action_internal`'s two `json_resp["rawTx"]` reads).
+- Both fields derive from one hex string inside `SignActionResponse::from_atomic_beef`, so drift is
+  unrepresentable.
+- ⚠️ **This is pure Rust — one binary, both platforms.** Nothing for you to port. Worth knowing
+  because it changes the wire shape every dApp sees.
+
+⭐ **Two defects found alongside, filed not fixed** — both are cross-platform and neither is claimed:
+1. `signAction` **accepts `sendWith` and silently ignores it** (parsed, never read). A dApp batching
+   this way gets a `200` and believes transactions were broadcast that were not.
+2. A **fatal** broadcast failure still returns **`200`** with a BEEF. Needs an owner decision on
+   non-2xx vs 200-with-failure-field; BRC-100's `SignActionResult` has no error member.
+
+## 3. Still owed **to** Mac from Windows
+
+- `MAC_RELAY_P35_P4_ROUND.md` M3 — the tab context menu is **Windows-only**. Overlays: Windows **15**,
+  macOS **14**. `CreateTabContextMenuOverlay` has no macOS twin. Nothing is broken meanwhile.
+
+## 4. Still owed **from** Mac
+
+- Phase 5 R1 + R2 above.
+- Phase 4 O5 (macOS tab-menu parity) and the mic/camera half — `helper-Info.plist.in` still has
+  **neither** usage string, and capture runs in the helper on macOS. Prime suspect, Mac-only
+  diagnosable.
+
+---
+
 # 📋 ROUND 2026-08-26 (Mac) — Phase 0.8 items #2 and #3 done; the modal check (#1) NOT RUN. **And please drop `P0.5-B1` from "still owed from you" — it was fixed four days before you wrote that line.**
 
 Dev stack only (wallet 31401 `HODOS_DEV=1`, verified by open-file paths; prod 31301 never listening;
