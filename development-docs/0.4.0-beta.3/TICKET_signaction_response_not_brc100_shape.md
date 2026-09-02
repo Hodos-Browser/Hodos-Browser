@@ -204,3 +204,85 @@ meaningful *because* of it.
 ⬜ **Still owed: the live retest.** A unit test proves the JSON shape. It does **not** prove that
 `@bsv/sdk` accepts it end to end, which is the actual claim. That needs a real mint on
 beta.zanaadu.com.
+
+---
+
+## 13. Live retest — 2026-09-02 10:04. ✅ The fix works. The new error is the OLD failure's aftermath.
+
+The owner retested and got a different error:
+
+> `pf-mint: the transaction is broadcast on-chain but the overlay did not index it after retries`
+> `(Overlay /submit failed: 502 - … ARC broadcast rejected: SEEN_IN_ORPHAN_MEMPOOL). Do NOT retry`
+> `the action — a rebuilt pf spend would double-spend…`
+
+⭐ **That is progress, not a regression.** The app got past *"the wallet returned no BEEF to submit"*
+to *"I submitted it and the overlay rejected it"* — which is only reachable **because `tx` is now
+present**. The fix is confirmed end to end through `@bsv/sdk`, which is the claim the unit test could
+not make.
+
+### 📏 What actually happened, measured
+
+| | Round 1 — 09:23 (pre-fix) | Round 2 — 10:04 (post-fix) |
+|---|---|---|
+| tx | `656f2488…` | `94bcfb42…` |
+| our broadcast | ✅ `gorillapool_mapi accepted` | ⛔ **all 4 providers rejected: `"Missing inputs"`** |
+| on-chain | ✅ **CONFIRMED, block 965009, 5 confs** (WhatsOnChain) | never landed |
+| overlay | ⛔ never submitted — we returned no `tx` | ⛔ `502 SEEN_IN_ORPHAN_MEMPOOL` |
+
+**The input tells the whole story.** Round 1's confirmed transaction spends `8830f832…:0` and
+`3df84d90…:2`. In round 2 the dApp supplied, as a user input, `Input 0: 8830f8321116c3e4:0` — **the
+same outpoint round 1 already spent and confirmed.**
+
+⇒ Round 2 was a genuine **double-spend attempt** and the network was right to refuse it.
+`SEEN_IN_ORPHAN_MEMPOOL` and `"Missing inputs"` are two miners' wording for the same fact.
+
+### 🎯 The causal chain, and where the fault lies at each link
+
+1. Round 1's mint was built, broadcast and **confirmed on-chain**. ✅ ours, worked.
+2. We returned no `tx`, so the dApp could not submit it to the overlay. ⛔ **our bug — now fixed.**
+3. The overlay therefore never indexed it, and the dApp's view of "which pf head is unspent" comes
+   from the overlay. Their state is stale **because of step 2**.
+4. Round 2 the dApp handed us the stale head. ⛔ **their state, downstream of our bug.**
+
+⇒ Nothing in round 2 indicts the fix. The residue is a **data** problem on their side, seeded by our
+defect, and their own error text prescribes the remedy: do not retry; let the drift auditor re-index.
+
+### ⛔ We do NOT talk to that overlay
+
+Worth stating because it is the owner's first question. `src/overlay/mod.rs` submits to exactly one
+topic — `TOPIC_IDENTITY = "tm_identity"`, for BRC-52 certificates. There is no pf/OpNS submit path in
+this wallet. **`Overlay /submit` is Zanaadu's own call**, made with the BEEF we hand back. Our job
+ends at returning a valid `tx`; theirs begins there.
+
+## 14. 🚨 NEW — found while confirming the retest: a fatal broadcast failure still returns `200`
+
+📏 Round 2's broadcast failed **fatally** — `is_fatal_broadcast_error` fired and logged
+`❌ Fatal broadcast error: … "Missing inputs"` — and `signAction` then returned
+**`200` with 334 774 bytes of BEEF**. The caller cannot tell a broadcast that landed from one the
+whole provider chain permanently refused.
+
+```rust
+Err(e) => {
+    log::error!("   ❌ Broadcast failed: {}", e);
+    // Leave status as 'sending' — TaskSendWaiting (120s) will retry
+}
+```
+
+Two problems, and the second is worse:
+
+1. **The caller is told success.** Zanaadu only discovered the failure because their *overlay*
+   independently rejected it. A dApp with no overlay step would record a mint that never happened.
+   ⭐ This is the **same shape as the bug this ticket fixed** — a silent success after a real failure.
+2. **The retry comment is wrong for this class.** The error was classified **fatal**, yet the status
+   is left `sending` so `TaskSendWaiting` re-attempts it every 120 s. `"Missing inputs"` is permanent:
+   the input is spent and confirmed. That is an unbounded retry of a transaction that can never
+   succeed.
+
+⛔ **Reported, not fixed** (working rule #3): this is a behaviour change on the money path — it
+changes what a dApp sees on a failed spend — and it is not what this ticket came for. It also needs a
+decision the owner should make: does a fatal broadcast failure become a non-2xx, or a 200 carrying an
+explicit failure field? BRC-100's `SignActionResult` has no error member, so the answer is not
+obvious from the spec.
+
+**Suggested home:** beta.3 Phase 8 (alongside `TICKET_wallet_backend_death_is_silent_and_unrecovered`
+— same family: a failure the user is never told about).
