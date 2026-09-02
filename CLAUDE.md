@@ -407,6 +407,43 @@ When asked to run/test the wallet, adblock, or CEF browser during development:
 - **CEF exe:** Ensure `HODOS_DEV=1` is in the environment before launching
 - **NEVER run `cargo run` without `HODOS_DEV=1`** — the safeguard will block it anyway, but don't even try
 
+#### ⛔ Stopping a dev process: match by EXE PATH, never by image name
+
+**All three dev processes share their image name with the user's installed build** —
+`HodosBrowser.exe`, `hodos-wallet.exe`, `hodos-adblock.exe`. A name-matched kill takes down the
+**user's production browser and wallet** along with the dev ones.
+
+⭐ **Use the script. Do not hand-write the kill:**
+
+```powershell
+.\scripts\stop-dev.ps1            # stops dev browser + wallet + adblock, path-matched
+.\scripts\stop-dev.ps1 -WhatIf    # show what would be stopped, kill nothing
+```
+
+If you must write it inline, the `Where-Object` clause is **not optional**:
+
+```powershell
+# ⛔ WRONG — also kills the user's installed wallet
+Get-CimInstance Win32_Process -Filter "Name='hodos-wallet.exe'" | Stop-Process -Force
+
+# ✅ RIGHT — dev only
+Get-CimInstance Win32_Process -Filter "Name='hodos-wallet.exe'" |
+  Where-Object { $_.ExecutablePath -like '*rust-wallet	argetelease*' } | Stop-Process -Force
+```
+
+> 🚨 **This happened, 2026-09-01.** A name-matched `Stop-Process` on `hodos-wallet.exe` — run to free
+> a file lock before `cargo build` — killed the owner's **production** wallet backend. The installed
+> browser stayed up and reported *"no wallet"* to every dApp for ~4 hours, and the owner reasonably
+> concluded first that a site was broken, then that the browser was. ⚠️ The exe-path rule **already
+> existed** in the beta.3 session prompt, but only for `HodosBrowser.exe`; it was honoured there and
+> not carried across. That is why it now lives here, covering all three.
+> ⭐ The *product* half — the browser never noticing its backend died — is
+> `development-docs/0.4.0-beta.4/tickets/TICKET_wallet_backend_death_is_silent_and_unrecovered.md`.
+
+⚠️ **You need to stop the dev processes before building:** the linker fails `LNK1104` while the dev
+browser runs, and `cargo build` fails *"Access is denied"* while the dev wallet runs. That pressure is
+exactly what produces a hasty kill — which is why the script exists.
+
 **Storage (dev)**: Windows: `%APPDATA%/HodosBrowserDev/`, macOS: `~/Library/Application Support/HodosBrowserDev/`
 **Storage (production)**: Windows: `%APPDATA%/HodosBrowser/`, macOS: `~/Library/Application Support/HodosBrowser/`
 
