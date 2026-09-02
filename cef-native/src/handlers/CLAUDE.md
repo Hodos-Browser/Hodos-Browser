@@ -294,14 +294,14 @@ On macOS the model is popped up manually as an `NSMenu` by `simple_handler_mac.m
 `SimpleHandler::GetResourceRequestHandler()` runs on the IO thread for every request, in this order:
 
 1. **Production frontend serving** — `127.0.0.1:5137` URLs when a `frontend/` dir sits next to the exe → `LocalFileResourceRequestHandler`. Must run first; later handlers would try to network-fetch port 5137, which has no server in production.
-2. **Trusted overlay wallet bypass** — `hodos::IsWalletHostPort(url)` from roles `wallet` / `wallet_panel` / `settings` / `backup` → `nullptr` (native CEF handling; avoids `CefURLRequest` forwarding issues on macOS).
+2. **Trusted overlay wallet bypass** — `hodos::IsOurWalletOrigin(url)` from roles `wallet` / `wallet_panel` / `settings` / `backup` → `nullptr` (native CEF handling; avoids `CefURLRequest` forwarding issues on macOS).
 3. **Paid content cache read hook** (BRC-121) — GET, non-localhost, cache enabled, and not a hard reload (`Cache-Control`/`Pragma: no-cache` from Ctrl+Shift+R) → `CachedContentRequestHandler` serving bytes from SQLite. Short-circuits the entire 402 chain; no payment IPC, no session state change.
 4. **DNT/GPC headers** — injects `DNT: 1` and `Sec-GPC: 1` when the privacy setting is on.
 5. **Ad & tracker blocking** — global toggle + per-site toggle; `AdblockCache::checkCacheOnly()` → `AdblockBlockHandler` on a cached block, `DeferredAdblockHandler` on a cache miss (defers to a background thread so the IO thread stays free). A cached *allow* falls through.
-6. **Wallet routing** — `hodos::IsWalletHostPort(url)`, or `localhost:3321` / `localhost:2121` / `localhost:8080`, or `messagebox.babbage.systems`, or `/.well-known/auth` → `HttpRequestInterceptor`.
+6. **Wallet routing** — `hodos::IsWalletOrigin(url)` (our port **or** the compat bridge ports 3321 / 2121, on any loopback host), or `hodos::IsMessageboxOrigin(url)`, or `hodos::IsWellKnownAuthRequest(url)` → `HttpRequestInterceptor`. ⛔ **8080 was removed** in beta.3 Phase 5 (owner decision): it is in no BRC and no wallet, and it hijacked `/health`, `/encrypt` and `/getVersion` on any developer's own dev server. Do not re-add it.
 7. **Everything else http/https** → `CookieFilterResourceHandler`. This is **not** optional: it applies cookie blocking + YouTube ad-response filtering *and* runs BRC-121 402 detection in `OnResourceResponse`. Returning `nullptr` here would mean no response callback fires and 402 challenges from arbitrary sites would never trigger the pay flow.
 
-> Ports are never literals. `hodos::IsWalletHostPort()` from `include/core/PortConfig.h` resolves 31301 (release) vs 31401 (`HODOS_DEV=1`), and checks both `localhost:` and `127.0.0.1:` host forms.
+> Ports are never literals — `include/core/PortConfig.h` resolves 31301 (release) vs 31401 (`HODOS_DEV=1`). ⭐ Since Phase 5 these predicates parse the **authority**, never the whole URL, and are deliberately **broad** about which hosts count as loopback (`*.localhost` and `127.0.0.0/8` included). Narrowing one is a privilege change, because un-intercepted traffic reaches Rust unstamped and is therefore *trusted* — see `hodos::IsLoopbackHost`.
 
 ## Overlay Patterns
 

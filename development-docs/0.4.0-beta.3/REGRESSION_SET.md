@@ -97,7 +97,7 @@ Auto-update must never force a reinstall and must never brick an install.
 | 1 → 2 | | | | | | | |
 | 2 → 3 | 2026-08-26 | 🟢 **GREEN both halves** (see run log) | ⬜ needs a real payment | ⬜ live app, human | 🟢 T1 — 73 engine tests · ⬜ T2 e2e | ⬜ needs a payment | 🟡 T1 only (6 tests); real N−1→N owed at RC |
 | 3 → 4 | 2026-09-01 | 🟢 **GREEN both halves** (run log) | ⬜ needs a real payment | 🟡 **PARTIAL** — the arms this phase touched are green; file-dialog arm + a clean prevent-close pair still owed | 🟢 T1 (preflight `T1a`) · ⬜ T2 e2e | ⬜ needs a payment | 🟡 T1 only; real N−1→N owed at RC |
-| 4 → 5 | | | | | | | |
+| 4 → 5 | 2026-09-02 | 🟢🔴 **GREEN both halves + the injected RED, both directions — first time this sprint** (run log) | ⬜ needs a real payment | ⬜ not touched by this phase | 🟢 T1 (preflight `T1a`) · ⬜ T2 e2e | ⬜ needs a payment | 🟡 T1 only; real N−1→N owed at RC | |
 
 ---
 
@@ -311,3 +311,46 @@ measured directly: the overlay inherits Phase 3.5's ownership handling, and the 
 session clear once per tab with the right browser ids. The remaining gaps are the same three that
 have been owed since the 0 → 0.5 boundary, plus one genuinely new one — the new overlay's mouse
 path, which needs a human with a mouse and is listed as owner item **O1/O2** in the phase contract.
+
+---
+
+## Run log — 4 → 5 boundary (2026-09-02)
+
+Phase 5 rewrote `GetResourceRequestHandler`'s gate — **the predicate every network request in the
+browser passes through** — so this is the boundary `R-INTEXT` was written for.
+
+### R-INTEXT — 🟢🔴 GREEN **and** RED, both directions
+
+⭐ **The injected RED has been owed at every prior boundary** (*"not re-run; it needs a code change"*
+at both 2→3 and 3→4). Phase 5 was already changing that code, so it was finally run: two one-line
+stubs, built, observed, **reverted, rebuilt, and the GREEN halves re-observed** to prove the revert.
+
+| | 🟢 GREEN (shipped code) | 🔴 RED (stubbed) |
+|---|---|---|
+| **(a) internal** | 7 × `requesting_domain=<none:internal>`, **0 prompts** | Always stamp in `runIpcCallDirect` ⇒ 🚨 the wallet **prompts for its own backend calls**: `engine Prompt … domain=127.0.0.1:5137 endpoint=/wallet/peerpay/status` |
+| **(b) external** | `requesting_domain=example.com` ⇒ `engine Prompt … endpoint=/getVersion` | Suppress in `startAsyncHTTPRequest` ⇒ `<none:internal>`, **`200` in 20 ms with the wallet's real answer**, no 202, no modal |
+
+🎯 **SUBJECT:** every cell read from the **Rust** log — what the wallet received — never the C++ log
+or the page. Revert verified twice: `grep` for the injected marker returns 0, and `git diff` against
+the fix commit is empty.
+
+⚠️ `IsInternalOrigin("")` still returns **`true`** (`HttpRequestInterceptor.cpp:1070`) — re-checked,
+unchanged, and deliberately out of scope (W6, beta.4). Detail in
+`phase-5-loopback-routing/MEASUREMENTS.md` M11.
+
+### R-GOLD / R-COUNT — ⬜ NOT RUN, and this phase raises the stakes
+
+⛔ Both need **one real auto-approved payment**, owed at every boundary of this sprint. Phase 5
+changed the predicate that decides whether a request is intercepted **at all**, and the gold pill is
+emitted from inside that interception path — so a URL that stopped being intercepted would stop
+producing a pill for a payment that still happens.
+
+📏 What partially covers it: the W3 shadow log recorded **one** gate disagreement across
+`example.com` + `github.com` + `youtube.com` + `en.wikipedia.org` and every subresource, and that one
+was the intended `new=no old=yes` on the crafted exploit URL. Nothing that was intercepted before
+stopped being intercepted. That is evidence, **not** a substitute for the payment.
+
+### R-CLOSE / R-PERIM — unchanged
+
+`R-PERIM` T1 green via preflight `T1a`. `R-CLOSE` not touched by this phase (no overlay lifetime
+change); still carries the file-dialog arm owed from the 3→4 boundary.

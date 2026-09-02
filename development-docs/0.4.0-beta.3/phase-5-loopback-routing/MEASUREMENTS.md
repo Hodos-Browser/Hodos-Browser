@@ -176,3 +176,83 @@ that is prior state, not a broken gate. Deny-and-verify against a fresh host ins
 | **O2** | 🍎 macOS — M1 and M3 both | Not runnable from the Windows box. Relay only |
 | **O3** | `R-GOLD` / `R-COUNT` / `payment.auto_approved` | One real payment closes all three; owed at every boundary so far |
 | **O4** | Stopping MetaNet Client as an additional control | ⛔ Not run, and **not needed** — NC-1 (M1) is the stronger control and costs the owner nothing. Recorded so the omission is a decision, not a gap |
+
+---
+
+# Post-fix run — 2026-09-02, after `1743b20`
+
+Same rig, same page, rebuilt shell. ⭐ Every row below has its pre-fix counterpart above, taken on the
+**same binary lineage minutes earlier**, so the before/after is a real A/B and not two descriptions.
+
+## M8 — 🟢 `P5-A4` GREEN: the site answers its own request again
+
+| | `https://example.com/getNetwork?x=127.0.0.1:3321` |
+|---|---|
+| **Before** (M2) | `status=200`, body `{"error":"Wallet request timeout"}` — **our wallet answered**, after a 45 s consent modal |
+| **After** | `status=404`, body `<!doctype html>…<title>Example Domain</title>` — **example.com answered**, in 54 ms |
+| 🎯 **SUBJECT** | 📏 `getNetwork` appears in our Rust log **0 times** post-fix. Before, it appeared with `requesting_domain=example.com`. The destination confirms the client. |
+
+`P5-A7` rides along: `https://example.com/health` also returns the site's own page.
+
+## M9 — 🟢 `P5-A1` still GREEN: real bridge traffic is untouched
+
+The whole risk of this change was breaking the thing Phase 0.5 fixed. 📏 `http://127.0.0.1:3321/getVersion`
+from the same external page still reaches our wallet:
+
+```
+08:09:38.338  R-INTEXT trust: path=/getVersion requesting_domain=example.com
+```
+
+## M10 — 🟢 `P5-A6` W3 shadow log: **one** disagreement, and it is the intended one
+
+Both predicates ran on every request; only the new one decided. Across `example.com`,
+`github.com`, `youtube.com` (plus its service worker and every subresource) and
+`en.wikipedia.org/wiki/Bitcoin` — all of which loaded normally, titles verified over CDP:
+
+```
+🔀 P5 gate disagreement: new=no old=yes authority=example.com role=tab_1     ← the exploit URL
+```
+
+**Total: 1.** Zero from ordinary browsing. Zero `new=yes old=no`, i.e. the deliberate broadening to
+`*.localhost` and `127.0.0.0/8` admitted nothing unexpected in practice.
+
+🔴 **RED for the shadow log itself:** the one line above *is* it — the log was observed to fire on a
+known-disagreeing URL. A shadow log that never fires is the farbling-harness failure shape.
+
+## M11 — 🔴🟢 `R-INTEXT` COMPLETE — all four cells, first time in this sprint
+
+⭐ **The injected RED has been owed at every phase boundary of beta.3** — both prior boundaries
+recorded *"the injected RED was not re-run; it needs a code change."* This is the phase that was
+already changing that code, so it was run. Two one-line stubs, built, observed, **reverted, rebuilt,
+and the GREEN halves re-observed** to prove the revert.
+
+| | 🟢 GREEN (shipped code) | 🔴 RED (stubbed) |
+|---|---|---|
+| **(a) internal** | 7 × `requesting_domain=<none:internal>`, **0 prompts** | Always stamp in `runIpcCallDirect` ⇒ 🚨 **the wallet prompts for its own backend calls**: `engine Prompt … for domain=127.0.0.1:5137 endpoint=/wallet/peerpay/status type=DomainApproval` |
+| **(b) external** | `requesting_domain=example.com` ⇒ `engine Prompt … endpoint=/getVersion` | Suppress in `startAsyncHTTPRequest` ⇒ `requesting_domain=<none:internal>`, **`200` in 20 ms carrying the wallet's real answer** (`HodosWallet-Rust v0.0.1` + capability list). No 202, no modal |
+
+⇒ One header is the entire difference between *gated and prompted* and *silent, instant, fully
+trusted*. That is what `REGRESSION_SET.md` asserts, and it is now **observed** rather than reasoned.
+
+⭐ **Incidental finding, free:** under RED (a), `/wallet/balance` kept reporting `<none:internal>`
+while `/wallet/peerpay/status` flipped. 📏 The two internal calls use **different transports**, and
+only one was stubbed. Worth knowing — a future R-INTEXT stub that touches one transport will look
+like a partial result rather than a bug.
+
+🎯 **SUBJECT:** every cell is read from the **Rust** log — what the wallet received — never from the
+C++ log or the page. Revert verified two ways: `grep` for the marker returns **0**, and
+`git diff --stat` against `1743b20` is empty.
+
+## M12 — 📖 Observed, deliberately NOT fixed (working rule #3)
+
+3. 🚨 **`scripts/stop-dev.ps1` fails outright when invoked as `powershell -File`.**
+   `[string]$RepoRoot = (Split-Path -Parent $PSScriptRoot)` is a *parameter default*, and
+   `$PSScriptRoot` is empty during parameter binding under Windows PowerShell 5.1 — so the script
+   dies with `Cannot bind argument to parameter 'Path'` before stopping anything.
+   📏 `& '.\scripts\stop-dev.ps1'` (the form `CLAUDE.md` documents) works and was used throughout.
+   ⚠️ **Worth its own ticket:** this is the tool that exists so nobody hand-writes a kill, written
+   the day after a name-matched kill took down the owner's production wallet. A safety tool that
+   fails on a natural invocation invites exactly the hand-written fallback it was built to prevent —
+   and `-File` is how a script or an agent would most naturally call it. ⛔ Not fixed here: it is
+   another change's file, and per working rule #6 the instrument does not move inside the change it
+   measures.

@@ -1,6 +1,7 @@
 # Phase 5 — loopback routing & trust boundary · PHASE CONTRACT
 
-**Workstream:** WS5(b) · **Opened:** 2026-09-01 · **Status:** 🟢 **CONFIRMED 2026-09-02** — all five open questions decided by the owner (§6). §4 rows `A1`/`A2` **GREEN**, `A4` RED **captured pre-fix** — see `MEASUREMENTS.md`
+**Workstream:** WS5(b) · **Opened:** 2026-09-01 · **Status:** 🟢 **LANDED 2026-09-02** — `c4603e1` contract · `1743b20` fix · `36f7a66` gate `G12`. All 9 evidence rows resolved; `R-INTEXT`’s injected RED run in both directions for the first time this sprint.
+**Was:** 🟢 **CONFIRMED 2026-09-02** — all five open questions decided by the owner (§6). §4 rows `A1`/`A2` **GREEN**, `A4` RED **captured pre-fix** — see `MEASUREMENTS.md`
 **Owner:** Matthew · **Platform:** Windows (macOS relayed, not claimed)
 **Standard:** `../HARNESS.md`. Inherits the beta.3 harness in full.
 **Ticket:** `../TICKET_loopback_host_form_wallet_routing.md` (W0 · W1 · W2' · W3 of §5.2)
@@ -121,14 +122,14 @@ it decides whether the rest of the phase is urgent or tidy-up.
 |---|---|---|---|---|
 | **P5-A1** 🟢 **GREEN 2026-09-02** (M1) | From a real external https page in the dev browser, `fetch('http://127.0.0.1:3321/getVersion')` **and** the `https://127.0.0.1:2121` form are answered by **our** wallet | ⭐ **Replaced with a stronger, free control** (M1): probe `127.0.0.1:3322` — a loopback port one digit off 3321, not in the gate list. Observed: **no interception, zero Rust lines**, client `Failed to fetch`. ⇒ the gate is the cause. ⛔ MetaNet Client was **not** stopped and did not need to be | **Our Rust log** — `domain_trust_mw`'s `requesting_domain=<exact page host>` line for `/getVersion`. ⛔ Not the C++ log, not the page's console: the C++ log records intent, the page cannot tell which wallet answered | T2 |
 | **P5-A2** 🟢 **GREEN 2026-09-02** (M1/M3) | `https://127.0.0.1:2121/health` is served by our resource handler with no cert interstitial | Ticket §8.1's fallback is the RED's consequence, not a control: if TLS fires first, **stop matching 2121** and record it | The rendered page / DevTools network entry for the *2121* request specifically, not the 3321 retry that follows it | T2 |
-| **P5-A3** | `IsWalletOrigin()` matches `127.0.0.0/8`, `[::1]`, `localhost` **and `*.localhost`**, on our port and each compat port | Unit test: with the `*.localhost` arm removed, `http://x.localhost:31401/createAction` must go **false** — and that is a privilege escalation, not a tidy-up (§5.1) | `hodos_tests` — a new `wallet_origin_test.cpp` beside `port_config_origin_test.cpp`. No libcef (§0.3) | T1 |
+| **P5-A3** 🟢 **GREEN** (32 unit tests) | `IsWalletOrigin()` matches `127.0.0.0/8`, `[::1]`, `localhost` **and `*.localhost`**, on our port and each compat port | Unit test: with the `*.localhost` arm removed, `http://x.localhost:31401/createAction` must go **false** — and that is a privilege escalation, not a tidy-up (§5.1) | `hodos_tests` — a new `wallet_origin_test.cpp` beside `port_config_origin_test.cpp`. No libcef (§0.3) | T1 |
 | **P5-A4** 🔴 **RED CAPTURED 2026-09-02** (M2) | `https://evil.example/?x=127.0.0.1:31401` and `…/health?x=127.0.0.1:3321` are **not** wallet traffic | Same URLs against the pre-change predicate return **true** — asserted in the same test file, so the fix's own control ships with it | `hodos_tests` assertions, plus one live fetch whose response body is the *site's*, not `{"backend":"rust-wallet"}` | T1 + T2 |
-| **P5-A5** | `redirectPort` rewrites only the authority | RED: with the anchor removed, `?x=127.0.0.1:3321` in a query is rewritten to `:31401` — observed in the interceptor log line the lambda already emits | The rewritten `url` string in `🌐 Port redirection:`, not the request object (`SetURL` in `GetResourceHandler` is documented inert — panel #2 finding, `cef_resource_request_handler.h`) | T1 + T2 |
-| **P5-A6** | **W3 shadow log.** Old and new predicates both evaluated; every **disagreement** logged (URL host:port + which side said yes) with the old one still deciding. After a Standard test basket + App Lab + a known dApp, the disagreement set is empty or every entry is named in §6 | RED: inject a URL known to disagree (`https://example.com/?x=127.0.0.1:31401`) and confirm it **appears** in the shadow log. A shadow log that never fires is the farbling-harness failure shape | The **disagreement** count, not the match count. `LogSafeUrl` applies — host only, never path or query | T2 |
-| **P5-A7** | `/health` on our port and on 3321/2121 reaches the wallet; `/health` on an ordinary site does not | RED: `https://example.com/health` returns the *site's* body. This is the arm's stated purpose and it has never been observed | Response **body**, compared against `curl` outside the browser. A synthesized 404 also "loads" | T2 |
-| **P5-A8** | **`R-INTEXT` RED, internal-as-external.** Stub the origin derivation to always emit `X-Requesting-Domain` → the user's own send from the wallet UI **starts prompting** | This row *is* a RED. Its GREEN is the standing `R-INTEXT` (a) | Rust log: header **present** where it must be absent | T2 |
-| **P5-A9** | **`R-INTEXT` RED, external-as-internal.** Suppress the header → an external over-cap send **goes silent** | This row *is* a RED. Its GREEN is the standing `R-INTEXT` (b) | Rust log: header **absent** where it must be present, and **no** 202 | T2 |
-| **P5-B1** | 🍎 macOS relay entry written to `MAC_RELAY_*`, naming `A1`/`A2` as the two Mac-shaped unknowns | n/a — relay, never claimed | `MAC_RELAY_P5_ROUND.md` | — |
+| **P5-A5** 🟢 **GREEN** (M2 pre-fix / M8 post-fix) | `redirectPort` rewrites only the authority | RED: with the anchor removed, `?x=127.0.0.1:3321` in a query is rewritten to `:31401` — observed in the interceptor log line the lambda already emits | The rewritten `url` string in `🌐 Port redirection:`, not the request object (`SetURL` in `GetResourceHandler` is documented inert — panel #2 finding, `cef_resource_request_handler.h`) | T1 + T2 |
+| **P5-A6** 🟢 **GREEN** (M10 — 1 disagreement, the intended one) | **W3 shadow log.** Old and new predicates both evaluated; every **disagreement** logged (URL host:port + which side said yes) with the old one still deciding. After a Standard test basket + App Lab + a known dApp, the disagreement set is empty or every entry is named in §6 | RED: inject a URL known to disagree (`https://example.com/?x=127.0.0.1:31401`) and confirm it **appears** in the shadow log. A shadow log that never fires is the farbling-harness failure shape | The **disagreement** count, not the match count. `LogSafeUrl` applies — host only, never path or query | T2 |
+| **P5-A7** 🟢 **GREEN** (M8) | `/health` on our port and on 3321/2121 reaches the wallet; `/health` on an ordinary site does not | RED: `https://example.com/health` returns the *site's* body. This is the arm's stated purpose and it has never been observed | Response **body**, compared against `curl` outside the browser. A synthesized 404 also "loads" | T2 |
+| **P5-A8** 🔴 **RED OBSERVED** (M11) | **`R-INTEXT` RED, internal-as-external.** Stub the origin derivation to always emit `X-Requesting-Domain` → the user's own send from the wallet UI **starts prompting** | This row *is* a RED. Its GREEN is the standing `R-INTEXT` (a) | Rust log: header **present** where it must be absent | T2 |
+| **P5-A9** 🔴 **RED OBSERVED** (M11) | **`R-INTEXT` RED, external-as-internal.** Suppress the header → an external over-cap send **goes silent** | This row *is* a RED. Its GREEN is the standing `R-INTEXT` (b) | Rust log: header **absent** where it must be present, and **no** 202 | T2 |
+| **P5-B1** 🟡 **RELAYED** | 🍎 macOS relay entry written to `MAC_RELAY_*`, naming `A1`/`A2` as the two Mac-shaped unknowns | n/a — relay, never claimed | `MAC_RELAY_P5_ROUND.md` | — |
 
 ⬜ **Boundary regression 4 → 5** — `R-INTEXT` (with its RED, finally), `R-PERIM` T1, `R-UPDATE` T1;
 `R-GOLD` / `R-COUNT` / `R-CLOSE` owed as at every prior boundary unless a real payment happens.
@@ -194,3 +195,55 @@ One commit. `IsWalletOrigin()` is a new inline predicate in `PortConfig.h` plus 
 | **O2** | 🍎 macOS — `A1` and `A2` both | Not runnable from the Windows box. Relayed, never claimed |
 | **O3** | `R-GOLD` / `R-COUNT` / the `payment.auto_approved` audit line | One real payment closes all three; owed at every boundary so far |
 | **O4** | Anything needing a real mouse click | ⛔ `SendInput` clicks are dropped in this agent environment (P4 M11). Mostly irrelevant — this phase is network-level |
+
+
+---
+
+## 9. Sign-off — 2026-09-02
+
+| | |
+|---|---|
+| **Commits** | `c4603e1` contract + pre-fix measurement · `1743b20` the fix · `36f7a66` gate `G12` (separate, per working rule #6) · this docs commit |
+| **preflight** | `-Full` **PASS** — 8 gates + 7 T1 checks, nothing skipped |
+| **`-NegativeControl`** | **PASS** — every gate seen to fail, including new `G12` (`5 > 4`) |
+| **Unit tests** | 374 pass / 1 pre-existing skip (`UpdateStagerRig.StagesFromLocalFeed`). 32 new, each paired with the legacy predicate as its own control |
+| **Boundary 4 → 5** | `REGRESSION_SET.md` run log. `R-INTEXT` 🟢🔴 complete; `R-GOLD` / `R-COUNT` / `R-CLOSE` owed as before |
+
+### `G12` residuals — 4, all named, all deliberate
+
+Per `HARNESS.md` §4, a residual at a non-zero baseline is listed by file:line in the owning contract.
+
+| File:line | Why it is allowed |
+|---|---|
+| `PortConfig.h` — `IsWalletHostPort` (2 lines) | Kept **only** to back `hodos::LegacyWalletGateMatch`, the W3 shadow predicate. Decides nothing |
+| `PortConfig.h` — `IsLoopbackHostPort` (2 lines) | Same |
+
+⇒ All four die together with `LegacyWalletGateMatch` in **beta.4, ticket W8**, which drives `G12` to
+its target of 0. ⛔ Until then, deleting them silently removes the shadow comparison's control.
+
+### What this phase did NOT do, stated plainly
+
+- ⬜ **`R-GOLD` / `R-COUNT`** — need one real payment. This phase changed the predicate that decides
+  whether a request is intercepted at all, and the gold pill fires from inside that path. The shadow
+  log (M10) shows nothing that was intercepted stopped being intercepted, which is evidence but not
+  the payment.
+- ⬜ **The App Lab board** — fund-moving methods; needs an unfunded test wallet and a human.
+  ⚠️ `brc-cloud.bcryderman.workers.dev` is **already an approved domain** in the dev wallet, so an
+  App Lab run will show no consent prompt. That is prior state, not a broken gate.
+- ⬜ **🍎 macOS** — relayed in `MAC_RELAY_P5_ROUND.md`, never claimed.
+- ⛔ **W4 / W6 / W7 / W8** — beta.4, unchanged. `IsInternalOrigin("")` still returns `true`
+  (re-verified at `HttpRequestInterceptor.cpp:1070`); that is W6.
+
+### 📖 Reported, not fixed (working rule #3)
+
+1. 🚨 **`scripts/stop-dev.ps1` fails when invoked as `powershell -File`** — `$PSScriptRoot` is empty
+   during parameter binding, so it dies before stopping anything. The documented `& '.\scripts\stop-dev.ps1'`
+   form works and was used throughout. ⚠️ **Worth its own ticket:** this is the tool that exists so
+   nobody hand-writes a process kill, written the day after a name-matched kill took down the owner's
+   production wallet. A safety tool that fails on a natural invocation invites the hand-written
+   fallback it was built to prevent. Detail: `MEASUREMENTS.md` M12.3.
+2. **The synthesized timeout envelope returns HTTP `200`** with an `{"error":…}` body — already filed
+   as ticket §6.4.
+3. **14 more unanchored `find("localhost")` / `find("127.0.0.1")` sites** in `CookieBlockManager` (12)
+   and `EphemeralCookieManager` (2). Same defect class, different shape (bare host, no port), so
+   `G12` does not count them. They belong to W7 in beta.4.

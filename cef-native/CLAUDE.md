@@ -202,10 +202,24 @@ Both Windows launchers kill only the DEV instance, matched by **executable path*
 
 | Backend | Release | `HODOS_DEV=1` | Helper |
 |---------|---------|---------------|--------|
-| Rust wallet | `127.0.0.1:31301` | `127.0.0.1:31401` | `hodos::WalletPort()`, `hodos::WalletUrl(path)`, `hodos::IsWalletHostPort(url)` |
+| Rust wallet | `127.0.0.1:31301` | `127.0.0.1:31401` | `hodos::WalletPort()`, `hodos::WalletUrl(path)`, `hodos::IsWalletOrigin(url)` / `IsOurWalletOrigin(url)` |
 | Adblock engine | `127.0.0.1:31302` | `127.0.0.1:31402` | `hodos::AdblockPort()`, `hodos::AdblockUrl(path)` |
 
-`IsWalletHostPort()` checks **both** `localhost:<port>` and `127.0.0.1:<port>` — the codebase uses both host forms and they must move in lockstep.
+⛔ **`IsWalletHostPort()` is no longer a decision predicate.** beta.3 Phase 5 replaced it with
+`hodos::IsWalletOrigin(url)` (any wallet on this machine — ours or a foreign bridge port) and
+`hodos::IsOurWalletOrigin(url)` (ours only), both of which parse the **authority** instead of
+searching the whole URL. `IsWalletHostPort` / `IsLoopbackHostPort` survive only to back
+`LegacyWalletGateMatch`, the W3 shadow predicate, and are retired in beta.4 (ticket W8). Gate `G12`
+counts them.
+
+⭐ **The rule that governs every predicate here, and it is counter-intuitive:** this layer is what
+marks traffic **untrusted** — Rust's `domain_trust_mw` reads a *missing* `X-Requesting-Domain` as
+internal and fully trusted. So a matcher that fails to match does not leave traffic ungated, it
+leaves it **trusted**, and every narrowing is a privilege change. Hence: **broad** on what counts as
+loopback (`127.0.0.0/8`, `[::1]`, `localhost` **and `*.localhost`** — Chromium routes the whole tree
+there per RFC 6761), **strict** on where in the URL you look (the authority only). Full reasoning at
+`hodos::IsLoopbackHost` in `PortConfig.h`; measured exploit chain in
+`development-docs/0.4.0-beta.3/phase-5-loopback-routing/MEASUREMENTS.md` M2.
 
 ## Invariants
 
@@ -439,7 +453,7 @@ Cross-browser communication (e.g. header find bar → tab search) always routes 
 | `src/handlers/simple_handler.cpp` | `OnProcessMessageReceived`, `OnAfterCreated`, `OnBeforeClose`, `GetResourceRequestHandler`, `CefDownloadHandler` (`CanDownload`, `OnBeforeDownload`, `OnDownloadUpdated`), `DownloadInfo` struct, `active_downloads_` map, `NotifyDownloadStateChanged`, `CefFindHandler::OnFindResult`, find IPC (`find_text`, `find_stop`), helpers `CreateNewTabWithUrl()` / `CopyTextToClipboard()` |
 | `src/handlers/simple_app.cpp` | `SimpleApp::OnContextInitialized`, `InjectHodosBrowserAPI`, the 15 `Create…Overlay` functions (+ their `Show…`/`Hide…` pairs), and the overlay-ownership helpers `OwnOverlayToRequestingWindow` / `ReturnOverlayOwnershipToPrimary` / `ReleaseOverlaysOwnedBy` |
 | `src/core/HttpRequestInterceptor.cpp` | `HttpRequestInterceptor::isWalletEndpoint`, `DomainPermissionCache`, `WalletStatusCache`, `BSVPriceCache`, `AsyncWalletResourceHandler`, `AsyncHTTPClient`, `Async402ResourceHandler` + `Async402HTTPClient`, free functions `TryHandleBrc121_402` / `InstallAsync402HandlerIfPending`, structs `PaidRetryContext`, `PendingEnvelope`, `PendingReload`, `Brc121FailedEntry`, `CertDisclosureInfo`, `ProtocolScope`, `BasketScope`. **`DomainVerifier` was removed** — replaced by the DB-backed `DomainPermissionCache`. |
-| `include/core/PortConfig.h` | `hodos::IsDevEnv`, `WalletPort`, `AdblockPort`, `WalletUrl`, `AdblockUrl`, `IsWalletHostPort` — the only sanctioned source of backend ports |
+| `include/core/PortConfig.h` | `hodos::IsDevEnv`, `WalletPort`, `AdblockPort`, `WalletUrl`, `AdblockUrl` — the only sanctioned source of backend ports. Also the wallet-traffic predicates: `AuthoritySpan`, `OriginFromUrl`, `SplitAuthority`, `IsLoopbackHost`, `IsWalletOrigin`, `IsOurWalletOrigin`, `IsMessageboxOrigin`, `IsWellKnownAuthRequest`, `RepointLoopbackToWallet` |
 | `include/core/AppPaths.h` | `GetAppDirName()` (dev/prod namespace), `GetLogDir()`, `GetInstanceMutexNameW()`, dev/prod safeguard logic |
 | `include/core/Logger.h` + `src/core/Logger.cpp` | `Logger`, `LogLevel` (DEBUG/INFO/WARNING/ERROR_LEVEL), `ProcessType` (MAIN/RENDER/BROWSER) |
 | `src/core/HistoryManager.cpp` | Browser history SQLite database; singleton with `Initialize`, `AddVisit`, `GetHistory`, `GetHistorySimple`, `SearchHistory`, `SearchHistoryWithFrecency`, `GetTopSites`, `DeleteHistoryEntry`, `DeleteAllHistory`, `DeleteHistoryRange`, Chromium-time converters |

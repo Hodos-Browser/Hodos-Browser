@@ -9,7 +9,7 @@ This module contains the core C++ business logic for the CEF browser shell. It p
 
 All files are cross-platform (Windows + macOS) unless noted. Windows uses WinHTTP; macOS uses libcurl. Platform-specific code is gated with `#ifdef _WIN32` / `#elif defined(__APPLE__)`.
 
-**Ports:** never hardcode. `include/core/PortConfig.h` is the single source of truth — wallet `127.0.0.1:31301` in release / `31401` under `HODOS_DEV=1`, adblock `31302` / `31402`. Use `hodos::WalletUrl(path)`, `hodos::WalletPort()`, `hodos::IsWalletHostPort(url)`.
+**Ports:** never hardcode. `include/core/PortConfig.h` is the single source of truth — wallet `127.0.0.1:31301` in release / `31401` under `HODOS_DEV=1`, adblock `31302` / `31402`. Use `hodos::WalletUrl(path)`, `hodos::WalletPort()`, and — for "is this wallet traffic?" — `hodos::IsWalletOrigin(url)` / `hodos::IsOurWalletOrigin(url)`. ⛔ **Not** `IsWalletHostPort`: it is an unanchored whole-URL search, retired as a decision predicate in beta.3 Phase 5 and counted by gate `G12`.
 
 **The permission DECISION engine is NOT here.** It lives in Rust (`rust-wallet/crates/hodos_permission_engine`, wrapped by `rust-wallet/src/permission_service/`, wired as Actix middleware in `rust-wallet/src/main.rs`). The former C++ `PermissionEngine.cpp` and `SessionManager.cpp` were **deleted in Phase 2.6-H** — neither file exists in this directory. C++ is now a thin proxy: it forwards every external wallet call to Rust and reacts to `200` (silent) / `202` (prompt) / `403` (deny). See `runIpcEngineCascade` in `HttpRequestInterceptor.cpp`.
 
