@@ -120,3 +120,92 @@ macOS-only failure mode with no Windows analogue, so it cannot be inferred from 
   last window's tabs, and menu → Exit closes the *primary* window rather than the one clicked. The
   macOS Exit path takes a different arm (`ShowQuitConfirmationAndShutdown()`) and **may not have the
   defect at all** — worth a two-minute check when you are next in that code.
+
+---
+
+# 📋 ADDENDUM 2026-09-01 (Windows) — Phase 4 has **LANDED**. M3 was written before the code existed.
+
+Commits `0b68727` (menu) + `420b722` (mute tab), both on `origin/0.4.0`.
+Detail: `phase-4-tab-peripheral-parity/{PHASE_CONTRACT.md,MEASUREMENTS.md}` (M1–M17).
+
+⭐ **Nothing here changes your ask** — it is still "one new overlay, when you get to it". This exists
+because M3 above described a plan, and you should be working from what actually shipped.
+
+## ✅ M6 — What the 15th overlay actually is, so you are not reverse-engineering it
+
+| Piece | Windows file |
+|---|---|
+| React page | `frontend/src/pages/TabContextMenuOverlayRoot.tsx`, route `/tab-context-menu` — **cross-platform, already yours** |
+| Create/Show/Hide trio | `simple_app.cpp :: Create/Show/HideTabContextMenuOverlay` |
+| WndProc + click-outside hook | `cef_browser_shell.cpp :: TabMenuOverlayWndProc`, `TabMenuMouseHookProc` |
+| Role | `tabmenu` (`BrowserWindow.cpp`, both accessor arms) |
+| IPC | `tab_context_menu_show` / `_hide` / `_action` / `_request_context` — **all in cross-platform `simple_handler.cpp`**; the `_show` arm's macOS branch currently just logs "no macOS implementation yet" |
+
+⭐ **The only genuinely macOS work is the window itself** — a borderless `NSWindow` + click-outside
+monitor + `Create…OverlayMacOS`, then replace that `#elif defined(__APPLE__)` log line. Every action,
+the target-tab bookkeeping, the menu contents and the mute state are already cross-platform and will
+work the moment the window exists.
+
+⚠️ **Two traps, both of which cost us time:**
+1. It is anchored to the **cursor**, not to a toolbar icon — the only one of the 15. Your positioning
+   helper takes an anchor point, not an icon offset.
+2. On Windows a new overlay had to be added to `ReleaseOverlaysOwnedBy`'s **explicit list** or it is
+   destroyed with its owner window. Whatever your equivalent lifetime list is, check it has the new
+   window in it. This is Phase 3.5's K12 hazard, and the list names its members one by one.
+
+## ✅ M7 — Mute tab shipped too, and it is **already cross-platform except for the trigger**
+
+👤 Owner-requested after the menu landed. `Tab::muted` + `SetAudioMuted`/`IsAudioMuted`, all in
+`Tab.h` and `simple_handler.cpp` — **no `_mac` arm needed**. It will start working on macOS as soon
+as the overlay above can raise the menu.
+
+🚨 **The finding worth carrying over:** 📏 **CEF's mute does NOT survive a navigation.** Mute a tab,
+navigate it (same-origin *or* cross-origin — same `CefBrowser`, no `OnBeforeClose`), and
+`IsAudioMuted()` reads back **false**. The mute is per-**document**; the user's intent is per-**tab**.
+So `Tab::muted` holds the intent and `SimpleHandler::OnLoadingStateChange` re-applies it. That hook is
+cross-platform, so you inherit the fix — ⚠️ but **verify the re-apply actually fires on your side**,
+because it is the difference between the feature working and it silently dying on the first link
+click. Look for `🔇 Re-applied mute to tab N after navigation`.
+
+⛔ **Do not add a "tab is making noise" speaker icon.** 📏 This CEF build exposes **no
+`OnAudioStateChanged`** (checked across `cef-binaries/include`). We show a muted-only glyph, which is
+the honest subset. If macOS's CEF headers differ here, that is a real finding — tell us.
+
+## ⭐ M8 — A Windows-only defect where **macOS was already right**, so there is nothing to port
+
+📏 On Windows, `TabManager::OnTabBrowserClosed` — the point where a tab actually stops existing —
+**never notified the frontend**. Single closes were masked by React's optimistic removal; the new
+"close other tabs" has no such path, and the tab strip sat stale for a measured **17.5 s**.
+
+📏 **Your `TabManager_mac.mm :: OnTabBrowserClosed` already ends with
+`SimpleHandler::NotifyTabListChanged()`** — it has always done the right thing, at exactly the point
+we just moved Windows to. ⇒ **no port, no action.** Recorded because "Windows found a bug, therefore
+macOS has it" is the wrong default in both directions, and here the platforms had genuinely diverged
+with macOS ahead.
+
+⚠️ One difference left standing, deliberately: yours broadcasts to **all** windows
+(`NotifyTabListChanged`), ours pushes to the **one** affected window
+(`NotifyWindowTabListChanged(closed_window_id)`). Both correct; ours is narrower. Not worth churning.
+
+## 🔴 M9 — `P4-B2` (mic/camera) is unchanged and still yours
+
+Windows is now **measured** across all three stored states — `allow` → `Continue()` + `RESOLVED
+tracks=2`; `block` → `Cancel()` + `NotAllowedError`; `ask` → prompt + pending. So the *"reported
+working"* claim in M4 is now a real result on our side.
+
+⛔ **macOS is still ⬜ and will not be marked from our run** — TCC has no Windows analogue.
+⚠️ **Method warning that cost us a run:** setting the stored state via `site_permissions_set` sent
+**from the page** is correctly **DENIED** by the IPC allowlist, so both arms silently measure *Ask*.
+Set it from an internal origin, and use a **fresh tab per state** — an outstanding permission request
+blocks the next one.
+
+## 🗒️ M10 — Roster + ticket updates since M3/M5
+
+- `cef-native/CLAUDE.md` now says **Windows 15 / macOS 14** explicitly, and names this file as where
+  the macOS half is tracked. ⇒ the parity line is no longer quietly wrong; it is loudly asymmetric.
+- 🎫 One new beta.4 ticket: **split view** (`TICKET_split_view_needs_multi_visible_tab_model.md`).
+  👤 Owner raised it, chose ticket-not-build. ⚠️ Relevant to you only as a heads-up that it would be a
+  **window-layout** change on both platforms, not a menu item — our tab model shows exactly one tab
+  per window, and yours does too.
+- 🎫 `TICKET_tab_pin_and_mute_need_model_changes.md` **retitled and rescoped** — mute-tab is done, pin
+  and mute-**site** remain. If you were holding it as one item, it is now two.
