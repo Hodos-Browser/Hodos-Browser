@@ -7378,13 +7378,77 @@ pub struct SignActionRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SignActionResponse {
     pub txid: String,
+
+    /// BRC-100 `SignActionResult.tx` — Atomic BEEF (BRC-95) as a **byte array**.
+    ///
+    /// 🚨 Added 2026-09-02 after a live failure on beta.zanaadu.com's name-token
+    /// mint. `@bsv/sdk`'s `SignActionResult` is `{ txid?, tx?: AtomicBEEF,
+    /// sendWithResults? }` where `AtomicBEEF = Byte[]`, and `HTTPWalletJSON`
+    /// hands the parsed JSON to the caller verbatim — so a conforming client read
+    /// `result.tx`, found `undefined`, and reported "the wallet returned no BEEF
+    /// to submit". The money had already been spent and the transaction
+    /// broadcast. `CreateActionResponse.tx` in this same file always had the
+    /// right shape; only this struct drifted.
+    #[serde(rename = "tx", skip_serializing_if = "Option::is_none")]
+    pub tx: Option<Vec<u8>>,
+
+    /// ⚠️ DEPRECATED — the same Atomic BEEF as `tx`, hex-encoded. Not BRC-100.
+    ///
+    /// Kept alongside `tx` so this fix cannot break existing callers. Two known
+    /// readers must be migrated before it is removed:
+    ///   - `create_action_internal`'s two reads of `json_resp["rawTx"]` in this
+    ///     file (search: `json_resp["rawTx"]`)
+    ///   - any integrator already coded against the old shape
+    /// ⛔ Do not remove without grepping for `rawTx` across the tree first.
     #[serde(rename = "rawTx")]
     pub raw_tx: String,
+
     /// Input indices that weren't covered by pre-signing or spends (diagnostic).
     /// Per BSV SDK model, all custom inputs should be signed via two-phase flow
     /// (createSignature + signAction spends) before this point.
+    /// ⚠️ Not a BRC-100 field — an extra, which the spec tolerates.
     #[serde(rename = "unsignedInputs", skip_serializing_if = "Option::is_none")]
     pub unsigned_inputs: Option<Vec<usize>>,
+    // ⛔ `sendWithResults` is deliberately NOT populated here, though BRC-100
+    // lists it. `SignActionOptions.send_with` is parsed and then never read by
+    // sign_action — the feature does not work — so emitting a result array for it
+    // would be inventing a value. Reported, not fixed:
+    // development-docs/0.4.0-beta.3/TICKET_signaction_response_not_brc100_shape.md §11.
+}
+
+impl SignActionResponse {
+    /// Build the response from the ONE Atomic BEEF hex string the signer produced.
+    ///
+    /// ⭐ This exists so `tx` cannot be set independently of `rawTx`. Both are
+    /// derived here from a single input, which makes "they drifted" and "someone
+    /// passed `tx: None`" unrepresentable rather than merely discouraged — and it
+    /// is what gives `sign_action_response_shape_tests` a real negative control:
+    /// the tests construct through this function, exactly as the handler does, so
+    /// breaking the conversion turns them red. Building the struct literally in a
+    /// test would assert only that serde renames fields, which passes with the
+    /// shipped defect fully present.
+    ///
+    /// A hex-decode failure yields `None` for `tx` rather than an error: by the
+    /// time this is called the transaction is signed and usually broadcast, so
+    /// turning a completed spend into a 500 would be worse than a degraded reply.
+    pub fn from_atomic_beef(
+        txid: String,
+        beef_hex: String,
+        unsigned_inputs: Option<Vec<usize>>,
+    ) -> Self {
+        let tx = match hex::decode(&beef_hex) {
+            Ok(b) if !b.is_empty() => Some(b),
+            Ok(_) => {
+                log::error!("   ❌ Atomic BEEF hex was empty, omitting `tx`");
+                None
+            }
+            Err(e) => {
+                log::error!("   ❌ Atomic BEEF hex did not decode, omitting `tx`: {}", e);
+                None
+            }
+        };
+        SignActionResponse { txid, tx, raw_tx: beef_hex, unsigned_inputs }
+    }
 }
 
 // /signAction - Sign transaction inputs
@@ -8538,11 +8602,14 @@ pub async fn sign_action(
         Some(unsigned_inputs)
     };
 
-    HttpResponse::Ok().json(SignActionResponse {
+    // ⛔ Construct through from_atomic_beef, never a struct literal: it derives
+    // BRC-100's `tx` and the deprecated `rawTx` from one hex string so they
+    // cannot diverge, and it is the seam the shape tests share with this handler.
+    HttpResponse::Ok().json(SignActionResponse::from_atomic_beef(
         txid,
-        raw_tx: beef_hex,
-        unsigned_inputs: unsigned_for_response,
-    })
+        beef_hex,
+        unsigned_for_response,
+    ))
 }
 
 // Request structure for /processAction
@@ -9438,6 +9505,92 @@ pub async fn address_to_script(
                 "error": format!("Invalid address: {}", e)
             }))
         }
+    }
+}
+
+#[cfg(test)]
+mod sign_action_response_shape_tests {
+    use super::*;
+
+    // 🚨 beta.3 — /signAction returned `rawTx` (hex string) where BRC-100 defines
+    // `tx` (AtomicBEEF = Byte[]). MEASURED live 2026-09-02 on beta.zanaadu.com:
+    // the name token was signed, BEEF was built (103 644 bytes) and the tx was
+    // broadcast, we answered 200 with 207 446 bytes — and the dApp said "the
+    // wallet returned no BEEF to submit", because @bsv/sdk's HTTPWalletJSON hands
+    // the parsed JSON straight to the caller and `result.tx` was undefined.
+    // The money was already spent. Ticket:
+    // development-docs/0.4.0-beta.3/TICKET_signaction_response_not_brc100_shape.md
+    //
+    // 🔴 NEGATIVE CONTROL: delete the `tx` field from SignActionResponse (or its
+    // `hex::decode` at the construction site) and `tx_is_present_as_a_byte_array`
+    // goes red on the FIRST assertion — the same undefined the dApp saw.
+    // ⛔ Asserting only that `rawTx` is a hex string is what the old tests
+    // effectively did, and it passes with the bug fully present.
+
+    // ⛔ Goes through the SAME constructor the handler uses. A struct literal here
+    // would assert only that serde renames fields — it passes with the defect.
+    fn sample() -> SignActionResponse {
+        SignActionResponse::from_atomic_beef(
+            "656f24882329e7da69813423965bafe3597ff7bd166c7b66e92f6ea7ee97f568".into(),
+            "0101beef02fe99b70e".to_string(),
+            None,
+        )
+    }
+
+    #[test]
+    fn tx_is_present_as_a_byte_array() {
+        let v = serde_json::to_value(sample()).unwrap();
+
+        // This is the exact read @bsv/sdk performs: result.tx
+        let tx = v.get("tx").unwrap_or_else(|| {
+            panic!("BRC-100 SignActionResult.tx is missing — this is the shipped defect")
+        });
+        assert!(
+            tx.is_array(),
+            "AtomicBEEF is Byte[]; a hex string is not a conforming `tx` (got {})",
+            tx
+        );
+        assert!(!tx.as_array().unwrap().is_empty(), "`tx` must not be empty");
+        // Every element must be a byte, not a char or a nested value.
+        for e in tx.as_array().unwrap() {
+            let n = e.as_u64().expect("AtomicBEEF elements must be numbers");
+            assert!(n <= 255, "AtomicBEEF elements must be bytes, got {}", n);
+        }
+    }
+
+    #[test]
+    fn tx_and_raw_tx_cannot_drift() {
+        let v = serde_json::to_value(sample()).unwrap();
+        let bytes: Vec<u8> = v["tx"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e.as_u64().unwrap() as u8)
+            .collect();
+        assert_eq!(
+            hex::encode(&bytes),
+            v["rawTx"].as_str().unwrap(),
+            "`tx` and the deprecated `rawTx` must be the same BEEF — they are \
+             decoded from one hex string precisely so they cannot diverge"
+        );
+    }
+
+    #[test]
+    fn deprecated_raw_tx_is_still_emitted() {
+        // Removing `rawTx` in the same change would break create_action_internal's
+        // two `json_resp["rawTx"]` reads and any existing integrator. It is
+        // retired separately, after those are migrated.
+        let v = serde_json::to_value(sample()).unwrap();
+        assert!(v.get("rawTx").is_some_and(|r| r.is_string()));
+        assert!(v.get("txid").is_some_and(|t| t.is_string()));
+    }
+
+    #[test]
+    fn unsigned_inputs_is_omitted_when_empty_not_null() {
+        // BRC-100 tolerates extra fields but a literal null for an absent
+        // diagnostic is noise the SDK would surface as a present-but-empty value.
+        let v = serde_json::to_value(sample()).unwrap();
+        assert!(v.get("unsignedInputs").is_none());
     }
 }
 

@@ -1,6 +1,7 @@
 # TICKET — `/signAction` returns `rawTx` (hex) instead of BRC-100's `tx` (AtomicBEEF bytes)
 
-**Status:** 🟢 **DIAGNOSED — root cause confirmed against the SDK type, not inferred**
+**Status:** 🟢 **FIXED 2026-09-02** — implemented, unit-tested with an observed negative control, preflight `-Full` + `-NegativeControl` PASS. ⬜ **Awaiting the owner's live retest on beta.zanaadu.com.**
+**Was:** DIAGNOSED — root cause confirmed against the SDK type, not inferred
 **Opened:** 2026-09-02
 **Origin:** live failure on **`beta.zanaadu.com`** name-token mint, driven by the owner, watched in the dev wallet log
 **Severity:** 🔴 **Breaks every conforming BRC-100 client that calls `signAction` directly.** Money is spent and the transaction *is* broadcast — the caller just cannot see the result, so downstream indexing never happens
@@ -122,9 +123,12 @@ internal reader at `handlers.rs:6242`/`:6206` and any integrator already coded a
 1. Add `tx: Option<Vec<u8>>` (Atomic BEEF bytes) to `SignActionResponse`, populated from the same
    `beef_hex` already built.
 2. Keep `rawTx` for now; mark it deprecated in a comment with the removal release.
-3. Add `sendWithResults` — `signAction` already knows the broadcast outcome (`handlers.rs:8490`), so
-   the data exists and is simply not surfaced.
-4. Update `handlers.rs:6242` / `:6206` to prefer `tx` and fall back to `rawTx`.
+3. ~~Add `sendWithResults`.~~ ⛔ **DROPPED on measurement — see §11.** `SignActionOptions.send_with`
+   is parsed and then **never read** by `sign_action`, so emitting a results array would be reporting
+   on a feature that does not run. Reported instead.
+4. ~~Update `handlers.rs:6242` / `:6206` to prefer `tx`.~~ **Not needed while `rawTx` stays** — those
+   readers keep working unchanged, and touching them would add risk for no present benefit. The
+   coupling is recorded in the deprecation comment on the field so whoever removes `rawTx` finds it.
 5. Separately (**not** the same commit): `validate_and_normalize_basket_name` should refuse
    **unknown** `p <scheme>` names, not all of them — `p 1sat` is spec-defined (BRC-174). And
    `list_outputs` should validate at all: it calls `find_or_insert` with no check, so a *read* on any
@@ -151,3 +155,52 @@ partner today**, and the failure spends money before failing.
   waiting.
 - §8.5 (the basket-namespace half) is genuinely **beta.4**, alongside the 1Sat Ordinals sprint, since
   `p 1sat` is that sprint's basket.
+
+
+---
+
+## 11. 📖 Found while fixing — reported, NOT fixed (working rule #3)
+
+**`signAction` accepts `sendWith` and silently ignores it.**
+
+📏 `SignActionOptions` declares `#[serde(rename = "sendWith")] pub send_with: Option<Vec<String>>`, and
+`grep send_with` across the whole of `sign_action` (handlers.rs:7391–8546) returns **nothing**. The
+option is parsed and dropped.
+
+⚠️ Consequence: a dApp that batches with `signAction({ options: { sendWith: [...] } })` gets a 200 and
+believes its other transactions were broadcast. They were not. That is the same *shape* as the bug
+this ticket fixes — a silent success — and arguably worse, because here the caller is told nothing
+at all rather than merely being handed the wrong field name.
+
+⛔ Deliberately not fixed here: it is a behaviour change to the broadcast path, not a response-shape
+correction, and bundling it would make this fix un-revertable on its own. It is also why
+`sendWithResults` was dropped from §8 — populating a result array for an input we discard would be
+inventing a value, which is exactly the kind of plausible-looking output this sprint keeps catching.
+
+**Suggested home:** beta.4, alongside the Ordinals/OpNS work that will actually batch transactions.
+
+---
+
+## 12. Implementation record — 2026-09-02
+
+| | |
+|---|---|
+| **Change** | `SignActionResponse` gains `tx: Option<Vec<u8>>` (BRC-100 AtomicBEEF bytes). `rawTx` kept and marked deprecated with its two internal readers named |
+| **Seam** | ⭐ `SignActionResponse::from_atomic_beef(txid, beef_hex, unsigned)` derives **both** fields from one hex string, so "they drifted" and "someone passed `tx: None`" are unrepresentable rather than merely discouraged |
+| **Tests** | 4 in `handlers.rs :: sign_action_response_shape_tests` |
+| 🔴 **Negative control** | **Observed.** Forced `tx = None` inside the constructor → `tx_is_present_as_a_byte_array` and `tx_and_raw_tx_cannot_drift` went **red** with `BRC-100 SignActionResult.tx is missing — this is the shipped defect`. Reverted; green returned; zero residue |
+| **Gates** | `preflight.ps1 -Full` **PASS** (8 gates + 7 T1). `-NegativeControl` **PASS** |
+
+### ⭐ The test caught a hole in itself first
+
+The first version of `sample()` built `SignActionResponse` as a **struct literal**. That version passed
+— and would have kept passing if the handler set `tx: None`, because it never touched the handler's
+code path. It asserted only that serde renames fields.
+
+That is the same false-green shape as the four farbling harnesses in `CLAUDE.md`, in miniature. The
+constructor exists so the test and the handler share one seam; the negative control above is only
+meaningful *because* of it.
+
+⬜ **Still owed: the live retest.** A unit test proves the JSON shape. It does **not** prove that
+`@bsv/sdk` accepts it end to end, which is the actual claim. That needs a real mint on
+beta.zanaadu.com.
