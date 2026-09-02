@@ -1410,3 +1410,23 @@ test, because one wallet DB is shared by every browser profile:
 
     python development-docs/0.4.0-beta.3/phase-0.9-chromium-prompt-branding/reset_test_state.py show
     ... clear-loopback ALL / clear-wallet-domain <domain> / verify      # verify exits non-zero on mismatch
+
+---
+
+# 📋 ROUND 2026-09-02 (Windows) — Phase 6 (Chrome import / WS4) ⛔ CUT
+
+**One-line:** Phase 6 was **cut from beta.3** (owner decision) and deferred whole to **beta.5**.
+**No code was written on either platform.** Nothing to port.
+
+**Why (Windows measurement):** Chrome 152 on this box has App-Bound Encryption active
+(`app_bound_encrypted_key` present in `Local State`), and `Network/Cookies` cannot even be copied while
+Chrome runs (`ERROR_SHARING_VIOLATION`). Cookies/passwords are blocked by Chrome's own design; the
+safe part (bookmarks/history) is already written but disconnected from the live `SettingsPage`.
+
+**🍎 Mac's half, if/when beta.5 picks this up:** Chrome on macOS uses **Keychain**, not DPAPI/ABE —
+⛔ **assume no symmetry with the Windows analysis.** The Windows measurements above do **not** transfer.
+Mac researches its own encryption/lock story from scratch. Relay findings; do not claim parity.
+
+**Deferred-work ticket:** `development-docs/0.4.0-beta.5/TICKET_chrome_import_bookmarks_history_passwords.md`
+(three slices: reconnect bookmarks/history import · bookmarks-HTML file import · password-CSV import,
+the last gated on branding the stock save-password bubble + safe plaintext-CSV handling).

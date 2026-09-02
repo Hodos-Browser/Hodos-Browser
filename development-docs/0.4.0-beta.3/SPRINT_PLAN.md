@@ -259,7 +259,7 @@ Standalone, research-heavy, security-sensitive. Scope against §2's wall **befor
 **WS1b(a) → WS5(a) → WS6 → WS1 → WS1b(b) → WS2 → WS2(cont.) → WS3 → WS5(b) → WS4.**
 *(phases 0 → 0.5 → 0.6 → 1 → 2 → 3 → **3.5** → 4 → 5 → 6 → **7 → 8 → 9 → 10**;
 3.5 added 2026-08-30; 7–10 are the ticket consolidation added 2026-08-31 — see §4.1)*
-**✅ 0 · 0.5 · 0.6 · 1 · 2 · 3 · 3.5 complete** — 3.5 fixed at the **cause** (overlay ownership follows the requesting window), owner-confirmed 2026-09-01. ⬜ Regression set still owed at the 3.5 → 4 boundary. **⬜ 4 · 5 · 6 · 7 · 8 · 9 · 10.**
+**✅ 0 · 0.5 · 0.6 · 1 · 2 · 3 · 3.5 · 4 · 5 complete.** **⛔ 6 CUT** (Chrome import — deferred to beta.5; see below). **⬜ 7 · 8 · 9 · 10.**
 
 ⭐ **Changed 2026-08-18 (second revision), after `TICKET_loopback_host_form_wallet_routing.md` was
 filed and verified.** WS1b splits and its first half stays at the front; WS5 splits and its first
@@ -276,7 +276,7 @@ half slots in behind it.
 | **3.5 — WS2 (cont.)** | Layout is window-scoped | ⭐ **ADDED 2026-08-30 by owner decision.** The densest cluster of #5's defect — `ShellWindowProc`'s layout arms + 12 overlay `ScalePx` sites — where one coherent change and one test story cover many sites. ⛔ Explicitly **not** `SaveSession`/`ShutdownApplication`, which are correct as global. The scattered remainder goes to beta.4, held by the `P3-G11` ratchet. See `phase-3.5-layout-window-scoping/`. |
 | **4 — WS3** | Tab context menu & peripheral parity | ⛔ **CORRECTED 2026-09-01 at kickoff — two claims in §WS3 below were measured false.** There is **no tab context menu at all** (build, not extend), and `MENU_ID_USER_FIRST` is the **wrong machinery** — that is CEF's *page* menu; a tab right-click lands in the header browser, so this is **overlay #15**. 👤 Scope cut to **six items** that reuse existing IPC; pin/mute deferred (no `Tab` fields, and pin persistence would touch the defective `session.json` path). Mic/camera = **verify** on Windows, relay macOS. See `phase-4-tab-peripheral-parity/`. |
 | **5 — WS5(b)** | Loopback compatibility: W0 + W1 + W2' + W3 | Fixes the user-visible interop bug **and** closes the cross-wallet routing hole (MetaNet Client answering for us — verified live). Placed after the reported-defect work because it rewrites a predicate every request passes through. |
-| **6 — WS4** | Chrome import | Last: most able to balloon, and its value is capped by a constraint we do not control. **First candidate to cut.** |
+| ~~**6 — WS4**~~ | ~~Chrome import~~ | ⛔ **CUT 2026-09-02** → deferred to beta.5. Value capped by Chrome's ABE + file lock (measured). See §6 decision 3. |
 | **7 — consent surface** | The permission/consent UX tickets | ⭐ **ADDED 2026-08-31** — see §4.1 |
 | **8 — money-path correctness** | Asset-safety tickets | ⭐ ADDED 2026-08-31 — see §4.1 |
 | **9 — release readiness** | Promotion blockers + DevOps hygiene | ⭐ ADDED 2026-08-31 — see §4.1 |
@@ -392,6 +392,14 @@ the fix lands once. Only WS5(b) has a macOS-shaped unknown.
 2. **Chrome-import UX** — auto-detect the local profile, folder-picker, or offer at first-run? (And
    whether importing live sessions into a wallet browser is acceptable at all.)
 3. **Cut line** — with WS5 added, does WS4 slip out of beta.3 entirely?
+   ✅ **RESOLVED 2026-09-02 — CUT.** Kickoff measured the wall on this machine (Chrome 152; ABE key
+   present in `Local State`; `Network/Cookies` unreadable while Chrome runs — `ERROR_SHARING_VIOLATION`).
+   The safe, valuable part (bookmarks/history) is **already built but disconnected** from the live
+   `SettingsPage`; passwords/cookies are blocked by ABE + file lock; the lawful password-CSV slice
+   still wants unbranded-bubble + naming + secure-file work. Deferred whole to **beta.5**:
+   `development-docs/0.4.0-beta.5/TICKET_chrome_import_bookmarks_history_passwords.md`. Decisions 1
+   (scope) and 2 (UX) are moot for beta.3; **session import into a wallet browser = settled NO.**
+   Full record: `phase-6-chrome-import/PHASE_CONTRACT.md`.
 4. Big Sur users: nothing, a pinned final 0.3.x, or an in-app message?
 5. ⭐ **NEW — disclosure posture.** Phase 0 and Phase 0.5 are both *shipping* defects with a security
    character: the recovery phrase written to disk, and a fund-moving endpoint with no approval gate.
