@@ -256,3 +256,28 @@ C++ log or the page. Revert verified two ways: `grep` for the marker returns **0
    and `-File` is how a script or an agent would most naturally call it. ⛔ Not fixed here: it is
    another change's file, and per working rule #6 the instrument does not move inside the change it
    measures.
+
+## M13 — 🟢 `P5-A7`, second half: the App Lab's **discovery probe** still works post-fix
+
+⭐ **Caught by checking my own work.** The post-fix run (M8/M9) verified `/getNetwork` and
+`/getVersion` but **not `/health`** — and `/health` is the one arm of `isWalletEndpoint` this phase
+actually rewrote (`IsWalletHostPort` + whole-url `find` → `IsOurWalletOrigin` + normalized path). It
+is also the App Lab's *entire* detection probe: no `/health`, no "Connected", regardless of whether
+every other method works. Re-tested rather than inferred from the unit test:
+
+| Probe | Client | 🎯 Rust log |
+|---|---|---|
+| `http://127.0.0.1:3321/health` | `status=200` (our envelope) | `08:47:08` `requesting_domain=example.com path=/health` |
+| `https://127.0.0.1:2121/health` | `status=200` (our envelope) | `08:47:53` `requesting_domain=example.com path=/health` |
+
+⇒ The two-step chain still holds end to end: `RepointLoopbackToWallet` moves the compat port to ours,
+*then* `IsOurWalletOrigin` recognises it. Unit-covered by
+`OurWalletOrigin.AfterRepointTheCompatPortQualifies`; now also observed live.
+
+## M14 — 📖 Stale rationale struck in place (HARNESS §8)
+
+`isWalletEndpoint`'s comment read *"The `/health` arm above deliberately keeps the full url — it is
+scoped by IsWalletHostPort, which is a host:port test, not a path test."* 📏 **Both halves became
+false** with this change, and the second half was never true: `IsWalletHostPort` was a whole-URL
+`find()` — a host:port test in intent only, which is exactly why the scoping it claimed did not hold.
+Struck rather than deleted, per §8.

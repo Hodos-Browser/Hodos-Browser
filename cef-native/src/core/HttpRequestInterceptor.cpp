@@ -5270,8 +5270,16 @@ bool HttpRequestInterceptor::isWalletEndpoint(const std::string& url) {
     //           included, so `https://site/?r=/createAction` was intercepted and
     //           forwarded to the wallet. Cutting the query retires that.
     //
-    // The `/health` arm above deliberately keeps the full url — it is scoped by
-    // IsWalletHostPort, which is a host:port test, not a path test.
+    // ~~The `/health` arm above deliberately keeps the full url — it is scoped by
+    // IsWalletHostPort, which is a host:port test, not a path test.~~
+    // ⛔ STRUCK, beta.3 Phase 5. Both halves of that sentence stopped being true:
+    // the arm no longer reads the full url (it normalizes through
+    // RequestPathForMatching, exactly like every arm below), and it is scoped by
+    // hodos::IsOurWalletOrigin, which parses the authority. IsWalletHostPort was
+    // a whole-URL find() — a host:port test in intent only — which is why the
+    // scoping it claimed did not hold. Left struck rather than deleted per
+    // HARNESS.md §8: a plausible-but-wrong rationale is how this file talked
+    // itself into the defect in the first place.
     const std::string path = hodos::RequestPathForMatching(url);
 
     // Check if the request path is a wallet endpoint
