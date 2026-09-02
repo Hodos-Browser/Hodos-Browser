@@ -209,3 +209,46 @@ blocks the next one.
   per window, and yours does too.
 - 🎫 `TICKET_tab_pin_and_mute_need_model_changes.md` **retitled and rescoped** — mute-tab is done, pin
   and mute-**site** remain. If you were holding it as one item, it is now two.
+
+---
+
+## 🔴 M11 — NEW, and it is **yours too**: a dead wallet backend is silent on both platforms
+
+Filed 2026-09-01 as `0.4.0-beta.3/TICKET_wallet_backend_death_is_silent_and_unrecovered.md`.
+👤 Owner put it in **beta.3**, not beta.4.
+
+**What happens:** the browser spawns `hodos-wallet` **once at startup and never looks again**. If it
+dies, nothing notices, nothing restarts it, and every dApp is told **"no wallet"** — which is
+indistinguishable from *"your wallet is gone"* on an app that holds real money. 🚨 The hazard is a
+user deciding to **restore from their recovery phrase** to fix what is actually "restart the app".
+
+⛔ **This is not a Windows-only ticket, so please do not skip it.** 📏 I read your arm:
+`cef_browser_shell_mac.mm` has the same shape — `SpawnWalletServer()`, a startup health-check loop,
+then nothing. `g_walletServerRunning` is only ever set `true` (2 sites) and read (3 sites); it is
+**never** set back to `false`.
+
+⭐ **One place macOS is genuinely better than us, and it should survive the fix:** on health-check
+timeout you log *"health check timed out"* and leave the flag **false**. Windows forces it `true`
+with the comment *"Process was launched, just slow to start"* — a latch that lies. When supervision
+is built, keep your honest-flag behaviour and make Windows match it, not the other way round.
+
+⚠️ Same pattern on `g_adblockServerRunning`, both platforms. Lower stakes (ads stop being blocked),
+but worth covering once rather than twice.
+
+⛔ **Do not fix this by waking `WalletService::monitorDaemon()`.** 📏 It has **zero call sites**
+outside `WalletService.cpp` on either platform, and on exit it only logs and `break`s — **no
+restart**. `WalletService_mac.cpp` has its own `startDaemon`/`isDaemonRunning`, equally uncalled.
+Adopting or deleting that API is a separate decision; §8 of the ticket keeps it out of scope.
+
+### 🗒️ And a dev-hygiene rule that now applies to your box too
+
+🚨 The ticket was found because I killed the owner's **production** wallet with a name-matched
+`Stop-Process`. **All three processes share their image name between the dev and installed builds**
+(`HodosBrowser` / `hodos-wallet` / `hodos-adblock`), so a name-matched kill takes down the user's
+real browser and wallet.
+
+⇒ `CLAUDE.md`'s Dev Runbook now carries the exe-path rule for **all three**, and
+`scripts/stop-dev.ps1` implements it (Windows). ⭐ **If you kill dev processes by name on macOS
+(`pkill hodos-wallet`, `killall`), you have the identical hazard** — the owner runs an installed
+Hodos on his Mac too. A `scripts/stop-dev.sh` doing the same path-matched job would be a genuinely
+useful thing for you to add; ⛔ I am not writing it blind for a platform I cannot test on.

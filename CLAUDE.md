@@ -428,7 +428,8 @@ Get-CimInstance Win32_Process -Filter "Name='hodos-wallet.exe'" | Stop-Process -
 
 # ✅ RIGHT — dev only
 Get-CimInstance Win32_Process -Filter "Name='hodos-wallet.exe'" |
-  Where-Object { $_.ExecutablePath -like '*rust-wallet	argetelease*' } | Stop-Process -Force
+  Where-Object { $_.ExecutablePath -like '*rust-wallet	arget
+elease*' } | Stop-Process -Force
 ```
 
 > 🚨 **This happened, 2026-09-01.** A name-matched `Stop-Process` on `hodos-wallet.exe` — run to free
@@ -438,7 +439,7 @@ Get-CimInstance Win32_Process -Filter "Name='hodos-wallet.exe'" |
 > existed** in the beta.3 session prompt, but only for `HodosBrowser.exe`; it was honoured there and
 > not carried across. That is why it now lives here, covering all three.
 > ⭐ The *product* half — the browser never noticing its backend died — is
-> `development-docs/0.4.0-beta.4/tickets/TICKET_wallet_backend_death_is_silent_and_unrecovered.md`.
+> `development-docs/0.4.0-beta.3/TICKET_wallet_backend_death_is_silent_and_unrecovered.md`.
 
 ⚠️ **You need to stop the dev processes before building:** the linker fails `LNK1104` while the dev
 browser runs, and `cargo build` fails *"Access is denied"* while the dev wallet runs. That pressure is

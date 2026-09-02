@@ -1,9 +1,10 @@
 # 🎫 If the wallet backend dies, the browser never notices, never restarts it, and tells the user "no wallet"
 
 **Found:** 2026-09-01, while diagnosing a dApp payment failure on the owner's installed build
-**Status:** ⬜ UNASSIGNED · **Sprint:** unassigned (beta.4 candidate; ⚠️ **beta.3 Phase 8 if the owner
-wants it sooner** — it is money-path *resilience*, not money-path correctness)
-**Filed by:** Phase 4 close-out
+**Status:** ⬜ UNASSIGNED · **Sprint:** 👤 **beta.3** (owner call 2026-09-01) — phase TBD; **Phase 8
+(money-path correctness) is the natural home**, since that is where the money-path work already sits
+and this is its availability half
+**Filed by:** Phase 4 close-out · **Platforms:** 📏 **both** (see §2.1)
 
 > ⚠️ **Method note.** The mechanism below is **code reading**, stated per claim. The *symptom* was
 > observed live on the owner's installed build (Aug 17) for roughly **four hours**. ⛔ **Honest
@@ -33,6 +34,24 @@ us"* → *"strange, we should not have touched anything"* → *"wait, my install
 | **F3** | The one piece of code that **does** detect death is unused, and would not fix it anyway | `WalletService::monitorDaemon()` polls `GetExitCodeProcess` every 5 s — but on exit it only logs a WARNING, sets `daemonRunning_ = false`, and `break`s. **No restart.** And 📏 `startDaemon()` / `isDaemonRunning()` have **zero call sites outside `WalletService.cpp` itself** — the whole daemon-management API is dead code; production uses the `cef_browser_shell.cpp` path in F1 |
 
 ⇒ there is no supervision on the live path, and the dormant supervision would not have restarted it.
+
+## 2.1 📏 It is CROSS-PLATFORM, and macOS is very slightly better
+
+⛔ Do not scope this Windows-only. `cef_browser_shell_mac.mm` has the same shape: `SpawnWalletServer()`
+once, a startup health-check loop, and then **nothing re-checks**. 📏 `g_walletServerRunning` there is
+only ever *set* `true` (2 sites) and *read* (3 sites) — never set back to `false`.
+
+| | Windows | macOS |
+|---|---|---|
+| Spawn once, never watched | ✅ same defect | ✅ same defect |
+| Flag forced `true` when the health check **fails** | 🚨 **yes** — `WaitForWalletHealth()`: *"Process was launched, just slow to start"* | ⭐ **no** — logs *"health check timed out"* and leaves it `false` |
+
+⇒ the core defect is shared; **F2 (the dishonest latch) is Windows-only**. Fix the supervision once,
+cross-platform; fix F2 in the Windows arm.
+
+⚠️ **The adblock engine has the identical pattern** (`g_adblockServerRunning`, both platforms). Its
+failure is far less alarming — ads stop being blocked — but whatever supervision is built should
+cover both backends rather than being written twice.
 
 ## 3. Why the message is the worst part
 
@@ -136,6 +155,7 @@ here would smuggle a dead-code cleanup into a resilience fix.
 
 - `0.4.0-beta.3/phase-2-logging-syncio/` — wallet **hang** handling; this is wallet **absence**.
 - `CLAUDE.md` → Dev Runbook — where the exe-path rule in §6 belongs.
+- `MAC_RELAY_P35_P4_ROUND.md` §M11 — relayed to the macOS side, with §2.1's split.
 - 📌 Incidental, from the same session: on **current** code the dApp that prompted this
   (`chaintap.utxoengineer.com`) works end to end — domain-approval prompt → auto-approve →
   `POST /createAction 200`, 4 cents, access token granted. ⇒ **no dApp-compatibility ticket is owed**;
