@@ -63,6 +63,8 @@ PROBE = r"""
     quietModeCallout: body.indexOf('Quiet mode is on') >= 0,
     protectedBasketMark: body.indexOf('never auto-granted') >= 0,
     allowWithoutLimits: btns.indexOf('Allow without limits') >= 0,
+    orderToggleFirst: body.indexOf('across the Metanet') < body.indexOf('This site is asking permission to'),
+    orderCalloutBeforeList: body.indexOf('Quiet mode is on') < body.indexOf('This site is asking permission to'),
     counterpartyFootnoteGone: body.indexOf('Who these are with') < 0,
     infoIcons: icons
   });
@@ -82,5 +84,11 @@ if not d["identityAcrossMetanet"]:     fails.append("identity label missing 'acr
 if not d["quietModeFullLabel"]:        fails.append("quiet-mode label missing the qualifier")
 if not d["counterpartyFootnoteGone"]:  fails.append("counterparty footnote still rendered")
 if d["checkboxes"] < 5:                fails.append("per-item ticks not on the first screen")
+# Owner layout, 2026-09-04: quiet mode GOVERNS the list (its ticks are inert while
+# quiet mode is on), so the toggle and its consequence must precede what they govern.
+if not d["orderToggleFirst"]:          fails.append("toggles not above the permission list")
+if not d["orderCalloutBeforeList"]:    fails.append("quiet-mode callout not above the list it describes")
+# Folded behind the limits disclosure (owner, 2026-09-04): absent until expanded.
+if d["allowWithoutLimits"]:            fails.append("'Allow without limits' visible while limits are collapsed")
 print("\nRESULT:", "FAIL - " + "; ".join(fails) if fails else "PASS")
 sys.exit(1 if fails else 0)

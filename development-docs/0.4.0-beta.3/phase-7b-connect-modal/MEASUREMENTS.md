@@ -317,3 +317,43 @@ visible, `maxHeight 944px`, `overflowY auto`. 7a's cap is the backstop and is no
 **"Allow without limits"** (raises caps to $1000/tx, $10000/session) lived behind the Customize
 click. With one view it is in front of every user. Kept — silently deleting a spending control is
 not mine to do — but promoting one is not either. Options in `PHASE_CONTRACT.md` §6.
+
+### N14 — layout order + folding "Allow without limits" (owner, 2026-09-04)
+
+**The reason for the order, stated so it survives a future refactor:** quiet mode **governs** the
+list beneath it. While it is on — the default — every tick in that list is inert, because
+`decide_scoped_grant` returns `Silent` on `bundled_scope_grant` before it ever consults the V18 rows
+those boxes write. The previous order put the greyed-out list **above** the control that greyed it,
+so the user met the effect before the cause.
+
+New order: **identity + quiet-mode toggles → the quiet-mode callout → "This site is asking permission
+to:" → the itemised list → limits → Decline / Connect.**
+
+Measured on the rendered screen (character offsets in `body.innerText`):
+
+```
+identity  42   callout 204   "asking permission to" 363   list item 398   limits 538   Connect 595
+```
+
+⚠️ **The cost, recorded rather than glossed:** two pre-ticked broad grants now sit above the
+itemisation, so a fast user can reach Connect having read only those. That was already true of a
+user who skimmed the list; the callout sitting directly under quiet mode is the mitigation. It is a
+trade, not a free win.
+
+**"Allow without limits" is folded into the limits disclosure**, resolving the decision `P7b` flagged.
+Collapsed: absent from the DOM. Expanded: present at offset 852, inside the limits section (538) and
+above Connect (1040). The capability is exactly as reachable as before the merge — one click — without
+putting the widest spending control on the screen in front of a user who never asked about limits.
+
+`merged_view_probe.py` now asserts both: `orderToggleFirst`, `orderCalloutBeforeList`, and that
+`Allow without limits` is **absent** while limits are collapsed. All PASS.
+
+### N15 — ⚠️ a preflight FAIL that was not a failure
+
+`preflight -Full` reported `T1d ... npm run build exited 143`. **143 is SIGTERM** — the build was
+killed, not broken. The dev browser, dev wallet and vite were all running and competing for CPU; the
+same build took 2m49s standalone. Stopping the dev stack and re-running gave a clean PASS.
+
+⛔ Worth knowing before someone "fixes" a build that is not broken: read the exit code. 143/137 mean
+something killed it. This is the mirror image of the session's other lesson — a green that means
+nothing, and here a red that means nothing.

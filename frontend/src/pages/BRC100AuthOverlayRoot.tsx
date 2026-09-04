@@ -2545,6 +2545,115 @@ const BRC100AuthOverlayRoot: React.FC = () => {
             </div>
           </div>
 
+            {/* ⭐ beta.3 Phase 7b — ORDER IS DELIBERATE (owner, 2026-09-04).
+                Quiet mode DOMINATES the list below it: while it is on, every tick
+                in that list is inert, because `decide_scoped_grant` returns Silent
+                on `bundled_scope_grant` before it ever consults the V18 rows those
+                boxes write. So the governing decision comes FIRST, its consequence
+                is stated immediately under it, and the thing it governs comes after.
+                ⛔ The previous order put the greyed-out list ABOVE the control that
+                greyed it — the user met the effect before the cause. */}
+
+          {/* Identity-key bundle checkbox — same pattern as domain_approval Step 1 */}
+          <label style={{
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: '8px',
+            fontSize: '13px',
+            color: COLORS.textDark,
+            cursor: 'pointer',
+            marginBottom: '10px',
+            userSelect: 'none',
+          }}>
+            <input
+              type="checkbox"
+              checked={manifestAllowIdentityKey}
+              onChange={(e) => setManifestAllowIdentityKey(e.target.checked)}
+              style={{
+                accentColor: COLORS.primary, width: '16px', height: '16px',
+                cursor: 'pointer', flexShrink: 0, marginTop: '2px',
+              }}
+            />
+            {/* ⛔ Wording is SHARED with the Customize view — keep them
+                identical. Owner-reported 2026-08-23, the same drift as the
+                quiet-mode label: one control read two different ways
+                depending on which screen you were on, and the shorter one
+                dropped "across the Metanet" — the fact that actually matters,
+                since this key is the SAME on every BRC-100 site and is
+                therefore what lets sites correlate you between them.
+                Single <span> so the flex container doesn't shatter it. */}
+            <span style={{ lineHeight: 1.45 }}>
+              <strong>Identity:</strong> Allow this site to identify you across the Metanet
+              <InfoIcon />
+            </span>
+          </label>
+
+          {/* Phase 2.6-D Fix #4 — bundled scope grant checkbox. Default ON. */}
+          {/* ⚠️ The text MUST stay inside a single <span>. This <label> is a
+              flex container with `gap: 8px`, so every child element and text
+              node becomes its own FLEX ITEM and wraps independently — with
+              the gap inserted between each. When the wording gained <strong>
+              and <em>, the line shattered into fragments ("mode" under
+              "Quiet", "any" on its own). `flexShrink: 0` on the box is the
+              other half: without it the checkbox is compressed to a
+              different size than its neighbour once the row overflows.
+              Both reported by the owner on 2026-08-23. */}
+          <label style={{
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: '8px',
+            fontSize: '13px',
+            color: COLORS.textDark,
+            cursor: 'pointer',
+            marginBottom: '16px',
+            userSelect: 'none',
+          }}>
+            <input
+              type="checkbox"
+              checked={manifestAllowBundledScope}
+              onChange={(e) => setManifestAllowBundledScope(e.target.checked)}
+              style={{
+                accentColor: COLORS.primary, width: '16px', height: '16px',
+                cursor: 'pointer', flexShrink: 0, marginTop: '2px',
+              }}
+            />
+            <span style={{ lineHeight: 1.45 }}>
+            {/* ⛔ Owner-reported 2026-08-23: this used to read "Allow this
+                site to perform wallet operations without asking each time",
+                which omits the single most important fact about the control
+                — that it also covers protocols and baskets the site NEVER
+                DECLARED. The Customize view already said so; the summary,
+                which is the screen most users actually read, did not. One
+                control must not carry two meanings. Wording is now shared
+                with Customize; keep them identical. */}
+            <strong>Quiet mode:</strong> let this site use <em>any</em> protocol or
+            basket without asking — including ones it did not list above
+            <InfoIcon tooltip="When ticked, this site can use ANY protocol or basket without prompting - including ones it did not declare in its manifest. Untick it to approve only the specific items listed above. Protected baskets (change outputs, backup tokens) are never included. Sensitive operations - large payments, identity disclosure, sensitive certificate fields - always prompt regardless. Revoke any time from Manage Site Permissions." />
+            </span>
+          </label>
+
+          {/* 🚨 Quiet mode makes the ticks above INERT — say so beside them.
+              `matrix_c.rs :: decide_scoped_grant` returns Silent on
+              `bundled_scope_grant` BEFORE it consults `scoped_grant_exists`, so
+              while quiet mode is on the V18 rows these boxes write are never
+              read: every ProtocolUse and BasketAccess from this domain goes
+              silent, declared or not. (Protected baskets are still excluded.)
+              ⛔ Disabling the boxes is deliberate — it is the only state in which
+              the two controls cannot contradict each other, so there is no
+              hidden cross-toggling. Narrowing the flag itself is an ENGINE
+              change: beta.3 Phase 7c. */}
+          {manifestAllowBundledScope && (
+            <div style={{
+              fontSize: '12px', color: COLORS.textDark, marginBottom: '16px',
+              lineHeight: 1.5, background: 'rgba(166, 124, 0, 0.10)',
+              border: `1px solid ${COLORS.gold}`, borderRadius: '8px', padding: '10px 12px',
+            }}>
+              <strong>Quiet mode is on</strong>, so this site can use <em>any</em> protocol or
+              basket without asking — not just the ones listed above. Untick{' '}
+              <strong>Quiet mode</strong> below to choose individually.
+            </div>
+          )}
+
           <div style={{ fontSize: '14px', color: COLORS.textDark, marginBottom: '12px' }}>
             This site is asking permission to:
           </div>
@@ -2702,105 +2811,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
             )}
           </div>
 
-          {/* 🚨 Quiet mode makes the ticks above INERT — say so beside them.
-              `matrix_c.rs :: decide_scoped_grant` returns Silent on
-              `bundled_scope_grant` BEFORE it consults `scoped_grant_exists`, so
-              while quiet mode is on the V18 rows these boxes write are never
-              read: every ProtocolUse and BasketAccess from this domain goes
-              silent, declared or not. (Protected baskets are still excluded.)
-              ⛔ Disabling the boxes is deliberate — it is the only state in which
-              the two controls cannot contradict each other, so there is no
-              hidden cross-toggling. Narrowing the flag itself is an ENGINE
-              change: beta.3 Phase 7c. */}
-          {manifestAllowBundledScope && (
-            <div style={{
-              fontSize: '12px', color: COLORS.textDark, marginBottom: '16px',
-              lineHeight: 1.5, background: 'rgba(166, 124, 0, 0.10)',
-              border: `1px solid ${COLORS.gold}`, borderRadius: '8px', padding: '10px 12px',
-            }}>
-              <strong>Quiet mode is on</strong>, so this site can use <em>any</em> protocol or
-              basket without asking — not just the ones listed above. Untick{' '}
-              <strong>Quiet mode</strong> below to choose individually.
-            </div>
-          )}
 
-          {/* Identity-key bundle checkbox — same pattern as domain_approval Step 1 */}
-          <label style={{
-            display: 'flex',
-            alignItems: 'flex-start',
-            gap: '8px',
-            fontSize: '13px',
-            color: COLORS.textDark,
-            cursor: 'pointer',
-            marginBottom: '10px',
-            userSelect: 'none',
-          }}>
-            <input
-              type="checkbox"
-              checked={manifestAllowIdentityKey}
-              onChange={(e) => setManifestAllowIdentityKey(e.target.checked)}
-              style={{
-                accentColor: COLORS.primary, width: '16px', height: '16px',
-                cursor: 'pointer', flexShrink: 0, marginTop: '2px',
-              }}
-            />
-            {/* ⛔ Wording is SHARED with the Customize view — keep them
-                identical. Owner-reported 2026-08-23, the same drift as the
-                quiet-mode label: one control read two different ways
-                depending on which screen you were on, and the shorter one
-                dropped "across the Metanet" — the fact that actually matters,
-                since this key is the SAME on every BRC-100 site and is
-                therefore what lets sites correlate you between them.
-                Single <span> so the flex container doesn't shatter it. */}
-            <span style={{ lineHeight: 1.45 }}>
-              <strong>Identity:</strong> Allow this site to identify you across the Metanet
-              <InfoIcon />
-            </span>
-          </label>
-
-          {/* Phase 2.6-D Fix #4 — bundled scope grant checkbox. Default ON. */}
-          {/* ⚠️ The text MUST stay inside a single <span>. This <label> is a
-              flex container with `gap: 8px`, so every child element and text
-              node becomes its own FLEX ITEM and wraps independently — with
-              the gap inserted between each. When the wording gained <strong>
-              and <em>, the line shattered into fragments ("mode" under
-              "Quiet", "any" on its own). `flexShrink: 0` on the box is the
-              other half: without it the checkbox is compressed to a
-              different size than its neighbour once the row overflows.
-              Both reported by the owner on 2026-08-23. */}
-          <label style={{
-            display: 'flex',
-            alignItems: 'flex-start',
-            gap: '8px',
-            fontSize: '13px',
-            color: COLORS.textDark,
-            cursor: 'pointer',
-            marginBottom: '16px',
-            userSelect: 'none',
-          }}>
-            <input
-              type="checkbox"
-              checked={manifestAllowBundledScope}
-              onChange={(e) => setManifestAllowBundledScope(e.target.checked)}
-              style={{
-                accentColor: COLORS.primary, width: '16px', height: '16px',
-                cursor: 'pointer', flexShrink: 0, marginTop: '2px',
-              }}
-            />
-            <span style={{ lineHeight: 1.45 }}>
-            {/* ⛔ Owner-reported 2026-08-23: this used to read "Allow this
-                site to perform wallet operations without asking each time",
-                which omits the single most important fact about the control
-                — that it also covers protocols and baskets the site NEVER
-                DECLARED. The Customize view already said so; the summary,
-                which is the screen most users actually read, did not. One
-                control must not carry two meanings. Wording is now shared
-                with Customize; keep them identical. */}
-            <strong>Quiet mode:</strong> let this site use <em>any</em> protocol or
-            basket without asking — including ones it did not list above
-            <InfoIcon tooltip="When ticked, this site can use ANY protocol or basket without prompting - including ones it did not declare in its manifest. Untick it to approve only the specific items listed above. Protected baskets (change outputs, backup tokens) are never included. Sensitive operations - large payments, identity disclosure, sensitive certificate fields - always prompt regardless. Revoke any time from Manage Site Permissions." />
-            </span>
-          </label>
 
           {/* 🚨 THE R-PROV BLOCK. This used to be one static line reading
               "Default payment limits: $X/tx" while X came from the SITE's
@@ -2876,39 +2887,36 @@ const BRC100AuthOverlayRoot: React.FC = () => {
             {manifestLimitsOpen && (
               <div style={{ padding: '0 12px 12px 12px' }}>
                 {renderLimitFields()}
+                {/* ⭐ "Allow without limits" lives INSIDE this disclosure —
+                    owner decision, 2026-09-04. It raises caps to $1000/tx and
+                    $10000/session, and it used to sit behind the Customize click,
+                    so most users never met it. Deleting Customize would have
+                    promoted the widest spending control on the screen to the
+                    front of every connect; folding it in here keeps the
+                    capability exactly as reachable as it was (one click) without
+                    putting it in front of a user who never asked about limits.
+                    ⛔ It belongs with the limits it changes, not beside Connect. */}
+                <div style={{
+                  marginTop: '12px',
+                  paddingTop: '12px',
+                  borderTop: `1px solid ${COLORS.borderLight}`,
+                  fontSize: '12px',
+                  color: COLORS.textMuted,
+                  lineHeight: 1.5,
+                }}>
+                  <strong style={{ color: COLORS.textDark }}>Trust this site fully?</strong>
+                  <br />
+                  "Allow without limits" raises payment caps to $1000/tx and $10000/session.
+                  Sensitive baskets (default change outputs, backup tokens) stay protected
+                  either way.
+                  <div style={{ marginTop: '8px' }}>
+                    <HodosButton variant="secondary" size="small" onClick={() => handleManifestConnect(true)}>
+                      Allow without limits
+                    </HodosButton>
+                  </div>
+                </div>
               </div>
             )}
-          </div>
-
-          {/* "Allow without limits" — carried over from the deleted Customize
-              subview so the merge REMOVES NO CAPABILITY.
-              🙋 OWNER DECISION OWED: it used to sit behind the Customize click,
-              so most users never saw it; on a single view it is in front of
-              everyone. That is a widening of a money control's exposure, and it
-              is a product call, not mine. Options recorded in the phase
-              contract §6: keep as-is, fold behind the limits "Adjust"
-              disclosure, or drop. ⛔ Kept for now — silently deleting a spending
-              control is worse than showing it. */}
-          <div style={{
-            background: 'rgba(166, 124, 0, 0.08)',
-            border: `1px solid ${COLORS.gold}`,
-            borderRadius: '8px',
-            padding: '10px 12px',
-            marginBottom: '16px',
-            fontSize: '12px',
-            color: COLORS.textMuted,
-            lineHeight: 1.5,
-          }}>
-            <strong style={{ color: COLORS.textDark }}>Trust this site fully?</strong>
-            <br />
-            "Allow without limits" raises payment caps to $1000/tx and $10000/session.
-            Sensitive baskets (default change outputs, backup tokens) stay protected
-            either way.
-            <div style={{ marginTop: '8px' }}>
-              <HodosButton variant="secondary" size="small" onClick={() => handleManifestConnect(true)}>
-                Allow without limits
-              </HodosButton>
-            </div>
           </div>
 
           {/* Buttons: Decline / Connect. ⛔ There is no "Customize" button any
