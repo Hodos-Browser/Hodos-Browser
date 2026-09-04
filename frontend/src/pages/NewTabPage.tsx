@@ -63,6 +63,45 @@ function getDomain(siteUrl: string): string {
 
 // ── Component ──────────────────────────────────────────────────────
 
+/**
+ * A tile's icon: the real favicon when we hold one, otherwise a letter square.
+ *
+ * ⛔ NEVER render `<img src="">`. That is what shipped in the first cut of the
+ * favicon-store change and it is what the owner saw: an empty `src` does not
+ * reliably fire `error`, so the `onError` hide never ran and every tile showed a
+ * broken/blank image. The regression was invisible to the network test that
+ * change was verified with — it proved no request LEAKED, and proved nothing
+ * about whether an icon RENDERED.
+ *
+ * ⭐ The letter square is not a stopgap, it is the permanent fallback. Our store
+ * only learns an icon when the user actually VISITS a site, so a freshly created
+ * store legitimately has none for historical top sites, and any site can fail to
+ * provide one. ⛔ Do not "fix" a missing icon by fetching it from a remote favicon
+ * service — that is precisely the leak this whole change removed.
+ */
+const TileIcon: React.FC<{ src?: string; domain: string }> = ({ src, domain }) => {
+    const [failed, setFailed] = useState(false);
+    const box: React.CSSProperties = {
+        width: 28, height: 28, borderRadius: 4, marginBottom: 8, flexShrink: 0,
+    };
+    if (src && !failed) {
+        return (
+            <img src={src} alt="" style={{ ...box, objectFit: 'contain' }}
+                 onError={() => setFailed(true)} />
+        );
+    }
+    return (
+        <div style={{
+            ...box,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            background: tokens.borderSubtle, color: tokens.textSecondary,
+            fontSize: 14, fontWeight: 600, textTransform: 'uppercase',
+        }}>
+            {(domain || '?').charAt(0)}
+        </div>
+    );
+};
+
 const NewTabPage: React.FC = () => {
     const [searchQuery, setSearchQuery] = useState('');
     // Load cached tiles synchronously so the page renders fully on first paint.
@@ -317,19 +356,9 @@ const NewTabPage: React.FC = () => {
                                 (e.currentTarget as HTMLDivElement).style.boxShadow = 'none';
                             }}
                         >
-                            <img
-                                src={favicons[hostOf(site.url)] || site.faviconDataUrl || ''}
-                                alt=""
-                                style={{
-                                    width: 28,
-                                    height: 28,
-                                    borderRadius: 4,
-                                    marginBottom: 8,
-                                    objectFit: 'contain',
-                                }}
-                                onError={(e) => {
-                                    (e.target as HTMLImageElement).style.display = 'none';
-                                }}
+                            <TileIcon
+                                src={favicons[hostOf(site.url)] || site.faviconDataUrl}
+                                domain={getDomain(site.url)}
                             />
                             <span style={{
                                 color: tokens.textSecondary,

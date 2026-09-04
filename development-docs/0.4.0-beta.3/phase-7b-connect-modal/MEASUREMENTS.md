@@ -164,3 +164,78 @@ it had no basis for (see N3, and the vacuous `showNotification` runs).
 orphaned the only writer of the new-tab tile cache, while `getCachedTiles()` kept reading it. Left
 alone, the NTP would have painted permanently stale tiles. The unused-symbol error was the only
 thing that pointed at it.
+
+### N9 — 🚨 OWNER-REPORTED REGRESSION: every new-tab favicon was broken
+
+> *"All of the favicons on the new tab are broken/not displaying"* — owner, 2026-09-04
+
+**My bug, and my own test could not see it.** N6 proved no request LEAKED. It proved nothing about
+whether an icon RENDERED — the two are independent, and a page that renders nothing at all passes
+the leak test perfectly. This is the same shape as N3: an instrument that only checks the absence of
+a bad thing will happily bless the absence of the good thing too.
+
+Two causes, both mine:
+
+1. **`<img src="">`.** The tile fell back to `''` when the store had no icon. An empty `src` does not
+   reliably fire `error` in Chromium, so the existing `onError` hide never ran — every tile drew a
+   broken/blank image. Bookmarks and the omnibox already rendered a globe/history glyph instead of an
+   `<img>` in that case; the NTP had never needed a fallback because it always had a URL.
+2. **Cold start is normal, not a bug.** The store learns an icon only when the user VISITS a site, so
+   a freshly created store legitimately holds none for historical top sites. At the time of the
+   report it held **2 rows**; the NTP was showing 8 tiles.
+
+Fix: a `TileIcon` component — real favicon when we hold one, otherwise a **letter square**. The letter
+square is the permanent fallback, not a stopgap. ⛔ It must never be "fixed" by fetching from a remote
+favicon service; that is the leak this phase removed.
+
+Measured after, same page: `imgs: 1, imgsRendering: 1, imgsBrokenOrEmpty: 0, letterTiles: 7` — one
+real icon (github.com, the only site visited since the store existed) and seven letter tiles. Icons
+fill in as the user browses.
+
+## Row 3 — full favicon sweep across the app (owner request)
+
+> *"Can we double check all the favicons throughout the app because we use them in quite a few
+> spaces."* — owner, 2026-09-04
+
+Every `<img>` in `frontend/src` was enumerated, not just the four surfaces the ticket named.
+
+| Surface | Icon source | Third party? | Fallback when absent |
+|---|---|---|---|
+| Consent modals (`BRC100AuthOverlayRoot`) | `Tab::favicon_url` via C++ | **No** | domain-initial avatar ✅ |
+| New tab (`NewTabPage`) | our store (data URI) | **No** | letter square ✅ *(fixed in N9)* |
+| Bookmarks (`BookmarksOverlayRoot`) | our store | **No** | globe glyph ✅ |
+| Omnibox (`OmniboxOverlayRoot`) | our store | **No** | history glyph ✅ |
+| Tab strip (`TabComponent`) | `tab.favicon` — the **site's own** icon URL | No third party | globe glyph ✅ |
+| Tab drag ghost (`TabBar`) | same | No third party | grey circle ✅ |
+| Tab list (`TabListOverlayRoot`) | same | No third party | globe glyph ✅ |
+| Recently closed (`TabListOverlayRoot`) | — carries only `{url, title}` | none rendered | n/a ✅ |
+| WhatsOnChain marks (Activity/Dashboard/Tokens tabs) | local `/whatsonchain.png` | **No** | n/a ✅ |
+
+**No third-party favicon service remains anywhere in the app.** The only surviving hits for
+`s2/favicons` / `duckduckgo` / `gstatic` are the comments recording what was removed.
+
+### 🆕 Two remote-image loads found by this sweep that are NOT favicons
+
+⛔ Neither is fixed here — both are outside this phase's fence, and one is on the money path
+(Phase 8). Reported rather than silently changed.
+
+| Where | What | Why it matters |
+|---|---|---|
+| `TransactionForm.tsx` — `<img src={s.avatar_url}>` and `<img src={paymailInfo.avatar_url}>` | **Paymail avatars**, loaded from a URL the paymail provider supplies | 🚨 Fires **as the user types a recipient** and again when a paymail resolves. The avatar host learns *"this user is preparing a payment to this person, now."* Same defect class as the consent-modal favicon, on the **payment** surface, and the URL is chosen by a third party rather than being a fixed service we control — so it doubles as a per-user tracking pixel a provider could mint deliberately |
+| `CertificatesTab.tsx` — `<img src={value}>` for an avatar-shaped certificate field | Remote image from a **certificate field value** | Viewing your own certificates discloses that visit to whatever host the issuer named |
+
+⭐ The pattern worth naming: **any place we render a URL someone else chose, we hand that someone a
+timestamped signal about the user.** Favicons were the instance we knew about; these are the same
+instance wearing different clothes. A standing check — "does this surface render a remote URL we did
+not author?" — belongs in the review criteria, not in one ticket.
+
+### ⚠️ Tab strip: first-party, but worth a decision
+
+The tab strip, drag ghost and tab list render `Tab::favicon_url` directly — e.g.
+`https://github.githubassets.com/favicons/favicon.svg`. That is **not** a third-party favicon service;
+it is the site's own asset host, for a site already open in that tab.
+
+But it is still a request per tab, and **session restore fires one for every restored tab at
+once** — telling N sites' CDNs "this browser just started". Pointing these three at the store instead
+would remove that entirely and make them work offline. Not done here: it is a behaviour change to the
+tab strip, which is not what this phase was scoped to touch.
