@@ -7,26 +7,26 @@ import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import PublicIcon from '@mui/icons-material/Public';
 import { HodosButton } from '../components/HodosButton';
 import { useBookmarks } from '../hooks/useBookmarks';
+import { useFavicons } from '../hooks/useFavicons';
 import type { BookmarkData } from '../types/bookmarks';
 
 function hostOf(url: string): string {
     try { return new URL(url).hostname; } catch { return url; }
 }
 
-// Derive a favicon URL from the host, mirroring the New Tab Page (google s2 service).
-// The backend never stores a favicon for bookmarks (bookmark_add saves only url/title),
-// so bm.favicon_url is effectively always empty — derive client-side instead. Falls back
-// to the globe icon via the <img> onError handler if the fetch fails.
-function faviconFor(url: string): string {
-    const host = hostOf(url);
-    return host ? `https://www.google.com/s2/favicons?domain=${host}&sz=32` : '';
-}
+// beta.3 Phase 7b — icons come from OUR local store (`useFavicons`), as data:
+// URIs, so opening the bookmarks panel makes no network request at all.
+//
+// 🚨 This used to be `google.com/s2/favicons?domain=<host>`, i.e. opening the
+// panel handed Google the user's entire bookmark list, one request per row.
+// ⛔ There is deliberately no remote fallback: a bookmark for a site the user
+// has not visited recently simply shows the globe glyph.
 
 // Favicon with graceful fallback to a globe glyph if the image fails to load
 // (offline / blocked). Prefers a backend-provided favicon_url, else derives one.
-const BookmarkFavicon: React.FC<{ url: string; src?: string }> = ({ url, src }) => {
+const BookmarkFavicon: React.FC<{ src?: string }> = ({ src }) => {
     const [failed, setFailed] = useState(false);
-    const resolved = src || faviconFor(url);
+    const resolved = src || '';
     if (failed || !resolved) {
         return <PublicIcon sx={{ fontSize: 16, color: '#6b7280', flexShrink: 0 }} />;
     }
@@ -44,6 +44,9 @@ const BookmarkFavicon: React.FC<{ url: string; src?: string }> = ({ url, src }) 
 
 const BookmarksOverlayRoot: React.FC = () => {
     const { bookmarks, refresh, search, isBookmarked, add, removeByUrl, remove } = useBookmarks();
+    // beta.3 Phase 7b — icons from our own store; opening this panel no longer
+    // hands a third party the user's whole bookmark list.
+    const favicons = useFavicons(bookmarks.map((bm: BookmarkData) => hostOf(bm.url)));
 
     // Current page context, injected by C++ on each show via window.setBookmarkContext.
     const [ctx, setCtx] = useState<{ url: string; title: string }>({ url: '', title: '' });
@@ -220,7 +223,7 @@ const BookmarksOverlayRoot: React.FC = () => {
                         }}
                         onClick={() => openBookmark(bm.url)}
                     >
-                        <BookmarkFavicon url={bm.url} src={bm.favicon_url} />
+                        <BookmarkFavicon src={favicons[hostOf(bm.url)] || bm.favicon_url} />
                         <Box sx={{ flex: 1, minWidth: 0 }}>
                             <Typography variant="body2" sx={{
                                 color: '#f0f0f0',

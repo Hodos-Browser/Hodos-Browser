@@ -3,6 +3,7 @@ import { Box, List, ListItem, ListItemButton, ListItemIcon, ListItemText, Typogr
 import HistoryIcon from '@mui/icons-material/History';
 import SearchIcon from '@mui/icons-material/Search';
 import { useOmniboxSuggestions } from '../hooks/useOmniboxSuggestions';
+import { useFavicons, hostOf } from '../hooks/useFavicons';
 import type { Suggestion } from '../types/omnibox';
 
 const OmniboxOverlayRoot: React.FC = () => {
@@ -10,6 +11,8 @@ const OmniboxOverlayRoot: React.FC = () => {
   const [selectedIndex, setSelectedIndex] = useState(-1);
   const { suggestions, loading, search } = useOmniboxSuggestions();
 
+  // beta.3 Phase 7b — icons from our own store; no request per keystroke.
+  const favicons = useFavicons(suggestions.map((sg) => hostOf(sg.url)));
   const suggestionsRef = useRef(suggestions);
   suggestionsRef.current = suggestions;
 
@@ -140,6 +143,7 @@ const OmniboxOverlayRoot: React.FC = () => {
               isFirst={index === 0}
               isSelected={index === selectedIndex}
               index={index}
+              faviconSrc={favicons[hostOf(suggestion.url)]}
             />
           ))}
         </List>
@@ -148,14 +152,18 @@ const OmniboxOverlayRoot: React.FC = () => {
   );
 };
 
-const FaviconIcon: React.FC<{ url: string }> = ({ url }) => {
+// beta.3 Phase 7b — `src` comes from OUR favicon store as a data: URI.
+// ⛔ Was `google.com/s2/favicons?domain=…`, which fired on EVERY KEYSTROKE
+// that matched a suggestion — a live feed of the user's typing to Google
+// (and onward to t2.gstatic.com/faviconV2 with the full URL).
+const FaviconIcon: React.FC<{ url: string; src?: string }> = ({ url, src }) => {
   const [loaded, setLoaded] = useState(false);
   const [failed, setFailed] = useState(false);
   const domain = useMemo(() => {
     try { return new URL(url).hostname; } catch { return null; }
   }, [url]);
 
-  if (!domain || failed) {
+  if (!domain || failed || !src) {
     return <HistoryIcon fontSize="small" sx={{ color: '#9ca3af' }} />;
   }
 
@@ -163,7 +171,7 @@ const FaviconIcon: React.FC<{ url: string }> = ({ url }) => {
     <>
       {!loaded && <HistoryIcon fontSize="small" sx={{ color: '#9ca3af' }} />}
       <img
-        src={`https://www.google.com/s2/favicons?domain=${domain}&sz=16`}
+        src={src}
         width={16}
         height={16}
         onLoad={() => setLoaded(true)}
@@ -181,9 +189,14 @@ interface SuggestionItemProps {
   isFirst: boolean;
   isSelected: boolean;
   index: number;
+  /** beta.3 Phase 7b — data: URI from our local favicon store, or undefined.
+   *  ⛔ Passed DOWN rather than fetched per row: the parent asks once for every
+   *  suggestion in one IPC. A per-row fetch would be slower than the Google
+   *  request this replaces. */
+  faviconSrc?: string;
 }
 
-const SuggestionItem: React.FC<SuggestionItemProps> = ({ suggestion, query, isFirst, isSelected, index }) => {
+const SuggestionItem: React.FC<SuggestionItemProps> = ({ suggestion, query, isFirst, isSelected, index, faviconSrc }) => {
   const handleClick = () => {
     if (window.cefMessage) {
       window.cefMessage.send('navigate', suggestion.url);
@@ -234,7 +247,7 @@ const SuggestionItem: React.FC<SuggestionItemProps> = ({ suggestion, query, isFi
       >
         <ListItemIcon sx={{ minWidth: 36, cursor: 'pointer', color: '#9ca3af' }}>
           {suggestion.type === 'history' ? (
-            <FaviconIcon url={suggestion.url} />
+            <FaviconIcon url={suggestion.url} src={faviconSrc} />
           ) : (
             <SearchIcon fontSize="small" sx={{ color: '#9ca3af' }} />
           )}

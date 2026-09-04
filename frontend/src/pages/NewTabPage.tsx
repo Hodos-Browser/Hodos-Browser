@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { isUrl, normalizeUrl, toSearchUrl } from '../utils/urlDetection';
 import { tokens } from '../theme/tokens';
+import { useFavicons, hostOf } from '../hooks/useFavicons';
 
 interface TopSite {
     url: string;
@@ -38,16 +39,13 @@ function saveCachedTiles(tiles: TopSite[]) {
 
 // ── Helpers ────────────────────────────────────────────────────────
 
-function buildFaviconUrl(siteUrl: string, engine: string): string {
-    try {
-        const domain = new URL(siteUrl).hostname;
-        return engine === 'google'
-            ? `https://www.google.com/s2/favicons?domain=${domain}&sz=32`
-            : `https://icons.duckduckgo.com/ip3/${domain}.ico`;
-    } catch {
-        return '';
-    }
-}
+// beta.3 Phase 7b — REMOVED. This returned a third-party favicon URL:
+// `google.com/s2/favicons?domain=…` (which redirects to t2.gstatic.com/faviconV2
+// carrying the full URL) or, for the non-Google search engine,
+// `icons.duckduckgo.com/ip3/…`. Either way, opening a NEW TAB handed a third
+// party the user's most-visited sites — and switching search engine only chose
+// WHICH third party. Icons now come from our local store via `useFavicons`.
+// ⛔ Do not reintroduce a remote favicon URL here, for either engine.
 
 function getDomain(siteUrl: string): string {
     try {
@@ -57,22 +55,11 @@ function getDomain(siteUrl: string): string {
     }
 }
 
-/** Fetch a favicon image and return it as a base64 data URL. */
-async function fetchFaviconDataUrl(faviconUrl: string): Promise<string> {
-    try {
-        const res = await fetch(faviconUrl);
-        if (!res.ok) return '';
-        const blob = await res.blob();
-        return new Promise<string>((resolve) => {
-            const reader = new FileReader();
-            reader.onloadend = () => resolve((reader.result as string) || '');
-            reader.onerror = () => resolve('');
-            reader.readAsDataURL(blob);
-        });
-    } catch {
-        return '';  // CORS or network failure — fall back to <img> tag
-    }
-}
+// beta.3 Phase 7b — REMOVED with buildFaviconUrl above. This fetched the
+// third-party favicon URL and cached the bytes into localStorage, so the leak
+// happened once per new site and then looked cached forever. Icons now come from
+// the browser's own favicon store, which holds bytes for pages the user actually
+// visited — no fetch from this page at all.
 
 // ── Component ──────────────────────────────────────────────────────
 
@@ -81,6 +68,8 @@ const NewTabPage: React.FC = () => {
     // Load cached tiles synchronously so the page renders fully on first paint.
     // Fall back to DEFAULT_TILES on fresh installs so users always see content.
     const [topSites, setTopSites] = useState<TopSite[] | null>(() => getCachedTiles() || DEFAULT_TILES);
+    // beta.3 Phase 7b — icons from our own store; no third-party request.
+    const favicons = useFavicons((topSites || []).map((t) => hostOf(t.url)));
     const [searchEngine, setSearchEngine] = useState('duckduckgo');
     const searchInputRef = useRef<HTMLInputElement>(null);
 
@@ -134,20 +123,17 @@ const NewTabPage: React.FC = () => {
                         tiles = DEFAULT_TILES;
                     }
 
-                    // Carry over cached favicons so we don't re-fetch known icons
-                    const cached = getCachedTiles();
-                    if (cached) {
-                        const faviconMap = new Map<string, string>();
-                        cached.forEach(t => {
-                            if (t.faviconDataUrl) faviconMap.set(t.url, t.faviconDataUrl);
-                        });
-                        tiles = tiles.map(t => ({
-                            ...t,
-                            faviconDataUrl: faviconMap.get(t.url),
-                        }));
-                    }
-
+                    // beta.3 Phase 7b — the favicon carry-over that used to sit here is
+                    // gone: icons no longer live on the tile, they come from the
+                    // browser's own favicon store via `useFavicons`.
+                    //
+                    // ⭐ The tile LIST is still cached, and deliberately so — it is what
+                    // makes the new-tab page paint instantly instead of waiting for the
+                    // `get_most_visited` round trip. Dropping the write here (which the
+                    // favicon removal orphaned) would have left `getCachedTiles()` reading
+                    // a cache nothing ever refreshes, i.e. permanently stale tiles.
                     setTopSites(tiles);
+                    saveCachedTiles(tiles);
                 } catch {
                     setTopSites(DEFAULT_TILES);
                 }
@@ -158,30 +144,10 @@ const NewTabPage: React.FC = () => {
         return () => window.removeEventListener('message', handler);
     }, []);
 
-    // Pre-fetch favicons as base64 and persist to cache
-    // Runs whenever topSites changes; skips tiles that already have a cached favicon
-    useEffect(() => {
-        if (!topSites || topSites.length === 0) return;
-        // undefined = not yet fetched;  '' = fetched but failed
-        const needsFetch = topSites.some(s => s.faviconDataUrl === undefined);
-        if (!needsFetch) return;
-
-        let cancelled = false;
-        (async () => {
-            const updated = await Promise.all(topSites.map(async (tile) => {
-                if (tile.faviconDataUrl !== undefined) return tile;
-                const url = buildFaviconUrl(tile.url, searchEngine);
-                if (!url) return { ...tile, faviconDataUrl: '' };
-                const dataUrl = await fetchFaviconDataUrl(url);
-                return { ...tile, faviconDataUrl: dataUrl };
-            }));
-            if (!cancelled) {
-                setTopSites(updated);
-                saveCachedTiles(updated);
-            }
-        })();
-        return () => { cancelled = true; };
-    }, [topSites, searchEngine]);
+    // beta.3 Phase 7b — the pre-fetch/persist effect that used to live here is
+    // gone. It existed to hide the latency of a THIRD-PARTY favicon request;
+    // `useFavicons` reads our local store over one batched IPC, so there is
+    // nothing to pre-warm and nothing to persist.
 
     const handleSearch = useCallback(() => {
         const input = searchQuery.trim();
@@ -352,7 +318,7 @@ const NewTabPage: React.FC = () => {
                             }}
                         >
                             <img
-                                src={site.faviconDataUrl || buildFaviconUrl(site.url, searchEngine)}
+                                src={favicons[hostOf(site.url)] || site.faviconDataUrl || ''}
                                 alt=""
                                 style={{
                                     width: 28,

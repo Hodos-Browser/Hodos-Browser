@@ -279,6 +279,7 @@ set(SOURCES
     src/core/FarblingPolicy.cpp
     src/core/BookmarkManager.cpp
     src/core/SitePermissionStore.cpp
+    src/core/FaviconStore.cpp
     src/core/PaidContentCache.cpp
     src/core/ProfileLock.cpp
     src/core/SingleInstance.cpp

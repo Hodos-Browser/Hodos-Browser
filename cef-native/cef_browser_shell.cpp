@@ -46,6 +46,7 @@
 #include "include/core/CookieBlockManager.h"
 #include "include/core/BookmarkManager.h"
 #include "include/core/SitePermissionStore.h"
+#include "include/core/FaviconStore.h"
 #include "include/core/PaidContentCache.h"
 #include "include/core/SettingsManager.h"
 #include "include/core/FingerprintProtection.h"
@@ -5900,6 +5901,17 @@ static int RunHodosMain(HINSTANCE hInstance, int nCmdShow, void* sandbox_info,
         } else {
             LOG_ERROR("Failed to initialize SitePermissionStore");
         }
+
+        // beta.3 Phase 7b — local favicon store. Same SQLite/per-profile pattern.
+        // Exists so the omnibox, new-tab tiles and bookmarks stop asking Google
+        // for icons (that endpoint redirects to t2.gstatic.com/faviconV2 carrying
+        // the full URL). Non-fatal: with no store, those surfaces fall back to
+        // their initial-letter tiles rather than to a remote lookup.
+        if (hodos::FaviconStore::GetInstance().Initialize(profile_cache)) {
+            LOG_INFO("FaviconStore initialized successfully");
+        } else {
+            LOG_ERROR("Failed to initialize FaviconStore");
+        }
     });
 
     std::thread paidCacheThread([&profile_cache]() {
@@ -6159,6 +6171,7 @@ static int RunHodosMain(HINSTANCE hInstance, int nCmdShow, void* sandbox_info,
     HistoryManager::GetInstance().Shutdown();
     BookmarkManager::GetInstance().Shutdown();
     SitePermissionStore::GetInstance().Shutdown();
+    hodos::FaviconStore::GetInstance().Shutdown();
     CookieBlockManager::GetInstance().Shutdown();
     PaidContentCache::GetInstance().Shutdown();
 

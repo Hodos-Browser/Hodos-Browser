@@ -35,6 +35,7 @@
 #include "../../include/core/EphemeralCookieManager.h"
 #include "../../include/core/BookmarkManager.h"
 #include "../../include/core/SitePermissionStore.h"
+#include "../../include/core/FaviconStore.h"
 #include "../../include/core/SitePermissionMapping.h"
 #include "../../include/core/WalletActivityTracker.h"
 #include "include/cef_request_context.h"
@@ -1178,6 +1179,43 @@ void SimpleHandler::OnFaviconURLChange(CefRefPtr<CefBrowser> browser,
         std::string favicon_url = icon_urls[0].ToString();
         TabManager::GetInstance().UpdateTabFavicon(tab_id, favicon_url);
         LOG_DEBUG_BROWSER("🖼️ Tab " + std::to_string(tab_id) + " favicon updated: " + favicon_url);
+
+        // beta.3 Phase 7b — persist the icon BYTES for the surfaces that have no
+        // live tab to read: omnibox suggestions, new-tab tiles, bookmarks. Those
+        // three each rendered `google.com/s2/favicons?domain=…`, which redirects
+        // to `t2.gstatic.com/faviconV2?...&url=<full url>` — so Google learned
+        // every domain the user typed, every top site, and every bookmark.
+        //
+        // ⭐ `DownloadImage(is_favicon=true)` is CEF's purpose-built path and,
+        // per its header, sends and accepts NO cookies. We only download when we
+        // do not already hold a fresh copy, so this is idle on revisits.
+        auto& store = hodos::FaviconStore::GetInstance();
+        const std::string host =
+            SitePermissionStore::NormalizeHost(browser->GetMainFrame()->GetURL().ToString());
+        if (store.IsInitialized() && !host.empty() && !store.HasFresh(host)) {
+            class FaviconDownloadCb : public CefDownloadImageCallback {
+            public:
+                FaviconDownloadCb(std::string host, std::string url)
+                    : host_(std::move(host)), url_(std::move(url)) {}
+                void OnDownloadImageFinished(const CefString& /*image_url*/,
+                                             int http_status_code,
+                                             CefRefPtr<CefImage> image) override {
+                    if (!image || (http_status_code && http_status_code != 200)) return;
+                    int w = 0, h = 0;
+                    CefRefPtr<CefBinaryValue> png = image->GetAsPNG(1.0f, true, w, h);
+                    if (!png || png->GetSize() == 0) return;
+                    std::vector<uint8_t> bytes(png->GetSize());
+                    png->GetData(bytes.data(), bytes.size(), 0);
+                    hodos::FaviconStore::GetInstance().Put(host_, url_, bytes, w);
+                }
+            private:
+                std::string host_, url_;
+                IMPLEMENT_REFCOUNTING(FaviconDownloadCb);
+            };
+            browser->GetHost()->DownloadImage(favicon_url, /*is_favicon=*/true,
+                                              /*max_image_size=*/64, /*bypass_cache=*/false,
+                                              new FaviconDownloadCb(host, favicon_url));
+        }
     }
 }
 
@@ -8258,6 +8296,40 @@ bool SimpleHandler::OnProcessMessageReceived(
 
     // b2b — site-permission management (read). Arg: [host]. Replies with the full
     // 5-capability list via window.onSitePermissionsResponse on the calling browser.
+    // beta.3 Phase 7b — favicons for the omnibox / new tab / bookmarks, served
+    // from our own store as data: URIs. Arg: JSON array of hosts. Replies via
+    // window.onFaviconsResponse({ host: "data:image/png;base64,…" }).
+    //
+    // ⭐ BATCHED on purpose: the omnibox asks for every suggestion at once, and a
+    // round trip per row would be slower than the Google request this replaces —
+    // "more private but visibly worse" is how a privacy feature gets turned off.
+    // ⛔ Hosts absent from the store are simply omitted; React falls back to its
+    // own initial-letter tile. It must never fall back to a remote lookup.
+    if (message_name == "favicon_get") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        nlohmann::json out = nlohmann::json::object();
+        try {
+            nlohmann::json hosts = nlohmann::json::parse(
+                args->GetSize() > 0 ? args->GetString(0).ToString() : "[]");
+            auto& store = hodos::FaviconStore::GetInstance();
+            for (const auto& h : hosts) {
+                if (!h.is_string()) continue;
+                const std::string host = SitePermissionStore::NormalizeHost(h.get<std::string>());
+                if (host.empty()) continue;
+                const std::string uri = store.GetDataUri(host);
+                if (!uri.empty()) out[host] = uri;
+            }
+        } catch (const std::exception& e) {
+            LOG_WARNING_BROWSER(std::string("favicon_get: bad payload: ") + e.what());
+        }
+        if (browser && browser->GetMainFrame()) {
+            browser->GetMainFrame()->ExecuteJavaScript(
+                "if (window.onFaviconsResponse) window.onFaviconsResponse(" + out.dump() + ");",
+                browser->GetMainFrame()->GetURL(), 0);
+        }
+        return true;
+    }
+
     if (message_name == "site_permissions_get") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
         std::string host = args->GetSize() > 0 ? args->GetString(0).ToString() : "";
