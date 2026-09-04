@@ -239,3 +239,81 @@ But it is still a request per tab, and **session restore fires one for every res
 once** — telling N sites' CDNs "this browser just started". Pointing these three at the store instead
 would remove that entirely and make them work offline. Not done here: it is a behaviour change to the
 tab strip, which is not what this phase was scoped to touch.
+
+---
+
+## Row 4 — the one-view merge (`P7b-A3` / `A5` / `A6`)
+
+**SUBJECT.** Notification overlay browser, attached by URL, driven through
+`window.showNotification` — the path C++ uses. Rig: `merged_view_probe.py`.
+
+⛔ **The fixture protocol is security level 1**, deliberately: `[1, "3241645161d8"]` (BRC-29,
+payment-key derivation) described as *"Show your profile picture."* A **level-2** fixture would have
+had its identifier printed by the old counterparty footnote, so it passes whether or not this change
+works. That is the vacuous test this row exists to avoid.
+
+### N10 — 🔴 RED, observed (pre-merge code via `git stash`)
+
+```
+protocolIdShown          False   <- "3241645161d8" appears NOWHERE on screen
+deceptivePurposeShown    True    <- "Show your profile picture." does
+ticked                   2       <- only identity + quiet mode; no per-item ticks
+hasCustomizeButton       True
+protectedBasketMark      False   <- the protected-basket warning was behind the click too
+RESULT: FAIL
+```
+
+🚨 The ticket's attack, reproduced exactly: the site's sentence was the **only** thing on screen
+describing its own grant, and the real scope was invisible.
+
+### N11 — 🟢 GREEN, after
+
+```
+checkboxes 7   ticked 6   disabled 4      <- per-item ticks on the FIRST screen, all on by default
+hasCustomizeButton        False           <- one view; no second wording to drift from
+protocolIdShown           True            <- [1] 3241645161d8 beside the site's sentence
+level0IdShown             True            <- level 0 too, not just the level the footnote covered
+identityAcrossMetanet     True
+quietModeFullLabel        True            <- "including ones it did not list above"
+quietModeCallout          True            <- the ticks-are-inert warning, beside the ticks
+protectedBasketMark       True
+counterpartyFootnoteGone  True
+allowWithoutLimits        True            <- capability preserved, see the flag below
+infoIcons                 2               <- identity + quiet-mode tooltips, which Customize NEVER had
+RESULT: PASS
+```
+
+`disabled 4` is correct: quiet mode is on by default, which disables the protocol and basket ticks
+(they would be inert), and the protected `default` basket is disabled independently.
+
+### N12 — `domain_approval`, the third view (`P7b-A6`)
+
+```
+identityAcrossMetanet True   quietFullLabel True
+oldIdentityLabel      False  oldQuietLabel  False   infoIcons 2
+```
+
+All three views — the merged connect screen and `domain_approval` — now carry the same label **and**
+the same tooltip. There is no fourth.
+
+### N13 — geometry still holds (`P7b-A8`)
+
+Merged view at 6 declared permissions: card **897 px** in a 1032 px viewport, top 68, Connect fully
+visible, `maxHeight 944px`, `overflowY auto`. 7a's cap is the backstop and is not being leaned on.
+
+### Owed, and not claimed
+
+- ⬜ **`P7b-A4` — that an unticked item actually fails to persist.** The probe proves the ticks
+  *render*; it does not prove that unticking one leaves no row in `domain_protocol_permissions`.
+  That needs a real connect against a real dApp. The handlers and state were carried over from
+  Customize **unchanged**, so the risk is low — but "unchanged code" is a reading, not a measurement,
+  and this is the permission path.
+- ⬜ **`P7b-A2` omnibox** — still unmeasured from Row 2.
+- ⬜ **👤 the owner reading the merged screen.** Every consent defect this sprint was found that way
+  and none by a gate.
+
+### 🙋 Owner decision surfaced by the merge
+
+**"Allow without limits"** (raises caps to $1000/tx, $10000/session) lived behind the Customize
+click. With one view it is in front of every user. Kept — silently deleting a spending control is
+not mine to do — but promoting one is not either. Options in `PHASE_CONTRACT.md` §6.

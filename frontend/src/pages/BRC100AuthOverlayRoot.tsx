@@ -246,67 +246,15 @@ const InfoIcon: React.FC<{ tooltip?: string; style?: React.CSSProperties }> = ({
   );
 };
 
-/**
- * beta.3 Phase 0.8 UI follow-up (owner-requested 2026-08-23) — turn the raw
- * Level-2 counterparty into something a human can act on the right way.
- *
- * BRC-116 §4.1 requires the wallet to identify WHO a Level 2 protocol
- * operation is with. The declared value is one of three things, and the
- * ordering that matters is the opposite of how they read:
- *
- *   66-hex pubkey  → ONE named party. The NARROWEST of the three.
- *   "self"         → the user's own keys. Nothing leaves.
- *   "anyone" / ""  → anybody can derive the matching key. The WIDEST.
- *
- * ⭐ A wall of hex looks scarier than the English word "anyone" while being
- * strictly safer, so the copy states the width explicitly instead of leaving
- * the user to infer it from the shape of the value.
- *
- * ⛔ There is nothing for the user to DO with the value — it is an
- * identifier, not a decision. Every tooltip says so rather than implying an
- * action the screen does not offer.
- *
- * ⚠️ The label for a named key deliberately does NOT say "this site's
- * server". That is the overwhelmingly likely reading, but it is UNVERIFIED —
- * the manifest is untrusted text, and asserting an identity we have not
- * checked is the exact display-vs-reality defect class this phase exists to
- * remove. The tooltip carries the likelihood; the label carries only the
- * fact. (`identity_resolver.rs` can resolve the key to a real name later —
- * see UI_FOLLOWUPS.md §2.)
- */
-function describeCounterparty(counterparty?: string): {
-  label: string;
-  hex?: string;
-  tooltip: string;
-} {
-  if (counterparty === 'self') {
-    return {
-      // Owner misread the previous wording ("you only") as meaning the SITE
-      // only. It means the opposite: the pairing is the user with themselves.
-      label: 'your own keys only',
-      tooltip: 'Limited to operations with your own keys — nothing is shared '
-        + 'with anyone else. This is the narrowest of the three options. '
-        + 'You do not need to do anything with this.',
-    };
-  }
-  if (!counterparty || counterparty === 'anyone') {
-    return {
-      label: 'anyone',
-      tooltip: 'This site did not limit this permission to one party, so it '
-        + 'can use this protocol with anybody. This is the WIDEST of the '
-        + 'three options — narrower would be one named party, or your own '
-        + 'keys only. You do not need to do anything with this.',
-    };
-  }
-  return {
-    label: 'one specific party',
-    hex: counterparty,
-    tooltip: 'Limited to a single party, identified by its public key — for a '
-      + 'site this is normally its own server. That is narrower, and safer, '
-      + 'than letting the site use this protocol with anyone. It is an '
-      + 'identifier only: you do not need to do anything with this value.',
-  };
-}
+// beta.3 Phase 7b — `describeCounterparty` was deleted with the "Who these
+// are with" footnote it served. Owner decision, 2026-09-04: the section asked
+// "who?", and the only honest answer we have is a public key nobody can act
+// on. The useful part underneath was SCOPE (bounded vs unbounded), not
+// identity — and the counterparty is not a lever the user has: the manifest
+// declares it, and the engine enforces the narrowing whether or not we print
+// it (`is_protocol_granted` matches on counterparty). The identifier is still
+// available where identifiers belong — Manage Site Permissions renders it per
+// grant via /domain/permissions/protocol.
 
 // Phase 1.5 Step 0 — Hodos wallet attribution header. Renders the
 // Hodos_Gold_Wallet_Icon.svg at the top of every auth/payment/cert/
@@ -539,12 +487,6 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     counterparties: ManifestCounterparty[];
   }
   const [manifestData, setManifestData] = useState<ManifestData | null>(null);
-  const [manifestShowCustomize, setManifestShowCustomize] = useState<boolean>(false);
-  // beta.3 Phase 7a — the Level-2 counterparty footnote is collapsed by default.
-  // ⛔ Reset in applyParams like every other per-prompt field: P0.8 defect 5 was
-  // the previous site's choice still on screen for the next site, because this
-  // overlay is keep-alive and its state was written as if freshly mounted.
-  const [manifestPartiesOpen, setManifestPartiesOpen] = useState<boolean>(false);
   const [manifestSelectedProtocols, setManifestSelectedProtocols] = useState<Set<number>>(new Set());
   const [manifestSelectedBaskets, setManifestSelectedBaskets] = useState<Set<number>>(new Set());
   const [manifestSelectedCertificates, setManifestSelectedCertificates] = useState<Set<number>>(new Set());
@@ -716,8 +658,6 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     // Phase 1.5 Step 5 — manifest_connect_bundle params.
     // Reset every time so a previous site's manifest doesn't leak in.
     setManifestData(null);
-    setManifestShowCustomize(false);
-    setManifestPartiesOpen(false);
     setManifestLimitsOpen(false);
     setManifestAllowIdentityKey(savedDefaultIdentityKeyRef.current);
     const manifestParam = params.get('manifest');
@@ -2556,516 +2496,82 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     );
 
     // Primary view — bundled summary
-    if (!manifestShowCustomize) {
-      return (
-        <div style={overlayBackdrop}>
-          <div style={{ ...cardStyle, maxWidth: '480px' }}>
-            <HodosWalletHeader />
-
-            {/* App branding row */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '16px' }}>
-              {manifestData.iconUrl && !faviconError ? (
-                <img
-                  src={manifestData.iconUrl}
-                  width={48}
-                  height={48}
-                  style={{ borderRadius: 8, flexShrink: 0 }}
-                  onError={() => setFaviconError(true)}
-                  alt=""
-                />
-              ) : pageFaviconUrl && !faviconError ? (
-                <img
-                  src={pageFaviconUrl}
-                  width={48}
-                  height={48}
-                  style={{ borderRadius: 8, flexShrink: 0 }}
-                  onError={() => setFaviconError(true)}
-                  alt=""
-                />
-              ) : (
-                <div style={{ ...avatarStyle, width: 48, height: 48 }}>
-                  {getDomainInitial(notificationDomain)}
-                </div>
-              )}
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: '17px', fontWeight: 700, color: COLORS.textDark }}>
-                  {manifestData.name || cleanDomain}
-                </div>
-                <div style={{ fontSize: '12px', color: COLORS.textMuted, marginTop: '2px' }}>
-                  {cleanDomain}
-                </div>
-                {manifestData.description && (
-                  <div style={{ fontSize: '13px', color: COLORS.textMuted, marginTop: '4px', lineHeight: 1.4 }}>
-                    {manifestData.description}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div style={{ fontSize: '14px', color: COLORS.textDark, marginBottom: '12px' }}>
-              This site is asking permission to:
-            </div>
-
-            {/* Permissions list with plain-language `purpose` strings */}
-            <div style={{
-              background: COLORS.subduedGold,
-              borderRadius: '10px',
-              padding: '14px 16px',
-              marginBottom: '16px',
-              maxHeight: '240px',
-              overflowY: 'auto',
-            }}>
-              {manifestData.protocols.map((p, i) => (
-                <div key={`proto-${i}`} style={permissionItem}>
-                  <span style={checkmark}>&#10003;</span>
-                  <span>
-                    {p.purpose || `Use protocol "${p.name}"`}
-                    {/* BRC-116 §4.1: for a Level 2 protocol the wallet MUST
-                        identify the counterparty to the user. It is no longer
-                        shown inline here — it moved to the "Who these are
-                        with" footnote below (owner request, 2026-08-23), which
-                        has the room to say what the value MEANS rather than
-                        dropping ten characters of hex mid-sentence. Every
-                        Level 2 entry still appears there, INCLUDING one that
-                        names no counterparty: understating is the defect. */}
-                  </span>
-                </div>
-              ))}
-              {manifestData.baskets.map((b, i) => (
-                <div key={`basket-${i}`} style={permissionItem}>
-                  <span style={checkmark}>&#10003;</span>
-                  <span>
-                    {b.purpose || `${b.access === 'read_write' ? 'Manage' : 'View'} "${b.name}"`}
-                    {isProtectedBasket(b.name) && (
-                      <span style={{ color: COLORS.error, fontWeight: 600, fontSize: '11px', marginLeft: '6px' }}>
-                        (protected — won't auto-grant)
-                      </span>
-                    )}
-                  </span>
-                </div>
-              ))}
-              {manifestData.certificates.map((c, i) => (
-                <div key={`cert-${i}`} style={permissionItem}>
-                  <span style={checkmark}>&#10003;</span>
-                  <span>
-                    {c.purpose || `Read ${c.fields.length} certificate field(s)`}
-                    {c.fields.length > 0 && (
-                      <span style={{ color: COLORS.textMuted, fontSize: '11px', marginLeft: '6px' }}>
-                        ({c.fields.join(', ')})
-                      </span>
-                    )}
-                    {/* BRC-116 §4.4 — the user is shown who receives the data. */}
-                    {c.verifierPublicKey && (
-                      <span style={{ color: COLORS.textMuted, fontSize: '11px', marginLeft: '6px' }}>
-                        shared with {c.verifierPublicKey.slice(0, 10)}…
-                      </span>
-                    )}
-                  </span>
-                </div>
-              ))}
-              {(manifestData.spending.perTransactionUsd > 0
-                || (manifestData.spending.monthlySatoshis ?? 0) > 0) && (
-                <div style={permissionItem}>
-                  <span style={checkmark}>&#10003;</span>
-                  <span>
-                    {manifestData.spending.purpose || 'Send payments'}
-                    {' '}
-                    {/* ⛔ R-CAPS. Whatever the site declares here is a REQUEST,
-                        never a setting. BRC-73's figure is monthly satoshis —
-                        shown in the unit and period the site actually declared,
-                        never converted into one of our caps. The limits that
-                        will really apply are below, and they are the user's. */}
-                    <span style={{ color: COLORS.textMuted, fontSize: '12px' }}>
-                      {manifestData.spending.perTransactionUsd > 0
-                        ? `(the site asks for up to $${manifestData.spending.perTransactionUsd}/tx, $${manifestData.spending.perSessionUsd}/session)`
-                        : `(the site asks for up to ${formatMonthlyAllowance(manifestData.spending)})`}
-                    </span>
-                  </span>
-                </div>
-              )}
-              {manifestData.counterparties.map((cp, i) => (
-                <div key={`cp-${i}`} style={permissionItem}>
-                  <span style={checkmark}>&#10003;</span>
-                  <span>{cp.purpose || 'Communicate with specific peers'}</span>
-                </div>
-              ))}
-              {/* ⚠️ Unreachable since beta.3 Phase 0.8: a manifest declaring
-                  nothing no longer parses as a manifest at all
-                  (ManifestFetcher.h / manifest.rs), so the interceptor falls
-                  back to the plain domain_approval modal and this component
-                  never renders. Kept as a visible failure mode rather than a
-                  silent empty box, in case a future shape slips through. */}
-              {manifestData.protocols.length === 0 &&
-                manifestData.baskets.length === 0 &&
-                manifestData.certificates.length === 0 &&
-                manifestData.counterparties.length === 0 &&
-                manifestData.spending.perTransactionUsd === 0 &&
-                (manifestData.spending.monthlySatoshis ?? 0) === 0 && (
-                <div style={{ color: COLORS.error, fontSize: '13px', fontWeight: 600 }}>
-                  This site declared no specific permissions. Nothing here is itemised —
-                  decline unless you know why you are connecting.
-                </div>
-              )}
-            </div>
-
-            {/* ⭐ "Who these are with" — the Level-2 counterparty footnote.
-                Moved out of the inline permission lines on owner request
-                (2026-08-23, UI_FOLLOWUPS.md §1 reading (a)): inline, it was
-                ten characters of hex interrupting a plain-English sentence
-                and the owner's first question about it was literally "what
-                exactly is that number?". Down here there is room to name the
-                width of the grant, which is the only thing about it that
-                bears on their safety.
-
-                ⛔ Renders for EVERY securityLevel === 2 protocol, including
-                the ones naming no counterparty — those are the WIDEST case
-                and hiding them would understate the grant.
-
-                ⭐ beta.3 Phase 7a — COLLAPSED BY DEFAULT (P7a-A3). This block
-                was the modal's one uncapped growth region: one row per Level-2
-                protocol, no cap, no scroll. At 10 declared protocols it pushed
-                Decline/Customize/Connect to a 2-pixel strip that was still
-                clickable and no longer readable (MEASUREMENTS.md M2 — the
-                owner's live report, reproduced on a 1920×1080 display at 100%).
-
-                ⛔ Collapsed, NOT capped-and-scrolled. `InfoIcon` renders its
-                tooltip position:absolute OUTSIDE the icon's box, so an
-                `overflow` on this container would clip the per-entry tooltips —
-                and those tooltips are where "what is a counterparty" is
-                explained. That would trade disclosure for layout, which this
-                phase's contract §3 forbids. Collapsing bounds the height with
-                no overflow anywhere. Owner decision, 2026-09-02.
-
-                ⚠️ BRC-116 §4.1 requires the wallet to IDENTIFY the counterparty
-                for a Level 2 protocol. The heading therefore always states that
-                these permissions exist AND how many, on screen, unconditionally
-                — only the identifiers themselves are one click away. Do not
-                reduce the header to a bare chevron. */}
-            {manifestData.protocols.some((p) => p.securityLevel === 2) && (
-              <div style={{
-                border: '1px solid #e5e7eb',
-                borderRadius: '10px',
-                padding: '10px 12px',
-                marginBottom: '16px',
-              }}>
-                <div style={{
-                  fontSize: '12px',
-                  fontWeight: 600,
-                  color: COLORS.textDark,
-                  marginBottom: manifestPartiesOpen ? '6px' : '0',
-                  display: 'flex',
-                  alignItems: 'center',
-                }}>
-                  <span
-                    onClick={() => setManifestPartiesOpen(!manifestPartiesOpen)}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      cursor: 'pointer',
-                      userSelect: 'none',
-                      flex: 1,
-                      minWidth: 0,
-                    }}
-                  >
-                    <span style={{ fontSize: '10px', marginRight: '6px', flexShrink: 0 }}>
-                      {manifestPartiesOpen ? '▼' : '▶'}
-                    </span>
-                    {/* ⛔ P0.8 lesson 6: keep label text in ONE span. This row is
-                        display:flex, so every child becomes its own flex item and
-                        a split label shatters across lines. */}
-                    <span>
-                      Who these are with ({manifestData.protocols.filter((p) => p.securityLevel === 2).length})
-                    </span>
-                  </span>
-                  {/* Outside the toggle span on purpose — reading the tooltip
-                      must not collapse the section under the pointer. */}
-                  <InfoIcon tooltip="Some permissions are limited to operations with one particular party. This is who — an identifier, not a choice you need to make. Fewer parties is narrower, and narrower is safer." />
-                  <span
-                    onClick={() => setManifestPartiesOpen(!manifestPartiesOpen)}
-                    style={{
-                      fontSize: '11px',
-                      color: COLORS.textMuted,
-                      cursor: 'pointer',
-                      userSelect: 'none',
-                      marginLeft: '8px',
-                      flexShrink: 0,
-                      fontWeight: 400,
-                    }}
-                  >
-                    {manifestPartiesOpen ? 'Hide' : 'Show'}
-                  </span>
-                </div>
-                {manifestPartiesOpen && manifestData.protocols.map((p, i) => {
-                  if (p.securityLevel !== 2) return null;
-                  const cp = describeCounterparty(p.counterparty);
-                  return (
-                    <div key={`cp-note-${i}`} style={{
-                      fontSize: '12px',
-                      color: COLORS.textMuted,
-                      lineHeight: 1.5,
-                      marginBottom: '4px',
-                    }}>
-                      <span style={{ color: COLORS.textDark }}>{p.name}</span>
-                      {' — with '}
-                      <span style={{ fontWeight: 600 }}>{cp.label}</span>
-                      <InfoIcon tooltip={cp.tooltip} />
-                      {cp.hex && (
-                        <div style={{
-                          fontFamily: 'monospace',
-                          fontSize: '11px',
-                          wordBreak: 'break-all',
-                          opacity: 0.8,
-                          marginTop: '1px',
-                        }}>
-                          {cp.hex}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-            {/* Identity-key bundle checkbox — same pattern as domain_approval Step 1 */}
-            <label style={{
-              display: 'flex',
-              alignItems: 'flex-start',
-              gap: '8px',
-              fontSize: '13px',
-              color: COLORS.textDark,
-              cursor: 'pointer',
-              marginBottom: '10px',
-              userSelect: 'none',
-            }}>
-              <input
-                type="checkbox"
-                checked={manifestAllowIdentityKey}
-                onChange={(e) => setManifestAllowIdentityKey(e.target.checked)}
-                style={{
-                  accentColor: COLORS.primary, width: '16px', height: '16px',
-                  cursor: 'pointer', flexShrink: 0, marginTop: '2px',
-                }}
-              />
-              {/* ⛔ Wording is SHARED with the Customize view — keep them
-                  identical. Owner-reported 2026-08-23, the same drift as the
-                  quiet-mode label: one control read two different ways
-                  depending on which screen you were on, and the shorter one
-                  dropped "across the Metanet" — the fact that actually matters,
-                  since this key is the SAME on every BRC-100 site and is
-                  therefore what lets sites correlate you between them.
-                  Single <span> so the flex container doesn't shatter it. */}
-              <span style={{ lineHeight: 1.45 }}>
-                <strong>Identity:</strong> Allow this site to identify you across the Metanet
-                <InfoIcon />
-              </span>
-            </label>
-
-            {/* Phase 2.6-D Fix #4 — bundled scope grant checkbox. Default ON. */}
-            {/* ⚠️ The text MUST stay inside a single <span>. This <label> is a
-                flex container with `gap: 8px`, so every child element and text
-                node becomes its own FLEX ITEM and wraps independently — with
-                the gap inserted between each. When the wording gained <strong>
-                and <em>, the line shattered into fragments ("mode" under
-                "Quiet", "any" on its own). `flexShrink: 0` on the box is the
-                other half: without it the checkbox is compressed to a
-                different size than its neighbour once the row overflows.
-                Both reported by the owner on 2026-08-23. */}
-            <label style={{
-              display: 'flex',
-              alignItems: 'flex-start',
-              gap: '8px',
-              fontSize: '13px',
-              color: COLORS.textDark,
-              cursor: 'pointer',
-              marginBottom: '16px',
-              userSelect: 'none',
-            }}>
-              <input
-                type="checkbox"
-                checked={manifestAllowBundledScope}
-                onChange={(e) => setManifestAllowBundledScope(e.target.checked)}
-                style={{
-                  accentColor: COLORS.primary, width: '16px', height: '16px',
-                  cursor: 'pointer', flexShrink: 0, marginTop: '2px',
-                }}
-              />
-              <span style={{ lineHeight: 1.45 }}>
-              {/* ⛔ Owner-reported 2026-08-23: this used to read "Allow this
-                  site to perform wallet operations without asking each time",
-                  which omits the single most important fact about the control
-                  — that it also covers protocols and baskets the site NEVER
-                  DECLARED. The Customize view already said so; the summary,
-                  which is the screen most users actually read, did not. One
-                  control must not carry two meanings. Wording is now shared
-                  with Customize; keep them identical. */}
-              <strong>Quiet mode:</strong> let this site use <em>any</em> protocol or
-              basket without asking — including ones it did not list above
-              <InfoIcon tooltip="When ticked, this site can use ANY protocol or basket without prompting - including ones it did not declare in its manifest. Untick it to approve only the specific items listed above. Protected baskets (change outputs, backup tokens) are never included. Sensitive operations - large payments, identity disclosure, sensitive certificate fields - always prompt regardless. Revoke any time from Manage Site Permissions." />
-              </span>
-            </label>
-
-            {/* 🚨 THE R-PROV BLOCK. This used to be one static line reading
-                "Default payment limits: $X/tx" while X came from the SITE's
-                manifest — the site's numbers wearing the word "Default". It now
-                says whose numbers these are, in words, differently in each case,
-                and it EXPANDS IN PLACE rather than throwing the user into the
-                Customize subview to see them (contract §6a). */}
-            {/* Owner-directed 2026-08-23: no tinted panel and no tinted border
-                for the site-suggested state. The amber wash plus gold outline
-                turned a legitimate, user-chosen configuration into what looked
-                like an error banner. The WORDS still carry the provenance —
-                that is what R-PROV requires, and words survive a screenshot,
-                greyscale and a colour-blind reader in a way a wash does not. */}
-            <div style={{
-              border: '1px solid #e5e7eb',
-              borderRadius: '10px', marginBottom: '16px', overflow: 'hidden',
-            }}>
-              <button
-                type="button"
-                onClick={() => setManifestLimitsOpen((o) => !o)}
-                aria-expanded={manifestLimitsOpen}
-                style={{
-                  width: '100%', display: 'flex', alignItems: 'center', gap: '8px',
-                  background: 'transparent',
-                  border: 'none', padding: '10px 12px', cursor: 'pointer',
-                  font: 'inherit', textAlign: 'left', color: COLORS.textDark,
-                }}
-              >
-                <span style={{
-                  fontSize: '11px', color: COLORS.textMuted, width: '10px',
-                  transform: manifestLimitsOpen ? 'rotate(90deg)' : 'none',
-                  transition: 'transform 0.15s',
-                }}>&#9654;</span>
-                <span style={{ fontSize: '12px', flex: 1, lineHeight: 1.5 }}>
-                  {anyLimitFromSite ? (
-                    <>
-                      {/* ⚠️ NOT COLORS.error ('#c62828'). MEASURED 3.00:1 against
-                          the dark card — below WCAG AA, on the one line whose
-                          job is to say "these are not your defaults". Same red
-                          family as the *** mark (6.10:1), so the two read as
-                          one signal instead of two different warnings. */}
-                      <span style={{ color: '#f87171', fontWeight: 700 }}>
-                        Payment limits suggested by this site:
-                      </span>{' '}
-                      {formatCentsUsd(manifestLimits.perTxCents)}/tx,{' '}
-                      {formatCentsUsd(manifestLimits.perSessionCents)}/session.{' '}
-                      <strong>These are not your defaults.</strong>
-                    </>
-                  ) : (
-                    <>
-                      <strong>Your payment limits:</strong>{' '}
-                      {formatCentsUsd(manifestLimits.perTxCents)}/tx,{' '}
-                      {formatCentsUsd(manifestLimits.perSessionCents)}/session
-                      {siteSuggestsAnything && (
-                        <>
-                          {' '}— this site suggests{' '}
-                          {manifestSiteSuggests.perTxCents !== undefined
-                            && `${formatCentsUsd(manifestSiteSuggests.perTxCents)}/tx`}
-                          {manifestSiteSuggests.perTxCents !== undefined
-                            && manifestSiteSuggests.perSessionCents !== undefined && ', '}
-                          {manifestSiteSuggests.perSessionCents !== undefined
-                            && `${formatCentsUsd(manifestSiteSuggests.perSessionCents)}/session`}
-                          , not applied
-                        </>
-                      )}
-                    </>
-                  )}
-                </span>
-                <span style={{ fontSize: '11px', color: COLORS.textMuted, whiteSpace: 'nowrap' }}>
-                  {manifestLimitsOpen ? 'Hide' : 'Adjust'}
-                </span>
-              </button>
-              {manifestLimitsOpen && (
-                <div style={{ padding: '0 12px 12px 12px' }}>
-                  {renderLimitFields()}
-                </div>
-              )}
-            </div>
-
-            {/* Buttons: Decline / Customize / Connect */}
-            {grantsLocalAccess && <LocalAccessNotice onShown={markLocalAccessShown} />}
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', flexWrap: 'wrap' }}>
-              <HodosButton variant="secondary" onClick={handleManifestDecline}>
-                Decline
-              </HodosButton>
-              <HodosButton variant="secondary" onClick={() => setManifestShowCustomize(true)}>
-                Customize
-              </HodosButton>
-              <HodosButton variant="primary" onClick={() => handleManifestConnect(false)}>
-                Connect
-              </HodosButton>
-            </div>
-          </div>
-        </div>
-      );
-    }
-
-    // Customize subview — per-permission checkboxes + payment-cap inputs
+    // ⭐ beta.3 Phase 7b — ONE view. There is no `manifestShowCustomize`
+    // branch any more: the per-item ticks that lived on a second screen are
+    // on this one, all ticked by default, so the fast path is still one
+    // click and there is no second wording to drift from.
     return (
       <div style={overlayBackdrop}>
-        <div style={{ ...cardStyle, maxWidth: '520px' }}>
+        <div style={{ ...cardStyle, maxWidth: '480px' }}>
           <HodosWalletHeader />
 
-          {/* Same branding row as the summary, at 28px — losing the icon on the
-              way into Customize made it feel like a different dialog. */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px' }}>
+          {/* App branding row */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '16px' }}>
             {manifestData.iconUrl && !faviconError ? (
-              <img src={manifestData.iconUrl} width={28} height={28}
-                   style={{ borderRadius: 6, flexShrink: 0 }}
-                   onError={() => setFaviconError(true)} alt="" />
+              <img
+                src={manifestData.iconUrl}
+                width={48}
+                height={48}
+                style={{ borderRadius: 8, flexShrink: 0 }}
+                onError={() => setFaviconError(true)}
+                alt=""
+              />
             ) : pageFaviconUrl && !faviconError ? (
-              <img src={pageFaviconUrl}
-                   width={28} height={28} style={{ borderRadius: 6, flexShrink: 0 }}
-                   onError={() => setFaviconError(true)} alt="" />
+              <img
+                src={pageFaviconUrl}
+                width={48}
+                height={48}
+                style={{ borderRadius: 8, flexShrink: 0 }}
+                onError={() => setFaviconError(true)}
+                alt=""
+              />
             ) : (
-              <div style={{ ...avatarStyle, width: 28, height: 28, fontSize: '13px' }}>
+              <div style={{ ...avatarStyle, width: 48, height: 48 }}>
                 {getDomainInitial(notificationDomain)}
               </div>
             )}
-            <div style={{ fontSize: '15px', fontWeight: 700, color: COLORS.textDark }}>
-              Customize permissions for {manifestData.name || cleanDomain}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: '17px', fontWeight: 700, color: COLORS.textDark }}>
+                {manifestData.name || cleanDomain}
+              </div>
+              <div style={{ fontSize: '12px', color: COLORS.textMuted, marginTop: '2px' }}>
+                {cleanDomain}
+              </div>
+              {manifestData.description && (
+                <div style={{ fontSize: '13px', color: COLORS.textMuted, marginTop: '4px', lineHeight: 1.4 }}>
+                  {manifestData.description}
+                </div>
+              )}
             </div>
           </div>
-          {/* 🚨 QUIET MODE MAKES THESE TICKS INERT — say so, do not imply otherwise.
-              `matrix_c.rs :: decide_scoped_grant` returns
-              Silent(SilentBundledScopeGrant) on `bundled_scope_grant` BEFORE it
-              consults `scoped_grant_exists`, so while quiet mode is on the V18
-              rows these checkboxes write are never read: every ProtocolUse and
-              BasketAccess from this domain goes silent, declared or not.
-              (Protected baskets — default / backup-* / admin * — are still
-              excluded by `dispatch_scoped_grant`.)
-              ⛔ Disabling them is deliberate: it is the ONLY state in which the
-              two controls cannot contradict each other, so there is no
-              cross-toggling to keep in sync. Untick quiet mode to choose
-              individually. Narrowing the flag itself is an ENGINE change and is
-              deliberately NOT done here — beta.4 ticket. */}
-          {manifestAllowBundledScope ? (
-            <div style={{
-              fontSize: '12px', color: COLORS.textDark, marginBottom: '14px',
-              lineHeight: 1.5, background: 'rgba(166, 124, 0, 0.10)',
-              border: `1px solid ${COLORS.gold}`, borderRadius: '8px', padding: '10px 12px',
-            }}>
-              <strong>Quiet mode is on</strong>, so this site can use <em>any</em> protocol or
-              basket without asking — not just the ones listed below. Untick{' '}
-              <strong>Quiet mode</strong> to choose individually.
-            </div>
-          ) : (
-            <div style={{ fontSize: '12px', color: COLORS.textMuted, marginBottom: '14px' }}>
-              Untick anything you don't want to grant.
-            </div>
-          )}
 
-          {/* Per-permission checkboxes */}
+          <div style={{ fontSize: '14px', color: COLORS.textDark, marginBottom: '12px' }}>
+            This site is asking permission to:
+          </div>
+
+          {/* ⭐ beta.3 Phase 7b — THE ONLY connect view.
+              The read-only summary list that used to sit here, and the separate
+              "Customize" screen that repeated it with ticks, were TWO
+              REPRESENTATIONS OF ONE CONSENT — and they drifted three separate
+              times, always with the summary being the less alarming one (it
+              dropped "including ones it did not list above" from quiet mode and
+              "across the Metanet" from identity). The drift then reappeared in
+              the TOOLTIPS, which Customize never carried at all.
+              ⛔ Do not reintroduce a "short version" of this screen. Summarising
+              a consent string reliably drops the qualifying clause, because the
+              qualifier is the part that creates the alarm.
+
+              Everything starts ticked, so the fast path is still one click. */}
           <div style={{
             background: COLORS.subduedGold,
             borderRadius: '10px',
-            padding: '12px 14px',
-            marginBottom: '14px',
-            maxHeight: '260px',
+            padding: '14px 16px',
+            marginBottom: '16px',
+            maxHeight: '240px',
             overflowY: 'auto',
           }}>
             {manifestData.protocols.map((p, i) => (
-              <label key={`cust-proto-${i}`} style={customizeRowLabel}>
+              <label key={`proto-${i}`} style={customizeRowLabel}>
                 <input
                   type="checkbox"
                   checked={manifestSelectedProtocols.has(i)}
@@ -3073,11 +2579,37 @@ const BRC100AuthOverlayRoot: React.FC = () => {
                   onChange={() => toggleManifestPerm(manifestSelectedProtocols, setManifestSelectedProtocols, i)}
                   style={customizeCheckbox}
                 />
-                <span><strong>Protocol:</strong> {p.purpose || p.name}</span>
+                {/* ⛔ P0.8 lesson 6: keep the row's text in ONE span. This row is
+                    display:flex, so every child becomes its own flex item and a
+                    split label shatters across lines. */}
+                <span>
+                  {p.purpose || `Use protocol "${p.name}"`}
+                  {/* 🚨 beta.3 Phase 7b — the protocol's OWN identifier, always.
+                      `protocolID` is machine-readable and enforced; `description`
+                      is the SITE'S free text, and nothing ties them together. A
+                      hostile manifest can pair a payment-key scope
+                      ([2,"3241645161d8"] — BRC-29) with "Show your profile
+                      picture." Printing the id means the label can never FULLY
+                      lie: the real scope is on screen for a careful reader or a
+                      support person.
+                      ⛔ Shown at EVERY security level. It previously appeared only
+                      in the level-2 counterparty footnote, so level 0/1
+                      protocols — the ones granted for ANY counterparty — put no
+                      identifier on screen at all. */}
+                  <span style={{
+                    color: COLORS.textMuted,
+                    fontSize: '11px',
+                    marginLeft: '6px',
+                    fontFamily: 'monospace',
+                    wordBreak: 'break-all',
+                  }}>
+                    [{p.securityLevel}] {p.name}
+                  </span>
+                </span>
               </label>
             ))}
             {manifestData.baskets.map((b, i) => (
-              <label key={`cust-basket-${i}`} style={customizeRowLabel}>
+              <label key={`basket-${i}`} style={customizeRowLabel}>
                 <input
                   type="checkbox"
                   checked={manifestSelectedBaskets.has(i) && !isProtectedBasket(b.name)}
@@ -3086,79 +2618,277 @@ const BRC100AuthOverlayRoot: React.FC = () => {
                   style={customizeCheckbox}
                 />
                 <span>
-                  <strong>Basket {b.access}:</strong> {b.purpose || b.name}
+                  {b.purpose || `${b.access === 'read_write' ? 'Manage' : 'View'} "${b.name}"`}
+                  <span style={{ color: COLORS.textMuted, fontSize: '11px', marginLeft: '6px' }}>
+                    ({b.access})
+                  </span>
                   {isProtectedBasket(b.name) && (
-                    <span style={{ color: COLORS.error, fontSize: '11px', marginLeft: '6px' }}>
-                      (protected, never auto-granted)
+                    <span style={{ color: COLORS.error, fontWeight: 600, fontSize: '11px', marginLeft: '6px' }}>
+                      (protected — never auto-granted)
                     </span>
                   )}
                 </span>
               </label>
             ))}
             {manifestData.certificates.map((c, i) => (
-              <label key={`cust-cert-${i}`} style={customizeRowLabel}>
+              <label key={`cert-${i}`} style={customizeRowLabel}>
                 <input
                   type="checkbox"
                   checked={manifestSelectedCertificates.has(i)}
                   onChange={() => toggleManifestPerm(manifestSelectedCertificates, setManifestSelectedCertificates, i)}
                   style={customizeCheckbox}
                 />
-                <span><strong>Certificate fields:</strong> {c.purpose || c.fields.join(', ')}</span>
+                <span>
+                  {c.purpose || `Read ${c.fields.length} certificate field(s)`}
+                  {c.fields.length > 0 && (
+                    <span style={{ color: COLORS.textMuted, fontSize: '11px', marginLeft: '6px' }}>
+                      ({c.fields.join(', ')})
+                    </span>
+                  )}
+                  {/* BRC-116 §4.4 — the user is shown who receives the data. */}
+                  {c.verifierPublicKey && (
+                    <span style={{ color: COLORS.textMuted, fontSize: '11px', marginLeft: '6px' }}>
+                      shared with {c.verifierPublicKey.slice(0, 10)}…
+                    </span>
+                  )}
+                </span>
               </label>
             ))}
             {manifestData.counterparties.map((cp, i) => (
-              <label key={`cust-cp-${i}`} style={customizeRowLabel}>
+              <label key={`cp-${i}`} style={customizeRowLabel}>
                 <input
                   type="checkbox"
                   checked={manifestSelectedCounterparties.has(i)}
                   onChange={() => toggleManifestPerm(manifestSelectedCounterparties, setManifestSelectedCounterparties, i)}
                   style={customizeCheckbox}
                 />
-                <span><strong>Counterparty:</strong> {cp.purpose || cp.type || cp.counterparty.slice(0, 12) + '…'}</span>
+                <span>{cp.purpose || cp.type || `${cp.counterparty.slice(0, 12)}…`}</span>
               </label>
             ))}
+            {(manifestData.spending.perTransactionUsd > 0
+              || (manifestData.spending.monthlySatoshis ?? 0) > 0) && (
+              <div style={permissionItem}>
+                <span style={checkmark}>&#10003;</span>
+                <span>
+                  {manifestData.spending.purpose || 'Send payments'}
+                  {' '}
+                  {/* ⛔ R-CAPS. Whatever the site declares here is a REQUEST,
+                      never a setting. BRC-73's figure is monthly satoshis —
+                      shown in the unit and period the site actually declared.
+                      The limits that will really apply are below, and they are
+                      the user's. */}
+                  <span style={{ color: COLORS.textMuted, fontSize: '12px' }}>
+                    {manifestData.spending.perTransactionUsd > 0
+                      ? `(the site asks for up to $${manifestData.spending.perTransactionUsd}/tx, $${manifestData.spending.perSessionUsd}/session)`
+                      : `(the site asks for up to ${formatMonthlyAllowance(manifestData.spending)})`}
+                  </span>
+                </span>
+              </div>
+            )}
+            {/* ⚠️ Unreachable since beta.3 Phase 0.8: a manifest declaring
+                nothing no longer parses as a manifest at all, so the
+                interceptor falls back to the plain domain_approval modal.
+                Kept as a visible failure mode rather than a silent empty box. */}
+            {manifestData.protocols.length === 0 &&
+              manifestData.baskets.length === 0 &&
+              manifestData.certificates.length === 0 &&
+              manifestData.counterparties.length === 0 &&
+              manifestData.spending.perTransactionUsd === 0 &&
+              (manifestData.spending.monthlySatoshis ?? 0) === 0 && (
+              <div style={{ color: COLORS.error, fontSize: '13px', fontWeight: 600 }}>
+                This site declared no specific permissions. Nothing here is itemised —
+                decline unless you know why you are connecting.
+              </div>
+            )}
           </div>
 
-          {/* Identity-key toggle */}
-          <label style={{ ...customizeRowLabel, marginBottom: '10px' }}>
+          {/* 🚨 Quiet mode makes the ticks above INERT — say so beside them.
+              `matrix_c.rs :: decide_scoped_grant` returns Silent on
+              `bundled_scope_grant` BEFORE it consults `scoped_grant_exists`, so
+              while quiet mode is on the V18 rows these boxes write are never
+              read: every ProtocolUse and BasketAccess from this domain goes
+              silent, declared or not. (Protected baskets are still excluded.)
+              ⛔ Disabling the boxes is deliberate — it is the only state in which
+              the two controls cannot contradict each other, so there is no
+              hidden cross-toggling. Narrowing the flag itself is an ENGINE
+              change: beta.3 Phase 7c. */}
+          {manifestAllowBundledScope && (
+            <div style={{
+              fontSize: '12px', color: COLORS.textDark, marginBottom: '16px',
+              lineHeight: 1.5, background: 'rgba(166, 124, 0, 0.10)',
+              border: `1px solid ${COLORS.gold}`, borderRadius: '8px', padding: '10px 12px',
+            }}>
+              <strong>Quiet mode is on</strong>, so this site can use <em>any</em> protocol or
+              basket without asking — not just the ones listed above. Untick{' '}
+              <strong>Quiet mode</strong> below to choose individually.
+            </div>
+          )}
+
+          {/* Identity-key bundle checkbox — same pattern as domain_approval Step 1 */}
+          <label style={{
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: '8px',
+            fontSize: '13px',
+            color: COLORS.textDark,
+            cursor: 'pointer',
+            marginBottom: '10px',
+            userSelect: 'none',
+          }}>
             <input
               type="checkbox"
               checked={manifestAllowIdentityKey}
               onChange={(e) => setManifestAllowIdentityKey(e.target.checked)}
-              style={customizeCheckbox}
+              style={{
+                accentColor: COLORS.primary, width: '16px', height: '16px',
+                cursor: 'pointer', flexShrink: 0, marginTop: '2px',
+              }}
             />
-            <span>
+            {/* ⛔ Wording is SHARED with the Customize view — keep them
+                identical. Owner-reported 2026-08-23, the same drift as the
+                quiet-mode label: one control read two different ways
+                depending on which screen you were on, and the shorter one
+                dropped "across the Metanet" — the fact that actually matters,
+                since this key is the SAME on every BRC-100 site and is
+                therefore what lets sites correlate you between them.
+                Single <span> so the flex container doesn't shatter it. */}
+            <span style={{ lineHeight: 1.45 }}>
               <strong>Identity:</strong> Allow this site to identify you across the Metanet
+              <InfoIcon />
             </span>
           </label>
 
-          {/* Phase 2.6-D Fix #4 — bundled scope grant toggle. Same as the
-              domain_approval modal's allowBundledScope checkbox. */}
-          <label style={{ ...customizeRowLabel, marginBottom: '14px' }}>
+          {/* Phase 2.6-D Fix #4 — bundled scope grant checkbox. Default ON. */}
+          {/* ⚠️ The text MUST stay inside a single <span>. This <label> is a
+              flex container with `gap: 8px`, so every child element and text
+              node becomes its own FLEX ITEM and wraps independently — with
+              the gap inserted between each. When the wording gained <strong>
+              and <em>, the line shattered into fragments ("mode" under
+              "Quiet", "any" on its own). `flexShrink: 0` on the box is the
+              other half: without it the checkbox is compressed to a
+              different size than its neighbour once the row overflows.
+              Both reported by the owner on 2026-08-23. */}
+          <label style={{
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: '8px',
+            fontSize: '13px',
+            color: COLORS.textDark,
+            cursor: 'pointer',
+            marginBottom: '16px',
+            userSelect: 'none',
+          }}>
             <input
               type="checkbox"
               checked={manifestAllowBundledScope}
               onChange={(e) => setManifestAllowBundledScope(e.target.checked)}
-              style={customizeCheckbox}
+              style={{
+                accentColor: COLORS.primary, width: '16px', height: '16px',
+                cursor: 'pointer', flexShrink: 0, marginTop: '2px',
+              }}
             />
-            <span>
-              <strong>Quiet mode:</strong> Let this site use <em>any</em> protocol or basket
-              without asking — including ones it did not list above
+            <span style={{ lineHeight: 1.45 }}>
+            {/* ⛔ Owner-reported 2026-08-23: this used to read "Allow this
+                site to perform wallet operations without asking each time",
+                which omits the single most important fact about the control
+                — that it also covers protocols and baskets the site NEVER
+                DECLARED. The Customize view already said so; the summary,
+                which is the screen most users actually read, did not. One
+                control must not carry two meanings. Wording is now shared
+                with Customize; keep them identical. */}
+            <strong>Quiet mode:</strong> let this site use <em>any</em> protocol or
+            basket without asking — including ones it did not list above
+            <InfoIcon tooltip="When ticked, this site can use ANY protocol or basket without prompting - including ones it did not declare in its manifest. Untick it to approve only the specific items listed above. Protected baskets (change outputs, backup tokens) are never included. Sensitive operations - large payments, identity disclosure, sensitive certificate fields - always prompt regardless. Revoke any time from Manage Site Permissions." />
             </span>
           </label>
 
-          {/* Payment limit inputs — same shared renderer the summary uses, so the
-              provenance marking cannot drift between the two views.
-              ⛔ R-PROV / P0.8-A9: these four are OURS — the limits we allow the
-              site to operate under, not something it asks for. */}
-          <div style={{ fontSize: '13px', fontWeight: 600, color: COLORS.textDark, marginBottom: '8px' }}>
-            Payment limits
-          </div>
-          <div style={{ marginBottom: '14px' }}>
-            {renderLimitFields()}
+          {/* 🚨 THE R-PROV BLOCK. This used to be one static line reading
+              "Default payment limits: $X/tx" while X came from the SITE's
+              manifest — the site's numbers wearing the word "Default". It now
+              says whose numbers these are, in words, differently in each case,
+              and it EXPANDS IN PLACE rather than throwing the user into the
+              Customize subview to see them (contract §6a). */}
+          {/* Owner-directed 2026-08-23: no tinted panel and no tinted border
+              for the site-suggested state. The amber wash plus gold outline
+              turned a legitimate, user-chosen configuration into what looked
+              like an error banner. The WORDS still carry the provenance —
+              that is what R-PROV requires, and words survive a screenshot,
+              greyscale and a colour-blind reader in a way a wash does not. */}
+          <div style={{
+            border: '1px solid #e5e7eb',
+            borderRadius: '10px', marginBottom: '16px', overflow: 'hidden',
+          }}>
+            <button
+              type="button"
+              onClick={() => setManifestLimitsOpen((o) => !o)}
+              aria-expanded={manifestLimitsOpen}
+              style={{
+                width: '100%', display: 'flex', alignItems: 'center', gap: '8px',
+                background: 'transparent',
+                border: 'none', padding: '10px 12px', cursor: 'pointer',
+                font: 'inherit', textAlign: 'left', color: COLORS.textDark,
+              }}
+            >
+              <span style={{
+                fontSize: '11px', color: COLORS.textMuted, width: '10px',
+                transform: manifestLimitsOpen ? 'rotate(90deg)' : 'none',
+                transition: 'transform 0.15s',
+              }}>&#9654;</span>
+              <span style={{ fontSize: '12px', flex: 1, lineHeight: 1.5 }}>
+                {anyLimitFromSite ? (
+                  <>
+                    {/* ⚠️ NOT COLORS.error ('#c62828'). MEASURED 3.00:1 against
+                        the dark card — below WCAG AA, on the one line whose
+                        job is to say "these are not your defaults". Same red
+                        family as the *** mark (6.10:1), so the two read as
+                        one signal instead of two different warnings. */}
+                    <span style={{ color: '#f87171', fontWeight: 700 }}>
+                      Payment limits suggested by this site:
+                    </span>{' '}
+                    {formatCentsUsd(manifestLimits.perTxCents)}/tx,{' '}
+                    {formatCentsUsd(manifestLimits.perSessionCents)}/session.{' '}
+                    <strong>These are not your defaults.</strong>
+                  </>
+                ) : (
+                  <>
+                    <strong>Your payment limits:</strong>{' '}
+                    {formatCentsUsd(manifestLimits.perTxCents)}/tx,{' '}
+                    {formatCentsUsd(manifestLimits.perSessionCents)}/session
+                    {siteSuggestsAnything && (
+                      <>
+                        {' '}— this site suggests{' '}
+                        {manifestSiteSuggests.perTxCents !== undefined
+                          && `${formatCentsUsd(manifestSiteSuggests.perTxCents)}/tx`}
+                        {manifestSiteSuggests.perTxCents !== undefined
+                          && manifestSiteSuggests.perSessionCents !== undefined && ', '}
+                        {manifestSiteSuggests.perSessionCents !== undefined
+                          && `${formatCentsUsd(manifestSiteSuggests.perSessionCents)}/session`}
+                        , not applied
+                      </>
+                    )}
+                  </>
+                )}
+              </span>
+              <span style={{ fontSize: '11px', color: COLORS.textMuted, whiteSpace: 'nowrap' }}>
+                {manifestLimitsOpen ? 'Hide' : 'Adjust'}
+              </span>
+            </button>
+            {manifestLimitsOpen && (
+              <div style={{ padding: '0 12px 12px 12px' }}>
+                {renderLimitFields()}
+              </div>
+            )}
           </div>
 
-          {/* Allow without limits — payment caps only, scoped grants unaffected */}
+          {/* "Allow without limits" — carried over from the deleted Customize
+              subview so the merge REMOVES NO CAPABILITY.
+              🙋 OWNER DECISION OWED: it used to sit behind the Customize click,
+              so most users never saw it; on a single view it is in front of
+              everyone. That is a widening of a money control's exposure, and it
+              is a product call, not mine. Options recorded in the phase
+              contract §6: keep as-is, fold behind the limits "Adjust"
+              disclosure, or drop. ⛔ Kept for now — silently deleting a spending
+              control is worse than showing it. */}
           <div style={{
             background: 'rgba(166, 124, 0, 0.08)',
             border: `1px solid ${COLORS.gold}`,
@@ -3181,14 +2911,16 @@ const BRC100AuthOverlayRoot: React.FC = () => {
             </div>
           </div>
 
-          {/* Buttons: Back / Connect with current selections */}
+          {/* Buttons: Decline / Connect. ⛔ There is no "Customize" button any
+              more — the ticks are on this screen. See the list block above for
+              why a second view was removed rather than reworded. */}
           {grantsLocalAccess && <LocalAccessNotice onShown={markLocalAccessShown} />}
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
-            <HodosButton variant="secondary" onClick={() => setManifestShowCustomize(false)}>
-              Back
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', flexWrap: 'wrap' }}>
+            <HodosButton variant="secondary" onClick={handleManifestDecline}>
+              Decline
             </HodosButton>
             <HodosButton variant="primary" onClick={() => handleManifestConnect(false)}>
-              Connect with these
+              Connect
             </HodosButton>
           </div>
         </div>
@@ -3286,7 +3018,17 @@ const BRC100AuthOverlayRoot: React.FC = () => {
               onChange={(e) => setAllowIdentityKey(e.target.checked)}
               style={{ accentColor: COLORS.primary, width: '16px', height: '16px', cursor: 'pointer' }}
             />
-            Allow this site to identify you
+            {/* ⭐ beta.3 Phase 7b — VERBATIM the connect modal's wording.
+                This view kept the pre-P0.8 label after the connect bundle was
+                fixed, and the drift was in the same direction every time: the
+                shorter string dropped "across the Metanet", i.e. the clause that
+                says this key is the SAME on every BRC-100 site and is therefore
+                exactly what lets sites correlate the user between them.
+                ⛔ Keep these two identical. A consent label that is merely shorter
+                is not merely shorter — the qualifier is the alarm. */}
+            <span>
+              <strong>Identity:</strong> Allow this site to identify you across the Metanet
+            </span>
             <InfoIcon />
           </label>
 
@@ -3310,8 +3052,16 @@ const BRC100AuthOverlayRoot: React.FC = () => {
               onChange={(e) => setAllowBundledScope(e.target.checked)}
               style={{ accentColor: COLORS.primary, width: '16px', height: '16px', cursor: 'pointer' }}
             />
-            Allow this site to perform wallet operations without asking each time
-            <InfoIcon tooltip="When ticked, the wallet won't prompt you for individual protocol, basket, or counterparty grants on this site after the first connect. You can revoke this at any time from Manage Site Permissions. Sensitive operations (large payments, identity disclosure, sensitive certificate fields) always prompt regardless." />
+            {/* ⭐ beta.3 Phase 7b — VERBATIM the connect modal's wording, label AND
+                tooltip. The old label said "perform wallet operations without
+                asking each time" and the old tooltip said the wallet "won't
+                prompt for individual grants" — neither said the part that
+                matters: it covers protocols the site NEVER DECLARED. */}
+            <span>
+              <strong>Quiet mode:</strong> Let this site use <em>any</em> protocol or basket
+              without asking — including ones it did not list above
+            </span>
+            <InfoIcon tooltip="When ticked, this site can use ANY protocol or basket without prompting - including ones it did not declare in its manifest. Untick it to approve only the specific items listed above. Protected baskets (change outputs, backup tokens) are never included. Sensitive operations - large payments, identity disclosure, sensitive certificate fields - always prompt regardless. Revoke any time from Manage Site Permissions." />
           </label>
 
           {/* Advanced settings toggle */}
