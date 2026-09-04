@@ -9224,7 +9224,11 @@ static bool FireHodosPermissionPrompt(const std::string& host, PendingPermission
     std::string id = PendingPermissionManager::GetInstance().add(std::move(pr));
     extern HINSTANCE g_hInstance;
     extern void CreateNotificationOverlay(HINSTANCE, const std::string&, const std::string&, const std::string&);
-    CreateNotificationOverlay(g_hInstance, "permission_request", host, "&requestId=" + id + "&perm=" + permCode);
+    // beta.3 Phase 7b — the page's own favicon, not google.com/s2/favicons.
+    // Same helper the interceptor's modal funnel uses; "" when we have no icon
+    // for this host, in which case React shows the domain-initial avatar.
+    CreateNotificationOverlay(g_hInstance, "permission_request", host,
+                              "&requestId=" + id + "&perm=" + permCode + FaviconParamForDomain(host));
     return true;
 #elif defined(__APPLE__)
     if (permCode.empty()) return false;
@@ -9235,7 +9239,9 @@ static bool FireHodosPermissionPrompt(const std::string& host, PendingPermission
     }
     std::string id = PendingPermissionManager::GetInstance().add(std::move(pr));
     extern void CreateNotificationOverlay(const std::string& type, const std::string& domain, const std::string& extraParams);
-    CreateNotificationOverlay("permission_request", host, "&requestId=" + id + "&perm=" + permCode);
+    // beta.3 Phase 7b — see the Windows arm above.
+    CreateNotificationOverlay("permission_request", host,
+                              "&requestId=" + id + "&perm=" + permCode + FaviconParamForDomain(host));
     return true;
 #else
     (void)host; (void)pr; (void)permCode;

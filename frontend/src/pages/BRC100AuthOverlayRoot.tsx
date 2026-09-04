@@ -399,6 +399,20 @@ const BRC100AuthOverlayRoot: React.FC = () => {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showModifyLimits, setShowModifyLimits] = useState(false);
   const [faviconError, setFaviconError] = useState(false);
+  // beta.3 Phase 7b — the PAGE'S OWN favicon URL, supplied by C++ from
+  // `Tab::favicon_url` (populated by OnFaviconURLChange for the tab strip).
+  //
+  // 🚨 This replaces `https://www.google.com/s2/favicons?domain=<site>`, which
+  // every consent modal rendered — telling Google which site the user was being
+  // asked to trust, at the moment of the decision, whether or not they approved
+  // and whether or not they read it. From a privacy browser, on its most
+  // sensitive surface.
+  //
+  // ⛔ Empty is normal and must stay renderable: C++ returns "" rather than
+  // guessing, because the wrong site's icon on a consent screen is worse than
+  // no icon. Empty falls through to the domain-initial avatar. ⛔ Never restore
+  // a remote lookup as the fallback.
+  const [pageFaviconUrl, setPageFaviconUrl] = useState('');
 
   // Payment/rate-limit params
   const [paymentSatoshis, setPaymentSatoshis] = useState<number>(0);
@@ -600,6 +614,12 @@ const BRC100AuthOverlayRoot: React.FC = () => {
 
     // b1b — site-permission prompt params.
     setPermCode(params.get('perm') || '');
+    // beta.3 Phase 7b — the page's own favicon, supplied by C++.
+    // ⛔ Read AND reset here, inside applyParams, which runs on EVERY prompt.
+    // This overlay is keep-alive: a field that is set but never re-read shows
+    // the PREVIOUS site's icon beside THIS site's name — P0.8 defect 5, same
+    // shape, same overlay. `|| ''` is the reset.
+    setPageFaviconUrl(params.get('favicon') || '');
     setPermRequestId(params.get('requestId') || '');
     setGrantsLocalAccess(params.get('grantsLocalAccess') === '1');
     setLocalAccessShown(false);   // re-earned on every show, never inherited
@@ -1542,9 +1562,9 @@ const BRC100AuthOverlayRoot: React.FC = () => {
           <HodosWalletHeader />
           {/* Domain avatar + title */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '20px' }}>
-            {!faviconError ? (
+            {pageFaviconUrl && !faviconError ? (
               <img
-                src={`https://www.google.com/s2/favicons?domain=${notificationDomain}&sz=32`}
+                src={pageFaviconUrl}
                 width={32}
                 height={32}
                 style={{ borderRadius: 4, flexShrink: 0 }}
@@ -1605,9 +1625,9 @@ const BRC100AuthOverlayRoot: React.FC = () => {
           <HodosWalletHeader />
           {/* Domain avatar + title */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '22px' }}>
-            {!faviconError ? (
+            {pageFaviconUrl && !faviconError ? (
               <img
-                src={`https://www.google.com/s2/favicons?domain=${notificationDomain}&sz=32`}
+                src={pageFaviconUrl}
                 width={32}
                 height={32}
                 style={{ borderRadius: 4, flexShrink: 0 }}
@@ -1781,9 +1801,9 @@ const BRC100AuthOverlayRoot: React.FC = () => {
         <div style={cardStyle}>
           <HodosBrowserHeader />
           <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '20px' }}>
-            {!faviconError ? (
+            {pageFaviconUrl && !faviconError ? (
               <img
-                src={`https://www.google.com/s2/favicons?domain=${notificationDomain}&sz=32`}
+                src={pageFaviconUrl}
                 width={32}
                 height={32}
                 style={{ borderRadius: 4, flexShrink: 0 }}
@@ -1896,9 +1916,9 @@ const BRC100AuthOverlayRoot: React.FC = () => {
           <HodosWalletHeader />
           {/* Domain avatar + title */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '22px' }}>
-            {!faviconError ? (
+            {pageFaviconUrl && !faviconError ? (
               <img
-                src={`https://www.google.com/s2/favicons?domain=${notificationDomain}&sz=32`}
+                src={pageFaviconUrl}
                 width={32}
                 height={32}
                 style={{ borderRadius: 4, flexShrink: 0 }}
@@ -2050,9 +2070,9 @@ const BRC100AuthOverlayRoot: React.FC = () => {
           <HodosWalletHeader />
           {/* Domain row */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '18px' }}>
-            {!faviconError ? (
+            {pageFaviconUrl && !faviconError ? (
               <img
-                src={`https://www.google.com/s2/favicons?domain=${notificationDomain}&sz=32`}
+                src={pageFaviconUrl}
                 width={32}
                 height={32}
                 style={{ borderRadius: 4, flexShrink: 0 }}
@@ -2133,9 +2153,9 @@ const BRC100AuthOverlayRoot: React.FC = () => {
 
   const renderPrivacyPerimeterDomainRow = (subtitle: string) => (
     <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '14px' }}>
-      {!faviconError ? (
+      {pageFaviconUrl && !faviconError ? (
         <img
-          src={`https://www.google.com/s2/favicons?domain=${notificationDomain}&sz=32`}
+          src={pageFaviconUrl}
           width={32}
           height={32}
           style={{ borderRadius: 4, flexShrink: 0 }}
@@ -2292,9 +2312,9 @@ const BRC100AuthOverlayRoot: React.FC = () => {
           <HodosWalletHeader />
           {/* Domain avatar + title */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '22px' }}>
-            {!faviconError ? (
+            {pageFaviconUrl && !faviconError ? (
               <img
-                src={`https://www.google.com/s2/favicons?domain=${notificationDomain}&sz=32`}
+                src={pageFaviconUrl}
                 width={32}
                 height={32}
                 style={{ borderRadius: 4, flexShrink: 0 }}
@@ -2553,9 +2573,9 @@ const BRC100AuthOverlayRoot: React.FC = () => {
                   onError={() => setFaviconError(true)}
                   alt=""
                 />
-              ) : !faviconError ? (
+              ) : pageFaviconUrl && !faviconError ? (
                 <img
-                  src={`https://www.google.com/s2/favicons?domain=${notificationDomain}&sz=48`}
+                  src={pageFaviconUrl}
                   width={48}
                   height={48}
                   style={{ borderRadius: 8, flexShrink: 0 }}
@@ -2993,8 +3013,8 @@ const BRC100AuthOverlayRoot: React.FC = () => {
               <img src={manifestData.iconUrl} width={28} height={28}
                    style={{ borderRadius: 6, flexShrink: 0 }}
                    onError={() => setFaviconError(true)} alt="" />
-            ) : !faviconError ? (
-              <img src={`https://www.google.com/s2/favicons?domain=${notificationDomain}&sz=32`}
+            ) : pageFaviconUrl && !faviconError ? (
+              <img src={pageFaviconUrl}
                    width={28} height={28} style={{ borderRadius: 6, flexShrink: 0 }}
                    onError={() => setFaviconError(true)} alt="" />
             ) : (
@@ -3184,9 +3204,9 @@ const BRC100AuthOverlayRoot: React.FC = () => {
           <HodosWalletHeader />
           {/* Domain avatar + title */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '22px' }}>
-            {!faviconError ? (
+            {pageFaviconUrl && !faviconError ? (
               <img
-                src={`https://www.google.com/s2/favicons?domain=${notificationDomain}&sz=32`}
+                src={pageFaviconUrl}
                 width={32}
                 height={32}
                 style={{ borderRadius: 4, flexShrink: 0 }}
@@ -3360,9 +3380,9 @@ const BRC100AuthOverlayRoot: React.FC = () => {
           <HodosWalletHeader />
           {/* Domain avatar + title */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '22px' }}>
-            {!faviconError ? (
+            {pageFaviconUrl && !faviconError ? (
               <img
-                src={`https://www.google.com/s2/favicons?domain=${notificationDomain}&sz=32`}
+                src={pageFaviconUrl}
                 width={32}
                 height={32}
                 style={{ borderRadius: 4, flexShrink: 0 }}

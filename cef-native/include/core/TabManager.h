@@ -232,6 +232,27 @@ public:
      */
     void UpdateTabFavicon(int tab_id, const std::string& favicon_url);
 
+    /**
+     * @brief The page's OWN favicon URL for `host`, or "" if we do not have one.
+     *
+     * beta.3 Phase 7b. Consent modals used to render
+     * `https://www.google.com/s2/favicons?domain=<site>`, which told Google which
+     * site the user was being asked to trust, at the moment of the decision —
+     * from a privacy browser, on its most sensitive surface. The page's own icon
+     * is more private (no third party), more accurate (it is the icon of the site
+     * actually being consented to, not whatever Google cached) and already
+     * fetched, since `OnFaviconURLChange` populates `Tab::favicon_url` for the
+     * tab strip.
+     *
+     * ⛔ Matches on host, and returns "" rather than guessing. A consent screen
+     * showing the WRONG site's icon is worse than showing none — the caller
+     * falls back to the domain-initial avatar.
+     *
+     * @param host Normalised host (see `SitePermissionStore::NormalizeHost`)
+     * @return favicon URL, or "" when no live tab for that host has one
+     */
+    std::string GetFaviconUrlForHost(const std::string& host);
+
     // ========== Browser Registration ==========
 
     /**

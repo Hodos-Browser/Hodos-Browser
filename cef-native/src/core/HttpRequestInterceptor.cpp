@@ -706,6 +706,25 @@ static bool IsConnectModalType(const std::string& type) {
            type == "domain_approval";
 }
 
+// beta.3 Phase 7b — the `&favicon=` query fragment for a consent modal, or "".
+//
+// Declared in HttpRequestInterceptor.h and shared with simple_handler.cpp's
+// permission-prompt path so there is ONE implementation. It lives here because
+// `urlEncode` above is the encoder every other modal param already uses;
+// duplicating an encoder on a query string that carries site-controlled text is
+// how injection defects are born (see P0.5 panel #3, which had to go back and
+// urlEncode the certificate `fields` list for exactly this reason).
+//
+// ⛔ Returns "" when we have no icon for that host. The React side falls back to
+// the domain-initial avatar. It must never fall back to a remote lookup — that
+// is the defect being removed.
+std::string FaviconParamForDomain(const std::string& domain) {
+    const std::string host = SitePermissionStore::NormalizeHost(domain);
+    const std::string url = TabManager::GetInstance().GetFaviconUrlForHost(host);
+    if (url.empty()) return "";
+    return "&favicon=" + urlEncode(url);
+}
+
 class CreateNotificationOverlayTask : public CefTask {
 public:
     CreateNotificationOverlayTask(const std::string& type, const std::string& domain,
@@ -734,6 +753,25 @@ public:
                               " claimed a parked local-network permission — disclosing it in the modal");
             }
         }
+
+        // beta.3 Phase 7b — the consent surface renders the PAGE'S OWN favicon.
+        //
+        // 🚨 It used to render `https://www.google.com/s2/favicons?domain=<site>`,
+        // so every consent prompt — permission, domain approval, payment, rate
+        // limit, certificate disclosure — told Google which site the user was
+        // being asked to trust, at the instant of the decision, whether or not
+        // they approved and whether or not they even read the modal. From a
+        // privacy browser, on its most sensitive screen.
+        //
+        // ⛔ Empty is a valid answer and must stay one. The React side falls back
+        // to the domain-initial avatar; it must NOT fall back to a remote fetch.
+        // Showing the wrong site's icon on a consent screen is worse than showing
+        // no icon at all, so GetFaviconUrlForHost matches on host and never guesses.
+        //
+        // This is the single funnel for every interceptor-raised modal, which is
+        // why one append covers them all. The permission-prompt path in
+        // simple_handler.cpp builds its own query and calls the same helper.
+        extra += FaviconParamForDomain(domain_);
 #ifdef _WIN32
         extern HINSTANCE g_hInstance;
         CreateNotificationOverlay(g_hInstance, type_, domain_, extra);

@@ -2,6 +2,7 @@
 #include "../../include/core/LogSafeUrl.h"
 #include "../../include/core/EphemeralCookieManager.h"
 #include "../../include/core/WindowManager.h"
+#include "../../include/core/SitePermissionStore.h"
 #include "../../include/handlers/simple_handler.h"
 #include "include/cef_app.h"
 #include "include/wrapper/cef_helpers.h"
@@ -547,6 +548,24 @@ void TabManager::UpdateTabFavicon(int tab_id, const std::string& favicon_url) {
         tab->favicon_url = favicon_url;
         LOG(INFO) << "Tab " << tab_id << " favicon updated to: " << favicon_url;
     }
+}
+
+// beta.3 Phase 7b — see the header for why this exists (it replaces a
+// third-party favicon fetch on the consent surface).
+//
+// ⛔ Reuses SitePermissionStore::NormalizeHost rather than parsing the URL here.
+// That function already handles scheme, path, userinfo and — the case a
+// hand-rolled version gets wrong — IPv6 literals, where a naive first-colon
+// strip collapses every address to "[".
+std::string TabManager::GetFaviconUrlForHost(const std::string& host) {
+    if (host.empty()) return "";
+    for (Tab* tab : GetAllTabs()) {
+        if (!tab || tab->favicon_url.empty() || tab->url.empty()) continue;
+        if (SitePermissionStore::NormalizeHost(tab->url) == host) {
+            return tab->favicon_url;
+        }
+    }
+    return "";
 }
 
 // ========== Browser Registration ==========

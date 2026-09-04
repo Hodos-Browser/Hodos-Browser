@@ -264,6 +264,13 @@ std::string openCertificateDisclosureModal(const ModalContext& ctx, const Resume
 //
 // Returns the requestId of the enrolled PendingAuthRequest, or empty string
 // if no opener matched the promptType.
+// beta.3 Phase 7b — the `&favicon=` query fragment for a consent modal, or "".
+// Resolves the PAGE'S OWN favicon (TabManager::GetFaviconUrlForHost); consent
+// modals used to fetch google.com/s2/favicons, telling Google which site the
+// user was being asked to trust. Shared with simple_handler.cpp's
+// permission-prompt path so there is one implementation and one encoder.
+std::string FaviconParamForDomain(const std::string& domain);
+
 std::string OpenPromptModal(const std::string& promptType,
                             const ModalContext& ctx,
                             const ResumeContext& resume,
