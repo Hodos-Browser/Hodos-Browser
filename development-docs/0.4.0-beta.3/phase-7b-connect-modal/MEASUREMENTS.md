@@ -357,3 +357,118 @@ same build took 2m49s standalone. Stopping the dev stack and re-running gave a c
 ⛔ Worth knowing before someone "fixes" a build that is not broken: read the exit code. 143/137 mean
 something killed it. This is the mirror image of the session's other lesson — a green that means
 nothing, and here a red that means nothing.
+
+### N16 — 🟢 omnibox CLOSED (`P7b-A2`), the half that was owed
+
+**Two failed attempts first, both instructive.**
+
+1. Driving `omniboxQueryUpdate` synthetically after creating the overlay by IPC gave
+   `0 requests / 0 third-party` — and it was **vacuous**: a DOM probe showed `rows: 0, imgs: 0,
+   bodyLen: 14`. The overlay had been *created* but never *shown*, so it drew nothing. "No requests"
+   from a surface that rendered nothing is not a result. Third time this session that shape appeared.
+2. ⇒ `omnibox_watch.py` was written to record **what rendered alongside what was requested**, and to
+   exit 2 with `⛔ VACUOUS` when the peak row count is zero, rather than print a green.
+
+**The real run — a human typing, 2026-09-04:**
+
+```
+suggestion rows seen (peak) : 6
+data: URI icons seen (peak) : 3
+requests observed           : 5 total, 0 non-local
+THIRD-PARTY FAVICON HOSTS   : 0  (none)
+✅ Non-vacuous
+```
+
+👤 Owner, same session: *"I could see all four of the sites I know we should have in the db. So it
+looked correct to the user."*
+
+⚠️ The peak sample caught **3** data-URI icons where the owner saw **4** sites with icons. That is a
+sampling artefact — the DOM is polled every 0.6 s and suggestion rows change as you type — **not** a
+discrepancy. Recorded rather than smoothed over: the owner's observation is the stronger evidence
+here, and the instrument's job was the network half.
+
+⇒ Both halves now hold. The icons come from our store, they render, and typing in the address bar
+sends **nothing** to Google or DuckDuckGo. Row `P7b-A2` is complete; the ⚠️ carried since N6 is
+cleared.
+
+### N17 — 🟢 `P7b-A4` CLOSED: an unticked item is not written
+
+**Live connect, owner-driven, 2026-09-04.** Site: `beta.zanaadu.com` (a real BRC-100 dApp asking for
+a lot — 10 protocol grants, 7 baskets, 1 certificate). Dev wallet, real modal raised by C++, real
+Connect. ⛔ Not a fixture: the earlier probe proved the ticks *render*; only a real connect proves
+they *govern*.
+
+Owner unticked **Quiet mode**, then exactly one item: *"Store upvote proof UTXOs showing posts you've
+upvoted"* — basket `xanaverse-upvotes`.
+
+| Manifest declared | Written to `domain_basket_permissions` (id 108) |
+|---|---|
+| xanaverse-posts | ✅ |
+| **xanaverse-upvotes** | 🎯 **ABSENT** |
+| xanaverse-replies | ✅ |
+| xanaverse-downvotes | ✅ |
+| xanaverse-reclaimed | ✅ |
+| contacts | ✅ |
+| wallet settings | ✅ |
+
+**7 declared, 6 written, and the missing one is the one unticked.** All 10 protocol grants written
+(ids 89–98), the certificate row too. `bundled_scope_grant = 0` — the quiet-mode untick persisted as
+well, which is a second confirmation on the same screen. `identity_key_disclosure_allowed = 1`, left
+ticked.
+
+⇒ The tick governs the row. The merged view's per-item controls are load-bearing, not decorative.
+
+### N18 — two things the live manifest showed that no fixture would have
+
+1. **Zanaadu publishes the deprecated `babbage.groupPermissions` shape**, not BRC-73's
+   `metanet.groupPermissions`. `ManifestFetcher` handles all three shapes in precedence order and
+   this is the first *live* confirmation the deprecated arm works end to end.
+
+2. 🚨 **A real site asks for BRC-29 payment-key derivation against the "anyone" counterparty.**
+   ```json
+   { "protocolID": [2, "3241645161d8"],
+     "counterparty": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+     "description": "Sign for your profile name and picture tokens from your public identity slot." }
+   ```
+   That counterparty is **exactly** `ANYONE_PUBKEY_HEX` (`certificate_handlers.rs:3828`) —
+   `PrivateKey(1).toPublicKey()`, the secp256k1 generator, whose private half everyone knows. So this
+   is the widest form of that grant, and it is in the wild today, on the first real manifest tested
+   after the protocol-id display landed.
+
+   ⭐ Under the old UI the user saw only the sentence. They now also see `[2] 3241645161d8`. The
+   description here is honest — but this is precisely the pairing
+   `TICKET_manifest_description_can_misdescribe_protocol` was written about, occurring naturally.
+
+### N19 — 👤 owner observations closing the last two T3 rows
+
+- **`P7a-A4` (does a capped list LOOK scrollable) — 🟢 CLOSED.** Owner on the live Zanaadu connect
+  (17 declared items, well past the 240 px cap): *"yes and I was able to scroll through them. I
+  scrolled down and unchecked that basket permission request."* The affordance is adequate — the
+  user found content below the fold unprompted and acted on it. ⇒ The pre-existing worry (that the
+  cap had been silently hiding permissions since before this phase) is **not** borne out.
+- **Quiet-mode → per-item enable transition — 🟢 confirmed useful.** *"yes it did go from greyed out
+  to clickable, the visible change was good visual feedback for humans."* That transition is what
+  makes the inertness legible, so it is worth protecting in any future restyle.
+
+### N20 — ⚠️ correction to my own reading of the "anyone" counterparty
+
+I reported N18(2) as *"a real site asks for BRC-29 payment-key derivation against the anyone
+counterparty"*, which is accurate, and the owner reasonably read it as *"Zanaadu lets anyone pay
+you, so the counterparty must be anyone."* **That inference does not hold, and the difference
+matters for how we explain this to users.**
+
+- In BRC-42, `anyone` is **not a wildcard** meaning "any counterparty". It is one **specific,
+  publicly known key** — `PrivateKey(1)`, the secp256k1 generator
+  (`ANYONE_PUBKEY_HEX`, `certificate_handlers.rs:3828`). Deriving against it produces a key
+  **everyone can also derive**, i.e. deliberately non-secret.
+- **Receiving a payment from an arbitrary sender does not require it.** In BRC-29 the *sender*
+  derives using the *recipient's* identity key; the recipient's wallet needs to notice the output
+  (basket / monitoring), not a per-payer protocol grant. So a tipping feature does **not** imply an
+  `anyone` counterparty.
+- Zanaadu's own description says what it is actually for: *"Sign for your profile name and picture
+  tokens from your public identity slot."* Publicly-derivable is the **correct** choice for public
+  profile data.
+
+⇒ The owner's general intuition (p2p social apps need wide counterparty scope) is directionally
+reasonable, but this particular entry is the *public-data* case, not the *tipping* case.
+⚠️ Marked as **inference** about Zanaadu's intent — I have read their manifest, not their code.

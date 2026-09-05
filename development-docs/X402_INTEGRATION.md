@@ -233,6 +233,37 @@ Where Cloudflare does *not* compete: they shipped no browser, and their model is
 
 **BAT Roadmap 4.0 (2026-07-09)** commits Brave — 122M MAU — to first-class browser handling of HTTP 402: on a 402 response with an **x402 or MPP** (Machine Payments Protocol, agent payments) body, the browser pays for protected content. Rails are GENIUS-compliant stablecoins via BravePay (self-custody, `.brave` addresses); BAT survives via buybacks; Brave Search API to accept x402/MPP; wallet prototypes Fall 2026; experiments repo `brave-experiments/bx402`. Eich publicly: “all hail the HTTP 402 response code” (2026-08-19). **Read**: the browser-pays-402 architecture is now validated by the largest privacy-browser vendor — and the demand-side risk of §6a gains a browser-side twin: if Brave + Cloudflare normalize 402-with-stablecoin, the accepted-asset list consolidates around USDC-class assets from both ends. Our §6b differentiators are unaffected (BSV rails, BRC-29 derivation, per-domain permission engine, non-custodial in-process keys), but comparisons must target this roadmap, not 2024 Brave. Profile: `Marston Enterprises/Hodos/Marketing/Profiles/browser-tech/brave.md`.
 
+### ⭐ 6a¾. Orthogonal — an operator's field report, and it validates our roadmap (added 2026-09-02)
+
+Source: Christian Pickett (co-founder/CEO, ex-**payments at Coinbase**, ex-billing at Vercel),
+*"What Onboarding 700+ x402-Enabled API Endpoints Are Teaching Us About Agent Commerce"*,
+`orthogonal.com/blog/x402-agent-commerce-700-api-endpoints`. Orthogonal is YC W26, **$4.3M seed led
+by Pantera**, aggregating paid APIs behind one integration for agents. Post banner is
+**Orthogonal × Coinbase × x402**.
+
+⭐ **This is the first operator-scale account of x402 in production we have seen**, and three of its
+findings land directly on our open questions.
+
+| Their finding | What it means for us |
+|---|---|
+| ⭐⭐ **Their stated next priorities are *"governance and spend controls, limits, self-service API onboarding, and a control plane so companies can manage agent capabilities with confidence."*** | **That is our auto-approve engine.** A Pantera-funded x402 company, at 700+ endpoints, says the missing layer is per-agent spend governance — the thing Hodos already ships and video 4 is about. ⭐ **Strongest external validation of the permission engine we have** |
+| ⭐ **The friction they name is wallet management** — x402 became viable ~Jan 2026 when agents "could stand up and control their own wallets", but there was *"not an easy way to set up x402 at the time without managing your own wallet"* | **The obstacle they routed around by becoming an aggregator is the thing we ship.** A browser with an in-process wallet removes that setup step rather than intermediating it. ⚠️ Note the trade-off honestly: their answer scales to non-wallet-holders, ours does not |
+| ⭐ **Refunds are unspecified.** *"Facilitators did not have support for managing refunds, so each API that implemented v1 had to manage its own refund policy"* | **A gap our §3 does not mention at all.** ⭐ And BRC-166's shape partly pre-empts it: the **payer does not broadcast — the origin does, after producing the resource** (§9b), so a failed fulfilment means no payment rather than a refund. Worth raising as a genuine BSV-side advantage, carefully |
+| **Dynamic/request-based pricing** was *"not native to x402 v1, but came later in v2"* | ⭐ **Independent corroboration of the v1/v2 split** found in the 09-02 sweep. Two sources now |
+| **No shared discovery surface** existed; they built natural-language search and request-time routing | Upstream is now building this too (#3309, `bazaar` discovery indexing). Not our layer, but it is where they say the value sits |
+| Demand shape: **contact enrichment dominates** (ContactOut, Fiber AI, Tomba) | Agents went at the highest-friction manual workflows first. A demand signal for §8 q3, though not a BSV one |
+
+⭐ **Their thesis in one line, and it is worth internalising:** *x402 made agent payments possible;
+the value is in what sits above it — **discovery, pricing, and fulfilment**.* ⚠️ **That is an argument
+that the protocol layer is not the differentiator** — which cuts against treating the #2890 merge as
+important, and for treating our permission engine as the asset.
+
+⛔ **Do not over-read it.** "700+ endpoints" is a **catalogue count, not traffic**; the one outcome
+number given (*"87% of company updates surfaced were independently grounded, up from near zero"*) is
+a single customer over two weeks. **Same caution as the bsv.cx read in §9 — live is not trafficked.**
+⚠️ **And it is a Coinbase-lineage, stablecoin-rail account** — no BSV anywhere in it. Evidence for
+x402 demand generally, **not** for our variant.
+
 ### 6b. Structural advantages over the mobile browser
 
 Both stem from embedding the engine rather than wrapping a WebView:
@@ -279,6 +310,47 @@ Both stem from embedding the engine rather than wrapping a WebView:
 CONTRIBUTING also warns that contributions *"that show clear signs of unreviewed AI output... may be closed without detailed review."* The PR discloses AI assistance (correctly), but paired with a monolithic diff that is a risk factor. Most thread comments are content-free ecosystem cheerleading — **never add to that; only implementer-grade technical comments help** (see [[project_x402_brc121_ecosystem_2026_08_07]]).
 
 **The §4a freshness fix is the natural small spec-only PR** that would fit the documented workflow.
+
+### ⭐ Sweep 2026-09-02 — the PR is on life support while the spec moves under it
+
+Verified via GitHub API. **Headline: sirdeggen has merged nothing. He has exactly one PR in the repo
+(#2890) and it is still open.**
+
+| | State at 2026-09-02 |
+|---|---|
+| **#2890** | OPEN, `mergeable=MERGEABLE`, `mergeStateStatus=`**`BLOCKED`**, head `9d43df6`, updated 09-02 |
+| **Reviews** | ⛔ **Still 1** — andyrowe's, 2026-08-19. **Fourteen days, no second review; TSC engagement still zero** |
+| **Comments** | 37 — unchanged |
+| ⛔ **CI** | **Only three checks have ever run**: `check-verified-commits` ✅, `labeler` ✅, `Vercel` ❌ *"Authorization required to deploy"*. **Unit tests and lint have still never executed.** The fork-CI `action_required` block from the 08-21 sweep is unchanged |
+
+**Commits since the last substantive one (`d14bff7`, 08-25, a prettier fix):** five, **all**
+`Merge remote-tracking branch 'upstream/main'` — 08-26, 08-27, 08-28, 09-01, 09-02.
+
+⭐ **Verified still merge-only for BSV.** `compare d14bff7...9d43df6` = **300 files changed, not one
+matching `bsv`.** So §4a's freshness rule and every earlier code reading **carry over unchanged** —
+open question 2 re-checked, no change.
+
+#### ⚠️ But the surface around it is moving fast, and that is the new risk
+
+The repo merged **15 PRs in the six days to 09-02** (phdargen, CarsonRoscoe, wnjoon, mintlify). Three
+strands touch our future implementation:
+
+| Landing upstream | Why it matters to us |
+|---|---|
+| ⭐ **`EXTENSION-RESPONSES`** (#3270 → #3278, #3306 py, #3301 go) | A **facilitator → resource-server sidechannel header**, deliberately **excluded from JSON serialization "so it cannot reach buyers through `PAYMENT-RESPONSE`"** — an architectural privacy boundary that did not exist when #2890 was written |
+| ⭐ **builder-code `a` field attribution** (#3313 ts, #3302 go, docs #3315) | An app-attribution field now **validated on v2**, with distinct v1 behaviour. New required-field surface |
+| **v1 / v2 split being enforced** | #3313 and #3315 both distinguish them explicitly. BRC-166 targets `x402Version 2` (§9b) |
+
+⛔ **The risk, plainly: #2890 was written against an earlier wire surface, its author merges 300-file
+upstream deltas into it weekly, and CI has never once run on the result.** Nobody — including him —
+currently knows whether the BSV scheme still passes.
+
+⭐ **Two consequences for us.** Keep reading from **the spec, not his branch**; and **do not treat a
+future merge as evidence the code works** — on this PR, merging would prove only that a maintainer
+approved it, never that a test ran.
+
+⭐ **No change to the §10 decision.** Still do not implement. The gate is still a paying BRC-29
+`exact` server, not a merge.
 
 ---
 

@@ -575,13 +575,74 @@ Every outgoing transaction includes a **1000-satoshi service fee** output sent t
 
 ---
 
+## ⭐ Key vocabulary — short version
+
+**Rewritten 2026-09-04.** ⛔ An earlier version of this section invented "three senses of public"
+and made things worse, not better. Owner: *"Your charts still make no fucking sense."* Fair. The
+convention was never the problem — this is.
+
+### The convention is the normal one. Use it.
+
+**"public key" = the shareable half of a keypair. "private key" = the secret half.** That is
+standard and nothing here changes it.
+
+### The one fact that resolves most of the confusion
+
+⭐ **One private key derives many keypairs.** That is what BIP32/BRC-42 *are*. From a single master
+private key you can compute unlimited **child keypairs**, each with its own private and public half.
+
+⇒ So you do **not** have to hand the same public key to every site. You can derive a different one
+per site, and those sites cannot link them. **The linkability is a choice, not a constraint.**
+
+### The keys we actually have
+
+| Name | What it is |
+|---|---|
+| **recovery phrase** | The BIP39 mnemonic. Everything below is computed from it |
+| **master private key** | The one key at the top. `master_pubkey` / master private key in `handlers.rs` |
+| **identity key** | The public half of the master key. **The same on every site you show it to**, which is what makes it linkable. BRC-103 calls it `identityKey`; `identity_key_disclosure_allowed` governs revealing it |
+| **derived key** | A child keypair from (master private key + counterparty public key + invoice number). **Different inputs → different key** |
+| **site-scoped key** | A *derived key* whose inputs include the site's origin, so each site gets a different one. ⭐ This is the unlinkable option |
+| **payment output key** | A derived key used to lock one UTXO. The address is a hash of it |
+
+⚠️ **"master" vs "root":** the code says **master**. Use *master*. (BRC-42 prose says "root" and
+BRC-103 says "identity key" for the same thing — expect all three in the wild.)
+
+### The one genuine oddity, and it is a real trap
+
+**The well-known "anyone" key** — `PrivateKey(1)`, the secp256k1 generator
+(`ANYONE_PUBKEY_HEX`, `certificate_handlers.rs`).
+
+It is a public key like any other **except that its private half is the number 1, which everybody
+knows.** So anything derived against it can be derived by anyone. That is sometimes exactly right —
+publishing a certificate, or a public profile token — and catastrophic if used by mistake for
+something meant to be secret.
+
+⛔ It is **not** a wildcard meaning "any counterparty". It is one specific key.
+
+### Protocol vocabulary
+
+| Name | What it is |
+|---|---|
+| **protocol namespace** | The site-authored string, e.g. `server hmac`. **Untrusted text** |
+| **security level** | BRC-43's `0`/`1`/`2`. ⚠️ **Higher = narrower.** Level 2 re-asks per counterparty; level 1 covers every counterparty at once. The name reads like a risk score and means the opposite |
+| **protocol scope** | The pair `[security level, namespace]`. `is_protocol_granted` matches on **both**, so `[1,"foo"]` ≠ `[2,"foo"]` |
+| **invoice number** | BRC-43's `{securityLevel}-{protocolID}-{keyID}`. With the counterparty, it determines which derived key comes out |
+
+⛔ **Why this matters:** a site's `identity key retrieval` **protocol grant** and the wallet's
+**Identity checkbox** are different mechanisms with different gates. They look identical because both
+were being called "the identity key permission". Do not couple them —
+`TICKET_connect_modal_two_views_drift.md` §"A third instance".
+
+---
+
 ## Glossary
 
 | Term | Meaning |
 |------|---------|
 | BRC-100 | BSV authentication/identity protocol suite |
-| BRC-42 | ECDH-based child key derivation (master key + counterparty public key → child key) |
-| BRC-43 | Invoice number format: `{securityLevel}-{protocolID}-{keyID}` |
+| BRC-42 | ECDH-based child key derivation (root identity private key + counterparty key → **site-scoped derived key**). ⭐ Vocabulary: see the section above |
+| BRC-43 | Invoice number format: `{securityLevel}-{protocolID}-{keyID}`. The **protocol scope** is the pair `[security level, namespace]` — both are matched |
 | BRC-52 | Identity certificate format with selective disclosure |
 | BRC-2 | Symmetric encryption using BRC-42-derived AES-256-GCM keys. Used for MessageBox message encryption |
 | BRC-29 | PeerPay direct payment protocol: sender derives recipient key via BRC-42, creates P2PKH output, sends PaymentToken via encrypted MessageBox. Protocol ID: `3241645161d8` |
