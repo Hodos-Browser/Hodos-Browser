@@ -128,12 +128,13 @@ pub enum EngineReason {
     /// "prompt-per-recipient" UX collapse seen with token-issuing dApps like
     /// todo.metanet.app. Phase 2.6-D Fix #3 (2026-06-09).
     SilentCounterpartyDefault,
-    /// Bundle-grant on first connect covers this scoped call. The user
-    /// approved an "allow this site to perform wallet operations without
-    /// prompting each time" checkbox on the connect modal, which sets
-    /// domain_permissions.bundled_scope_grant=1. Protected baskets still
-    /// prompt regardless (dispatch overrides). Phase 2.6-D Fix #4.
-    SilentBundledScopeGrant,
+    // ⛔ `SilentBundledScopeGrant` was removed by beta.3 Phase 7c. It marked a
+    // decision that can no longer be reached: quiet mode used to silence every
+    // ProtocolUse and BasketAccess on the domain, declared or not. It now
+    // silences nothing of its own — `SilentScopedGrantExists` covers what the
+    // user actually approved. Removed rather than left in place so no future
+    // edit can attach a reason that no longer describes anything true.
+    // See `matrix_c.rs :: decide_scoped_grant` for the three traps.
     /// Cert disclosure: every requested field has a matching permission row.
     SilentAllCertFieldsApproved,
     /// Generic approved-domain call with no extra gate. The catch-all silent

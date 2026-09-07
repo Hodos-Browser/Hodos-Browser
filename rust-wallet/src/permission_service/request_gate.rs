@@ -437,26 +437,21 @@ pub fn dispatch_scoped_grant(
     };
 
     let call_kind = scoped_call.call_kind();
-    // Phase 2.6-D Fix #4 — protected-basket override.
+    // ⛔ beta.3 Phase 7c removed the Phase 2.6-D Fix #4 "protected-basket
+    // override" that used to sit here. It pinned `ctx.bundled_scope_grant =
+    // false` for protected baskets so the bundle grant could not silence them.
+    // The engine no longer reads that field at all, so the override became a
+    // no-op that still *looked* protective — the most dangerous kind of dead
+    // code in a permission gate.
     //
-    // The V22 `bundled_scope_grant` column normally silences ProtocolUse +
-    // BasketAccess for the domain. For BasketAccess against a protected
-    // basket (`default` / `backup-*` / `admin *`), we must NOT let the bundle
-    // grant silence the engine — protected baskets ALWAYS prompt. So we pass
-    // `Some(false)` as the override, which pins ctx.bundled_scope_grant=false
-    // regardless of what the perm row says.
-    //
-    // For everything else, pass `None` so the builder reads the column from
-    // the perm row directly.
-    let bundled_override = match &scoped_call {
-        ScopedCall::Basket { basket, .. } if is_protected_basket(basket) => Some(false),
-        _ => None,
-    };
+    // ⭐ The protected-basket guardrail is unchanged and lives ~30 lines above:
+    // the `is_protected_basket(basket)` arm of the `scoped_grant_exists`
+    // computation forces `false`, so `default` / `backup-*` / `admin *` reach
+    // the engine with no grant and always prompt. That is the one with teeth.
     let ctx = context_builder::build_scoped_grant_context(
         call_kind,
         perm_row.as_ref(),
         scoped_grant_exists,
-        bundled_override,
     );
     let decision = permission.decide(&ctx);
 

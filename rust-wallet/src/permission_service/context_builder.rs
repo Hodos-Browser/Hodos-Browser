@@ -129,16 +129,21 @@ pub fn build_privacy_perimeter_context(
 ///
 /// Note: caller is responsible for the protected-basket guardrail — when
 /// `call_kind == BasketAccess` and the basket name is protected
-/// (`default`, `backup-*`, `admin *`), the caller MUST pass
-/// `bundled_scope_grant_override = Some(false)` AND force
+/// (`default`, `backup-*`, `admin *`), the caller MUST force
 /// `scoped_grant_exists = false`, so the engine always prompts regardless of
-/// any V18 row or the column on `domain_permissions`. The defense-in-depth
-/// pair (REJECTING POSTs to write protected-basket grants) lives in the
-/// `grant_basket_permission` handler.
+/// any V18 row. The defense-in-depth pair (REJECTING POSTs to write
+/// protected-basket grants) lives in the `grant_basket_permission` handler.
+/// ⚠️ beta.3 Phase 7c dropped the second half of that instruction — the
+/// `bundled_scope_grant_override = Some(false)` argument — because the engine
+/// no longer reads the flag. Forcing `scoped_grant_exists = false` is now the
+/// whole guardrail.
 ///
-/// `bundled_scope_grant_override`:
-///   - `None` — read `bundled_scope_grant` from `domain_perm` (the V22 column)
-///   - `Some(b)` — override; used for protected-basket force-prompt
+/// 🐛 **Pre-existing, not introduced by 7c:** this doc block is orphaned. It
+/// documents `build_scoped_grant_context` but sits directly above
+/// `build_payment_context` with no function between, so rustdoc attaches all
+/// of it to the payment builder. Verified against `HEAD` before this phase.
+/// Left in place rather than moved — reattaching it is not this phase's change.
+///
 /// Phase 2.6-E — build a PermissionContext for the Payment CallKind.
 ///
 /// Mirrors the C++ inline payment branch ctx-population in
@@ -197,11 +202,16 @@ pub fn build_payment_context(
     }
 }
 
+/// ⚠️ beta.3 Phase 7c dropped the `bundled_scope_grant_override` parameter.
+/// The engine no longer reads `bundled_scope_grant`, so the override was a
+/// no-op; the protected-basket guardrail lives in `dispatch_scoped_grant`'s
+/// `scoped_grant_exists` computation. The context field is still populated from
+/// the row so the engine's "this flag decides nothing" regression guard has a
+/// subject — see `matrix_c.rs :: decide_scoped_grant`.
 pub fn build_scoped_grant_context(
     call_kind: CallKind,
     domain_perm: Option<&DomainPermission>,
     scoped_grant_exists: bool,
-    bundled_scope_grant_override: Option<bool>,
 ) -> PermissionContext {
     debug_assert!(
         matches!(
@@ -220,12 +230,9 @@ pub fn build_scoped_grant_context(
         None => TrustLevel::Unknown,
     };
 
-    // Read the V22 column from the permission row, with override support for
-    // the protected-basket guardrail.
-    let bundled_scope_grant = match bundled_scope_grant_override {
-        Some(b) => b,
-        None => domain_perm.map(|p| p.bundled_scope_grant).unwrap_or(false),
-    };
+    // Read the V22 column from the permission row. Recorded on the context,
+    // read by nothing — see the doc comment above.
+    let bundled_scope_grant = domain_perm.map(|p| p.bundled_scope_grant).unwrap_or(false);
 
     PermissionContext {
         call_kind,
@@ -420,7 +427,6 @@ mod tests {
         let ctx = build_scoped_grant_context(
             CallKind::ProtocolUse, Some(&perm),
             /*scoped_grant_exists=*/ true,
-            /*bundled_scope_grant_override=*/ None,
         );
         assert_eq!(ctx.call_kind, CallKind::ProtocolUse);
         assert_eq!(ctx.trust_level, TrustLevel::Approved);
@@ -434,7 +440,6 @@ mod tests {
         let ctx = build_scoped_grant_context(
             CallKind::BasketAccess, Some(&perm),
             /*scoped_grant_exists=*/ false,
-            None,
         );
         assert!(!ctx.scoped_grant_exists);
         assert!(!ctx.bundled_scope_grant);
@@ -446,7 +451,6 @@ mod tests {
         let ctx = build_scoped_grant_context(
             CallKind::CounterpartyUse, Some(&perm),
             true,
-            None,
         );
         assert_eq!(ctx.call_kind, CallKind::CounterpartyUse);
         assert!(ctx.scoped_grant_exists);
@@ -454,7 +458,7 @@ mod tests {
 
     #[test]
     fn scoped_grant_context_without_perm_row_falls_to_unknown() {
-        let ctx = build_scoped_grant_context(CallKind::ProtocolUse, None, true, None);
+        let ctx = build_scoped_grant_context(CallKind::ProtocolUse, None, true);
         assert_eq!(ctx.trust_level, TrustLevel::Unknown);
         // Engine will hit DomainTrust gate first and Prompt domain_approval
         // regardless of scoped_grant_exists — the flag still gets populated
@@ -467,7 +471,7 @@ mod tests {
     #[test]
     fn scoped_grant_context_translates_blocked_trust() {
         let perm = sample_perm("blocked", false);
-        let ctx = build_scoped_grant_context(CallKind::ProtocolUse, Some(&perm), true, None);
+        let ctx = build_scoped_grant_context(CallKind::ProtocolUse, Some(&perm), true);
         assert_eq!(ctx.trust_level, TrustLevel::Blocked);
     }
 
@@ -480,36 +484,41 @@ mod tests {
         let ctx = build_scoped_grant_context(
             CallKind::ProtocolUse, Some(&perm),
             /*scoped_grant_exists=*/ false,
-            /*bundled_scope_grant_override=*/ None,
         );
         assert!(ctx.bundled_scope_grant);
     }
 
     #[test]
-    fn scoped_grant_context_protected_basket_override_forces_false() {
-        // Even when the V22 column says bundled grant is on, the protected
-        // basket override must force it false so the engine prompts.
+    fn p7c_protected_basket_prompts_even_when_the_v22_column_is_set() {
+        // Replaces `scoped_grant_context_protected_basket_override_forces_false`
+        // and `scoped_grant_context_override_some_true_pins_to_true`, both of
+        // which exercised the `bundled_scope_grant_override` parameter Phase 7c
+        // removed. The second tested an API generality no caller used and is
+        // simply gone; this one preserves what actually mattered - that a
+        // protected basket still prompts with the V22 column set - but asserts
+        // it through the mechanism that now carries the guardrail.
+        //
+        // The teeth are in `dispatch_scoped_grant`, which forces
+        // `scoped_grant_exists = false` for protected baskets before calling
+        // this builder. So the subject here is: given that force-false, does
+        // the resulting context make the engine prompt even though the row
+        // says quiet mode is on?
         let mut perm = sample_perm("approved", false);
         perm.bundled_scope_grant = true;
         let ctx = build_scoped_grant_context(
             CallKind::BasketAccess, Some(&perm),
-            false,
-            /*bundled_scope_grant_override=*/ Some(false),
+            /*scoped_grant_exists=*/ false, // what dispatch_scoped_grant forces
         );
-        assert!(!ctx.bundled_scope_grant);
-    }
-
-    #[test]
-    fn scoped_grant_context_override_some_true_pins_to_true() {
-        // No real production caller does this, but the API is general — verify
-        // an explicit Some(true) override pins true even if perm row says false.
-        let perm = sample_perm("approved", false); // bundled_scope_grant=false in sample
-        let ctx = build_scoped_grant_context(
-            CallKind::ProtocolUse, Some(&perm),
-            false,
-            Some(true),
+        assert!(ctx.bundled_scope_grant, "the column is still read onto the context");
+        assert!(!ctx.scoped_grant_exists, "the guardrail must survive the builder");
+        assert_eq!(
+            hodos_permission_engine::decide(&ctx),
+            hodos_permission_engine::PermissionDecision::prompt(
+                hodos_permission_engine::PromptType::BasketPermissionPrompt,
+                hodos_permission_engine::EngineReason::ScopedGrantMissing,
+            ),
+            "a protected basket must prompt regardless of the V22 column",
         );
-        assert!(ctx.bundled_scope_grant);
     }
 
     // ------------- Phase 2.6-E — payment context builder -------------

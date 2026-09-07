@@ -147,30 +147,47 @@ fn decide_privacy_perimeter(ctx: &PermissionContext) -> PermissionDecision {
 ///      key derivation is mathematically one-sided and reveals nothing the
 ///      dApp doesn't already know. Prompting per-counterparty collapses UX
 ///      on token-issuing dApps that use one counterparty per recipient.
-///   2. **Bundled scope grant → Silent** (Phase 2.6-D Fix #4). If the user
-///      ticked "Allow this site to perform wallet operations without
-///      prompting each time" on the connect modal,
-///      `domain_permissions.bundled_scope_grant=1` and ProtocolUse +
-///      BasketAccess are silent. Protected baskets are NOT silenced here —
-///      `dispatch_scoped_grant` overrides `bundled_scope_grant` to false for
-///      basket access against `default`/`backup-*`/`admin *`.
-///   3. **Matching V18 row → Silent**. Per-call explicit grant from a prior
-///      "Always allow" prompt.
-///   4. Otherwise → Prompt with the appropriate scope modal.
+///   2. **Matching V18 row → Silent**. The user approved this exact scope —
+///      either by leaving it ticked on the connect screen, or by answering
+///      "Always allow" to a prior prompt.
+///   3. Otherwise → Prompt with the appropriate scope modal.
 ///
 /// Mirrors C++ `DecideScopedGrant` (PermissionEngine.cpp:83-113) with the
-/// Fix #3 / Fix #4 deltas.
+/// Fix #3 delta.
+///
+/// ⛔ **beta.3 Phase 7c removed the `bundled_scope_grant` arm that used to sit
+/// between 1 and 2.** It returned `Silent` for *every* ProtocolUse and
+/// BasketAccess while the flag was set — declared or not, ticked or not — so
+/// the per-item list on the connect screen was a preview rather than a limit,
+/// and the V18 rows those ticks write were never read.
+/// (`TICKET_quiet_mode_wider_than_manifest.md`, owner yes 2026-09-07.)
+///
+/// Three things a future edit needs to know, because each one was measured
+/// and each one is a trap:
+///
+/// - ⛔ **Do not "fix" this by reordering.** Both arms returned `Silent`, so
+///   swapping them was a pure no-op in all four input cells. The arm had to
+///   go, not move.
+/// - ⛔ **Do not narrow it by reading `domain_manifest_snapshots`.** That
+///   table is informational only and must never be a decision input
+///   (`R-SNAPSHOT` / `P0.8-A11`, owner-approved 2026-08-22) — a site could
+///   otherwise widen its own grants by republishing after approval. The V18
+///   child tables, i.e. `scoped_grant_exists`, are the authoritative record.
+/// - ⚠️ **`PermissionContext.bundled_scope_grant` is deliberately still here**
+///   and deliberately unread by this function. It is retained as the *subject*
+///   of `p7c_quiet_mode_never_changes_any_scoped_outcome`, which asserts the
+///   decision is identical with the flag on and off for every
+///   (call_kind, scoped_grant_exists) pair. Delete the field and that guard
+///   goes with it, and re-introducing the bug becomes a one-line change nobody
+///   catches.
+///   ⛔ It is **not** what protects the protected baskets. That guardrail lives
+///   in `request_gate.rs :: dispatch_scoped_grant`, which forces
+///   `scoped_grant_exists = false` for `default` / `backup-*` / `admin *`
+///   before the context is built — unaffected by this phase.
 fn decide_scoped_grant(ctx: &PermissionContext) -> PermissionDecision {
     // Fix #3 — CounterpartyUse is silent for approved domains.
     if ctx.call_kind == CallKind::CounterpartyUse {
         return PermissionDecision::silent(EngineReason::SilentCounterpartyDefault);
-    }
-
-    // Fix #4 — bundle-grant covers ProtocolUse + BasketAccess on approved
-    // domains where the user opted into the bundled grant on the connect
-    // modal. dispatch_scoped_grant has already cleared protected baskets.
-    if ctx.bundled_scope_grant {
-        return PermissionDecision::silent(EngineReason::SilentBundledScopeGrant);
     }
 
     if ctx.scoped_grant_exists {
@@ -591,10 +608,18 @@ mod tests {
         assert_eq!(d, PermissionDecision::deny(EngineReason::TrustBlocked));
     }
 
-    // ── Phase 2.6-D Fix #4 — bundled_scope_grant covers ProtocolUse + BasketAccess ──
+    // ── beta.3 Phase 7c — quiet mode covers only what the user approved ──
+    //
+    // These two were `fix4_bundle_grant_silences_*_without_v18_row`, asserting
+    // the opposite. They are REWRITTEN, not deleted: the input they cover — the
+    // flag set with no matching grant — is the exact case Phase 7c changed, so
+    // deleting them would have dropped coverage behind a green gate.
+    // `P7c-A10`.
 
     #[test]
-    fn fix4_bundle_grant_silences_protocol_use_without_v18_row() {
+    fn p7c_quiet_mode_does_not_silence_undeclared_protocol_use() {
+        // The whole point of the phase: flag on, no grant for THIS scope ⇒
+        // prompt. Before 7c this returned Silent(SilentBundledScopeGrant).
         let ctx = PermissionContext {
             call_kind: CallKind::ProtocolUse,
             trust_level: TrustLevel::Approved,
@@ -605,12 +630,15 @@ mod tests {
         let d = decide(&ctx);
         assert_eq!(
             d,
-            PermissionDecision::silent(EngineReason::SilentBundledScopeGrant)
+            PermissionDecision::prompt(
+                PromptType::ProtocolPermissionPrompt,
+                EngineReason::ScopedGrantMissing
+            )
         );
     }
 
     #[test]
-    fn fix4_bundle_grant_silences_basket_access_without_v18_row() {
+    fn p7c_quiet_mode_does_not_silence_undeclared_basket_access() {
         let ctx = PermissionContext {
             call_kind: CallKind::BasketAccess,
             trust_level: TrustLevel::Approved,
@@ -621,8 +649,70 @@ mod tests {
         let d = decide(&ctx);
         assert_eq!(
             d,
-            PermissionDecision::silent(EngineReason::SilentBundledScopeGrant)
+            PermissionDecision::prompt(
+                PromptType::BasketPermissionPrompt,
+                EngineReason::ScopedGrantMissing
+            )
         );
+    }
+
+    #[test]
+    fn p7c_approved_scope_is_silent_whether_or_not_quiet_mode_is_on() {
+        // The other half of `P7c-A1`, and the pair that makes the two tests
+        // above meaningful: a scope the user DID approve must stay silent, and
+        // must be silent for the same reason either way. If the flag ever
+        // changes this outcome again, it has grown a second meaning.
+        for quiet in [true, false] {
+            for (kind, label) in [
+                (CallKind::ProtocolUse, "ProtocolUse"),
+                (CallKind::BasketAccess, "BasketAccess"),
+            ] {
+                let ctx = PermissionContext {
+                    call_kind: kind,
+                    trust_level: TrustLevel::Approved,
+                    scoped_grant_exists: true,
+                    bundled_scope_grant: quiet,
+                    ..Default::default()
+                };
+                assert_eq!(
+                    decide(&ctx),
+                    PermissionDecision::silent(EngineReason::SilentScopedGrantExists),
+                    "{label} with an approved grant must be silent for the grant, \
+                     not the flag (quiet mode = {quiet})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn p7c_quiet_mode_never_changes_any_scoped_outcome() {
+        // ⭐ The generalisation, and the guard that makes a future reorder
+        // pointless: for every (call_kind, scoped_grant_exists) pair, the
+        // decision must be IDENTICAL with the flag on and off. Phase 7c's
+        // whole claim is that `bundled_scope_grant` no longer decides
+        // anything on this branch; this asserts it exhaustively rather than
+        // one case at a time.
+        for kind in [
+            CallKind::ProtocolUse,
+            CallKind::BasketAccess,
+            CallKind::CounterpartyUse,
+        ] {
+            for exists in [true, false] {
+                let mk = |quiet: bool| PermissionContext {
+                    call_kind: kind,
+                    trust_level: TrustLevel::Approved,
+                    scoped_grant_exists: exists,
+                    bundled_scope_grant: quiet,
+                    ..Default::default()
+                };
+                assert_eq!(
+                    decide(&mk(true)),
+                    decide(&mk(false)),
+                    "quiet mode changed the outcome for {kind:?} with \
+                     scoped_grant_exists={exists}"
+                );
+            }
+        }
     }
 
     #[test]
