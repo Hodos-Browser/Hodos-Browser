@@ -20,7 +20,7 @@ longer than the screen.
 ⚠️ Phase 7a's `cardStyle` cap means it now **scrolls rather than clipping** — so this is a usability
 ticket, not a safety one. It was a safety one until `c7ce5c6`.
 
-## The four items
+## The five items
 
 ### 1. 🚨 Click-outside discards unsaved changes with no warning
 
@@ -72,6 +72,29 @@ distinguish *"never asked for"* from *"user said no"*, and offers no way to turn
 pressure and must not stick; an **overt untick on the connect screen or in this panel** is a settled
 preference and should. That distinction needs stating explicitly wherever it lands, or the two
 tickets will be read as contradicting each other.
+
+### 5. No way to find a site — the approved list has no search
+
+Added 2026-09-05 from owner review. `ApprovedSitesTab.tsx` (503 lines) contains **no search, filter
+or sort** — measured, the words do not appear in the file. The list is rendered in insertion order
+and the user scrolls.
+
+Already awkward: the dev wallet holds **15** approved sites (measured 2026-09-04, `domain_permissions`).
+A real user who has been browsing for months will have far more, and the entry point that matters most
+— right-click → *"Manage Site Permissions"*, the quick-revoke path CLAUDE.md names as load-bearing —
+lands them in this same list.
+
+**Requested:** a filter box at the top of the list, matching on domain substring.
+
+⭐ Cheapest item in this ticket and it makes the other four easier to test, since reaching a specific
+site stops being a scroll. Suggest doing it **first**, not last.
+
+⚠️ Two things to check rather than assume:
+- Native `<input>`, not MUI `TextField` — CEF overlay input rule, root `CLAUDE.md` §CEF Input Patterns.
+  The delayed-focus `setTimeout(50ms)` pattern applies if the box is to be auto-focused.
+- Filtering must not change what **Revoke** acts on. If any row action is keyed by list index rather
+  than by domain + grant identity, filtering silently makes it revoke the wrong row. Check before
+  writing the filter, not after.
 
 ---
 
