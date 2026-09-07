@@ -27,11 +27,12 @@ export interface DomainPermissionSettings {
   // Optional in the interface for backward compat; callers should always pass
   // the user's current selection so the column doesn't silently flip.
   identityKeyDisclosureAllowed?: boolean;
-  // Phase 2.6-D Fix #4 — V22 domain_permissions.bundled_scope_grant column.
-  // When true, the wallet engine silences ProtocolUse + BasketAccess prompts
-  // for this site (CounterpartyUse silent for approved sites via Fix #3;
-  // protected baskets always prompt regardless).
-  bundledScopeGrant?: boolean;
+  // ⛔ beta.3 Phase 7c removed `bundledScopeGrant` from this shape along with
+  // the "Quiet mode" toggle it drove. The V22 column still exists but the
+  // engine no longer reads it, so a control here would have changed nothing —
+  // a toggle that silently does nothing is worse than the blanket grant it
+  // used to describe. Per-scope grants are revoked from the sub-permission
+  // rows below, which is where the real state lives.
 }
 
 // Sub-permission row types fetched from Step 3 GET endpoints. Display-only
@@ -83,13 +84,6 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
   // Phase 1.5 Step 5 — Personal Info Disclosure section state.
   const [allowIdentityKey, setAllowIdentityKey] = useState<boolean>(
     currentSettings?.identityKeyDisclosureAllowed ?? true
-  );
-  // Phase 2.6-D Fix #4 — bundled scope grant toggle state. Defaults to false
-  // when editing an existing row that pre-dates V22 (so silent migration
-  // doesn't accidentally promote per-call prompts to always-allow); defaults
-  // to true on the connect modal where the user is explicitly opting in.
-  const [allowBundledScope, setAllowBundledScope] = useState<boolean>(
-    currentSettings?.bundledScopeGrant ?? false
   );
   const [subPermissions, setSubPermissions] = useState<SubPermissionRow[]>([]);
   const [subPermsLoading, setSubPermsLoading] = useState<boolean>(false);
@@ -204,7 +198,6 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
       rateLimitPerMin: rateLimitNum,
       maxTxPerSession: parseInt(maxTxPerSession) || 0,
       identityKeyDisclosureAllowed: allowIdentityKey,
-      bundledScopeGrant: allowBundledScope,
     });
   };
 
@@ -483,62 +476,15 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
           </div>
         </div>
 
-        {/* Phase 2.6-D Fix #4 — Quiet-mode toggle (V22 bundled_scope_grant). */}
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '10px',
-            marginBottom: '12px',
-            cursor: 'pointer',
-            userSelect: 'none',
-          }}
-          onClick={() => setAllowBundledScope(!allowBundledScope)}
-        >
-          <div style={{
-            width: '18px',
-            height: '18px',
-            borderRadius: '4px',
-            border: `2px solid ${allowBundledScope ? COLORS.gold : COLORS.borderInput}`,
-            background: allowBundledScope ? COLORS.gold : 'transparent',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            flexShrink: 0,
-            transition: 'all 0.15s',
-          }}>
-            {allowBundledScope && (
-              <span style={{ color: '#0f1117', fontSize: '12px', fontWeight: 700, lineHeight: 1 }}>&#10003;</span>
-            )}
-          </div>
-          <div>
-            <div style={{ fontSize: '13px', color: COLORS.textDark, fontWeight: 600 }}>
-              Quiet mode — perform wallet operations without asking
-              <span
-                title="When on, this site can use BRC-100 protocol, basket, and counterparty operations without prompting you each time. Sensitive operations (large payments, identity disclosure, sensitive certificate fields) and protected baskets (default/backup-*/admin *) always prompt regardless."
-                style={{
-                  marginLeft: '6px',
-                  cursor: 'help',
-                  color: COLORS.textMuted,
-                  fontSize: '11px',
-                  border: `1px solid ${COLORS.textMuted}`,
-                  borderRadius: '50%',
-                  width: '14px',
-                  height: '14px',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  fontWeight: 600,
-                  lineHeight: 1,
-                  verticalAlign: 'middle',
-                }}
-              >i</span>
-            </div>
-            <div style={{ fontSize: '11px', color: COLORS.textMuted }}>
-              When off, the wallet prompts the first time this site requests each protocol or basket.
-            </div>
-          </div>
-        </div>
+        {/* [P7c] DELETED the "Quiet mode" toggle that sat here.
+            It wrote the V22 bundled_scope_grant column, which the engine no
+            longer reads - so the control would have moved a value that
+            changes nothing while still reading, on screen, as the site's
+            master permission switch. Its own subtitle claimed "when off, the
+            wallet prompts the first time this site requests each protocol or
+            basket", which is now simply how the wallet always behaves.
+            The real per-site state is the "Granted permissions" list below:
+            revoking a row there is what makes that scope prompt again. */}
 
         {/* Granted sub-permissions list (read-only with revoke buttons) */}
         <div style={{ fontSize: '12px', color: COLORS.textMuted, marginBottom: '6px' }}>

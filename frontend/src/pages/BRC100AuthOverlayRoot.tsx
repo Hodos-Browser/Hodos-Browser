@@ -63,8 +63,6 @@ const EditPermissionsForm: React.FC<{ domain: string; onClose: () => void }> = (
               // Phase 1.5 Step 5 — pass through current V17 column value so
               // the form shows the actual setting, not the default.
               identityKeyDisclosureAllowed: data.identityKeyDisclosureAllowed ?? true,
-              // Phase 2.6-D Fix #4 — pass through V22 column value.
-              bundledScopeGrant: data.bundledScopeGrant ?? false,
             });
           }
         }
@@ -89,8 +87,6 @@ const EditPermissionsForm: React.FC<{ domain: string; onClose: () => void }> = (
           maxTxPerSession: settings.maxTxPerSession,
           // Phase 1.5 Step 5 — Personal Info Disclosure toggle persistence.
           identityKeyDisclosureAllowed: settings.identityKeyDisclosureAllowed,
-          // Phase 2.6-D Fix #4 — Quiet-mode toggle persistence (V22 column).
-          bundledScopeGrant: settings.bundledScopeGrant,
         }),
       });
     } catch (err) {
@@ -394,7 +390,6 @@ const BRC100AuthOverlayRoot: React.FC = () => {
   // scope kind, populated by applyParams from the C++ extraParams query string.
   const [scopedProtocolLevel, setScopedProtocolLevel] = useState<number>(2);
   const [scopedProtocolName, setScopedProtocolName] = useState<string>('');
-  const [scopedProtocolKeyId, setScopedProtocolKeyId] = useState<string>('*');
   const [scopedProtocolCounterparty, setScopedProtocolCounterparty] = useState<string>('');
   const [scopedBasket, setScopedBasket] = useState<string>('');
   const [scopedBasketAccess, setScopedBasketAccess] = useState<string>('read');
@@ -421,14 +416,10 @@ const BRC100AuthOverlayRoot: React.FC = () => {
   // the identity-key reveal. Power users can untick to keep the prompt.
   const [allowIdentityKey, setAllowIdentityKey] = useState<boolean>(true);
 
-  // Phase 2.6-D Fix #4 — "Allow this site to perform wallet operations
-  // without prompting each time" checkbox. Defaults ON for UX (per CLAUDE.md:
-  // UX wins ties when no privacy/security cost is at stake). When ticked,
-  // the engine silences ProtocolUse + BasketAccess prompts for this domain.
-  // CounterpartyUse is already silent for approved domains via Fix #3.
-  // Protected baskets (default/backup-*/admin *) still prompt regardless —
-  // those forced-prompt paths run before this flag is consulted.
-  const [allowBundledScope, setAllowBundledScope] = useState<boolean>(true);
+  // ⛔ Phase 7c removed the "Quiet mode" checkbox state that lived here, and
+  // the V25 saved-default ref that seeded it. Both connect views now express
+  // consent solely through the per-item ticks (manifest) or through nothing at
+  // all (no manifest — the site declared nothing, so nothing is granted).
 
   // Phase 1.5 Step 5 — user's saved default for the bundle checkbox (V19
   // settings column). applyParams reads this ref so each fresh notification
@@ -436,11 +427,6 @@ const BRC100AuthOverlayRoot: React.FC = () => {
   // (not state) because applyParams is invoked from a JS-injection callback
   // whose closure would otherwise capture stale state.
   const savedDefaultIdentityKeyRef = useRef<boolean>(true);
-
-  // beta.3 Phase 0.8 V25 — the user's default for QUIET MODE, the widest grant
-  // on the connect screen. Was hardcoded `true` with no way to change it.
-  // Defaults to true here so a wallet without V25 behaves exactly as before.
-  const savedDefaultBundledScopeRef = useRef<boolean>(true);
 
   // Phase 1.5 Step 5 — manifest_connect_bundle state. Parsed once from the
   // C++-supplied `manifest` query param; sub-permissions start all-selected
@@ -492,12 +478,6 @@ const BRC100AuthOverlayRoot: React.FC = () => {
   const [manifestSelectedCertificates, setManifestSelectedCertificates] = useState<Set<number>>(new Set());
   const [manifestSelectedCounterparties, setManifestSelectedCounterparties] = useState<Set<number>>(new Set());
   const [manifestAllowIdentityKey, setManifestAllowIdentityKey] = useState<boolean>(true);
-  // Phase 2.6-D Fix #4 — bundled scope grant for the manifest connect path.
-  // Same semantics as the domain_approval modal's allowBundledScope: when
-  // ticked, the engine silences ProtocolUse + BasketAccess prompts for this
-  // domain (CounterpartyUse silent by Fix #3, protected baskets always
-  // prompt). Default ON.
-  const [manifestAllowBundledScope, setManifestAllowBundledScope] = useState<boolean>(true);
   // beta.3 Phase 0.8 — the four limit fields, plus WHOSE number each one is.
   //
   // 🚨 These used to be seeded straight from `m.spending.perTransactionUsd`,
@@ -630,7 +610,6 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     const protoLevelParam = params.get('protocolLevel');
     setScopedProtocolLevel(protoLevelParam ? parseInt(protoLevelParam) : 2);
     setScopedProtocolName(params.get('protocolName') || '');
-    setScopedProtocolKeyId(params.get('protocolKeyId') || '*');
     setScopedProtocolCounterparty(params.get('protocolCounterparty') || '');
     setScopedBasket(params.get('basket') || '');
     setScopedBasketAccess(params.get('basketAccess') || 'read');
@@ -652,8 +631,6 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     // checkbox showing a state the user never chose for the site in front of
     // them. Now re-seeded from the V25 user default on every prompt, which
     // fixes the leak and the hardcoded default in one move.
-    setAllowBundledScope(savedDefaultBundledScopeRef.current);
-    setManifestAllowBundledScope(savedDefaultBundledScopeRef.current);
 
     // Phase 1.5 Step 5 — manifest_connect_bundle params.
     // Reset every time so a previous site's manifest doesn't leak in.
@@ -760,9 +737,6 @@ const BRC100AuthOverlayRoot: React.FC = () => {
         savedUserLimitsRef.current = userLimits;
         savedPrefillFromManifestRef.current =
           data.default_prefill_from_manifest === true;
-        if (typeof data.default_bundled_scope_grant === 'boolean') {
-          savedDefaultBundledScopeRef.current = data.default_bundled_scope_grant;
-        }
         // A notification may already be on screen when this resolves (the
         // fetch is async and applyParams can run first). Re-resolve so the
         // fields show the user's real defaults rather than the hardcoded
@@ -843,13 +817,14 @@ const BRC100AuthOverlayRoot: React.FC = () => {
         // Set domain permission to "approved" (sets cache + DB write).
         // Phase 1.5 Step 1: bundle identityKeyDisclosureAllowed via the
         // "Allow this site to identify you" checkbox state.
-        // Phase 2.6-D Fix #4: bundle bundledScopeGrant via the "Allow this
-        // site to perform wallet operations" checkbox state.
         window.cefMessage.send('add_domain_permission', [
           JSON.stringify({
             domain: notificationDomain,
             identityKeyDisclosureAllowed: allowIdentityKey,
-            bundledScopeGrant: allowBundledScope,
+            // ⛔ Phase 7c: the V22 column is vestigial — the engine no longer
+            // reads it. Written `false` so no stored row claims a blanket
+            // grant the user was never offered and that nothing honours.
+            bundledScopeGrant: false,
           }),
         ]);
         // Tell the interceptor to forward the pending request
@@ -877,7 +852,10 @@ const BRC100AuthOverlayRoot: React.FC = () => {
             identityKeyDisclosureAllowed: allowIdentityKey,
             // Phase 2.6-D Fix #4 — bundle the V22 column write through the
             // advanced path too.
-            bundledScopeGrant: allowBundledScope,
+            // ⛔ Phase 7c: the V22 column is vestigial — the engine no longer
+            // reads it. Written `false` so no stored row claims a blanket
+            // grant the user was never offered and that nothing honours.
+            bundledScopeGrant: false,
           }),
         ]);
         window.cefMessage.send('brc100_auth_response', [
@@ -991,7 +969,29 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     if (kind === 'protocol') {
       base.protocolLevel = scopedProtocolLevel;
       base.protocolName = scopedProtocolName;
-      base.protocolKeyId = scopedProtocolKeyId;
+      // ⛔ beta.3 Phase 7c (owner decision 2026-09-07): "Always allow" grants the
+      // PROTOCOL, not one key under it — so write `*`, never `scopedProtocolKeyId`.
+      //
+      // 🚨 The bug this closes. A keyID is the site's own label picking which
+      // child key it wants; a site that encrypts each record separately uses a
+      // different one per call (the record id, a nonce). Storing the exact keyID
+      // meant the next call derived a different key, missed
+      // `is_protocol_granted`, and prompted AGAIN — forever, with the user
+      // clicking "Always allow" every time and it never taking. That does not
+      // protect anyone; it trains people to dismiss consent prompts unread.
+      //
+      // ⭐ It also ends a real inconsistency: manifest-derived grants have always
+      // been written `key_id = '*'` (BRC-73 has no keyID field, so
+      // `p.keyId || '*'` in the connect path always takes the fallback). The two
+      // ways of granting the same protocol disagreed with each other.
+      //
+      // ⚠️ This IS wider — one click now covers every key under that protocol.
+      // Accepted because the keys are site-scoped: they are derived against this
+      // origin's own counterparty, so a different keyID yields a different key
+      // OF THE SITE'S OWN. It learns nothing about you or any other site.
+      // `is_protocol_granted` matches `key_id = ?4 OR key_id = '*'`, so this row
+      // covers every keyID under (level, name, counterparty) — and nothing else.
+      base.protocolKeyId = '*';
       if (scopedProtocolCounterparty) {
         base.protocolCounterparty = scopedProtocolCounterparty;
       }
@@ -1227,11 +1227,9 @@ const BRC100AuthOverlayRoot: React.FC = () => {
           rateLimitPerMin: rate,
           maxTxPerSession: maxTx,
           identityKeyDisclosureAllowed: manifestAllowIdentityKey,
-          // Phase 2.6-D Fix #4 — bundle the V22 column write. Manifest path
-          // also writes per-scope V18 rows below; the bundle flag is an
-          // extra silencer above those (engine returns SilentBundledScopeGrant
-          // before consulting V18).
-          bundledScopeGrant: manifestAllowBundledScope,
+          // ⛔ Phase 7c: vestigial column, see the domain_approval path.
+          // The consent that matters is the per-item rows written below.
+          bundledScopeGrant: false,
         })]);
       }
 
@@ -2588,71 +2586,30 @@ const BRC100AuthOverlayRoot: React.FC = () => {
             </span>
           </label>
 
-          {/* Phase 2.6-D Fix #4 — bundled scope grant checkbox. Default ON. */}
-          {/* ⚠️ The text MUST stay inside a single <span>. This <label> is a
-              flex container with `gap: 8px`, so every child element and text
-              node becomes its own FLEX ITEM and wraps independently — with
-              the gap inserted between each. When the wording gained <strong>
-              and <em>, the line shattered into fragments ("mode" under
-              "Quiet", "any" on its own). `flexShrink: 0` on the box is the
-              other half: without it the checkbox is compressed to a
-              different size than its neighbour once the row overflows.
-              Both reported by the owner on 2026-08-23. */}
-          <label style={{
-            display: 'flex',
-            alignItems: 'flex-start',
-            gap: '8px',
-            fontSize: '13px',
-            color: COLORS.textDark,
-            cursor: 'pointer',
-            marginBottom: '16px',
-            userSelect: 'none',
-          }}>
-            <input
-              type="checkbox"
-              checked={manifestAllowBundledScope}
-              onChange={(e) => setManifestAllowBundledScope(e.target.checked)}
-              style={{
-                accentColor: COLORS.primary, width: '16px', height: '16px',
-                cursor: 'pointer', flexShrink: 0, marginTop: '2px',
-              }}
-            />
-            <span style={{ lineHeight: 1.45 }}>
-            {/* ⛔ Owner-reported 2026-08-23: this used to read "Allow this
-                site to perform wallet operations without asking each time",
-                which omits the single most important fact about the control
-                — that it also covers protocols and baskets the site NEVER
-                DECLARED. The Customize view already said so; the summary,
-                which is the screen most users actually read, did not. One
-                control must not carry two meanings. Wording is now shared
-                with Customize; keep them identical. */}
-            <strong>Quiet mode:</strong> let this site use <em>any</em> protocol or
-            basket without asking — including ones it did not list above
-            <InfoIcon tooltip="When ticked, this site can use ANY protocol or basket without prompting - including ones it did not declare in its manifest. Untick it to approve only the specific items listed above. Protected baskets (change outputs, backup tokens) are never included. Sensitive operations - large payments, identity disclosure, sensitive certificate fields - always prompt regardless. Revoke any time from Manage Site Permissions." />
-            </span>
-          </label>
+          {/* ⛔ beta.3 Phase 7c DELETED the "Quiet mode" checkbox that used to
+              sit here, together with the gold callout that explained why the
+              ticks below were greyed out.
 
-          {/* 🚨 Quiet mode makes the ticks above INERT — say so beside them.
-              `matrix_c.rs :: decide_scoped_grant` returns Silent on
-              `bundled_scope_grant` BEFORE it consults `scoped_grant_exists`, so
-              while quiet mode is on the V18 rows these boxes write are never
-              read: every ProtocolUse and BasketAccess from this domain goes
-              silent, declared or not. (Protected baskets are still excluded.)
-              ⛔ Disabling the boxes is deliberate — it is the only state in which
-              the two controls cannot contradict each other, so there is no
-              hidden cross-toggling. Narrowing the flag itself is an ENGINE
-              change: beta.3 Phase 7c. */}
-          {manifestAllowBundledScope && (
-            <div style={{
-              fontSize: '12px', color: COLORS.textDark, marginBottom: '16px',
-              lineHeight: 1.5, background: 'rgba(166, 124, 0, 0.10)',
-              border: `1px solid ${COLORS.gold}`, borderRadius: '8px', padding: '10px 12px',
-            }}>
-              <strong>Quiet mode is on</strong>, so this site can use <em>any</em> protocol or
-              basket without asking — not just the ones listed above. Untick{' '}
-              <strong>Quiet mode</strong> below to choose individually.
-            </div>
-          )}
+              It read: "Quiet mode: let this site use ANY protocol or basket
+              without asking — including ones it did not list above" — and it
+              was true. `matrix_c.rs :: decide_scoped_grant` returned Silent on
+              `bundled_scope_grant` BEFORE consulting the per-item grants, so
+              the list below was a preview rather than a limit and the rows
+              these ticks write were never read. The ticks were `disabled`
+              while it was on, because two controls that can contradict each
+              other is worse than one that is honest.
+
+              ⭐ The engine no longer reads that flag, so there is nothing left
+              for a second control to mean: ticking every item and ticking
+              "quiet mode" are now the same act. One control, no contradiction
+              to hide. Owner decision 2026-09-07: "quiet mode should only
+              approve exactly what is in the manifest and has been shown to
+              the user" — which is this list.
+
+              ⛔ Do not re-add a master checkbox here without deciding what it
+              means that the ticks do not already say. A select-all is the only
+              honest candidate, and it was explicitly considered and declined.
+              See `phase-7c-quiet-mode/PHASE_CONTRACT.md`. */}
 
           <div style={{ fontSize: '14px', color: COLORS.textDark, marginBottom: '12px' }}>
             This site is asking permission to:
@@ -2684,7 +2641,6 @@ const BRC100AuthOverlayRoot: React.FC = () => {
                 <input
                   type="checkbox"
                   checked={manifestSelectedProtocols.has(i)}
-                  disabled={manifestAllowBundledScope}
                   onChange={() => toggleManifestPerm(manifestSelectedProtocols, setManifestSelectedProtocols, i)}
                   style={customizeCheckbox}
                 />
@@ -2722,7 +2678,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
                 <input
                   type="checkbox"
                   checked={manifestSelectedBaskets.has(i) && !isProtectedBasket(b.name)}
-                  disabled={isProtectedBasket(b.name) || manifestAllowBundledScope}
+                  disabled={isProtectedBasket(b.name)}
                   onChange={() => toggleManifestPerm(manifestSelectedBaskets, setManifestSelectedBaskets, i)}
                   style={customizeCheckbox}
                 />
@@ -3040,37 +2996,24 @@ const BRC100AuthOverlayRoot: React.FC = () => {
             <InfoIcon />
           </label>
 
-          {/* Phase 2.6-D Fix #4 \u2014 bundled scope grant. Default ON; users who
-              untick get the per-call permission prompts the engine would
-              otherwise show (protocol/basket scopes the first time each one
-              is touched). Protected baskets always prompt regardless. */}
-          <label style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '8px',
-            fontSize: '13px',
-            color: COLORS.textDark,
-            cursor: 'pointer',
-            marginBottom: '14px',
-            userSelect: 'none',
-          }}>
-            <input
-              type="checkbox"
-              checked={allowBundledScope}
-              onChange={(e) => setAllowBundledScope(e.target.checked)}
-              style={{ accentColor: COLORS.primary, width: '16px', height: '16px', cursor: 'pointer' }}
-            />
-            {/* ⭐ beta.3 Phase 7b — VERBATIM the connect modal's wording, label AND
-                tooltip. The old label said "perform wallet operations without
-                asking each time" and the old tooltip said the wallet "won't
-                prompt for individual grants" — neither said the part that
-                matters: it covers protocols the site NEVER DECLARED. */}
-            <span>
-              <strong>Quiet mode:</strong> Let this site use <em>any</em> protocol or basket
-              without asking — including ones it did not list above
-            </span>
-            <InfoIcon tooltip="When ticked, this site can use ANY protocol or basket without prompting - including ones it did not declare in its manifest. Untick it to approve only the specific items listed above. Protected baskets (change outputs, backup tokens) are never included. Sensitive operations - large payments, identity disclosure, sensitive certificate fields - always prompt regardless. Revoke any time from Manage Site Permissions." />
-          </label>
+          {/* ⛔ beta.3 Phase 7c DELETED the "Quiet mode" checkbox here too, and
+              this view is the one where it was most misleading.
+
+              🚨 This is the NO-MANIFEST connect screen. There is no list of
+              declared permissions above it — the site told us nothing — so
+              "including ones it did not list above" described a list that does
+              not exist, and ticking it granted blanket protocol and basket
+              access on the strength of a site that declared none.
+
+              What happens now: nothing is granted at connect, because there is
+              nothing to grant. The site prompts the first time it signs,
+              encrypts or reads outputs, and "Always allow" settles that scope
+              for good. That is noisier than before and it is the intended
+              outcome — the alternative is approving permissions the user was
+              never shown. ⭐ A site that wants a quiet connect publishes a
+              manifest; that is the incentive, and it is deliberate.
+
+              See `phase-7c-quiet-mode/PHASE_CONTRACT.md` §4. */}
 
           {/* Advanced settings toggle */}
           <div

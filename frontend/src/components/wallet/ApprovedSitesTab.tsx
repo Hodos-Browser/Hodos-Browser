@@ -16,7 +16,6 @@ interface DefaultLimits {
   // connect prompt. ⚠️ The widest grant on that screen: it covers protocols
   // and baskets the site never declared. Default true = the behaviour that
   // shipped before this was configurable.
-  defaultBundledScopeGrant: boolean;
   // beta.3 Phase 0.8 — V24 column. OFF (the default) = the connect modal's
   // limit fields start from the four values above and a site's suggestion is
   // shown beside them. ON = a site's suggested values are pre-filled instead.
@@ -34,7 +33,6 @@ const ApprovedSitesTab: React.FC = () => {
     defaultMaxTxPerSession: 100,
     defaultIdentityKeyDisclosureAllowed: true,
     defaultPrefillFromManifest: false,
-    defaultBundledScopeGrant: true,
   });
   const [savedDefaults, setSavedDefaults] = useState<DefaultLimits>(defaults);
   const [perTxUsd, setPerTxUsd] = useState('1.00');
@@ -59,7 +57,6 @@ const ApprovedSitesTab: React.FC = () => {
         defaultMaxTxPerSession: data.default_max_tx_per_session ?? 100,
         defaultIdentityKeyDisclosureAllowed: data.default_identity_key_disclosure_allowed ?? true,
         defaultPrefillFromManifest: data.default_prefill_from_manifest ?? false,
-        defaultBundledScopeGrant: data.default_bundled_scope_grant ?? true,
       };
       setDefaults(loaded);
       setSavedDefaults(loaded);
@@ -93,7 +90,6 @@ const ApprovedSitesTab: React.FC = () => {
           default_max_tx_per_session: defaults.defaultMaxTxPerSession,
           default_identity_key_disclosure_allowed: defaults.defaultIdentityKeyDisclosureAllowed,
           default_prefill_from_manifest: defaults.defaultPrefillFromManifest,
-          default_bundled_scope_grant: defaults.defaultBundledScopeGrant,
         }),
       });
       if (!postRes.ok) throw new Error('Failed to save defaults');
@@ -109,7 +105,6 @@ const ApprovedSitesTab: React.FC = () => {
           defaultMaxTxPerSession: data.default_max_tx_per_session ?? defaults.defaultMaxTxPerSession,
           defaultIdentityKeyDisclosureAllowed: data.default_identity_key_disclosure_allowed ?? defaults.defaultIdentityKeyDisclosureAllowed,
           defaultPrefillFromManifest: data.default_prefill_from_manifest ?? defaults.defaultPrefillFromManifest,
-          defaultBundledScopeGrant: data.default_bundled_scope_grant ?? defaults.defaultBundledScopeGrant,
         };
         setDefaults(confirmed);
         setSavedDefaults(confirmed);
@@ -378,64 +373,16 @@ const ApprovedSitesTab: React.FC = () => {
               </div>
             </div>
 
-
-            {/* beta.3 Phase 0.8 (V25, owner-approved 2026-08-23) — the quiet-mode
-                default. ⚠️ Deliberately the LAST of the three: it is the widest
-                grant of the set, and the one whose tooltip has to do the most
-                work. Same row, equal share, wraps with the others. */}
-            <div style={{
-              flex: '1 1 220px',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '10px',
-              cursor: 'pointer',
-              userSelect: 'none',
-            }} onClick={() => setDefaults((d) => ({ ...d, defaultBundledScopeGrant: !d.defaultBundledScopeGrant }))}>
-              <div style={{
-                width: '18px',
-                height: '18px',
-                borderRadius: '4px',
-                border: `2px solid ${defaults.defaultBundledScopeGrant ? '#a67c00' : '#555'}`,
-                background: defaults.defaultBundledScopeGrant ? '#a67c00' : 'transparent',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                flexShrink: 0,
-                transition: 'all 0.15s',
-              }}>
-                {defaults.defaultBundledScopeGrant && (
-                  <span style={{ color: '#0f1117', fontSize: '12px', fontWeight: 700, lineHeight: 1 }}>&#10003;</span>
-                )}
-              </div>
-              <div style={{ fontSize: '13px', color: '#f0f0f0', fontWeight: 600 }}>
-                Start new sites in quiet mode
-                <span
-                  title={"Quiet mode lets a site use ANY protocol or basket without asking each time — "
-                    + "including ones it never declared in its manifest. On (the shipped default) means a new "
-                    + "site's connect prompt starts with that box ticked; turn this off to be asked the first "
-                    + "time a site uses each protocol or basket. Protected baskets are never included, and "
-                    + "large payments, identity disclosure and sensitive certificate fields always prompt "
-                    + "either way. You can change it per site on the connect prompt, or later from Manage "
-                    + "Site Permissions."}
-                  style={{
-                    marginLeft: '6px',
-                    cursor: 'help',
-                    color: '#9ca3af',
-                    fontSize: '11px',
-                    border: '1px solid #9ca3af',
-                    borderRadius: '50%',
-                    width: '14px',
-                    height: '14px',
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    fontWeight: 600,
-                    lineHeight: 1,
-                    verticalAlign: 'middle',
-                  }}
-                >i</span>
-              </div>
-            </div>
+            {/* [P7c] DELETED the "Start new sites in quiet mode" default.
+                It set the initial state of a connect-screen checkbox that no
+                longer exists, for an engine flag that is no longer read. Its
+                tooltip promised a site could use "ANY protocol or basket ...
+                including ones it never declared" - which is exactly the
+                behaviour Phase 7c removed, so keeping the control would have
+                let the user set a preference the wallet cannot honour.
+                New sites now grant exactly what their manifest declared and
+                the user left ticked; a site with no manifest grants nothing
+                and prompts on first use. There is no default to choose. */}
             </div>
 
             {/* Owner-reported 2026-08-23: the Save/Reset row sat too close to
