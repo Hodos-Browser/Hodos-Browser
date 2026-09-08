@@ -326,6 +326,13 @@ const DomainPermissionsTab: React.FC = () => {
             display: 'flex',
             alignItems: 'center',
             gap: 1.5,
+            // 📏 Measured 2026-09-08: one row is right wherever it fits, but at
+            // a ~250px row width the box collapsed to 22px and the count
+            // overflowed the row by 142px. Wrapping degrades to the old
+            // two-line layout only when there genuinely isn't room; the box's
+            // minWidth is what forces the wrap instead of an unusable box.
+            flexWrap: 'wrap',
+            rowGap: 1,
             mb: 2,
             // Chromium's default placeholder is near-black at reduced opacity,
             // which is unreadable on our dark surface. Same rule the cookie and
@@ -339,8 +346,14 @@ const DomainPermissionsTab: React.FC = () => {
               placeholder="Filter sites by domain…"
               aria-label="Filter approved sites by domain"
               style={{
-                flex: 1,
-                minWidth: 0,
+                // Left-justified and capped rather than stretched: at 1910px a
+                // flexed box measured 1501px, which is the "entire width it
+                // doesn't need". Shrinks below the cap on narrow panels, so the
+                // box — not the count — is what gives. One number to retune.
+                flex: '1 1 auto',
+                maxWidth: '420px',
+                minWidth: '200px',        // below this the row wraps rather than shrinking the box further
+                boxSizing: 'border-box',  // else maxWidth excludes padding+border
                 padding: '7px 10px',
                 border: `1.5px solid ${hodosColors.borderDefault}`,
                 borderRadius: '6px',
@@ -358,12 +371,21 @@ const DomainPermissionsTab: React.FC = () => {
                 Clear
               </HodosButton>
             )}
+            {/* Count shares the row, hard right — `ml: auto` eats the slack the
+                capped box leaves. Deliberately NOT `nowrap`/`flexShrink: 0`:
+                that pinned it to max-content, and at a 236px row a 288px string
+                overflowed the panel by 52px with nowhere to go. Allowed to wrap,
+                it drops to its own line first and only then wraps its text. */}
+            <Typography
+              variant="body2"
+              color="text.secondary"
+              sx={{ ml: 'auto', textAlign: 'right' }}
+            >
+              {query
+                ? `${filtered.length} of ${permissions.length} approved site${permissions.length !== 1 ? 's' : ''} match “${query.trim()}”`
+                : `${permissions.length} approved site${permissions.length !== 1 ? 's' : ''}`}
+            </Typography>
           </Box>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-            {query
-              ? `${filtered.length} of ${permissions.length} approved site${permissions.length !== 1 ? 's' : ''} match “${query.trim()}”`
-              : `${permissions.length} approved site${permissions.length !== 1 ? 's' : ''}`}
-          </Typography>
           {filtered.length === 0 ? (
             <Paper sx={{ p: 3, textAlign: 'center' }}>
               <Typography variant="body2" color="text.secondary">
