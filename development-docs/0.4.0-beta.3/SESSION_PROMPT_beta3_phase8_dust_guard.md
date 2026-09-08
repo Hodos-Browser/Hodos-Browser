@@ -21,7 +21,7 @@ all shipped since.
 ⛔ Run the kickoff before any code. Read, in this order:
 
 1. `development-docs/0.4.0-beta.3/TICKET_token_outputs_destroyed_by_dust_paths.md` — the whole thing
-2. `development-docs/1SatOrdinals-BSV21/README.md` — "Two rules from BRC-147 that are load-bearing
+2. `development-docs/0.4.0-beta.4/sprint-2-1sat-ordinals/README.md` — "Two rules from BRC-147 that are load-bearing
    for us", rule 2. The rule this violates was already written down before the defect was found
 3. `development-docs/0.4.0-beta.3/HARNESS.md` §6 (adversarial posture) and the negative-control rule
 4. `development-docs/0.4.0-beta.4/` `README.md` + `TELESCOPE.md` — sprint 1 is the *real*

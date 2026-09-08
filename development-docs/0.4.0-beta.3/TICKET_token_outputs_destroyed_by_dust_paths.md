@@ -2,7 +2,7 @@
 
 **Found 2026-08-29**, during beta.4 scoping, while reading the prerequisites for the 1Sat Ordinals
 sprint. Not found by a failure — found by reading `monitor/` after noticing that
-`1SatOrdinals-BSV21/README.md` already states the rule ("a 1-sat ordinal caught by ordinary coin
+`0.4.0-beta.4/sprint-2-1sat-ordinals/README.md` already states the rule ("a 1-sat ordinal caught by ordinary coin
 selection is a **permanently destroyed asset**... treat this with the same seriousness as the
 privacy-perimeter gates") while no code enforces it.
 
@@ -139,5 +139,5 @@ Per `HARNESS.md`, a fix is not done until the gate is shown able to fail:
 - Full beta.4 context and the classification-guard scope:
   `development-docs/0.4.0-beta.4/SESSION_PROMPT_beta4_kickoff.md` §5.
 - The rule this violates was already written down in
-  `development-docs/1SatOrdinals-BSV21/README.md` ("Two rules from BRC-147 that are load-bearing for
+  `development-docs/0.4.0-beta.4/sprint-2-1sat-ordinals/README.md` ("Two rules from BRC-147 that are load-bearing for
   us", rule 2).
