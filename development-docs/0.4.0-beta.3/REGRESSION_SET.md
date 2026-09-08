@@ -88,11 +88,16 @@ Auto-update must never force a reinstall and must never brick an install.
 
 ---
 
-## R-DUST — no path may spend a 1-satoshi output
+## R-DUST — no *incidental* path may spend a 1-satoshi output
+
+> ⚠️ **Renamed 2026-09-08 by the Phase 8 adversarial review (`F1`).** It read *"no path may spend a
+> 1-satoshi output"*, which was an **overclaim**: a fifth path exists and is deliberately uncovered —
+> see the exclusion below. The title now matches what the GREEN row actually proves.
 
 | | |
 |---|---|
-| **GREEN** | With a 1-satoshi output in the default pool, **no** path puts it in a transaction's inputs: not the daily dust consolidator, not coin selection (either pass), not `send_max`, not the external-wallet sweep |
+| **GREEN** | With a 1-satoshi output in the default pool, no path that selects outputs *on the user's behalf* puts it in a transaction's inputs: not the daily dust consolidator, not coin selection (either pass), not `send_max`, not the external-wallet sweep |
+| **⛔ EXCLUDED, deliberately** | **`create_action`'s `user_inputs`** — a dApp naming an outpoint explicitly (`handlers.rs:5366-5381`) never reaches the selector, and the wallet **will sign it** (`sign_action`, `:7600-7740`). ⛔ Do **not** close this with a value floor: a deliberate ordinal transfer *is* a dApp naming a 1-sat outpoint, so a blanket refusal would make beta.4 sprint 2 unimplementable. ⚠️ The correct guard is the one **BRC-147 rule 2** specifies — *"a general 'pay' or auto-pay grant MUST NOT authorize spending them… enforced in the Rust permission engine"* — which does **not exist today**. ⇒ beta.4 sprint 1, tracked on `R-CLASSIFY`'s route list |
 | **RED** | Remove `is_token_reserved_value` from the site under test and re-run: the candidate/selection set must be seen to **grow by exactly that output**. ⛔ Assert the **count rises**, never merely that the output is absent — an absence proves nothing if the fixture never reached the filter |
 | **SUBJECT** | The **candidate or selection set itself** — `is_consolidation_candidate`, `select_utxos_greedy`, `select_all_spendable`, `split_token_reserved` — or the **serialised transaction's input outpoints**. ⛔ Never a broadcast result, a balance total, or a log line: all three are identical either way |
 | **Tier** | T1 |
@@ -125,6 +130,7 @@ BRC-147's rule properly belongs in `hodos_permission_engine`, which is beta.4's 
 | 2 → 3 | 2026-08-26 | 🟢 **GREEN both halves** (see run log) | ⬜ needs a real payment | ⬜ live app, human | 🟢 T1 — 73 engine tests · ⬜ T2 e2e | ⬜ needs a payment | 🟡 T1 only (6 tests); real N−1→N owed at RC |
 | 3 → 4 | 2026-09-01 | 🟢 **GREEN both halves** (run log) | ⬜ needs a real payment | 🟡 **PARTIAL** — the arms this phase touched are green; file-dialog arm + a clean prevent-close pair still owed | 🟢 T1 (preflight `T1a`) · ⬜ T2 e2e | ⬜ needs a payment | 🟡 T1 only; real N−1→N owed at RC |
 | 4 → 5 | 2026-09-02 | 🟢🔴 **GREEN both halves + the injected RED, both directions — first time this sprint** (run log) | ⬜ needs a real payment | ⬜ not touched by this phase | 🟢 T1 (preflight `T1a`) · ⬜ T2 e2e | ⬜ needs a payment | 🟡 T1 only; real N−1→N owed at RC | |
+| **8 → next** | **2026-09-08** | ⬜ **subject untouched** — see run log; no gating, header or origin-derivation change | ⬜ needs a real payment | ⬜ subject untouched (no C++, no overlay) | 🟢 T1 (preflight `T1a`) · ⬜ T2 e2e | ⬜ needs a payment | 🟡 T1 only; real N−1→N owed at RC | **R-DUST 🟢🔴 GREEN + RED** |
 
 ---
 
@@ -454,3 +460,81 @@ No real payment happened this session. Not upgraded to a pass.
 The trust discriminator is **live and correctly two-sided on this build** — the first time both
 halves of `R-INTEXT` have been observed together at any beta.3 boundary. It does **not** establish
 that the downstream gate reacts to a forced flip; that stub remains owed before the release boundary.
+
+---
+
+## Run log — 8 → next boundary (2026-09-08)
+
+Phase 8's first ticket is **Rust-only**: five files under `rust-wallet/src/`, no C++, no React, no
+overlay, no IPC, no permission-engine change, no schema change. That shapes this boundary — most rows
+are "subject untouched", and ⛔ **that claim is verified below rather than asserted**, because
+"untouched" is the easiest way to never run anything.
+
+### `R-DUST` — 🟢🔴 **GREEN and RED. New this boundary, and the strongest form available.**
+
+The floor has a single point of control, so it can be disabled in **one line** that no test knows
+about: `TOKEN_RESERVED_SATS: i64 = 1` → `0`.
+
+| With the constant at `0` | Count |
+|---|---|
+| 🔴 tests asserting the floor — **FAILED** | **11** |
+| ✅ `without_the_floor_*` controls — still green (they assert the *unguarded* behaviour) | 5 |
+| ✅ `token_reserved_exposure_tests` — still green; they measure **ingest**, not the floor | 3 |
+| ⚠️ `candidate_predicate_is_stable_across_repeated_evaluation` — still green | 1 |
+
+Restored to `1`: **458 lib + 526 bin, 0 failed.**
+
+⭐ Stronger than the per-site control run at implementation time, because it removes the **whole
+feature** from one place — a test that merely re-derived the predicate would survive this, and none
+did. ⚠️ The last row **cannot fail with the feature removed** and is therefore not evidence
+(`ADVERSARIAL_REVIEW.md` `F2`) ⇒ **11 is the evidence count, not 19.**
+
+### `R-INTEXT` — ⬜ subject untouched. Verified, not assumed.
+
+The discriminator is the caller's frame origin re-derived in C++, and the gate is
+`domain_trust_mw` → `hodos_permission_engine`. Phase 8 changed **none** of that: no C++ file, no
+header handling, no origin derivation, no engine rule.
+
+⚠️ **The one interaction I checked and did not assume:** Phase 8 edits `create_action`, which *is*
+R-INTEXT's money path. But it changes which UTXOs become **inputs**, and the payment gate reads
+**output** amounts; for `send_max` the gated figure is `resolved_amount`, computed in
+`send_transaction` (`:10132`) from `calculate_balance` — which Phase 8 does not touch. ⇒ The gate
+sees the same number it saw before. Downstream of the gate, upstream of nothing it reads.
+
+### `R-GOLD` / `R-COUNT` — ⬜ NOT RUN. Same reason as every prior boundary: no real payment.
+
+Subject untouched regardless — the pill is emitted from `HttpRequestInterceptor.cpp ::
+OnWalletCallSuccess` (C++, untouched) and counters live in `PermissionService.session_counters`
+(untouched).
+
+### `R-CLOSE` — ⬜ subject untouched. No C++, no overlay, no WndProc, no NSWindow.
+
+⭐ **Carried finding, still owed:** `R-CLOSE`'s SUBJECT names three C++ paths and **no React one**,
+which is why a React backdrop discarding unsaved edits was missed on the first pass of Phase 7d
+item 1. That set should grow a React layer. Unchanged this boundary.
+
+### `R-PERIM` — 🟢 T1 (preflight `T1a`, 458+526 tests) · ⬜ T2 e2e still owed.
+
+No permission-engine change. ⚠️ Worth stating plainly: **BRC-147 rule 2 belongs in this engine and is
+not there** — a general pay grant is not stopped from spending a token carrier named as a
+`user_inputs` outpoint. That is the `R-DUST` exclusion above and it is beta.4 sprint 1 work, not a
+regression introduced here.
+
+### `R-UPDATE` — 🟡 T1 only, unchanged. Real N−1 → N apply still owed at RC.
+
+---
+
+### ⚠️ Owed at this boundary, and honestly so
+
+| Item | State |
+|---|---|
+| Live-wallet run of the floor | ⬜ **never run.** By design (contract §4), but it means "the selector excluded it" is proven and "the broadcast tx lacks it" is not |
+| A send whose balance is mostly 1-sat outputs | ⬜ **not exercised.** The floor can turn a previously-successful send into `insufficient funds`; intended, but untested against a live wallet |
+| `R-INTEXT` injected REDs (stub form) | ⬜ carried from 7d |
+| DPI matrix cells #4/#6/#9 | ⬜ carried, neither platform |
+| Mac `R4` from the 7d round | ⬜ carried |
+| Independent adversarial pass | ⬜ Phase 8's review was written by the session that wrote the code |
+
+⛔ **Production was not touched.** The owner's installed browser, wallet (`31301`, `/health` ok) and
+adblock (`31302`) were running throughout; every check above ran against the build tree or the test
+harness. No dev stack was started, so no port or data directory was contended.

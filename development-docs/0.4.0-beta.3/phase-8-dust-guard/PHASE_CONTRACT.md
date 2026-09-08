@@ -182,7 +182,8 @@ without the user having asked for that specific thing.
 - [x] The floor is **one named constant with one predicate** (`TOKEN_RESERVED_SATS` /
       `is_token_reserved_value` in `utxo_fetcher.rs` — see `D-9`), not four `<= 1` literals.
 - [x] Each site has a unit test **and** an in-file negative control proving the test would fail
-      without the floor. 19 new tests.
+      without the floor. 19 new tests — ⚠️ but **11** is the evidence count: that is how many fail
+      when the feature is disabled at `TOKEN_RESERVED_SATS`. See ADVERSARIAL_REVIEW.md `F2`.
 - [ ] `REGRESSION_SET.md` gains `R-DUST` (§9) — ⛔ **separate commit**, working rule 6.
 - [x] The dead `1SatOrdinals-BSV21` path is corrected in the ticket and the session prompt.
 
@@ -231,6 +232,14 @@ sats of real dust) also makes a live trigger expensive and slow to arrange for n
 | `handlers.rs` | `select_utxos_greedy` (`:7296`) — **shared by 4 call sites**: `create_action` `:5187`, backup `:13808`, certificate publish `certificate_handlers.rs:2798`, certificate unpublish `:4509`. The three non-`create_action` sites pass `None` for consolidation, so a primary-pass floor changes their behaviour too — **intended**, and the reason `A5` tests the primary pass separately. |
 | `handlers.rs :: create_action` `:5178` | Only if `Q-1` is approved. |
 | `REGRESSION_SET.md` | ⛔ **Separate commit.** Working rule 6: the instrument is not edited by the change it measures. |
+
+**⛔ A fifth spend path, considered and deliberately NOT floored** — added 2026-09-08 by the
+adversarial review (`F1`); §5 originally omitted it entirely, so a reviewer could not tell it had
+been looked at:
+
+| Path | Where | Why it is left alone |
+|---|---|---|
+| `create_action` **`user_inputs`** — a dApp names an outpoint explicitly | accepted `handlers.rs:4808-4886`, added to the tx at **`:5366-5381`** with no value check; signed by `sign_action` (`:7494`, `:7600-7740`) when no `unlockingScript` is supplied | A deliberate ordinal transfer **is** a dApp naming a 1-sat outpoint. A blanket refusal here would make beta.4 sprint 2 unimplementable. ⚠️ The right guard is BRC-147 rule 2's — enforced in `hodos_permission_engine`, which has no notion of a token-carrying input today ⇒ **beta.4 sprint 1** |
 
 **Deliberately NOT touched, though adjacent and tempting:**
 `is_p2pkh_script` and its false comment (`D-5`) · the fabricated-locking-script issue (`D-5`.2) ·
@@ -321,8 +330,9 @@ independently. No schema, no migration, no persisted state.
 - [x] `scripts/preflight.ps1 -NegativeControl` run — every T0 gate seen to fail
 - [x] `cargo test` full pass (**not** `cargo build --release`)
 - [ ] `../REGRESSION_SET.md` run in full at this boundary — ⬜ **OWED at the phase boundary**
-- [ ] Adversarial review — ⬜ **OWED.** ⛔ Written by the same session that wrote the code; HARNESS §6
-      requires a pass by someone that did not
+- [x] Adversarial review — ✅ **DONE 2026-09-08**, `ADVERSARIAL_REVIEW.md`. Found `F1` (an overclaim in
+      R-DUST, now corrected) plus three minor items. ⛔ Its own limitation is declared up front: written
+      by the session that wrote the code, which HARNESS §6 does not consider sufficient
 - [x] Commit messages cite the row IDs they satisfy
 
 | Item | Result | Date | By |
@@ -332,12 +342,16 @@ independently. No schema, no migration, no persisted state.
 | cargo test | **PASS** — 458 lib + 526 bin + 16 integration binaries, 0 failed | 2026-09-08 | Claude |
 | A1 production-code negative control | **RED OBSERVED** — floor deleted ⇒ `left: 21, right: 20`; restored ⇒ green | 2026-09-08 | Claude |
 | regression set | ⬜ OWED | | |
-| adversarial review | ⬜ OWED | | |
+| adversarial review | 🟡 **DONE** — `ADVERSARIAL_REVIEW.md`; found `F1` (overclaim), corrected. ⛔ Same-session, not independent | 2026-09-08 | Claude |
 
 ### Residuals — carried, not rounded up
 
-1. ⬜ **`R-DUST` not yet in `REGRESSION_SET.md`** — separate commit, working rule 6.
-2. ⬜ **Adversarial review owed.** Same-session code and tests; §6 wants an independent refuter.
+1. ✅ **`R-DUST` landed in `REGRESSION_SET.md`** (`b885875`, separate commit per working rule 6), and
+   its title was corrected 2026-09-08 after the adversarial review — see item 2.
+2. 🟡 **Adversarial review DONE** (`ADVERSARIAL_REVIEW.md`) — but by the same session that wrote the
+   code, which §6 does not consider sufficient. ⭐ An independent pass is still worth commissioning.
+   It found `F1`: `R-DUST` overclaimed ("no path") when a fifth path — `create_action`'s `user_inputs`
+   — exists and is deliberately uncovered. Invariant and §5 corrected; no production change.
 3. ⬜ **Regression-set boundary run owed.**
 4. ⚠️ **No live-wallet run, by design** (§4). The floor is proven at the predicate and selection
    layer, not against a real 20-UTXO consolidation on chain.
