@@ -1,12 +1,17 @@
 # Phase 8c — per-request ids for the wallet bridge · PHASE CONTRACT
 
 **Workstream:** money-path correctness · **Ticket:** `TICKET_bridge_single_slot_callbacks_race.md`
-**Status:** 🔵 **KICKOFF DONE — NOT STARTED. One decision needed before any code (§8).**
+**Status:** 🟢 **DECIDED — Option B. Ready to start at stage 1 (§7).**
+👤 **Owner, 2026-09-08:** *"Let's go with your recommendation of Option B."* — the 41 slots converge on
+the **C++-side promise map** already shipping for the history API. ⛔ The ticket's proposed JS-side
+`Map<id,{resolve,reject}>` is **not** what gets built; see §0.3 for why.
+⚠️ Owner also noted *"this seems like a big change now"* — which is why §7's staging is not optional.
+Stage 1 must land and be reviewed before stages 2–4 are attempted.
 **Opened:** 2026-09-08 · **Owner:** Matthew Archbold · **Platforms:** Windows + macOS (shared C++ / TS)
 **Standard:** `../HARNESS.md`. **Base:** `c68ed57`.
 
-> ⛔ **Nothing is implemented.** The kickoff changed what the fix should be, and the change is large
-> enough that guessing would waste the work. §8 is the question.
+> ⛔ **Nothing is implemented yet.** The kickoff changed what the fix should be; §8 records the
+> decision that resolved it. Start at §7 stage 1.
 
 ---
 
@@ -78,12 +83,12 @@ happen.
 | `R-CLOSE` | Overlay close guards | `wallet_prevent_close` / `wallet_allow_close` are IPC on this surface |
 | `R-DUST` | No incidental 1-sat spend | `sendTransaction` is in scope |
 
-## 4. Evidence table — ⬜ not written
+## 4. Evidence table — ⬜ written at stage 1
 
-Deferred until §8 is answered: the subject differs entirely between "JS-side id map" and "C++-side
-promise map". ⛔ Writing rows now would bake in the decision.
+Now that §8 is answered the subject is fixed: the C++ `std::map<int, Pending…>` and the V8 promise it
+resolves. Full rows are written when stage 1 lands, against the real mechanism rather than a sketch.
 
-One row is fixed regardless, and it is the important one:
+One row holds regardless, and it is the important one:
 
 | ID | 🟢 GREEN | 🔴 RED | 🎯 SUBJECT | Tier |
 |---|---|---|---|---|
@@ -99,7 +104,7 @@ migrated method · ⚠️ **macOS shares both files** — this is not a Windows-
 
 The `wallet_call` path itself (pattern 2) — it already routes correctly and is not implicated.
 
-## 7. Staging — recommended, not decided
+## 7. Staging — REQUIRED, not optional
 
 ⛔ A 41-slot big-bang on the money path is the wrong shape. Suggested order:
 
@@ -108,7 +113,7 @@ The `wallet_call` path itself (pattern 2) — it already routes correctly and is
 3. The remaining ~38 in batches, each batch its own commit, the old global deleted as each lands.
 4. `initWindowBridge.ts`'s `window.on*` declarations deleted last, as the proof nothing still uses them.
 
-## 8. ⛔ THE DECISION — needed before any code
+## 8. The decision — ✅ ANSWERED
 
 **Which mechanism do the 41 slots converge on?**
 
@@ -128,6 +133,9 @@ more C++ per method — real, but paid once per slot and mechanical after the fi
 ⚠️ **Counter-argument worth weighing:** Option A is a smaller diff per slot and keeps the async shape
 in TypeScript where it is easier to read and test. If the intent is to migrate all 41 quickly and
 move on, A gets there sooner.
+
+⛔ **DECIDED: Option B** (owner, 2026-09-08). The section above is kept as the record of what was
+weighed, not as an open question.
 
 **Second question, smaller:** do all 41 migrate, or only the ones that can actually overlap? Several
 (bookmark folder CRUD, cache size) are UI-driven and unlikely to race. ⛔ Recommend migrating all

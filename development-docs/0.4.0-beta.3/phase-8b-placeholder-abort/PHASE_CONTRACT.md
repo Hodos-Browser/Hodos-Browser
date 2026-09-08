@@ -99,7 +99,7 @@ transaction.
 
 | ID | 🟢 GREEN | 🔴 RED — must be *seen* to fail | 🎯 SUBJECT | Tier | Result |
 |---|---|---|---|---|---|
-| `P8b-A1` | With the resolution write forced to fail, the send returns an error and **nothing reaches the network** | Pre-fix binary, same forced failure ⇒ the transaction **is** broadcast | ⛔ **WhatsOnChain for the txid** — *did it reach the network* — not the HTTP response | T2 | ⬜ **OWED.** Needs the live stack **and a real broadcast**. Not run; not claimed |
+| `P8b-A1` | With the resolution write forced to fail, the send returns an error and **nothing reaches the network** | Pre-fix binary, same forced failure ⇒ the transaction **is** broadcast | ⛔ **WhatsOnChain for the txid** — *did it reach the network* — not the HTTP response | T2 | ⬜ **OWED — scheduled as `M4` in `../PAYMENT_TEST_BATCH.md`.** ⭐ Its GREEN half costs nothing (the assertion IS "nothing was broadcast"); only the RED half spends. Not run; not claimed |
 | `P8b-A2` | A write failure surfaces as `Err`, so the abort branch is **reachable** | If this ever returns `Ok`, every abort added here is dead code — the test says so | The repo call itself | T1 | 🟢 `a_write_failure_surfaces_as_err_so_the_abort_branch_can_fire` |
 | `P8b-A3` | The happy path resolves every reserved input and sets its spending txid | — (regression half of `A2`) | `outputs.spending_description` after the call | T1 | 🟢 `resolution_succeeds_and_reports_the_row_count` |
 | `P8b-A4` | A resolution claims **only** its own placeholder | A concurrent transaction's reservation must be untouched | The other placeholder's row | T1 | 🟢 `resolution_claims_only_its_own_placeholder` |
@@ -136,7 +136,7 @@ One `git revert`. No schema, no migration, no persisted state.
 
 | # | Item |
 |---|---|
-| 1 | ⬜ **`A1` live run + fault-injection seam.** The ticket's real test. |
+| 1 | ⬜ **`A1` live run + fault-injection seam** — now scheduled as `M4` in `../PAYMENT_TEST_BATCH.md`, with the seam design (gate on `HODOS_DEV`, which `enforce_dev_prod_isolation` already guarantees a production binary cannot see). |
 | 2 | ⚠️ **BRC-121 paid-retry audit not done.** §5.3 asks whether an abort can strand a paid retry or double-mint a payment. The five abort sites are all pre-broadcast, so no payment has been *made* at the abort point — but `pay_402` / `broadcast_nosend` were **not** traced. Code reading, not a measurement, and it is the one place an abort could plausibly cost money. |
 | 3 | ⚠️ **`Ok(0)` gap** (`D-4`) — needs the reserved count threaded through. |
 | 4 | ⚠️ **`do_onchain_backup` still has the original defect**, by necessity (`D-2`). Fixing it means moving the resolution before the broadcast, which is a restructure of that function and its rollback path — a separate ticket if it is worth doing. |
