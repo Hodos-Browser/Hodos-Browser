@@ -58,6 +58,22 @@ the gap identified 2026-08-29 as the real defect.
 ⛔ **The complete route list is sprint 1.1's deliverable.** Until it exists, this row cannot be
 honestly signed off — it can only be run against a route list someone believes is complete. Say which.
 
+> 🚨 **This row can go vacuous before it is ever run. Added 2026-09-08, measured.**
+> `outputs.locking_script` is **synthesised from the address** for every output found by address sync
+> (`utxo_fetcher :: generate_p2pkh_script_from_address`, all three fetch sites) — always exactly 25
+> bytes, always the P2PKH pattern. A classifier that reads it sees the same legitimate-looking script
+> for every row, classifies all of them `Spendable`, and **never produces an `Unknown`** — so the RED
+> above ("prove the default is refusal") has nothing to observe and the GREEN means nothing.
+> ⇒ **Before running this row, state which field the classifier reads and whether that field is an
+> observation or a fabrication.** Detail:
+> `../0.4.0-beta.3/TICKET_synced_outputs_store_a_fabricated_locking_script.md`.
+
+⭐ **Two routes to put on the list now**, both measured during beta.3 Phase 8 and both easy to miss:
+`create_action`'s **`send_max`** branch (bypasses coin selection entirely —
+`selected_utxos = all_utxos.clone()`), and **`wallet_recover_external`** (the external-wallet sweep,
+which is what `scan_external_wallet` / `build_sweep_transactions` actually serve — *not*
+restore-from-seed, which builds no sweep at all).
+
 ## R-RESTORE — fail-closed survives recovery
 
 The sharpest cross-sprint edge in the release: sprint 1's fail-closed rule meets sprint 4's recovery

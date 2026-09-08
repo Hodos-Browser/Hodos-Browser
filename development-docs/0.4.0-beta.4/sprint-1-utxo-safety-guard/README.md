@@ -122,23 +122,86 @@ almost nothing, and a guard whose regression row was never seen failing beforeha
 | Whether the beta.3 `satoshis > 1` floor is removed once the guard lands | Cheap either way. Defence in depth vs one obvious rule. |
 | Whether a T0 static gate on unguarded UTXO-selecting paths is worth adding | ⛔ If yes, **baseline it with `preflight.ps1` itself**, never a hand grep — `HARNESS.md` §9 records two gates whose hand counts were wrong. |
 
-## ⚠️ Unverified, and owed before sizing
+## ✅ ANSWERED 2026-09-08 — was "Unverified, and owed before sizing"
 
 > **Does an ordinary incoming 1-sat payment become a tracked default-basket row without a recovery
 > scan?**
 
-Confirmed: the wallet derives receive addresses users can hand out (`reconcile.rs:308`, invoice
-`"2-receive address-{N}"`), and a tokens UI exists that groups by basket
-(`frontend/src/components/wallet/TokensTab.tsx`). **Not** confirmed: the ingest question above.
+**YES.** Measured during the beta.3 Phase 8 kickoff, and the ingest path is not the one this
+document guessed — it is neither recovery nor sweep, it is **automatic and continuous**:
 
-| If | Then |
-|---|---|
-| **Yes** | Path 1 is live for any user who has ever received a 1-sat output. Urgent. |
-| **No** | Exposure is limited to recovery/sweep and to acquisition paths that do internalize it. Still real, less urgent. |
+| # | Link | Evidence |
+|---|---|---|
+| 1 | `monitor/task_sync_pending.rs :: run` — automatic, **every 30 s** for fresh addresses (3 min / 5 min for older tiers), **plus a full sweep of all pending addresses on every startup** | `monitor/mod.rs:75` `sync_pending: 30`; `task_sync_pending.rs:8-11`, `:53` `FIRST_RUN` |
+| 2 | Calls `upsert_received_utxo_with_confirmed` for **every** UTXO returned, with **no value filter of any kind** | `task_sync_pending.rs:~168` (individual tier), `:307` (bulk tier) |
+| 3 | That insert writes `spendable = 1`, `basket_id` **unset ⇒ NULL**, `derivation_prefix = '2-receive address'`, `type = 'P2PKH'` hardcoded | `output_repo.rs:491-509` |
+| 4 | Such a row passes **all four** WHERE clauses of `get_spendable_confirmed_by_user` | `output_repo.rs:133-150` |
 
-Either way the affected population today is probably near zero — we ship no ordinal support and there
-is little reason to send one here yet. ⚠️ **That stops being true the moment sprint 2 or an OpNS name
-lands.** This changes **urgency, not the fix**, which is why the beta.3 floor ships without waiting.
+Asserted, not merely read: `output_repo.rs :: token_reserved_exposure_tests` (beta.3 `383bf4f`) drives
+the **real ingest function** against a seeded DB and shows the row comes back spendable with
+`basket_id IS NULL` — and that the same row filed into a `1sat` basket is correctly excluded.
+
+⇒ **The exclusion logic works. Nothing files a token into a basket. That gap is this sprint.**
+
+The beta.3 floor (`R-DUST`) now blocks 1-satoshi outputs from every spend path, so the immediate
+hazard is contained. ⛔ **It is a value floor, not a classifier** — it cannot tell a token from a
+stray 1-satoshi payment and protects nothing at 2 satoshis or above.
+
+## 🚨 Read this before designing the classifier — `locking_script` is a FABRICATION
+
+**Measured against mainnet 2026-09-08.** Full detail and reproducible outpoints:
+`../../0.4.0-beta.3/TICKET_synced_outputs_store_a_fabricated_locking_script.md`.
+
+The wallet **never records the locking script it saw on chain.** `utxo_fetcher.rs` generates one from
+the address (`generate_p2pkh_script_from_address`) at all three fetch sites, because neither indexer
+returns a per-UTXO script. The result is **always exactly 25 bytes in exactly the P2PKH pattern.**
+
+⛔ **A classifier that inspects `outputs.locking_script` will read that fabrication for every output
+address sync has ever found, and classify all of them `Spendable`.** The `ord` envelope it exists to
+detect is erased at ingest, before it runs.
+
+⚠️ **It would not error.** It would fail closed on nothing, pass everything, and look like it works —
+the same shape as the three 0.4.0 farbling harnesses that would each have passed with the feature
+absent. `R-CLASSIFY`'s RED ("prove the default is refusal") **cannot be observed** while the input is
+synthesised, because every output looks identical and legitimate.
+
+What is actually on chain, for the three real cases:
+
+| Kind | Real script | Stored |
+|---|---|---|
+| Transferred ordinal | bare P2PKH, **25 B** | correct, by luck |
+| Fresh inscription | P2PKH **+ ord envelope — 2,596,810 B measured** | ⛔ 25 B fabrication |
+| OrdLock listing | contract, **860 B**, not P2PKH-shaped | ⛔ 25 B fabrication |
+
+🚨 The inscription's **first 25 bytes are a valid P2PKH**, then `OP_FALSE OP_IF "ord" OP_1 "image/png"`.
+That is *why* address indexers return it under the owner's address — and why it reaches us at all.
+
+⭐ **The fix needs no new fetch and no schema change**, which is why it belongs at the front of this
+sprint rather than in its own: `cache_parent_transactions` already stores the raw parent tx,
+`reconcile.rs :: parse_tx_outputs` already returns per-output `(value, script)`, and
+`outputs.script_length` already exists and is never written. ⚠️ But **do not write the naive version** —
+copying a 2.6 MB script into the `locking_script` BLOB lands it in the DB *and* in every on-chain
+backup. The ticket sets out three bounded options and takes no decision.
+
+⛔ **Sequencing:** do this **before** 1.1's route list is turned into a classifier, not after.
+Otherwise sprint 1 has to build its own negative control proving the classifier can see an envelope
+at all — harder than the fix.
+
+## ⚠️ Also carried from beta.3 Phase 8 — two path claims that did not survive
+
+Both were measured false; do not inherit them from the beta.3 ticket:
+
+- **The recovery sweep is the EXTERNAL-wallet import**, not restore-from-seed.
+  `scan_external_wallet` / `build_sweep_transactions` have exactly one caller,
+  `handlers.rs :: wallet_recover_external`. `recover_wallet_from_mnemonic` builds **no sweep at all**
+  — it discovers and reports, so restore-from-seed is an *ingest amplifier* for the sync path above,
+  not itself a destroyer.
+- **`create_action`'s `send_max` branch bypasses coin selection entirely**
+  (`selected_utxos = all_utxos.clone()`). Any guard placed only in the selector misses it. beta.3
+  floored it by owner decision; a classifier must cover it as its own route in `R-CLASSIFY`'s list.
+
+⭐ And a guard that is **not** a guard: `task_consolidate_dust :: is_p2pkh_script` cannot return false
+for a synced output, because it inspects the fabricated script. Do not count it as a route defence.
 
 ## Links
 
