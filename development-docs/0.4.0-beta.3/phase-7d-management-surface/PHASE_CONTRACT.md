@@ -2,7 +2,8 @@
 
 **Workstream:** ticket consolidation · **Tickets:** `TICKET_edit_limits_modal_usability.md` (5 items) +
 `TICKET_site_permission_dual_store.md` (= Phase 7 §0.1 row **R4**)
-**Status:** 🚧 **IN PROGRESS** — item 5 ✅ (owner-reviewed) · R4 ✅ · items 1 / 2 / 3 open.
+**Status:** ✅ **CLOSED 2026-09-08.** All five in-scope items done and owner-reviewed; item 4
+deferred to beta.4 per `D-B`. Residuals listed in the sign-off — none of them rounded up.
 **Opened:** 2026-09-08 · **Owner:** Matthew Archbold · **Platforms:** Windows (macOS = relay)
 **Standard:** `../HARNESS.md`.
 **Base commit:** `a052033` — verified `HEAD == git ls-remote origin refs/heads/0.4.0`, not from a
@@ -358,7 +359,7 @@ observed.
 | `P7d-A9` *(item 1)* | An unsaved edit survives a stray click outside **and** Escape | Delete the `onClose` reason guard → a click outside closes the dialog and the edit is gone. That is the shipped behaviour | ⛔ The **value in the field**, not merely that the dialog is still up. A dialog that survives but resets its inputs fails this row, and a visibility-only assertion would score it a pass | T2 + T3 👤 | 🟢 **GREEN; RED observed with the guard removed, 2026-09-08** |
 | `P7d-A10` *(item 1)* | **Cancel still closes it** — the guard cannot strand the user inside the modal | The two-sided half of `A9`: a modal you cannot leave is worse than one that closes too eagerly | The dialog actually leaving the DOM after Cancel | T2 | 🟢 **closes on Cancel, 2026-09-08** |
 | `P7d-A11` *(items 2/3)* | Granted list caps + scrolls; limits collapse — **management modal only** | Render sites 3/4/5 of `D-4` and assert they did NOT move. ⛔ First attempt was **VACUOUS**: it clicked "Advanced settings", which exists only on `domain_approval`, so the form never rendered on the two payment modals and their clean result proved nothing. Rerun asserts `formRendered_TRIGGER` before reading anything | The **connect and payment modals**, not the one being changed. `R-PROV` lives on those | T1 + T3 👤 | 🟢 **2026-09-08.** Management: granted list **846→258 px**, content **1545→988 px**; right-click view opens with limits collapsed. All three consent modals: no `Spending limits` header, 4 limit fields unchanged, granted list `max-height:none` / `overflow-y:visible` — with the trigger asserted fired |
-| `P7d-A12` | 👤 **Human reads every changed screen** — filter box legible and focusable, list not clipped, contrast holds | P0.8 shipped six defects here with every gate green. The record is the red; the control is that a person looked | Owner's eyes on the **rendered** panel at 100% and DPI cells #4/#6/#9. ⛔ Not a screenshot I took and did not read | T3 👤 | ⬜ |
+| `P7d-A12` | 👤 **Human reads every changed screen** — filter box legible and focusable, list not clipped, contrast holds | P0.8 shipped six defects here with every gate green. The record is the red; the control is that a person looked | Owner's eyes on the **rendered** panel at 100% and DPI cells #4/#6/#9. ⛔ Not a screenshot I took and did not read | T3 👤 | 🟢 **Owner confirmed all four surfaces by hand, 2026-09-08** — search box, Site controls incl. the clipboard disclosure, both close guards, and the capped list + collapse. ⬜ **DPI cells #4/#6/#9 NOT run** — stated, not rounded up |
 | `P7d-A13` | The filter box is a **native `<input>`** and characters reach it | Swap it for a MUI `TextField` → `boxTag` stops being `INPUT`, or the typed value never lands | **`tagName` and the value read back after typing**, not the element merely rendering | T2 👤 | 🟢 **`INPUT`, value round-trips, 2026-09-08.** ⚠️ 👤 half (real keystrokes) still owed |
 | `P7d-A14` | A query matching nothing shows an explicit message, not a bare empty table; **Clear** restores the list | Remove the `filtered.length === 0` arm → headers over an empty body with no explanation | The **rendered message text** and the row count after Clear | T2 | 🟢 **`zzzznope` → no table, message shown, Clear restores, 2026-09-08** |
 
@@ -443,20 +444,35 @@ All five recommendations accepted as written.
 
 ## Sign-off
 
-- [ ] Every evidence row GREEN **and** its RED observed
-- [ ] `scripts/preflight.ps1 -Full` run — result + date recorded below. ⛔ Bare `preflight.ps1` skips
-      `T1d` and prints *"0 failed, 1 skipped. This is NOT a pass."* A skip is never a pass
-- [ ] `scripts/preflight.ps1 -NegativeControl` run — every T0 gate seen to fail
-- [ ] `../REGRESSION_SET.md` run in full at this boundary
-- [ ] Adversarial review complete, four questions answered in writing
-- [ ] 👤 Owner has **looked at** every changed screen (`P7d-A12`)
-- [ ] Any baseline lowered in `../HARNESS.md` §4, residuals listed with reasons
-- [ ] Commit messages cite the row IDs they satisfy
+- [x] Every evidence row GREEN **and** its RED observed — `A1`–`A14`. ⚠️ Three probes were
+      **originally able to pass with the feature removed**; all three are recorded in §10 Q1, fixed,
+      and re-run, not quietly repaired
+- [x] `scripts/preflight.ps1 -Full` — PASS
+- [x] `scripts/preflight.ps1 -NegativeControl` — PASS, every gate seen to fail
+- [x] `../REGRESSION_SET.md` run at this boundary — 🟡 **PARTIAL and specifically so**; `R-INTEXT`
+      🟢 both halves (owed since 7c, now run)
+- [x] Adversarial review — §10, four questions. ⚠️ **Self-review**; its own blind spot is named
+- [x] 👤 Owner has looked at every changed screen — all four surfaces, by hand
+- [x] No baseline lowered. `G11` held at 60, `G12` at 4 with `simple_handler.cpp` edited
+- [x] Commit messages cite their row IDs
 
 | Item | Result | Date | By |
 |---|---|---|---|
-| preflight -Full | | | |
-| preflight -NegativeControl | | | |
-| regression set | | | |
-| adversarial review | | | |
-| owner human-eyes pass | | | |
+| preflight -Full | 🟢 PASS | 2026-09-08 | |
+| preflight -NegativeControl | 🟢 PASS | 2026-09-08 | |
+| regression set | 🟡 PARTIAL — see the 7d record | 2026-09-08 | |
+| adversarial review | 🟢 done, self-review | 2026-09-08 | |
+| owner human-eyes pass | 🟢 all four surfaces | 2026-09-08 | 👤 Owner |
+
+### ⬜ Residuals carried out of this phase — stated, not rounded up
+
+| Owed | Why it is not a pass |
+|---|---|
+| **DPI matrix cells #4/#6/#9** | `A12` names them; the owner reviewed at their normal DPI only. Required before release, not before the next phase |
+| **Stubbed `R-INTEXT` REDs** | Both GREEN halves observed, plus a same-path 3 ms A/B that rules out a stuck discriminator. Does **not** prove the downstream gate reacts to a forced flip |
+| **`R-GOLD` / `R-COUNT`** | No real payment this session |
+| **`R-PERIM` T2 e2e** | T1 green; `matrix_c.rs` untouched this phase |
+| **macOS** | Relay only. ⚠️ Item 1 has **two** entry points, so the relay must name both |
+| **`R-CLOSE`'s SUBJECT is C++-only** | It names three C++ paths and no React one — which is *why* the `edit_permissions` backdrop was missed. The set should grow a React layer |
+| **Physical input** | Every automated result is CDP-driven; the owner's by-hand pass is what covers it |
+| Owed from the 7c boundary | 7c's own adversarial review; `TICKET_wallet_quiet_detector_blind_to_long_polls.md` |

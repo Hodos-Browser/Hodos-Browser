@@ -354,3 +354,76 @@ stopped being intercepted. That is evidence, **not** a substitute for the paymen
 
 `R-PERIM` T1 green via preflight `T1a`. `R-CLOSE` not touched by this phase (no overlay lifetime
 change); still carries the file-dialog arm owed from the 3→4 boundary.
+
+---
+
+# Boundary run: 7d close, 2026-09-08 — 🟡 PARTIAL, and specifically so
+
+Phase 7d = the management half of the consent surface (approved-sites search, the dual-store fix,
+the close guard, the grant-list cap + limits collapse).
+
+### What Phase 7d actually put at risk
+
+| Change | Which invariant it could break |
+|---|---|
+| `MirrorSitePermissionToChromium` widened to 3 types | none in this set directly — but it **changes which store governs a permission**, the "gate that silently stops gating" shape |
+| Two React close guards (MUI backdrop; overlay backdrop) | `R-CLOSE` |
+| One prop gating layout on a component shared with 4 consent modals | not in this set — covered by `P7d-A11` |
+
+### `R-INTEXT` — 🟢 **GREEN, both halves, correct SUBJECT.** Owed since the 7c boundary; now run.
+
+⛔ **First attempt read zero.** The stated subject is the Rust log's record of `X-Requesting-Domain`,
+and `grep` returned **0 lines**. That is not "no header" — `domain_trust_mw` logs at **debug** and the
+wallet defaults to **info**, so the subject was *suppressed, not absent*. Reading that zero as
+evidence would have been the exact vacuous-probe failure this sprint keeps paying for. Re-run with
+`RUST_LOG=hodos_wallet=debug`.
+
+```
+10:51:32.027989  R-INTEXT trust: path=/wallet/status  requesting_domain=<none:internal>
+10:51:32.030747  R-INTEXT trust: path=/wallet/status  requesting_domain=example.com
+```
+
+- **GREEN a** — every wallet-UI call carries `<none:internal>`: `/domain/permissions/all`,
+  `/wallet/settings`, `/wallet/status`, `/wallet/bsv-price`, `/wallet/balance`, `/wallet/peerpay/status`.
+- **GREEN b** — the call made from a real `https://example.com` page through the injected bridge
+  arrives stamped with **the exact page host**.
+
+⭐ **A control stronger than the stub the row asks for.** The two lines above are **the same path,
+3 ms apart, with opposite verdicts.** No "always emits the header" implementation and no "never
+emits it" implementation can produce that pair. Both failure modes the stubbed REDs target are ruled
+out for that path by a natural A/B, on one build, without touching the code.
+
+⬜ **Still owed:** the *stubbed* REDs (force internal-as-external and observe (a) start prompting;
+force external-as-internal and observe (b) go silent). The natural A/B proves the discriminator is
+live; it does not prove the downstream gate reacts. Not upgraded.
+
+⚠️ **Observation, filed not fixed:** the external `__hodos_walletCall` reached Rust in 3 ms but its
+client-side promise had not settled after 10 s. The R-INTEXT claim is unaffected (the subject is what
+Rust received), but the round trip on that path is worth its own look.
+
+### `R-CLOSE` — 🟢 **subjects untouched, and that is the finding**
+
+`git diff a052033..HEAD -- cef-native/` touches **0** lines matching `WM_ACTIVATE`,
+`prevent_close`, `file_dialog_active`, `MouseHookProc` or `HideWalletOverlay`. The only C++ change in
+this phase is the content-setting mirror. So `R-CLOSE`'s defined GREENs (`g_file_dialog_active`,
+`g_wallet_overlay_prevent_close`) are not at risk from Phase 7d — a **code reading**, labelled as one.
+
+⚠️ Phase 7d added **two new close guards that this invariant does not describe**, both React:
+the MUI `<Dialog>` backdrop and the `edit_permissions` overlay backdrop. They are covered by
+`P7d-A9`/`A10` (green, with REDs observed). 🚨 `R-CLOSE`'s SUBJECT line names three C++ paths and no
+React one — which is exactly why the `edit_permissions` backdrop was missed on the first pass of item
+1. **A future edit to this set should add the React layer to that SUBJECT.**
+
+### `R-PERIM` — 🟢 T1, ⬜ T2 e2e owed — unchanged from prior boundaries
+`matrix_c.rs` untouched this phase. `T1a` green in preflight.
+
+### `R-GOLD` / `R-COUNT` — ⬜ NOT RUN, same reason as every prior boundary
+No real payment happened this session. Not upgraded to a pass.
+
+### `R-UPDATE` — 🟡 T1 only, unchanged. Real N−1 → N apply still owed at RC.
+
+### ⭐ What this boundary establishes
+
+The trust discriminator is **live and correctly two-sided on this build** — the first time both
+halves of `R-INTEXT` have been observed together at any beta.3 boundary. It does **not** establish
+that the downstream gate reacts to a forced flip; that stub remains owed before the release boundary.
