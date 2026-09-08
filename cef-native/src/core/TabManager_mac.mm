@@ -6,6 +6,7 @@
 #include "../../include/core/TabManager.h"
 #include "../../include/core/WindowManager.h"
 #include "../../include/core/EphemeralCookieManager.h"
+#include "../../include/core/SitePermissionStore.h"
 #include "../../include/core/Logger.h"
 #include "../../include/handlers/simple_handler.h"
 #include "include/cef_app.h"
@@ -648,4 +649,28 @@ Tab* TabManager::GetActiveTabForWindow(int window_id) {
     int id = GetActiveTabIdForWindow(window_id);
     if (id == -1) return nullptr;
     return GetTab(id);
+}
+
+// beta.3 Phase 7b — macOS arm of GetFaviconUrlForHost.
+//
+// ⛔ MEASURED 2026-09-08: this was defined ONLY in TabManager.cpp, which CMakeLists
+// compiles on Windows alone (macOS builds TabManager_mac.mm instead). Its caller —
+// FaviconParamForDomain in HttpRequestInterceptor.cpp — is SHARED, so the macOS link
+// failed outright: "Undefined symbols for architecture arm64". The whole browser shell
+// could not be built on macOS. Ported verbatim rather than reimplemented, so the two
+// platforms cannot answer the same question differently.
+//
+// ⛔ Reuses SitePermissionStore::NormalizeHost rather than parsing the URL here. That
+// function already handles scheme, path, userinfo and — the case a hand-rolled version
+// gets wrong — IPv6 literals, where a naive first-colon strip collapses every address
+// to "[".
+std::string TabManager::GetFaviconUrlForHost(const std::string& host) {
+    if (host.empty()) return "";
+    for (Tab* tab : GetAllTabs()) {
+        if (!tab || tab->favicon_url.empty() || tab->url.empty()) continue;
+        if (SitePermissionStore::NormalizeHost(tab->url) == host) {
+            return tab->favicon_url;
+        }
+    }
+    return "";
 }

@@ -3036,18 +3036,35 @@ pub async fn wallet_unlock(
             }
         }
 
-        // Backfill DPAPI blob so future startups auto-unlock without PIN
+        // Re-write the OS credential store so future startups auto-unlock without a PIN.
+        //
+        // ⛔ UNCONDITIONAL, deliberately. This used to be gated on
+        // `wallet.mnemonic_dpapi.is_none()` — i.e. "only if we never stored one". That gate
+        // reads the DB column, which is only ever the sentinel `KEYCHAIN`; it says nothing
+        // about what the credential store ACTUALLY holds. So a wallet whose stored value had
+        // become garbage skipped the repair entirely: the PIN unlocked the session, the bad
+        // value stayed, and the next start was locked again — a PIN prompt every single
+        // launch, forever, with no way out.
+        //
+        // MEASURED 2026-09-08: caught by the live repair test, not by reading the code. With
+        // the gate in place the dev wallet unlocked (locked:false) while the Keychain entry's
+        // mdat never moved — proof the write was skipped. Re-run unconditional: entry
+        // rewritten, and the next restart auto-unlocked with no PIN.
+        //
+        // Cost is one credential-store write per manual unlock, which is rare; the write is
+        // idempotent, and "the stored key always matches the wallet after a successful PIN
+        // unlock" is a far easier invariant to keep than tracking whether it drifted.
         {
             use crate::database::WalletRepository;
             let wallet_repo = WalletRepository::new(db.connection());
             if let Ok(Some(wallet)) = wallet_repo.get_primary_wallet() {
-                if wallet.mnemonic_dpapi.is_none() {
-                    if let Ok(mnemonic) = db.get_cached_mnemonic() {
-                        let mnemonic_owned = mnemonic.to_string();
-                        let wallet_id = wallet.id.unwrap_or(1);
-                        if let Err(e) = db.store_dpapi_blob(wallet_id, &mnemonic_owned) {
-                                    log::error!("   Auto-unlock repair failed ({}): {} — the wallet will still ask for a PIN next start", "unlock", e);
-                                }
+                if let Ok(mnemonic) = db.get_cached_mnemonic() {
+                    let mnemonic_owned = mnemonic.to_string();
+                    let wallet_id = wallet.id.unwrap_or(1);
+                    if let Err(e) = db.store_dpapi_blob(wallet_id, &mnemonic_owned) {
+                        log::error!("   Auto-unlock repair FAILED: {} — the wallet will ask for a PIN again next start", e);
+                    } else {
+                        log::info!("   ✅ Credential store refreshed — next start will auto-unlock");
                     }
                 }
             }
