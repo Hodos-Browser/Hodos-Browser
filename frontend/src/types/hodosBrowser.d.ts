@@ -9,6 +9,14 @@ import type { BookmarkData, FolderData, BookmarkAddResponse, BookmarkUpdateRespo
 declare global {
   interface Window {
     hodosBrowser: {
+      // Phase 8c — the per-request-id wallet bridge. Native promise-returning
+      // functions bound in C++ (`WalletBridgeV8Handler`), one entry per migrated
+      // method. ⚠️ Deliberately NOT merged into `wallet` below: C++ binds these
+      // before the page's JS runs, and `initWindowBridge.ts` guards its whole wallet
+      // block with `if (!window.hodosBrowser.wallet)`.
+      bridge?: {
+        getStatus: () => Promise<{ exists: boolean; needsBackup: boolean }>;
+      };
       // Promise-based since the history-over-IPC move: the render process no longer
       // opens the history database itself, so every call is a round-trip to the
       // browser process. Matches the shape `cookies` below has always had.
@@ -116,8 +124,9 @@ declare global {
     onGetBalanceError?: (error: string) => void;
     onGetTransactionHistoryResponse?: (data: any[]) => void;
     onGetTransactionHistoryError?: (error: string) => void;
-    onWalletStatusResponse?: (data: { exists: boolean; needsBackup: boolean }) => void;
-    onWalletStatusError?: (error: string) => void;
+    // ⛔ REMOVED by Phase 8c stage 1 — `wallet.getStatus` no longer uses a global
+    // callback slot. Re-declaring these would invite a caller to reintroduce the race.
+    //   onWalletStatusResponse / onWalletStatusError
     onCreateWalletResponse?: (data: { success: boolean; mnemonic: string; address: string; version: string }) => void;
     onCreateWalletError?: (error: string) => void;
     onLoadWalletResponse?: (data: { success: boolean; address: string; mnemonic: string; version: string; backedUp: boolean }) => void;

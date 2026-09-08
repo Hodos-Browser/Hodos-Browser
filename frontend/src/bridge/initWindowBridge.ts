@@ -158,33 +158,28 @@ let balanceInFlight: Promise<any> | null = null;
 // Wallet methods
 if (!window.hodosBrowser.wallet) {
   window.hodosBrowser.wallet = {
+    // ⭐ MIGRATED — Phase 8c stage 1, the first of 41.
+    //
+    // No `window.onWalletStatusResponse` global, no `setTimeout` race, no `delete` on a
+    // slot another in-flight call may own. `hodosBrowser.bridge.getStatus` is a NATIVE
+    // function: C++ mints a request id, holds the promise in its own map keyed by that
+    // id, and the browser process echoes the id back. Two concurrent calls get two
+    // promises and two correct answers.
+    //
+    // ⚠️ The native binding is on `hodosBrowser.bridge`, not here, on purpose — C++
+    // OnContextCreated runs before this file, and creating `hodosBrowser.wallet` there
+    // would make the `if (!window.hodosBrowser.wallet)` guard above fail and silently
+    // drop the other 40 methods. Each migrated method becomes one assignment like this.
+    //
+    // ⛔ The timeout is gone deliberately. The old one existed to stop a caller hanging
+    // forever when its reply was stolen by another call — the bug itself. A reply that
+    // arrives late is now discarded by request id (`TakeBridgeCall`), and a reply that
+    // never arrives is a native failure that rejects the promise.
     getStatus: () => {
-      console.log("🔍 JS: Sending wallet_status_check to native");
-      return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          delete window.onWalletStatusResponse;
-          delete window.onWalletStatusError;
-          reject(new Error('wallet_status_check timed out'));
-        }, 10000);
-
-        window.onWalletStatusResponse = (data: any) => {
-          clearTimeout(timeout);
-          console.log("✅ Wallet status retrieved:", data);
-          resolve(data);
-          delete window.onWalletStatusResponse;
-          delete window.onWalletStatusError;
-        };
-
-        window.onWalletStatusError = (error: string) => {
-          clearTimeout(timeout);
-          console.error("❌ Wallet status error:", error);
-          reject(new Error(error));
-          delete window.onWalletStatusResponse;
-          delete window.onWalletStatusError;
-        };
-
-        window.cefMessage?.send('wallet_status_check', []);
-      });
+      if (!window.hodosBrowser?.bridge?.getStatus) {
+        return Promise.reject(new Error('wallet.getStatus: native bridge unavailable'));
+      }
+      return window.hodosBrowser.bridge.getStatus();
     },
 
     create: () => {

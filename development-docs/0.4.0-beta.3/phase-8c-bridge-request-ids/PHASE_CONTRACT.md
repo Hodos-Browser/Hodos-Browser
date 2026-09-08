@@ -1,7 +1,7 @@
 # Phase 8c — per-request ids for the wallet bridge · PHASE CONTRACT
 
 **Workstream:** money-path correctness · **Ticket:** `TICKET_bridge_single_slot_callbacks_race.md`
-**Status:** 🟢 **DECIDED — Option B. Ready to start at stage 1 (§7).**
+**Status:** 🟢 **STAGE 1 DONE and measured live. Stages 2-4 not started.**
 👤 **Owner, 2026-09-08:** *"Let's go with your recommendation of Option B."* — the 41 slots converge on
 the **C++-side promise map** already shipping for the history API. ⛔ The ticket's proposed JS-side
 `Map<id,{resolve,reject}>` is **not** what gets built; see §0.3 for why.
@@ -10,8 +10,9 @@ Stage 1 must land and be reviewed before stages 2–4 are attempted.
 **Opened:** 2026-09-08 · **Owner:** Matthew Archbold · **Platforms:** Windows + macOS (shared C++ / TS)
 **Standard:** `../HARNESS.md`. **Base:** `c68ed57`.
 
-> ⛔ **Nothing is implemented yet.** The kickoff changed what the fix should be; §8 records the
-> decision that resolved it. Start at §7 stage 1.
+> ⭐ **Stage 1 landed 2026-09-08**: the mechanism exists, one read-only method (`wallet.getStatus`) is
+> migrated end to end, and the GREEN/RED pair is measured (§4). ⛔ Stages 2-4 are NOT started — the
+> money path has not been touched.
 
 ---
 
@@ -83,16 +84,57 @@ happen.
 | `R-CLOSE` | Overlay close guards | `wallet_prevent_close` / `wallet_allow_close` are IPC on this surface |
 | `R-DUST` | No incidental 1-sat spend | `sendTransaction` is in scope |
 
-## 4. Evidence table — ⬜ written at stage 1
+## 4. Evidence — stage 1 measured live, 2026-09-08
 
-Now that §8 is answered the subject is fixed: the C++ `std::map<int, Pending…>` and the V8 promise it
-resolves. Full rows are written when stage 1 lands, against the real mechanism rather than a sketch.
+⭐ **The concurrency test is FREE.** `wallet.getStatus` is read-only, so unlike the payment batch this
+needed only the dev stack. Run against a freshly built dev browser, hard-reloaded first.
 
-One row holds regardless, and it is the important one:
+⚠️ **Subject, asserted before measuring** — 11 CDP targets all report `type:"page"` (header + 10
+overlays), the trap that faked an "intermittent per-session bug" earlier in 0.4.0:
 
-| ID | 🟢 GREEN | 🔴 RED | 🎯 SUBJECT | Tier |
-|---|---|---|---|---|
-| `P8c-A1` | Two concurrent `sendTransaction` calls produce **two** on-chain sends | Apply `getBalance`'s dedupe to `sendTransaction` ⇒ **one** send. Must be seen | ⛔ Two distinct **txids**, not two resolved promises | T2 |
+| Check | Result |
+|---|---|
+| Target URL | `http://127.0.0.1:5137/` — the header, where `initWindowBridge` runs |
+| `hodosBrowser.bridge.getStatus` exists | ✅ |
+| …and is genuinely native | ✅ `toString()` contains `[native code]` — not a JS shim |
+| `window.onWalletStatusResponse` | ✅ **gone** |
+
+### `P8c-A1a` — 🟢🔴 GREEN **and** RED, same harness, both observed
+
+The RED is not a stub or a reverted patch: it is **the identical experiment run against an
+un-migrated sibling** (`getBackupModalState`), which still uses the legacy single-slot path. Same
+page, same probe, same moment.
+
+| | Migrated (`getStatus`) | Legacy (`getBackupModalState`) |
+|---|---|---|
+| 3 concurrent calls | **3 / 3 fulfilled, correct** | 1 / 3 correct |
+| Wall clock | **9 ms** | **10,815 ms** |
+| Values | `{"exists":true,"needsBackup":false}` ×3 | 🚨 `null`, `null`, `{"shown":false}` |
+
+⇒ **A test that could not pass with the feature removed**, because the un-migrated method *is* the
+feature removed.
+
+### 🚨 `D-5` — the harm is worse than the ticket says, and it was measured
+
+The ticket describes the losing caller as one that *"waits out its own timeout and reports a failure
+that never happened."* For `getBackupModalState` that is **not** what happens:
+
+```ts
+const timeout = setTimeout(() => { delete window.onGetBackupModalStateResponse;
+                                   resolve(null); }, 10000);   // ⛔ resolve, not reject
+```
+
+It **resolves `null`**. The losing callers get a **silently wrong value**, not an error — no rejection,
+nothing in the console, nothing to catch. A caller doing `if (state?.shown)` takes the wrong branch
+with no signal anywhere. ⇒ Every legacy slot must be checked for resolve-on-timeout while migrating;
+"reports a spurious failure" understates the class.
+
+### Still owed
+
+| ID | | Tier |
+|---|---|---|
+| `P8c-A2` | Two concurrent `sendTransaction` calls produce **two** on-chain sends. RED: apply `getBalance`'s dedupe ⇒ **one**. ⛔ Subject is two distinct **txids**, not two resolved promises | T2 — **stage 2**, and it belongs in `../PAYMENT_TEST_BATCH.md` |
+| `P8c-A3` | A reply arriving after its caller gave up is discarded, not misrouted | ⚠️ Implemented (`TakeBridgeCall` logs and drops an unknown id) but **not yet exercised** — needs an induced late reply |
 
 ## 5. Blast radius
 
@@ -108,7 +150,7 @@ The `wallet_call` path itself (pattern 2) — it already routes correctly and is
 
 ⛔ A 41-slot big-bang on the money path is the wrong shape. Suggested order:
 
-1. **Build the mechanism once** and migrate **one** read-only method end to end, with `A1`'s harness.
+1. ✅ **DONE** — mechanism built (`WalletBridgeV8Handler`, `s_pendingBridgeCalls`, `ResolveBridgeCall`/`RejectBridgeCall`), `wallet.getStatus` migrated end to end, GREEN/RED measured live (§4). **1 of 41.**
 2. **Money path next** — `sendTransaction`, `createTransaction` — while attention is on it.
 3. The remaining ~38 in batches, each batch its own commit, the old global deleted as each lands.
 4. `initWindowBridge.ts`'s `window.on*` declarations deleted last, as the proof nothing still uses them.

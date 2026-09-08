@@ -4553,12 +4553,21 @@ bool SimpleHandler::OnProcessMessageReceived(
 
         // Always send a response, even if it's just the default "no wallet" state
         // This allows the app to continue running regardless of wallet status
+        //
+        // Phase 8c stage 1 — MIGRATED to per-request-id routing. Arg 0 is the request id
+        // the render process sent; echoing it is what lets `ResolveBridgeCall` deliver
+        // this reply to the caller that asked for it, instead of to whichever promise
+        // owned a global callback slot at that moment.
+        const int requestId = message->GetArgumentList()->GetInt(0);
+
         CefRefPtr<CefProcessMessage> cefResponse = CefProcessMessage::Create("wallet_status_check_response");
         CefRefPtr<CefListValue> responseArgs = cefResponse->GetArgumentList();
-        responseArgs->SetString(0, response.dump());
+        responseArgs->SetInt(0, requestId);
+        responseArgs->SetString(1, response.dump());
 
         browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, cefResponse);
-        LOG_DEBUG_BROWSER("📤 Wallet status sent: " + response.dump());
+        LOG_DEBUG_BROWSER("📤 Wallet status sent (requestId " + std::to_string(requestId) +
+                          "): " + response.dump());
 
         return true;
     }

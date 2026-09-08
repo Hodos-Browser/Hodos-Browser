@@ -272,6 +272,138 @@ void ResolveHistoryRequest(int requestId, const std::string& json) {
     pending.context->Exit();
 }
 
+// ========== WALLET BRIDGE — PER-REQUEST ROUTING (Phase 8c, stage 1) ==========
+//
+// The legacy bridge in `initWindowBridge.ts` resolves each native call through a
+// SINGLE global callback slot per METHOD (`window.on<Method>Response`). Two calls to
+// the same method in flight together clobber each other: the first reply resolves one
+// promise and deletes the handler, and the second caller waits out its own timeout and
+// reports a failure that never happened. Measured at 1 run in 3 for `getBalance`
+// (`TICKET_bridge_single_slot_callbacks_race.md`).
+//
+// ⭐ This is deliberately NOT a new mechanism. It is the same shape as
+// `s_pendingHistory` directly above — a promise held in C++, keyed by request id,
+// resolved inside its owning V8 context — chosen over the ticket's proposed JS-side
+// `Map<id,{resolve,reject}>` because that leaves a JS registry that leaks when a page
+// navigates mid-request. Owner decision, 2026-09-08 (phase contract §8, Option B).
+//
+// ⛔ Do NOT "fix" the remaining legacy slots by copying `getBalance`'s in-flight dedupe.
+// It is sound only for idempotent reads. Deduping `sendTransaction` would collapse two
+// distinct payments into ONE, which is worse than the bug.
+struct PendingBridgeCall {
+    CefRefPtr<CefV8Value> promise;
+    CefRefPtr<CefV8Context> context;
+    std::string method;  // diagnostics only — which call this id belongs to
+};
+static std::map<int, PendingBridgeCall> s_pendingBridgeCalls;
+static int s_nextBridgeRequestId = 1;
+
+// Take the pending call for `requestId` out of the map, or return false if it is
+// unknown or its context has died. Shared by the resolve and reject paths so the
+// "unknown id" and "context gone" rules cannot drift apart.
+static bool TakeBridgeCall(int requestId, const char* what, PendingBridgeCall& out) {
+    CEF_REQUIRE_RENDERER_THREAD();
+
+    auto it = s_pendingBridgeCalls.find(requestId);
+    if (it == s_pendingBridgeCalls.end()) {
+        // Not an error: a reply arriving after its caller gave up lands here and is
+        // DISCARDED rather than misrouted. That is the defect this phase exists to fix.
+        LOG_DEBUG_RENDER(std::string("🌉 bridge ") + what + " for unknown requestId " +
+                         std::to_string(requestId) + " — discarded, not misrouted");
+        return false;
+    }
+
+    out = it->second;
+    s_pendingBridgeCalls.erase(it);
+
+    if (!out.context || !out.context->IsValid()) {
+        LOG_DEBUG_RENDER(std::string("🌉 bridge ") + what + " dropped — context gone (" +
+                         out.method + ", requestId " + std::to_string(requestId) + ")");
+        return false;
+    }
+    return true;
+}
+
+// Resolve the promise for `requestId` with `json`. Called from a migrated `*_response`
+// IPC arm. No-ops if the id is unknown or the page navigated away mid-request.
+void ResolveBridgeCall(int requestId, const std::string& json) {
+    PendingBridgeCall pending;
+    if (!TakeBridgeCall(requestId, "response", pending)) return;
+
+    pending.context->Enter();
+    try {
+        pending.promise->ResolvePromise(jsonToV8(nlohmann::json::parse(json)));
+    } catch (const std::exception& e) {
+        pending.promise->RejectPromise(pending.method + ": bad response — " + e.what());
+    }
+    pending.context->Exit();
+}
+
+// Reject the promise for `requestId`. The legacy bridge reported a native failure by
+// invoking a separate `window.on<Method>Error` global — the same single-slot shape, and
+// the same race.
+void RejectBridgeCall(int requestId, const std::string& error) {
+    PendingBridgeCall pending;
+    if (!TakeBridgeCall(requestId, "error", pending)) return;
+
+    pending.context->Enter();
+    pending.promise->RejectPromise(pending.method + ": " + error);
+    pending.context->Exit();
+}
+
+// `window.hodosBrowser.bridge.<method>()` — returns a real Promise, routed by id.
+//
+// ⚠️ Registered on its own `bridge` object rather than onto `hodosBrowser.wallet`.
+// C++ `OnContextCreated` runs BEFORE the page's JS, and `initWindowBridge.ts` guards its
+// whole wallet block with `if (!window.hodosBrowser.wallet)`. Creating `wallet` here
+// would make that guard fail and silently drop the other 40 methods. The TS side assigns
+// these onto `wallet` instead, one line per migrated method — which is also what makes
+// the migration incremental.
+class WalletBridgeV8Handler : public CefV8Handler {
+public:
+    WalletBridgeV8Handler() {}
+
+    bool Execute(const CefString& name,
+                 CefRefPtr<CefV8Value> object,
+                 const CefV8ValueList& arguments,
+                 CefRefPtr<CefV8Value>& retval,
+                 CefString& exception) override {
+        CEF_REQUIRE_RENDERER_THREAD();
+
+        const std::string method = name.ToString();
+
+        // method name -> the IPC the browser process already handles.
+        // Stage 1 migrates one read-only method; later stages extend this table.
+        const char* ipcName = nullptr;
+        if (method == "getStatus") ipcName = "wallet_status_check";
+        if (!ipcName) return false;  // unknown method — V8 throws for us
+
+        CefRefPtr<CefV8Context> context = CefV8Context::GetCurrentContext();
+        if (!context) {
+            exception = "bridge: no V8 context";
+            return true;
+        }
+
+        const int requestId = s_nextBridgeRequestId++;
+
+        CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create(ipcName);
+        // ⛔ Arg 0 is ALWAYS the request id for a migrated call. The browser process
+        // echoes it back in arg 0 of the response.
+        msg->GetArgumentList()->SetInt(0, requestId);
+
+        retval = CefV8Value::CreatePromise();
+        s_pendingBridgeCalls[requestId] = { retval, context, method };
+        context->GetBrowser()->GetMainFrame()->SendProcessMessage(PID_BROWSER, msg);
+
+        LOG_DEBUG_RENDER("🌉 bridge " + method + " -> " + ipcName +
+                         " (requestId " + std::to_string(requestId) + ")");
+        return true;
+    }
+
+private:
+    IMPLEMENT_REFCOUNTING(WalletBridgeV8Handler);
+};
+
 class HistoryV8Handler : public CefV8Handler {
 public:
     HistoryV8Handler() {}
@@ -695,6 +827,16 @@ void SimpleRenderProcessHandler::OnContextCreated(
     // Create the history object (cross-platform)
     LOG_DEBUG_RENDER("📚 Creating history object for V8 context");
     CefRefPtr<CefV8Value> historyObject = CefV8Value::CreateObject(nullptr, nullptr);
+    // Phase 8c stage 1 — per-request-id wallet bridge. See WalletBridgeV8Handler for
+    // why this is its own object rather than `hodosBrowser.wallet`.
+    CefRefPtr<CefV8Value> bridgeObject = CefV8Value::CreateObject(nullptr, nullptr);
+    CefRefPtr<CefV8Handler> bridgeHandler = new WalletBridgeV8Handler();
+    bridgeObject->SetValue("getStatus",
+        CefV8Value::CreateFunction("getStatus", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    hodosBrowser->SetValue("bridge", bridgeObject, V8_PROPERTY_ATTRIBUTE_READONLY);
+    LOG_DEBUG_RENDER("🌉 Bound WalletBridgeV8Handler (1 method migrated)");
+
     hodosBrowser->SetValue("history", historyObject, V8_PROPERTY_ATTRIBUTE_READONLY);
 
     // Bind HistoryV8Handler
@@ -1543,16 +1685,23 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // MIGRATED (Phase 8c stage 1) — routed by request id, not through a global slot.
+    // Args: 0 = requestId (echoed by the browser process), 1 = response JSON.
+    // ⛔ No `window.onWalletStatusResponse` any more: a reply that arrives after its
+    // caller gave up is discarded by ResolveBridgeCall instead of resolving whichever
+    // promise happens to own the global at that moment.
     if (message_name == "wallet_status_check_response") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0);
+        if (args->GetSize() < 2) {
+            LOG_WARNING_RENDER("wallet_status_check_response missing args (need 2: requestId, json)");
+            return true;
+        }
+        const int requestId = args->GetInt(0);
+        const std::string responseJson = args->GetString(1).ToString();
 
-        LOG_DEBUG_RENDER(LogFmt() << "✅ Wallet status check response received: " << responseJson);
-
-        // Execute JavaScript to call the callback function directly
-        std::string js = "if (window.onWalletStatusResponse) { window.onWalletStatusResponse(" + responseJson + "); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-
+        LOG_DEBUG_RENDER(LogFmt() << "✅ Wallet status response (requestId " << requestId
+                                  << "): " << responseJson);
+        ResolveBridgeCall(requestId, responseJson);
         return true;
     }
 
