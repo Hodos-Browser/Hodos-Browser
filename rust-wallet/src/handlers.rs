@@ -4109,6 +4109,37 @@ pub(crate) struct ReservationGuard {
     placeholder: Option<String>,
 }
 
+/// The transaction is signed but **not yet broadcast**, and the wallet just failed to
+/// record which coins it spends. Refuse to send it.
+///
+/// ⛔ **The rule this encodes:** *if the wallet cannot record which coins a transaction
+/// spends, it must not broadcast that transaction.* Aborting here costs nothing — no
+/// money has moved. Broadcasting anyway produces a transaction that is on-chain but
+/// **unattributable**: `spent_by` never set, the inputs still wearing a `pending-`
+/// marker, and the spend missing from history.
+///
+/// ⭐ **Do not release the reservation here.** The outpoint is genuinely unspent, so
+/// Phase 0.7's sweeper (`monitor/task_sweep_reservations`) frees it after its on-chain
+/// check — and hand-releasing would be the enumerate-don't-gate mistake that sweeper
+/// was built to replace. `TaskFailAbandoned` retires the stored transaction row.
+///
+/// ⚠️ **Not usable from `do_onchain_backup`.** That path resolves the placeholder
+/// *after* it broadcasts, so by the time a failure is visible the money has already
+/// moved and there is nothing left to abort. See its call site for what it does instead.
+fn resolution_failed_response(placeholder: &str, txid: &str, err: &str) -> HttpResponse {
+    log::error!(
+        "   ⛔ ABORTING BEFORE BROADCAST — could not resolve reservation {} → {}: {}. \
+         No money has moved. The reservation is left for the sweeper.",
+        placeholder, txid, err
+    );
+    HttpResponse::InternalServerError().json(serde_json::json!({
+        "error": "Transaction was signed but the wallet could not record which coins it spends, \
+                  so it was NOT broadcast. No funds have moved. Please try again.",
+        "code": "reservation_resolution_failed",
+        "txid": txid,
+    }))
+}
+
 impl ReservationGuard {
     fn new(state: &AppState, placeholder: String) -> Self {
         Self {
@@ -4118,7 +4149,8 @@ impl ReservationGuard {
         }
     }
 
-    /// Hand the reservation over to the pending transaction's own lifecycle.
+
+/// Hand the reservation over to the pending transaction's own lifecycle.
     ///
     /// Call once the transaction is stored in `PENDING_TRANSACTIONS`: from that point
     /// `sign_action` resolves the placeholder to the real txid, the broadcast-failure path
@@ -6385,10 +6417,14 @@ pub(crate) async fn create_action_internal(
         }
 
         // 3. Update spending_description on reserved inputs (placeholder → signed txid)
+        //
+        // ⛔ Fatal. If the wallet cannot record which coins this transaction spends,
+        // it must not broadcast it — see `resolution_failed_response`.
         if let Some(ref placeholder) = reservation_placeholder {
             let output_repo = crate::database::OutputRepository::new(db.connection());
             if let Err(e) = output_repo.update_spending_description_batch(placeholder, &final_txid) {
-                log::warn!("   ⚠️  Failed to update spending_description on inputs: {}", e);
+                drop(db);
+                return resolution_failed_response(placeholder, &final_txid, &e.to_string());
             }
         }
 
@@ -6399,7 +6435,8 @@ pub(crate) async fn create_action_internal(
             let db = state.database.lock().unwrap();
             let output_repo = crate::database::OutputRepository::new(db.connection());
             if let Err(e) = output_repo.update_spending_description_batch(placeholder, &final_txid) {
-                log::warn!("   ⚠️  Failed to update spending_description on inputs: {}", e);
+                drop(db);
+                return resolution_failed_response(placeholder, &final_txid, &e.to_string());
             }
             drop(db);
         }
@@ -8556,7 +8593,9 @@ pub async fn sign_action(
                     state.balance_cache.invalidate();
                 }
                 Err(e) => {
-                    log::warn!("   ⚠️  Failed to update spending_description from placeholder: {}", e);
+                    // ⛔ Fatal — the broadcast below has not happened yet.
+                    drop(db);
+                    return resolution_failed_response(placeholder, &txid, &e.to_string());
                 }
             }
         } else {
@@ -14276,8 +14315,29 @@ pub async fn do_onchain_backup(
             let _ = output_repo.link_outputs_to_transaction(&txid, tx_id);
         }
 
-        // Update input reservations from placeholder to real txid
-        let _ = output_repo.update_spending_description_batch(&placeholder_txid, &txid);
+        // Update input reservations from placeholder to real txid.
+        //
+        // 🚨 **This site cannot abort, and that is the one place it differs from the
+        // other five.** `TICKET_placeholder_resolution_failure_broadcasts_anyway.md` §2
+        // asserts *"at every one of these sites the transaction is signed but not yet
+        // sent"* — that is **false here**. The broadcast happens ~110 lines above, so by
+        // the time this can fail the money has already moved and there is nothing left
+        // to refuse. Verified 2026-09-08: both statements are in `do_onchain_backup`,
+        // broadcast first.
+        //
+        // So the harm is unavoidable; only its *visibility* is in our control. Log at
+        // error with the placeholder and txid so the row is findable, and do not
+        // hand-release: the outpoints are genuinely spent, so the sweeper will correctly
+        // withhold them forever. The residue is a permanent reservation plus an
+        // unattributed spend — bookkeeping, not a double-spend (Phase 0.7 closed that).
+        if let Err(e) = output_repo.update_spending_description_batch(&placeholder_txid, &txid) {
+            log::error!(
+                "   🚨 BACKUP ALREADY BROADCAST but its inputs could not be recorded: \
+                 {} → {}: {}. spent_by is unset and reservation {} will never release. \
+                 Manual repair needed; this is not a double-spend.",
+                placeholder_txid, txid, e, placeholder_txid
+            );
+        }
 
         // Create proven_tx_req for proof tracking
         let ptx_repo = crate::database::ProvenTxReqRepository::new(db.connection());

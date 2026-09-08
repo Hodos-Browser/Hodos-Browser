@@ -358,7 +358,16 @@ pub async fn run_inner(state: &web::Data<AppState>) -> Result<ConsolidateResult,
                 );
 
                 let _ = output_repo.link_outputs_to_transaction(&txid, transaction_id);
-                let _ = output_repo.update_spending_description_batch(&placeholder_txid, &txid);
+
+                // ⛔ Fatal — the broadcast at step 13 has not happened yet. If the wallet
+                // cannot record which coins this consolidation spends, it must not send it.
+                // Nothing is hand-released: the outpoints are genuinely unspent, so
+                // TaskSweepReservations frees them after its on-chain check.
+                if let Err(e) = output_repo.update_spending_description_batch(&placeholder_txid, &txid) {
+                    error!("   ⛔ ABORTING BEFORE BROADCAST — could not resolve consolidation \
+                            reservation {} → {}: {}. No money has moved.", placeholder_txid, txid, e);
+                    return Err(format!("Could not record consolidation inputs, not broadcasting: {}", e));
+                }
 
                 // Record commission
                 let commission_repo = CommissionRepository::new(db.connection());

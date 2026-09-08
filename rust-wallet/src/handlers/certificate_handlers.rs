@@ -4782,10 +4782,20 @@ async fn unpublish_certificate_core(
 
     // Update input reservations from placeholder to real txid
     // Now that the transaction record exists, spent_by will be set correctly
+    //
+    // ⛔ Fatal — the broadcast below has not happened yet. If the wallet cannot record
+    // which coins this certificate transaction spends, it must not send it. The
+    // reservation is left standing: the outpoints are genuinely unspent, so
+    // TaskSweepReservations releases them after its on-chain check.
     {
         let db = state.database.lock().unwrap();
         let output_repo = OutputRepository::new(db.connection());
-        let _ = output_repo.update_spending_description_batch(&placeholder_txid, &txid);
+        if let Err(e) = output_repo.update_spending_description_batch(&placeholder_txid, &txid) {
+            drop(db);
+            log::error!("   ⛔ ABORTING BEFORE BROADCAST — could not resolve certificate \
+                         reservation {} → {}: {}. No money has moved.", placeholder_txid, txid, e);
+            return Err(format!("Could not record certificate transaction inputs, not broadcasting: {}", e));
+        }
     }
 
     // Create proven_tx_req so TaskCheckForProofs tracks this transaction

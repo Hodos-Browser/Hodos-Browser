@@ -1,7 +1,7 @@
 # 🚨 Every output found by address sync stores a **fabricated** locking script
 
 **Found 2026-09-08**, during the Phase 8 dust-guard kickoff (`D-5` in
-`phase-8-dust-guard/PHASE_CONTRACT.md`). Not found by a failure — found while checking whether
+`phase-8a-dust-guard/PHASE_CONTRACT.md`). Not found by a failure — found while checking whether
 `task_consolidate_dust`'s `is_p2pkh_script()` guard had teeth. It does not.
 
 **Status: OPEN.** ⛔ **Not urgent for beta.3 — see §"What Phase 8 already closed".** It is filed
@@ -149,7 +149,7 @@ format, is the defect.
 
 ## 7. Links
 
-- `phase-8-dust-guard/PHASE_CONTRACT.md` §0.5 (`D-5`) — where this was found, and §7 `D-9`
+- `phase-8a-dust-guard/PHASE_CONTRACT.md` §0.5 (`D-5`) — where this was found, and §7 `D-9`
 - `TICKET_token_outputs_destroyed_by_dust_paths.md` — the sibling ticket; its floor is what makes
   this non-urgent today
 - `../0.4.0-beta.4/README.md` decision 3 — the classifier this would blind

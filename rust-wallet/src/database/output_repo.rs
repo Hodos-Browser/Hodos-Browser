@@ -1605,3 +1605,117 @@ mod token_reserved_exposure_tests {
             "both are tracked as spendable value; nothing on ingest tells them apart");
     }
 }
+
+/// `P8b-A2` — the abort branch added by Phase 8b must be **reachable**.
+///
+/// The fix in `handlers.rs`, `certificate_handlers.rs` and `task_consolidate_dust.rs`
+/// turns a failed placeholder→txid resolution into a refusal to broadcast. That is only
+/// worth anything if `update_spending_description_batch` can actually return `Err` —
+/// otherwise the new branch is dead code that will never run and never be seen to run.
+///
+/// ⛔ This does **not** prove "nothing was broadcast". That assertion needs the running
+/// handler and a live network, and is recorded as owed (`P8b-A1`).
+#[cfg(test)]
+mod resolution_failure_tests {
+    use super::*;
+    use crate::database::migrations;
+
+    fn seed_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
+        migrations::create_schema_v1(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO users (userId, identity_key, active_storage, created_at, updated_at)
+             VALUES (1, 'k', 'local', 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    fn reserve(conn: &Connection, txid: &str, placeholder: &str) {
+        conn.execute(
+            "INSERT INTO outputs (user_id, spendable, change, vout, satoshis, provided_by,
+                                  purpose, type, txid, spending_description, confirmed,
+                                  created_at, updated_at)
+             VALUES (1, 0, 0, 0, 5000, 'you', '', 'P2PKH', ?1, ?2, 1, 0, 0)",
+            rusqlite::params![txid, placeholder],
+        )
+        .unwrap();
+    }
+
+    /// GREEN — the happy path resolves the reservation and sets the row's spending txid.
+    #[test]
+    fn resolution_succeeds_and_reports_the_row_count() {
+        let conn = seed_db();
+        let repo = OutputRepository::new(&conn);
+        reserve(&conn, "aa", "pending-1-0");
+        reserve(&conn, "bb", "pending-1-0");
+
+        let n = repo.update_spending_description_batch("pending-1-0", "realtxid").unwrap();
+        assert_eq!(n, 2, "both reserved inputs are resolved");
+
+        let desc: String = conn
+            .query_row("SELECT spending_description FROM outputs WHERE txid='aa'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(desc, "realtxid");
+    }
+
+    /// `P8b-A2` — the failure the abort branch exists for is **real and reachable**.
+    ///
+    /// A SQLite write failure at this exact moment is what the ticket is about (disk
+    /// full, corruption, a busy timeout that outlasts the 5 s `busy_timeout`). Dropping
+    /// the table reproduces the same `Err` shape without needing any of those.
+    #[test]
+    fn a_write_failure_surfaces_as_err_so_the_abort_branch_can_fire() {
+        let conn = seed_db();
+        reserve(&conn, "aa", "pending-1-0");
+        conn.execute("DROP TABLE outputs", []).unwrap();
+
+        let repo = OutputRepository::new(&conn);
+        let result = repo.update_spending_description_batch("pending-1-0", "realtxid");
+
+        assert!(result.is_err(),
+            "if this ever becomes Ok, every abort added by Phase 8b is dead code");
+    }
+
+    /// ⚠️ The failure mode the ticket does **not** mention: `Ok(0)`.
+    ///
+    /// A resolution that matches no rows is **not** an error, so the abort branch does
+    /// not fire — the wallet broadcasts having recorded nothing. Documented here rather
+    /// than guarded, because `Ok(0)` is also the legitimate answer when a transaction
+    /// spends only external inputs that were never in our table.
+    ///
+    /// ⭐ Checked and NOT a live double-spend path: `TaskSweepReservations` skips any
+    /// placeholder held by a live `PENDING_TRANSACTIONS` entry
+    /// (`task_sweep_reservations.rs:56-62`, *"however old the reservation looks"*), so a
+    /// slow createAction→signAction cannot have its reservation swept out from under it.
+    /// Closing the remaining gap needs the reserved count threaded to the resolution
+    /// site — deliberately out of scope; see the phase contract §8.
+    #[test]
+    fn a_resolution_matching_no_rows_is_ok_zero_not_an_error() {
+        let conn = seed_db();
+        let repo = OutputRepository::new(&conn);
+
+        let n = repo.update_spending_description_batch("pending-nothing-here", "realtxid").unwrap();
+        assert_eq!(n, 0, "no rows matched — and this is Ok, not Err");
+    }
+
+    /// The resolution only claims rows holding *its own* placeholder. A concurrent
+    /// transaction's reservation must be untouched, or one send would resolve another's
+    /// inputs to the wrong txid.
+    #[test]
+    fn resolution_claims_only_its_own_placeholder() {
+        let conn = seed_db();
+        let repo = OutputRepository::new(&conn);
+        reserve(&conn, "mine", "pending-1-0");
+        reserve(&conn, "theirs", "pending-2-0");
+
+        assert_eq!(repo.update_spending_description_batch("pending-1-0", "tx-a").unwrap(), 1);
+
+        let other: String = conn
+            .query_row("SELECT spending_description FROM outputs WHERE txid='theirs'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(other, "pending-2-0", "the other transaction's reservation is untouched");
+    }
+}
