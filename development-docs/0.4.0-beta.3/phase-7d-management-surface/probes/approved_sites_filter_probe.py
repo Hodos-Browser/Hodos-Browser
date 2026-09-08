@@ -27,6 +27,15 @@ USAGE
 import json
 import os
 import sys
+
+# Windows consoles default to cp1252, which raises UnicodeEncodeError on the
+# marks this project's output uses. Reconfigure rather than strip them: a probe
+# that dies while PRINTING a result has thrown the result away.
+try:
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+except AttributeError:  # pragma: no cover - py<3.7
+    pass
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),

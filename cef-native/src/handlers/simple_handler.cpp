@@ -737,8 +737,9 @@ static void ReshowParkedPermissionPrompt() {
 #endif
 }
 
-// beta.3 P0.9 (HIGH-4 from the adversarial review) — write the hub's decision
-// THROUGH to Chromium's own content setting for the two network types.
+// beta.3 P0.9 (HIGH-4 from the adversarial review), widened by Phase 7d R4 —
+// write the hub's decision THROUGH to Chromium's own content setting for every
+// prompt-path type we expose.
 //
 // Why this is required and not optional: for the prompt-path permissions Chromium
 // consults ITS setting before it ever calls OnShowPermissionPrompt again. Once a
@@ -747,21 +748,55 @@ static void ReshowParkedPermissionPrompt() {
 // site kept full loopback access. That is worse than the one-way door the hub
 // entries were added to close, because it also lies about it.
 //
-// ⚠️ Scoped deliberately to LocalNetwork/Loopback. Camera/mic are media-path and
-// genuinely governed by our store; location/notifications/clipboard have the SAME
-// defect but predate this phase and are covered by their own ticket — widening it
-// here would be smuggling a fix for the existing five into a branding phase.
-static void MirrorNetworkPermissionToChromium(const std::string& host,
+// beta.3 Phase 7d R4 (`TICKET_site_permission_dual_store.md`) — the three types
+// the comment below used to defer now mirror too. 📏 Measured 2026-09-08 before
+// the change, on the site rather than the panel: with our store reading `block`
+// for all three, `navigator.permissions.query` on the page still returned
+// `prompt` for all three, and Reset was equally inert. A control that reports
+// success and does nothing, on a surface CLAUDE.md names load-bearing.
+//
+// ⚠️ Camera/mic are STILL excluded, deliberately — they ride
+// OnRequestMediaAccessPermission, whose Continue() persists nothing, so our
+// store genuinely is authoritative there. `P7d-A8` is the control that proves
+// this arm did not widen onto them.
+//
+// ⚠️ Two types are not one-to-one with ours, both read out of
+// cef_types_content_settings.h rather than guessed:
+//   • CLIPBOARD — two CEF types exist. Only CLIPBOARD_READ_WRITE is writable;
+//     CLIPBOARD_SANITIZED_WRITE is documented "special-cased in the permissions
+//     layer to always allow, and as such doesn't have associated prefs data",
+//     so sanitized write CANNOT be blocked. That residual is disclosed in the
+//     Site controls panel rather than left silent (owner decision D-C) — a
+//     quieter version of the bug we are fixing is still the bug.
+//   • GEOLOCATION — GEOLOCATION_WITH_OPTIONS also exists and says the
+//     permission "is migrating to use permissions with options, which won't be
+//     stored as ContentSettings". Both compile in (CEF_API_VERSION is
+//     EXPERIMENTAL here), so writing GEOLOCATION may write a setting Chromium
+//     no longer consults. ⛔ Seeing the content setting appear is NOT the
+//     green — `P7d-A5` asserts the SITE's behaviour.
+static void MirrorSitePermissionToChromium(const std::string& host,
                                               SitePermissionType type,
                                               SitePermissionState state) {
-    if (type != SitePermissionType::Loopback && type != SitePermissionType::LocalNetwork) return;
     if (host.empty()) return;
     auto ctx = CefRequestContext::GetGlobalContext();
     if (!ctx) return;
 
-    const cef_content_setting_types_t ct =
-        (type == SitePermissionType::Loopback) ? CEF_CONTENT_SETTING_TYPE_LOOPBACK_NETWORK
-                                               : CEF_CONTENT_SETTING_TYPE_LOCAL_NETWORK;
+    cef_content_setting_types_t ct;
+    switch (type) {
+        case SitePermissionType::Loopback:
+            ct = CEF_CONTENT_SETTING_TYPE_LOOPBACK_NETWORK;      break;
+        case SitePermissionType::LocalNetwork:
+            ct = CEF_CONTENT_SETTING_TYPE_LOCAL_NETWORK;         break;
+        case SitePermissionType::Notifications:
+            ct = CEF_CONTENT_SETTING_TYPE_NOTIFICATIONS;         break;
+        case SitePermissionType::Location:
+            ct = CEF_CONTENT_SETTING_TYPE_GEOLOCATION;           break;
+        case SitePermissionType::Clipboard:
+            ct = CEF_CONTENT_SETTING_TYPE_CLIPBOARD_READ_WRITE;  break;
+        // ⛔ Camera/Microphone fall through deliberately — see above.
+        default:
+            return;
+    }
     // Ask == "no stored decision" for us, and DEFAULT is Chromium's way of saying
     // the same thing (it deletes the exception rather than storing ASK).
     const cef_content_setting_values_t cv =
@@ -8355,7 +8390,7 @@ bool SimpleHandler::OnProcessMessageReceived(
         }
         if (typeOk && !host.empty() && ParseSitePermState(stateS, st)) {
             SitePermissionStore::GetInstance().SetState(host, type, st);
-            MirrorNetworkPermissionToChromium(host, type, st);
+            MirrorSitePermissionToChromium(host, type, st);
             LOG_DEBUG_BROWSER("🛈 site permission " + code + "=" + stateS + " for " + host);
         }
         SendSitePermissionsToBrowser(browser, host);
@@ -8372,8 +8407,19 @@ bool SimpleHandler::OnProcessMessageReceived(
             SitePermissionStore::GetInstance().ResetDomain(host);
             // Reset must clear Chromium's copy too, or "reset" leaves the real grant
             // in place while every row we own reads Ask.
-            MirrorNetworkPermissionToChromium(host, SitePermissionType::Loopback, SitePermissionState::Ask);
-            MirrorNetworkPermissionToChromium(host, SitePermissionType::LocalNetwork, SitePermissionState::Ask);
+            // ⚠️ Phase 7d R4: this list is NOT a loop over kSitePermCaps — camera
+            // and mic must stay out (they never gained a content setting, and
+            // writing DEFAULT for them would be this phase widening onto the
+            // control that proves it didn't). Driven off the same enum the
+            // mirror's switch accepts; anything the switch ignores is a no-op
+            // here anyway, but naming them keeps the intent readable.
+            for (SitePermissionType t : { SitePermissionType::Loopback,
+                                          SitePermissionType::LocalNetwork,
+                                          SitePermissionType::Notifications,
+                                          SitePermissionType::Location,
+                                          SitePermissionType::Clipboard }) {
+                MirrorSitePermissionToChromium(host, t, SitePermissionState::Ask);
+            }
             LOG_DEBUG_BROWSER("🛈 site permissions reset for " + host);
         }
         SendSitePermissionsToBrowser(browser, host);

@@ -2,7 +2,7 @@
 
 **Workstream:** ticket consolidation · **Tickets:** `TICKET_edit_limits_modal_usability.md` (5 items) +
 `TICKET_site_permission_dual_store.md` (= Phase 7 §0.1 row **R4**)
-**Status:** 🚧 **KICKOFF COMPLETE — AWAITING OWNER CONFIRMATION. No code written.**
+**Status:** 🚧 **IN PROGRESS** — item 5 ✅ (owner-reviewed) · R4 ✅ · items 1 / 2 / 3 open.
 **Opened:** 2026-09-08 · **Owner:** Matthew Archbold · **Platforms:** Windows (macOS = relay)
 **Standard:** `../HARNESS.md`.
 **Base commit:** `a052033` — verified `HEAD == git ls-remote origin refs/heads/0.4.0`, not from a
@@ -190,6 +190,11 @@ setting Chromium actually consults"*) is not hypothetical. It must be **measured
 before the mirror arm is written — and if Location turns out unenforceable through
 `SetContentSetting`, that is a **different fix**, not this one. Owner decision `D-D`.
 
+> ✅ **ANSWERED 2026-09-08 by measurement, not by reading.** Writing plain
+> `CEF_CONTENT_SETTING_TYPE_GEOLOCATION` **is** consulted in this build:
+> `getCurrentPosition` returns `PERMISSION_DENIED` after the panel sets Block. `D-D`'s fallback was
+> not needed. The clipboard residual is real and is disclosed on the panel per `D-C`.
+
 ⚠️ Clipboard carries a residual **of the same shape as the defect being fixed**: after the mirror,
 the panel says Block, sanitized write still works, because Chromium always allows it. Decision `D-C`.
 
@@ -322,11 +327,11 @@ observed.
 | `P7d-A1` | Typing a substring narrows the approved-sites list to matching domains | Delete the filter predicate (pass-through) → the same query returns all rows and the test names the query | The **rendered rows**, read from the DOM. ⚠️ 📏 The subject is a **tab** at `/wallet?tab=4`, not an overlay — see `D-13`. Probe resolves it by URL substring via `phase-1/cdp.py :: pick`, which errors on ambiguity | T2 | 🟢 **`app` → 4/15 rows, all matching, 2026-09-08** |
 | `P7d-A2` | 🚨 With >12 sites, filtering **from page 2** shows the matches and the count agrees with the table | Both guards deleted → **0 rows** at 400 ms while the count line still reads *"4 of 15 approved sites match"*. ⛔ **Only reproduces after a hard reload** — see `D-14` | The **count line and the row count together**. A row-count-only assertion passes on the broken build | T1 + T2 | 🟢 **GREEN with guards; RED without, 2026-09-08** |
 | `P7d-A3` | Edit / Revoke act on the domain the user clicked, **while a filter is active** | Re-key one action to `paged[i]` by index → filter, click row 1, observe the wrong domain in the confirm dialog | The **domain string** of the first rendered row vs the filtered set. Per `D-3` this passes today — a **regression guard**, labelled as one, not as a discovered bug | T1 | 🟢 **first filtered row in set, 2026-09-08** |
-| `P7d-A4` | Site controls → **Notifications = Block** ⇒ `Notification.requestPermission()` resolves `"denied"`, no prompt | ⛔ **Before** the mirror: same steps leave the site allowed and no prompt appears. Shipped behaviour, captured as the control before any code | The **JS promise's resolved value** on the page. The panel showing "Block" is the lie under test | T2 | ⬜ |
-| `P7d-A5` | Same for **Location** — `navigator.geolocation.getCurrentPosition` errors `PERMISSION_DENIED` | Per type, not once for all three. ⛔ First determine **which** of `GEOLOCATION` / `GEOLOCATION_WITH_OPTIONS` our build consults (`D-10`) — writing the unconsulted one produces a green content setting and an unchanged site | Chromium's **stored content setting** *and* the site's behaviour. One without the other has been wrong on this exact surface before | T2 | ⬜ |
-| `P7d-A6` | Same for **Clipboard** — `navigator.clipboard.readText()` rejects | ⛔ Assert the **residual too**: sanitized write stays allowed (CEF header: "special-cased … always allow"). A test that only checks read passes while the panel over-claims | `CLIPBOARD_READ_WRITE` behaviour **and** a sanitized-write probe. The residual is a result, not an excuse | T2 | ⬜ |
-| `P7d-A7` | **Reset** returns all three to Ask in **both** stores, and the site prompts again | Reset with only the SQLite half wired → our rows read Ask while Chromium's exception survives and the site stays allowed | Both stores read back, **plus** the site's next request producing a prompt | T2 | ⬜ |
-| `P7d-A8` | **Camera/mic unchanged** — our store governs, Chromium has **no** entry | Add a mirror arm for mic, observe the media path change, revert it | `site_permissions.db` has a mic row and Chromium has none — the asymmetry in the ticket's evidence table is the control. `A7` of Phase 7 | T2 | ⬜ |
+| `P7d-A4` | Site controls → Notifications = **Block** ⇒ `Notification.requestPermission()` resolves `"denied"`, no prompt | ⛔ **Before** the mirror: same steps leave the site allowed and no prompt appears. Shipped behaviour, captured as the control before any code | The **JS promise's resolved value** on the page. The panel showing "Block" is the lie under test | T2 | 🟢 **RED captured pre-fix; post-fix `requestPermission()` → `"denied"`, `Notification.permission` → `denied`, 2026-09-08** |
+| `P7d-A5` | Same for **Location** — `getCurrentPosition` errors `PERMISSION_DENIED` | Per type, not once for all three. ⛔ First determine **which** of `GEOLOCATION` / `GEOLOCATION_WITH_OPTIONS` our build consults (`D-10`) — writing the unconsulted one produces a green content setting and an unchanged site | Chromium's **stored content setting** *and* the site's behaviour. One without the other has been wrong on this exact surface before | T2 | 🟢 **`PERMISSION_DENIED`, 2026-09-08.** ⭐ Answers `D-10`: plain `GEOLOCATION` **is** consulted in this build — `D-D` did not bite |
+| `P7d-A6` | Same for **Clipboard** — `navigator.clipboard.readText()` rejects | ⛔ Assert the **residual too**: sanitized write stays allowed (CEF header: "special-cased … always allow"). A test that only checks read passes while the panel over-claims | `CLIPBOARD_READ_WRITE` behaviour **and** the residual being disclosed on the panel | T2 | 🟢 **rejects `NotAllowedError`, 2026-09-08.** Residual disclosed in the panel per `D-C` |
+| `P7d-A7` | **Reset** returns all three to Ask in **both** stores, and the site prompts again | Reset with only the SQLite half wired → our rows read Ask while Chromium's exception survives and the site stays allowed | Both stores read back, **plus** the site's next request producing a prompt | T2 | 🟢 **all three back to `prompt`, 2026-09-08** |
+| `P7d-A8` | **Camera/mic unchanged** — our store governs, Chromium has **no** entry | Add a mirror arm for mic, observe the media path change behaviour → revert it | The asymmetry in the ticket's evidence table is the control | T2 | 🟢 **both `prompt` while the other three read `denied`, 2026-09-08** |
 | `P7d-A9` *(item 1)* | An unsaved edit survives a click outside the **dialog** and a click outside the **overlay window** | ⛔ **Two probes, one per mechanism** (`D-7`). Guard only the C++ half → the backdrop click still discards, and the backdrop click is the common case. A single probe would pass on a half-fix | Which **mechanism** fired: MUI `onClose` reason vs `WM_ACTIVATE` in the browser log | T2 + T3 👤 | ⬜ |
 | `P7d-A10` *(item 1)* | The right-click `edit_permissions` overlay still closes on its own Close/OK | Item 1's guard is a real risk to a path that has **no** click-outside close today (`D-7`) — break `WM_CLOSE` and the overlay strands | The **notification overlay HWND** actually going away, not the React view changing | T2 | ⬜ |
 | `P7d-A11` *(items 2/3)* | Granted list caps + scrolls; limits collapse — **management modal only** | Render sites 3/4/5 of `D-4` before and after; any pixel difference on the payment or connect modal is the red | The **connect and payment modals**, not the one being changed. `R-PROV` lives on those | T1 + T3 👤 | ⬜ |
@@ -396,8 +401,8 @@ All five recommendations accepted as written.
 
 | Item | State |
 |---|---|
-| **5 — search box** | ✅ **Done.** `A1`, `A2`, `A3`, `A13` (probe half), `A14` green; `A2` RED observed. 👤 owner pass owed. |
-| **R4 — dual store** | ⬜ Next. |
+| **5 — search box** | ✅ **Done** + owner-reviewed. `A1`, `A2`, `A3`, `A13` (probe half), `A14` green; `A2` RED observed. Two layout follow-ups on owner review (`0821274`, `08aa761`). |
+| **R4 — dual store** | ✅ **Done.** RED captured pre-fix, `A4`–`A8` green post-fix. 👤 owner pass owed. |
 | **1 — close guard** | ⬜ |
 | **2 / 3 — scroll box + collapse** | ⬜ |
 

@@ -218,9 +218,25 @@ const SiteInfoOverlayRoot: React.FC = () => {
                                     return (
                                         <Box key={p.code} sx={{ pl: 3.5, pr: 1.5, py: 0.6, display: 'flex', alignItems: 'center', gap: 1.25 }}>
                                             <MetaIcon sx={{ fontSize: 18, color: '#9ca3af', flexShrink: 0 }} />
-                                            <Typography variant="body2" sx={{ flex: 1, minWidth: 0, color: '#f0f0f0' }}>
-                                                {meta.label}
-                                            </Typography>
+                                            <Box sx={{ flex: 1, minWidth: 0 }}>
+                                                <Typography variant="body2" sx={{ color: '#f0f0f0' }}>
+                                                    {meta.label}
+                                                </Typography>
+                                                {/* beta.3 Phase 7d R4 (owner decision D-C) — disclose the one
+                                                    part of Block we cannot deliver. CEF has two clipboard
+                                                    content-setting types and only CLIPBOARD_READ_WRITE is
+                                                    writable; CLIPBOARD_SANITIZED_WRITE is documented
+                                                    "special-cased in the permissions layer to always allow"
+                                                    and has no prefs data. ⛔ Saying nothing would ship a
+                                                    quieter version of the exact defect this phase fixes: a
+                                                    control that reads as absolute and is not. */}
+                                                {p.code === 'clipboard' && p.state === 'block' && (
+                                                    <Typography variant="caption" sx={{ display: 'block', color: '#9ca3af', lineHeight: 1.35, mt: 0.25 }}>
+                                                        Reading your clipboard is blocked. Sites can still write to it —
+                                                        Chromium always permits that.
+                                                    </Typography>
+                                                )}
+                                            </Box>
                                             <Segmented value={p.state} onChange={(s) => perms.setPermission(p.code, s)} />
                                         </Box>
                                     );
