@@ -142,6 +142,36 @@ impl WalletDatabase {
         self.cached_mnemonic.is_some()
     }
 
+    /// ⛔ The ONE place anything may enter `cached_mnemonic`. Every caller goes through here.
+    ///
+    /// A value that is not a valid BIP39 phrase must NEVER be cached, because caching it
+    /// makes `is_unlocked()` true — and a wallet that believes it is unlocked never offers
+    /// the user the PIN screen, which is the only way back. MEASURED 2026-09-08: the owner's
+    /// production wallet cached a 2-word value out of the macOS Keychain and was
+    /// unrecoverable for 8 days while the correct encrypted phrase sat in the database.
+    /// See `crypto::mnemonic_guard`.
+    ///
+    /// ⚠️ Keep this private and keep the three call sites going through it. A future
+    /// `self.cached_mnemonic = Some(..)` written directly would silently reopen the hole —
+    /// the per-arm-check mistake that `IpcAuth.h` was created to stop repeating.
+    /// ⛔ INVARIANT: every `self.cached_mnemonic = Some(..)` in this file passes its value
+    /// through here first. `grep -n "cached_mnemonic = Some" connection.rs` — each hit must
+    /// contain `Self::validated_mnemonic(`. There are no other writers.
+    ///
+    /// (An associated fn rather than a `&mut self` setter because two call sites hold live
+    /// repository borrows of `self.conn`; a whole-`self` mutable borrow will not compile
+    /// there, while a disjoint field assignment does.)
+    fn validated_mnemonic(phrase: String) -> std::result::Result<String, String> {
+        if !crate::crypto::mnemonic_guard::is_valid_mnemonic(&phrase) {
+            // Shape only — never the value. A bad value may still be a real secret.
+            return Err(format!(
+                "not a valid BIP39 recovery phrase ({})",
+                crate::crypto::mnemonic_guard::describe_shape(&phrase)
+            ));
+        }
+        Ok(phrase)
+    }
+
     /// Unlock the wallet by decrypting the mnemonic with the user's PIN.
     /// Caches the plaintext mnemonic in memory for the session.
     pub fn unlock(&mut self, pin: &str) -> Result<()> {
@@ -165,13 +195,22 @@ impl WalletDatabase {
                 Some(e)
             ))?;
 
-        self.cached_mnemonic = Some(mnemonic);
+        // A correct PIN that decrypts to something which is not a phrase means the stored
+        // ciphertext is damaged. Report it rather than caching it — a cached bad value would
+        // present as "unlocked" and fail every operation afterwards.
+        self.cached_mnemonic = Some(Self::validated_mnemonic(mnemonic).map_err(|e| {
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_AUTH),
+                Some(format!("Decrypted mnemonic is unusable: {}", e)))
+        })?);
         Ok(())
     }
 
-    /// Cache the plaintext mnemonic directly (used after create/recover when mnemonic is known)
-    pub fn cache_mnemonic(&mut self, mnemonic: String) {
-        self.cached_mnemonic = Some(mnemonic);
+    /// Cache the plaintext mnemonic directly (used after create/recover when mnemonic is known).
+    /// Returns Err if the value is not a valid phrase; the caller must leave the wallet locked.
+    pub fn cache_mnemonic(&mut self, mnemonic: String) -> std::result::Result<(), String> {
+        self.cached_mnemonic = Some(Self::validated_mnemonic(mnemonic)?);
+        Ok(())
     }
 
     /// Try to auto-unlock the wallet using Windows DPAPI.
@@ -198,8 +237,23 @@ impl WalletDatabase {
                         rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
                         Some(format!("Invalid UTF-8 in DPAPI-decrypted mnemonic: {}", e))
                     ))?;
-                self.cached_mnemonic = Some(mnemonic);
-                Ok(true)
+                // ⛔ Validate before caching. The credential store is not trusted input:
+                // its contents can be wrong (corruption, a stale entry from an older service
+                // name, an ACL-mangled in-place update) and we cannot tell from the read
+                // itself. Returning Ok(false) makes the caller treat this as "no usable
+                // auto-unlock", so the wallet stays LOCKED and the user is shown the PIN
+                // screen — and `wallet_unlock`'s existing backfill then rewrites a correct
+                // entry. That makes the failure self-healing in one prompt instead of
+                // permanent.
+                match Self::validated_mnemonic(mnemonic) {
+                    Ok(good) => { self.cached_mnemonic = Some(good); Ok(true) }
+                    Err(e) => {
+                        error!("🔑 Credential-store auto-unlock REJECTED: {} — the stored \
+                                value is not a recovery phrase. Leaving the wallet locked so \
+                                the PIN screen can repair it.", e);
+                        Ok(false)
+                    }
+                }
             }
             Err(e) => {
                 Err(rusqlite::Error::SqliteFailure(
@@ -279,7 +333,13 @@ impl WalletDatabase {
 
         // 1. Create wallet (generates mnemonic, encrypts if PIN provided)
         let (wallet_id, mnemonic_phrase) = wallet_repo.create_wallet(pin)?;
-        self.cached_mnemonic = Some(mnemonic_phrase.clone());
+        // Through the guard like every other cache write — see set_cached_mnemonic. Safe
+        // today (it is parsed two lines below), routed anyway so no bypass exists to copy.
+        self.cached_mnemonic = Some(Self::validated_mnemonic(mnemonic_phrase.clone()).map_err(|e| {
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                Some(format!("Generated mnemonic is invalid: {}", e)))
+        })?);
 
         // 2. Parse mnemonic and derive master keys (needed for user creation)
         let mnemonic = Mnemonic::parse_in(Language::English, &mnemonic_phrase)
@@ -458,7 +518,12 @@ impl WalletDatabase {
 
         // 1. Create wallet from existing mnemonic (validates + inserts with backed_up=true)
         let (wallet_id, mnemonic_str) = wallet_repo.create_wallet_with_mnemonic(mnemonic_phrase, pin)?;
-        self.cached_mnemonic = Some(mnemonic_str.clone());
+        // Through the guard like every other cache write — see set_cached_mnemonic.
+        self.cached_mnemonic = Some(Self::validated_mnemonic(mnemonic_str.clone()).map_err(|e| {
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                Some(format!("Provided mnemonic is invalid: {}", e)))
+        })?);
 
         // 2. Parse mnemonic and derive master keys
         let mnemonic = Mnemonic::parse_in(Language::English, &mnemonic_str)

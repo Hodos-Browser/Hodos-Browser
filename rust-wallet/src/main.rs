@@ -581,13 +581,19 @@ async fn main() -> std::io::Result<()> {
                             if !is_pin_protected {
                                 // Legacy unencrypted wallet: cache mnemonic directly
                                 log::info!("🔓 Legacy wallet (no PIN, no DPAPI) — caching plaintext mnemonic");
-                                db.cache_mnemonic(wallet.mnemonic.clone());
+                                if let Err(e) = db.cache_mnemonic(wallet.mnemonic.clone()) {
+                                    log::error!("🔑 Stored mnemonic is unusable: {} — wallet stays locked", e);
+                                }
                             } else {
                                 // PIN-protected but no DPAPI blob — backfill if we can unlock
                                 // This case shouldn't happen for new wallets but handles
                                 // wallets created before DPAPI support was added
-                                log::info!("🔒 PIN-protected wallet without DPAPI blob — wallet locked");
-                                log::info!("   Use POST /wallet/unlock with PIN to unlock");
+                                // Reached either when no blob was ever stored, OR when one was
+                                // stored but did not survive validation (try_dpapi_unlock logs
+                                // the rejection and returns Ok(false)). Both mean the same thing
+                                // to the user: enter the PIN once and it repairs itself.
+                                log::info!("🔒 PIN-protected wallet with no usable auto-unlock — wallet locked");
+                                log::info!("   Use POST /wallet/unlock with PIN to unlock (this also repairs the stored key)");
                             }
                         }
                         Err(e) => {

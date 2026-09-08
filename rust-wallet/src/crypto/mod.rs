@@ -11,6 +11,7 @@ pub mod ghash;
 pub mod aesgcm_custom;
 pub mod pin;
 pub mod dpapi;
+pub mod mnemonic_guard;
 
 #[cfg(test)]
 mod aesgcm_custom_test;
