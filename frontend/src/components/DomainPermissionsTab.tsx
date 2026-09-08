@@ -91,6 +91,12 @@ const DomainPermissionsTab: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [expandedDomain, setExpandedDomain] = useState<number | null>(null);
 
+  // beta.3 Phase 7d item 5 — domain substring filter. The list already sorted
+  // and paged (12/page); what it had no way to do was FIND a site, and after
+  // Phase 7c this panel is the entire per-site permission state, so reaching a
+  // specific row stopped being a convenience.
+  const [query, setQuery] = useState('');
+
   // Sorting
   const [sortKey, setSortKey] = useState<SortKey>('domain');
   const [sortDir, setSortDir] = useState<SortDir>('asc');
@@ -124,9 +130,18 @@ const DomainPermissionsTab: React.FC = () => {
     fetchPermissions();
   }, [fetchPermissions]);
 
+  // Filter by domain substring, case-insensitive. Runs BEFORE sort so the
+  // sort and the pager both see the narrowed set — see the page clamp below
+  // for why that matters.
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return permissions;
+    return permissions.filter(p => p.domain.toLowerCase().includes(q));
+  }, [permissions, query]);
+
   // Sort permissions
   const sorted = useMemo(() => {
-    const arr = [...permissions];
+    const arr = [...filtered];
     arr.sort((a, b) => {
       let cmp = 0;
       if (sortKey === 'domain') {
@@ -137,17 +152,29 @@ const DomainPermissionsTab: React.FC = () => {
       return sortDir === 'asc' ? cmp : -cmp;
     });
     return arr;
-  }, [permissions, sortKey, sortDir]);
+  }, [filtered, sortKey, sortDir]);
 
   // Paginate
   const totalPages = Math.max(1, Math.ceil(sorted.length / ROWS_PER_PAGE));
-  const paged = useMemo(() => {
-    const start = page * ROWS_PER_PAGE;
-    return sorted.slice(start, start + ROWS_PER_PAGE);
-  }, [sorted, page]);
 
-  // Reset page when sort changes or data changes
-  useEffect(() => { setPage(0); }, [sortKey, sortDir, permissions.length]);
+  // 🚨 P7d-A2 — `page` is the one index-keyed thing on this surface, and a
+  // filter is exactly what breaks it. Narrowing the list does NOT change
+  // `permissions.length`, so the reset effect below cannot be the only guard.
+  // 📏 Measured 2026-09-08 with both guards removed: filter from page 2 and the
+  // table is EMPTY and stays empty, the pager vanishes (totalPages collapses to
+  // 1), and the count line above still reads "4 of 15 approved sites match" —
+  // no row, no pager, no explanation. Clamping derives the page from what is
+  // actually on screen, so no frame is ever wrong. The effect stays for
+  // behaviour, not correctness: typing should take you to the top of the
+  // results rather than to the last still-valid page.
+  const safePage = Math.min(page, totalPages - 1);
+  const paged = useMemo(() => {
+    const start = safePage * ROWS_PER_PAGE;
+    return sorted.slice(start, start + ROWS_PER_PAGE);
+  }, [sorted, safePage]);
+
+  // Reset page when sort, filter, or data changes
+  useEffect(() => { setPage(0); }, [sortKey, sortDir, permissions.length, query]);
 
   const handleSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -281,9 +308,69 @@ const DomainPermissionsTab: React.FC = () => {
         </Paper>
       ) : (
         <>
+          {/* beta.3 Phase 7d item 5 — find a site.
+              ⚠️ Native <input>, not MUI TextField. 📏 Measured 2026-09-08: this
+              surface currently renders in a normal TAB, not an overlay —
+              WalletPanel's "Manage approved sites" does
+              `tab_create → /wallet?tab=4` (WalletPanel.tsx :: handleManageSites),
+              so the CEF overlay input rule does not strictly bite here today.
+              Native anyway, for two reasons that do: the component it opens
+              (DomainPermissionForm) uses native inputs throughout and is ALSO
+              rendered inside the notification overlay on the right-click path,
+              and the host is named WalletOverlayRoot — if it is ever hosted as
+              an overlay again, a MUI TextField would break focus silently.
+              Deliberately NOT auto-focused: this panel sits below the defaults
+              form, and stealing focus on mount would move the caret out from
+              under a user who came to edit a default. */}
+          <Box sx={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 1.5,
+            mb: 2,
+            // Chromium's default placeholder is near-black at reduced opacity,
+            // which is unreadable on our dark surface. Same rule the cookie and
+            // history panels already use.
+            '& input::placeholder': { color: '#888', opacity: 1 },
+          }}>
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Filter sites by domain…"
+              aria-label="Filter approved sites by domain"
+              style={{
+                flex: 1,
+                minWidth: 0,
+                padding: '7px 10px',
+                border: `1.5px solid ${hodosColors.borderDefault}`,
+                borderRadius: '6px',
+                fontSize: '13px',
+                fontFamily: 'inherit',
+                outline: 'none',
+                background: hodosColors.bgSurface,
+                color: hodosColors.textPrimary,
+              }}
+              onFocus={(e) => { e.target.style.borderColor = hodosColors.goldPrimary; }}
+              onBlur={(e) => { e.target.style.borderColor = hodosColors.borderDefault; }}
+            />
+            {query && (
+              <HodosButton variant="secondary" size="small" onClick={() => setQuery('')}>
+                Clear
+              </HodosButton>
+            )}
+          </Box>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-            {permissions.length} approved site{permissions.length !== 1 ? 's' : ''}
+            {query
+              ? `${filtered.length} of ${permissions.length} approved site${permissions.length !== 1 ? 's' : ''} match “${query.trim()}”`
+              : `${permissions.length} approved site${permissions.length !== 1 ? 's' : ''}`}
           </Typography>
+          {filtered.length === 0 ? (
+            <Paper sx={{ p: 3, textAlign: 'center' }}>
+              <Typography variant="body2" color="text.secondary">
+                No approved site matches “{query.trim()}”.
+              </Typography>
+            </Paper>
+          ) : (
           <TableContainer component={Paper}>
             <Table size="small">
               <TableHead>
@@ -428,18 +515,20 @@ const DomainPermissionsTab: React.FC = () => {
               </TableBody>
             </Table>
           </TableContainer>
+          )}
 
-          {/* Pagination */}
+          {/* Pagination. No guard needed for the no-match case: with 0 rows
+              totalPages is 1, so this whole block is already absent. */}
           {totalPages > 1 && (
             <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', mt: 1.5, gap: 1 }}>
               <Typography variant="caption" color="text.secondary">
-                {page * ROWS_PER_PAGE + 1}–{Math.min((page + 1) * ROWS_PER_PAGE, sorted.length)} of {sorted.length}
+                {safePage * ROWS_PER_PAGE + 1}–{Math.min((safePage + 1) * ROWS_PER_PAGE, sorted.length)} of {sorted.length}
               </Typography>
               <HodosButton
                 variant="icon"
                 size="small"
-                onClick={() => setPage(p => Math.max(0, p - 1))}
-                disabled={page === 0}
+                onClick={() => setPage(Math.max(0, safePage - 1))}
+                disabled={safePage === 0}
                 aria-label="Previous page"
               >
                 <ChevronLeftIcon fontSize="small" />
@@ -447,8 +536,8 @@ const DomainPermissionsTab: React.FC = () => {
               <HodosButton
                 variant="icon"
                 size="small"
-                onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
-                disabled={page >= totalPages - 1}
+                onClick={() => setPage(Math.min(totalPages - 1, safePage + 1))}
+                disabled={safePage >= totalPages - 1}
                 aria-label="Next page"
               >
                 <ChevronRightIcon fontSize="small" />
