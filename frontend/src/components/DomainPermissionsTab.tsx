@@ -333,7 +333,12 @@ const DomainPermissionsTab: React.FC = () => {
             // minWidth is what forces the wrap instead of an unusable box.
             flexWrap: 'wrap',
             rowGap: 1,
-            mb: 2,
+            // 📏 The parent contributes a flat 20px between siblings. This row
+            // used to add `mb: 2` on top of it, so the gap below was 36px and
+            // above only 20 — the filter read as belonging to the Default
+            // Limits card above rather than to the list it controls. Moved to
+            // `mt` so the extra 16px sits above: 36 above, 20 below.
+            mt: 2,
             // Chromium's default placeholder is near-black at reduced opacity,
             // which is unreadable on our dark surface. Same rule the cookie and
             // history panels already use.
