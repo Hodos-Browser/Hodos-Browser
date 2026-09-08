@@ -111,6 +111,25 @@ const DomainPermissionsTab: React.FC = () => {
   const [revokeTarget, setRevokeTarget] = useState<DomainPermissionRecord | null>(null);
   const [revoking, setRevoking] = useState(false);
 
+  // beta.3 Phase 7d item 1 — the "Click Save or Cancel to close" hint.
+  // ⚠️ A counter, not a boolean: a second stray click while the hint is already
+  // up would leave a boolean unchanged, so the effect would not re-run and the
+  // timer would not restart — the hint would vanish mid-click and read as if
+  // nothing had happened.
+  const [closeHintTick, setCloseHintTick] = useState(0);
+  const closeHint = closeHintTick > 0;
+
+  useEffect(() => {
+    if (!closeHintTick) return;
+    const t = window.setTimeout(() => setCloseHintTick(0), 2200);
+    return () => window.clearTimeout(t);
+  }, [closeHintTick]);
+
+  // Never let a stale hint greet the next open.
+  useEffect(() => {
+    if (!editingDomain) setCloseHintTick(0);
+  }, [editingDomain]);
+
   const fetchPermissions = useCallback(async () => {
     try {
       setLoading(true);
@@ -574,15 +593,57 @@ const DomainPermissionsTab: React.FC = () => {
         </>
       )}
 
-      {/* Edit Dialog */}
+      {/* Edit Dialog.
+          beta.3 Phase 7d item 1 — this modal is long (a real site can carry 17
+          grant rows plus four limit fields) and it used to close on a click one
+          pixel outside, discarding everything with no warning, no toast and no
+          recovery. It now closes ONLY on Save or Cancel.
+
+          📏 The ticket said to fix this with the C++ prevent-close flag and
+          warned "do not implement this as a React handler and assume it holds".
+          Measured 2026-09-08: that is inverted for THIS surface. The Approved
+          Sites list is a normal TAB (`/wallet?tab=4` via CreateNewTabWithUrl),
+          not the wallet overlay — the overlay only ever loads `/wallet-panel`.
+          So there is no WM_ACTIVATE path over this dialog; MUI's backdrop and
+          Escape are the only ways out, and both are React. The C++ flag would
+          have guarded a window this modal does not live in.
+          (The right-click editor is a different surface — notification overlay,
+          which has no click-outside close at all. Nothing to guard there.) */}
       <Dialog
         open={editingDomain !== null}
-        onClose={() => setEditingDomain(null)}
+        onClose={(_event, reason) => {
+          // Swallow the two accidental exits and say why. Anything else (there
+          // is nothing else today) still closes, so this cannot strand the user.
+          if (reason === 'backdropClick' || reason === 'escapeKeyDown') {
+            setCloseHintTick((n) => n + 1);
+            return;
+          }
+          setEditingDomain(null);
+        }}
         maxWidth="xs"
         fullWidth
-        PaperProps={{ sx: dialogPaperSx }}
+        PaperProps={{ sx: { ...dialogPaperSx, position: 'relative' } }}
       >
         <DialogTitle sx={dialogTitleSx}>Edit Limits</DialogTitle>
+        {closeHint && (
+          <Box
+            role="status"
+            sx={{
+              position: 'absolute', top: '50%', left: '50%',
+              transform: 'translate(-50%, -50%)',
+              zIndex: 1, pointerEvents: 'none',
+              px: 2.5, py: 1.25, borderRadius: 1.5,
+              backgroundColor: 'rgba(10,10,11,0.94)',
+              border: `1px solid ${hodosColors.goldPrimary}`,
+              color: hodosColors.textPrimary,
+              fontSize: '0.875rem', fontWeight: 500,
+              boxShadow: '0 8px 28px rgba(0,0,0,0.6)',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            Click Save or Cancel to close
+          </Box>
+        )}
         <DialogContent>
           {editingDomain && (
             <Box sx={{ pt: 2 }}>

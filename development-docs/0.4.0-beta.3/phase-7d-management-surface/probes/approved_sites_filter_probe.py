@@ -42,7 +42,35 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "..", "phase-1-overlay-input-dpi"))
 import cdp  # noqa: E402  — the shared helper; do not re-derive target selection
 
-WALLET = "wallet?tab="
+PORT = cdp.DEV_PORT
+
+WALLET_URL = "http://127.0.0.1:5137/wallet?tab=4"
+
+
+def wallet_tab():
+    """Resolve the Approved Sites tab by PATH, and refuse to guess.
+
+    ⚠️ Two traps, both hit on 2026-09-08:
+      • `/wallet` is a PREFIX of `/wallet-panel` (the wallet overlay), so a
+        substring match is ambiguous — and the overlay has no list on it, so
+        driving it would measure the wrong browser.
+      • the `?tab=4` query does NOT reliably survive, so a substring containing
+        it stops resolving at all.
+    Match on the parsed path instead, and error if it is not exactly one.
+    """
+    try:
+        from urllib.parse import urlparse
+    except ImportError:  # pragma: no cover
+        from urlparse import urlparse  # type: ignore
+    hits = [t for t in cdp.targets(PORT)
+            if urlparse(t.get("url", "")).path == "/wallet"]
+    if not hits:
+        sys.exit("VACUOUS: the wallet page is not open. Open it with the wallet "
+                 "panel's 'Manage approved sites'. Nothing measured.")
+    if len(hits) > 1:
+        sys.exit("VACUOUS: %d targets have path /wallet — refusing to guess: %s"
+                 % (len(hits), [t["url"] for t in hits]))
+    return "=" + hits[0]["url"]
 
 # The filter box, the footer, and the table rows. Read from the DOM, not from
 # React state: what the user can see is the subject.
@@ -99,7 +127,7 @@ def set_query(text):
       box.dispatchEvent(new Event('input', {bubbles:true}));
       return 'OK';
     })()""" % json.dumps(text)
-    t, msg = cdp.evaluate(WALLET, js)
+    t, msg = cdp.evaluate(wallet_tab(), js)
     return msg.get("result", {}).get("result", {}).get("value")
 
 
@@ -111,12 +139,12 @@ def click_next_page():
       b.click();
       return 'OK';
     })()"""
-    t, msg = cdp.evaluate(WALLET, js)
+    t, msg = cdp.evaluate(wallet_tab(), js)
     return msg.get("result", {}).get("result", {}).get("value")
 
 
 def read():
-    t, msg = cdp.evaluate(WALLET, READ_JS)
+    t, msg = cdp.evaluate(wallet_tab(), READ_JS)
     raw = msg.get("result", {}).get("result", {}).get("value")
     if raw is None:
         detail = json.dumps(msg.get("result", {}))[:400]
@@ -137,11 +165,12 @@ def reload_and_settle():
     ⇒ Measuring this surface without a reload measures leftover state from the
     previous build. Never make that optional.
     """
-    cdp.evaluate(WALLET, "location.reload()")
+    cdp.evaluate(wallet_tab(),
+                 "location.replace(%r + '&_r=' + Math.random()); 'go'" % WALLET_URL)
     for _ in range(40):
         time.sleep(0.5)
         try:
-            t, msg = cdp.evaluate(WALLET, READ_JS)
+            t, msg = cdp.evaluate(wallet_tab(), READ_JS)
             raw = msg.get("result", {}).get("result", {}).get("value")
             if raw and json.loads(raw)["hasBox"]:
                 time.sleep(0.6)   # let the permissions fetch land
@@ -269,7 +298,7 @@ def main():
           var d = (first.querySelector('td')||{}).innerText || '';
           return d.trim();
         })()"""
-        t3, m3 = cdp.evaluate(WALLET, js)
+        t3, m3 = cdp.evaluate(wallet_tab(), js)
         top = m3.get("result", {}).get("result", {}).get("value")
         if top not in s2["domains"]:
             failures.append("A3: first rendered row %r is not in the filtered "

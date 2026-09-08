@@ -135,10 +135,20 @@ This is the concrete reason `D-A` is a decision and not my call.
 The ticket's implementation note: *"this overlay's close paths are C++, not React … ⛔ Do not
 implement this as a React `onClick` handler and assume it holds."*
 
+> 🚨 **CORRECTED 2026-09-08 — this row's second line was wrong, and it was my own
+> error, not the ticket's.** I wrote that the Edit Limits modal also has a C++
+> `WM_ACTIVATE` close path over it. `D-13`, measured later the same day, established
+> that the Approved Sites list is a **tab**, and I did not propagate it back here.
+> Re-verified: `/wallet` is opened only by `CreateNewTabWithUrl`
+> (`simple_handler.cpp` 3490) and by the frontend's `tab_create`; the wallet
+> **overlay** loads `/wallet-panel` on both platforms (`simple_app.cpp` 892,
+> `cef_browser_shell_mac.mm` 2978). There is no overlay window over this dialog to
+> lose activation. ⇒ **Item 1 is React-only. No C++.**
+
 | Path | Click-outside mechanism today | Guard |
 |---|---|---|
-| **Wallet overlay → Approved Sites → Edit Limits** — click inside the overlay, outside the dialog | **MUI `<Dialog>` backdrop** (`DomainPermissionsTab` 461–467, `onClose={() => setEditingDomain(null)}`). Escape too | ⛔ **React.** Exactly the mechanism the ticket says not to rely on — and it is the common case |
-| Same path — click **outside the wallet overlay window** | `WalletOverlayWndProc` `WM_ACTIVATE(WA_INACTIVE)` → `HideWalletOverlay()` (`cef_browser_shell.cpp` 2210–2226) | ✅ C++, `g_wallet_overlay_prevent_close` — the ticket's mechanism, correct for this half |
+| **Approved Sites (a TAB) → Edit Limits** | **MUI `<Dialog>` backdrop + Escape** (`DomainPermissionsTab`, `onClose`). The only ways out | ⛔ **React** — exactly the mechanism the ticket says not to rely on, and the *only* one that exists here |
+| ~~Click outside the wallet overlay window~~ | ⛔ **Does not apply** — this modal is not in the wallet overlay. See the correction above | — |
 | **Right-click → Manage Wallet Permissions** | `MENU_ID_MANAGE_PERMISSIONS` → `CreateNotificationOverlay(…, "edit_permissions", domain, "")` (`simple_handler.cpp` 10273–10300). `NotificationOverlayWndProc` (`cef_browser_shell.cpp` 2414) has **no `WM_ACTIVATE` arm**, and the `WH_MOUSE_LL` roster in `simple_app.cpp` has **no notification hook** | 🆕 **It does not close on click-outside at all today.** Only `WM_CLOSE` → `DestroyWindow` |
 
 ⇒ Item 1 is **two mechanisms on the wallet-overlay path**, not one mechanism on two paths. A
@@ -332,8 +342,8 @@ observed.
 | `P7d-A6` | Same for **Clipboard** — `navigator.clipboard.readText()` rejects | ⛔ Assert the **residual too**: sanitized write stays allowed (CEF header: "special-cased … always allow"). A test that only checks read passes while the panel over-claims | `CLIPBOARD_READ_WRITE` behaviour **and** the residual being disclosed on the panel | T2 | 🟢 **rejects `NotAllowedError`, 2026-09-08.** Residual disclosed in the panel per `D-C` |
 | `P7d-A7` | **Reset** returns all three to Ask in **both** stores, and the site prompts again | Reset with only the SQLite half wired → our rows read Ask while Chromium's exception survives and the site stays allowed | Both stores read back, **plus** the site's next request producing a prompt | T2 | 🟢 **all three back to `prompt`, 2026-09-08** |
 | `P7d-A8` | **Camera/mic unchanged** — our store governs, Chromium has **no** entry | Add a mirror arm for mic, observe the media path change behaviour → revert it | The asymmetry in the ticket's evidence table is the control | T2 | 🟢 **both `prompt` while the other three read `denied`, 2026-09-08** |
-| `P7d-A9` *(item 1)* | An unsaved edit survives a click outside the **dialog** and a click outside the **overlay window** | ⛔ **Two probes, one per mechanism** (`D-7`). Guard only the C++ half → the backdrop click still discards, and the backdrop click is the common case. A single probe would pass on a half-fix | Which **mechanism** fired: MUI `onClose` reason vs `WM_ACTIVATE` in the browser log | T2 + T3 👤 | ⬜ |
-| `P7d-A10` *(item 1)* | The right-click `edit_permissions` overlay still closes on its own Close/OK | Item 1's guard is a real risk to a path that has **no** click-outside close today (`D-7`) — break `WM_CLOSE` and the overlay strands | The **notification overlay HWND** actually going away, not the React view changing | T2 | ⬜ |
+| `P7d-A9` *(item 1)* | An unsaved edit survives a stray click outside **and** Escape | Delete the `onClose` reason guard → a click outside closes the dialog and the edit is gone. That is the shipped behaviour | ⛔ The **value in the field**, not merely that the dialog is still up. A dialog that survives but resets its inputs fails this row, and a visibility-only assertion would score it a pass | T2 + T3 👤 | 🟢 **GREEN; RED observed with the guard removed, 2026-09-08** |
+| `P7d-A10` *(item 1)* | **Cancel still closes it** — the guard cannot strand the user inside the modal | The two-sided half of `A9`: a modal you cannot leave is worse than one that closes too eagerly | The dialog actually leaving the DOM after Cancel | T2 | 🟢 **closes on Cancel, 2026-09-08** |
 | `P7d-A11` *(items 2/3)* | Granted list caps + scrolls; limits collapse — **management modal only** | Render sites 3/4/5 of `D-4` before and after; any pixel difference on the payment or connect modal is the red | The **connect and payment modals**, not the one being changed. `R-PROV` lives on those | T1 + T3 👤 | ⬜ |
 | `P7d-A12` | 👤 **Human reads every changed screen** — filter box legible and focusable, list not clipped, contrast holds | P0.8 shipped six defects here with every gate green. The record is the red; the control is that a person looked | Owner's eyes on the **rendered** panel at 100% and DPI cells #4/#6/#9. ⛔ Not a screenshot I took and did not read | T3 👤 | ⬜ |
 | `P7d-A13` | The filter box is a **native `<input>`** and characters reach it | Swap it for a MUI `TextField` → `boxTag` stops being `INPUT`, or the typed value never lands | **`tagName` and the value read back after typing**, not the element merely rendering | T2 👤 | 🟢 **`INPUT`, value round-trips, 2026-09-08.** ⚠️ 👤 half (real keystrokes) still owed |
@@ -403,7 +413,7 @@ All five recommendations accepted as written.
 |---|---|
 | **5 — search box** | ✅ **Done** + owner-reviewed. `A1`, `A2`, `A3`, `A13` (probe half), `A14` green; `A2` RED observed. Two layout follow-ups on owner review (`0821274`, `08aa761`). |
 | **R4 — dual store** | ✅ **Done.** RED captured pre-fix, `A4`–`A8` green post-fix. 👤 owner pass owed. |
-| **1 — close guard** | ⬜ |
+| **1 — close guard** | ✅ **Done.** React-only — `D-7` corrected, no C++ needed. 👤 owner pass owed. |
 | **2 / 3 — scroll box + collapse** | ⬜ |
 
 ---
