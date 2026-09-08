@@ -6,6 +6,86 @@
 
 ---
 
+# 📋 ROUND 2026-09-08 (Windows) — **Phase 6 CUT, Phases 7 · 7a · 7b · 7c · 7d all landed.** Next is **Phase 8**, and one of its tickets is overdue by design
+
+Windows is **through Phase 7d**. Sprint order `0 · 0.5 · 0.6 · 1 · 2 · 3 · 3.5 · 4 · 5` ✅,
+**6 ⛔ CUT** (Chrome import → beta.5; Chrome 152 ABE wall, measured), `7 · 7a · 7b · 7c · 7d` ✅.
+
+⚠️ **The round below this one says "Phase 6 is next". That is three phases stale — ignore it.**
+
+## A. Round files to read, newest first
+
+| Round | Covers | Mac work? |
+|---|---|---|
+| `MAC_RELAY_P7D_ROUND.md` | **7d — management surface** (approved-sites search, dual-store fix, close guard, list cap + limits collapse) | ⚠️ **one row must be re-measured — see B** |
+| `MAC_RELAY_P7C_ROUND.md` | 7c — quiet mode narrowed | none, Rust+React |
+| `MAC_RELAY_P7_ROUND.md` | 7a + 7b — connect modal, favicon leak | already relayed |
+
+## B. 🎯 The one thing we need from Mac out of 7d — `R4`, ~3 minutes
+
+`MirrorSitePermissionToChromium` (`simple_handler.cpp`) now writes Chromium content settings for
+**Location, Notifications and Clipboard**, not just the two network types. Before the fix, setting
+one of those to **Block** in Site controls changed our SQLite row and nothing else — the panel
+reported success and the site kept working.
+
+⛔ **Seeing the content setting appear is NOT the green.** The subject is the **site's behaviour**.
+Full steps in `MAC_RELAY_P7D_ROUND.md` §M3. Two per-type traps, both read out of
+`cef_types_content_settings.h` rather than guessed:
+
+- **Location** — `GEOLOCATION_WITH_OPTIONS` also exists and its header says the permission *"won't be
+  stored as ContentSettings"*. 📏 On Windows, plain `GEOLOCATION` **is** consulted. That is a
+  per-build measurement, not a per-platform guarantee.
+- **Clipboard** — `CLIPBOARD_SANITIZED_WRITE` is *"special-cased … to always allow"*, so sanitized
+  write **cannot** be blocked anywhere. The panel discloses this rather than over-promising.
+
+⛔ **Also assert the control:** camera and microphone must stay `prompt`. If they go `denied`, the
+mirror widened onto the media path and that is a defect, not a bonus.
+
+## C. Nothing else in 7d needs porting
+
+No new overlay (Windows still **15**, macOS **14** — the Phase 4 tab context menu remains the only
+gap), no `#ifdef` added, no schema change. The C++ delta is one `switch` inside an existing
+cross-platform function.
+
+⛔ **One claim worth carrying so it is not re-derived on Mac:** the ticket said the Edit Limits
+modal's close paths are C++ and warned against a React fix. **Both surfaces are React.** The Approved
+Sites list is a browser **tab** (`/wallet`), not the wallet overlay (`/wallet-panel`). The Mac-shaped
+temptation — `InstallClickOutsideMonitor` / `windowDidResignKey` — is equally wrong. Nothing to port.
+
+## D. ⭐ `R-INTEXT` is GREEN on both halves — first time at any beta.3 boundary
+
+```
+10:51:32.027989  path=/wallet/status  requesting_domain=<none:internal>
+10:51:32.030747  path=/wallet/status  requesting_domain=example.com
+```
+
+⛔ **It first read ZERO lines, and that was not evidence.** `domain_trust_mw` logs at **debug**; the
+wallet defaults to **info**. Run it with `RUST_LOG=hodos_wallet=debug` or you will measure a silence
+that is not there. Worth repeating on Mac when you next touch that boundary.
+
+## E. 🚨 What Windows starts next, so we do not collide
+
+**Phase 8 — money-path correctness**, beginning with
+`TICKET_token_outputs_destroyed_by_dust_paths.md`, ahead of the full phase kickoff.
+
+Why it jumps the queue: its path 1 is `monitor/task_consolidate_dust.rs`, an **automatic daily task**
+(86,400 s) that filters candidates on value alone. A 1-sat ordinal in the default basket is
+consolidated — origin destroyed — within 24 h of the twentieth dust UTXO appearing, **with no user
+action and no prompt**. The sprint plan scheduled it "before or alongside Phase 4"; 4, 5 and 7 have
+all shipped since.
+
+⚠️ It is **Rust-only** (`task_consolidate_dust.rs`, `recovery.rs`, `handlers.rs`) — no Mac port
+expected, but do not start it in parallel.
+
+## F. Still owed **from** Mac — unchanged, carried forward
+
+- Phase 5 R1 + R2.
+- Phase 4 O5 (macOS tab-menu parity) and the mic/camera half — `helper-Info.plist.in` still has
+  **neither** usage string.
+- 7a/7b and 7c rounds, if not yet run.
+
+---
+
 # 📋 ROUND 2026-09-02 (Windows) — **Phase 5 landed** · a BRC-100 conformance bug fixed on the Rust side that affects you for free · Phase 4 detail still owed
 
 Windows is **through Phase 5**. Sprint order `0 · 0.5 · 0.6 · 1 · 2 · 3 · 3.5 · 4 · 5` ✅ complete;
