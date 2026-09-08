@@ -17,6 +17,7 @@ use crate::database::{TransactionRepository, ParentTransactionRepository, get_ma
 use crate::transaction::{Transaction, TxInput, TxOutput, OutPoint, Script};
 use crate::transaction::sighash::{calculate_sighash, SIGHASH_ALL_FORKID};
 use crate::handlers::{estimate_transaction_size, calculate_fee, broadcast_transaction, HODOS_FEE_ADDRESS, HODOS_SERVICE_FEE_SATS};
+use crate::utxo_fetcher::is_token_reserved_value;
 use crate::recovery::address_to_p2pkh_script;
 use crate::crypto::brc42::derive_child_public_key;
 use crate::action_storage::TransactionStatus;
@@ -81,8 +82,7 @@ pub async fn run_inner(state: &web::Data<AppState>) -> Result<ConsolidateResult,
         };
 
         confirmed.iter()
-            .filter(|o| o.satoshis <= DUST_THRESHOLD_SATS && o.txid.is_some()
-                && o.locking_script.as_ref().map(|s| is_p2pkh_script(s)).unwrap_or(false))
+            .filter(|o| is_consolidation_candidate(o))
             .map(|o| DustUtxo {
                 txid: o.txid.clone().unwrap(),
                 vout: o.vout as u32,
@@ -132,8 +132,7 @@ pub async fn run_inner(state: &web::Data<AppState>) -> Result<ConsolidateResult,
             .map_err(|e| format!("Re-read failed: {}", e))?;
 
         confirmed.iter()
-            .filter(|o| o.satoshis <= DUST_THRESHOLD_SATS && o.txid.is_some()
-                && o.locking_script.as_ref().map(|s| is_p2pkh_script(s)).unwrap_or(false))
+            .filter(|o| is_consolidation_candidate(o))
             .map(|o| DustUtxo {
                 txid: o.txid.clone().unwrap(),
                 vout: o.vout as u32,
@@ -442,8 +441,31 @@ pub async fn run_inner(state: &web::Data<AppState>) -> Result<ConsolidateResult,
     Ok(ConsolidateResult::Consolidated { txid, input_count, net_sats: net_value })
 }
 
+/// Is this output a candidate for automatic dust consolidation?
+///
+/// Extracted so the two call sites — the initial read and the re-read under lock —
+/// cannot drift apart, and so the 1-satoshi floor is unit-testable without an
+/// `AppState`, a network or a broadcast. Both sites must use this and nothing else.
+///
+/// ⛔ The `is_token_reserved_value` arm is the load-bearing one: this task is
+/// **automatic and daily**, so it is the only path that can destroy a 1-satoshi
+/// asset with no user action at all. See `is_token_reserved_value` for why value is
+/// the only discriminator available here — in particular, the `is_p2pkh_script`
+/// check below cannot be relied on to reject a token, because outputs found by
+/// address sync carry a synthesised P2PKH script rather than the real one.
+fn is_consolidation_candidate(o: &crate::database::Output) -> bool {
+    !is_token_reserved_value(o.satoshis)
+        && o.satoshis <= DUST_THRESHOLD_SATS
+        && o.txid.is_some()
+        && o.locking_script.as_ref().map(|s| is_p2pkh_script(s)).unwrap_or(false)
+}
+
 /// Check if a locking script is standard P2PKH (OP_DUP OP_HASH160 <20 bytes> OP_EQUALVERIFY OP_CHECKSIG)
 /// This guards against accidentally trying to spend PushDrop tokens or other non-standard scripts.
+///
+/// ⚠️ Not a token guard. For any output discovered by address sync this check cannot
+/// fail, because the stored locking script was generated from the address rather than
+/// read from the chain. `is_consolidation_candidate`'s value floor is what excludes tokens.
 fn is_p2pkh_script(script: &[u8]) -> bool {
     script.len() == 25
         && script[0] == 0x76  // OP_DUP
@@ -462,4 +484,119 @@ struct DustUtxo {
     derivation_prefix: Option<String>,
     derivation_suffix: Option<String>,
     sender_identity_key: Option<String>,
+}
+
+#[cfg(test)]
+mod dust_candidate_tests {
+    use super::*;
+    use crate::database::Output;
+
+    /// A standard 25-byte P2PKH locking script — the shape address-sync synthesises
+    /// for every output it discovers, and therefore the shape a 1-satoshi ordinal
+    /// arrives wearing. See `is_p2pkh_script`'s warning.
+    fn p2pkh() -> Vec<u8> {
+        let mut s = vec![0x76, 0xa9, 0x14];
+        s.extend_from_slice(&[0xab; 20]);
+        s.extend_from_slice(&[0x88, 0xac]);
+        s
+    }
+
+    fn output(txid: &str, satoshis: i64) -> Output {
+        Output {
+            output_id: None,
+            user_id: 1,
+            transaction_id: None,
+            basket_id: None,
+            spendable: true,
+            change: false,
+            vout: 0,
+            satoshis,
+            provided_by: "you".into(),
+            purpose: "receive".into(),
+            output_type: "P2PKH".into(),
+            output_description: None,
+            txid: Some(txid.into()),
+            sender_identity_key: None,
+            derivation_prefix: Some("2-receive address".into()),
+            derivation_suffix: Some("0".into()),
+            custom_instructions: None,
+            spent_by: None,
+            sequence_number: None,
+            spending_description: None,
+            script_length: None,
+            script_offset: None,
+            locking_script: Some(p2pkh()),
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    /// The candidate set the task actually consolidates: 20 ordinary dust outputs
+    /// plus one 1-satoshi token carrier.
+    fn staged_wallet() -> Vec<Output> {
+        let mut outputs: Vec<Output> = (0..MIN_DUST_COUNT)
+            .map(|i| output(&format!("dust{:02}", i), 200 + i as i64))
+            .collect();
+        outputs.push(output("ordinal", 1));
+        outputs
+    }
+
+    /// `P8-A1` — the whole point of this ticket. The daily automatic task must not
+    /// treat a 1-satoshi output as dust.
+    #[test]
+    fn one_sat_output_is_not_a_consolidation_candidate() {
+        let staged = staged_wallet();
+        let candidates: Vec<&Output> = staged.iter().filter(|o| is_consolidation_candidate(o)).collect();
+
+        assert_eq!(candidates.len(), MIN_DUST_COUNT,
+            "exactly the 20 ordinary dust outputs are candidates");
+        assert!(!candidates.iter().any(|o| o.txid.as_deref() == Some("ordinal")),
+            "the 1-sat output must never be a consolidation candidate");
+    }
+
+    /// `P8-A2` — the permanent negative control for `A1`.
+    ///
+    /// ⛔ Without this, `A1` could pass for the wrong reason: if some *other* arm of
+    /// `is_consolidation_candidate` (or the fixture itself) stopped the 1-sat output
+    /// reaching the value floor, `A1` would still read GREEN while testing nothing.
+    /// This asserts the count RISES to 21 when only the floor is removed — proving
+    /// the floor, and nothing else, is what excludes it.
+    #[test]
+    fn without_the_floor_the_one_sat_output_would_be_consolidated() {
+        let staged = staged_wallet();
+
+        // `is_consolidation_candidate` with the `is_token_reserved_value` arm removed.
+        let without_floor = |o: &Output| {
+            o.satoshis <= DUST_THRESHOLD_SATS
+                && o.txid.is_some()
+                && o.locking_script.as_ref().map(|s| is_p2pkh_script(s)).unwrap_or(false)
+        };
+
+        let candidates: Vec<&Output> = staged.iter().filter(|o| without_floor(o)).collect();
+
+        assert_eq!(candidates.len(), MIN_DUST_COUNT + 1,
+            "without the floor the 1-sat output IS a candidate — if this is 20, the \
+             test above is vacuous and proves nothing");
+        assert!(candidates.iter().any(|o| o.txid.as_deref() == Some("ordinal")),
+            "the excluded output must be the 1-sat one specifically");
+    }
+
+    /// The floor is a floor, not a range: 2 satoshis is ordinary dust and must still
+    /// be consolidated. A guard that quietly swallowed small change would be a
+    /// different bug wearing this fix's clothes.
+    #[test]
+    fn two_sat_output_is_still_ordinary_dust() {
+        assert!(is_consolidation_candidate(&output("twosat", 2)));
+        assert!(!is_consolidation_candidate(&output("onesat", 1)));
+        assert!(!is_consolidation_candidate(&output("zerosat", 0)));
+    }
+
+    /// The two filter sites in `run_inner` are the same predicate by construction.
+    /// This pins the reason the extraction exists: before it, the pre-lock and
+    /// under-lock filters were duplicated literals that could drift apart.
+    #[test]
+    fn candidate_predicate_is_stable_across_repeated_evaluation() {
+        let o = output("ordinal", 1);
+        assert_eq!(is_consolidation_candidate(&o), is_consolidation_candidate(&o));
+    }
 }

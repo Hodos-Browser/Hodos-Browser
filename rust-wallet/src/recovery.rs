@@ -474,9 +474,15 @@ pub struct ExternalUTXO {
 
 /// Result of scanning an external wallet for UTXOs.
 pub struct ExternalScanResult {
+    /// Sweepable outputs only. Token-reserved outputs are **not** here — see `token_reserved`.
     pub utxos: Vec<ExternalUTXO>,
+    /// Sum of `utxos` only. Deliberately excludes `token_reserved`.
     pub total_balance: i64,
     pub addresses_scanned: u32,
+    /// Outputs found on the external wallet that must not be swept as value
+    /// (1-satoshi token carriers). Reported so the caller can tell the user they
+    /// exist and were left behind, rather than silently destroying or hiding them.
+    pub token_reserved: Vec<ExternalUTXO>,
 }
 
 /// Scan an external wallet's derivation paths for UTXOs.
@@ -489,8 +495,7 @@ pub async fn scan_external_wallet(
     config: &ExternalWalletConfig,
     gap_limit: u32,
 ) -> std::result::Result<ExternalScanResult, String> {
-    let mut all_utxos = Vec::new();
-    let mut total_balance: i64 = 0;
+    let mut scanned: Vec<ExternalUTXO> = Vec::new();
     let mut total_scanned: u32 = 0;
 
     for (chain_idx, chain_prefix) in config.chains.iter().enumerate() {
@@ -520,7 +525,7 @@ pub async fn scan_external_wallet(
                           utxos.len(), label, addr_index, addr_balance);
 
                     for utxo in utxos {
-                        all_utxos.push(ExternalUTXO {
+                        let external = ExternalUTXO {
                             txid: utxo.txid.clone(),
                             vout: utxo.vout,
                             satoshis: utxo.satoshis,
@@ -529,8 +534,9 @@ pub async fn scan_external_wallet(
                             address: address.clone(),
                             chain_index: chain_idx,
                             address_index: addr_index,
-                        });
-                        total_balance += utxo.satoshis;
+                        };
+
+                        scanned.push(external);
                     }
                     gap_count = 0;
                 }
@@ -551,14 +557,46 @@ pub async fn scan_external_wallet(
         }
     }
 
-    info!("   External scan complete: {} UTXOs, {} sats, {} addresses scanned",
-          all_utxos.len(), total_balance, total_scanned);
+    let (sweepable, token_reserved, total_balance) = split_token_reserved(scanned);
+
+    info!("   External scan complete: {} sweepable UTXOs, {} sats, {} token-reserved withheld, {} addresses scanned",
+          sweepable.len(), total_balance, token_reserved.len(), total_scanned);
+    for u in &token_reserved {
+        info!("   🔒 Withholding token-reserved output {}:{} ({} sat) from sweep",
+              &u.txid[..16.min(u.txid.len())], u.vout, u.satoshis);
+    }
 
     Ok(ExternalScanResult {
-        utxos: all_utxos,
+        utxos: sweepable,
         total_balance,
         addresses_scanned: total_scanned,
+        token_reserved,
     })
+}
+
+/// Split a scan's findings into (sweepable, token-reserved, sweepable total).
+///
+/// ⛔ `total_balance` counts the sweepable half **only**. Summing a token-reserved
+/// output into the headline balance would present it as spendable money immediately
+/// before a flow whose entire purpose is to spend everything it was shown.
+///
+/// Pure and separate from `scan_external_wallet` so this can be tested without a
+/// network round-trip — the scan itself is `async` and hits WhatsOnChain.
+fn split_token_reserved(scanned: Vec<ExternalUTXO>) -> (Vec<ExternalUTXO>, Vec<ExternalUTXO>, i64) {
+    let mut sweepable = Vec::new();
+    let mut token_reserved = Vec::new();
+    let mut total_balance: i64 = 0;
+
+    for utxo in scanned {
+        if crate::utxo_fetcher::is_token_reserved_value(utxo.satoshis) {
+            token_reserved.push(utxo);
+        } else {
+            total_balance += utxo.satoshis;
+            sweepable.push(utxo);
+        }
+    }
+
+    (sweepable, token_reserved, total_balance)
 }
 
 /// Build sweep transactions that move all external UTXOs to a single destination address.
@@ -575,13 +613,31 @@ pub fn build_sweep_transactions(
         return Err("No UTXOs to sweep".to_string());
     }
 
+    // ⛔ Second line of defence. `scan_external_wallet` already withholds these, but
+    // this function is `pub` and takes an arbitrary slice, so it must not depend on
+    // its caller having filtered. The batching below sums a batch into ONE output —
+    // a 1-sat carrier swept in with ordinary coins is annihilated, and the existing
+    // dust check further down only inspects the resulting OUTPUT, never the inputs.
+    // Borrowed, not cloned — `ExternalUTXO` carries private key bytes and there is no
+    // reason to make a second copy of them in memory to run a filter.
+    let sweepable: Vec<&ExternalUTXO> = utxos.iter()
+        .filter(|u| !crate::utxo_fetcher::is_token_reserved_value(u.satoshis))
+        .collect();
+    let withheld = utxos.len() - sweepable.len();
+    if withheld > 0 {
+        log::info!("   🔒 Sweep: withheld {} token-reserved output(s) from batching", withheld);
+    }
+    if sweepable.is_empty() {
+        return Err("No sweepable UTXOs (all outputs are token-reserved)".to_string());
+    }
+
     // Decode destination address to get pubkey hash for P2PKH locking script
     let dest_script = address_to_p2pkh_script(destination_address)?;
 
     let mut results = Vec::new();
 
     // Process UTXOs in batches
-    for batch in utxos.chunks(max_inputs_per_tx) {
+    for batch in sweepable.chunks(max_inputs_per_tx) {
         let total_input: i64 = batch.iter().map(|u| u.satoshis).sum();
 
         // Estimate fee: P2PKH unlocking = 107 bytes, input = 32+4+varint+107+4 = 148 bytes
@@ -797,5 +853,122 @@ mod address_to_p2pkh_script_tests {
         let short = bs58::encode(&[0u8; 20]).into_string();
         let result = address_to_p2pkh_script(&short);
         assert!(result.is_err(), "20-byte payload must error on length check");
+    }
+}
+
+#[cfg(test)]
+mod token_reserved_sweep_tests {
+    use super::*;
+
+    /// A well-formed mainnet P2PKH address — the sweep destination.
+    const DEST: &str = "1Q1A2rq6trBdptd3t6n53vB79mRN6JHEFT";
+
+    /// Distinctive, well-formed 32-byte txids so the carrier can be searched for
+    /// in the serialised transaction.
+    const CARRIER_TXID: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+
+    fn utxo(txid: &str, satoshis: i64) -> ExternalUTXO {
+        // 25-byte P2PKH locking script, hex-encoded.
+        let mut script = vec![0x76u8, 0xa9, 0x14];
+        script.extend_from_slice(&[0xab; 20]);
+        script.extend_from_slice(&[0x88, 0xac]);
+
+        ExternalUTXO {
+            txid: txid.to_string(),
+            vout: 0,
+            satoshis,
+            script_hex: hex::encode(&script),
+            private_key: vec![0x11; 32],
+            address: DEST.to_string(),
+            chain_index: 0,
+            address_index: 0,
+        }
+    }
+
+    /// Three ordinary outputs plus one 1-satoshi token carrier.
+    fn staged() -> Vec<ExternalUTXO> {
+        vec![
+            utxo(&"aa".repeat(32), 50_000),
+            utxo(CARRIER_TXID, 1),
+            utxo(&"bb".repeat(32), 30_000),
+            utxo(&"cc".repeat(32), 20_000),
+        ]
+    }
+
+    /// `P8-A4` — the scan must not sum a token carrier into the headline balance,
+    /// and must surface it separately rather than dropping it silently.
+    #[test]
+    fn scan_split_excludes_token_carrier_from_balance_and_reports_it() {
+        let (sweepable, token_reserved, total) = split_token_reserved(staged());
+
+        assert_eq!(sweepable.len(), 3, "only the ordinary outputs are sweepable");
+        assert_eq!(total, 100_000, "balance sums the sweepable half ONLY");
+        assert_eq!(token_reserved.len(), 1, "the carrier is reported, not discarded");
+        assert_eq!(token_reserved[0].txid, CARRIER_TXID);
+        assert!(!sweepable.iter().any(|u| u.txid == CARRIER_TXID));
+    }
+
+    /// `P8-A4` negative control. Unguarded, the same input is 4 outputs worth
+    /// 100,001 sats — the carrier counted as money and queued to be spent. If these
+    /// numbers ever match the guarded ones, the test above is vacuous.
+    #[test]
+    fn without_the_floor_the_carrier_would_be_swept_and_counted() {
+        let scanned = staged();
+        let unguarded_total: i64 = scanned.iter().map(|u| u.satoshis).sum();
+
+        assert_eq!(scanned.len(), 4);
+        assert_eq!(unguarded_total, 100_001,
+            "unguarded the carrier is money; 100_001 must differ from the guarded 100_000");
+    }
+
+    /// `P8-A3` — the destructive step. Batching sums a batch into ONE output, so a
+    /// carrier reaching this function is annihilated. Asserted on the SERIALISED
+    /// transaction: its input count, and the absence of the carrier's outpoint.
+    #[test]
+    fn sweep_transaction_inputs_exclude_the_token_carrier() {
+        let txs = build_sweep_transactions(&staged(), DEST, 1000, 50)
+            .expect("sweep should build");
+        assert_eq!(txs.len(), 1, "four inputs fit in one batch");
+
+        let raw = hex::decode(&txs[0].0).expect("valid tx hex");
+
+        // Wire format: 4-byte version, then the input-count varint (1 byte below 253).
+        assert_eq!(raw[4], 3, "the transaction spends 3 inputs, not 4");
+
+        // Outpoint txids are serialised little-endian — the reverse of the hex form.
+        let mut carrier_le = hex::decode(CARRIER_TXID).unwrap();
+        carrier_le.reverse();
+        assert!(!raw.windows(32).any(|w| w == carrier_le.as_slice()),
+            "the carrier's outpoint must not appear anywhere in the transaction");
+
+        // Control on the assertion itself: an output that SHOULD be spent is present,
+        // proving the search above can actually find an outpoint when one is there.
+        let mut ordinary_le = hex::decode("aa".repeat(32)).unwrap();
+        ordinary_le.reverse();
+        assert!(raw.windows(32).any(|w| w == ordinary_le.as_slice()),
+            "an ordinary input IS present — otherwise the search proves nothing");
+    }
+
+    /// `P8-A3` negative control: a slice of nothing but carriers must refuse to
+    /// build, rather than quietly producing a sweep that consumes them.
+    #[test]
+    fn sweep_of_only_carriers_refuses_rather_than_spending_them() {
+        let only_carriers = vec![utxo(&"ee".repeat(32), 1), utxo(&"ff".repeat(32), 1)];
+        let result = build_sweep_transactions(&only_carriers, DEST, 1000, 50);
+        assert!(result.is_err(), "must refuse, not sweep");
+        assert!(result.unwrap_err().contains("token-reserved"));
+    }
+
+    /// The floor is a floor. 2 satoshis is ordinary value and must still sweep.
+    #[test]
+    fn two_sat_output_still_sweeps() {
+        let (sweepable, reserved, total) = split_token_reserved(vec![
+            utxo(&"11".repeat(32), 2),
+            utxo(&"22".repeat(32), 1),
+        ]);
+        assert_eq!(sweepable.len(), 1);
+        assert_eq!(sweepable[0].satoshis, 2);
+        assert_eq!(total, 2);
+        assert_eq!(reserved.len(), 1);
     }
 }

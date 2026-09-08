@@ -1512,3 +1512,96 @@ mod reservation_race_tests {
         assert_eq!(spendable, 0, "A still holds the reservation");
     }
 }
+
+/// `P8-A7` — evidence for the beta.3 dust-guard ticket's severity question.
+///
+/// The ticket left one thing unverified: *"whether an ordinary incoming 1-sat payment
+/// becomes a tracked default-basket row without a recovery scan."* These tests answer
+/// it by measurement rather than by reading the code. `upsert_received_utxo_with_confirmed`
+/// is the exact insert used by `monitor::task_sync_pending` — an automatic task on a
+/// 30-second tier — and by `handlers::wallet_sync`.
+#[cfg(test)]
+mod token_reserved_exposure_tests {
+    use super::*;
+    use crate::database::migrations;
+
+    fn seed_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
+        migrations::create_schema_v1(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO users (userId, identity_key, active_storage, created_at, updated_at)
+             VALUES (1, 'test_identity_key', 'local', 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    const SCRIPT: &str = "76a914abababababababababababababababababababab88ac";
+
+    /// GREEN — a 1-satoshi payment arriving at a receive address becomes a fully
+    /// spendable, default-pool row with no user action and no recovery scan.
+    /// This is the exposure the ticket asked about, and it is real.
+    #[test]
+    fn incoming_one_sat_payment_becomes_a_spendable_default_pool_row() {
+        let conn = seed_db();
+        let repo = OutputRepository::new(&conn);
+
+        // Exactly what address sync does: address_index 0, confirmed.
+        let inserted = repo
+            .upsert_received_utxo_with_confirmed(1, "ord", 0, 1, SCRIPT, 0, true)
+            .unwrap();
+        assert_eq!(inserted, 1);
+
+        let spendable = repo.get_spendable_confirmed_by_user(1).unwrap();
+        assert_eq!(spendable.len(), 1,
+            "the 1-sat output IS returned to every spend path that reads this query");
+        assert_eq!(spendable[0].satoshis, 1);
+        assert!(spendable[0].basket_id.is_none(),
+            "no basket is assigned on ingest — this is the actual defect, and the \
+             reason the existing basket exclusion never fires for a token");
+    }
+
+    /// RED half — the same row filed into a non-default basket is excluded.
+    ///
+    /// This proves the basket filter in `get_spendable_confirmed_by_user` WORKS, so
+    /// the green half above is not a broken query: it is a missing classification.
+    /// That is why the beta.3 fix is a value floor and the real fix (beta.4 sprint 1)
+    /// is classification on ingest.
+    #[test]
+    fn the_same_row_in_a_protective_basket_is_excluded() {
+        let conn = seed_db();
+        let repo = OutputRepository::new(&conn);
+
+        repo.upsert_received_utxo_with_confirmed(1, "ord", 0, 1, SCRIPT, 0, true)
+            .unwrap();
+        conn.execute(
+            "INSERT INTO output_baskets (basketId, user_id, name, created_at, updated_at)
+             VALUES (1, 1, '1sat', 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute("UPDATE outputs SET basket_id = 1 WHERE txid = 'ord'", []).unwrap();
+
+        assert!(repo.get_spendable_confirmed_by_user(1).unwrap().is_empty(),
+            "a correctly-basketed token is already excluded from spending");
+    }
+
+    /// The ingest path applies no value filter of any kind — a 1-satoshi output and
+    /// an ordinary one are written identically and both land in the spendable pool.
+    #[test]
+    fn ingest_applies_no_value_filter() {
+        let conn = seed_db();
+        let repo = OutputRepository::new(&conn);
+
+        repo.upsert_received_utxo_with_confirmed(1, "ord", 0, 1, SCRIPT, 0, true).unwrap();
+        repo.upsert_received_utxo_with_confirmed(1, "coin", 0, 50_000, SCRIPT, 0, true).unwrap();
+
+        let mut sats: Vec<i64> = repo.get_spendable_confirmed_by_user(1).unwrap()
+            .iter().map(|o| o.satoshis).collect();
+        sats.sort();
+        assert_eq!(sats, vec![1, 50_000],
+            "both are tracked as spendable value; nothing on ingest tells them apart");
+    }
+}

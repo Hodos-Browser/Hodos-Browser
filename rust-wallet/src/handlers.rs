@@ -46,6 +46,12 @@ pub const HODOS_FEE_ADDRESS: &str = "1Q1A2rq6trBdptd3t6n53vB79mRN6JHEFT";
 /// Must be >= 546 (dust limit). Currently ~$0.04 at $40/BSV.
 pub const HODOS_SERVICE_FEE_SATS: i64 = 1000;
 
+// The 1-satoshi token floor lives in `utxo_fetcher` — see
+// `utxo_fetcher::is_token_reserved_value`. ⛔ It cannot live here: `handlers` is
+// declared only by the binary crate (main.rs), while `recovery.rs` compiles into
+// BOTH the binary and the library, and it needs the same floor.
+pub use crate::utxo_fetcher::{is_token_reserved_value, TOKEN_RESERVED_SATS};
+
 /// Internal engine seed for wallet operation HMAC derivation paths.
 /// Used to namespace internal wallet operations from user-initiated ones.
 const WALLET_ENGINE_SEED: [u8; 32] = [
@@ -5176,10 +5182,21 @@ pub(crate) async fn create_action_internal(
         // Select UTXOs to cover the amount needed from wallet
         if !all_utxos.is_empty() {
             if send_max {
-                // Send max: select ALL available UTXOs to drain the wallet
-                selected_utxos = all_utxos.clone();
+                // Send max: drain the wallet of ordinary value.
+                //
+                // ⛔ This branch bypasses select_utxos_with_preference entirely, so it
+                // needs its own floor — a guard placed only in the selector would leave
+                // "Send max" as a one-click destroyer of every 1-sat asset the wallet
+                // holds. "Send everything I have" is a statement about money; it is not
+                // a request to annihilate a token. Owner decision, 2026-09-08.
+                selected_utxos = select_all_spendable(&all_utxos);
+                let reserved_count = all_utxos.len() - selected_utxos.len();
                 let wallet_total: i64 = selected_utxos.iter().map(|u| u.satoshis).sum();
-                log::info!("   Send max: selected ALL {} UTXOs ({} satoshis)", selected_utxos.len(), wallet_total);
+                if reserved_count > 0 {
+                    log::info!("   Send max: withheld {} token-reserved output(s) (≤{} sat) from the drain",
+                        reserved_count, TOKEN_RESERVED_SATS);
+                }
+                log::info!("   Send max: selected ALL {} spendable UTXOs ({} satoshis)", selected_utxos.len(), wallet_total);
             } else {
                 // Normal: greedy selection with confirmed preference + lazy consolidation.
                 // Consolidation adds small UTXOs (≤5000 sats) to reduce UTXO count over time.
@@ -7292,6 +7309,19 @@ pub(crate) fn select_utxos_with_preference(
     select_utxos_greedy(all_utxos, amount_needed, consolidation)
 }
 
+/// Everything `send_max` may drain: all outputs except token-reserved ones.
+///
+/// ⛔ Exists as a named function so the `send_max` branch of `create_action` — which
+/// deliberately bypasses `select_utxos_with_preference` — has a floor that can be
+/// tested directly. Testing `is_token_reserved_value` alone would not prove the
+/// drain path calls it.
+pub(crate) fn select_all_spendable(all_utxos: &[UTXO]) -> Vec<UTXO> {
+    all_utxos.iter()
+        .filter(|u| !is_token_reserved_value(u.satoshis))
+        .cloned()
+        .collect()
+}
+
 /// Simple greedy UTXO selection (largest first), with optional lazy consolidation.
 fn select_utxos_greedy(
     available: &[UTXO],
@@ -7301,8 +7331,17 @@ fn select_utxos_greedy(
     let mut selected = Vec::new();
     let mut total: i64 = 0;
 
-    // Sort by value (largest first) for efficiency
-    let mut sorted_utxos = available.to_vec();
+    // Sort by value (largest first) for efficiency.
+    //
+    // ⛔ Token-reserved outputs are dropped before anything else looks at them, so
+    // BOTH passes below are covered by one filter. The two passes would otherwise
+    // reach a 1-sat output for different reasons: the primary pass is largest-first
+    // so it only gets there on a near-total drain, while the lazy-consolidation pass
+    // actively seeks small outputs and would take it first.
+    let mut sorted_utxos: Vec<UTXO> = available.iter()
+        .filter(|u| !is_token_reserved_value(u.satoshis))
+        .cloned()
+        .collect();
     sorted_utxos.sort_by(|a, b| b.satoshis.cmp(&a.satoshis));
 
     for utxo in &sorted_utxos {
@@ -16297,7 +16336,18 @@ pub async fn wallet_recover_external(
         });
     }
 
-    log::info!("   📊 Found {} UTXOs, total {} sats", scan_result.utxos.len(), scan_result.total_balance);
+    log::info!("   📊 Found {} sweepable UTXOs, total {} sats", scan_result.utxos.len(), scan_result.total_balance);
+    if !scan_result.token_reserved.is_empty() {
+        // Not swept, not counted in total_balance, and said out loud rather than
+        // dropped on the floor — the user is importing a wallet and has a right to
+        // know something was left on the external one.
+        log::info!("   🔒 {} token-reserved output(s) left on the external wallet (not swept):",
+            scan_result.token_reserved.len());
+        for u in &scan_result.token_reserved {
+            log::info!("      {}:{} ({} sat) at {}",
+                &u.txid[..16.min(u.txid.len())], u.vout, u.satoshis, u.address);
+        }
+    }
 
     // 9. Create Hodos wallet (DB lock)
     let (wallet_id, user_id, dest_address) = {
@@ -20055,3 +20105,122 @@ pub async fn debug_broadcast_nosend(
 }
 
 
+
+#[cfg(test)]
+mod token_reserved_selection_tests {
+    use super::*;
+
+    fn utxo(txid: &str, satoshis: i64) -> UTXO {
+        UTXO {
+            txid: txid.to_string(),
+            vout: 0,
+            satoshis,
+            script: "76a914".to_string() + &"ab".repeat(20) + "88ac",
+            address_index: 0,
+            custom_instructions: None,
+            confirmed: true,
+        }
+    }
+
+    /// One 1-satoshi carrier among ordinary coins.
+    fn wallet() -> Vec<UTXO> {
+        vec![
+            utxo("big", 50_000),
+            utxo("ordinal", 1),
+            utxo("small", 900),
+            utxo("mid", 4_000),
+        ]
+    }
+
+    fn picked(selected: &[UTXO]) -> Vec<&str> {
+        selected.iter().map(|u| u.txid.as_str()).collect()
+    }
+
+    /// `P8-A5` — the lazy-consolidation pass actively seeks small outputs, so it is
+    /// the pass that would reach a 1-satoshi carrier FIRST.
+    #[test]
+    fn consolidation_pass_does_not_sweep_up_the_carrier() {
+        let selected = select_utxos_greedy(&wallet(), 10_000, Some(&CONSOLIDATION_FOR_SENDS));
+
+        assert!(!picked(&selected).contains(&"ordinal"),
+            "consolidation pass must not add the carrier: {:?}", picked(&selected));
+        assert!(picked(&selected).contains(&"small"),
+            "it must still consolidate ordinary small outputs — otherwise this test \
+             passes because consolidation did nothing at all");
+    }
+
+    /// `P8-A5` — the primary pass is largest-first, so it only reaches a 1-satoshi
+    /// output on a near-total drain. Ask for more than everything-but-the-carrier.
+    #[test]
+    fn primary_pass_fails_rather_than_spending_the_carrier() {
+        let all = wallet();
+        let ordinary_total: i64 = all.iter().filter(|u| u.satoshis > 1).map(|u| u.satoshis).sum();
+
+        // One satoshi more than the ordinary coins can cover: only the carrier could
+        // close the gap, and it must not be allowed to.
+        let selected = select_utxos_greedy(&all, ordinary_total + 1, None);
+        assert!(selected.is_empty(),
+            "insufficient funds is the correct answer; spending the carrier is not: {:?}",
+            picked(&selected));
+
+        // Control: one satoshi less and the selection succeeds without the carrier.
+        let ok = select_utxos_greedy(&all, ordinary_total, None);
+        assert!(!ok.is_empty(), "the same call succeeds when the target is reachable");
+        assert!(!picked(&ok).contains(&"ordinal"));
+    }
+
+    /// `P8-A5` negative control. The identical calls against a wallet whose carrier
+    /// is 2 satoshis DO select it — proving the exclusion is the value floor and not
+    /// some incidental property of the fixture.
+    #[test]
+    fn without_the_floor_the_carrier_is_selected() {
+        let mut all = wallet();
+        all[1] = utxo("ordinal", 2); // one satoshi above the floor — no longer reserved
+
+        let consolidated = select_utxos_greedy(&all, 10_000, Some(&CONSOLIDATION_FOR_SENDS));
+        assert!(picked(&consolidated).contains(&"ordinal"),
+            "at 2 sats the same output IS consolidated — if not, the A5 tests are vacuous");
+
+        let ordinary_total: i64 = all.iter().map(|u| u.satoshis).sum();
+        let drained = select_utxos_greedy(&all, ordinary_total, None);
+        assert!(picked(&drained).contains(&"ordinal"),
+            "at 2 sats a full drain DOES reach it");
+    }
+
+    /// `P8-A6` — `send_max` bypasses the selector entirely, so it carries its own
+    /// floor. This asserts on exactly the value the branch assigns to
+    /// `selected_utxos`.
+    #[test]
+    fn send_max_drains_everything_except_the_carrier() {
+        let all = wallet();
+        let selected = select_all_spendable(&all);
+
+        assert_eq!(selected.len(), 3, "every ordinary output is drained");
+        assert!(!picked(&selected).contains(&"ordinal"), "the carrier is withheld");
+        assert_eq!(selected.iter().map(|u| u.satoshis).sum::<i64>(), 54_900);
+    }
+
+    /// `P8-A6` negative control: unguarded, send_max takes all four and 54,901 sats.
+    #[test]
+    fn without_the_floor_send_max_would_take_the_carrier() {
+        let all = wallet();
+        assert_eq!(all.len(), 4);
+        assert_eq!(all.iter().map(|u| u.satoshis).sum::<i64>(), 54_901,
+            "unguarded totals must differ from the guarded 3 outputs / 54,900 sats");
+    }
+
+    /// A wallet holding only carriers has nothing to send — and must not be drained.
+    #[test]
+    fn send_max_over_only_carriers_selects_nothing() {
+        let only = vec![utxo("a", 1), utxo("b", 1)];
+        assert!(select_all_spendable(&only).is_empty());
+    }
+
+    /// The floor is a floor, at every call site.
+    #[test]
+    fn two_sat_outputs_remain_ordinary_value() {
+        let all = vec![utxo("two", 2), utxo("one", 1)];
+        assert_eq!(picked(&select_all_spendable(&all)), vec!["two"]);
+        assert_eq!(picked(&select_utxos_greedy(&all, 2, None)), vec!["two"]);
+    }
+}
