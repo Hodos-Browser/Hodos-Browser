@@ -59,6 +59,33 @@ interface DomainPermissionFormProps {
    * Manage Site Permissions).
    */
   hideDisclosureSection?: boolean;
+  /**
+   * beta.3 Phase 7d items 2+3 — management layout: cap the granted-permissions
+   * list so it scrolls in place, and make the limits section collapsible.
+   *
+   * ⛔ Default OFF, and that is a deliberate scope fence (owner decision D-A).
+   * This one component renders on FIVE surfaces, four of them the connect and
+   * payment consent modals that Phase 7a/7b/7c just settled. Two of those wrap
+   * it in their own collapsible already, so an unconditional collapse would
+   * make a limit field two clicks deep on the payment screen — and `R-PROV`
+   * (P0.8 §6a: a user must not approve values hidden behind a collapsed
+   * section) is live on those, not here. `P7d-A11` checks they did not move.
+   *
+   * 📏 Measured on beta.zanaadu.com (17 grants, the ticket's worst case): the
+   * granted list alone was 846 px of 1545 px of content in an 811 px box — 55 %,
+   * and bigger than the whole visible area on its own.
+   */
+  managementLayout?: boolean;
+  /**
+   * Start the limits section collapsed. Only meaningful with `managementLayout`.
+   *
+   * ⭐ Set per entry point, so each screen opens showing what you came for:
+   * the "Edit Limits" dialog leaves them OPEN (you clicked *Edit limits*), the
+   * right-click "Manage Wallet Permissions" editor starts them CLOSED (you came
+   * to manage grants). Collapsing limits inside a dialog titled "Edit Limits"
+   * would hide the thing its own title promises.
+   */
+  limitsStartCollapsed?: boolean;
 }
 
 const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
@@ -67,7 +94,12 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
   onSave,
   onCancel,
   hideDisclosureSection = false,
+  managementLayout = false,
+  limitsStartCollapsed = false,
 }) => {
+  const [limitsOpen, setLimitsOpen] = useState(
+    !(managementLayout && limitsStartCollapsed)
+  );
   const [perTxUsd, setPerTxUsd] = useState(
     currentSettings ? (currentSettings.perTxLimitCents / 100).toFixed(2) : '1.00'
   );
@@ -250,6 +282,40 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
         Auto-approve settings for {domain.replace(/^https?:\/\//, '').replace(/^www\./, '')}
       </div>
 
+      {/* Phase 7d item 3 — collapsible limits header. Rendered only in the
+          management layout; the consent modals keep their existing shape. */}
+      {managementLayout && (
+        <div
+          onClick={() => setLimitsOpen((o) => !o)}
+          role="button"
+          aria-expanded={limitsOpen}
+          style={{
+            display: 'flex', alignItems: 'center', gap: '8px',
+            marginBottom: limitsOpen ? '14px' : '16px',
+            cursor: 'pointer', userSelect: 'none',
+            fontSize: '13px', fontWeight: 600, color: COLORS.textDark,
+          }}
+        >
+          <span style={{ fontSize: '11px', color: COLORS.textMuted }}>
+            {limitsOpen ? '▼' : '▶'}
+          </span>
+          Spending limits
+          {!limitsOpen && (
+            <span style={{ fontWeight: 400, fontSize: '12px', color: COLORS.textMuted }}>
+              {isAlwaysNotify
+                ? '— always ask'
+                : `— $${perTxUsd} per payment, $${perSessionUsd} per session`}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* ⛔ The collapsed summary above is not decoration: a section that hides
+          numbers must say what it is hiding, or the user cannot tell whether it
+          is worth opening. Same principle as R-PROV, applied to the user's own
+          stored values rather than a site's suggested ones. */}
+      {(!managementLayout || limitsOpen) && (
+      <>
       {/* Always notify checkbox */}
       <div style={{
         display: 'flex',
@@ -393,6 +459,8 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
           High limits set. Payments up to these amounts will be approved automatically without confirmation.
         </div>
       )}
+      </>
+      )}
 
       {/* ─── Phase 1.5 Step 5: Personal Info Disclosure section ──────────
           Hidden when the form is embedded inside the domain_approval modal's
@@ -504,6 +572,17 @@ const DomainPermissionForm: React.FC<DomainPermissionFormProps> = ({
             border: `1px solid ${COLORS.borderLight}`,
             borderRadius: '6px',
             padding: '8px 10px',
+            // Phase 7d item 2 — cap it and let it scroll in place, so the list
+            // stops driving the height of the whole modal.
+            // 📏 Rows measured at 47 px, so ~5 rows visible; enough to see this
+            // is a list and to scroll it, without the list being the modal.
+            // ⛔ Safe to clip here ONLY because these rows carry no tooltip:
+            // checked 2026-09-08, they are plain divs with a label and sublabel
+            // string — no InfoIcon, no Tooltip, no position:absolute child. An
+            // ancestor `overflow` would clip a tooltip rendered outside its
+            // icon's box, which is why the connect modal's counterparty block
+            // was collapsed rather than capped in Phase 7b.
+            ...(managementLayout ? { maxHeight: '240px', overflowY: 'auto' as const } : {}),
           }}>
             {subPermissions.map((row) => (
               <div

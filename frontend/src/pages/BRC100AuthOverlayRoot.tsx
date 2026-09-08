@@ -140,6 +140,11 @@ const EditPermissionsForm: React.FC<{ domain: string; onClose: () => void }> = (
   return (
     <>
       <DomainPermissionForm
+        // Phase 7d items 2+3. Limits start COLLAPSED here: right-click "Manage
+        // Wallet Permissions" is where you go to see and revoke grants, so the
+        // grant list should be what greets you, not four spending fields.
+        managementLayout
+        limitsStartCollapsed
         domain={domain}
         currentSettings={currentSettings}
         onSave={handleSave}

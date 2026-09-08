@@ -648,6 +648,10 @@ const DomainPermissionsTab: React.FC = () => {
           {editingDomain && (
             <Box sx={{ pt: 2 }}>
               <DomainPermissionForm
+                // Phase 7d items 2+3. Limits stay expanded here: the dialog is
+                // titled "Edit Limits" and you got here from an "Edit limits"
+                // button — collapsing them would hide what the title promises.
+                managementLayout
                 domain={editingDomain.domain}
                 currentSettings={{
                   perTxLimitCents: editingDomain.perTxLimitCents,
