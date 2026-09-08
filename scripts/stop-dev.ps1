@@ -25,11 +25,35 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
     # Repo root. Everything stopped must live underneath it.
-    [string]$RepoRoot = (Split-Path -Parent $PSScriptRoot)
+    # ⛔ Resolved in the BODY, not as a parameter default — see below.
+    [string]$RepoRoot
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+# 🚨 This used to be a parameter default: `[string]$RepoRoot = (Split-Path -Parent $PSScriptRoot)`.
+# `$PSScriptRoot` is empty at PARAMETER-BINDING time under `powershell -File`, so `Split-Path` threw
+# before the body ever ran and the documented invocation — `.\scripts\stop-dev.ps1`, with no
+# arguments, exactly as CLAUDE.md instructs — died with:
+#
+#     Split-Path : Cannot bind argument to parameter 'Path' because it is an empty string.
+#
+# ⛔ Why that mattered more than an ordinary script bug: this script IS the safeguard against the
+# 2026-09-01 incident, where a name-matched kill took out the owner's PRODUCTION wallet and left the
+# installed browser saying "no wallet" for ~4 hours. The moment someone reaches for it is the moment
+# a linker is holding a file and a build is failing — maximum pressure to give up and hand-write
+# `Stop-Process -Name hodos-wallet`, which is the exact thing this exists to prevent.
+# ⭐ The lesson from that incident was "embody a rule in a tool, don't rely on remembering it."
+# A tool that will not start does not embody anything.
+#
+# Fixed 2026-09-08. The matching logic below was NOT touched — it was measured correct on the same
+# day (stopped 20 dev processes, spared all 77 installed-build ones). Only the startup was broken.
+if (-not $RepoRoot) {
+    $here = if ($PSScriptRoot) { $PSScriptRoot }
+            else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+    $RepoRoot = Split-Path -Parent $here
+}
 
 # name -> the path fragment that identifies the DEV build of it.
 # ⚠️ Keep these anchored to build-output directories. A fragment as loose as 'Hodos-Browser'

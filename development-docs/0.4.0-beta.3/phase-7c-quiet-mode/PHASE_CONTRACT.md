@@ -458,8 +458,29 @@ contradict. A **select-all** master checkbox was offered and explicitly **declin
 
 | Item | Result | Date | By |
 |---|---|---|---|
-| preflight | | | |
-| preflight -NegativeControl | | | |
-| regression set | | | |
-| adversarial review | | | |
-| owner human-eyes pass | | | |
+| preflight | 🟢 **PASS** — `-Full`, all 8 T0 gates + all 7 T1 suites | 2026-09-08 | Claude |
+| preflight -NegativeControl | 🟢 **PASS** — every gate seen to fail on an injected violation | 2026-09-08 | Claude |
+| regression set | ⚠️ **PARTIAL** — see below | 2026-09-08 | Claude |
+| adversarial review | ⬜ not run | | |
+| owner human-eyes pass | 🟢 connect screen + both live sessions | 2026-09-07 | 👤 Owner |
+
+⛔ **First preflight run was `INCOMPLETE`, not a pass** — `T1d` (frontend build) skips unless `-Full`
+is passed, and the script says so in as many words: *"0 failed, 1 skipped. This is NOT a pass."*
+Recorded because the instinct to read 0-failed as green is exactly what `HARNESS` §"a skip is never
+a pass" exists to stop. Re-run with `-Full` → PASS.
+
+⚠️ **Why the regression set is PARTIAL, stated rather than rounded up:**
+
+- `R-PERIM` — 🟢 T1 green (`T1a` covers the engine crate). The **engine-decision** half is also
+  green live: `Silent`/`Prompt` observed with the right `EngineReason` on both a granted and an
+  ungranted scope (§5.1), plus the owner's two sessions (§5.3). ⬜ The four gates were **not**
+  individually re-flipped end-to-end at this boundary.
+- `R-INTEXT` — ⬜ **not run.** `A8` needs the origin derivation stubbed in both directions, and
+  neither half was observed this phase. ⚠️ This phase does not touch the predicate, but the
+  invariant is listed as live here and the honest state is unrun, not green.
+- `R-GOLD` / `R-COUNT` / `R-CLOSE` / `R-UPDATE` — not exercised; no payment, overlay-lifetime or
+  update work in this phase.
+
+⇒ **Phase 7c is complete as scoped and safe to build on, but the boundary sign-off is not closed.**
+`R-INTEXT` and the adversarial review are owed before the beta.3 release boundary, not before the
+next phase.

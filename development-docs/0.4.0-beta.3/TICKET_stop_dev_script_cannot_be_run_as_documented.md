@@ -1,6 +1,6 @@
 # `stop-dev.ps1` fails to start when invoked the way the docs say to invoke it
 
-**Status:** 🔴 OPEN — filed 2026-09-08, measured during Phase 7c.
+**Status:** ✅ **FIXED 2026-09-08**, same day, in `scripts/stop-dev.ps1`. Verified by the acceptance list below with the dev wallet AND the installed wallet both running: **19 dev processes stopped, the installed wallet and all 74 installed browser processes survived.** The documented no-argument invocation now works. Matching logic untouched.
 **Sprint:** 📌 Unassigned. ⭐ **Small and safety-relevant — worth doing out of band rather than queuing.**
 **Surface:** `scripts/stop-dev.ps1` line 28.
 
@@ -78,12 +78,19 @@ if (-not $RepoRoot) {
 
 ## Acceptance
 
-- [ ] `.\scripts\stop-dev.ps1` runs with **no arguments**, from the repo root and from `scripts\`
-- [ ] `-WhatIf` still names only build-directory paths and still reports the installed build spared
-- [ ] ⛔ **Negative control:** with a dev wallet **and** the installed wallet both running, confirm the
-      script stops the dev one and the installed one **survives** — the actual property the tool
-      exists for. A green that only proves "the script started" proves nothing.
-- [ ] Verified on both PowerShell 5.1 and 7 if both are in use
+- [x] `.\scripts\stop-dev.ps1` runs with **no arguments** — verified from the repo root
+- [x] `-WhatIf` still names only build-directory paths and still reports the installed build spared
+      (`Stopped 0 dev process(es); left 76 non-dev process(es) alone`)
+- [x] ⭐ **The property the tool exists for, measured directly** with both wallets running:
+
+      installed wallet  : 1  SURVIVED
+      dev wallet        : 0  stopped
+      installed browser : 74 SURVIVED
+      dev browser       : 0  stopped
+
+- [ ] ⚠️ **Not verified on PowerShell 7.** Fixed and tested on Windows PowerShell 5.1 only. The
+      `$MyInvocation` fallback is there for the case where `$PSScriptRoot` is empty; on 7 it should
+      simply never be reached. Worth one run if 7 is ever used here.
 
 ## Related
 
