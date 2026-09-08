@@ -149,11 +149,24 @@ implement this as a React `onClick` handler and assume it holds."*
 |---|---|---|
 | **Approved Sites (a TAB) → Edit Limits** | **MUI `<Dialog>` backdrop + Escape** (`DomainPermissionsTab`, `onClose`). The only ways out | ⛔ **React** — exactly the mechanism the ticket says not to rely on, and the *only* one that exists here |
 | ~~Click outside the wallet overlay window~~ | ⛔ **Does not apply** — this modal is not in the wallet overlay. See the correction above | — |
-| **Right-click → Manage Wallet Permissions** | `MENU_ID_MANAGE_PERMISSIONS` → `CreateNotificationOverlay(…, "edit_permissions", domain, "")` (`simple_handler.cpp` 10273–10300). `NotificationOverlayWndProc` (`cef_browser_shell.cpp` 2414) has **no `WM_ACTIVATE` arm**, and the `WH_MOUSE_LL` roster in `simple_app.cpp` has **no notification hook** | 🆕 **It does not close on click-outside at all today.** Only `WM_CLOSE` → `DestroyWindow` |
+| **Right-click → Manage Wallet Permissions** | 🚨 **A React backdrop.** `BRC100AuthOverlayRoot.tsx` 3099: `<div style={overlayBackdrop} onClick={() => cefMessage.send('overlay_close')}>`. The C++ side genuinely has none — no `WM_ACTIVATE` arm, no mouse hook, not in the `WM_ACTIVATEAPP` list — but the React side closes it, and that is the one the user hits | ⛔ **Same defect, same discard.** See the correction below |
 
-⇒ Item 1 is **two mechanisms on the wallet-overlay path**, not one mechanism on two paths. A
-C++-only fix leaves the backdrop click — the common case — unfixed. On the right-click path there is
-nothing to fix, and the risk is *adding* a guard that breaks its working `WM_CLOSE`.
+🚨🚨 **SECOND CORRECTION, 2026-09-08 — and this one I reported to the owner as fact.** I wrote that
+the right-click path "does not close on click-outside at all" and that there was "nothing to fix"
+there. **False.** I had checked only the layer the ticket named — the C++ close paths — and never
+looked at the React tree above them. `BRC100AuthOverlayRoot.tsx:3099` is a full-screen backdrop
+whose `onClick` sends `overlay_close`.
+
+Measured with the guard removed: type into the form, click the backdrop → `overlay_close` fires,
+`formStillRendered: false`, the typed value is **gone**. Identical defect to the Edit Limits dialog,
+on the surface CLAUDE.md calls load-bearing.
+
+⭐ **The lesson is the same one twice in one item:** the ticket named a mechanism (C++ close paths),
+I checked that mechanism, and both times the real one was in the other layer. Checking where the
+ticket points is not the same as checking the behaviour.
+
+⇒ Item 1 is **two surfaces, both React**: the MUI `<Dialog>` backdrop + Escape, and the
+`edit_permissions` overlay backdrop. Neither needs C++.
 
 ### 0.8 ⛔ `D-8` — Item 5's stated motive is false: the right-click path never sees the list
 

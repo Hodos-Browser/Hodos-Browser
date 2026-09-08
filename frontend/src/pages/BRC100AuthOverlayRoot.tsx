@@ -343,6 +343,23 @@ const BRC100AuthOverlayRoot: React.FC = () => {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showModifyLimits, setShowModifyLimits] = useState(false);
   const [faviconError, setFaviconError] = useState(false);
+
+  // beta.3 Phase 7d item 1 — the `edit_permissions` view (right-click → Manage
+  // Wallet Permissions) is the SAME management surface as the Edit Limits
+  // dialog, and it had the same defect: its backdrop `onClick` fired
+  // `overlay_close`, so one stray click discarded every unsaved edit.
+  // 🚨 I initially reported this path as having "no click-outside close at
+  // all" — true of the C++ side (no WM_ACTIVATE arm, no mouse hook, not in the
+  // WM_ACTIVATEAPP hide list) and false of the React side, which is the one
+  // the user actually hits. Checking only the layer the ticket named is how it
+  // was missed. Cancel remains the deliberate exit.
+  // ⚠️ Counter, not boolean — a repeat click must restart the timer.
+  const [editCloseHintTick, setEditCloseHintTick] = useState(0);
+  useEffect(() => {
+    if (!editCloseHintTick) return;
+    const t = window.setTimeout(() => setEditCloseHintTick(0), 2200);
+    return () => window.clearTimeout(t);
+  }, [editCloseHintTick]);
   // beta.3 Phase 7b — the PAGE'S OWN favicon URL, supplied by C++ from
   // `Tab::favicon_url` (populated by OnFaviconURLChange for the tab strip).
   //
@@ -3076,8 +3093,29 @@ const BRC100AuthOverlayRoot: React.FC = () => {
   // ── Edit permissions (right-click "Manage Site Permissions") ──
   if (notificationType === 'edit_permissions') {
     return (
-      <div style={overlayBackdrop} onClick={() => window.cefMessage?.send('overlay_close', [])}>
-        <div style={cardStyle} onClick={(e) => e.stopPropagation()}>
+      // Phase 7d item 1 — a click out here used to send `overlay_close` and take
+      // the user's unsaved edits with it. It now says why and does nothing;
+      // Cancel and Save are the ways out.
+      <div style={overlayBackdrop} onClick={() => setEditCloseHintTick((n) => n + 1)}>
+        <div style={{ ...cardStyle, position: 'relative' }} onClick={(e) => e.stopPropagation()}>
+          {editCloseHintTick > 0 && (
+            <div
+              role="status"
+              style={{
+                position: 'absolute', top: '50%', left: '50%',
+                transform: 'translate(-50%, -50%)',
+                zIndex: 5, pointerEvents: 'none',
+                padding: '10px 20px', borderRadius: '8px',
+                background: 'rgba(10,10,11,0.94)',
+                border: '1px solid #a67c00',
+                color: '#f0f0f0', fontSize: '14px', fontWeight: 500,
+                whiteSpace: 'nowrap',
+                boxShadow: '0 8px 28px rgba(0,0,0,0.6)',
+              }}
+            >
+              Click Save or Cancel to close
+            </div>
+          )}
           <HodosWalletHeader />
           {/* Domain avatar + title */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '22px' }}>
