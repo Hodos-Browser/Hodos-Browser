@@ -277,10 +277,80 @@ original 10 protocol rows. Approvals minted by the probes are single-use and exp
 | Row | What | State |
 |---|---|---|
 | `A11` | 👤 owner reads the changed connect screen | 🟢 **CLOSED 2026-09-07 by owner observation** — *"I have already looked at the connect screen. It looks good."* ⚠️ Recorded as the owner's eyes on the **connect** screen. The DPI matrix cells (#4/#6/#9) were **not** part of that look and are still owed at the boundary. |
-| `D3` | keyID `*` on Always-allow | 🟢 **DONE 2026-09-07** — owner yes. `buildScopedGrantPayload` writes `'*'`; the orphaned `scopedProtocolKeyId` state removed. ⛔ **Not yet live-tested** — the probes above pre-date it and drove the grant endpoint directly, not the modal button. |
-| `A2` (UI half) | the **scoped permission modal** actually renders for an undeclared scope | ⬜ **OPEN.** ⚠️ Do not read `A11` as covering this — the owner looked at the *connect* screen, which is a different modal on a different code path. The engine half of `A2` is green (202 + `scoped_grant_missing`); that a window opens with legible text is unobserved. |
+| `D3` | keyID `*` on Always-allow | 🟢 **CLOSED 2026-09-07 by owner live test** — the button itself wrote `keyID=*`. §5.3. |
+| `A2` (UI half) | the **scoped permission modal** actually renders for an undeclared scope | 🟢 **CLOSED 2026-09-07 by owner live test** — see §5.3. |
 | `A6`–`A9` | protected baskets, `R-PERIM`, `R-INTEXT`, `R-SNAPSHOT` end-to-end | ⬜ T1 green; T2 owed at the boundary |
 | preflight | `scripts/preflight.ps1` (+ `-NegativeControl`) | ⬜ **Not run.** ⚠️ Deliberately deferred rather than run against a live dev stack — the running wallet holds `hodos-wallet.exe`, which already produced one `Access is denied` link failure this session. Run it with the dev stack **stopped**, or it reports a red that is about file locks, not code. |
+
+### 5.3 👤 Owner live test — 2026-09-07, `teragun.com`, both paths
+
+Driven by the owner, not by me. Two sessions an hour apart happened to exercise the **legacy** path
+and the **connect** path, which is the pair the desk probes in §5.1 could not reach.
+
+⛔ **Correction first, because it shaped the first reading of this.** The owner said *"I don't think
+it has a manifest"* and I repeated it back as fact without checking. **teragun.com does have one** —
+`https://teragun.com/manifest.json`, `namespace=babbage` (the deprecated one), 4 protocols, 0
+baskets, 1 certificate. The log said so plainly and I had not looked. ⭐ Nothing in the result
+changes, but the first analysis was built on an unmeasured premise, which is the thing this project
+keeps paying for.
+
+**Session 1, 17:49 — the legacy path (`A4`), and the one that proves the phase.**
+
+teragun was already `approved` from before the manifest work, so it carried quiet mode **on** with
+**zero** stored grants — the exact 8-of-8 shape in §0.3. No connect modal was involved.
+
+```
+17:49:07.563  engine Prompt (scoped) minted approval … /createSignature kind=ProtocolUse
+17:49:14.986  POST /domain/permissions/protocol  proto="teragun auth"  keyID=*
+17:49:15.080  X-User-Approved consumed  → the call completed
+```
+
+⭐ Line 1 was **silent before this phase**. Line 2 is `D3` working through the button — the grant
+written is `*`, not the call's literal keyID. Line 3 is the call resuming rather than failing, which
+is the half of `A2` the ticket explicitly asked to confirm. Three open rows closed by one click.
+
+**Session 2, 18:48 — the connect path, after the owner revoked and reconnected.**
+
+```
+18:47:44  DELETE /domain/permissions?domain=teragun.com          (owner revoked)
+18:47:48  manifest parsed … (namespace=babbage, 4 protocols, 0 baskets, 1 certs)
+18:47:48  engine Prompt (domain-trust) type=ManifestConnectBundle reason=new_domain_with_manifest
+18:48:04  POST /domain/permissions  + approved manifest snapshot (1944 bytes)
+18:48:04  4 × POST /domain/permissions/protocol   … all keyID=*
+18:48:04  1 × POST /domain/permissions/certificate  fields=["userName","profilePhoto"]
+```
+
+Resulting state, read back through the wallet API:
+
+```
+trust      : approved
+quiet mode : OFF          ← no checkbox exists to turn it on
+protocol grants: 4
+   level 2  identity key retrieval     keyId=*
+   level 1  identity resolution        keyId=*
+   level 0  teragun auth               keyId=*
+   level 0  teragun lottery payout     keyId=*
+```
+
+⭐ **This is the phase's whole thesis, on screen and in the database:** four specific grants matching
+the four things the site asked for, instead of one invisible blanket. Anything else prompts.
+
+⚠️ **Two observations worth carrying forward, neither a defect in this phase:**
+
+- **Both new grants are security level 0.** At level 0 the protocol identifier appears nowhere on
+  screen except the ID that Phase 7b added beside the site's description — so 7b's fix is load-bearing
+  on this very common shape, not a corner case. ⛔ The `securityLevel === 2` footnote alone would
+  have shown the user nothing here.
+- **The manifest uses the deprecated `babbage` namespace**, not `metanet`. Parsed correctly by the
+  compatibility arm. Relevant to the Auto-Approve Engine video, whose outline says not to show
+  `babbage` on screen — a real shipping site uses it.
+
+**Also surfaced, and filed rather than fixed here:** two prompts appeared in session 1 (the scoped
+grant plus a Chromium **loopback** prompt). Diagnosed in full —
+`TICKET_wallet_quiet_detector_blind_to_long_polls.md`. ⛔ Not caused by this phase, and the
+loopback grant is **per requesting site, not per target** (our store is keyed
+`(domain, permission_type, state)` with no target column), so it cannot be folded into a wallet
+approval without granting undisclosed access to every local service.
 
 ## 6. Blast radius
 
