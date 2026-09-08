@@ -88,6 +88,33 @@ Auto-update must never force a reinstall and must never brick an install.
 
 ---
 
+## R-DUST — no path may spend a 1-satoshi output
+
+| | |
+|---|---|
+| **GREEN** | With a 1-satoshi output in the default pool, **no** path puts it in a transaction's inputs: not the daily dust consolidator, not coin selection (either pass), not `send_max`, not the external-wallet sweep |
+| **RED** | Remove `is_token_reserved_value` from the site under test and re-run: the candidate/selection set must be seen to **grow by exactly that output**. ⛔ Assert the **count rises**, never merely that the output is absent — an absence proves nothing if the fixture never reached the filter |
+| **SUBJECT** | The **candidate or selection set itself** — `is_consolidation_candidate`, `select_utxos_greedy`, `select_all_spendable`, `split_token_reserved` — or the **serialised transaction's input outpoints**. ⛔ Never a broadcast result, a balance total, or a log line: all three are identical either way |
+| **Tier** | T1 |
+
+A 1-satoshi output is a token carrier (1Sat Ordinals, OpNS). Spending one into a larger output
+**permanently destroys the asset** — BRC-147: *"a general 'pay' or auto-pay grant MUST NOT authorize
+spending them."* The hazard is not hypothetical: `monitor/task_consolidate_dust` is **automatic and
+daily**, and `monitor/task_sync_pending` files an incoming 1-satoshi payment into the spendable pool
+within 30 seconds with no user action.
+
+> ⚠️ **This invariant must survive beta.4, and it must survive it for a *different reason*.**
+> Today it holds because of a **value floor**. beta.4 sprint 1 replaces that with classification on
+> ingest. If the guard work makes `R-DUST` pass because a token never reaches the filter at all, the
+> RED half stops being observable and the invariant has gone **vacuous** — re-base it onto the
+> classifier rather than recording the green.
+
+⚠️ **The floor is not a classifier.** It cannot tell a token from a stray 1-satoshi payment, and it
+protects nothing at 2 satoshis or above. It is a floor beneath the selector, not a permission gate —
+BRC-147's rule properly belongs in `hodos_permission_engine`, which is beta.4's work.
+
+---
+
 ## Boundary run record
 
 | Phase boundary | Date | R-INTEXT | R-GOLD | R-CLOSE | R-PERIM | R-COUNT | R-UPDATE |
