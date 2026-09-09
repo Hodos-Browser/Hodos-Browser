@@ -92,6 +92,45 @@ if (-not $RepoRoot) {
       `$MyInvocation` fallback is there for the case where `$PSScriptRoot` is empty; on 7 it should
       simply never be reached. Worth one run if 7 is ever used here.
 
+## 🍎 macOS half — `scripts/stop-dev.sh` ADDED 2026-09-08
+
+`MAC_RELAY_P7C_ROUND.md` M6 flagged that there was **no macOS equivalent**, and that the hazard is not
+Windows-specific: `HodosBrowser` / `hodos-wallet` / `hodos-adblock` share their names with the
+installed build on macOS too, and the owner runs an installed Hodos on that Mac. `pkill -f hodos-wallet`
+is exactly the shape that caused the 2026-09-01 incident.
+
+⛔ **It does not use `pgrep -f`.** `pgrep -f` matches the **argument vector**, and argv[0] is whatever
+the launcher passed: a browser started as `./build/bin/HodosBrowser.app/...` has a RELATIVE argv[0] and
+is invisible to an absolute-prefix match. 📏 Measured 2026-08-26 — that left two browsers running on one
+profile and looked exactly like profile corruption. The script reads **`ps -axo comm=`**, the path the
+**kernel** executed, which is absolute however the process was launched.
+
+⚠️ **Two defects found by running it, both fixed before commit** — neither would have shown up in a read:
+1. `basename` printed `illegal option -- z` for every login shell, whose `comm` is **`-zsh`** and is
+   parsed as a flag. Now `${path##*/}`.
+2. The browser spawns the wallet through a relative hop
+   (`.../build/bin/HodosBrowser.app/Contents/MacOS/../../../../../../rust-wallet/target/release/hodos-wallet`),
+   so a textual repo-root prefix test would also accept a path that starts inside the repo and then
+   `..`s **out** of it — the exact case the script exists to refuse. Paths are canonicalised with
+   `pwd -P` before the prefix test.
+
+### Acceptance — measured with BOTH builds running
+
+⭐ The negative control is *"the installed wallet survives"*, not *"the script ran"*:
+
+```
+                         BEFORE    AFTER
+installed browser procs    10   →    10     unchanged
+installed wallet            1   →     1     SURVIVED
+installed wallet :31301  LISTEN →  LISTEN   still serving
+dev processes              10   →     0
+dev wallet     :31401    LISTEN →   gone
+```
+
+- [x] `./scripts/stop-dev.sh` runs with **no arguments** from the repo root
+- [x] `--dry-run` names only build-directory paths and lists every `/Applications/...` process as spared
+- [x] ⭐ the installed wallet and all installed browser processes survived a real run
+
 ## Related
 
 - Root `CLAUDE.md` § *"Stopping a dev process: match by EXE PATH, never by image name"*
