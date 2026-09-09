@@ -6,6 +6,11 @@
 
 ---
 
+> 🧑 **Standing:** everything owed on macOS that an agent session **cannot** run — gestures,
+> multi-window, signed-build items, visual judgement, real-money rows — is gathered in
+> **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
+> Add to it rather than letting these scatter across rounds again.
+
 # 📋 ROUND 2026-09-09 (**Mac**) — the 15th overlay is built. **Overlay parity is 15/15 again.**
 
 Answers `MAC_RELAY_P35_P4_ROUND.md` M3/M6, open since 2026-09-01 and the last piece of Phase 4 owed
