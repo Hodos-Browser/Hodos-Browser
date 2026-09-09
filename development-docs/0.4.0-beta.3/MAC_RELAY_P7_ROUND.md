@@ -140,3 +140,26 @@ request was ever made**. De-Googling intact; only the local replacement was dead
 
 ⬜ **M4 #1/#2 still owed on macOS**, and this fix *changes what they measure* — before today macOS
 could produce neither a store hit nor a Google request, so a green would have been vacuous.
+
+
+## ✅ ANSWERED BY MAC 2026-09-09 — **M4 #1 and #2 RE-RUN and GREEN**, this time non-vacuously
+
+Evidence: `MAC_RELAY_BETA3.md` round 2026-09-09b §B–§D, `phase-7b-connect-modal/PHASE_CONTRACT.md` §4c.
+
+- **#1 consent modal:** `netwatch.py` + a new `netwatch_domain.py` → **0 total requests · 0 non-local
+  · 0** Google/gstatic. ⛔ Trigger `SHOWN` alone was not accepted — the DOM was read straight after
+  and the modal was up (*"Netwatch Fixture / github.com / …Do a thing[1] p / Decline / Connect"*),
+  because M5's first false green was exactly a `SHOWN` with nothing mounted.
+- **#2 new tab:** **125 requests · 0 non-local · 0** third-party. ⭐ **The control that makes it
+  mean something:** 8 hosts listed, and `google.com`'s tile is a `data:` URI decoding to **1391
+  bytes** = `length(png)` of the `www.google.com` row in `favicons.db`. Before the store fix this
+  surface produced the same zero from a dead path.
+- ⭐ **M2's second ask re-confirmed:** `DownloadImage(is_favicon=true)` on macOS now has a second
+  stored host (`www.google.com`, 1391 B at width 32) beyond 2026-09-08's `127.0.0.1`.
+- 🆕 **One finding for you:** the consent surface still issues a request for **off-host** icons —
+  `FaviconParamForDomain` passes the site's own *remote* icon URL and the overlay renders it directly
+  (`<img src={pageFaviconUrl}>`), so a prompt for `google.com` fetches from `gstatic.com`. Measured
+  with an unresolvable host: **1 non-local request**. Narrower than the original defect, but not the
+  ticket's stated "no third-party request at all". ⛔ **Not changed — production code, owner's call.**
+  Written up in `TICKET_consent_surface_fetches_third_party_favicon.md`.
+- ⬜ Bookmarks/omnibox **not** re-run on macOS this round (no omnibox CDP target).

@@ -104,6 +104,50 @@ the consent modal / new tab) are **still not run on macOS**, and this fix *chang
 before today macOS could not have produced a store hit **or** a Google request, so a green there would
 have been vacuous. Re-run them now that the store is live.
 
+## 4c. 🍎 macOS — `M4` #1/#2 **RE-RUN** after the store fix, 2026-09-09. Both GREEN.
+
+Owed by §4b's closing paragraph: before the 2026-09-08 `FaviconStore` fix macOS could produce
+neither a store hit nor a Google request, so any earlier green was vacuous. Re-run now that the
+store is live. **Relay:** `MAC_RELAY_BETA3.md` round 2026-09-09b §B–§D.
+
+| Row | 🎯 Subject | Observed | |
+|---|---|---|---|
+| `P7b-A1` (mac) | notification overlay, `Network.requestWillBeSent`, trigger asserted **and DOM read** | `netwatch.py` + `netwatch_domain.py`: **0 total requests · 0 non-local · 0 Google/gstatic**. Modal proven mounted — *"Netwatch Fixture / github.com / …Do a thing[1] p / Decline / Connect"* | 🟢 |
+| `P7b-A2` (mac) | new tab, hard reload, load event asserted | **125 requests · 0 non-local · 0** third-party | 🟢 |
+
+⭐ **The store-hit control, which is what makes `A2` mean anything on macOS.** The new tab lists **8
+hosts**; `google.com`'s tile is an `<img>` whose `data:` URI decodes to **1391 bytes** — byte-for-byte
+`length(png)` of the `www.google.com` row in `favicons.db`. The local path is alive end-to-end. The
+other 7 hosts have no stored icon, draw their letter tile, and still generate no request.
+⛔ Without this the run is indistinguishable from the pre-fix state, which produced the same zero.
+
+⚠️ `netwatch_page.py` for **bookmarks/omnibox** was not re-run this round; Windows' `A2` covers them
+and macOS has no CDP target for the omnibox (noted in §4's `A2` cell).
+
+### 🆕 `P7b-A1` is green **and** the surface still issues a third-party request for off-host icons
+
+Not a regression and narrower than the original defect, but it contradicts
+`TICKET_consent_surface_fetches_third_party_favicon.md`'s stated goal (*"no third-party request at
+all"*), so it is recorded here rather than left in a relay round. ⛔ **No production code changed —
+owner's call** (HARNESS §6).
+
+| # | Claim | Type |
+|---|---|---|
+| 1 | `FaviconParamForDomain()` (`core/HttpRequestInterceptor.cpp:721-726`) builds `&favicon=` from `TabManager::GetFaviconUrlForHost(host)` — the site's own **remote** icon URL, verbatim | CODE_READING |
+| 2 | The overlay renders it directly, `<img src={pageFaviconUrl}>` (`BRC100AuthOverlayRoot.tsx:566`, `:1525`) — no `favicon_get`, no store | CODE_READING |
+| 3 | 📏 A `domain_approval` modal fed `favicon=https://favicon-probe.invalid/icon.png` issued **1 non-local request to that host**; modal mounted, `onError` drew the Hodos fallback | **MEASURED** |
+| 4 | 📏 `favicons.db`: `www.google.com`'s declared icon is on `www.gstatic.com` — a **different host** | **MEASURED** |
+
+⇒ A real consent prompt for a CDN-hosted icon fetches from that CDN at decision time.
+⭐ **The fix exists now and did not when this phase was written:** `FaviconStore` holds the bytes and
+`favicon_get` already serves them to the new tab as `data:` URIs (proved above, 1391 bytes).
+⚠️ **Not proven:** whether Chromium's HTTP cache would satisfy the real request without touching the
+network — the probe used an unresolvable host, so *"a request is issued"* is measured, *"packets
+leave the machine"* is not.
+
+⚠️ New harness: `netwatch_domain.py`. ⛔ Read its docstring before reusing it — its store-hit
+assertion **cannot** pass on the consent surface, because that surface does not read the store.
+
 ## 5. Blast radius
 
 - `BRC100AuthOverlayRoot.tsx` — the connect bundle (both views), `domain_approval`, and the shared

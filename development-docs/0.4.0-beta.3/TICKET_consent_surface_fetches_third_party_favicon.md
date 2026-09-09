@@ -54,3 +54,45 @@ carrying the domain. After: none.
 
 ⛔ Assert on the **network**, not on whether an icon renders. An icon can render from cache while the
 request still fires, and it can fail to render for reasons unrelated to the fix.
+
+---
+
+## 🆕 2026-09-09 (macOS) — the fix landed, and a **residual third-party request** remains. Owner decision needed.
+
+**The original defect is gone.** 📏 Measured on macOS: a consent modal opens and makes **0 requests**
+to `google.com` / `gstatic.com` / `duckduckgo.com`, with the modal proven mounted (its fixture text
+read out of the DOM, not just a `SHOWN` return). New tab likewise: **125 requests, 0 non-local**.
+`phase-7b-connect-modal/PHASE_CONTRACT.md` §4c.
+
+**But the shipped path does not meet this ticket's stated goal of "no third-party request at all",**
+for any site whose declared icon lives on a different host. Each link evidenced separately:
+
+| # | Claim | Type |
+|---|---|---|
+| 1 | `FaviconParamForDomain()` (`cef-native/src/core/HttpRequestInterceptor.cpp:721-726`) builds `&favicon=` from `TabManager::GetFaviconUrlForHost(host)` — the site's own **remote** icon URL, verbatim | CODE_READING |
+| 2 | The overlay renders it directly: `<img src={pageFaviconUrl}>` (`frontend/src/pages/BRC100AuthOverlayRoot.tsx:566`, `:1525`). No `favicon_get`, no store | CODE_READING |
+| 3 | 📏 A `domain_approval` modal fed `favicon=https://favicon-probe.invalid/icon.png` issued **1 non-local request to that host**. Modal mounted; `onError` then drew the Hodos fallback — the graceful path works | **MEASURED** |
+| 4 | 📏 `favicons.db`: `www.google.com` declares its icon at `https://www.gstatic.com/images/branding/searchlogo/ico/favicon.ico` — **a different host** | **MEASURED** |
+
+⇒ A real consent prompt for `google.com` fetches from **gstatic.com** at the moment of the decision;
+likewise any CDN-hosted icon.
+
+⚠️ **This is much smaller than the original leak and should not be described as the same defect.**
+`s2/favicons?domain=X` told Google about *every* site the user was asked to trust. Here the icon host
+learns only about its own site, which it already serves. The ticket's rationale (a) — *"no
+third-party request at all"* — is nonetheless not met.
+
+⭐ **A fix now exists that did not when this ticket was written.** `FaviconStore` (Phase 7b, and
+initialised on macOS since 2026-09-08) holds the PNG bytes locally, and `favicon_get` already serves
+them to the new tab as `data:` URIs — 📏 proved by `google.com`'s new-tab tile decoding to exactly the
+1391 bytes stored for that host. Routing the consent modal through the same call would make the
+request genuinely zero, and would fall back to the domain-initial avatar for hosts with no stored
+icon, exactly as today.
+
+⚠️ **What is NOT proven, stated so it is not over-read:** whether Chromium's HTTP cache would satisfy
+the real request without touching the network. The probe used an unresolvable host, so *"a request is
+issued"* is measured; *"packets leave the machine"* is **not**. The rationale in this ticket assumed
+the icon is "already fetched, so it costs nothing new" — that assumption has never been tested either.
+
+⛔ **No production code was changed** — this is the wallet's consent surface and the call is the
+owner's (HARNESS §6: evidence pointing at production code stops and asks).

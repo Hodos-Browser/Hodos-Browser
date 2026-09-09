@@ -148,3 +148,34 @@ Phase 4 owner items.
 
 - ⬜ **M4 (all six rows) NOT RUN on macOS** — quiet-mode probe pair, the three no-checkbox surfaces,
   and the `key_id='*'` DB check. Deferred this round, explicitly not done.
+
+
+## ✅ ANSWERED BY MAC 2026-09-09 — **M4, all six rows, RUN**
+
+Evidence: `MAC_RELAY_BETA3.md` round 2026-09-09b §E, `phase-7c-quiet-mode/PHASE_CONTRACT.md` §5.4.
+
+- **#1 probe pair → run as THREE probes.** `teragun.com` (quiet=1, 0 grants) → **202**
+  `scoped_grant_missing`; `bitgenius.net` (quiet=1, **granted** `[2,"server hmac"]`) → **200** with a
+  real hmac; `bitgenius.net` **same site**, ungranted protocol → **202**. ⭐ That last one is a
+  single-variable control your §5.1 could not build: same domain, same session, same call, **same
+  `bundled_scope_grant=1`**, only the V18 grant differs. Both macOS subjects are quiet=1.
+  ⛔ De-risked first by reading `peek_scoped_grant_scope_protocol:589-598`: `counterparty:"self"` →
+  `None` ⇒ `ProtocolUse`. Had it mapped to `Some(_)` the 200 would have been Fix #3 and vacuous.
+  ⚠️ Your M3 wording holds, and so does the `counterparty`-is-required warning.
+- **#2 tests: 42 + 33 = 75 passed, 0 failed.** ⛔ Your "42 tests" is the **lib** binary; a `tail` of
+  the run shows only `33` — one result line per binary, exactly as you warned. ⭐ Negative control
+  actually run: reinstating the arm turns **3** p7c tests red (the 4th passes either way by design).
+- **#3 connect modal:** 0 `quiet`/`bundled`/`silently` in `outerHTML`, and **4/4** per-item
+  checkboxes `disabled === false` — the greying regression you flagged is absent.
+- **#4 Manage Site Permissions / #5 Approved Sites:** 0 `quiet`, 0 `start new sites`, each with a
+  positive control on the same regex. ⚠️ **`input[type=checkbox]` is blind on both** — their toggles
+  are custom elements. The text search is what carries these rows.
+- **#6 `key_id='*'` — measured through the real button, end to end.** `Always allow` → wallet log
+  `POST /domain/permissions/protocol … keyID=*` (⭐ so the `*` came over the wire, not from the
+  column DEFAULT) → row with `key_id='*'` → the **same call with two different keyIDs both return
+  200** → a different protocol still 202 → `Revoke` → 202 again.
+  ⭐ This also closes, on macOS and by measurement, the two rows Windows closed by owner observation:
+  `A2`'s UI half and `A3` (both buttons).
+- **`A12`** `npm run build` clean on macOS. ⬜ `preflight.ps1` not run — PowerShell, no macOS arm.
+- ⚠️ **Worth checking on Windows:** does your `WH_MOUSE_LL` hook see `WM_RBUTTONDOWN`? Carried from
+  the 2026-09-09a round's decision #3.

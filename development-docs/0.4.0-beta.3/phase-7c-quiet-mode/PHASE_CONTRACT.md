@@ -352,6 +352,85 @@ loopback grant is **per requesting site, not per target** (our store is keyed
 `(domain, permission_type, state)` with no target column), so it cannot be folded into a wallet
 approval without granting undisclosed access to every local service.
 
+### 5.4 🍎 macOS run — 2026-09-09, dev stack (wallet 31401, vite 5137, browser CDP 9322)
+
+`MAC_RELAY_P7C_ROUND.md` M4, **all six rows**, run on the Mac. Relay: `MAC_RELAY_BETA3.md` round
+2026-09-09b §E. Subjects: `bitgenius.net` (id 2, quiet=1, **4** V18 rows) and `teragun.com`
+(id 3, quiet=1, **0** V18 rows) — ⭐ note **both** are quiet=1, unlike §5.1.
+
+| M4 | Check | Observed on macOS | |
+|---|---|---|---|
+| #1 | probe pair | **3** probes — see below | 🟢 |
+| #2 | `cargo test -p hodos_permission_engine` | **42 + 33 = 75 passed, 0 failed**, with the arm-reinstated negative control | 🟢 |
+| #3 | connect modal: no Quiet checkbox, ticks live | 0 `quiet`/`bundled`/`silently` in `outerHTML`; **4/4** checkboxes `disabled === false` | 🟢 |
+| #4 | Manage Site Permissions: no Quiet toggle | 0 `quiet`; controls are `Revoke ×4 · Cancel · Save · Revoke All` | 🟢 |
+| #5 | Wallet settings: no "Start new sites in quiet mode" | 0 `quiet`, 0 `start new sites` | 🟢 |
+| #6 | Always allow writes `key_id = '*'` | measured **through the button**, end to end | 🟢 |
+
+**#1 — three probes, one call shape (`POST /createHmac`, `keyID "1"`, `counterparty "self"`):**
+
+| | Subject | Result |
+|---|---|---|
+| A | `teragun.com` · quiet=1, zero grants · `[2,"p7c mac probe"]` | **202** · `scoped_grant_missing` · `kind=ProtocolUse` |
+| B | `bitgenius.net` · quiet=1, **granted** `[2,"server hmac"]` `key_id='*'` | **200** · real 32-byte hmac |
+| C | `bitgenius.net` · quiet=1, **same site**, ungranted `[2,"p7c mac probe"]` | **202** · `scoped_grant_missing` |
+
+⭐ **B↔C is a single-variable control** — same domain, same session, same call, same
+`bundled_scope_grant=1`; only the V18 grant differs and the outcomes invert. That is a stronger form
+of `A1`↔`A2` than §5.1 could build, because there the two arms differed in the flag as well.
+
+⛔ **Read before the probes, and load-bearing:** `counterparty:"self"` maps to `None`
+(`handlers.rs :: peek_scoped_grant_scope_protocol:589-598`) ⇒ `ProtocolUse`, **not**
+`CounterpartyUse`. Had it mapped to `Some(_)`, B's 200 would have been the Fix #3 short-circuit and
+completely vacuous.
+
+⚠️ **Instrument limit:** the Silent arm is `log::debug!` (`request_gate.rs:459-464`), so **no
+`engine Silent` line exists** without `RUST_LOG=hodos_wallet=debug`. Its absence in this run is a
+suppressed log, not evidence. The Prompt arm is `log::info!` and did appear. B rests on the **200 +
+hmac bytes**.
+
+**#2 — the negative control was run, not just described.** Reinstating the `bundled_scope_grant` arm
+in `decide_scoped_grant` turns **3** tests red (`p7c_quiet_mode_does_not_silence_undeclared_protocol_use`,
+`…_basket_access`, `p7c_quiet_mode_never_changes_any_scoped_outcome`); patch reverted, tree clean.
+⭐ The fourth (`p7c_approved_scope_is_silent_whether_or_not_quiet_mode_is_on`) passes either way **by
+design** — it is the "still silent" arm. ⛔ `cargo test` prints one result line **per binary**; a
+`tail` of the run shows only `33`. 📏 `EngineReason::SilentBundledScopeGrant` is gone from the enum
+(`decision.rs:131-137`, tombstone comment only); `SilentScopedGrantExists` is the grep's positive control.
+
+**#3/#4/#5 — each zero carries a positive control on the same instrument:** `permission` = 1 (#3),
+`permission` = 3 (#4), `approved` = 27 (#5). ⚠️ **`input[type=checkbox]` is BLIND on
+`DomainPermissionForm` and `ApprovedSitesTab`** — their toggles are custom elements, so "0
+checkboxes" there proves nothing and the text search is what carries those rows. Both were confirmed
+alive: #4 rendered all four V18 grants matching the DB row for row; #5 rendered the four
+default-limit fields and "3 approved sites" against a DB holding exactly 3.
+⚠️ An early #3 run reported `quiet = 1` — it was **my own fixture's description string**. Re-run with
+neutral text it went to 0. Recorded because that is the kind of self-inflicted red that gets
+explained away instead of re-run.
+
+**#6 — measured through the real button, which also closes `A2`'s UI half and `A3` on macOS:**
+
+| Step | Observed |
+|---|---|
+| 1 | probe → **202** |
+| 2 | scoped prompt renders: `Deny` · `Allow once` · **`Always allow for this site`** ⇒ **`A2` UI half, macOS** |
+| 3 | click **Always allow** → wallet log `POST /domain/permissions/protocol domain=teragun.com proto=p7c mac probe keyID=* counterparty=None` |
+| 4 | row `id=9`, level 2, **`key_id='*'`**, counterparty NULL; UI renders *"level 2 · key any"* |
+| 5 | keyID **`1`** → **200**; keyID **`record-4f2a-nonce-9931`** → **200** ⇒ the wildcard works |
+| 6 | different protocol, same site → **202** (scoped, not blanket) |
+| 7 | click **Revoke** → `revoked_at` set → same probe → **202** ⇒ **`A3`'s RED, macOS** |
+
+⭐ **Step 3 is the attribution.** The column DEFAULT is also `'*'`, so the row alone cannot show the
+button sent it. The wallet logs the incoming payload at INFO and it reads `keyID=*` — i.e. it came
+over the wire from `BRC100AuthOverlayRoot.tsx:1014`, not from SQLite filling a default.
+⭐ **Step 5 beats string inspection:** two different keyIDs both go silent, so the defect this closes
+(a per-record keyID being re-prompted forever) is measured fixed, not asserted.
+
+**`A12` — `npm run build` clean on macOS** (exit 0, 0 errors). ⛔ Not `tsc --noEmit`.
+
+⚠️ **DB residue, stated:** row `id=9` remains, **revoked**. `teragun.com` is back to zero *active*
+V18 grants and is still a valid `A4` subject. ⛔ Nothing touched the production wallet.
+⬜ `preflight.ps1` is PowerShell and was **not** run on macOS — not claimed either way.
+
 ## 6. Blast radius
 
 - **`matrix_c.rs :: decide_scoped_grant`** — the decision engine, `R-PERIM`'s subject. Two of the

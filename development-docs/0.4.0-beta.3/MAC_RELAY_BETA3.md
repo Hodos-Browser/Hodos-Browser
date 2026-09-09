@@ -11,6 +11,240 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-09b (**Mac**) — Phase 7 `M4` #1/#2 and Phase 7c `M4` all six rows are **RUN**. Plus one finding that needs an owner decision.
+
+**Base:** `79b9bc0` (branch `0.4.0`; `git pull --rebase` = *Already up to date* — no rebase needed,
+Windows' `ccd89c2` was already in the tree). **Answers:** `MAC_RELAY_P7_ROUND.md` M4 #1/#2 ·
+`MAC_RELAY_P7C_ROUND.md` M4 #1–#6. Both were the two items the 2026-09-08 round listed as deferred
+and the 2026-09-09a round carried forward.
+
+⚠️ **`ccd89c2` (P8c stage 2) touched `simple_handler.cpp` after this morning's Mac build.** Rebuilt
+before measuring anything — the Mac link stayed green. Bundle re-signed via `mac_build_run.sh`.
+
+---
+
+## A. Subject discipline
+
+⛔ The owner's **production** browser ran throughout (`/Applications/HodosBrowser.app`, wallet
+**31301**, CDP **9222**). Every measurement here is the dev bundle on CDP **9322** / wallet **31401**.
+Verified at the end, not assumed: prod `GET /wallet/status` → **200**, 10 prod processes alive.
+
+⚠️ These are **not** security-policy rows, so they were run under the normal
+`mac_build_run.sh` launcher (i.e. with `HODOS_MAC_DEV_FLAGS`, hence
+`--disable-web-security`). That is stated rather than glossed: for a *leak* test the permissive arm
+is the safe direction — web security off cannot **suppress** an outbound request, only allow more of
+them. A zero measured here would still be a zero with the flag off.
+
+## B. ✅ Phase 7 `M4` #2 — new tab, zero third-party favicon requests. GREEN, and **not** vacuous this time.
+
+| | |
+|---|---|
+| Instrument | `phase-7b-connect-modal/netwatch_page.py newtab` — hard reload, `ignoreCache`, load event asserted |
+| Result | **125 requests · 0 non-local · 0** to `google.com` / `gstatic.com` / `duckduckgo.com` |
+
+⭐ **The control that was missing before, and the reason this row had to be re-run.** The new tab
+lists **8 hosts**; `google.com`'s tile renders an `<img>` whose `data:` URI decodes to **1391 bytes**
+— byte-for-byte `length(png)` of the `www.google.com` row in `favicons.db`. So the local store path
+is alive end-to-end on macOS and the zero is a **real absence**, not a dead code path. The other 7
+hosts have no stored icon, draw their letter tile, and still generate no request.
+
+⛔ Before the 2026-09-08 `FaviconStore` fix this surface would have shown 8 letter tiles, 0 images and
+the **same** "0 requests" — the vacuous green the last round warned about. It is now excluded.
+
+## C. ✅ Phase 7 `M4` #1 — consent modal, zero third-party favicon requests. GREEN.
+
+`netwatch.py` (github.com fixture) and a new `netwatch_domain.py` (www.google.com fixture): trigger
+`SHOWN`, **0 total requests**, 0 non-local, 0 Google/gstatic.
+
+⛔ **Trigger assertion is not enough** — M5's first false green was exactly a `SHOWN` with a modal
+that never mounted. So the DOM was read straight after: *"Netwatch Fixture / github.com / This site
+is asking permission to: Do a thing[1] p / Decline / Connect"*. The modal was up. The zero counts.
+
+## D. 🆕 Finding — the consent surface **still makes a third-party request** for any site whose icon is off-host. Needs an owner decision; **no code changed.**
+
+This is not a regression of the old defect, and it is narrower than it. Recorded because
+`TICKET_consent_surface_fetches_third_party_favicon.md` states the goal as *"no third-party request
+at all"*, and that is not what the shipped path does.
+
+**The chain, each link evidenced separately:**
+
+| # | Claim | Type |
+|---|---|---|
+| 1 | `FaviconParamForDomain()` (`core/HttpRequestInterceptor.cpp:721-726`) builds `&favicon=` from `TabManager::GetFaviconUrlForHost(host)` — the site's own **remote** icon URL, verbatim | CODE_READING |
+| 2 | The overlay renders it directly: `<img src={pageFaviconUrl}>` (`BRC100AuthOverlayRoot.tsx:566`, `:1525`) — no `favicon_get`, no store | CODE_READING |
+| 3 | 📏 Feeding `favicon=https://favicon-probe.invalid/icon.png` to a `domain_approval` modal produced **1 non-local request, to that host**. Modal mounted (*"probe-site.test wants to connect to your wallet"*); `onError` then drew the Hodos fallback — the graceful path works | **MEASURED** |
+| 4 | 📏 `favicons.db` shows `www.google.com`'s declared icon is `https://www.gstatic.com/images/branding/searchlogo/ico/favicon.ico` — **a different host from the site** | **MEASURED** |
+
+⇒ A real consent prompt for `google.com` fetches from **gstatic.com** at the moment of the decision.
+Same for any site whose icon lives on a CDN. The disclosure is much smaller than the original
+(`s2/favicons?domain=X` told Google about *every* site); here the host learns only about its own
+site, which it already serves. But it is still an outbound request from the consent surface.
+
+⭐ **A fix now exists that did not when 7b was written.** `FaviconStore` holds those PNG bytes
+locally, and `favicon_get` already serves them to the new tab as `data:` URIs (§B proves it, 1391
+bytes). Routing the consent modal through the same call would make the request genuinely zero.
+
+⚠️ **What is NOT proven:** whether Chromium's HTTP cache would satisfy the real request without
+touching the network. The probe used an unresolvable host, so *"a request is issued"* is measured;
+*"packets leave the machine"* is not. ⛔ **Production code, so nothing was changed** — HARNESS §6.
+Ticket updated with this section; the call is the owner's.
+
+## E. ✅ Phase 7c `M4` — all six rows RUN on macOS
+
+Subjects from the Mac dev wallet: `bitgenius.net` (id 2, `bundled_scope_grant=1`, **4** V18 protocol
+rows) and `teragun.com` (id 3, `bundled_scope_grant=1`, **0** V18 rows).
+
+### #1 — the probe pair, run as a **three**-probe set
+
+| Probe | Subject | Result | |
+|---|---|---|---|
+| A | `teragun.com` · quiet=1, **zero** grants · `[2,"p7c mac probe"]` | **202** · `scoped_grant_missing` · `kind=ProtocolUse` | 🟢 |
+| B | `bitgenius.net` · quiet=1, **granted** `[2,"server hmac"]` `key_id='*'` | **200** · a real 32-byte hmac returned | 🟢 |
+| C | `bitgenius.net` · quiet=1, **same site**, ungranted `[2,"p7c mac probe"]` | **202** · `scoped_grant_missing` | 🟢 |
+
+⭐ **B↔C is a single-variable control** — same domain, same session, same call shape, same
+`bundled_scope_grant=1`; only the V18 grant differs, and the outcomes are opposite. ⭐ And unlike
+Windows' §5.1, **both** arms here are quiet=1, so the pair directly demonstrates the flag is no
+longer what decides.
+
+⛔ **The reading that de-risks the whole set**, done *before* the probes: `counterparty:"self"` maps
+to `None` (`handlers.rs :: peek_scoped_grant_scope_protocol:589-598`), so these are `ProtocolUse`,
+**not** `CounterpartyUse`. Had `"self"` mapped to `Some(_)`, probe B's 200 would have been the Fix #3
+short-circuit and completely vacuous.
+
+⚠️ **Instrument limit, stated:** the Silent arm logs at `log::debug!`
+(`request_gate.rs:459-464`), so **no `engine Silent` line appears** without `RUST_LOG=hodos_wallet=debug`.
+The absence of that line in this run is a suppressed log, not evidence. The Prompt arm is
+`log::info!` and did appear. ⇒ For probe B the artifact is the **200 + real hmac bytes**, not a log.
+
+### #2 — `cargo test -p hodos_permission_engine`, with a two-sided control
+
+📏 **42 passed** (`unittests src/lib.rs`) **+ 33 passed** (`tests/decision_matrix.rs`) = **75, 0
+failed**. ⛔ A `tail` of that run shows only `33` — one result line **per binary**, as the relay warned.
+
+⛔ **Negative control actually run:** reinstating the `bundled_scope_grant` arm in
+`decide_scoped_grant` → **3 failed** (`p7c_quiet_mode_does_not_silence_undeclared_protocol_use`,
+`…_basket_access`, `p7c_quiet_mode_never_changes_any_scoped_outcome`). Patch reverted, tree clean.
+⭐ The fourth p7c test (`p7c_approved_scope_is_silent_whether_or_not_quiet_mode_is_on`) passes either
+way **by design** — it is the "still silent" arm, and a suite where all four flipped would mean the
+control was wrong.
+
+📏 `EngineReason::SilentBundledScopeGrant` is genuinely **gone** from the enum
+(`decision.rs:131-137` — only a tombstone comment remains); the same grep finds
+`SilentScopedGrantExists` as its positive control.
+
+### #3/#4/#5 — the three surfaces, each with a positive control on the same instrument
+
+| # | Surface | "quiet" / "bundled" / "silently" in `outerHTML` | positive control, same regex | verdict |
+|---|---|---|---|---|
+| 3 | **Connect modal** (`manifest_connect_bundle`, 2 protocols + 1 basket) | **0 / 0 / 0** | `permission` = 1 | 🟢 |
+| 4 | **Manage Site Permissions** (`edit_permissions`, bitgenius.net) | **0** | `permission` = 3 | 🟢 |
+| 5 | **Wallet → Approved Sites** (`ApprovedSitesTab`) | **0**, and `start new sites` = **0** | `approved` = 27 | 🟢 |
+
+⭐ **#3's second half — the per-item ticks are LIVE.** All **4** checkboxes report `disabled === false`
+(identity + 2 protocols + 1 basket). That is the exact regression the relay flagged: a stale bundle
+would still carry `disabled={manifestAllowBundledScope}` and grey them.
+
+⚠️ **A blind instrument, named so nobody reuses it:** `input[type=checkbox]` returns **0** on
+`DomainPermissionForm` and `ApprovedSitesTab` — their toggles are custom elements, not real
+checkboxes. "0 checkboxes" there proves nothing; the **text/HTML search** is what carries #4 and #5.
+Both surfaces were confirmed alive: #4 rendered all four V18 grants matching the DB row for row, #5
+rendered the four default-limit fields and "3 approved sites" (the DB has exactly 3).
+
+⚠️ #4's remaining controls are `Revoke ×4 · Cancel · Save · Revoke All Permissions`. No quiet toggle.
+The only "quiet" hit in an early #3 run was **my own fixture's description string** — re-run with
+neutral text, it went to 0. Recorded because it is precisely the kind of self-inflicted red that
+gets explained away instead of re-run.
+
+### #6 — `key_id = '*'` on **Always allow**. Measured end-to-end **through the real button**, not the API.
+
+| Step | Observed |
+|---|---|
+| 1 | `teragun.com` · `[2,"p7c mac probe"]` · keyID `1` → **202** |
+| 2 | Rendered `protocol_permission_prompt` in the overlay → three buttons: `Deny` · `Allow once` · **`Always allow for this site`** |
+| 3 | Clicked **Always allow** → wallet log: `POST /domain/permissions/protocol domain=teragun.com proto=p7c mac probe keyID=* counterparty=None` |
+| 4 | New row `id=9`, `domain_permission_id=3`, level 2, **`key_id='*'`**, counterparty NULL. Manage-permissions renders it as *"level 2 · key any"* |
+| 5 | Same call, keyID **`1`** → **200**. Same call, keyID **`record-4f2a-nonce-9931`** → **200** |
+| 6 | Different protocol, same site → **202** (the grant is scoped, not blanket) |
+| 7 | Clicked **Revoke** in Manage Site Permissions → `revoked_at` set → same probe → **202** again |
+
+⭐ **Step 3 is what makes this attributable.** The column DEFAULT is also `'*'`, so a `'*'` in the
+row alone cannot tell you the button sent it. The wallet logs the **incoming payload** at INFO, and
+it says `keyID=*` — so the `*` came over the wire from
+`BRC100AuthOverlayRoot.tsx:1014 (base.protocolKeyId = '*')`, not from SQLite filling a default.
+
+⭐ **Step 5 is the behavioural proof, which beats string inspection.** Two different keyIDs both go
+silent — that is the wildcard doing the job the row exists to do, and the defect it closes (a site
+using a per-record keyID being re-prompted forever) is measured as fixed, not asserted.
+
+⭐ **This also settles two rows Windows closed by owner observation, now measured on macOS:** 7c
+`A2`'s UI half (the scoped modal renders for an undeclared scope) and `A3` (Always-allow → the next
+identical call is silent; and its RED, Revoke → it prompts again).
+
+### `A12` — `npm run build` clean (exit 0, 0 errors). ⛔ Not `tsc --noEmit`.
+
+## F. 🆕 macOS divergence — the notification overlay is **never pre-created** here
+
+📏 `simple_handler.cpp:1761-1769` — the only `CreateNotificationOverlay(…, "preload", …)` call site
+in the tree sits inside `#ifdef _WIN32` with **no `#elif defined(__APPLE__)` arm**.
+
+⭐ It reads as an omission rather than a decision, because **`cef_browser_shell_mac.mm:3698-3700`
+already implements the preload branch** (`orderOut:` + `🔔 Notification overlay pre-created (hidden)`)
+— written, compiled, and unreachable.
+
+📏 **Measured, with a live instrument:** `debug_output.log` contains **0** `pre-created (hidden)`
+lines across the whole file, while the *same* file carries `✅ Notification overlay created
+successfully` (including the one this session caused at 10:44:52) and 8 `FaviconStore` lines. And at
+startup macOS reports **2** CDP targets with no `brc100-auth` among them; the target appeared only
+after an `open_wallet_permissions` IPC.
+
+⇒ Not a correctness bug — the first consent prompt on macOS pays the React bundle's cold start that
+Windows has already warmed. ⬜ The latency cost is **not measured**; do not quote one.
+
+## G. ⭐ Instrument corrections worth more than the rows
+
+1. 🎯 **The C++ `Logger` sink is `~/Library/Application Support/HodosBrowserDev/debug_output.log`** —
+   **not** `cef-native/build/bin/debug.log`, which is CEF's own `--log-file`. The 2026-09-08 round
+   established that `build/bin/debug.log` was the *wrong* sink for `FaviconStore` but never named the
+   right one, so the next reader would have repeated the detour. `debug_output.log` carries
+   `FaviconStore`, the overlay lifecycle, and the mac-shell `LOG_INFO` lines.
+2. ⛔ **The notification overlay is keep-alive, so its CDP target URL LIES.** It stayed
+   `…?type=edit_permissions&domain=bitgenius.net` for the entire session while the DOM showed, in
+   turn, a connect modal for `p7c-mac.test`, a domain-approval modal for `probe-site.test`, and a
+   scoped prompt for `teragun.com`. ⇒ **Attribute by DOM content, never by target URL.** Same family
+   as the `argv[0]` trap.
+3. ⛔ **A React `.click()` over CDP is legitimate here and a native mouse-down is not.** Clicking
+   `Always allow` / `Revoke` / `Manage approved sites` with `element.click()` runs the real React
+   `onClick`, which is the code under test. That is *not* the same as `Input.dispatchMouseEvent`,
+   which enters below the native `NSView`→`CefMouseEvent` layer and is still barred (queue `L2`).
+4. ⚠️ **The Keychain dialog recurred with NO wallet rebuild.** `SecurityAgent` spawned at 10:36:39,
+   the same second as the wallet spawn, wallet alive-but-not-listening at `main.rs:568` — the exact
+   2026-09-08 signature — while `target/release/hodos-wallet` still had its **Sep 8 16:11** mtime.
+   ⇒ "after a rebuild" is **not** the whole trigger. Most likely last session answered *Allow*
+   rather than *Always Allow*. Owner clicked through; added to `HUMAN_TEST_QUEUE.md` as `F1`.
+
+## H. ⬜ Owed — deferred, NOT done
+
+| # | Item | Why |
+|---|---|---|
+| 1 | The three tab-menu **gestures** (`A1`–`A4` in `HUMAN_TEST_QUEUE.md`) | Unchanged: `CGEventPost` blocked, CDP mouse enters below the native layer |
+| 2 | **P3 `M2.1` / P3.5 `M2`** multi-window | Same limit |
+| 3 | **Phase 5 `W7`** — the four overlays open from native toolbar clicks | Partial only, as before |
+| 4 | **Sparkle 2.9.6** + negative control, Big Sur `minimumSystemVersion`, `T1g`, Phase 4 `O2`/`O3`/`O5`/`O6`, **`P4-B2`** | Carried. `P4-B2` still needs a CI-signed hardened-runtime build |
+| 5 | **7c `A6`–`A9`** (protected baskets, `R-PERIM`, `R-INTEXT`, `R-SNAPSHOT`) end-to-end | T1 green both platforms; T2 owed at the boundary, **both** platforms |
+| 6 | `scripts/preflight.ps1` | PowerShell; no macOS arm. Not run here and not claimed |
+| 7 | DPI matrix cells #4/#6/#9 | `HUMAN_TEST_QUEUE.md` `E3`; still not run on **either** platform |
+| 8 | From 2026-08-26: `g_file_dialog_active` latch, P0.9 `A3.3`/`A3.4`, the `D1` sizing contract, profile panel focus-loss dismissal | Untouched |
+
+## I. Residue left in the dev wallet DB, stated rather than tidied away
+
+- `domain_protocol_permissions` row **id=9** (`teragun.com` / `p7c mac probe` / `key_id='*'`) exists
+  and is **revoked** (`revoked_at=1788972722`). teragun.com is back to **zero active** V18 grants, so
+  it remains a valid `A4` subject. The row is kept as the record of the §E#6 cycle.
+- Three pending approvals minted by the probes: single-use, 600 s TTL, no DB rows.
+- ⛔ **Nothing was written to the production wallet or its DB.**
+
+---
 # 📋 ROUND 2026-09-09 (**Mac**) — the 15th overlay is built. **Overlay parity is 15/15 again.**
 
 Answers `MAC_RELAY_P35_P4_ROUND.md` M3/M6, open since 2026-09-01 and the last piece of Phase 4 owed

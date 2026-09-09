@@ -94,14 +94,28 @@ Source: `MAC_RELAY_P3_ROUND.md` M2.1, `MAC_RELAY_P35_P4_ROUND.md` M2.
 
 ---
 
+## F. Environment — needs a human at the keyboard
+
+| # | Check | Note |
+|---|---|---|
+| F1 | ⚠️ **Does *Always Allow* on the wallet Keychain dialog actually stop it recurring?** Next dev start after clicking **Always Allow** (not *Allow*) | 📏 2026-09-09 the dialog fired again **with no wallet rebuild** (`SecurityAgent` at 10:36:39 = the wallet spawn second; wallet alive-but-not-listening at `main.rs:568`; binary mtime still Sep 8 16:11). ⇒ "after a rebuild" is not the whole trigger. ⛔ Never diagnose with `security find-generic-password -w` — it hangs on its own prompt. ⛔ The dev stack **cannot come up unattended** while this is unresolved |
+
+---
+
 ## Not human-bound — try these with a harness first
 
 Listed so nobody parks them here by mistake:
 
-- **Phase 7 `M4` #1/#2** — zero third-party favicon requests from the consent modal and new tab.
-  `phase-7b-connect-modal/netwatch.py` / `netwatch_page.py` exist and assert their own trigger.
-  ⚠️ **Re-run now that `FaviconStore` is initialised on macOS** (fixed 2026-09-08) — before that fix
-  macOS could produce neither a store hit *nor* a Google request, so a green would have been vacuous.
-- **Phase 7c `M4`** — the quiet-mode probe pair is `curl`; the `key_id = '*'` check is `sqlite3`.
-  Only the three "no checkbox is visible" rows are eyes-on.
+- ✅ **Phase 7 `M4` #1/#2 — DONE 2026-09-09.** Both green with a store-hit control (new tab:
+  `google.com`'s tile decodes to 1391 bytes = its `favicons.db` row). `phase-7b-connect-modal/PHASE_CONTRACT.md` §4c.
+- ✅ **Phase 7c `M4` — DONE 2026-09-09, all six rows.** ⭐ Including the three "no checkbox is
+  visible" rows, which were **not** eyes-on after all: a `outerHTML` search for `quiet` with a
+  positive control on the same regex settles them, and the per-item ticks are settled by reading
+  `disabled` on each checkbox. `phase-7c-quiet-mode/PHASE_CONTRACT.md` §5.4. The *visual* half
+  (does the layout look deliberate with the callout gone) stays human-bound — that is `D4`.
+  ⚠️ `input[type=checkbox]` is **blind** on `DomainPermissionForm` / `ApprovedSitesTab`; their
+  toggles are custom elements. Use the text search there.
+- ⭐ **A React `element.click()` over CDP is a legitimate instrument** and closed `key_id='*'`
+  end-to-end: it runs the real `onClick`. It is **not** `Input.dispatchMouseEvent`, which is still
+  barred by `L2`. Try it before parking a button-driven row here.
 - **Stubbed `R-INTEXT` REDs** — forced-flip stubs, owed before the release boundary.
