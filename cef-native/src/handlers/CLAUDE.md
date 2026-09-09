@@ -102,7 +102,9 @@ CEF application object. Singleton created in `main()`.
 | `CreateTabContextMenuOverlay()` / `Show` / `Hide` | Tab context menu (#15) | 240 × 241 | Keep-alive; anchored to the **cursor**, not a toolbar icon — the only one of the 15 that is. Owner = requesting window from creation. Geometry is an exact fit for 7 × 32 px rows + 1 divider + padding, pinned on both sides (`kTabMenuHeightDip` ↔ `ROW_HEIGHT` in `TabContextMenuOverlayRoot.tsx`) — adding an item means changing both |
 | `CreateProfilePanelOverlay()` / `Show` / `Hide` | Profile picker | 380 × 520 | Keep-alive, enables focus; clipboard + DOM paste (name edit) |
 
-⛔ macOS is at **14**, Windows at **15** — the tab context menu is Windows-only and is relayed, not written (see the parent doc). macOS overlay creation is in `cef_browser_shell_mac.mm` (14 `Create*Overlay*` functions there, plus a `CreateMenuOverlay` compat shim with the Windows signature). Names differ — the macOS side uses the `…MacOS` / `…WithSeparateProcess` suffixes, not the bare Windows names.
+✅ **Parity restored 2026-09-09: 15 each.** macOS overlay creation is in `cef_browser_shell_mac.mm` (15 `Create*Overlay*` functions, plus a `CreateMenuOverlay` compat shim with the Windows signature). Names differ — the macOS side uses the `…MacOS` / `…WithSeparateProcess` suffixes, not the bare Windows names.
+
+⚠️ The macOS tab-context-menu half (`CreateTabContextMenuOverlayMacOS`) differs from its Windows twin in three deliberate ways, all recorded in the parent doc: **no `addChildWindow:`** (so it must be torn down explicitly in `ShutdownApplication()` **and** `InstallAppFocusLossHandler()`), **no DPI scaling** of the anchor (macOS OSR overlays are sized in points and React CSS px *are* points — measured at `devicePixelRatio = 2`), and **two** click-outside monitors rather than one, because this menu is *opened* by a right-click.
 
 > Windows uses `CreateWalletOverlay()`; there is **no** `CreateWalletOverlayWithSeparateProcess()` on Windows — that name is macOS-only. Both call sites in `simple_handler.cpp` are `#ifdef`-split accordingly.
 
@@ -338,7 +340,7 @@ CefBrowserHost::CreateBrowser(window_info, handler, url, settings, nullptr,
 
 | Aspect | Windows | macOS |
 |--------|---------|-------|
-| Overlay creation | 14 functions in `simple_app.cpp` (HWND + GDI) | 14 functions in `cef_browser_shell_mac.mm` (NSWindow + Core Animation) |
+| Overlay creation | 15 functions in `simple_app.cpp` (HWND + GDI) | 15 functions in `cef_browser_shell_mac.mm` (borderless NSWindow + Core Animation) |
 | Context menu presentation | CEF presents the `CefMenuModel` natively | Manual `CefMenuModel` → `NSMenu` popup in `simple_handler_mac.mm` |
 | OSR rendering | `UpdateLayeredWindow` + `BLENDFUNCTION` | `CALayer.contents` + `CGImageCreate` |
 | Buffer handling | Direct `dib_data_` pointer | `malloc` copy (prevents CEF buffer reuse ghosting) |
