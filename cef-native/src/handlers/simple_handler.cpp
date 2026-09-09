@@ -4925,6 +4925,8 @@ bool SimpleHandler::OnProcessMessageReceived(
     }
 
     if (message_name == "get_backup_modal_state") {
+        // Phase 8c stage 3 — MIGRATED. Arg 0 is the request id, echoed below.
+        const int bmsGetRequestId = message->GetArgumentList()->GetInt(0);
         LOG_DEBUG_BROWSER("📨 Message received: get_backup_modal_state");
 
         nlohmann::json response;
@@ -4932,7 +4934,8 @@ bool SimpleHandler::OnProcessMessageReceived(
 
         CefRefPtr<CefProcessMessage> cefResponse = CefProcessMessage::Create("get_backup_modal_state_response");
         CefRefPtr<CefListValue> responseArgs = cefResponse->GetArgumentList();
-        responseArgs->SetString(0, response.dump());
+        responseArgs->SetInt(0, bmsGetRequestId);
+        responseArgs->SetString(1, response.dump());
 
         browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, cefResponse);
         LOG_DEBUG_BROWSER("📤 Backup modal state sent: " + response.dump());
@@ -4941,6 +4944,8 @@ bool SimpleHandler::OnProcessMessageReceived(
     }
 
     if (message_name == "set_backup_modal_state") {
+        // Phase 8c stage 3 — MIGRATED. Args: 0 = requestId, 1 = shown (bool).
+        const int bmsSetRequestId = message->GetArgumentList()->GetInt(0);
         LOG_DEBUG_BROWSER("📨 Message received: set_backup_modal_state");
 
         CefRefPtr<CefListValue> args = message->GetArgumentList();
@@ -4953,7 +4958,7 @@ bool SimpleHandler::OnProcessMessageReceived(
             LOG_DEBUG_BROWSER("🔍 Arg 0 as double: " + std::to_string(args->GetDouble(0)));
         }
 
-        bool shown = args->GetBool(0);
+        bool shown = args->GetBool(1);
         LOG_DEBUG_BROWSER("🔍 Parsed boolean: " + std::to_string(shown));
         setBackupModalShown(shown);
 
@@ -4963,7 +4968,8 @@ bool SimpleHandler::OnProcessMessageReceived(
 
         CefRefPtr<CefProcessMessage> cefResponse = CefProcessMessage::Create("set_backup_modal_state_response");
         CefRefPtr<CefListValue> responseArgs = cefResponse->GetArgumentList();
-        responseArgs->SetString(0, response.dump());
+        responseArgs->SetInt(0, bmsSetRequestId);
+        responseArgs->SetString(1, response.dump());
 
         browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, cefResponse);
         LOG_DEBUG_BROWSER("📤 Backup modal state updated: " + std::to_string(shown));
@@ -6677,9 +6683,16 @@ bool SimpleHandler::OnProcessMessageReceived(
             return v && std::string(v) == "1";
         }();
 
+        // Phase 8c stage 3 — MIGRATED. Arg 0 is the request id.
+        //
+        // ⚠️ It is threaded through as a PARAMETER, not a capture: `fetchAndDeliver` is
+        // deliberately captureless so it can be bound into a CEF task (see the comment
+        // below), and capturing would break that.
+        const int balanceRequestId = message->GetArgumentList()->GetInt(0);
+
         // Captureless so it can be bound into a CEF task. Does the blocking wallet call,
         // then hops the answer back to TID_UI -- CefBrowser is only safe to touch there.
-        auto fetchAndDeliver = [](CefRefPtr<CefBrowser> target) {
+        auto fetchAndDeliver = [](CefRefPtr<CefBrowser> target, int reqId) {
             std::string payload;
             bool ok = true;
             try {
@@ -6703,16 +6716,17 @@ bool SimpleHandler::OnProcessMessageReceived(
             LOG_DEBUG_BROWSER(std::string("✅ Balance fetch ") + (ok ? "ok" : "failed")
                               + " (" + std::to_string(payload.length()) + " bytes)");
 
-            CefPostTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b, std::string p, bool good) {
+            CefPostTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b, std::string p, bool good, int rid) {
                 // The browser may have closed while we were waiting on the wallet.
                 if (!b) return;
                 CefRefPtr<CefFrame> frame = b->GetMainFrame();
                 if (!frame) return;
                 CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create(
                     good ? "get_balance_response" : "get_balance_error");
-                response->GetArgumentList()->SetString(0, p);
+                response->GetArgumentList()->SetInt(0, rid);
+                response->GetArgumentList()->SetString(1, p);
                 frame->SendProcessMessage(PID_RENDERER, response);
-            }, target, payload, ok));
+            }, target, payload, ok, reqId));
         };
 
         if (kForceSyncOnUiThread) {
@@ -6720,9 +6734,9 @@ bool SimpleHandler::OnProcessMessageReceived(
             // blocking path so the freeze can be reproduced without swapping builds.
             LOG_WARNING_BROWSER("⚠️ HODOS_WALLET_SYNC_UI=1 — balance runs ON the UI thread "
                                 "(P2a-A2 negative control; expect the browser to freeze)");
-            fetchAndDeliver(browser);
+            fetchAndDeliver(browser, balanceRequestId);
         } else {
-            CefPostTask(TID_FILE_USER_BLOCKING, base::BindOnce(fetchAndDeliver, browser));
+            CefPostTask(TID_FILE_USER_BLOCKING, base::BindOnce(fetchAndDeliver, browser, balanceRequestId));
         }
 
         return true;

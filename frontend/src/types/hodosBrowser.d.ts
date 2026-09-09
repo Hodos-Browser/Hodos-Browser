@@ -19,6 +19,10 @@ declare global {
         // ⛔ Takes a JSON STRING, not an object — the caller stringifies, matching what
         // the legacy path already put on the wire.
         sendTransaction: (payloadJson: string) => Promise<TransactionResponse>;
+        getBalance: () => Promise<{ balance: number; bsvPrice?: number }>;
+        getBackupModalState: () => Promise<{ shown: boolean } | null>;
+        // ⛔ A real boolean, not a stringified one — it rides as arg 1 via SetBool.
+        setBackupModalState: (shown: boolean) => Promise<{ success: boolean } | null>;
       };
       // Promise-based since the history-over-IPC move: the render process no longer
       // opens the history database itself, so every call is a round-trip to the
@@ -123,8 +127,8 @@ declare global {
     onAddressError?: (error: string) => void;
     // ⛔ REMOVED by Phase 8c stage 2 — wallet.sendTransaction is routed by request id.
     //   onSendTransactionResponse / onSendTransactionError
-    onGetBalanceResponse?: (data: { balance: number }) => void;
-    onGetBalanceError?: (error: string) => void;
+    // ⛔ REMOVED by Phase 8c stage 3 — getBalance is routed by request id.
+    //   onGetBalanceResponse / onGetBalanceError
     onGetTransactionHistoryResponse?: (data: any[]) => void;
     onGetTransactionHistoryError?: (error: string) => void;
     // ⛔ REMOVED by Phase 8c stage 1 — `wallet.getStatus` no longer uses a global
@@ -142,8 +146,8 @@ declare global {
     onGetAddressesError?: (error: string) => void;
     onMarkWalletBackedUpResponse?: (data: { success: boolean }) => void;
     onMarkWalletBackedUpError?: (error: string) => void;
-    onGetBackupModalStateResponse?: (data: { shown: boolean }) => void;
-    onSetBackupModalStateResponse?: (data: { success: boolean }) => void;
+    // ⛔ REMOVED by Phase 8c stage 3 — both backup-modal-state calls are routed by id.
+    //   onGetBackupModalStateResponse / onSetBackupModalStateResponse
     onCookieGetAllResponse?: (data: CookieData[]) => void;
     onCookieGetAllError?: (error: string) => void;
     onCookieDeleteResponse?: (data: CookieDeleteResponse) => void;

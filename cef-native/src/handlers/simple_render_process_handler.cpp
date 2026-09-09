@@ -398,6 +398,10 @@ class WalletBridgeV8Handler : public CefV8Handler {
 public:
     WalletBridgeV8Handler() {}
 
+    // What the caller passes, if anything. Kept tiny on purpose — the remaining legacy
+    // slots are overwhelmingly None or Str, with a handful of Bool.
+    enum class Payload { None, Str, Bool };
+
     bool Execute(const CefString& name,
                  CefRefPtr<CefV8Value> object,
                  const CefV8ValueList& arguments,
@@ -415,17 +419,28 @@ public:
         // wire format is unchanged and no V8→JSON conversion is needed here. Keeping the
         // shape identical is what makes this a routing change and nothing else.
         const char* ipcName = nullptr;
-        bool takesPayload = false;
+        Payload payload = Payload::None;
         if (method == "getStatus") {
             ipcName = "wallet_status_check";
         } else if (method == "sendTransaction") {
             ipcName = "send_transaction";
-            takesPayload = true;
+            payload = Payload::Str;
+        } else if (method == "getBalance") {
+            ipcName = "get_balance";
+        } else if (method == "getBackupModalState") {
+            ipcName = "get_backup_modal_state";
+        } else if (method == "setBackupModalState") {
+            ipcName = "set_backup_modal_state";
+            payload = Payload::Bool;
         }
         if (!ipcName) return false;  // unknown method — V8 throws for us
 
-        if (takesPayload && (arguments.empty() || !arguments[0]->IsString())) {
-            exception = method + "() requires a JSON string argument";
+        if (payload == Payload::Str && (arguments.empty() || !arguments[0]->IsString())) {
+            exception = method + "() requires a string argument";
+            return true;
+        }
+        if (payload == Payload::Bool && (arguments.empty() || !arguments[0]->IsBool())) {
+            exception = method + "() requires a boolean argument";
             return true;
         }
 
@@ -441,8 +456,10 @@ public:
         // ⛔ Arg 0 is ALWAYS the request id for a migrated call. The browser process
         // echoes it back in arg 0 of the response. Any payload shifts to arg 1.
         msg->GetArgumentList()->SetInt(0, requestId);
-        if (takesPayload) {
+        if (payload == Payload::Str) {
             msg->GetArgumentList()->SetString(1, arguments[0]->GetStringValue());
+        } else if (payload == Payload::Bool) {
+            msg->GetArgumentList()->SetBool(1, arguments[0]->GetBoolValue());
         }
 
         retval = CefV8Value::CreatePromise();
@@ -905,8 +922,19 @@ void SimpleRenderProcessHandler::OnContextCreated(
     bridgeObject->SetValue("sendTransaction",
         CefV8Value::CreateFunction("sendTransaction", bridgeHandler),
         V8_PROPERTY_ATTRIBUTE_READONLY);
+    // Stage 3 batch 1 — the three remaining SHAPES: a read that carried an in-flight
+    // dedupe workaround, the resolve-on-timeout offender, and a non-string payload.
+    bridgeObject->SetValue("getBalance",
+        CefV8Value::CreateFunction("getBalance", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    bridgeObject->SetValue("getBackupModalState",
+        CefV8Value::CreateFunction("getBackupModalState", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    bridgeObject->SetValue("setBackupModalState",
+        CefV8Value::CreateFunction("setBackupModalState", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
     hodosBrowser->SetValue("bridge", bridgeObject, V8_PROPERTY_ATTRIBUTE_READONLY);
-    LOG_DEBUG_RENDER("🌉 Bound WalletBridgeV8Handler (2 methods migrated)");
+    LOG_DEBUG_RENDER("🌉 Bound WalletBridgeV8Handler (5 methods migrated)");
 
     hodosBrowser->SetValue("history", historyObject, V8_PROPERTY_ATTRIBUTE_READONLY);
 
@@ -1629,35 +1657,31 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // MIGRATED (Phase 8c stage 3 batch 1). Args: 0 = requestId, 1 = payload.
+    //
+    // ⭐ This one also RETIRES A WORKAROUND. getBalance carried an in-flight dedupe
+    // (P2a) because a single global slot could not tell two callers apart. Per-request
+    // routing makes the dedupe unnecessary: two concurrent reads now get two correct
+    // answers instead of sharing one. ⛔ The dedupe was only ever sound because a balance
+    // read is idempotent — it must NOT be copied to any write.
     if (message_name == "get_balance_response") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0);
-
-        LOG_DEBUG_RENDER(LogFmt() << "✅ Get balance response received: " << responseJson);
-        LOG_DEBUG_RENDER(LogFmt() << "🔍 Browser ID: " << browser->GetIdentifier());
-        LOG_DEBUG_RENDER(LogFmt() << "🔍 Frame URL: " << hodos::LogSafeUrl(frame->GetURL().ToString()));
-
-        // Execute JavaScript to call the callback function directly
-        std::string js = "if (window.onGetBalanceResponse) { window.onGetBalanceResponse(" + responseJson + "); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "get_balance_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
+    // MIGRATED (Phase 8c stage 3 batch 1). Args: 0 = requestId, 1 = payload.
     if (message_name == "get_balance_error") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string errorMessage = args->GetString(0);
-
-        LOG_DEBUG_RENDER(LogFmt() << "❌ Get balance error received: " << errorMessage);
-
-        // P2a: errorMessage is a JSON envelope built from exception text, and it was being
-        // pasted between single quotes RAW -- one apostrophe or backslash in a what()
-        // string breaks out of the literal. Route it through the canonical encoder like
-        // every other injection site in this file.
-        std::string js = "if (window.onGetBalanceError) { window.onGetBalanceError(\""
-                       + escapeJsonForJs(errorMessage) + "\"); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "get_balance_error missing args (need 2)");
+            return true;
+        }
+        RejectBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
@@ -1854,29 +1878,28 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // MIGRATED (Phase 8c stage 3 batch 1). Args: 0 = requestId, 1 = payload.
+    //
+    // ⚠️ The legacy JS for this method called resolve(null) on timeout, not reject — so a
+    // losing caller got a SILENTLY WRONG VALUE rather than an error (measured, D-5).
     if (message_name == "get_backup_modal_state_response") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0);
-
-        LOG_DEBUG_RENDER("✅ Backup modal state response received: " + responseJson);
-
-        // Execute JavaScript callback
-        std::string js = "if (window.onGetBackupModalStateResponse) { window.onGetBackupModalStateResponse(" + responseJson + "); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "get_backup_modal_state_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
+    // MIGRATED (Phase 8c stage 3 batch 1). Args: 0 = requestId, 1 = payload.
     if (message_name == "set_backup_modal_state_response") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0);
-
-        LOG_DEBUG_RENDER("✅ Set backup modal state response received: " + responseJson);
-
-        // Execute JavaScript callback
-        std::string js = "if (window.onSetBackupModalStateResponse) { window.onSetBackupModalStateResponse(" + responseJson + "); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "set_backup_modal_state_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 

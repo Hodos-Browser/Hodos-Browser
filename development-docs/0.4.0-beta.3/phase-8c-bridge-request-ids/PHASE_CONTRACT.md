@@ -1,9 +1,10 @@
 # Phase 8c — per-request ids for the wallet bridge · PHASE CONTRACT
 
 **Workstream:** money-path correctness · **Ticket:** `TICKET_bridge_single_slot_callbacks_race.md`
-**Status:** 🟢 **STAGES 1 + 2 DONE and measured live. Stages 3-4 not started.**
-⛔ **2 of 41 migrated** — `getStatus` and `sendTransaction`. `P8c-A2` (two successful sends ⇒ two
-txids) still needs real money: `M8` in `../PAYMENT_TEST_BATCH.md`.
+**Status:** 🟢 **STAGES 1 + 2 DONE. STAGE 3 IN PROGRESS — batch 1 landed.**
+⛔ **5 of 41 migrated** — `getStatus`, `sendTransaction`, `getBalance`, `getBackupModalState`,
+`setBackupModalState`. **36 legacy slots remain.** `P8c-A2` (two successful sends ⇒ two txids) still
+needs real money: `M8` in `../PAYMENT_TEST_BATCH.md`.
 👤 **Owner, 2026-09-08:** *"Let's go with your recommendation of Option B."* — the 41 slots converge on
 the **C++-side promise map** already shipping for the history API. ⛔ The ticket's proposed JS-side
 `Map<id,{resolve,reject}>` is **not** what gets built; see §0.3 for why.
@@ -13,9 +14,26 @@ Stage 1 must land and be reviewed before stages 2–4 are attempted.
 **Standard:** `../HARNESS.md`. **Base:** `c68ed57`.
 
 > ⭐ **Stage 1 landed 2026-09-08** (mechanism + `wallet.getStatus`, §4) and **stage 2 on 2026-09-09**
-> (`wallet.sendTransaction`, §4b). ⛔ Stages 3-4 NOT started: 39 legacy slots remain.
+> (`wallet.sendTransaction`, §4b). 🚧 **Stage 3 batch 1 on 2026-09-09** (§4c). ⛔ **36 legacy slots
+> remain**; stage 4 (deleting the `window.on*` declarations wholesale) not started.
 
 ---
+
+## 👤 0a. OWED TO THE OWNER AT PHASE CLOSE — the standing register
+
+> Asked for explicitly, 2026-09-09: *"keep track of anything you will need me to get eyes on at the
+> end of the full phase."* ⛔ **Append here the moment something is found.** A decision that lives
+> only in a commit message is a decision nobody will find.
+
+| # | Needs your eyes on | Why it cannot be settled by me | State |
+|---|---|---|---|
+| **O1** | **`P8c-A2` — two *successful* sends produce two txids.** `M8` in `../PAYMENT_TEST_BATCH.md` | Needs **real money**, twice. Its RED (apply `getBalance`'s dedupe ⇒ one send) is the row that catches the worst possible way to finish this phase | ⬜ owed |
+| **O2** | **A genuinely *late* reply** — one that arrives *after* the deadline already rejected — is discarded, not misrouted | The deadline test proved "reply never arrives". "Arrives late" is a different path and needs an induced delay. Free to run; just not run yet | ⬜ owed |
+| **O3** | **`create_transaction` is orphaned** — full C++ round trip, zero JS callers (`D-6`) | Deleting live-looking C++ is a call I should not make alone. Options: delete, keep as future API, or migrate for completeness | ⬜ your call |
+| **O4** | **How many of the 41 do we actually migrate?** | Several (bookmark folder CRUD, cache size) are UI-driven and unlikely to race. My lean is *all* — a slot left behind is a slot the next person copies — but it is real work for little risk reduction | ⬜ your call |
+| **O5** | **The 30 s deadline value** | Chosen as a backstop, not measured against the slowest real wallet call. If any legitimate call can exceed 30 s, this turns a slow success into a failure | ⬜ needs one real slow-call measurement |
+| **O6** | **macOS parity.** Both changed files (`simple_render_process_handler.cpp`, `simple_handler.cpp`) are **shared**, not Windows-only | Unlike 8a/8b this is not Rust-only. Mac must verify the V8 binding and the promise map behave there | ⬜ relay owed |
+| **O7** | ⚠️ **RED controls are a wasting asset.** `getBackupModalState` WAS the control for `P8c-A1a`; it is now migrated, and batch 1 used `getInfo` instead for `P8c-A1a` — the un-migrated sibling proving the harness detects the bug. Once migrated, a future RED needs a *different* legacy method | Only matters while un-migrated slots remain; ⛔ **at 0 remaining there is no legacy control left at all**, and the RED must become a deliberate stub | ⚠️ live |
 
 ## 0. Plan-vs-tree delta
 
@@ -219,6 +237,41 @@ The old error arm built JavaScript by concatenation:
 quote would have broken out of it. Routing by id constructs no JavaScript at all, so the hazard is
 **deleted rather than escaped**. (Its sibling arm did use `escapeJsonForJs`; the error arm did not.)
 
+---
+
+## 4c. Stage 3 batch 1 — the three remaining *shapes*, measured 2026-09-09
+
+Batch chosen by **shape, not by convenience**: after these, every remaining slot is a variant of
+something already proven, so the rest of stage 3 is mechanical rather than exploratory.
+
+| Method | Shape it proves |
+|---|---|
+| `getBalance` | a read that carried an **in-flight dedupe workaround** — now retired |
+| `getBackupModalState` | the **resolve-on-timeout** offender from `D-5` |
+| `setBackupModalState` | the first **non-string payload** (`bool` via `SetBool`, not stringified) |
+
+⚠️ `getBalance`'s browser handler replies from an **async lambda** that is deliberately *captureless*
+so it can be bound into a CEF task. The id is threaded through as a **parameter**, not a capture —
+capturing would have broken that property and the comment that guards it.
+
+### `P8c-A3a` — 🟢🔴 GREEN and RED, same harness
+
+**Subject:** 5 methods report `[native code]`; all four legacy globals for this batch are gone.
+
+| Run | Result |
+|---|---|
+| `getBalance` ×3 | **3/3 correct, 6 ms** — and these are now **3 real round trips**, not one shared by a dedupe |
+| `getBackupModalState` ×3 | **3/3 correct, 1 ms** — previously **2 of 3 returned `null`** |
+| `setBackupModalState(true)` ×3 | **3/3 `{"success":true}`, 0 ms** — bool payload lands |
+| 🔴 **RED — `getInfo`, still legacy** | **10,013 ms; 2 of 3 REJECTED** `get_wallet_info timed out`, 1 fulfilled |
+
+⭐ **The RED confirms `D-5`'s two flavours.** `getInfo` *rejects* on timeout; `getBackupModalState`
+*resolved `null`*. Same single-slot bug, one loud and one silent — which is why every remaining slot
+must be read for its timeout behaviour rather than assumed.
+
+⚠️ **Test hygiene:** `setBackupModalState(true)` really does mutate dev state. It was set back to
+`false` and re-read to confirm (`{"shown":false}`) before the stack came down.
+
 ### Still owed
 
 | ID | | Tier |
@@ -242,7 +295,7 @@ The `wallet_call` path itself (pattern 2) — it already routes correctly and is
 
 1. ✅ **DONE** — mechanism built (`WalletBridgeV8Handler`, `s_pendingBridgeCalls`, `ResolveBridgeCall`/`RejectBridgeCall`), `wallet.getStatus` migrated end to end, GREEN/RED measured live (§4). **1 of 41.**
 2. ✅ **DONE** — `sendTransaction` migrated, routing + reject path measured (§4b). ⛔ `createTransaction` was found ORPHANED (no JS caller) and excluded — see `D-6`. **2 of 41.**
-3. The remaining ~38 in batches, each batch its own commit, the old global deleted as each lands.
+3. 🚧 **IN PROGRESS.** Batch 1 done — `getBalance`, `getBackupModalState`, `setBackupModalState`, chosen to cover the three remaining SHAPES (§4c). **36 slots remain**, now mechanical. Each batch its own commit, the old global deleted as each lands.
 4. `initWindowBridge.ts`'s `window.on*` declarations deleted last, as the proof nothing still uses them.
 
 ## 8. The decision — ✅ ANSWERED
