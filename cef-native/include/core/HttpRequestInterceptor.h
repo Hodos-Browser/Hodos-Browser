@@ -265,10 +265,16 @@ std::string openCertificateDisclosureModal(const ModalContext& ctx, const Resume
 // Returns the requestId of the enrolled PendingAuthRequest, or empty string
 // if no opener matched the promptType.
 // beta.3 Phase 7b — the `&favicon=` query fragment for a consent modal, or "".
-// Resolves the PAGE'S OWN favicon (TabManager::GetFaviconUrlForHost); consent
-// modals used to fetch google.com/s2/favicons, telling Google which site the
-// user was being asked to trust. Shared with simple_handler.cpp's
-// permission-prompt path so there is one implementation and one encoder.
+// Emits the STORED BYTES as a `data:` URI (hodos::FaviconStore::GetDataUri), so
+// rendering a consent prompt's icon issues NO network request at all.
+// ~~Resolves the PAGE'S OWN favicon (TabManager::GetFaviconUrlForHost)~~ — that
+// was the first fix, and it still put a REMOTE url in `<img src>`; measured
+// 2026-09-09, off-host icons (google.com's lives on gstatic.com) made a
+// third-party request at decision time. Consent modals originally fetched
+// google.com/s2/favicons, telling Google which site the user was being asked to
+// trust. Shared with simple_handler.cpp's permission-prompt path so there is one
+// implementation and one encoder. ⛔ A store miss returns "" (letter tile) and
+// must never fall back to a URL. See the definition for the full rationale.
 std::string FaviconParamForDomain(const std::string& domain);
 
 std::string OpenPromptModal(const std::string& promptType,

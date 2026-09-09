@@ -28,6 +28,7 @@
 #include "../../include/core/SitePermissionStore.h"
 #include "../../include/core/PaidContentCache.h"
 #include "../../include/core/TabManager.h"
+#include "../../include/core/FaviconStore.h"
 
 // Forward declaration
 class AsyncWalletResourceHandler;
@@ -718,11 +719,55 @@ static bool IsConnectModalType(const std::string& type) {
 // ⛔ Returns "" when we have no icon for that host. The React side falls back to
 // the domain-initial avatar. It must never fall back to a remote lookup — that
 // is the defect being removed.
+//
+// 🚨 beta.3, 2026-09-09 — this now emits the STORED BYTES, not the icon's URL.
+//
+// It used to return `&favicon=<Tab::favicon_url>`, i.e. the site's own *remote*
+// icon URL, which the overlay rendered straight into `<img src>`. 📏 MEASURED on
+// macOS: that issues a real network request from the consent surface at the
+// moment of the decision — 1 non-local request, observed by feeding the param an
+// unresolvable host and watching `Network.requestWillBeSent`. For any site whose
+// icon is off-host that request goes to a third party: `www.google.com` declares
+// its icon on `www.gstatic.com`, so a prompt for Google fetched from Google's CDN.
+//
+// ⚠️ That was far narrower than the defect this phase removed — the icon host
+// learns only about its own site, not about every site the user is asked to trust
+// — but the ticket's requirement is "no third-party request at all", and a URL
+// cannot meet it. Bytes can.
+//
+// ⭐ `FaviconStore` is what makes this possible now and did not exist when the
+// first fix landed: `GetDataUri` returns `data:image/png;base64,…` and issues no
+// request. The new-tab surface has consumed it since Phase 7b, so this is the
+// consent surface joining the path the other three already use, not a new one.
+//
+// ⛔ Store MISS falls through to "" — the letter tile — and must never fall back
+// to `GetFaviconUrlForHost`. Showing no icon is the documented, accepted answer
+// (the ticket: "the wrong site's icon on a consent screen is worse than no
+// icon"), and re-adding the URL is the whole defect.
+//
+// ⚠️ The coverage this trades away, stated rather than discovered later: the
+// store is populated asynchronously by `OnFaviconURLChange` → `DownloadImage`,
+// so a site that calls the wallet in the same instant the page loads can reach a
+// consent modal before its icon has been stored, and gets the letter tile. The
+// URL form did not have that window. Revisits are covered — the store is
+// persistent and host-keyed.
+//
+// ⭐ Both sides key through the SAME `SitePermissionStore::NormalizeHost`: the
+// write in `simple_handler.cpp :: OnFaviconURLChange` normalises the page URL,
+// this reads the modal's domain through it. A silently-missing lookup here would
+// look exactly like "this site has no icon", so the shared normaliser is the
+// thing that keeps it honest — do not hand-roll one on either side.
+//
+// ⚠️ Size: a data URI is larger than a URL by construction. `FaviconStore`'s own
+// `kMaxPngBytes` (256 KB) bounds the worst case at roughly 350 KB of param after
+// base64 + urlEncode; real icons here are ~1.4–4.5 KB and encode to a few KB. No
+// second cap is imposed, because a silent "your icon vanished above N bytes"
+// threshold is behaviour nobody asked for and nothing would test.
 std::string FaviconParamForDomain(const std::string& domain) {
     const std::string host = SitePermissionStore::NormalizeHost(domain);
-    const std::string url = TabManager::GetInstance().GetFaviconUrlForHost(host);
-    if (url.empty()) return "";
-    return "&favicon=" + urlEncode(url);
+    const std::string data_uri = hodos::FaviconStore::GetInstance().GetDataUri(host);
+    if (data_uri.empty()) return "";
+    return "&favicon=" + urlEncode(data_uri);
 }
 
 class CreateNotificationOverlayTask : public CefTask {
@@ -766,7 +811,12 @@ public:
         // ⛔ Empty is a valid answer and must stay one. The React side falls back
         // to the domain-initial avatar; it must NOT fall back to a remote fetch.
         // Showing the wrong site's icon on a consent screen is worse than showing
-        // no icon at all, so GetFaviconUrlForHost matches on host and never guesses.
+        // no icon at all, so the lookup matches on host and never guesses.
+        //
+        // ⭐ Since 2026-09-09 this carries the icon's BYTES (a `data:` URI out of
+        // FaviconStore), not its URL — ~~GetFaviconUrlForHost~~ returned a remote
+        // address, and an `<img src>` pointing at one is still a request. The
+        // param is therefore larger than it used to be; that is the trade.
         //
         // This is the single funnel for every interceptor-raised modal, which is
         // why one append covers them all. The permission-prompt path in

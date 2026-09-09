@@ -124,7 +124,7 @@ other 7 hosts have no stored icon, draw their letter tile, and still generate no
 ⚠️ `netwatch_page.py` for **bookmarks/omnibox** was not re-run this round; Windows' `A2` covers them
 and macOS has no CDP target for the omnibox (noted in §4's `A2` cell).
 
-### 🆕 `P7b-A1` is green **and** the surface still issues a third-party request for off-host icons
+### ✅ `P7b-A1` — the residual off-host request found here is **FIXED** (2026-09-09)
 
 Not a regression and narrower than the original defect, but it contradicts
 `TICKET_consent_surface_fetches_third_party_favicon.md`'s stated goal (*"no third-party request at
@@ -145,8 +145,39 @@ owner's call** (HARNESS §6).
 network — the probe used an unresolvable host, so *"a request is issued"* is measured, *"packets
 leave the machine"* is not.
 
-⚠️ New harness: `netwatch_domain.py`. ⛔ Read its docstring before reusing it — its store-hit
-assertion **cannot** pass on the consent surface, because that surface does not read the store.
+**The fix, same day.** `FaviconParamForDomain` now emits `hodos::FaviconStore::GetDataUri(host)` —
+the icon's **bytes** as a `data:` URI — instead of the remote URL. React unchanged; a `data:` URI is
+already a valid `<img src>`. ⛔ Store miss → `""` → letter tile, never a URL fallback.
+
+📏 **Measured on a REAL permission prompt**, so the param is built by C++ on the live path
+(`consent_favicon_probe.py`). ⛔ Not via `showNotification` — a hand-built fixture supplies its own
+`favicon=` and therefore cannot test what C++ puts there, which is the entire subject:
+
+| Arm | `&favicon=` | rendered `<img>` | non-local |
+|---|---|---|---|
+| **Fixed**, `github.com` | `data:image/png;base64,…` | data URI = **2364 bytes** | **0** of 129 |
+| ⛔ **Reverted line**, same prompt | `https://github.githubassets.com/…` | the remote URL | **1** → githubassets.com |
+| **Store miss**, `example.com` | absent | letter tile "E", 0 broken | **0** of 128 |
+
+⭐ github.com is the decisive subject because its icon is **off-host**, and **2364** is exactly
+`length(png)` for that host in `favicons.db` — displayed *and* provably from disk. The RED was
+**observed**: line reverted, rebuilt, re-signed, re-run, leak returned; then restored and re-confirmed.
+
+⛔ **Count NON-LOCAL requests, not substring matches on the leaking host.** Under the old code the
+overlay's own document URL carried the third-party address inside `?favicon=`, so a substring filter
+reports **2** for **1** real request — `netwatch.py`/`netwatch_page.py` use that form.
+
+⚠️ **Coverage traded away:** the store fills asynchronously, so a site that reaches a modal in the
+same instant its page loads gets the letter tile. Revisits are covered. This is the ticket's own
+documented fallback, and no icon is explicitly preferred to the wrong icon.
+
+🧹 `TabManager::GetFaviconUrlForHost` is now uncalled. **Reported, not deleted** — a public method
+with two platform arms, and this symbol already broke the macOS link once by existing on one side
+only. Its stale mention in `HttpRequestInterceptor.h` was corrected.
+
+⚠️ Harnesses: `netwatch_domain.py` (React half) and **`consent_favicon_probe.py`** (the real path —
+use this one for this row). ⛔ Two traps in the latter's docstring: an unanswered prompt silently
+blocks the next one, and the subject site must be **https**.
 
 ## 5. Blast radius
 

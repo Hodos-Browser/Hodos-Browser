@@ -1,6 +1,7 @@
 # Consent surfaces fetch favicons from google.com
 
-**Status:** 🔴 **OPEN — still live, verified 2026-08-31.** `BRC100AuthOverlayRoot.tsx` still fetches `https://www.google.com/s2/favicons?domain=<site>`, so every consent prompt tells Google which site the user is connecting a wallet to, at the moment of the privacy decision. Labelled 2026-08-31 (had no status line).
+**Status:** 🟢 **CLOSED 2026-09-09** — the consent surface now renders the icon's **bytes** from the local `FaviconStore`, so it makes **no network request of any kind**. Both the original Google leak and the residual off-host fetch are gone, each observed to fail with the fix removed. Evidence at the bottom of this file.
+**Previous status:** 🔴 ~~OPEN — still live, verified 2026-08-31.~~ `BRC100AuthOverlayRoot.tsx` still fetches `https://www.google.com/s2/favicons?domain=<site>`, so every consent prompt tells Google which site the user is connecting a wallet to, at the moment of the privacy decision. Labelled 2026-08-31 (had no status line).
 **Sprint:** 📌 **Phase 7 (consent surface)** — bundled 2026-08-31; see `SPRINT_PLAN.md` §4.1.
 **Approach: ✅ DECIDED by the owner, 2026-08-31 — use the page's own favicon.**
 
@@ -96,3 +97,64 @@ the icon is "already fetched, so it costs nothing new" — that assumption has n
 
 ⛔ **No production code was changed** — this is the wallet's consent surface and the call is the
 owner's (HARNESS §6: evidence pointing at production code stops and asks).
+
+
+---
+
+## ✅ FIXED 2026-09-09 (macOS) — the surface now makes **no request at all**
+
+**Change:** one statement in `cef-native/src/core/HttpRequestInterceptor.cpp :: FaviconParamForDomain`.
+`&favicon=` carries `hodos::FaviconStore::GetDataUri(host)` — `data:image/png;base64,…`, the bytes —
+instead of `TabManager::GetFaviconUrlForHost(host)`, a remote URL. React needed **no code change**:
+it already renders `<img src={pageFaviconUrl}>`, and a `data:` URI is a valid `src`. Comments in
+three files corrected in place.
+
+⛔ A store MISS returns `""` and falls through to the domain-initial avatar. It must never fall back
+to a URL — not `google.com/s2`, and not the site's own icon URL either.
+
+### 📏 Measured — a real permission prompt, so the param is built by C++ on the live path
+
+⛔ Not `showNotification`: a hand-built fixture supplies its own `favicon=` and therefore cannot test
+what C++ puts there, which is the whole subject. Harness: `phase-7b-connect-modal/consent_favicon_probe.py`.
+
+| Arm | `&favicon=` | rendered `<img>` | non-local requests |
+|---|---|---|---|
+| **Fixed** — `github.com` prompt | `data:image/png;base64,…` (URL 3506 chars) | `data:` URI decoding to **2364 bytes** | **0** of 129 |
+| ⛔ **Reverted line** — same site, same prompt | `https://github.githubassets.com/favicons/favicon.svg` (URL 188 chars) | the remote URL, **0** data URIs | **1** → `github.githubassets.com` |
+| **Store miss** — `example.com` (no row) | **absent** | letter tile **"E"**, `brokenImgs: 0` | **0** of 128 |
+
+⭐ **The subject is decisive because github.com's icon is off-host.** `favicons.db` records its
+`icon_url` as `https://github.githubassets.com/favicons/favicon.svg` — literally the string the old
+code emitted. And **2364** is `length(png)` for that host in the store, so the icon is displayed
+*and* provably came from disk.
+
+⭐ **The RED was observed, not argued:** the line was reverted, rebuilt, re-signed and re-run on the
+same machine, and the request to `githubassets.com` came back. Then restored and re-confirmed green.
+
+⛔ **Harness note — count NON-LOCAL requests, not substring matches on the leaking host.** Under the
+old code the overlay's own document URL contained the third-party address inside `?favicon=`, so a
+substring filter reports **2** for **1** real request. `netwatch.py` / `netwatch_page.py` use that
+substring form; on this row it over-counts by one.
+
+### ⚠️ The coverage this trades away, stated up front
+
+The store is filled asynchronously (`OnFaviconURLChange` → `DownloadImage`), so a site that reaches a
+consent modal in the same instant its page loads can arrive before its icon is stored, and gets the
+letter tile. The URL form had no such window. Revisits are covered — the store is persistent and
+host-keyed. This is the ticket's own documented fallback ("a bundled generic icon is the acceptable
+fallback"), and showing no icon is explicitly preferred here to showing the wrong one.
+
+### 🧹 Now unused, NOT deleted — reported instead
+
+`TabManager::GetFaviconUrlForHost` has no remaining caller. It is a public method with two verbatim
+platform arms (`TabManager.cpp`, `TabManager_mac.mm`), and this exact symbol already broke the macOS
+link once by existing on only one side (`TabManager_mac.mm:654-661`). Removing it is an API deletion,
+not part of a behaviour fix, and would conflict with any in-flight Windows branch — so it is left in
+place and flagged here. ⚠️ The header comment that named it as the consent path's source has been
+corrected, because that sentence became false.
+
+### ⬜ Not covered by a unit test, and why
+
+`FaviconParamForDomain` lives in a CEF-heavy translation unit and `FaviconStore::GetDataUri` uses
+`CefBase64Encode`; `hodos_tests` deliberately links no CEF. The evidence is the T2 runtime pair
+above, which is stronger here anyway — it exercises the real prompt path end to end.

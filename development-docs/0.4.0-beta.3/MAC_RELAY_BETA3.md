@@ -11,6 +11,90 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-09c (**Mac**) — the off-host consent favicon from §D of the round below is **FIXED**, with the RED observed both ways
+
+Owner decided the same session: *"fix the consent favicon to use the store."* Done, measured, and the
+leak was **watched to come back** with the fix removed. `TICKET_consent_surface_fetches_third_party_favicon.md`
+is now 🟢 **CLOSED**; detail in `phase-7b-connect-modal/PHASE_CONTRACT.md` §4c.
+
+**Change: one statement.** `HttpRequestInterceptor.cpp :: FaviconParamForDomain` emits
+`hodos::FaviconStore::GetDataUri(host)` — `data:image/png;base64,…`, the **bytes** — instead of
+`TabManager::GetFaviconUrlForHost(host)`, a remote URL. ⭐ **React needed no code change**: it already
+renders `<img src={pageFaviconUrl}>` and a `data:` URI is a valid `src`. Comments corrected in three
+files (`HttpRequestInterceptor.{h,cpp}`, `BRC100AuthOverlayRoot.tsx`) because each described the old
+source and became false.
+
+## 📏 Measured on a REAL permission prompt — not `showNotification`
+
+⛔ **This is the part the earlier round could not do.** `netwatch.py` / `netwatch_domain.py` drive
+`window.showNotification(...)` with a hand-built query string, so the `favicon=` param is whatever the
+harness typed — they can never test **what C++ puts there**, which is the whole subject. New harness
+`phase-7b-connect-modal/consent_favicon_probe.py` triggers a real Chromium geolocation prompt, so the
+param comes off the live `FireHodosPermissionPrompt` path.
+
+| Arm | `&favicon=` | rendered `<img>` | non-local requests |
+|---|---|---|---|
+| ✅ **Fixed** — `github.com` | `data:image/png;base64,…` (URL 3506 chars) | `data:` URI decoding to **2364 bytes** | **0** of 129 |
+| ⛔ **Reverted line** — same site, same prompt, rebuilt + re-signed | `https://github.githubassets.com/favicons/favicon.svg` (URL 188 chars) | the **remote URL**, 0 data URIs | **1** → `github.githubassets.com` |
+| ✅ **Store miss** — `example.com` (no row) | **absent** | letter tile **"E"**, `brokenImgs: 0` | **0** of 128 |
+
+⭐ **github.com is the decisive subject because its icon is off-host.** `favicons.db` records
+`icon_url = https://github.githubassets.com/favicons/favicon.svg` — literally the string the old code
+emitted — and **2364** is `length(png)` for that host, so the icon is displayed **and** provably came
+from disk rather than the network.
+
+⭐ **The RED was observed, not argued.** The line was reverted, rebuilt, re-signed and re-run on this
+machine; the request to `githubassets.com` returned. Then restored and re-confirmed green.
+
+## ⛔ One harness correction that matters to YOUR scripts too
+
+**Count NON-LOCAL requests, not substring matches on the leaking host.** Under the old code the
+overlay's **own document URL** contained the third-party address inside `?favicon=`, so a substring
+filter reported **2** for **1** real request. `netwatch.py` and `netwatch_page.py` both use the
+substring form — on this row it over-counts by one. The zero-vs-nonzero verdict is unaffected; the
+number is not.
+
+## ⚠️ What this trades away, said up front rather than discovered later
+
+`FaviconStore` fills asynchronously (`OnFaviconURLChange` → `DownloadImage`), so a site that reaches a
+consent modal in the same instant its page loads can arrive **before** its icon is stored, and gets
+the letter tile. The URL form had no such window. Revisits are covered — the store is persistent and
+host-keyed. This is the ticket's own documented fallback, and it explicitly prefers no icon to the
+wrong icon on a consent screen.
+
+⭐ Both sides key through the **same** `SitePermissionStore::NormalizeHost` — the write normalises the
+page URL in `OnFaviconURLChange`, the read normalises the modal's domain. A mismatch there would look
+exactly like "this site has no icon", which is why neither side may hand-roll one.
+
+## 🧹 Now uncalled, reported rather than deleted
+
+`TabManager::GetFaviconUrlForHost` has no remaining caller. ⛔ **Left in place deliberately** — it is a
+public method with two verbatim platform arms, and *this exact symbol* already took the macOS link
+down once by existing on only one side (`TabManager_mac.mm:654-661`). Deleting it is an API change,
+not part of a behaviour fix, and would conflict with an in-flight Windows branch. Your call.
+⚠️ Its stale mention in `HttpRequestInterceptor.h` **was** corrected — that sentence became false.
+
+## ⬜ Not covered by a unit test, and why
+
+`FaviconParamForDomain` sits in a CEF-heavy TU and `GetDataUri` uses `CefBase64Encode`, while
+`hodos_tests` deliberately links no CEF. The evidence is the T2 pair above, which is the stronger
+instrument here anyway — it exercises the real prompt path end to end.
+
+## ⚠️ Two traps found while measuring, both in `consent_favicon_probe.py`'s docstring
+
+1. ⛔ **An unanswered prompt silently blocks the next one.** `FireHodosPermissionPrompt` returns false
+   while `PendingPermissionManager` still holds one, deferring to Chromium's own UI — and
+   `OnShowPermissionPrompt` still logs, so the log looks healthy while no overlay appears. It cost a
+   run here. Restart the browser, or answer the prompt, between subjects.
+2. ⚠️ The subject site must be **https** — geolocation is refused on an insecure origin and the
+   refusal is invisible from CDP.
+
+## 🧑 Still owed to a human
+
+⚠️ `HUMAN_TEST_QUEUE.md` `D6` — a person should look at a consent prompt for a first-visit site and
+confirm the letter-tile fallback reads as deliberate now that it fires slightly more often.
+
+---
 # 📋 ROUND 2026-09-09b (**Mac**) — Phase 7 `M4` #1/#2 and Phase 7c `M4` all six rows are **RUN**. Plus one finding that needs an owner decision.
 
 **Base:** `79b9bc0` (branch `0.4.0`; `git pull --rebase` = *Already up to date* — no rebase needed,
@@ -60,7 +144,7 @@ the **same** "0 requests" — the vacuous green the last round warned about. It 
 that never mounted. So the DOM was read straight after: *"Netwatch Fixture / github.com / This site
 is asking permission to: Do a thing[1] p / Decline / Connect"*. The modal was up. The zero counts.
 
-## D. 🆕 Finding — the consent surface **still makes a third-party request** for any site whose icon is off-host. Needs an owner decision; **no code changed.**
+## D. 🆕 Finding — the consent surface **still makes a third-party request** for any site whose icon is off-host. ✅ **FIXED the same day — see round 2026-09-09c above.** (Written when it was still an open question; left as the record of how it was found.)
 
 This is not a regression of the old defect, and it is narrower than it. Recorded because
 `TICKET_consent_surface_fetches_third_party_favicon.md` states the goal as *"no third-party request

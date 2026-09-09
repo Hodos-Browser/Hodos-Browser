@@ -38,9 +38,12 @@ consent surface, and it cannot, because that surface does not read the store.
 The store-hit control lives on the new tab instead (`netwatch_page.py newtab`
 plus a byte-count check against `favicons.db`), which does use `favicon_get`.
 
-⛔ See the round's finding on `&favicon=<remote url>`: the param C++ builds is a
-REMOTE url (`HttpRequestInterceptor.cpp :: FaviconParamForDomain`), and the
-overlay does issue a request for it — measured with an unresolvable host.
+⛔ ⭐ UPDATE, same day: the finding this note recorded — that the param C++ builds
+was a REMOTE url and the overlay issued a request for it — has been **FIXED**.
+`FaviconParamForDomain` now emits the stored bytes as a `data:` URI. ⇒ For this
+row use **`consent_favicon_probe.py`**, which triggers a real permission prompt
+so the param comes from C++ rather than from the harness. This script remains
+useful only for the React half (does the overlay fetch what it is handed).
 
 Usage:  netwatch_domain.py <domain> [expected_png_bytes]
 """

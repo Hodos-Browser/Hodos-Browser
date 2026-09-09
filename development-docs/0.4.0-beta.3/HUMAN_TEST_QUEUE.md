@@ -83,6 +83,7 @@ Source: `MAC_RELAY_P3_ROUND.md` M2.1, `MAC_RELAY_P35_P4_ROUND.md` M2.
 | D3 | **Phase 0.8 connect modal** — card is **840 px in a 794 px window** (23 px off top and bottom, nothing scrolls) | 👤 Owner's call: **make it fit, no scrollbar** |
 | D4 | **Phase 7c connect modal** now that the Quiet-mode checkbox and callout are gone | Confirm the layout still looks deliberate rather than leaving a gap |
 | D5 | **`D1` overlay sizing contract** | 4 of 8 overlay heights disagree across platforms. Recommendation on record: derive window height from content rather than re-tuning constants |
+| D6 | **Consent prompt on a FIRST-visit site**, after the 2026-09-09 favicon change | The icon now comes from `FaviconStore`, which fills asynchronously, so a first visit can show the domain-initial tile where it previously showed the site's icon. 📏 Measured correct (`brokenImgs: 0`, tile renders); what a human owes is whether it *reads* as deliberate |
 
 ## E. Needs real money or real hardware
 

@@ -365,8 +365,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     const t = window.setTimeout(() => setEditCloseHintTick(0), 2200);
     return () => window.clearTimeout(t);
   }, [editCloseHintTick]);
-  // beta.3 Phase 7b — the PAGE'S OWN favicon URL, supplied by C++ from
-  // `Tab::favicon_url` (populated by OnFaviconURLChange for the tab strip).
+  // beta.3 Phase 7b — the page's own favicon, supplied by C++.
   //
   // 🚨 This replaces `https://www.google.com/s2/favicons?domain=<site>`, which
   // every consent modal rendered — telling Google which site the user was being
@@ -374,10 +373,20 @@ const BRC100AuthOverlayRoot: React.FC = () => {
   // and whether or not they read it. From a privacy browser, on its most
   // sensitive surface.
   //
+  // ⭐ 2026-09-09: this is now a `data:image/png;base64,…` URI carrying the icon's
+  // BYTES, read from the local FaviconStore by
+  // `HttpRequestInterceptor.cpp :: FaviconParamForDomain`. ~~It used to be
+  // `Tab::favicon_url`~~ — the site's own *remote* icon URL — and an <img src>
+  // pointing at one still makes a request: measured on macOS, a prompt for a site
+  // whose icon is off-host (google.com's lives on gstatic.com) fetched from that
+  // third party at the instant of the decision. The name is kept because it is
+  // still "the page's own icon"; only where the bytes come from changed.
+  //
   // ⛔ Empty is normal and must stay renderable: C++ returns "" rather than
   // guessing, because the wrong site's icon on a consent screen is worse than
   // no icon. Empty falls through to the domain-initial avatar. ⛔ Never restore
-  // a remote lookup as the fallback.
+  // a remote lookup as the fallback — not google.com/s2, and not the site's own
+  // icon URL either.
   const [pageFaviconUrl, setPageFaviconUrl] = useState('');
 
   // Payment/rate-limit params
