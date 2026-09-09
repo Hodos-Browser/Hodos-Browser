@@ -11,6 +11,7 @@
 #include "../../include/core/JsStringEscape.h"  // F6: canonical escapeJsonForJs encoder
 
 #include "wrapper/cef_helpers.h"
+#include "include/cef_task.h"
 #include "include/cef_v8.h"
 #include <iostream>
 #include <cstdio>
@@ -351,6 +352,40 @@ void RejectBridgeCall(int requestId, const std::string& error) {
     pending.context->Exit();
 }
 
+// How long a migrated bridge call may stay unanswered before it is rejected.
+//
+// ⚠️ Deliberately generous. Some wallet calls reach the network, and a deadline that
+// kills legitimate slow work is its own defect. This is a backstop against a browser
+// process that never replies — not a latency budget.
+static const int64_t kBridgeCallTimeoutMs = 30000;
+
+// Rejects one bridge call if it is still pending when the deadline fires.
+//
+// ⭐ Safe by construction when the reply already arrived: `TakeBridgeCall` no-ops on an
+// id that is no longer in the map, so a task that fires after a successful response
+// simply finds nothing. That is why this needs no cancellation and no bookkeeping.
+class BridgeCallDeadlineTask : public CefTask {
+public:
+    explicit BridgeCallDeadlineTask(int requestId) : requestId_(requestId) {}
+
+    void Execute() override {
+        // Only a call that is STILL pending gets here in any meaningful sense — but log
+        // before the no-op check so a genuine timeout is visible. A browser process that
+        // stopped answering is exactly the kind of failure that must not be silent.
+        if (s_pendingBridgeCalls.count(requestId_)) {
+            LOG_WARNING_RENDER("🌉 bridge call " + std::to_string(requestId_) +
+                               " (" + s_pendingBridgeCalls[requestId_].method +
+                               ") timed out — the browser process never replied");
+        }
+        RejectBridgeCall(requestId_,
+                         "timed out after " + std::to_string(kBridgeCallTimeoutMs / 1000) + "s");
+    }
+
+private:
+    int requestId_;
+    IMPLEMENT_REFCOUNTING(BridgeCallDeadlineTask);
+};
+
 // `window.hodosBrowser.bridge.<method>()` — returns a real Promise, routed by id.
 //
 // ⚠️ Registered on its own `bridge` object rather than onto `hodosBrowser.wallet`.
@@ -394,6 +429,17 @@ public:
         retval = CefV8Value::CreatePromise();
         s_pendingBridgeCalls[requestId] = { retval, context, method };
         context->GetBrowser()->GetMainFrame()->SendProcessMessage(PID_BROWSER, msg);
+
+        // ⛔ Arm the deadline. Without it an unanswered call hangs the caller FOREVER and
+        // leaks its map entry for the life of the process — `App.tsx` awaits
+        // `wallet.getStatus()` during startup, so that would be a silent boot stall.
+        // The legacy per-method `setTimeout` this replaced was crude but it was a
+        // backstop; dropping it without a replacement would be a regression.
+        //
+        // ⚠️ Renderer thread: `s_pendingBridgeCalls` is renderer-thread-only
+        // (`CEF_REQUIRE_RENDERER_THREAD` in TakeBridgeCall), so the task must land there.
+        CefPostDelayedTask(TID_RENDERER, new BridgeCallDeadlineTask(requestId),
+                           kBridgeCallTimeoutMs);
 
         LOG_DEBUG_RENDER("🌉 bridge " + method + " -> " + ipcName +
                          " (requestId " + std::to_string(requestId) + ")");

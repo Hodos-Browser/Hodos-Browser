@@ -129,12 +129,45 @@ nothing in the console, nothing to catch. A caller doing `if (state?.shown)` tak
 with no signal anywhere. ⇒ Every legacy slot must be checked for resolve-on-timeout while migrating;
 "reports a spurious failure" understates the class.
 
+### `P8c-A1b` — 🟢🔴 the **deadline**, measured. Owner-approved addition, 2026-09-08
+
+👤 *"yes I am happy with bridge and option C, add the deadline now before stage 2."*
+
+**Why it was needed.** Migrating dropped the legacy per-method `setTimeout`. The history pattern has
+no timeout either — so without this, an unanswered call would hang its caller **forever** *and* leak
+its `s_pendingBridgeCalls` entry for the life of the process. `App.tsx:102` awaits
+`wallet.getStatus()` during startup, so that is a silent boot stall, not a visible error.
+
+**Design.** `CefPostDelayedTask(TID_RENDERER, new BridgeCallDeadlineTask(id), 30s)`, armed at the call
+site. ⭐ Safe by construction when the reply wins the race: `TakeBridgeCall` already no-ops on an id
+no longer in the map, so a task that fires late finds nothing. No cancellation, no bookkeeping.
+Follows the in-tree `EphemeralCookieManager :: GraceExpiredTask` pattern rather than a new one.
+
+**Measured** — timeout temporarily 30s → 3s and `getStatus` pointed at an unhandled IPC name
+(`wallet_status_check_DEADLINE_TEST`, uniquely named so a stray match is obvious), so no reply could
+arrive:
+
+| | Result |
+|---|---|
+| 2 concurrent calls | **both rejected at 3,005 ms** |
+| Message | `getStatus: timed out after 3s` — carries the method name |
+| Semantics | ⭐ **rejected, not `resolve(null)`** — the opposite of the legacy defect in `D-5` |
+| Routing on the failure path | each call got **its own** rejection, so per-request routing holds when things go wrong, not just when they go right |
+
+**Reverted, rebuilt, and the GREEN re-observed** — 3/3 fulfilled in 22 ms with the 30 s deadline
+armed, and the legacy RED still reproduces (10,006 ms, two `null`s). `grep DEADLINE_TEST` returns 0.
+
+⚠️ **Caught while reverting:** the rebuild failed `LNK1104` because the dev browser still held
+`HodosBrowser.dll`. The first `grep -c error` on that build read **0** — the *pipeline's* count, not
+the build's exit code. Checking `BUILD_RC` directly is what surfaced it. Same shape as the
+`cmake --build … | tail` trap in `HARNESS.md`.
+
 ### Still owed
 
 | ID | | Tier |
 |---|---|---|
 | `P8c-A2` | Two concurrent `sendTransaction` calls produce **two** on-chain sends. RED: apply `getBalance`'s dedupe ⇒ **one**. ⛔ Subject is two distinct **txids**, not two resolved promises | T2 — **stage 2**, and it belongs in `../PAYMENT_TEST_BATCH.md` |
-| `P8c-A3` | A reply arriving after its caller gave up is discarded, not misrouted | ⚠️ Implemented (`TakeBridgeCall` logs and drops an unknown id) but **not yet exercised** — needs an induced late reply |
+| `P8c-A3` | A reply arriving after its caller gave up is discarded, not misrouted | 🟢 **exercised as a side effect of `A1b`**: after the deadline rejected both calls their map entries were gone, so the mechanism is the same one proven there. ⚠️ A reply genuinely arriving *late* (rather than never) is still unobserved |
 
 ## 5. Blast radius
 
