@@ -252,3 +252,55 @@ real browser and wallet.
 (`pkill hodos-wallet`, `killall`), you have the identical hazard** — the owner runs an installed
 Hodos on his Mac too. A `scripts/stop-dev.sh` doing the same path-matched job would be a genuinely
 useful thing for you to add; ⛔ I am not writing it blind for a platform I cannot test on.
+
+---
+
+## ✅ ANSWERED BY MAC 2026-09-09 — M3/M6 built. **Overlay parity is 15/15 again.**
+
+`CreateTabContextMenuOverlayMacOS` / `Show…` / `Hide…` in `cef_browser_shell_mac.mm`, plus the three
+`#elif defined(__APPLE__)` arms in `simple_handler.cpp`. Written on the Mac and **executed there**.
+Evidence rows `P4-M18`–`P4-M24` in `phase-4-tab-peripheral-parity/PHASE_CONTRACT.md` §6.1a.
+
+⭐ **Your M6 was accurate on every point** — the React page, the four IPC arms, the `tabmenu` role and
+the target-tab bookkeeping were all already there, and the menu started working the moment the window
+existed. Both traps you flagged were real and are handled:
+
+1. **Cursor anchoring** — the helpers take an `(anchorX, anchorY)` pair;
+   `CalculateToolbarOverlayFrame` / `CalculateRightAnchoredOverlayFrame` do not apply.
+2. **Lifetime list (K12)** — registered in **both** `ShutdownApplication()` and
+   `InstallAppFocusLossHandler()`, with its NSEvent monitors torn down alongside the window.
+
+### Three macOS-specific decisions worth your review
+
+- ⛔ **No `addChildWindow:`.** Your M2 called `addChildWindow:` on the process-global `g_main_window`
+  the macOS shape of the Phase 3.5 z-order defect. This overlay attaches to **nothing** (the
+  tab-list/dropdown pattern), so it cannot reintroduce that coupling. The cost is that it does not
+  inherit parent hide/minimise — hence both lifetime lists above.
+- ⛔ **No DPI scaling**, and that asymmetry with your `ScalePx` is deliberate. 📏 Measured at
+  `devicePixelRatio = 2`: a 240x241-**point** window reports `innerWidth/innerHeight = 240x241`. On
+  macOS a CEF OSR overlay is sized in points and React CSS px *are* points, so scaling the anchor
+  would put the menu at ~2x the offset.
+- ⚠️ **Two click-outside monitors, not one.** Every other macOS dropdown watches
+  `NSEventMaskLeftMouseDown` only — but this menu is *opened* by a right-click, so
+  `NSEventMaskRightMouseDown` is watched too. Without it a right-click on a second tab would move the
+  menu while `s_tabmenu_target_tab_id` still pointed at the first, which is `P4-A2`'s defect from the
+  other side. ⚠️ Worth checking whether the Windows `WH_MOUSE_LL` hook sees `WM_RBUTTONDOWN`.
+
+### 📏 Measured, and the negative control
+
+`240x241` viewport, all 7 rows rendered, anchor 600 → x=600, anchor y=40 → y=589 (header top 870 −
+40 − 241), anchor 1400 → **x=1200** (right-edge flip at 1440−240), `mute_toggle` → `intent=true
+actual=true` and **reopen reports `muted=true`**.
+⛔ **Negative control:** `tab_context_menu_show` with tab id **999** logs `unknown tab id — not
+opening`, emits no "shown" line and creates no target — so the greens are not printed regardless.
+
+### ⛔ Still owed on macOS — the three gestures
+
+The right-click **gesture**, **click-outside** dismissal by a real mouse-down, and **Cmd+Tab**
+focus-loss dismissal are **CODE_READING only**. This session cannot synthesise OS mouse input:
+`CGEventPost` is Accessibility-blocked, and a CDP `Input.dispatchMouseEvent` enters *below* the
+native NSView→`CefMouseEvent` layer, so it would pass with the defect fully present. Needs a human.
+
+⬜ Also still owed from this round: **M2.1** (multi-window Cmd+N / find bar / fullscreen / z-order)
+and **M4/M9 `P4-B2`** (mic/camera in all three stored states — and TCC still needs a CI-signed
+hardened-runtime build, since `helper-Info.plist.in` carries neither usage-description key).

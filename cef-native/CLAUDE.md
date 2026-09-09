@@ -372,13 +372,28 @@ That is 15 overlay HWNDs, 15 overlay WndProcs (+ `ShellWindowProc` for the main 
 
 Most also have a `Show…Overlay(offset, targetWin)` / `Hide…Overlay()` pair in the same file (wallet, omnibox, cookie, download, siteinfo, tablist, bookmarks, menu, profile). Settings / backup / brc100auth / notification / settings_menu are create-and-show only.
 
-**macOS — 14, all in `cef_browser_shell_mac.mm`** (NSPanel-based, not `WS_POPUP`):
-`CreateSettingsOverlayWithSeparateProcess`, `CreateWalletOverlayWithSeparateProcess`, `CreateBackupOverlayWithSeparateProcess`, `CreateBRC100AuthOverlayWithSeparateProcess`, `CreateNotificationOverlay`, `CreateSettingsMenuOverlay`, `CreateCookiePanelOverlayWithSeparateProcess`, `CreateOmniboxOverlayMacOS`, `CreateDownloadPanelOverlayMacOS`, `CreateProfilePanelOverlayMacOS`, `CreateBookmarksPanelOverlayMacOS`, `CreateSiteInfoPanelOverlayMacOS`, `CreateTabListPanelOverlayMacOS`, `CreateMenuOverlayMac` (plus a `CreateMenuOverlay(void*, bool, int)` shim matching the Windows signature).
+**macOS — 15, all in `cef_browser_shell_mac.mm`** (borderless `NSWindow`, not `NSPanel` and not `WS_POPUP`):
+`CreateSettingsOverlayWithSeparateProcess`, `CreateWalletOverlayWithSeparateProcess`, `CreateBackupOverlayWithSeparateProcess`, `CreateBRC100AuthOverlayWithSeparateProcess`, `CreateNotificationOverlay`, `CreateSettingsMenuOverlay`, `CreateCookiePanelOverlayWithSeparateProcess`, `CreateOmniboxOverlayMacOS`, `CreateDownloadPanelOverlayMacOS`, `CreateProfilePanelOverlayMacOS`, `CreateBookmarksPanelOverlayMacOS`, `CreateSiteInfoPanelOverlayMacOS`, `CreateTabListPanelOverlayMacOS`, `CreateMenuOverlayMac`, `CreateTabContextMenuOverlayMacOS` (plus a `CreateMenuOverlay(void*, bool, int)` shim matching the Windows signature).
 
-⛔ **Windows and macOS are NO LONGER at parity: Windows 15, macOS 14.** beta.3 Phase 4 added the tab
-context menu (`CreateTabContextMenuOverlay`) on Windows only; the macOS creation function is relayed
-in `development-docs/0.4.0-beta.3/MAC_RELAY_P35_P4_ROUND.md` (M3) per invariant #9 and has not been
-written. Nothing is broken meanwhile — macOS simply has no tab context menu.
+✅ **Parity restored 2026-09-09: Windows 15, macOS 15.** beta.3 Phase 4 added the tab context menu
+on Windows only; the macOS half (`CreateTabContextMenuOverlayMacOS`) was written and runtime-verified
+on 2026-09-09 — see `development-docs/0.4.0-beta.3/MAC_RELAY_P35_P4_ROUND.md` (M3/M6) and the
+`P4-M18` row.
+
+⚠️ **The tab context menu is the ONE overlay of the 15 anchored to the CURSOR**, not to a toolbar
+icon, so its create/show take an `(anchorX, anchorY)` pair rather than an icon offset and neither
+`CalculateToolbarOverlayFrame` nor `CalculateRightAnchoredOverlayFrame` applies to it.
+
+⛔ **Two macOS-specific things about it that are deliberate, not oversights.** (1) It calls **no**
+`addChildWindow:` — the menu/settings overlays attach to the process-global `g_main_window`, which
+`MAC_RELAY_P35_P4_ROUND.md` M2 identifies as the macOS shape of the Phase 3.5 z-order defect; this
+one attaches to nothing, so it cannot reintroduce that coupling. The cost is that it does **not**
+inherit parent hide/minimise, which is why it is registered in **both** `ShutdownApplication()` and
+`InstallAppFocusLossHandler()` (Phase 3.5's K12 hazard in its macOS form). (2) It applies **no DPI
+scaling** to the anchor, unlike the Windows arm's `ScalePx`: a CEF OSR overlay on macOS is sized in
+**points** and React CSS px are points. 📏 Measured on a Retina display — the overlay window is
+240x241 points and the page reports `innerWidth/innerHeight = 240x241` at `devicePixelRatio = 2`.
+Scaling the anchor would place the menu at roughly twice the intended offset.
 
 ### Rendering Modes
 

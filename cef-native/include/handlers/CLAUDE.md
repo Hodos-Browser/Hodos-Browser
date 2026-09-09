@@ -81,7 +81,7 @@ Windows — defined in `src/handlers/simple_app.cpp`. Sizes are logical px passe
 
 Each also has paired `Show*Overlay(...)` / `Hide*Overlay()` functions (except the modal/full-screen four, which are created-on-demand and destroyed on close).
 
-macOS — defined in `cef_browser_shell_mac.mm`. Same 14 overlays; naming diverges (`…WithSeparateProcess` for the early ports, `…MacOS` / `…Mac` for the later ones):
+macOS — defined in `cef_browser_shell_mac.mm`. Same 15 overlays since 2026-09-09 (`CreateTabContextMenuOverlayMacOS` closed the Phase 4 gap); naming diverges (`…WithSeparateProcess` for the early ports, `…MacOS` / `…Mac` for the later ones):
 
 | Function | Corresponding Windows function |
 |----------|-------------------------------|

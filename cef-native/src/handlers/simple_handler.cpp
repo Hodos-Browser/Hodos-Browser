@@ -3724,10 +3724,23 @@ bool SimpleHandler::OnProcessMessageReceived(
         }
         SendTabMenuContext(GetTabMenuBrowser());
 #elif defined(__APPLE__)
-        // 🍎 Not built here. The macOS creation function is relayed in
-        // MAC_RELAY_P35_P4_ROUND.md (M3), per invariant #9. Windows has 15 overlays,
-        // macOS has 14 — nothing is broken meanwhile; macOS simply has no tab menu.
-        LOG_DEBUG_BROWSER("📑 Tab context menu: no macOS implementation yet");
+        // 🍎 Overlay #15, macOS half — cef_browser_shell_mac.mm.
+        // ⚠️ NO ScalePx here, and that asymmetry with the Windows arm above is
+        // deliberate rather than an omission: a CEF OSR overlay on macOS is sized in
+        // POINTS and React CSS px are points, so the anchor already arrives in the
+        // right unit. Scaling it would put the menu at ~2x the offset on a Retina
+        // display. (The mixed-DPI case P3.5-A3 guards against does not arise the same
+        // way — AppKit hands each screen its own backing scale factor.)
+        extern void CreateTabContextMenuOverlayMacOS(int anchorX, int anchorY);
+        extern void ShowTabContextMenuOverlayMacOS(int anchorX, int anchorY);
+        extern NSWindow* g_tabmenu_overlay_window;
+
+        if (!g_tabmenu_overlay_window) {
+            CreateTabContextMenuOverlayMacOS(anchorX, anchorY);
+        } else {
+            ShowTabContextMenuOverlayMacOS(anchorX, anchorY);
+        }
+        SendTabMenuContext(GetTabMenuBrowser());
 #endif
         return true;
     }
@@ -3744,6 +3757,9 @@ bool SimpleHandler::OnProcessMessageReceived(
 #ifdef _WIN32
         extern void HideTabContextMenuOverlay();
         HideTabContextMenuOverlay();
+#elif defined(__APPLE__)
+        extern void HideTabContextMenuOverlayMacOS();
+        HideTabContextMenuOverlayMacOS();
 #endif
         return true;
     }
@@ -3755,6 +3771,12 @@ bool SimpleHandler::OnProcessMessageReceived(
 #ifdef _WIN32
         extern void HideTabContextMenuOverlay();
         HideTabContextMenuOverlay();
+#elif defined(__APPLE__)
+        // Hide BEFORE acting, same ordering as Windows: "close tab" destroys the tab the
+        // menu was opened on, and leaving the menu up over a tab that no longer exists
+        // is how the overlay ends up orphaned.
+        extern void HideTabContextMenuOverlayMacOS();
+        HideTabContextMenuOverlayMacOS();
 #endif
 
         // ⛔ The target is the REMEMBERED right-clicked tab. Substituting GetActiveTab()

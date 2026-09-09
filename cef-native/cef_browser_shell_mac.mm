@@ -274,6 +274,10 @@ NSWindow* g_profile_panel_overlay_window = nullptr;
 NSWindow* g_bookmarks_panel_overlay_window = nullptr;
 NSWindow* g_siteinfo_panel_overlay_window = nullptr;
 NSWindow* g_tablist_panel_overlay_window = nullptr;
+// Overlay #15 — the tab context menu (beta.3 Phase 4). ⚠️ The ONLY overlay of the 15
+// anchored to the CURSOR rather than to a toolbar icon, so its create/show take an
+// (anchorX, anchorY) pair instead of an icon offset.
+NSWindow* g_tabmenu_overlay_window = nullptr;
 
 // QR screen capture overlay
 static NSWindow* g_qr_selection_window = nullptr;
@@ -321,6 +325,15 @@ static CFAbsoluteTime g_siteinfo_panel_last_hide_time = 0;
 // Tab-list panel overlay monitors
 static id g_tablist_panel_click_monitor = nil;
 static CFAbsoluteTime g_tablist_panel_last_hide_time = 0;
+
+// Tab context menu overlay monitor (overlay #15).
+// ⚠️ Two monitors, not one: every other dropdown here watches LEFT mouse-down only,
+// but this menu is OPENED by a right-click. Watching left only would let a right-click
+// on a second tab arrive at the header while the menu for the first tab is still on
+// screen — the menu would jump to the new anchor with the old target still remembered
+// in s_tabmenu_target_tab_id, which is P4-A2's defect surfaced from the other side.
+static id g_tabmenu_click_monitor = nil;
+static id g_tabmenu_rclick_monitor = nil;
 
 // Server process management
 static pid_t g_wallet_server_pid = -1;
@@ -641,6 +654,12 @@ void ShowTabListPanelOverlayMacOS(int iconRightOffset);
 void HideTabListPanelOverlayMacOS();
 bool IsTabListPanelOverlayVisible();
 bool WasTabListPanelJustHidden();
+// Overlay #15 — tab context menu. ⚠️ Cursor-anchored: (anchorX, anchorY) are CSS px in
+// the HEADER browser's viewport (top-left origin, Y down), straight from the React
+// onContextMenu event's clientX/clientY.
+void CreateTabContextMenuOverlayMacOS(int anchorX, int anchorY);
+void ShowTabContextMenuOverlayMacOS(int anchorX, int anchorY);
+void HideTabContextMenuOverlayMacOS();
 void ShutdownApplication();
 void ToggleFullScreenMacOS();
 
@@ -4691,6 +4710,264 @@ void CreateTabListPanelOverlayMacOS(int iconRightOffset) {
 }
 
 // ============================================================================
+// TAB CONTEXT MENU OVERLAY (overlay #15) — beta.3 Phase 4, macOS half
+// ============================================================================
+// Windows equivalent: simple_app.cpp :: Create/Show/HideTabContextMenuOverlay.
+// Relayed as the one genuinely macOS-shaped item of Phase 4 in
+// MAC_RELAY_P35_P4_ROUND.md (M3/M6). Everything else — the React page
+// (/tab-context-menu), the four IPC arms, the `tabmenu` role slot, the target-tab
+// bookkeeping and the mute state — is already cross-platform and starts working the
+// moment this window exists.
+//
+// ⭐ WHAT MAKES THIS ONE DIFFERENT FROM THE OTHER 14: it is anchored to the CURSOR,
+// not to a toolbar icon. The positioning helpers here take an anchor point; the
+// CalculateToolbarOverlayFrame / CalculateRightAnchoredOverlayFrame pair every other
+// dropdown uses does not apply.
+//
+// ⛔ NO `addChildWindow:`. The menu/settings overlays attach themselves to the
+// process-global `g_main_window`, and MAC_RELAY_P35_P4_ROUND.md M2 identifies that as
+// the macOS shape of the Phase 3.5 z-order defect (AppKit child windows order WITH
+// their parent, so a dropdown opened in a secondary window drags the primary forward).
+// This overlay follows the tab-list/dropdown pattern instead, which attaches to
+// nothing — so it cannot reintroduce that coupling. ⚠️ That also means it does not
+// inherit parent-window hide/minimise for free, which is why it is registered in BOTH
+// InstallAppFocusLossHandler() and ShutdownApplication() below.
+//
+// ⚠️ NO DPI SCALING, deliberately — this is NOT an omission of the Windows ScalePx
+// step. Windows converts CSS px -> physical px because its overlays are sized in
+// physical pixels; on macOS a CEF OSR overlay is sized in POINTS and React CSS px are
+// points, so the anchor arrives in the right unit already. Scaling it here would put
+// the menu at roughly twice the offset on a Retina display.
+
+// Menu geometry in points, pinned against the React side: 7 rows (7 x 32 = 224) +
+// 1 divider block (9) + container padding (2 x 4) = 241.
+// ⚠️ `ROW_HEIGHT` in TabContextMenuOverlayRoot.tsx carries the matching note. Adding a
+// menu item without changing this clips the last row — same contract as Windows'
+// kTabMenuWidthDip / kTabMenuHeightDip.
+static const CGFloat kTabMenuWidthPt  = 240;
+static const CGFloat kTabMenuHeightPt = 241;
+
+// Cursor anchor (header-local, top-down CSS px) -> Cocoa screen rect (bottom-left origin).
+static NSRect ComputeTabMenuFrameMac(int anchorX, int anchorY) {
+    NSRect contentScreen =
+        [g_main_window convertRectToScreen:[[g_main_window contentView] frame]];
+
+    // The anchor is relative to the HEADER browser's viewport, so resolve the header
+    // view's own screen rect rather than the window's content rect — they differ by the
+    // title bar, and using the window would push the menu down by that much.
+    NSRect anchorBase = contentScreen;
+    if (g_header_view) {
+        NSRect headerInWindow = [g_header_view convertRect:[g_header_view bounds] toView:nil];
+        anchorBase = [g_main_window convertRectToScreen:headerInWindow];
+    }
+
+    CGFloat menuX = NSMinX(anchorBase) + (CGFloat)anchorX;
+    // Cocoa's Y grows UPWARD and the anchor is measured DOWNWARD from the header's top,
+    // so subtract. Then drop by the menu height, because an NSWindow frame's origin is
+    // its BOTTOM-left corner while the menu should hang below the cursor.
+    CGFloat menuTopY = NSMaxY(anchorBase) - (CGFloat)anchorY;
+    CGFloat menuY = menuTopY - kTabMenuHeightPt;
+
+    // Keep the menu inside the window it belongs to. Flipping left off the right edge is
+    // what a native context menu does; clamping is enough vertically because the anchor
+    // is always in the tab strip at the very top. Mirrors Windows' ComputeTabMenuRect.
+    if (menuX + kTabMenuWidthPt > NSMaxX(contentScreen)) {
+        menuX = NSMaxX(contentScreen) - kTabMenuWidthPt;
+    }
+    if (menuX < NSMinX(contentScreen)) menuX = NSMinX(contentScreen);
+    if (menuY < NSMinY(contentScreen)) menuY = NSMinY(contentScreen);
+    if (menuY + kTabMenuHeightPt > NSMaxY(contentScreen)) {
+        menuY = NSMaxY(contentScreen) - kTabMenuHeightPt;
+    }
+
+    // Final guard: a window narrower than the menu, or dragged part-way off screen,
+    // would otherwise place it outside the visible frame.
+    return ClampOverlayToScreen(NSMakeRect(menuX, menuY, kTabMenuWidthPt, kTabMenuHeightPt));
+}
+
+static void RemoveTabMenuClickOutsideMonitor() {
+    if (g_tabmenu_click_monitor) {
+        [NSEvent removeMonitor:g_tabmenu_click_monitor];
+        g_tabmenu_click_monitor = nil;
+    }
+    if (g_tabmenu_rclick_monitor) {
+        [NSEvent removeMonitor:g_tabmenu_rclick_monitor];
+        g_tabmenu_rclick_monitor = nil;
+    }
+}
+
+static void InstallTabMenuClickOutsideMonitor() {
+    if (g_tabmenu_click_monitor && g_tabmenu_rclick_monitor) return;
+
+    // One block, two masks. Returning the event unmodified lets the click through, so a
+    // right-click on another tab both dismisses this menu AND reaches the header, which
+    // re-opens the menu on the new tab with the new target id.
+    NSEvent* (^dismiss)(NSEvent*) = ^NSEvent*(NSEvent* event) {
+        if (!g_tabmenu_overlay_window || ![g_tabmenu_overlay_window isVisible]) {
+            return event;
+        }
+        // A native file dialog steals activation without the user having "clicked away";
+        // g_file_dialog_active is the shared guard the other dropdowns honour.
+        if (g_file_dialog_active) {
+            return event;
+        }
+        NSPoint screenLocation = [NSEvent mouseLocation];
+        if (!NSPointInRect(screenLocation, [g_tabmenu_overlay_window frame])) {
+            HideTabContextMenuOverlayMacOS();
+        }
+        return event;
+    };
+
+    if (!g_tabmenu_click_monitor) {
+        g_tabmenu_click_monitor =
+            [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown
+                                                  handler:dismiss];
+    }
+    if (!g_tabmenu_rclick_monitor) {
+        g_tabmenu_rclick_monitor =
+            [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskRightMouseDown
+                                                  handler:dismiss];
+    }
+}
+
+void HideTabContextMenuOverlayMacOS() {
+    if (!g_tabmenu_overlay_window) return;
+
+    [g_tabmenu_overlay_window orderOut:nil];
+    RemoveTabMenuClickOutsideMonitor();
+
+    CefRefPtr<CefBrowser> tabmenu_browser = SimpleHandler::GetTabMenuBrowser();
+    if (tabmenu_browser && tabmenu_browser->GetHost()) {
+        tabmenu_browser->GetHost()->SetFocus(false);
+    }
+
+    // Hand the keyboard back to the header, or the tab strip stays dead after the menu
+    // closes. Windows reads the owner HWND to pick the window; macOS has no owner here
+    // (see the addChildWindow note above), so it goes to the header browser directly.
+    CefRefPtr<CefBrowser> header_browser = SimpleHandler::GetHeaderBrowser();
+    if (header_browser && header_browser->GetHost()) {
+        header_browser->GetHost()->SetFocus(true);
+    }
+
+    LOG_INFO("Tab context menu overlay hidden (macOS)");
+}
+
+void ShowTabContextMenuOverlayMacOS(int anchorX, int anchorY) {
+    if (!g_tabmenu_overlay_window) {
+        LOG_WARNING("Cannot show tab context menu overlay - window does not exist");
+        return;
+    }
+
+    NSRect menuFrame = ComputeTabMenuFrameMac(anchorX, anchorY);
+    [g_tabmenu_overlay_window setFrame:menuFrame display:YES];
+    [g_tabmenu_overlay_window makeKeyAndOrderFront:nil];
+
+    NSView* contentView = [g_tabmenu_overlay_window contentView];
+    [g_tabmenu_overlay_window makeFirstResponder:contentView];
+
+    // The window moved; the OSR browser has to be told or it keeps painting at the old
+    // size/scale after a move between displays of different backing scale.
+    CefRefPtr<CefBrowser> tabmenu_browser = SimpleHandler::GetTabMenuBrowser();
+    if (tabmenu_browser && tabmenu_browser->GetHost()) {
+        tabmenu_browser->GetHost()->NotifyScreenInfoChanged();
+        tabmenu_browser->GetHost()->WasResized();
+        tabmenu_browser->GetHost()->Invalidate(PET_VIEW);
+    }
+
+    InstallTabMenuClickOutsideMonitor();
+    LOG_INFO("Tab context menu overlay shown (macOS) at " +
+             std::to_string((int)menuFrame.origin.x) + "," +
+             std::to_string((int)menuFrame.origin.y));
+}
+
+void CreateTabContextMenuOverlayMacOS(int anchorX, int anchorY) {
+    LOG_INFO("Creating tab context menu overlay (macOS) anchor=" +
+             std::to_string(anchorX) + "," + std::to_string(anchorY));
+
+    if (!g_main_window) {
+        LOG_ERROR("Cannot create tab context menu overlay: main window is null");
+        return;
+    }
+
+    // Keep-alive, like every other overlay here: reuse the window and just reposition.
+    if (g_tabmenu_overlay_window) {
+        ShowTabContextMenuOverlayMacOS(anchorX, anchorY);
+        return;
+    }
+
+    NSRect menuFrame = ComputeTabMenuFrameMac(anchorX, anchorY);
+
+    g_tabmenu_overlay_window = [[DropdownOverlayWindow alloc]
+        initWithContentRect:menuFrame
+        styleMask:NSWindowStyleMaskBorderless
+        backing:NSBackingStoreBuffered
+        defer:NO];
+
+    if (!g_tabmenu_overlay_window) {
+        LOG_ERROR("Failed to create tab context menu overlay window");
+        return;
+    }
+
+    [g_tabmenu_overlay_window setOpaque:NO];
+    [g_tabmenu_overlay_window setBackgroundColor:[NSColor clearColor]];
+    // NSPopUpMenuWindowLevel so it sits above the other dropdowns, matching what a
+    // native context menu does and mirroring Windows' HWND_TOPMOST.
+    [g_tabmenu_overlay_window setLevel:NSPopUpMenuWindowLevel];
+    [g_tabmenu_overlay_window setIgnoresMouseEvents:NO];
+    [g_tabmenu_overlay_window setReleasedWhenClosed:NO];
+    [g_tabmenu_overlay_window setHasShadow:YES];
+    [g_tabmenu_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
+    [g_tabmenu_overlay_window setAcceptsMouseMovedEvents:YES];
+
+    DropdownOverlayView* contentView = [[DropdownOverlayView alloc]
+        initWithFrame:NSMakeRect(0, 0, kTabMenuWidthPt, kTabMenuHeightPt)];
+    contentView.browserAccessor = ^CefRefPtr<CefBrowser>{
+        return SimpleHandler::GetTabMenuBrowser();
+    };
+    [g_tabmenu_overlay_window setContentView:contentView];
+
+    CefWindowInfo window_info;
+    window_info.SetAsWindowless((__bridge void*)contentView);
+
+    CefBrowserSettings settings;
+    settings.windowless_frame_rate = 30;
+    settings.background_color = CefColorSetARGB(0, 0, 0, 0);
+    settings.javascript = STATE_ENABLED;
+    settings.javascript_access_clipboard = STATE_ENABLED;
+    settings.javascript_dom_paste = STATE_ENABLED;
+
+    // Role "tabmenu" — the same string the 9 role consumers and BrowserWindow's slot
+    // use. ⚠️ GetTabMenuBrowser() reads a process STATIC rather than the window slot
+    // (simple_handler.cpp), so this works on the first open before any ref is filed.
+    CefRefPtr<SimpleHandler> handler(new SimpleHandler("tabmenu"));
+    CefRefPtr<MyOverlayRenderHandler> render_handler =
+        new MyOverlayRenderHandler((__bridge void*)contentView,
+                                   (int)kTabMenuWidthPt, (int)kTabMenuHeightPt);
+    handler->SetRenderHandler(render_handler);
+
+    bool result = CefBrowserHost::CreateBrowser(
+        window_info, handler,
+        "http://127.0.0.1:5137/tab-context-menu",
+        settings, nullptr, CefRequestContext::GetGlobalContext());
+
+    if (!result) {
+        LOG_ERROR("Failed to create tab context menu overlay CEF browser");
+        [g_tabmenu_overlay_window close];
+        g_tabmenu_overlay_window = nullptr;
+        return;
+    }
+
+    [g_tabmenu_overlay_window makeKeyAndOrderFront:nil];
+    [g_tabmenu_overlay_window makeFirstResponder:contentView];
+    InstallTabMenuClickOutsideMonitor();
+
+    // ⚠️ The page asks for its own context via tab_context_menu_request_context once its
+    // React effect runs, and that arm answers the browser that asked — so nothing needs
+    // to be pushed here, and pushing it would race the load.
+    LOG_INFO("Tab context menu overlay created successfully (macOS)");
+}
+
+// ============================================================================
 // Hide Application (Cmd+H)
 // ============================================================================
 
@@ -5006,6 +5283,17 @@ void ShutdownApplication() {
         LOG_INFO("🔄 Closing cookie panel overlay window...");
         [g_cookie_panel_overlay_window close];
         g_cookie_panel_overlay_window = nullptr;
+    }
+
+    // Overlay #15 (tab context menu). ⚠️ It attaches to no parent window by design, so
+    // unlike the child-window overlays it is NOT torn down for free — Phase 3.5's K12
+    // hazard, in its macOS form. Its event monitors must go with it: a live NSEvent
+    // monitor whose block captures a freed window is a crash at the next click.
+    if (g_tabmenu_overlay_window) {
+        LOG_INFO("🔄 Closing tab context menu overlay window...");
+        RemoveTabMenuClickOutsideMonitor();
+        [g_tabmenu_overlay_window close];
+        g_tabmenu_overlay_window = nullptr;
     }
 
     if (g_omnibox_overlay_window) {

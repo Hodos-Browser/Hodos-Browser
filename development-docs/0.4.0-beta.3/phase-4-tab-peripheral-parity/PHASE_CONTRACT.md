@@ -127,6 +127,36 @@ keeps paying for (same call as the Phase 3 round).
 `cef-native/CLAUDE.md` goes **stale the moment this phase lands** — update it in the landing commit
 rather than leaving a doc asserting 14/14 when it is 15/14.
 
+### ✅ 6.1a — BUILT AND RUNTIME-VERIFIED ON macOS 2026-09-09. Parity is 15/15.
+
+`CreateTabContextMenuOverlayMacOS` / `Show…` / `Hide…` in `cef_browser_shell_mac.mm`, plus the
+`#elif defined(__APPLE__)` arms in `simple_handler.cpp`'s `tab_context_menu_show` / `_hide` /
+`_action`. Written **on** the Mac and executed there, which is the condition §6.1 set.
+
+| ID | Claim | Evidence | Type |
+|---|---|---|---|
+| `P4-M18` | The overlay creates, loads its React page and renders all 7 rows | A 15th CDP target appears at `http://127.0.0.1:5137/tab-context-menu`; the page reports `bodyLen 4290` and the labels **Reload · Duplicate · New tab to the right · Bookmark tab · Mute tab · Close other tabs · Close tabs to the right** | 📏 MEASURED |
+| `P4-M19` | Geometry matches the React pin exactly | Page reports `innerWidth/innerHeight = 240 x 241` in a 240x241-**point** window — the 7 x 32 + 9 divider + 2 x 4 padding arithmetic holds on macOS too | 📏 MEASURED |
+| `P4-M20` | ⭐ **No DPI scaling is correct on macOS** | Same run at `devicePixelRatio = 2`. Window points == page CSS px, so the Windows `ScalePx` step has no macOS analogue; applying it would double the anchor offset | 📏 MEASURED |
+| `P4-M21` | Cursor anchoring converts top-down CSS px to Cocoa bottom-up screen coords correctly | Window spans x∈[0,1440], header top at Cocoa y=870. anchor 600 → **x=600**; anchor y=40 → 870−40−241 = **y=589**. Both logged exactly | 📏 MEASURED |
+| `P4-M22` | The right-edge flip works | anchor 1400 → clamped to **x=1200** = 1440 − 240, instead of running off the window | 📏 MEASURED |
+| `P4-M23` | ⛔ **NEGATIVE CONTROL** — the probe can detect a non-open | `tab_context_menu_show` with tab id **999** logs `unknown tab id 999 — not opening` and emits **no** "shown" line and no new target. So the greens above are not something the harness prints regardless | 📏 MEASURED |
+| `P4-M24` | An action mutates real tab state, hiding the menu first | `muted=false` → `mute_toggle` → `intent=true actual=true` → **reopening reports `muted=true`**. The subject is the tab's state read back, not the log line | 📏 MEASURED |
+
+⛔ **What is NOT verified, and needs a human at the machine.** All three are input-gesture bound, and
+this session cannot synthesise OS mouse input — `CGEventPost` is Accessibility-blocked and a CDP
+`Input.dispatchMouseEvent` enters *below* the native NSView→`CefMouseEvent` layer, so it would pass
+with the defect present:
+
+- the **right-click gesture itself** on a tab (the React `onContextMenu` → IPC hop is shared code and
+  unchanged, but it has never been executed on macOS);
+- **click-outside dismissal** by a real mouse-down, including the deliberately added
+  `NSEventMaskRightMouseDown` monitor — CODE_READING only;
+- **app-focus-loss dismissal** (Cmd+Tab) via the new `InstallAppFocusLossHandler` arm.
+
+⇒ The IPC path, geometry, rendering, context delivery, hide and actions are **measured**; the three
+mouse/focus gestures are **owed**.
+
 ## 7. Out of scope
 
 ⛔ Pin · mute tab · mute site · macOS · anything touching `session.json` (it carries an open defect) ·

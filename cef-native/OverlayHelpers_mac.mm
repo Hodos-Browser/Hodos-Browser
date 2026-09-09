@@ -237,6 +237,17 @@ void InstallAppFocusLossHandler() {
                 HideTabListPanelOverlayMacOS();
             }
 
+            // Close the tab context menu (overlay #15). ⛔ Required, not optional:
+            // this one attaches to no parent window (see the addChildWindow note at
+            // its implementation), so it does not inherit the parent's hide/minimise
+            // and would otherwise sit on top of every other app after a Cmd+Tab.
+            extern NSWindow* g_tabmenu_overlay_window;
+            if (g_tabmenu_overlay_window && [g_tabmenu_overlay_window isVisible]) {
+                LOG_INFO("OverlayHelpers: Closing tab context menu overlay on app focus loss");
+                extern void HideTabContextMenuOverlayMacOS();
+                HideTabContextMenuOverlayMacOS();
+            }
+
             // NOTE: Wallet overlay is NOT closed here. It has the prevent-close
             // exemption (user may Cmd+Tab to copy a mnemonic phrase). This matches
             // the Windows WM_ACTIVATEAPP behavior where wallet is guarded by

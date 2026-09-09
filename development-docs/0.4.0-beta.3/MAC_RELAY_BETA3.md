@@ -6,6 +6,59 @@
 
 ---
 
+# 📋 ROUND 2026-09-09 (**Mac**) — the 15th overlay is built. **Overlay parity is 15/15 again.**
+
+Answers `MAC_RELAY_P35_P4_ROUND.md` M3/M6, open since 2026-09-01 and the last piece of Phase 4 owed
+to macOS. Written **on** the Mac and **executed** there — the condition the Phase 4 contract §6.1 set
+when it declined to write this from a Windows box.
+
+**Files:** `cef_browser_shell_mac.mm` (globals, fwd decls, `ComputeTabMenuFrameMac`, the monitor pair,
+`Create/Show/HideTabContextMenuOverlayMacOS`, shutdown teardown) · `OverlayHelpers_mac.mm`
+(focus-loss arm) · `simple_handler.cpp` (three `#elif defined(__APPLE__)` arms) · parity docs.
+**Rows:** `P4-M18`–`P4-M24` in `phase-4-tab-peripheral-parity/PHASE_CONTRACT.md` §6.1a.
+
+⭐ **Windows' M6 was accurate on every point.** The React page, the four IPC arms, the `tabmenu` role
+and the target-tab bookkeeping were all already shared, and the menu worked the moment the window
+existed. Both flagged traps were real: cursor anchoring, and the K12 lifetime list.
+
+## 📏 Measured
+
+| | |
+|---|---|
+| Creates + renders | a 15th CDP target appears at `/tab-context-menu`; all **7** rows render (Reload · Duplicate · New tab to the right · Bookmark tab · Mute tab · Close other tabs · Close tabs to the right) |
+| Geometry | page reports `240 x 241` in a 240x241-**point** window — the React pin (7x32 + 9 + 2x4) holds |
+| Anchoring | window x∈[0,1440], header top at Cocoa y=870. anchor 600 → **x=600**; anchor y=40 → 870−40−241 = **y=589** |
+| Right-edge flip | anchor 1400 → **x=1200** (= 1440−240), not off-window |
+| Action end-to-end | `muted=false` → `mute_toggle` → `intent=true actual=true` → **reopen reports `muted=true`** |
+| ⛔ Negative control | tab id **999** → `unknown tab id — not opening`, **no** "shown" line, **no** target. The greens are not printed regardless |
+
+## Three macOS decisions Windows should review
+
+1. ⛔ **No `addChildWindow:`.** Your M2 named `addChildWindow:` on the process-global `g_main_window`
+   as the macOS shape of the Phase 3.5 z-order defect. This overlay attaches to **nothing**, so it
+   cannot reintroduce that coupling — at the cost of not inheriting parent hide/minimise, which is
+   why it is in **both** `ShutdownApplication()` and `InstallAppFocusLossHandler()`.
+2. ⛔ **No DPI scaling, deliberately** — not an omission of your `ScalePx`. 📏 At
+   `devicePixelRatio = 2` a 240x241-**point** window reports `innerWidth/innerHeight = 240x241`: on
+   macOS an OSR overlay is sized in points and React CSS px *are* points. Scaling would double the
+   anchor offset.
+3. ⚠️ **Two click-outside monitors.** Every other macOS dropdown watches left mouse-down only, but
+   this menu is *opened* by a right-click, so `NSEventMaskRightMouseDown` is watched too — otherwise
+   a right-click on a second tab moves the menu while `s_tabmenu_target_tab_id` still points at the
+   first, which is `P4-A2` from the other side. **Worth checking whether the Windows `WH_MOUSE_LL`
+   hook sees `WM_RBUTTONDOWN`.**
+
+## ⛔ Owed — the three gestures, and they need a human
+
+The right-click **gesture**, **click-outside** dismissal by a real mouse-down, and **Cmd+Tab**
+focus-loss dismissal are **CODE_READING only**. This session cannot synthesise OS mouse input:
+`CGEventPost` is Accessibility-blocked and a CDP `Input.dispatchMouseEvent` enters *below* the native
+NSView→`CefMouseEvent` layer, so it would pass with the defect fully present.
+
+⬜ Unchanged from yesterday's round §H: multi-window (P3 M2.1 / P3.5 M2), Phase 7 M4 #1/#2, Phase 7c
+M4, Phase 5 W7, Sparkle, `P4-B2`.
+
+---
 # 📋 ROUND 2026-09-08 (**Mac**) — catch-up after 13 idle days: `R4` GREEN, Phase 5 `R1`/`R2` answered, and a **shipped macOS defect in Phase 7b that was silent by construction**
 
 **Base:** `17b4a52` (branch `0.4.0`, already up to date at start — no pull needed).
