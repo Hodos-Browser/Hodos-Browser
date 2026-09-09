@@ -38,6 +38,11 @@ It is batched because the *rig* is the cost, not because the rows are release-on
 | **M5** | **`P8a` live** — the 1-sat floor against a real consolidation | Phase 8a (deferred by design) | ⚠️ Needs ~4,550 sats of accumulated dust before the consolidator fires at all. Cheapest as a **seeded dev DB** rather than by waiting | ✅ yes |
 | **M6** | **`E5-a`** — one real payment writes one `payment.auto_approved` audit line | Phase 2 (`MAC_RELAY_P2_ROUND.md`) | Two wired call sites are proven by unit test + code read only. ⚠️ **Neither Windows nor Mac has done this** | ✅ yes |
 | **M7** | **A send whose balance is mostly 1-sat outputs** | Phase 8a residual | The floor can turn a previously-successful send into `insufficient funds`. Intended, never exercised | ❌ fails by design |
+| **M8** | **`P8c-A2`** — two concurrent `sendTransaction` calls produce **two** sends | **Phase 8c stage 2** | ⛔ Subject is **two distinct txids**, not two resolved promises. RED: apply `getBalance`'s in-flight dedupe to `sendTransaction` ⇒ **one** send — the row that catches the single most dangerous way to "finish" 8c. ⚠️ Two sends means **two real transactions** | ✅ yes, ×2 |
+
+> ⚠️ **M8 added 2026-09-09, correcting a drift.** The stage-1 close-out said `P8c-A2` was *"already
+> routed to `PAYMENT_TEST_BATCH.md`"*. It was not — the row existed only in the phase contract. That
+> is precisely the silent-loss failure this register exists to prevent, and it happened here first.
 
 ## Rig — what has to be true once
 
