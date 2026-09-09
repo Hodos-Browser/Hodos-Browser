@@ -1,7 +1,9 @@
 # Phase 8c — per-request ids for the wallet bridge · PHASE CONTRACT
 
 **Workstream:** money-path correctness · **Ticket:** `TICKET_bridge_single_slot_callbacks_race.md`
-**Status:** 🟢 **STAGE 1 DONE and measured live. Stages 2-4 not started.**
+**Status:** 🟢 **STAGES 1 + 2 DONE and measured live. Stages 3-4 not started.**
+⛔ **2 of 41 migrated** — `getStatus` and `sendTransaction`. `P8c-A2` (two successful sends ⇒ two
+txids) still needs real money: `M8` in `../PAYMENT_TEST_BATCH.md`.
 👤 **Owner, 2026-09-08:** *"Let's go with your recommendation of Option B."* — the 41 slots converge on
 the **C++-side promise map** already shipping for the history API. ⛔ The ticket's proposed JS-side
 `Map<id,{resolve,reject}>` is **not** what gets built; see §0.3 for why.
@@ -10,9 +12,8 @@ Stage 1 must land and be reviewed before stages 2–4 are attempted.
 **Opened:** 2026-09-08 · **Owner:** Matthew Archbold · **Platforms:** Windows + macOS (shared C++ / TS)
 **Standard:** `../HARNESS.md`. **Base:** `c68ed57`.
 
-> ⭐ **Stage 1 landed 2026-09-08**: the mechanism exists, one read-only method (`wallet.getStatus`) is
-> migrated end to end, and the GREEN/RED pair is measured (§4). ⛔ Stages 2-4 are NOT started — the
-> money path has not been touched.
+> ⭐ **Stage 1 landed 2026-09-08** (mechanism + `wallet.getStatus`, §4) and **stage 2 on 2026-09-09**
+> (`wallet.sendTransaction`, §4b). ⛔ Stages 3-4 NOT started: 39 legacy slots remain.
 
 ---
 
@@ -162,6 +163,62 @@ armed, and the legacy RED still reproduces (10,006 ms, two `null`s). `grep DEADL
 the build's exit code. Checking `BUILD_RC` directly is what surfaced it. Same shape as the
 `cmake --build … | tail` trap in `HARNESS.md`.
 
+---
+
+## 4b. Stage 2 — the money path, measured 2026-09-09
+
+### ⛔ `D-6` — stage 2 is **`sendTransaction` only**. `createTransaction` is orphaned
+
+§7 planned *"sendTransaction, createTransaction"*. **`create_transaction` has no JS caller.** The C++
+round trip is complete and live — browser handler (`simple_handler.cpp :: create_transaction`),
+`WalletService::createTransaction` on both platforms, and two render arms
+(`create_transaction_response` / `_error`) — but `grep` over `frontend/src` returns **zero** matches
+for `create_transaction` or `createTransaction`, and nothing ever sets `onCreateTransactionResponse`.
+
+⇒ Migrating it would be migrating dead code. Stage 2 narrowed to `sendTransaction`.
+⚠️ **Reported, not deleted** (working rule 3): removing it is not what this phase came for.
+
+### `P8c-A2a` — 🟢 routing on the money path, **without moving any funds**
+
+⭐ `P8c-A2` (two *successful* sends ⇒ two txids) needs real money and is `M8` in the payment batch.
+But the **routing** can be proven for free: three concurrent sends with a deliberately invalid
+payload, where the wallet refuses and no transaction is ever built.
+
+| Check | Result |
+|---|---|
+| `bridge.sendTransaction` is native | ✅ `[native code]` |
+| `onSendTransactionResponse` / `onSendTransactionError` | ✅ **both gone** |
+| 3 concurrent sends, invalid recipient | **3 / 3 answered, 5 ms** — each got its own reply |
+
+### `P8c-A2b` — 🟢 the **reject** path, and the hoisted id that makes it work
+
+The run above travelled the *success* IPC carrying an error object, so it did **not** exercise
+`RejectBridgeCall`. Forced separately by calling the native bridge with a malformed payload, so
+`nlohmann::json::parse` throws in the browser process:
+
+| Check | Result |
+|---|---|
+| 3 concurrent malformed sends | **3 / 3 rejected in 82 ms**, each with its own reason |
+| Message | `sendTransaction: [json.exception.parse_error.101] …` — carries the method name |
+
+🚨 **This is the row that proves the one thing I was careful about.** The browser handler reads the
+request id **before** the `try`, precisely so the `catch` can echo it. The exception here fires
+*inside* the try — so had the id been read after the parse, the catch would have had no id, and all
+three callers would have hung to the **30 s deadline** instead of rejecting in 82 ms. Measured, not
+reasoned.
+
+### ⭐ The migration also retired a JS-injection site
+
+The old error arm built JavaScript by concatenation:
+
+```cpp
+"if (window.onSendTransactionError) { window.onSendTransactionError('" + errorMessage + "'); }"
+```
+
+`errorMessage` was pasted **unescaped** into a single-quoted literal — a wallet error containing a
+quote would have broken out of it. Routing by id constructs no JavaScript at all, so the hazard is
+**deleted rather than escaped**. (Its sibling arm did use `escapeJsonForJs`; the error arm did not.)
+
 ### Still owed
 
 | ID | | Tier |
@@ -184,7 +241,7 @@ The `wallet_call` path itself (pattern 2) — it already routes correctly and is
 ⛔ A 41-slot big-bang on the money path is the wrong shape. Suggested order:
 
 1. ✅ **DONE** — mechanism built (`WalletBridgeV8Handler`, `s_pendingBridgeCalls`, `ResolveBridgeCall`/`RejectBridgeCall`), `wallet.getStatus` migrated end to end, GREEN/RED measured live (§4). **1 of 41.**
-2. **Money path next** — `sendTransaction`, `createTransaction` — while attention is on it.
+2. ✅ **DONE** — `sendTransaction` migrated, routing + reject path measured (§4b). ⛔ `createTransaction` was found ORPHANED (no JS caller) and excluded — see `D-6`. **2 of 41.**
 3. The remaining ~38 in batches, each batch its own commit, the old global deleted as each lands.
 4. `initWindowBridge.ts`'s `window.on*` declarations deleted last, as the proof nothing still uses them.
 

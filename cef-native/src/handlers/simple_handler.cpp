@@ -6731,13 +6731,22 @@ bool SimpleHandler::OnProcessMessageReceived(
     if (message_name == "send_transaction") {
         LOG_DEBUG_BROWSER("🚀 Send transaction requested from browser ID: " + std::to_string(browser->GetIdentifier()));
 
+        // Phase 8c stage 2 — MIGRATED to per-request-id routing.
+        // Args: 0 = requestId, 1 = transaction JSON.
+        //
+        // ⛔ Read BEFORE the try. The catch below sends `send_transaction_error`, and it
+        // has to echo the same id — if this were read inside the try, an exception thrown
+        // before it would leave the error path with no id to reply on, and the caller's
+        // promise would hang until the 30 s deadline instead of rejecting immediately.
+        const int sendRequestId = message->GetArgumentList()->GetInt(0);
+
         try {
             // Parse transaction data from message arguments
             CefRefPtr<CefListValue> args = message->GetArgumentList();
             LOG_DEBUG_BROWSER("🔍 send_transaction: args->GetSize() = " + std::to_string(args->GetSize()));
 
-            if (args->GetSize() > 0) {
-                std::string transactionDataJson = args->GetString(0);
+            if (args->GetSize() > 1) {
+                std::string transactionDataJson = args->GetString(1);
                 LOG_DEBUG_BROWSER("🔍 send_transaction: received JSON = " + transactionDataJson);
 
                 nlohmann::json transactionData = nlohmann::json::parse(transactionDataJson);
@@ -6837,7 +6846,8 @@ bool SimpleHandler::OnProcessMessageReceived(
                 }
 
                 try {
-                    responseArgs->SetString(0, resultStr);
+                    responseArgs->SetInt(0, sendRequestId);
+                    responseArgs->SetString(1, resultStr);
                     LOG_DEBUG_BROWSER("✅ String argument set successfully");
                 } catch (const std::exception& e) {
                     LOG_DEBUG_BROWSER("❌ Failed to set string argument: " + std::string(e.what()));
@@ -6863,13 +6873,12 @@ bool SimpleHandler::OnProcessMessageReceived(
         } catch (const std::exception& e) {
             LOG_DEBUG_BROWSER("❌ Send transaction failed: " + std::string(e.what()));
 
-            // Send error response
-            nlohmann::json errorResponse;
-            errorResponse["error"] = e.what();
-
+            // Send error response — echoing the id read before the try, so the caller's
+            // promise rejects now rather than waiting out the 30 s deadline.
             CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("send_transaction_error");
             CefRefPtr<CefListValue> responseArgs = response->GetArgumentList();
-            responseArgs->SetString(0, errorResponse.dump());
+            responseArgs->SetInt(0, sendRequestId);
+            responseArgs->SetString(1, e.what());
 
             browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
         }

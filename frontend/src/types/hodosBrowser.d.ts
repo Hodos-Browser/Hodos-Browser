@@ -16,6 +16,9 @@ declare global {
       // block with `if (!window.hodosBrowser.wallet)`.
       bridge?: {
         getStatus: () => Promise<{ exists: boolean; needsBackup: boolean }>;
+        // ⛔ Takes a JSON STRING, not an object — the caller stringifies, matching what
+        // the legacy path already put on the wire.
+        sendTransaction: (payloadJson: string) => Promise<TransactionResponse>;
       };
       // Promise-based since the history-over-IPC move: the render process no longer
       // opens the history database itself, so every call is a round-trip to the
@@ -118,8 +121,8 @@ declare global {
     triggerPanel?: (panelName: string) => void;
     onAddressGenerated?: (data: AddressData) => void;
     onAddressError?: (error: string) => void;
-    onSendTransactionResponse?: (data: TransactionResponse) => void;
-    onSendTransactionError?: (error: string) => void;
+    // ⛔ REMOVED by Phase 8c stage 2 — wallet.sendTransaction is routed by request id.
+    //   onSendTransactionResponse / onSendTransactionError
     onGetBalanceResponse?: (data: { balance: number }) => void;
     onGetBalanceError?: (error: string) => void;
     onGetTransactionHistoryResponse?: (data: any[]) => void;

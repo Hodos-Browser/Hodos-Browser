@@ -503,33 +503,23 @@ if (!window.hodosBrowser.wallet) {
       return p;
     },
 
+    // ⭐ MIGRATED — Phase 8c stage 2. The money path.
+    //
+    // 🚨 Two concurrent sends are TWO PAYMENTS. Under the old single-slot callback the
+    // second caller's reply could resolve the first caller's promise — and the loser then
+    // sat until its 10 s timeout. Per-request routing makes each send its own promise.
+    //
+    // ⛔ NEVER apply `getBalance`'s in-flight dedupe here. Deduping a read is fine;
+    // deduping a send would silently collapse two distinct payments into one, which is
+    // far worse than the race being fixed. That is the trap `P8c-A2` exists to catch.
+    //
+    // The payload stays a JSON string — same bytes the legacy path put on the wire, so
+    // this is a routing change and nothing else.
     sendTransaction: (data: any) => {
-      console.log("🚀 JS: Sending send_transaction to native");
-      return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          delete window.onSendTransactionResponse;
-          delete window.onSendTransactionError;
-          reject(new Error('send_transaction timed out'));
-        }, 10000);
-
-        window.onSendTransactionResponse = (data: any) => {
-          clearTimeout(timeout);
-          console.log("✅ Transaction sent:", data);
-          resolve(data);
-          delete window.onSendTransactionResponse;
-          delete window.onSendTransactionError;
-        };
-
-        window.onSendTransactionError = (error: string) => {
-          clearTimeout(timeout);
-          console.error("❌ Transaction error:", error);
-          reject(new Error(error));
-          delete window.onSendTransactionResponse;
-          delete window.onSendTransactionError;
-        };
-
-        window.cefMessage?.send('send_transaction', [JSON.stringify(data)]);
-      });
+      if (!window.hodosBrowser?.bridge?.sendTransaction) {
+        return Promise.reject(new Error('wallet.sendTransaction: native bridge unavailable'));
+      }
+      return window.hodosBrowser.bridge.sendTransaction(JSON.stringify(data));
     },
 
     getTransactionHistory: () => {

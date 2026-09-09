@@ -407,11 +407,27 @@ public:
 
         const std::string method = name.ToString();
 
-        // method name -> the IPC the browser process already handles.
-        // Stage 1 migrates one read-only method; later stages extend this table.
+        // method name -> the IPC the browser process already handles, and whether the
+        // call carries a payload.
+        //
+        // ⛔ The payload is a STRING, not an object. The caller stringifies (the legacy
+        // bridge already did: `send('send_transaction', [JSON.stringify(data)])`), so the
+        // wire format is unchanged and no V8→JSON conversion is needed here. Keeping the
+        // shape identical is what makes this a routing change and nothing else.
         const char* ipcName = nullptr;
-        if (method == "getStatus") ipcName = "wallet_status_check";
+        bool takesPayload = false;
+        if (method == "getStatus") {
+            ipcName = "wallet_status_check";
+        } else if (method == "sendTransaction") {
+            ipcName = "send_transaction";
+            takesPayload = true;
+        }
         if (!ipcName) return false;  // unknown method — V8 throws for us
+
+        if (takesPayload && (arguments.empty() || !arguments[0]->IsString())) {
+            exception = method + "() requires a JSON string argument";
+            return true;
+        }
 
         CefRefPtr<CefV8Context> context = CefV8Context::GetCurrentContext();
         if (!context) {
@@ -423,8 +439,11 @@ public:
 
         CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create(ipcName);
         // ⛔ Arg 0 is ALWAYS the request id for a migrated call. The browser process
-        // echoes it back in arg 0 of the response.
+        // echoes it back in arg 0 of the response. Any payload shifts to arg 1.
         msg->GetArgumentList()->SetInt(0, requestId);
+        if (takesPayload) {
+            msg->GetArgumentList()->SetString(1, arguments[0]->GetStringValue());
+        }
 
         retval = CefV8Value::CreatePromise();
         s_pendingBridgeCalls[requestId] = { retval, context, method };
@@ -880,8 +899,14 @@ void SimpleRenderProcessHandler::OnContextCreated(
     bridgeObject->SetValue("getStatus",
         CefV8Value::CreateFunction("getStatus", bridgeHandler),
         V8_PROPERTY_ATTRIBUTE_READONLY);
+    // Stage 2 — the money path. ⛔ `sendTransaction` must NEVER be deduped the way
+    // `getBalance` is: two sends are two payments, and collapsing them would be worse
+    // than the race this replaces.
+    bridgeObject->SetValue("sendTransaction",
+        CefV8Value::CreateFunction("sendTransaction", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
     hodosBrowser->SetValue("bridge", bridgeObject, V8_PROPERTY_ATTRIBUTE_READONLY);
-    LOG_DEBUG_RENDER("🌉 Bound WalletBridgeV8Handler (1 method migrated)");
+    LOG_DEBUG_RENDER("🌉 Bound WalletBridgeV8Handler (2 methods migrated)");
 
     hodosBrowser->SetValue("history", historyObject, V8_PROPERTY_ATTRIBUTE_READONLY);
 
@@ -1565,55 +1590,42 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // MIGRATED (Phase 8c stage 2 — the money path). Routed by request id.
+    // Args: 0 = requestId (echoed by the browser process), 1 = result JSON.
     if (message_name == "send_transaction_response") {
-        try {
-            CefRefPtr<CefListValue> args = message->GetArgumentList();
-            if (!args || args->GetSize() == 0) {
-                LOG_ERROR_RENDER(LogFmt() << "❌ send_transaction_response: No arguments");
-                return true;
-            }
-
-            std::string responseJson = args->GetString(0);
-            LOG_DEBUG_RENDER(LogFmt() << "✅ Send transaction response received (length: " << responseJson.length() << ")");
-
-            // Execute JavaScript to call the callback function directly
-            // Use JSON.parse() to safely parse the JSON string and avoid injection issues
-            // Escape the JSON string to prevent JavaScript injection
-            try {
-                std::string escapedJson = escapeJsonForJs(responseJson);
-                LOG_DEBUG_RENDER(LogFmt() << "🔍 Escaped JSON (length: " << escapedJson.length() << ")");
-
-                std::string js = "if (window.onSendTransactionResponse) { try { window.onSendTransactionResponse(JSON.parse('" +
-                                 escapedJson + "')); } catch(e) { console.error('Failed to parse transaction response:', e); } }";
-
-                LOG_DEBUG_RENDER(LogFmt() << "🔍 Executing JavaScript (length: " << js.length() << ")");
-
-                if (frame) {
-                    frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-                    LOG_DEBUG_RENDER(LogFmt() << "✅ JavaScript executed successfully");
-                } else {
-                    LOG_ERROR_RENDER(LogFmt() << "❌ Frame is null, cannot execute JavaScript");
-                }
-            } catch (const std::exception& e) {
-                LOG_ERROR_RENDER(LogFmt() << "❌ Failed to execute JavaScript for send_transaction_response: " << e.what());
-            }
-        } catch (const std::exception& e) {
-            LOG_ERROR_RENDER(LogFmt() << "❌ Exception in send_transaction_response handler: " << e.what());
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "send_transaction_response missing args (need 2: requestId, json)");
+            return true;
         }
+        const int requestId = args->GetInt(0);
+        const std::string responseJson = args->GetString(1).ToString();
 
+        LOG_DEBUG_RENDER(LogFmt() << "Send transaction response (requestId " << requestId
+                                  << ", length " << responseJson.length() << ")");
+        ResolveBridgeCall(requestId, responseJson);
         return true;
     }
 
+    // MIGRATED (Phase 8c stage 2). Args: 0 = requestId, 1 = error JSON.
+    //
+    // ⭐ This arm also RETIRES A JS-INJECTION SITE. It used to build
+    //   "if (window.onSendTransactionError) { window.onSendTransactionError('" + errorMessage + "'); }"
+    // with the message pasted UNESCAPED into a single-quoted JS literal — a wallet error
+    // containing a quote would have broken out of it. Routing by id means no JavaScript
+    // is constructed at all, so the hazard is deleted rather than escaped.
     if (message_name == "send_transaction_error") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string errorMessage = args->GetString(0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "send_transaction_error missing args (need 2: requestId, error)");
+            return true;
+        }
+        const int requestId = args->GetInt(0);
+        const std::string errorMessage = args->GetString(1).ToString();
 
-        LOG_DEBUG_RENDER(LogFmt() << "❌ Send transaction error received: " << errorMessage);
-
-        // Execute JavaScript to handle the error
-        std::string js = "if (window.onSendTransactionError) { window.onSendTransactionError('" + errorMessage + "'); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-
+        LOG_DEBUG_RENDER(LogFmt() << "Send transaction error (requestId " << requestId
+                                  << "): " << errorMessage);
+        RejectBridgeCall(requestId, errorMessage);
         return true;
     }
 
