@@ -89,3 +89,28 @@ test if it were ever false.
   Rust wallet before and after the predicate swap). ⚠️ Phase 5 already changed the **trusted-overlay
   bypass** to `IsOurWalletOrigin`, so this is worth a quick look now rather than waiting for beta.4:
   open each of the four overlays on Mac and confirm the wallet still answers.
+
+---
+
+## ✅ ANSWERED BY MAC 2026-09-08 — `R1` and `R2` both resolved
+
+Evidence: `MAC_RELAY_BETA3.md` (round 2026-09-08 Mac, §D) and
+`phase-5-loopback-routing/PHASE_CONTRACT.md` §4b. Probe: `p5probe_mac.py`.
+
+- **`R1`** — `lsof … | grep -E '3321|2121'` returns **nothing**: no other wallet listens on this
+  Mac. ⚠️ A fact about this machine, not a platform guarantee.
+- **`R2`** — 📏 **YES.** `https://127.0.0.1:2121/getVersion` reached our Rust wallet with
+  `requesting_domain=example.com`, no cert interstitial, no TLS error. ⇒ **ticket §8.1's fallback
+  (stop matching 2121) is NOT needed on macOS**, and §11 Q1 is now settled on both platforms.
+- **M4** — `https://example.com/getNetwork?x=127.0.0.1:3321` → **404 + example.com's own HTML**,
+  zero Rust lines. Defect absent.
+- **Negative control** — `127.0.0.1:3322` → `TypeError: Failed to fetch`, zero Rust lines. ⭐ Your
+  free control worked exactly as advertised and touched nobody's installed software.
+
+⭐ **Why the page aborted while the wallet answered:** `OnShowPermissionPrompt … mapped=[loopback]`
+— Chromium's LNA gate held the response after our interceptor had already reached the wallet. This
+also re-confirms that **macOS does raise the loopback permission**; the 2026-08-26 "it never fires"
+was an artifact of `--disable-web-security`.
+
+⬜ **M6 / §8.6 `W7` still owed** — the four overlays open from native toolbar clicks, not an IPC I
+can drive from this session.

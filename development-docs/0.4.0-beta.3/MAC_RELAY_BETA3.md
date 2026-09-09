@@ -6,6 +6,289 @@
 
 ---
 
+# 📋 ROUND 2026-09-08 (**Mac**) — catch-up after 13 idle days: `R4` GREEN, Phase 5 `R1`/`R2` answered, and a **shipped macOS defect in Phase 7b that was silent by construction**
+
+**Base:** `17b4a52` (branch `0.4.0`, already up to date at start — no pull needed).
+**Answers:** `MAC_RELAY_P7D_ROUND.md` M3 · `MAC_RELAY_P5_ROUND.md` M2/M4 · `MAC_RELAY_P7_ROUND.md` M2
+· `MAC_RELAY_P7C_ROUND.md` M6 · `MAC_RELAY_P8_ROUND.md` M4.
+
+⭐ **Headline: `FaviconStore` was never initialised on macOS.** Phase 7b shipped 2026-09-04 and the
+store has been dead here ever since — no error, no log line, no missing symbol. Exactly the failure
+`MAC_RELAY_P7_ROUND.md` M2 predicted, found by doing the check it asked for. **Fixed and
+runtime-verified this round.**
+
+⚠️ **This round did NOT clear the queue.** Six items are still owed and are named in §H. They are
+deferred, not done.
+
+---
+
+## A. Subject discipline — what was actually under test
+
+⛔ **The owner's PRODUCTION browser was running for this entire session** (`/Applications/HodosBrowser.app`,
+its wallet on **31301**, holding CDP **9222**). Nothing here touched it. Every measurement ran against
+the dev bundle on CDP **9322** (`cef_browser_shell_mac.mm:5505-5508` — 9222 for `Default`, `+100`
+under `IsDevEnv()`), and `cdp.py` / `p35drive.py` both hard-refuse 9222. Prod survival was asserted
+at the end of the run, not assumed — see §F.
+
+🚨 **The security rows were run with web security ON**, i.e. **without** `HODOS_MAC_DEV_FLAGS`:
+
+```bash
+env -u HODOS_MAC_DEV_FLAGS HODOS_DEV=1 RUST_LOG=hodos_wallet=debug \
+  /Users/matt/Hodos-Browser/cef-native/build/bin/HodosBrowser.app/Contents/MacOS/HodosBrowser \
+  --profile=Default --in-process-gpu --disable-gpu-sandbox
+```
+
+📏 **Proven on a CHILD argv, not asserted** (CEF appends switches in `OnBeforeCommandLineProcessing`,
+so the parent never shows them). Across all 5 children — 2 utility, 3 renderer —
+`--disable-web-security` = **0** and `--allow-running-insecure-content` = **0**, with the positive
+control that the *same* grep finds `--no-sandbox` = **1** on the same process. Without that control
+the zeros would have been a blind instrument.
+
+## B. 🚨 `FaviconStore` — MEASURED defect, macOS only, shipped since `b3487a8`. **FIXED.**
+
+| | |
+|---|---|
+| **Claim type** | **CODE_READING** for the cause, **MEASURED** for the effect and the fix |
+| **Row** | `MAC_RELAY_P7_ROUND.md` M2 |
+
+`cef_browser_shell.cpp` (Windows entry) initialises the store at `:5910` and shuts it down at
+`:6174`, beside `SitePermissionStore` and `PaidContentCache`. **`cef_browser_shell_mac.mm` did
+neither, and did not even include the header.**
+
+⛔ **Why nobody would have noticed.** Both consumers are *guarded*, not fallible:
+
+- `simple_handler.cpp :: OnFaviconURLChange :1230` gates the download on `store.IsInitialized()` —
+  false on macOS, so `DownloadImage` was **never called**. No error.
+- `simple_handler.cpp :: favicon_get :8349` returns `GetDataUri()` == `""` for every host, so hosts
+  are **omitted** from the reply and React draws its initial-letter tile — which
+  `useFavicons.ts` documents as the correct fallback. No error.
+
+⇒ macOS showed letter tiles on the omnibox, new tab and bookmarks **forever**, and never created
+`favicons.db`. A Mac reviewer would call that a rendering bug.
+
+**📏 The measurement, and why it is not a log absence.** My first control was worthless and I threw
+it away: `build/bin/debug.log` contains **0** `FaviconStore` lines — but it also contains **0**
+`SitePermissionStore initialized` lines, so it is simply the wrong sink. A zero from a blind
+instrument is not an absence (7d M6.3). The honest artifact is the **database file**:
+
+| file | birth |
+|---|---|
+| profile dir `HodosBrowserDev/Default` | **2026-07-07** 13:09:28 |
+| `site_permissions.db`, `bookmarks.db`, `cookie_blocks.db` | **2026-07-07** 13:09:41 |
+| **`favicons.db`** | **2026-09-08 16:32:30** ← first launch after the fix |
+
+The siblings are the positive control: this profile's init path demonstrably *does* create such
+files. Phase 7b landed 2026-09-04 and the browser has run here since; the store had four days and
+several launches to appear and never did.
+
+**⭐ The fix is runtime-verified end-to-end, not just "it initialises."** After the fix:
+
+```
+FaviconStore initialized at .../HodosBrowserDev/Default/favicons.db
+sqlite> select host, icon_url, length(png), width from favicons;
+127.0.0.1|http://127.0.0.1:5137/Hodos_Gold_Icon.svg|4552|64
+```
+
+⇒ **4,552 real PNG bytes at width 64.** That also answers M2's *second* ask:
+`CefBrowserHost::DownloadImage(url, is_favicon=true, …)` — the CEF API never used before Phase 7b on
+either platform — **works on macOS**.
+
+⚠️ **What was NOT broken, stated so the severity is not overstated.** The phase's *privacy* subject
+held on macOS anyway: the React surfaces stopped emitting `google.com/s2/favicons` regardless of
+store state, and the store path was skipped entirely, so **no third-party request was ever made**.
+The de-Googling was intact; only the local replacement was dead.
+
+⚠️ Only `127.0.0.1` is stored. `example.com` declares `<link rel="icon" href="data:,">` — an empty
+data URI, nothing to fetch — so its absence is correct, not a second bug.
+
+## C. ⭐ `R4` (Phase 7d M3) — **GREEN on macOS**, including the control
+
+`probes/dual_store_probe_mac.py` (new, committed). **MEASURED.**
+
+⛔ **Why a macOS-specific probe rather than a flag on yours.** `dual_store_probe.py` gates every
+result on a control origin that already carries a real Chromium notifications BLOCK
+(`www.youtube.com`, planted 2026-08-10). 📏 This Mac's SQLite store carries **the identical row**
+(`www.youtube.com | type 4 Notifications | state 2 Block | 2026-08-10 14:10:23`) — but the
+**Chromium** half was never planted here, because notifications only began mirroring in the build
+under test. Your gate therefore cannot pass on macOS for a reason unrelated to the subject, and
+would have printed VACUOUS. Sensitivity is answered two stronger ways instead (D-D self-validating
+flip + an origin-specificity control).
+
+| arm | example.com (subject) | www.wikipedia.org (specificity control) |
+|---|---|---|
+| baseline | notif/loc/clip **prompt** | all **prompt** |
+| after Block | **denied · denied · denied** | **still prompt** ✅ |
+| camera / mic | **prompt · prompt** ✅ (`A8`) | prompt |
+| after Reset | back to **prompt · prompt · prompt** ✅ (`A7`) | prompt |
+
+**Trigger asserted, not assumed** — `🛈 Mirrored` is `LOG_INFO_BROWSER`, so it survives
+`minLevel=INFO`:
+
+```
+🛈 Mirrored notifications=block ... for example.com
+🛈 Mirrored location=block      ... for example.com
+🛈 Mirrored clipboard=block     ... for example.com
+[reset:] loopback=ask, local_network=ask, notifications=ask, location=ask, clipboard=ask
+```
+
+📏 **`A8` holds at BOTH layers**: `grep '🛈 Mirrored' | grep -cE 'camera|microphone'` = **0** over the
+whole session, and the page read camera/mic as `prompt` on the very origin whose other three types
+read `denied`. The mirror did not widen onto the media path.
+
+⭐ **`D-10` answers the same on macOS as on Windows: plain `GEOLOCATION` IS consulted.** The
+`GEOLOCATION_WITH_OPTIONS` worry does not bite on this engine pin.
+
+### C.1 🚨 Instrument finding — **the clipboard behavioural check in the ask is not a discriminator**
+
+The queue and `M3` both prescribe `await navigator.clipboard.readText()` → `NotAllowedError`. 📏 I ran
+the three behavioural probes in **both** arms:
+
+| probe | baseline (nothing blocked) | blocked | discriminates? |
+|---|---|---|---|
+| `Notification.requestPermission()` | **TIMEOUT — a prompt opened** | `"denied"`, no prompt | ✅ |
+| `getCurrentPosition` | **error code 3** (TIMEOUT) | **error code 1** (PERMISSION_DENIED) | ✅ |
+| `navigator.clipboard.readText()` | **`NotAllowedError`** | `NotAllowedError` | ❌ **confounded** |
+
+⇒ `readText()` rejects with the *same* error whether or not the type is blocked, because it also
+rejects on focus/transient-activation grounds (the page is not the focused window under CDP, and
+`userGesture:true` does not fix that). **HARNESS §6 Q1 — "can I make this test pass with the feature
+removed?" — the answer for that one probe is YES, so on its own it is void.** The decisive clipboard
+evidence is the `permissions.query('clipboard-read')` flip `prompt→denied` plus the mirror log line;
+`A6` rests on those. ⭐ Worth fixing in the Windows probe's prose too — the row is green there for
+the right reason, but the *stated* check would pass on a build with the mirror deleted.
+
+⭐ The baseline arm also **positively explains itself**: `🔔 OnShowPermissionPrompt origin=https://example.com/
+mask=0x00008000 mapped=[notifications]` at 19:07:48 is the prompt that caused the baseline TIMEOUT —
+and **no such line exists anywhere in the block arm's window**. "No prompt appeared" is therefore a
+measured artifact, not an inference from a fast return.
+
+## D. Phase 5 — `R1` and `R2` answered. **The ticket §11 Q1 fallback is not needed on macOS.**
+
+`phase-5-loopback-routing/p5probe_mac.py` (new, committed). **MEASURED**, one probe per run, each
+inside its own before/after window on the wallet log.
+
+⛔ **A first attempt fired all four fetches in one `Runtime.evaluate` and produced an
+unattributable result** — two `/getVersion requesting_domain=example.com` lines 45 s apart and an
+evaluate that never returned, so the second could not be told from a retry of the first. Rewritten to
+one probe per run with per-fetch `AbortController` deadlines. Recording it because the *first* shape
+looked like a perfectly good result.
+
+**Sink positive-controlled first**: 299 pre-existing `R-INTEXT` lines, wallet run under
+`RUST_LOG=hodos_wallet=debug` (inherited — `SpawnWalletServer` uses `posix_spawn(..., environ)`).
+
+| row | probe | page saw | **new external-domain `R-INTEXT`** | verdict |
+|---|---|---|---|---|
+| `R1` | `http://127.0.0.1:3321/getVersion` | abort @8s | **1** — `path=/getVersion requesting_domain=example.com` | 📏 **our wallet answered**, carrying the page's host |
+| `R2` | `https://127.0.0.1:2121/getVersion` | abort @8s | **1** — `path=/getVersion requesting_domain=example.com` | 📏 **YES — a `CefResourceHandler` takes over https loopback PRE-TLS on macOS.** No cert interstitial, no TLS error |
+| `M4` | `https://example.com/getNetwork?x=127.0.0.1:3321` | **404, 559 B, example.com's own HTML** | **0** | 📏 the pre-fix defect is **absent**; matches your "After" |
+| **NEG** | `http://127.0.0.1:3322/getNetwork` | **`TypeError: Failed to fetch`** | **0** | ⭐ the gate is what causes interception |
+
+⇒ **Ticket §8.1 (stop matching 2121) is NOT required on macOS.** `R2` settles the same way it did on
+Windows, and it is now settled on both platforms rather than one.
+
+**`R1` — no cross-wallet hole on this machine.** `lsof -nP -iTCP -sTCP:LISTEN | grep -E '3321|2121'`
+returns **nothing**, with the positive control that the same command sees 31301 and 9222. ⚠️ That is a
+fact about *this Mac* (no MetaNet Client installed), **not** a platform guarantee — the interception
+proven by `R1`/`R2` is what actually closes the hole if a wallet ever appears.
+
+### D.1 ⭐ Why the page aborted while the wallet answered — and it corroborates the 2026-08-26 retraction
+
+📏 `🔔 OnShowPermissionPrompt origin=https://example.com/ mask=0x08000000 mapped=[loopback]`.
+
+The request reached our Rust wallet (logged) while **Chromium's Local Network Access gate held the
+response** from the page, unanswered. So the page-side abort is not a routing failure.
+
+⭐ This independently re-confirms the retraction in `[[project_beta3_sprint]]`: **macOS DOES raise the
+loopback permission.** The 2026-08-26 claim that it never fires was an artifact of
+`--disable-web-security`. Here, under the honest launch recipe, it fired.
+
+## E. Phase 8 — `MAC-P8-1/2/3` SATISFIED (recorded, not re-run)
+
+Verified earlier the same day: shell builds clean; `hodos_tests` **332 / 331 pass / 1 skip**
+(`UpdateStagerRig`, expected). Rust **468 lib + 535 bin, 0 failed** — higher than your expected
+458+526, which is a count difference, not a discrepancy. All four `R-DUST` modules present and green:
+`dust_candidate_tests` 4, `token_reserved_sweep_tests` 10, `token_reserved_selection_tests` 7,
+`token_reserved_exposure_tests` 6.
+
+⚠️ **Trap for whoever repeats this:** `cargo test <module>` prints one result line **per binary**.
+Reading only the first reports "0 passed" for modules living in the other crate. Sum all result lines.
+
+## F. 🍎 `scripts/stop-dev.sh` — written, and its acceptance measured
+
+Answers `MAC_RELAY_P7C_ROUND.md` M6. Mirrors `stop-dev.ps1`'s matching logic and its
+resolve-in-the-body fix.
+
+⛔ **It does not use `pgrep -f`.** `pgrep -f` matches the **argument vector**, and argv[0] is whatever
+the launcher passed — a browser started as `./build/bin/...` has a RELATIVE argv[0] and is invisible
+to an absolute-prefix match (measured 2026-08-26; it left two browsers on one profile and looked
+exactly like profile corruption). The script reads **`ps -axo comm=`**, which is the path the
+**kernel** executed. Same lesson as the `proc_pidpath` finding.
+
+⚠️ Two defects found by running it, both fixed before commit:
+1. `basename` printed `illegal option -- z` for every login shell — their `comm` is **`-zsh`**, parsed
+   as a flag. Now `${path##*/}`, which cannot be tricked by a leading dash.
+2. The browser spawns the wallet through a relative hop, so its kernel path is
+   `.../build/bin/HodosBrowser.app/Contents/MacOS/../../../../../../rust-wallet/target/release/hodos-wallet`.
+   A textual repo-root prefix test accepts a path that starts inside the repo and then `..`s **out**
+   of it — precisely what the script exists to refuse. Paths are now canonicalised (`pwd -P`) before
+   the prefix test.
+
+**📏 Acceptance — the property the tool exists for, with both builds running.** The negative control
+is *"the installed wallet survives"*, not *"the script ran"*:
+
+```
+                        BEFORE   AFTER
+installed browser procs   10  →   10     unchanged
+installed wallet           1  →    1     SURVIVED
+installed wallet :31301  LISTEN → LISTEN still serving
+dev processes             10  →    0
+dev wallet     :31401    LISTEN → gone
+```
+
+## G. 🚨 Dev-ergonomics finding: **rebuilding the Rust wallet blocks the next dev start on a Keychain dialog**
+
+**MEASURED**, and it cost ~5.5 minutes of this session before the wallet answered at all.
+
+`try_dpapi_unlock()` → `security_framework::passwords::get_generic_password` on the dev Keychain item.
+The dev item's ACL was established at **15:42**; the wallet binary was rebuilt at **16:11**. An ad-hoc
+signature changes identity, so the ACL no longer trusted the binary and macOS raised a GUI
+authorization dialog — **`SecurityAgent` pid 58221, started 16:32:31**, exactly the first post-rebuild
+wallet spawn. The wallet sat in `main.rs:568` (after `Addresses: 3`, before binding) until it was
+answered; it then came up normally at 16:40:31.
+
+⚠️ **Consequences worth knowing:** the dev stack **cannot come up unattended** after a wallet rebuild —
+CI/headless would hang, not fail. And a harness that reads "wallet not listening" will diagnose a
+crash. ⛔ This is a **macOS-only layer with no Windows analogue** (DPAPI is user-bound, not
+binary-bound). ⛔ Do not "fix" it by running `security find-generic-password -w` to check the item —
+that hangs on its own auth prompt.
+
+⛔ **Root cause of the ACL mismatch is inferred from timing, not proven.** I did not force a
+re-signature and re-observe. Recorded as well-supported, **not** established.
+
+## H. ⬜ Owed, and deferred — NOT done. Say so out loud.
+
+Landed this round: `R4`, Phase 5 `R1`/`R2`/`M4`, the `FaviconStore` check, `stop-dev.sh`.
+The user's instruction was to land those and defer the rest if the batch ran long. It did.
+
+| # | Item | Why deferred |
+|---|---|---|
+| 1 | **`CreateTabContextMenuOverlay`** (the 15th overlay) | ⛔ Not written. It is a borderless `NSWindow` + click-outside monitor anchored to the **cursor**, and **I cannot verify it** — `CGEventPost` is Accessibility-blocked for this session and a CDP `Input.dispatchMouseEvent` enters *below* the native NSView→`CefMouseEvent` layer, so it would pass with the defect present. Shipping ~200 lines of unexecutable overlay code is the exact failure this project keeps paying for. **Needs a human at the machine.** macOS stays at 14 overlays |
+| 2 | **Phase 3 `M2.1` + Phase 3.5 `M2`** (multi-window) | Needs Cmd+N, window dragging and a z-order read — all click-dependent, same instrument limit |
+| 3 | **Phase 7 `M4` #1/#2** (zero third-party favicon requests) | Not run. ⚠️ Note the store fix in §B **changes this measurement's meaning** — it should be re-run now that the store is live, since before today macOS could not have made a store hit *or* a Google request |
+| 4 | **Phase 7c `M4`** (quiet mode: probe pair, no-checkbox rows, `key_id='*'`) | Not run |
+| 5 | **Phase 5 `W7`** (4 overlays still reach the wallet) | The overlays open from **native toolbar clicks**, not a frontend IPC I can drive. ⚠️ Partial only: internal-origin wallet traffic post-predicate-swap is confirmed alive in the log (`/wallet/status`, `/wallet/balance`, `/wallet/settings`, `/domain/permissions` all `<none:internal>`), but I cannot attribute it to the four specific overlays |
+| 6 | Sparkle 2.9.6 + negative control (🚦 blocks promotion), Big Sur `minimumSystemVersion`, `T1g`, Phase 4 `O2`/`O3`/`O5`/`O6`, **`P4-B2` mic/camera ×3 states** | Carried. ⚠️ `P4-B2` still needs a **CI-signed hardened-runtime build**: `helper-Info.plist.in` has neither `NSMicrophoneUsageDescription` nor `NSCameraUsageDescription`, and ad-hoc dev builds do not engage the policy — a clean result on this build would not mean what it looks like |
+| 7 | From 2026-08-26: `g_file_dialog_active` latch, Phase 0.9 `A3.3`/`A3.4`, the `D1` sizing contract, profile panel not dismissing on focus loss | Untouched this round |
+
+## I. Two corrections to the incoming ask, for the record
+
+1. ⛔ **The clipboard behavioural check is void on its own** — §C.1. The row is still green; the
+   stated method is not what makes it green.
+2. ⚠️ **`31402` is the adblock engine, not a wallet port.** I briefly mis-read
+   `Server listening on http://127.0.0.1:31402` as the wallet failing to take 31401. It is
+   `hodos-adblock`, and it was correct. Noted so the next reader does not repeat the detour.
+
+---
 # 📋 ROUND 2026-09-08 (Windows) — **Phase 6 CUT, Phases 7 · 7a · 7b · 7c · 7d all landed.** Next is **Phase 8**, and one of its tickets is overdue by design
 
 Windows is **through Phase 7d**. Sprint order `0 · 0.5 · 0.6 · 1 · 2 · 3 · 3.5 · 4 · 5` ✅,

@@ -366,6 +366,57 @@ observed.
 **Two-sided pairings:** `A4`/`A5`/`A6` ↔ `A8` (three types gain a mirror; camera/mic must not) ·
 `A9`'s two mechanisms · `A11`'s changed-screen ↔ unchanged-screen · `A2`'s count ↔ footer.
 
+## 4b. 🍎 macOS evidence — `R4` re-measured 2026-09-08
+
+Asked for by `MAC_RELAY_P7D_ROUND.md` M3. Probe: `probes/dual_store_probe_mac.py`.
+Subject: the **site's behaviour**, read from `https://example.com/` in the dev browser (CDP 9322).
+Launched **without** `HODOS_MAC_DEV_FLAGS`, so web security is ON — verified on a *child* argv
+(`--disable-web-security` = 0 across all 5 children, with `--no-sandbox` = 1 as the positive control
+that the grep can see a switch that is present).
+
+| Row | macOS result |
+|---|---|
+| `P7d-A4` notifications | 🟢 `prompt` → **`denied`**; `Notification.requestPermission()` → `"denied"` with **no prompt** |
+| `P7d-A5` location | 🟢 `prompt` → **`denied`**; `getCurrentPosition` → **code 1** `PERMISSION_DENIED`. ⭐ Answers `D-10` the same as Windows: plain `GEOLOCATION` **is** consulted on this pin |
+| `P7d-A6` clipboard | 🟢 `prompt` → **`denied`**. ⚠️ See the instrument note below — the behavioural half is void on its own |
+| `P7d-A7` reset | 🟢 all three back to **`prompt`** |
+| `P7d-A8` camera/mic control | 🟢 both stay **`prompt`** on the very origin whose other three read `denied`, **and** zero `🛈 Mirrored …camera/microphone` lines were emitted all session |
+
+**Trigger asserted** (`🛈 Mirrored` is `LOG_INFO_BROWSER`, survives `minLevel=INFO`): 3 `=block` lines
+for example.com, then 5 `=ask` lines on reset (loopback, local_network, notifications, location,
+clipboard) — camera/mic absent from both, as the reset list intends.
+
+**Sensitivity, without the Windows gate.** `dual_store_probe.py`'s control origin
+(`www.youtube.com`, a real Chromium notifications BLOCK planted 2026-08-10) does not exist on macOS:
+📏 this Mac's SQLite store holds the *identical* row (`www.youtube.com | 4 | 2 | 2026-08-10
+14:10:23`) but the **Chromium** half was never planted, because notifications only began mirroring in
+the build under test. Running that gate here would print VACUOUS for a reason unrelated to the
+subject. Replaced with two stronger controls:
+1. **The flip is self-validating (`D-D`)** — a blind reader cannot fabricate `denied`, only `prompt`.
+2. **Origin specificity** — `https://www.wikipedia.org/`, never touched, read `prompt` for all three
+   in the same breath. This rules out the failure the youtube gate cannot see: a reader that says
+   `denied` for everything.
+
+### ⛔ Instrument correction — `A6`'s behavioural check is void on its own
+
+📏 Both arms measured:
+
+| probe | baseline (nothing blocked) | blocked | discriminates? |
+|---|---|---|---|
+| `Notification.requestPermission()` | **TIMEOUT — a real prompt opened** | `"denied"`, no prompt | ✅ |
+| `getCurrentPosition` | **code 3** (TIMEOUT) | **code 1** (PERMISSION_DENIED) | ✅ |
+| `navigator.clipboard.readText()` | **`NotAllowedError`** | `NotAllowedError` | ❌ **confounded** |
+
+`readText()` rejects identically whether or not the type is blocked, because it also rejects on
+focus / transient-activation grounds (`userGesture:true` does not fix that under CDP). **HARNESS §6
+Q1: that probe passes with the feature removed, so alone it is void.** `A6` rests on the
+`permissions.query('clipboard-read')` flip plus the mirror log line — both of which are unambiguous.
+⚠️ The Windows row is green for the right reason; its *stated* check is the one to correct.
+
+⭐ The baseline arm explains itself positively: `🔔 OnShowPermissionPrompt … mapped=[notifications]`
+is logged at the baseline TIMEOUT and **appears nowhere in the block arm's window**, so "no prompt
+appeared" is a measured artifact rather than an inference from a fast return.
+
 ## 5. Blast radius
 
 - **`DomainPermissionsTab.tsx`** — the list, its sort, its pager. Items 5 and the `A2` reset bug.

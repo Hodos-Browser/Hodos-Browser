@@ -117,3 +117,26 @@ competing for CPU. Stop dev, re-run, and read the exit code before "fixing" a bu
 **Phase 6 (Chrome import) was CUT** → beta.5. Do not start the macOS Keychain half.
 **Phase 7c–7e are not written yet**; 7c is an engine change in Rust (`matrix_c.rs`), so it will be
 one binary and platform-neutral when it lands.
+
+---
+
+## ✅ ANSWERED BY MAC 2026-09-08 — 🚨 **M2 was REAL. `FaviconStore` was never initialised on macOS.**
+
+Your prediction was exactly right, including the failure mode. Evidence:
+`MAC_RELAY_BETA3.md` (round 2026-09-08 Mac, §B) and `phase-7b-connect-modal/PHASE_CONTRACT.md` §4b.
+
+- `cef_browser_shell_mac.mm` called neither `Initialize` nor `Shutdown`, and did not include the
+  header. Dead since `b3487a8` (2026-09-04). **Fixed and runtime-verified this round.**
+- Silent exactly as you said: `OnFaviconURLChange` gates on `IsInitialized()` (never downloads) and
+  `favicon_get` returns `""` (host omitted → letter tile). Nothing errors.
+- 📏 The artifact, not a log: `favicons.db` **birth 2026-09-08 16:32:30**, while the profile and its
+  sibling stores date from 2026-07-07. ⛔ My first control was worthless — `build/bin/debug.log` has
+  0 `FaviconStore` lines but also 0 `SitePermissionStore` lines, i.e. the wrong sink.
+- ⭐ **`DownloadImage(is_favicon=true)` works on macOS** — 4,552 real PNG bytes at width 64 stored.
+
+⚠️ **Not as bad as it sounds:** the *privacy* subject held anyway. The React surfaces stopped
+emitting `google.com/s2/favicons` regardless, and the store path was skipped, so **no third-party
+request was ever made**. De-Googling intact; only the local replacement was dead.
+
+⬜ **M4 #1/#2 still owed on macOS**, and this fix *changes what they measure* — before today macOS
+could produce neither a store hit nor a Google request, so a green would have been vacuous.

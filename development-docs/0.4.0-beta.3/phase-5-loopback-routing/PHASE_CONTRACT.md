@@ -135,6 +135,47 @@ it decides whether the rest of the phase is urgent or tidy-up.
 `R-GOLD` / `R-COUNT` / `R-CLOSE` owed as at every prior boundary unless a real payment happens.
 ⬜ `pwsh scripts/preflight.ps1` + `-NegativeControl`.
 
+## 4b. 🍎 macOS evidence — `P5-A1` / `P5-A2` answered 2026-09-08
+
+Asked for by `MAC_RELAY_P5_ROUND.md` M2 (`R1`/`R2`) and M4. Probe:
+`phase-5-loopback-routing/p5probe_mac.py`. Subject: **our Rust log**, run under
+`RUST_LOG=hodos_wallet=debug` (inherited — `SpawnWalletServer` uses `posix_spawn(..., environ)`),
+sink positive-controlled at **299** pre-existing `R-INTEXT` lines before any probe.
+
+⛔ One probe per run, each in its own before/after log window. A first attempt fired all four
+fetches inside one `Runtime.evaluate` and returned two `/getVersion requesting_domain=example.com`
+lines 45 s apart with no completion — unattributable, and it *looked* like a result.
+
+| Row | Probe | Page saw | New external-domain `R-INTEXT` | macOS verdict |
+|---|---|---|---|---|
+| `P5-A1` | `http://127.0.0.1:3321/getVersion` | abort @8 s | **1** · `path=/getVersion requesting_domain=example.com` | 🟢 our wallet answered, carrying the page's host |
+| `P5-A2` | `https://127.0.0.1:2121/getVersion` | abort @8 s | **1** · `path=/getVersion requesting_domain=example.com` | 🟢 **a `CefResourceHandler` DOES take over https loopback PRE-TLS on macOS** — no cert interstitial, no TLS error |
+| M4 | `https://example.com/getNetwork?x=127.0.0.1:3321` | **404, 559 B, example.com's own HTML** | **0** | 🟢 the pre-fix defect is absent |
+| NEG | `http://127.0.0.1:3322/getNetwork` | **`TypeError: Failed to fetch`** | **0** | ⭐ the gate is what causes interception |
+
+⇒ **Ticket §11 Q1 is now settled on BOTH platforms, and §8.1's fallback (stop matching 2121) is NOT
+required on macOS.**
+
+**`R1` — no cross-wallet hole on this machine.** `lsof -nP -iTCP -sTCP:LISTEN | grep -E '3321|2121'`
+returns nothing, positive-controlled by the same command seeing 31301 and 9222. ⚠️ A fact about *this
+Mac* (no MetaNet Client installed), not a platform guarantee — what actually closes the hole if a
+wallet appears is the interception proven above.
+
+### ⭐ Why the page aborted while the wallet answered
+
+📏 `🔔 OnShowPermissionPrompt origin=https://example.com/ mask=0x08000000 mapped=[loopback]`.
+Our interceptor reached the wallet (logged); **Chromium's Local Network Access gate held the response**
+from the page. Not a routing failure.
+
+⭐ This independently re-confirms the 2026-08-26 retraction: **macOS does raise the loopback
+permission.** The earlier "it never fires" claim was an artifact of `--disable-web-security`; under
+the honest launch recipe (no `HODOS_MAC_DEV_FLAGS`, verified on a child argv) it fired.
+
+⬜ **`W7` (ticket §8.6) still owed** — the four overlays open from **native toolbar clicks**, not a
+frontend IPC, so they cannot be driven from this session. Partial only: internal-origin wallet traffic
+after the predicate swap is confirmed alive (`/wallet/status`, `/wallet/balance`, `/wallet/settings`,
+`/domain/permissions`, all `<none:internal>`), but not attributable to those four overlays.
+
 ## 5. Blast radius — what this touches that it is not about
 
 | Site | Exposure |

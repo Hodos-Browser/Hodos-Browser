@@ -52,6 +52,58 @@ shows what the site actually asked for, and discloses nothing to anyone while th
 | `P7b-A7` | Nothing reachable before is unreachable after | Diff rendered text of the pre-merge Summary ∪ Customize against the merged view | rendered text, both states of quiet mode | T2 | ⬜ |
 | `P7b-A8` | The merged card still fits the viewport at the DPI-matrix cells | Feed the greedy fixture → card bottom within `innerHeight`; 7a's cap is the backstop, not the plan | `phase-7a-modal-viewport/measure.py`, same rig | T2 | ⬜ |
 
+## 4b. 🍎 macOS — 🚨 `FaviconStore` was NEVER INITIALISED here. Defect found + fixed 2026-09-08
+
+Asked for by `MAC_RELAY_P7_ROUND.md` M2, which predicted this exact failure. It was real.
+
+`cef_browser_shell.cpp` (Windows entry) calls `FaviconStore::GetInstance().Initialize(profile_cache)`
+at `:5910` and `.Shutdown()` at `:6174`, beside `SitePermissionStore` / `PaidContentCache`.
+📏 **`cef_browser_shell_mac.mm` did neither and did not include the header.** Shipped in `b3487a8`
+(2026-09-04); dead on macOS for four days.
+
+⛔ **Silent by construction — both consumers are guarded, not fallible:**
+
+| site | behaviour when `IsInitialized()` is false |
+|---|---|
+| `simple_handler.cpp :: OnFaviconURLChange :1230` | gates `DownloadImage` on `store.IsInitialized()` ⇒ **never downloads, never stores**. No error |
+| `simple_handler.cpp :: favicon_get :8349` | `GetDataUri()` returns `""` ⇒ host **omitted** from the reply, React draws its letter tile — the documented correct fallback. No error |
+
+⇒ macOS showed letter tiles everywhere and never created `favicons.db`. It reads as a rendering bug.
+
+**📏 The artifact, because the log was the wrong instrument.** My first control was worthless and was
+discarded: `build/bin/debug.log` has 0 `FaviconStore` lines — but also 0 `SitePermissionStore
+initialized` lines, so it is simply not that sink. A zero from a blind instrument is not an absence.
+
+| file | birth |
+|---|---|
+| profile dir `HodosBrowserDev/Default` | 2026-07-07 13:09:28 |
+| `site_permissions.db` · `bookmarks.db` · `cookie_blocks.db` | 2026-07-07 13:09:41 ← positive control: this path *does* create such files |
+| **`favicons.db`** | **2026-09-08 16:32:30** ← first launch after the fix |
+
+**Fix + runtime verification (not merely "it initialises"):**
+
+```
+FaviconStore initialized at .../HodosBrowserDev/Default/favicons.db
+sqlite> select host, icon_url, length(png), width from favicons;
+127.0.0.1|http://127.0.0.1:5137/Hodos_Gold_Icon.svg|4552|64
+```
+
+⇒ 4,552 real PNG bytes at width 64. That also answers M2's second ask: **`CefBrowserHost::DownloadImage
+(url, is_favicon=true, …)` works on macOS** — the CEF API never used before this phase on either platform.
+
+⚠️ **Scope of the damage, stated so it is not overstated.** `P7b-A1`'s *privacy* subject held on macOS
+regardless: the React surfaces stopped emitting `google.com/s2/favicons` whatever the store did, and
+the store path was skipped entirely, so **no third-party request was ever made**. The de-Googling was
+intact; only the local replacement was dead.
+
+⚠️ Only `127.0.0.1` is stored so far — `example.com` declares `<link rel="icon" href="data:,">`, an
+empty data URI, so its absence is correct rather than a second bug.
+
+⬜ **Consequence for the owed rows:** `MAC_RELAY_P7_ROUND.md` M4 #1/#2 (zero third-party requests on
+the consent modal / new tab) are **still not run on macOS**, and this fix *changes what they measure* —
+before today macOS could not have produced a store hit **or** a Google request, so a green there would
+have been vacuous. Re-run them now that the store is live.
+
 ## 5. Blast radius
 
 - `BRC100AuthOverlayRoot.tsx` — the connect bundle (both views), `domain_approval`, and the shared

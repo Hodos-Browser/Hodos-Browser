@@ -132,3 +132,19 @@ Phase 4 owner items.
 - `TICKET_wallet_quiet_detector_blind_to_long_polls.md` — filed, not fixed. ⛔ Its negative control
   needs a **first** connect to a manifest site with a slow auth step; a test on an already-approved
   site *cannot fail*, which is how it survived.
+
+---
+
+## ✅ PARTIALLY ANSWERED BY MAC 2026-09-08 — M6 done, M4 still owed
+
+- ✅ **M6 — `scripts/stop-dev.sh` written**, and its acceptance measured with both builds running:
+  installed wallet **SURVIVED** and kept serving `:31301`; 10 dev processes → 0. Detail in
+  `TICKET_stop_dev_script_cannot_be_run_as_documented.md` (macOS half).
+  ⛔ It reads `ps -axo comm=` (kernel path), **not** `pgrep -f` — argv[0] is a relative string on a
+  `./`-launched bundle and is invisible to an absolute-prefix match.
+  ⚠️ Two defects only running it revealed: `basename` chokes on a login shell's `-zsh` comm, and the
+  wallet's kernel path contains `../..`, so a textual repo-prefix test would accept a path that
+  `..`s out of the repo. Both fixed before commit.
+
+- ⬜ **M4 (all six rows) NOT RUN on macOS** — quiet-mode probe pair, the three no-checkbox surfaces,
+  and the `key_id='*'` DB check. Deferred this round, explicitly not done.

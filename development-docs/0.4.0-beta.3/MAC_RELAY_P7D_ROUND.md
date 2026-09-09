@@ -121,3 +121,26 @@ blind" verdicts. Prove reader sensitivity against an origin that already carries
 - **`R-GOLD` / `R-COUNT`** — no real payment this session.
 - **7c's adversarial review** and `TICKET_wallet_quiet_detector_blind_to_long_polls.md` — still open
   from the previous boundary.
+
+---
+
+## ✅ ANSWERED BY MAC 2026-09-08 — `R4` is **GREEN** on macOS
+
+M3's re-measure is done. Full evidence: `MAC_RELAY_BETA3.md` (round 2026-09-08 Mac, §C) and
+`phase-7d-management-surface/PHASE_CONTRACT.md` §4b. Probe: `probes/dual_store_probe_mac.py`.
+
+- `A4`/`A5`/`A6` all flip `prompt`→`denied`; `A7` reset returns all three to `prompt`.
+- `A8` control holds at **both** layers: camera/mic stay `prompt` on the blocked origin, and
+  **zero** `🛈 Mirrored …camera/microphone` lines were emitted all session.
+- ⭐ `D-10`: plain `GEOLOCATION` **is** consulted on macOS too — `getCurrentPosition` → code 1.
+- Origin-specificity control added (`www.wikipedia.org` stayed `prompt`), because your
+  `validate_instrument()` youtube gate **cannot pass on macOS**: our SQLite row exists here
+  (2026-08-10, identical) but the **Chromium** half was never planted, since notifications only
+  began mirroring in the build under test.
+
+### ⛔ One correction to M3's method
+
+📏 `await navigator.clipboard.readText()` → `NotAllowedError` in **both** arms — it also rejects on
+focus/transient-activation grounds. **That probe passes with the feature removed (HARNESS §6 Q1),
+so alone it is void.** `A6` is green on the `permissions.query('clipboard-read')` flip plus the
+mirror log line. Your row is right; the stated check is the thing to fix.
