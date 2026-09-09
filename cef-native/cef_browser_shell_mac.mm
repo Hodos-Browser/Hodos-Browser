@@ -135,6 +135,7 @@ namespace fs = std::filesystem;
 #include "include/core/FarblingPolicy.h"
 #include "include/core/CookieBlockManager.h"
 #include "include/core/BookmarkManager.h"
+#include "include/core/FaviconStore.h"
 #include "include/core/PaidContentCache.h"
 #include "include/core/SitePermissionStore.h"
 #include "include/core/WindowManager.h"
@@ -5460,6 +5461,28 @@ int main(int argc, char* argv[]) {
                 LOG_ERROR("Failed to initialize SitePermissionStore");
             }
 
+            // beta.3 Phase 7b — the local favicon store. Mirrors cef_browser_shell.cpp.
+            //
+            // ⛔ MEASURED-BY-READING 2026-09-08 (Mac): this call was MISSING on macOS while
+            // the Windows entry point had it, and the failure is entirely SILENT. Both
+            // consumers are guarded rather than fallible:
+            //   • simple_handler.cpp :: OnFaviconURLChange gates the DownloadImage on
+            //     `store.IsInitialized()`, so nothing is ever fetched or stored — no error;
+            //   • the `favicon_get` IPC returns GetDataUri()=="" for every host, so hosts are
+            //     simply omitted from the reply and React draws its initial-letter tile.
+            // ⇒ macOS showed letter tiles on the omnibox, new tab and bookmarks forever and
+            // never created favicons.db, which reads as a rendering bug rather than an
+            // uninitialised singleton. Predicted in MAC_RELAY_P7_ROUND.md M2, confirmed here.
+            //
+            // ⚠️ Note what was NOT broken: the phase's PRIVACY subject held on macOS anyway,
+            // because the React surfaces stopped emitting google.com/s2/favicons regardless of
+            // store state. The de-Googling was intact; only the replacement was dead.
+            if (hodos::FaviconStore::GetInstance().Initialize(profile_cache)) {
+                LOG_INFO("FaviconStore initialized successfully");
+            } else {
+                LOG_ERROR("Failed to initialize FaviconStore");
+            }
+
             if (PaidContentCache::GetInstance().Initialize(profile_cache)) {
                 PaidContentCache::GetInstance().SetEnabled(
                     SettingsManager::GetInstance().GetPrivacySettings().paidContentCacheEnabled);
@@ -5749,6 +5772,7 @@ int main(int argc, char* argv[]) {
             HistoryManager::GetInstance().Shutdown();
             BookmarkManager::GetInstance().Shutdown();
             SitePermissionStore::GetInstance().Shutdown();
+            hodos::FaviconStore::GetInstance().Shutdown();
             CookieBlockManager::GetInstance().Shutdown();
             PaidContentCache::GetInstance().Shutdown();
 
