@@ -15,7 +15,8 @@
 
 import express from 'express';
 import crypto from 'crypto';
-import { PrivateKey, Transaction } from '@bsv/sdk';
+import { PrivateKey } from '@bsv/sdk';
+import { validatePaymentHeaders } from './payment.js';
 
 const PORT = Number(process.env.PORT || 31402);
 const PRICE_SATS = Number(process.env.PRICE_SATS || 100);
@@ -97,51 +98,17 @@ app.get('/', (_req, res) => {
 //   x-bsv-nonce   — base64 nonce (client-chosen)
 //   x-bsv-time    — decimal-ms timestamp string
 //   x-bsv-vout    — index of the BRC-29 output in the BEEF (usually "0")
-// Older / abbreviated form was a single `x-bsv-payment: <BEEF base64>`. We
-// accept either so this server works against any BRC-121 client.
+// The legacy single `x-bsv-payment` form is deliberately rejected because it
+// cannot bind the selected output to this server's BRC-29 key.
 //
 // Returns { ok: true, txid, sats } on success, { ok: false, status, error } on
 // failure, { needPayment: true } if no payment headers present.
 function validatePayment(req) {
-    let beefB64 = req.get('x-bsv-beef') || req.get('x-bsv-payment');
-    if (!beefB64) {
-        return { ok: false, needPayment: true };
-    }
-    try {
-        const beefBytes = Buffer.from(beefB64, 'base64');
-        let tx;
-        try {
-            tx = Transaction.fromAtomicBEEF([...beefBytes]);
-        } catch {
-            tx = Transaction.fromBEEF([...beefBytes]);
-        }
-        const txid = tx.id('hex');
-        if (acceptedTxids.has(txid)) {
-            return { ok: false, status: 409, error: 'Replay: BEEF already accepted', txid };
-        }
-        // x-bsv-vout tells us which output carries the BRC-29 payment. Falls
-        // back to 0 for older clients that don't send the header.
-        const voutStr = req.get('x-bsv-vout') || '0';
-        const vout = Number.parseInt(voutStr, 10);
-        if (!Number.isFinite(vout) || vout < 0) {
-            return { ok: false, status: 400, error: `Invalid x-bsv-vout '${voutStr}'` };
-        }
-        const payOut = tx.outputs[vout];
-        if (!payOut) {
-            return { ok: false, status: 400, error: `BEEF has no output at vout=${vout}` };
-        }
-        if (typeof payOut.satoshis !== 'number' || payOut.satoshis < PRICE_SATS) {
-            return {
-                ok: false,
-                status: 400,
-                error: `Insufficient payment: output ${vout} has ${payOut.satoshis} sats, expected >= ${PRICE_SATS}`,
-            };
-        }
-        acceptedTxids.add(txid);
-        return { ok: true, txid, sats: payOut.satoshis, vout };
-    } catch (err) {
-        return { ok: false, status: 400, error: 'Invalid BEEF: ' + err.message };
-    }
+    return validatePaymentHeaders(req.headers, {
+        acceptedTxids,
+        priceSats: PRICE_SATS,
+        serverPrivateKey: serverPriv,
+    });
 }
 
 // Per-request paywall: every visit pays.
