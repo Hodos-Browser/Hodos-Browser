@@ -7,13 +7,14 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "test": "node --test payment.test.js"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
-    "@bsv/sdk": "^1.7.3",
+    "@bsv/sdk": "^2.5.0",
     "express": "^4.21.2"
   }
 }
