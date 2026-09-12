@@ -741,7 +741,9 @@ static bool IsConnectModalType(const std::string& type) {
 // consent surface joining the path the other three already use, not a new one.
 //
 // ⛔ Store MISS falls through to "" — the letter tile — and must never fall back
-// to `GetFaviconUrlForHost`. Showing no icon is the documented, accepted answer
+// to a live tab's icon URL. (That was `TabManager::GetFaviconUrlForHost`, deleted
+// once this became its last caller — do not reintroduce the shape.) Showing no
+// icon is the documented, accepted answer
 // (the ticket: "the wrong site's icon on a consent screen is worse than no
 // icon"), and re-adding the URL is the whole defect.
 //

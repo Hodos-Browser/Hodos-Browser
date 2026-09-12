@@ -144,14 +144,20 @@ letter tile. The URL form had no such window. Revisits are covered — the store
 host-keyed. This is the ticket's own documented fallback ("a bundled generic icon is the acceptable
 fallback"), and showing no icon is explicitly preferred here to showing the wrong one.
 
-### 🧹 Now unused, NOT deleted — reported instead
+### 🧹 `TabManager::GetFaviconUrlForHost` — ✅ **DELETED 2026-09-12**
 
-`TabManager::GetFaviconUrlForHost` has no remaining caller. It is a public method with two verbatim
-platform arms (`TabManager.cpp`, `TabManager_mac.mm`), and this exact symbol already broke the macOS
-link once by existing on only one side (`TabManager_mac.mm:654-661`). Removing it is an API deletion,
-not part of a behaviour fix, and would conflict with any in-flight Windows branch — so it is left in
-place and flagged here. ⚠️ The header comment that named it as the consent path's source has been
-corrected, because that sentence became false.
+It had no remaining caller once this fix landed. ~~Left in place and flagged, because removing it
+would conflict with an in-flight Windows branch~~ — ⛔ **that reason was wrong and is struck.** No
+branch on `origin` is ahead of `0.4.0`; every other branch is 0 commits ahead and dated 2026-08-17 or
+earlier. I asserted a branch without looking for it. Working rule #3 ("remove helpers **your** change
+orphaned") applies directly, so it went, together with the `SitePermissionStore.h` include it was the
+only user of.
+
+⚠️ Removed symmetrically — declaration + **both** platform arms — which is what makes it safe: the
+2026-09-08 macOS link break was caused by *asymmetry* (definition on one side, caller shared), and a
+complete deletion cannot reproduce it. 📏 macOS builds and links clean; the probe above is still green
+after it. ⬜ The Windows arm is **not** compiled on this machine and is unverified here — conflict and
+build-risk note for Windows in `MAC_RELAY_BETA3.md` round 2026-09-12.
 
 ### ⬜ Not covered by a unit test, and why
 

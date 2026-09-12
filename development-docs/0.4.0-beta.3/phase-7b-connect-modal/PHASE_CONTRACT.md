@@ -171,9 +171,11 @@ reports **2** for **1** real request — `netwatch.py`/`netwatch_page.py` use th
 same instant its page loads gets the letter tile. Revisits are covered. This is the ticket's own
 documented fallback, and no icon is explicitly preferred to the wrong icon.
 
-🧹 `TabManager::GetFaviconUrlForHost` is now uncalled. **Reported, not deleted** — a public method
-with two platform arms, and this symbol already broke the macOS link once by existing on one side
-only. Its stale mention in `HttpRequestInterceptor.h` was corrected.
+🧹 `TabManager::GetFaviconUrlForHost` — ✅ **DELETED 2026-09-12** (declaration + both platform arms +
+the `SitePermissionStore.h` include it solely used). ~~Reported, not deleted, because it would
+conflict with an in-flight Windows branch~~ — ⛔ struck: no branch on `origin` is ahead of `0.4.0`.
+Symmetric removal is what makes it safe; the 2026-09-08 link break came from asymmetry. ⬜ Windows arm
+unverified here (`TabManager.cpp` does not compile on macOS) — see relay round 2026-09-12.
 
 ⚠️ Harnesses: `netwatch_domain.py` (React half) and **`consent_favicon_probe.py`** (the real path —
 use this one for this row). ⛔ Two traps in the latter's docstring: an unanswered prompt silently

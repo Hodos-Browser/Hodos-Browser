@@ -11,6 +11,86 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-12 (**Mac**) — 🚨 **CONFLICT HEADS-UP: `TabManager::GetFaviconUrlForHost` is DELETED.** Read this before resolving any merge.
+
+Follow-up to round 2026-09-09c, which made that method's last caller go away. Owner: *"go ahead and
+delete it."* Behaviour change: **none** — it had no callers before this commit and none after.
+
+⛔ **I corrected myself here, and the correction is the reason this round exists.** In 09c I wrote
+that deleting it "would conflict with an in-flight Windows branch." **There is no such branch.**
+Measured: `origin/main`, `origin/staging`, `origin/feature/brc121-phase1`, `origin/helicops`,
+`origin/John`, `origin/john` are each **0 commits ahead of `origin/0.4.0`**, the newest of them dated
+2026-08-17. You commit straight to `0.4.0`. I asserted a branch without looking for it. The residual
+risk is your **uncommitted working tree**, which I genuinely cannot see — hence this note.
+
+## What was removed — three sites, symmetric, one commit
+
+| File | Removed |
+|---|---|
+| `cef-native/include/core/TabManager.h` | the declaration + its Doxygen block, immediately **after `UpdateTabFavicon`** |
+| `cef-native/src/core/TabManager.cpp` | the **Windows** definition + its comment, **after `UpdateTabFavicon`, before `// ========== Browser Registration ==========`** |
+| `cef-native/src/core/TabManager_mac.mm` | the **macOS** definition + its comment, **after `GetActiveTabForWindow`** |
+
+Plus the now-orphaned `#include ".../SitePermissionStore.h"` from **both** `.cpp`/`.mm` — it was used
+only by the deleted function (working rule #3). Search by symbol, not by line number; the line numbers
+in 09c have already drifted.
+
+## 🚨 The trap, and the single most important thing on this page
+
+**Each of us is blind to one arm.** `CMakeLists.txt:363-364` compiles `TabManager.cpp` on **Windows
+only**; `:303` compiles `TabManager_mac.mm` on **macOS only**.
+
+⇒ If you resolve a conflict in **`TabManager_mac.mm`** by keeping your side, you will leave a
+definition whose declaration is gone — and **your build will not tell you**, because it never compiles
+that file. It surfaces as `Undefined symbols for architecture arm64` on my next pull, which is
+*exactly* how this symbol took the macOS link down on 2026-09-08 (the comment block recording that
+incident was itself part of what got deleted). ⛔ **Resolve `TabManager_mac.mm` to the DELETED state
+even though you cannot compile it.**
+
+The mirror applies to me: I could not compile `TabManager.cpp` at all.
+
+## ⬜ The one thing I could NOT verify, stated plainly
+
+📏 **macOS: built and linked clean**, object mtime > source mtime (not exit code), and the consent
+probe re-run after the deletion is still green — `data:` URI of **2364 bytes**, **0 of 129** non-local.
+
+⬜ **Windows: unverified by me, and one line is a real candidate to break it.** I removed
+`#include "../../include/core/SitePermissionStore.h"` from `TabManager.cpp`. Grep says nothing else in
+that file uses `SitePermissionStore`, and it uses no `sqlite3` either (that header pulls in
+`sqlite3.h`, `<string>`, `<mutex>`, `<cstdint>`, `SitePermissionType.h`) — but a transitive include is
+exactly the kind of thing that only shows up at compile time on the platform that compiles it.
+
+⭐ **If the Windows build breaks after this, it is almost certainly that one line. Put it back and tell
+me** — do not restore the function.
+
+## ⛔ If your working tree has a NEW caller of `GetFaviconUrlForHost` — stop and tell me
+
+- **On the consent/permission path** → ⛔ that is the defect 09c removed (it returns a **remote** URL,
+  and the overlay renders it into `<img src>`, so off-host icons fetch a third party at the moment of
+  the decision). Use `hodos::FaviconStore::GetDataUri(host)` instead; it is already the single source
+  for all four surfaces.
+- **Anywhere else** → fine in principle, but it must be restored to **both** platform arms in the same
+  commit, or the macOS link breaks again. Say so in the relay and I will re-add the macOS half.
+
+## How to resolve, per file
+
+The deletion is the intended end state everywhere. Take my side for the deleted regions unless you hit
+the case above. The likeliest conflict hunk is `TabManager.h` **if you added a method right after
+`UpdateTabFavicon`** — keep your new method, drop the `GetFaviconUrlForHost` block.
+
+⚠️ Your current work (P8c) touches `simple_handler.cpp`, `simple_render_process_handler.cpp`,
+`initWindowBridge.ts`, `hodosBrowser.d.ts` — **none of the three files above** — so I expect a clean
+merge. This note exists because "I expect" is not a measurement of your working tree.
+
+## 📚 Docs left alone deliberately
+
+Every historical mention of `GetFaviconUrlForHost` in the ticket, the 7b contract and rounds 09b/09c
+**stays**: it is the record of how the defect was found, and rewriting it would erase the reasoning.
+Only the two "reported, not deleted" paragraphs were corrected, plus one comment in
+`HttpRequestInterceptor.cpp` that told a future reader never to fall back to a function that no longer
+exists — it now describes the *shape* rather than naming a dead symbol.
+
+---
 # 📋 ROUND 2026-09-09c (**Mac**) — the off-host consent favicon from §D of the round below is **FIXED**, with the RED observed both ways
 
 Owner decided the same session: *"fix the consent favicon to use the store."* Done, measured, and the
