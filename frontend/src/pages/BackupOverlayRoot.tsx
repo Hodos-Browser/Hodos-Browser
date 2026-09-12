@@ -86,13 +86,18 @@ const BackupOverlayRoot: React.FC = () => {
       try {
         // Load existing wallet (should already be created by main app)
         const walletInfo = await window.hodosBrowser.wallet!.getInfo();
-        console.log("💾 Loaded wallet:", walletInfo);
 
+        // Phase 8c stage 3 batch 2: C++ has always sent `{ success, wallet: {…} }`, and
+        // this read the fields flat — so `mnemonic` was `undefined`. The type now says
+        // what the wire carries, which is what surfaced it.
+        if (!walletInfo.success || !walletInfo.wallet) {
+          throw new Error(walletInfo.error || 'wallet info unavailable');
+        }
         setWallet({
-          address: walletInfo.address || "No address generated",
-          mnemonic: walletInfo.mnemonic,
-          version: walletInfo.version || "1.0.0",
-          backedUp: walletInfo.backedUp || false
+          address: walletInfo.wallet.address || "No address generated",
+          mnemonic: walletInfo.wallet.mnemonic,
+          version: walletInfo.wallet.version || "1.0.0",
+          backedUp: walletInfo.wallet.backedUp || false
         });
 
         // Show modal immediately since wallet is ready

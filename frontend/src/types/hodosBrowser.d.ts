@@ -6,6 +6,16 @@ import type { CookieData, CookieDeleteResponse, CacheSizeResponse } from './cook
 import type { BlockedDomainEntry, BlockLogEntry, BlockDomainResponse, UnblockDomainResponse, AllowThirdPartyResponse, BlockedCountResponse, ClearBlockLogResponse } from './cookieBlocking';
 import type { BookmarkData, FolderData, BookmarkAddResponse, BookmarkUpdateResponse, BookmarkRemoveResponse, BookmarkSearchResponse, BookmarkGetAllResponse, BookmarkIsBookmarkedResponse, FolderCreateResponse, FolderUpdateResponse, FolderRemoveResponse } from './bookmarks';
 
+// The `get_wallet_info` reply as C++ builds it (`simple_handler.cpp`): the wallet fields
+// are NESTED under `wallet`, not flat. Phase 8c stage 3 batch 2 replaced a flat
+// declaration that had never matched the wire — its one consumer read `mnemonic` as
+// `undefined`. Shared by `bridge.getInfo` and `wallet.getInfo`.
+type WalletInfoResponse = {
+  success: boolean;
+  wallet?: { version: string; mnemonic: string; address: string; backedUp: boolean };
+  error?: string;
+};
+
 declare global {
   interface Window {
     hodosBrowser: {
@@ -23,6 +33,11 @@ declare global {
         getBackupModalState: () => Promise<{ shown: boolean } | null>;
         // ⛔ A real boolean, not a stringified one — it rides as arg 1 via SetBool.
         setBackupModalState: (shown: boolean) => Promise<{ success: boolean } | null>;
+        // Stage 3 batch 2. Backs both `address.generate()` and `wallet.generateAddress()`.
+        generateAddress: () => Promise<AddressData>;
+        // Nested — this is the shape C++ sends, not the flat one the legacy type claimed.
+        getInfo: () => Promise<WalletInfoResponse>;
+        markBackedUp: () => Promise<{ success: boolean; error?: string }>;
       };
       // Promise-based since the history-over-IPC move: the render process no longer
       // opens the history database itself, so every call is a round-trip to the
@@ -80,11 +95,11 @@ declare global {
         getStatus: () => Promise<{ exists: boolean; needsBackup: boolean }>;
         create: () => Promise<{ success: boolean; wallet?: { mnemonic: string; address?: string; version?: string; backedUp?: boolean }; error?: string }>;
         load: () => Promise<{ success: boolean; address: string; mnemonic: string; version: string; backedUp: boolean }>;
-        getInfo: () => Promise<{ version: string; mnemonic: string; address: string; backedUp: boolean }>;
+        getInfo: () => Promise<WalletInfoResponse>;
         generateAddress: () => Promise<AddressData>;
         getCurrentAddress: () => Promise<AddressData>;
         getAddresses: () => Promise<AddressData[]>;
-        markBackedUp: () => Promise<{ success: boolean }>;
+        markBackedUp: () => Promise<{ success: boolean; error?: string }>;
         getBackupModalState: () => Promise<{ shown: boolean } | null>;
         setBackupModalState: (shown: boolean) => Promise<{ success: boolean } | null>;
         getBalance: () => Promise<{ balance: number; bsvPrice?: number }>;
@@ -123,8 +138,9 @@ declare global {
       send: (channel: string, ...args: any[]) => void;
     };
     triggerPanel?: (panelName: string) => void;
-    onAddressGenerated?: (data: AddressData) => void;
-    onAddressError?: (error: string) => void;
+    // ⛔ REMOVED by Phase 8c stage 3 batch 2 — address.generate / wallet.generateAddress
+    // are routed by request id. They used to SHARE this one slot pair.
+    //   onAddressGenerated / onAddressError
     // ⛔ REMOVED by Phase 8c stage 2 — wallet.sendTransaction is routed by request id.
     //   onSendTransactionResponse / onSendTransactionError
     // ⛔ REMOVED by Phase 8c stage 3 — getBalance is routed by request id.
@@ -138,14 +154,14 @@ declare global {
     onCreateWalletError?: (error: string) => void;
     onLoadWalletResponse?: (data: { success: boolean; address: string; mnemonic: string; version: string; backedUp: boolean }) => void;
     onLoadWalletError?: (error: string) => void;
-    onGetWalletInfoResponse?: (data: { version: string; mnemonic: string; address: string; backedUp: boolean }) => void;
-    onGetWalletInfoError?: (error: string) => void;
+    // ⛔ REMOVED by Phase 8c stage 3 batch 2 — wallet.getInfo is routed by request id.
+    //   onGetWalletInfoResponse / onGetWalletInfoError
     onGetCurrentAddressResponse?: (data: AddressData) => void;
     onGetCurrentAddressError?: (error: string) => void;
     onGetAddressesResponse?: (data: AddressData[]) => void;
     onGetAddressesError?: (error: string) => void;
-    onMarkWalletBackedUpResponse?: (data: { success: boolean }) => void;
-    onMarkWalletBackedUpError?: (error: string) => void;
+    // ⛔ REMOVED by Phase 8c stage 3 batch 2 — wallet.markBackedUp is routed by request id.
+    //   onMarkWalletBackedUpResponse / onMarkWalletBackedUpError
     // ⛔ REMOVED by Phase 8c stage 3 — both backup-modal-state calls are routed by id.
     //   onGetBackupModalStateResponse / onSetBackupModalStateResponse
     onCookieGetAllResponse?: (data: CookieData[]) => void;

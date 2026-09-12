@@ -4645,6 +4645,8 @@ bool SimpleHandler::OnProcessMessageReceived(
     }
 
     if (message_name == "mark_wallet_backed_up") {
+        // Phase 8c stage 3 batch 2 — MIGRATED. Arg 0 is the request id, echoed below.
+        const int mbuRequestId = message->GetArgumentList()->GetInt(0);
         LOG_DEBUG_BROWSER("✅ Mark wallet as backed up requested");
 
         nlohmann::json response;
@@ -4682,7 +4684,8 @@ bool SimpleHandler::OnProcessMessageReceived(
         // Send response back to frontend
         CefRefPtr<CefProcessMessage> cefResponse = CefProcessMessage::Create("mark_wallet_backed_up_response");
         CefRefPtr<CefListValue> responseArgs = cefResponse->GetArgumentList();
-        responseArgs->SetString(0, response.dump());
+        responseArgs->SetInt(0, mbuRequestId);
+        responseArgs->SetString(1, response.dump());
 
         browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, cefResponse);
         LOG_DEBUG_BROWSER("📤 Mark backed up response sent: " + response.dump());
@@ -4691,6 +4694,8 @@ bool SimpleHandler::OnProcessMessageReceived(
     }
 
     if (message_name == "get_wallet_info") {
+        // Phase 8c stage 3 batch 2 — MIGRATED. Arg 0 is the request id, echoed below.
+        const int gwiRequestId = message->GetArgumentList()->GetInt(0);
         LOG_DEBUG_BROWSER("🔍 Get wallet info requested");
 
         nlohmann::json response;
@@ -4730,10 +4735,14 @@ bool SimpleHandler::OnProcessMessageReceived(
         // Send response back to frontend
         CefRefPtr<CefProcessMessage> cefResponse = CefProcessMessage::Create("get_wallet_info_response");
         CefRefPtr<CefListValue> responseArgs = cefResponse->GetArgumentList();
-        responseArgs->SetString(0, response.dump());
+        responseArgs->SetInt(0, gwiRequestId);
+        responseArgs->SetString(1, response.dump());
 
         browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, cefResponse);
-        LOG_DEBUG_BROWSER("📤 Get wallet info response sent: " + response.dump());
+        // Length only: the payload carries the recovery phrase (`wallet.mnemonic`).
+        LOG_DEBUG_BROWSER("📤 Get wallet info response sent (requestId " +
+                          std::to_string(gwiRequestId) + ", " +
+                          std::to_string(response.dump().length()) + " bytes)");
 
         return true;
     }
@@ -6453,9 +6462,16 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
-#ifdef _WIN32
+    // Phase 8c stage 3 batch 2 — MIGRATED. This handler used to exist twice, as
+    // byte-identical `#ifdef _WIN32` / `#else` copies; they were collapsed here so the id
+    // echo is made once. Arg 0 is the request id.
     if (message_name == "address_generate") {
         LOG_DEBUG_BROWSER("🔑 Address generation requested from browser ID: " + std::to_string(browser->GetIdentifier()));
+
+        // ⛔ Read BEFORE the try. The catch below echoes it; read inside, a throw would
+        // leave the error reply without an id and the caller would hang to the 30 s
+        // deadline instead of rejecting — the trap `send_transaction` hit first.
+        const int addrRequestId = message->GetArgumentList()->GetInt(0);
 
         try {
             // Call WalletService to generate address
@@ -6467,10 +6483,12 @@ bool SimpleHandler::OnProcessMessageReceived(
             // Send result back to the requesting browser
             CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("address_generate_response");
             CefRefPtr<CefListValue> responseArgs = response->GetArgumentList();
-            responseArgs->SetString(0, addressData.dump());
+            responseArgs->SetInt(0, addrRequestId);
+            responseArgs->SetString(1, addressData.dump());
 
             browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
-            LOG_DEBUG_BROWSER("📤 Address data sent back to browser");
+            LOG_DEBUG_BROWSER("📤 Address data sent back to browser (requestId " +
+                              std::to_string(addrRequestId) + ")");
             LOG_DEBUG_BROWSER("🔍 Browser ID: " + std::to_string(browser->GetIdentifier()));
             LOG_DEBUG_BROWSER("🔍 Frame URL: " + hodos::LogSafeUrl(browser->GetMainFrame()->GetURL().ToString()));
 
@@ -6480,48 +6498,14 @@ bool SimpleHandler::OnProcessMessageReceived(
             // Send error response
             CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("address_generate_error");
             CefRefPtr<CefListValue> responseArgs = response->GetArgumentList();
-            responseArgs->SetString(0, e.what());
+            responseArgs->SetInt(0, addrRequestId);
+            responseArgs->SetString(1, e.what());
 
             browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
         }
 
         return true;
     }
-#else
-    if (message_name == "address_generate") {
-        LOG_DEBUG_BROWSER("🔑 Address generation requested from browser ID: " + std::to_string(browser->GetIdentifier()));
-
-        try {
-            // Call WalletService to generate address
-            WalletService walletService;
-            nlohmann::json addressData = walletService.generateAddress();
-
-            LOG_DEBUG_BROWSER("✅ Address generated successfully: " + addressData.dump());
-
-            // Send result back to the requesting browser
-            CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("address_generate_response");
-            CefRefPtr<CefListValue> responseArgs = response->GetArgumentList();
-            responseArgs->SetString(0, addressData.dump());
-
-            browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
-            LOG_DEBUG_BROWSER("📤 Address data sent back to browser");
-            LOG_DEBUG_BROWSER("🔍 Browser ID: " + std::to_string(browser->GetIdentifier()));
-            LOG_DEBUG_BROWSER("🔍 Frame URL: " + hodos::LogSafeUrl(browser->GetMainFrame()->GetURL().ToString()));
-
-        } catch (const std::exception& e) {
-            LOG_DEBUG_BROWSER("❌ Address generation failed: " + std::string(e.what()));
-
-            // Send error response
-            CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("address_generate_error");
-            CefRefPtr<CefListValue> responseArgs = response->GetArgumentList();
-            responseArgs->SetString(0, e.what());
-
-            browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
-        }
-
-        return true;
-    }
-#endif
 
     // Transaction Message Handlers (Cross-platform)
 

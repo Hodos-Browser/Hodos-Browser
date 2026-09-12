@@ -118,37 +118,21 @@ if (!window.hodosBrowser.overlay?.hide) {
   };
 }
 
-// Force override the existing function
-console.log("🔍 initWindowBridge: Forcing override of address.generate function");
+// ⭐ MIGRATED — Phase 8c stage 3 batch 2. The one LIVE slot in the wallet namespace
+// (WalletPanel's receive flow, via useAddress).
+//
+// This still force-overrides the native `address.generate` that C++ binds through
+// `AddressHandler` — that handler makes a SYNCHRONOUS wallet call on the renderer thread,
+// and this override is what has kept it unreachable. Keep overriding.
+//
+// Under the legacy bridge this and `wallet.generateAddress` shared one global slot pair
+// (`onAddressGenerated` / `onAddressError`), so a call through either could steal the
+// other's reply. Both now go through the same native, id-routed function.
 window.hodosBrowser.address.generate = () => {
-  console.log("🔑 JS: Sending address_generate to native");
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      delete window.onAddressGenerated;
-      delete window.onAddressError;
-      reject(new Error('address_generate timed out'));
-    }, 10000);
-
-    // Set up response handlers
-    window.onAddressGenerated = (data: any) => {
-      clearTimeout(timeout);
-      console.log("✅ Address generated:", data);
-      resolve(data);
-      delete window.onAddressGenerated;
-      delete window.onAddressError;
-    };
-
-    window.onAddressError = (error: string) => {
-      clearTimeout(timeout);
-      console.error("❌ Address generation error:", error);
-      reject(new Error(error));
-      delete window.onAddressGenerated;
-      delete window.onAddressError;
-    };
-
-    // Send the request
-    window.cefMessage?.send('address_generate', []);
-  });
+  if (!window.hodosBrowser?.bridge?.generateAddress) {
+    return Promise.reject(new Error('address.generate: native bridge unavailable'));
+  }
+  return window.hodosBrowser.bridge.generateAddress();
 };
 
 
@@ -241,62 +225,27 @@ if (!window.hodosBrowser.wallet) {
       });
     },
 
+    // ⭐ MIGRATED — Phase 8c stage 3 batch 2. Was batch 1's RED control: the still-legacy
+    // sibling that proved the harness sees the bug (10,013 ms, 2 of 3 rejected). The
+    // control now has to come from a namespace that is still legacy — contract O7.
+    //
+    // ⚠️ The resolved shape is what C++ actually sends — `{ success, wallet: {…} }`,
+    // nested — not the flat object the old declaration claimed. The one consumer
+    // (BackupOverlayRoot) was reading it flat.
     getInfo: () => {
-      console.log("🔍 JS: Sending get_wallet_info to native");
-      return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          delete window.onGetWalletInfoResponse;
-          delete window.onGetWalletInfoError;
-          reject(new Error('get_wallet_info timed out'));
-        }, 10000);
-
-        window.onGetWalletInfoResponse = (data: any) => {
-          clearTimeout(timeout);
-          console.log("✅ Wallet info retrieved:", data);
-          resolve(data);
-          delete window.onGetWalletInfoResponse;
-          delete window.onGetWalletInfoError;
-        };
-
-        window.onGetWalletInfoError = (error: string) => {
-          clearTimeout(timeout);
-          console.error("❌ Wallet info error:", error);
-          reject(new Error(error));
-          delete window.onGetWalletInfoResponse;
-          delete window.onGetWalletInfoError;
-        };
-
-        window.cefMessage?.send('get_wallet_info', []);
-      });
+      if (!window.hodosBrowser?.bridge?.getInfo) {
+        return Promise.reject(new Error('wallet.getInfo: native bridge unavailable'));
+      }
+      return window.hodosBrowser.bridge.getInfo();
     },
 
+    // ⭐ MIGRATED — Phase 8c stage 3 batch 2. Same IPC and, under the legacy bridge, the
+    // SAME global slot pair as `address.generate` above. One native function backs both.
     generateAddress: () => {
-      console.log("📍 JS: Sending wallet address generation to native");
-      return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          delete window.onAddressGenerated;
-          delete window.onAddressError;
-          reject(new Error('address_generate timed out'));
-        }, 10000);
-
-        window.onAddressGenerated = (data: any) => {
-          clearTimeout(timeout);
-          console.log("✅ Address generated:", data);
-          resolve(data);
-          delete window.onAddressGenerated;
-          delete window.onAddressError;
-        };
-
-        window.onAddressError = (error: string) => {
-          clearTimeout(timeout);
-          console.error("❌ Address generation error:", error);
-          reject(new Error(error));
-          delete window.onAddressGenerated;
-          delete window.onAddressError;
-        };
-
-        window.cefMessage?.send('address_generate', []);
-      });
+      if (!window.hodosBrowser?.bridge?.generateAddress) {
+        return Promise.reject(new Error('wallet.generateAddress: native bridge unavailable'));
+      }
+      return window.hodosBrowser.bridge.generateAddress();
     },
 
     getCurrentAddress: () => {
@@ -361,33 +310,17 @@ if (!window.hodosBrowser.wallet) {
       });
     },
 
+    // ⭐ MIGRATED — Phase 8c stage 3 batch 2. Records that the user backed up their
+    // recovery phrase.
+    //
+    // ⚠️ The recipe named this as the last `resolve(null)`-on-timeout slot. It was not —
+    // it rejected. Read before deleting, per the recipe's own rule; the actual
+    // resolve-on-timeout offenders left are in the cookie namespace (contract D-9).
     markBackedUp: () => {
-      console.log("✅ JS: Sending mark_wallet_backed_up to native");
-      return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          delete window.onMarkWalletBackedUpResponse;
-          delete window.onMarkWalletBackedUpError;
-          reject(new Error('mark_wallet_backed_up timed out'));
-        }, 10000);
-
-        window.onMarkWalletBackedUpResponse = (data: any) => {
-          clearTimeout(timeout);
-          console.log("✅ Wallet marked as backed up:", data);
-          resolve(data);
-          delete window.onMarkWalletBackedUpResponse;
-          delete window.onMarkWalletBackedUpError;
-        };
-
-        window.onMarkWalletBackedUpError = (error: string) => {
-          clearTimeout(timeout);
-          console.error("❌ Mark backed up error:", error);
-          reject(new Error(error));
-          delete window.onMarkWalletBackedUpResponse;
-          delete window.onMarkWalletBackedUpError;
-        };
-
-        window.cefMessage?.send('mark_wallet_backed_up', []);
-      });
+      if (!window.hodosBrowser?.bridge?.markBackedUp) {
+        return Promise.reject(new Error('wallet.markBackedUp: native bridge unavailable'));
+      }
+      return window.hodosBrowser.bridge.markBackedUp();
     },
 
     // ⭐ MIGRATED — Phase 8c stage 3.

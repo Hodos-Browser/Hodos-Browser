@@ -152,13 +152,34 @@ build with the guard deleted.
 ⛔ The owner's **installed** browser and wallet are normally running. Check ports/exe paths first;
 `stop-dev.ps1` spares them.
 
-## Remaining: 36 live slots
+## Two more traps, found by batch 2 (2026-09-12)
 
-Roughly: cookies (6) · cookie blocking (9) · bookmarks (14) · cache (2) · the rest of the wallet
-namespace (`create`, `load`, `getInfo`, `generateAddress`, `getCurrentAddress`, `getAddresses`,
-`markBackedUp`, `getTransactionHistory`).
+4. **Trace every caller before believing a slot is live.** The wallet namespace was listed above as
+   eight slots to migrate. It was **one** live slot and seven dead ones — `useWallet()` had no
+   consumers, the backup overlay had no opener, two methods had no caller at all (contract `D-7`).
+   Migrating dead code produces untested code that looks finished. Grep for the *hook* consumers,
+   not only the method name.
+5. **Check the backend route exists before calling a GREEN green.** `getInfo` and `markBackedUp`
+   routed perfectly — 3 of 3 answered in 7 ms — and every answer was a wrapped **404**: the Rust
+   wallet has no `/wallet/info` or `/wallet/markBackedUp` (contract `O8`). Routing proven, payload
+   dead. Say which.
+6. **An error arm can be unreachable.** `address_generate_error` needs `WalletService` to *throw*,
+   and `makeHttpRequest` never lets an exception escape — with the wallet down the call **resolved
+   `{}`** after 6 s (contract `O9`). Do not claim the reject path is tested on a slot where the C++
+   cannot reach it; say it is correct by construction and cite the slot where it *was* measured
+   (`P8c-A2b`).
 
-⭐ **Do the wallet namespace first** — it holds `markBackedUp` (the last `resolve(null)`) and four of
-the five remaining **JS-injection** sites (`onAddressError`, `onSignTransactionError`,
-`onBroadcastTransactionError`, `onGetTransactionHistoryError`). Bookmarks and cookies are the low-risk
-tail and can go last.
+## Remaining: 34 legacy slots (corrected — the "36" above was wrong, contract `D-8`)
+
+**Cookies 15** — `cookies` (6: `getAll`, `deleteCookie`, `deleteDomainCookies`, `deleteAllCookies`,
+`clearCache`, `getCacheSize`) + `cookieBlocking` (9). **Bookmarks 14** — 9 bookmark ops + 5 folder ops.
+**Wallet namespace: 0** — batch 2 migrated its three live methods and commit 2 deleted the rest.
+
+⚠️ **Three timeout flavours remain, not two** (contract `D-9`): four cookie reads **resolve** on
+timeout (`cookies.getAll`, `getBlockList`, `getBlockLog`, `getBlockedCount`) and five cookie/cache
+writes have **no timeout at all**. Read each before deleting it.
+
+⛔ The claim that `markBackedUp` was *"the last `resolve(null)`"* was false — it rejected (`D-10`).
+The JS-injection-site rationale was also built on dead code: only `onAddressError` was live, and
+batch 2 retired it. **RED control pool:** bookmarks and cookies only; batch 2 used
+`bookmarks.getAllTags`.

@@ -432,6 +432,14 @@ public:
         } else if (method == "setBackupModalState") {
             ipcName = "set_backup_modal_state";
             payload = Payload::Bool;
+        } else if (method == "generateAddress") {
+            // Stage 3 batch 2. Shared by `address.generate()` and `wallet.generateAddress()`,
+            // which under the legacy bridge also shared ONE global slot pair.
+            ipcName = "address_generate";
+        } else if (method == "getInfo") {
+            ipcName = "get_wallet_info";
+        } else if (method == "markBackedUp") {
+            ipcName = "mark_wallet_backed_up";
         }
         if (!ipcName) return false;  // unknown method — V8 throws for us
 
@@ -933,8 +941,19 @@ void SimpleRenderProcessHandler::OnContextCreated(
     bridgeObject->SetValue("setBackupModalState",
         CefV8Value::CreateFunction("setBackupModalState", bridgeHandler),
         V8_PROPERTY_ATTRIBUTE_READONLY);
+    // Stage 3 batch 2 — the wallet namespace's live remainder. `generateAddress` backs
+    // BOTH `address.generate()` and `wallet.generateAddress()`.
+    bridgeObject->SetValue("generateAddress",
+        CefV8Value::CreateFunction("generateAddress", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    bridgeObject->SetValue("getInfo",
+        CefV8Value::CreateFunction("getInfo", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    bridgeObject->SetValue("markBackedUp",
+        CefV8Value::CreateFunction("markBackedUp", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
     hodosBrowser->SetValue("bridge", bridgeObject, V8_PROPERTY_ATTRIBUTE_READONLY);
-    LOG_DEBUG_RENDER("🌉 Bound WalletBridgeV8Handler (5 methods migrated)");
+    LOG_DEBUG_RENDER("🌉 Bound WalletBridgeV8Handler (8 methods migrated)");
 
     hodosBrowser->SetValue("history", historyObject, V8_PROPERTY_ATTRIBUTE_READONLY);
 
@@ -1429,18 +1448,24 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
             return true;
         }
 
-        if (message_name == "address_generate_response") {
-            CefRefPtr<CefListValue> args = message->GetArgumentList();
-            std::string addressDataJson = args->GetString(0);
-
-            LOG_DEBUG_RENDER("✅ Address generation response received: " + addressDataJson);
-
-            // Execute JavaScript to call the callback function directly
-            std::string js = "if (window.onAddressGenerated) { window.onAddressGenerated(" + addressDataJson + "); }";
-            frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-
+    // MIGRATED (Phase 8c stage 3 batch 2). Args: 0 = requestId, 1 = address JSON.
+    //
+    // ⚠️ Two JS entry points share this IPC — `hodosBrowser.address.generate()` (the live
+    // one, behind WalletPanel's receive flow) and `wallet.generateAddress()`. Under the
+    // legacy bridge they also shared ONE global slot pair, so a call through either could
+    // steal the other's reply. Both now resolve through `bridge.generateAddress`.
+    //
+    // This file used to carry this arm TWICE (the second copy unreachable); the
+    // duplicate was removed with the migration rather than migrated in parallel.
+    if (message_name == "address_generate_response") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "address_generate_response missing args (need 2)");
             return true;
         }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
+        return true;
+    }
 
     if (message_name == "identity_status_check_response") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
@@ -1487,46 +1512,22 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // MIGRATED (Phase 8c stage 3 batch 2). Args: 0 = requestId, 1 = error message.
+    //
+    // ⭐ Retires the last LIVE JS-injection site of this family: the old arm pasted the
+    // wallet's error text UNESCAPED into `window.onAddressError('…')`. No JavaScript is
+    // built here any more, so the hazard is deleted rather than escaped.
     if (message_name == "address_generate_error") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string errorMessage = args->GetString(0);
-
-        LOG_DEBUG_RENDER(LogFmt() << "❌ Address generation error received: " << errorMessage);
-
-        // Execute JavaScript to handle the error
-        std::string js = "if (window.onAddressError) { window.onAddressError('" + errorMessage + "'); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "address_generate_error missing args (need 2)");
+            return true;
+        }
+        RejectBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
     // Transaction Response Handlers
-
-        if (message_name == "address_generate_response") {
-            CefRefPtr<CefListValue> args = message->GetArgumentList();
-            std::string responseJson = args->GetString(0);
-
-            LOG_DEBUG_RENDER("✅ Address generation response received: " + responseJson);
-
-            // Execute JavaScript to call the callback function directly
-            std::string js = "if (window.onAddressGenerated) { window.onAddressGenerated(" + responseJson + "); }";
-            frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-
-            return true;
-        }
-
-        if (message_name == "address_generate_error") {
-            CefRefPtr<CefListValue> args = message->GetArgumentList();
-            std::string errorJson = args->GetString(0);
-
-            LOG_DEBUG_RENDER("❌ Address generation error received: " + errorJson);
-
-            // Execute JavaScript to call the error callback function directly
-            std::string js = "if (window.onAddressError) { window.onAddressError(" + errorJson + "); }";
-            frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-
-            return true;
-        }
 
         if (message_name == "create_transaction_response") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
@@ -1813,16 +1814,16 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // MIGRATED (Phase 8c stage 3 batch 2). Args: 0 = requestId, 1 = payload.
+    //
+    // The payload carries the recovery phrase (`wallet.mnemonic`), so it is not logged.
     if (message_name == "get_wallet_info_response") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0);
-
-        LOG_DEBUG_RENDER(LogFmt() << "✅ Get wallet info response received: " << responseJson);
-
-        // Execute JavaScript to call the callback function directly
-        std::string js = "if (window.onGetWalletInfoResponse) { window.onGetWalletInfoResponse(" + responseJson + "); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "get_wallet_info_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
@@ -1852,16 +1853,14 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // MIGRATED (Phase 8c stage 3 batch 2). Args: 0 = requestId, 1 = payload.
     if (message_name == "mark_wallet_backed_up_response") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0);
-
-        LOG_DEBUG_RENDER(LogFmt() << "✅ Mark wallet backed up response received: " << responseJson);
-
-        // Execute JavaScript to call the callback function directly
-        std::string js = "if (window.onMarkWalletBackedUpResponse) { window.onMarkWalletBackedUpResponse(" + responseJson + "); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "mark_wallet_backed_up_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
