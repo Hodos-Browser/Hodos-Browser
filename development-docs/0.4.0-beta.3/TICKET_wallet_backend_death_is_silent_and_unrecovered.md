@@ -1,9 +1,16 @@
 # 🎫 If the wallet backend dies, the browser never notices, never restarts it, and tells the user "no wallet"
 
 **Found:** 2026-09-01, while diagnosing a dApp payment failure on the owner's installed build
-**Status:** ⬜ UNASSIGNED · **Sprint:** 👤 **beta.3** (owner call 2026-09-01) — phase TBD; **Phase 8
-(money-path correctness) is the natural home**, since that is where the money-path work already sits
-and this is its availability half
+**Status:** 🟡 **ASSIGNED — Phase 8, after 8c closes** (owner call 2026-09-12) · **Sprint:** beta.3.
+Phase 8 (money-path correctness) is its home because this is the availability half of the same work.
+⚠️ 8c batch 2 (`O9`) measured the symptom from a *migrated* call: with the wallet stopped,
+`address.generate` **resolved `{}` after 6.2 s on the UI thread** — the "throw a real wallet error"
+half of that finding is being fixed inside 8c; the "notice the wallet died and restart it" half is
+**this** ticket, and must not be attempted per call site.
+📏 **Extra evidence for F2, 2026-09-12:** `WalletService::isConnected()` is also a latch —
+`WinHttpConnect` only allocates a handle, it never contacts the wallet, so `connected_` reads **true**
+with the wallet dead (measured: an `isConnected()` guard in the address handler never fired). Any
+supervision design has to use a real probe (`/wallet/status`) or the child process handle, never this flag
 **Filed by:** Phase 4 close-out · **Platforms:** 📏 **both** (see §2.1)
 
 > ⚠️ **Method note.** The mechanism below is **code reading**, stated per claim. The *symptom* was

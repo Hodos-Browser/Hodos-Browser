@@ -6229,45 +6229,69 @@ bool SimpleHandler::OnProcessMessageReceived(
     // Phase 8c stage 3 batch 2 — MIGRATED. This handler used to exist twice, as
     // byte-identical `#ifdef _WIN32` / `#else` copies; they were collapsed here so the id
     // echo is made once. Arg 0 is the request id.
+    //
+    // 8c `O9` (owner call 2026-09-12): the wallet call now runs OFF the UI thread, the
+    // `get_balance` shape below, and a wallet that is unreachable or answers without an
+    // address is a REJECTION, not an empty object. Measured before this change, wallet
+    // stopped: three calls took 6,168 ms serialised on the UI thread and every one
+    // RESOLVED `{}`, because `WalletService` swallows transport failure — so the error arm
+    // could never fire and `useAddress` read `undefined`. ⛔ Restarting the wallet from
+    // here would be the wrong place: that is
+    // `TICKET_wallet_backend_death_is_silent_and_unrecovered.md`, process supervision,
+    // and it is not attempted per call site.
     if (message_name == "address_generate") {
         LOG_DEBUG_BROWSER("🔑 Address generation requested from browser ID: " + std::to_string(browser->GetIdentifier()));
 
-        // ⛔ Read BEFORE the try. The catch below echoes it; read inside, a throw would
-        // leave the error reply without an id and the caller would hang to the 30 s
-        // deadline instead of rejecting — the trap `send_transaction` hit first.
+        // Read up front and threaded through as a PARAMETER (the lambda is captureless so
+        // it can be bound into a CEF task) — every reply path below carries it.
         const int addrRequestId = message->GetArgumentList()->GetInt(0);
 
-        try {
-            // Call WalletService to generate address
-            WalletService walletService;
-            nlohmann::json addressData = walletService.generateAddress();
+        auto generateAndDeliver = [](CefRefPtr<CefBrowser> target, int reqId) {
+            std::string payload;
+            bool ok = true;
+            try {
+                // ⚠️ Not guarded on `isConnected()`: that flag is a LATCH — `WinHttpConnect`
+                // only allocates a handle and never touches the wallet, so it reads true
+                // with the wallet dead (measured 2026-09-12; same family as F2 in the
+                // wallet-death ticket). The only signal we have is the reply itself.
+                WalletService walletService;
+                nlohmann::json addressData = walletService.generateAddress();
+                if (addressData.contains("address")) {
+                    payload = addressData.dump();
+                } else {
+                    // `generateAddress()` returns `{}` on any HTTP failure; do not pass
+                    // that through as a success. With the wallet stopped this is the
+                    // branch that fires, after WinHTTP's connect timeout.
+                    payload = "wallet did not return an address (is the wallet backend running?)";
+                    ok = false;
+                }
+            } catch (const std::exception& e) {
+                payload = e.what();
+                ok = false;
+            } catch (...) {
+                payload = "unknown error";
+                ok = false;
+            }
 
-            LOG_DEBUG_BROWSER("✅ Address generated successfully: " + addressData.dump());
+            // Length only (P0-A8): the payload carries the address and public key.
+            LOG_DEBUG_BROWSER(std::string("🔑 Address generation ") + (ok ? "ok" : "failed: " + payload)
+                              + " (requestId " + std::to_string(reqId) + ", "
+                              + std::to_string(payload.length()) + " bytes)");
 
-            // Send result back to the requesting browser
-            CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("address_generate_response");
-            CefRefPtr<CefListValue> responseArgs = response->GetArgumentList();
-            responseArgs->SetInt(0, addrRequestId);
-            responseArgs->SetString(1, addressData.dump());
+            CefPostTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b, std::string p, bool good, int rid) {
+                // The browser may have closed while we were waiting on the wallet.
+                if (!b) return;
+                CefRefPtr<CefFrame> frame = b->GetMainFrame();
+                if (!frame) return;
+                CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create(
+                    good ? "address_generate_response" : "address_generate_error");
+                response->GetArgumentList()->SetInt(0, rid);
+                response->GetArgumentList()->SetString(1, p);
+                frame->SendProcessMessage(PID_RENDERER, response);
+            }, target, payload, ok, reqId));
+        };
 
-            browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
-            LOG_DEBUG_BROWSER("📤 Address data sent back to browser (requestId " +
-                              std::to_string(addrRequestId) + ")");
-            LOG_DEBUG_BROWSER("🔍 Browser ID: " + std::to_string(browser->GetIdentifier()));
-            LOG_DEBUG_BROWSER("🔍 Frame URL: " + hodos::LogSafeUrl(browser->GetMainFrame()->GetURL().ToString()));
-
-        } catch (const std::exception& e) {
-            LOG_DEBUG_BROWSER("❌ Address generation failed: " + std::string(e.what()));
-
-            // Send error response
-            CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("address_generate_error");
-            CefRefPtr<CefListValue> responseArgs = response->GetArgumentList();
-            responseArgs->SetInt(0, addrRequestId);
-            responseArgs->SetString(1, e.what());
-
-            browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
-        }
-
+        CefPostTask(TID_FILE_USER_BLOCKING, base::BindOnce(generateAndDeliver, browser, addrRequestId));
         return true;
     }
 

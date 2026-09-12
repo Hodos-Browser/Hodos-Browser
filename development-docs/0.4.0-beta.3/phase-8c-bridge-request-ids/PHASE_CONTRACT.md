@@ -43,7 +43,7 @@ Stage 1 must land and be reviewed before stages 2–4 are attempted.
 | **O6** | **macOS parity.** Both changed files (`simple_render_process_handler.cpp`, `simple_handler.cpp`) are **shared**, not Windows-only | Unlike 8a/8b this is not Rust-only. Mac must verify the V8 binding and the promise map behave there | ⬜ relay owed — batch 2 also **collapsed** the `#ifdef _WIN32` / `#else` twin copies of the `address_generate` handler (they were byte-identical), and commit 2 deletes bodies in `WalletService_mac.cpp` — Mac's lane, flagged for the relay |
 | **O7** | ⚠️ **RED controls are a wasting asset.** `getBackupModalState` WAS the control for `P8c-A1a`; batch 1 used `getInfo`; **batch 2 used `bookmarks.getAllTags`** (§4d — 2 of 3 rejected at 5,011 ms). The wallet namespace now has **no** legacy method left | Remaining legacy pool for a RED: cookies (15) and bookmarks (14). ⛔ **At 0 remaining there is no legacy control left at all**, and the RED must become a deliberate stub | ⚠️ live |
 | **O8** | 🚨 **`getInfo` and `markBackedUp` were dead at the BACKEND too.** The Rust wallet has no `/wallet/info` and no `/wallet/markBackedUp` route (`main.rs` — both **404**, measured against the dev wallet). C++ wraps the miss as `{success:false, error:"Failed to get wallet info: {}"}`. Their only consumer, `BackupOverlayRoot`, is itself **unreachable**: its only opener (`overlay_show_backup`) is sent from a block App.tsx has commented out. So the whole backup-overlay chain — the page, the route, the IPC, `CreateBackupOverlayWithSeparateProcess` on both platforms, its HWND/WndProc/role slot — is dead | They were migrated anyway (batch 2): the routing is proven and the change is reversible. **Deleting the chain is an overlay-lifecycle change** (CLAUDE.md invariant 8) and cascades into `cef_browser_shell.cpp` / `cef_browser_shell_mac.mm` — not a call to make inside a bridge batch | ⬜ **your call**: delete the backup-overlay chain (its own ticket), or keep it as the shell of a future backup flow |
-| **O9** | ⚠️ **`address_generate` blocks the UI thread and cannot reject.** The browser handler calls `WalletService::generateAddress()` **inline** — unlike `get_balance`, which P2a moved off-thread for exactly this reason. With the dev wallet stopped, three calls took **6,168 ms, serialised on the UI thread**, and every one **resolved `{}`** rather than rejecting, because `WalletService::makeHttpRequest` swallows transport failure. `useAddress` then reads `response.address` as `undefined`. ⇒ the `address_generate_error` arm (and `RejectBridgeCall` on this slot) is **unreachable in practice** | Pre-existing on both counts; reported, not fixed (working rule 3). Same family as `TICKET_wallet_backend_death_is_silent_and_unrecovered.md` | ⬜ your call — the off-thread fix is the `get_balance` pattern, mechanical but its own change |
+| **O9** | ⚠️ **`address_generate` blocks the UI thread and cannot reject.** The browser handler calls `WalletService::generateAddress()` **inline** — unlike `get_balance`, which P2a moved off-thread for exactly this reason. With the dev wallet stopped, three calls took **6,168 ms, serialised on the UI thread**, and every one **resolved `{}`** rather than rejecting, because `WalletService::makeHttpRequest` swallows transport failure. `useAddress` then reads `response.address` as `undefined`. ⇒ the `address_generate_error` arm (and `RejectBridgeCall` on this slot) is **unreachable in practice** | Pre-existing on both counts. Same family as `TICKET_wallet_backend_death_is_silent_and_unrecovered.md` | ✅ **fixed 2026-09-12 on owner's call** (`P8c-A4d`): off-thread via the `get_balance` shape, and a missing address is now a **rejection**. The "notice the wallet died and restart it" half is the death ticket, now **assigned to Phase 8 after 8c**. 📏 Side finding: `WalletService::isConnected()` is a **latch** — `WinHttpConnect` allocates a handle without touching the wallet, so it reads true with the wallet dead |
 
 ## 0. Plan-vs-tree delta
 
@@ -385,6 +385,30 @@ address / transaction-history families remain on the page. `address.generate` ×
 **3 / 3 fulfilled, 3 distinct addresses, 32 ms**; `wallet.generateAddress` is `undefined`. The
 harness's own mixed-entry-point row now throws on the deleted twin — which is the correct outcome
 of the deletion, not a regression.
+
+### `P8c-A4d` — 🟢🔴 `O9` fixed: `address_generate` off the UI thread, rejecting on wallet failure
+
+Owner call 2026-09-12: *"it should … throw some wallet error."* Handler rewritten to the
+`get_balance` shape (captureless lambda on `TID_FILE_USER_BLOCKING`, id threaded as a parameter,
+reply hopped back to `TID_UI`), and a reply without an `address` is sent on the **error** arm.
+Harness adds a concurrent `/json/list` probe: the browser process answers it on the UI thread, so a
+blocked UI thread shows up as probe latency.
+
+| Run (dev wallet **stopped**, path-matched kill; installed wallet on 31301 answered 200 throughout) | Result |
+|---|---|
+| 🟢 `address.generate` ×3 | **3 / 3 REJECTED** — `generateAddress: wallet did not return an address (is the wallet backend running?)` — wall 6,129 ms (WinHTTP connect timeout, serialised on the blocking pool). Final binary; the first cut measured 6,120 ms with the same outcome |
+| 🟢 UI-thread probe during those 6 s | **51 samples, max 19 ms, median 16 ms** — the browser stayed responsive |
+| 🔴 **RED — `wallet.getInfo` ×3, still INLINE on the UI thread**, same harness | 3 / 3 *fulfilled* `{success:false}`; probe **2 samples in 6 s, max 3,995 ms** — the stall the fix removes, observed on the same binary |
+| 🟢 wallet **up**, `address.generate` ×3 | 3 / 3 fulfilled, **3 distinct addresses, 28 ms** — no regression |
+
+⭐ The RED needed no rebuild: the batch-2 migration left `getInfo` inline, so it is the un-fixed
+sibling on the same harness. ⚠️ Two things this does **not** do, on purpose: it does not restart the
+wallet (that is the death ticket, process supervision, not per-call-site), and the rejection still
+takes the transport timeout (~2 s per call) rather than being instant — a supervised wallet with a
+known-dead state is what makes it instant.
+
+📏 `isConnected()` guard tried and **removed**: `WinHttpConnect` never opens a connection, so the flag
+is true with the wallet dead and the guard was a dead branch. The reply is the only signal.
 
 ### O5 — two real latencies
 
