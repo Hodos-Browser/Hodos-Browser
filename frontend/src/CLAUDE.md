@@ -59,14 +59,14 @@ Defined in `App.tsx` — **20 routes**. All are lazy-loaded via `React.lazy` ins
 
 ```
 src/
-├── bridge/           # 1 module: initWindowBridge.ts (IPC to C++, 8 window.hodosBrowser namespaces)
+├── bridge/           # 1 module: initWindowBridge.ts (IPC to C++, 6 window.hodosBrowser namespaces)
 ├── components/       # 18 .tsx components + HodosButton.module.css + 2 plain .css
 │   ├── __tests__/    #   EMPTY (no test files present)
 │   ├── panels/       #   EMPTY of code — only its CLAUDE.md remains
 │   ├── settings/     #   5 settings sub-pages
 │   └── wallet/       #   7 wallet tabs/sidebar + WalletDashboard.css
 ├── hooks/            # 22 custom hooks for CEF/wallet communication
-├── pages/            # 22 page/overlay components (21 routed, 2 orphaned — see above)
+├── pages/            # 21 page/overlay components (20 routed, 2 orphaned — see above; BackupOverlayRoot deleted in 8c O8)
 ├── services/         # 2 modules: balanceCache.ts, walletApi.ts
 ├── styles/           # hodosTheme.ts (colors / fonts / prompt tiers)
 ├── theme/            # tokens.css + tokens.ts (design tokens, TS + CSS-var forms)
@@ -82,7 +82,7 @@ Ten subdirectory docs exist. `services/` and `theme/` have **no** CLAUDE.md — 
 
 | Directory | Doc | Key Content |
 |-----------|-----|-------------|
-| `bridge/` | [bridge/CLAUDE.md](bridge/CLAUDE.md) | IPC pattern, guard pattern, 8 `window.hodosBrowser` namespaces defined in `initWindowBridge.ts`: `navigation`, `overlay`, `address`, `wallet`, `omnibox`, `cookies`, `cookieBlocking`, `bookmarks` |
+| `bridge/` | [bridge/CLAUDE.md](bridge/CLAUDE.md) | IPC pattern, guard pattern, 6 `window.hodosBrowser` namespaces defined in `initWindowBridge.ts`: `navigation`, `overlay`, `address`, `wallet`, `omnibox`, `bookmarks` (the `cookies` / `cookieBlocking` copies were deleted in beta.3 Phase 8c batch 3) |
 | `components/` | [components/CLAUDE.md](components/CLAUDE.md) | 18 components: browser chrome (`TabBar`, `TabComponent`, `FindBar`, `MenuOverlay`), wallet (`WalletPanel`, `BalanceDisplay`, `AddressManager`, `TransactionForm`, `TransactionHistory`), privacy (`PrivacyShieldPanel`, `CookiesPanel`, `CookiePanelOverlay`, `CachePanel`), permissions (`DomainPermissionForm`, `DomainPermissionsTab`), plus `BRC100AuthModal`, `HistoryPanel`, `HodosButton` |
 | `components/panels/` | [components/panels/CLAUDE.md](components/panels/CLAUDE.md) | ⚠️ Directory contains **no source files** — only the doc. The `WalletPanelContent` / `WalletPanelLayout` / `BackupModal` components it describes no longer exist; that layout now lives in `pages/WalletPanelPage.tsx` and `pages/BackupOverlayRoot.tsx` |
 | `components/settings/` | [components/settings/CLAUDE.md](components/settings/CLAUDE.md) | 5 files: `GeneralSettings`, `PrivacySettings`, `DownloadSettings`, `AboutSettings`, `SettingsCard` (shared card shell). There is **no** `WalletSettings` component — wallet settings live in `components/wallet/SettingsTab.tsx` |
@@ -116,12 +116,12 @@ const balance = await window.hodosBrowser.wallet.getBalance();
 const entries = window.hodosBrowser.history.get({ limit: 50 });
 ```
 
-### 2. IPC Callbacks (`cefMessage.send()` → `window.onXxxResponse`)
+### 2. IPC Callbacks (`cefMessage.send()` → `window.onXxxResponse`) — ⛔ legacy, being retired by Phase 8c
 Asynchronous message passing with one-shot global callbacks. Used for cookies, cookie blocking, settings, profiles, bookmarks.
 
 ```typescript
-window.onCookieGetAllResponse = (data) => { resolve(data); };
-window.cefMessage?.send('cookie_get_all', []);
+window.onAdblockBlockedCountResponse = (data) => { resolve(data); };
+window.cefMessage?.send('adblock_get_blocked_count', []);
 ```
 
 ### 3. PostMessage Events
@@ -187,7 +187,7 @@ if (res.ok) { const data = await res.json(); }
 
 ## Initialization Flow
 
-1. `main.tsx` imports `bridge/initWindowBridge` (side effect — populates the 8 `window.hodosBrowser` namespaces, guarded so V8-injected methods win)
+1. `main.tsx` imports `bridge/initWindowBridge` (side effect — populates the 6 `window.hodosBrowser` namespaces, guarded so V8-injected methods win)
 2. `main.tsx` renders `<BrowserRouter><App /></BrowserRouter>`
 3. `main.tsx` removes the `#splash` element immediately on any non-`/` route, and exposes `window.removeSplash()` for `MainBrowserView` to call after first paint on `/`
 4. `App.tsx` registers `window.showBRC100AuthApprovalModal` for C++ to call

@@ -51,8 +51,10 @@ export function CachePanel() {
 
   useEffect(() => {
     // Fetch cookies and cache size on mount
-    fetchAllCookies().finally(() => {});
-    getCacheSize().finally(() => {
+    // 8c batch 3: the hooks now REJECT on a real failure (they used to resolve a default
+    // on timeout); the hook records `error`, so a mount-time fetch just swallows it.
+    fetchAllCookies().catch(() => {});
+    getCacheSize().catch(() => {}).finally(() => {
       setCacheSizeLoading(false);
     });
   }, [fetchAllCookies, getCacheSize]);

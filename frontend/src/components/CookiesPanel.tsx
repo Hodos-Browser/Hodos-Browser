@@ -146,12 +146,13 @@ export function CookiesPanel({ initialSearch = '' }: { initialSearch?: string } 
   const [hasShownBlockWarning, setHasShownBlockWarning] = useState(false);
 
   useEffect(() => {
-    fetchAllCookies();
+    // 8c batch 3: rejects on a real failure now; the hook records `error`.
+    fetchAllCookies().catch(() => {});
   }, [fetchAllCookies]);
 
   // Fetch block list on mount
   useEffect(() => {
-    fetchBlockList();
+    fetchBlockList().catch(() => {});
   }, [fetchBlockList]);
 
   // Check if a domain is blocked (direct match or wildcard match)

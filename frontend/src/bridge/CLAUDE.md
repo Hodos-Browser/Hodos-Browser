@@ -38,7 +38,7 @@ window.onFooError = (error: string) => {
 window.cefMessage?.send('foo_action', [args]);
 ```
 
-Newer APIs (cookies, cookie blocking, bookmarks) add a 5-second timeout that auto-resolves or auto-rejects if no response arrives.
+Bookmarks add a 5-second timeout that auto-rejects if no response arrives. ⛔ Phase 8c is replacing this whole pattern with native, per-request-id promise functions on `window.hodosBrowser.bridge` (C++ holds the promise; no `window.on*` global at all). Migrated so far: `wallet.getStatus/getBalance/sendTransaction`, `address.generate`, and every cookie / cache / cookie-blocking call. Do not add new `window.on*` slots.
 
 ## API Namespaces in `initWindowBridge.ts`
 
@@ -47,10 +47,9 @@ Newer APIs (cookies, cookie blocking, bookmarks) add a 5-second timeout that aut
 | `navigation` | `navigate` | URL navigation from React to CEF |
 | `overlay` | `overlay_show_settings`, `overlay_show_brc100_auth`, `overlay_close`, `overlay_hide`, `overlay_input` | Overlay lifecycle control (show/hide/close/input toggle) |
 | `address` | `address_generate` | BSV address generation |
-| `wallet` | `wallet_status_check`, `get_wallet_info`, `mark_wallet_backed_up`, `get_backup_modal_state`, `set_backup_modal_state`, `get_balance`, `send_transaction` — all seven now route by request id through `hodosBrowser.bridge` (Phase 8c), not through `window.on*` globals. `create_wallet`, `load_wallet`, `get_current_address`, `get_addresses`, `get_transaction_history` were deleted in 8c batch 2 (no reachable caller) | Wallet operations that are not `walletFetch` |
+| `wallet` | `wallet_status_check`, `get_balance`, `send_transaction` — all three route by request id through `hodosBrowser.bridge` (Phase 8c), not through `window.on*` globals. `create_wallet`, `load_wallet`, `get_current_address`, `get_addresses`, `get_transaction_history` were deleted in 8c batch 2 (no reachable caller); `get_wallet_info`, `mark_wallet_backed_up`, `get/set_backup_modal_state` went with the backup overlay (8c O8) | Wallet operations that are not `walletFetch` |
 | `omnibox` | `omnibox_show`, `omnibox_hide`, `omnibox_create_or_show` | Address bar overlay control |
-| `cookies` | `cookie_get_all`, `cookie_delete`, `cookie_delete_domain`, `cookie_delete_all`, `cache_clear`, `cache_get_size` | Cookie and cache management |
-| `cookieBlocking` | `cookie_block_domain`, `cookie_unblock_domain`, `cookie_get_blocklist`, `cookie_allow_third_party`, `cookie_remove_third_party_allow`, `cookie_get_block_log`, `cookie_clear_block_log`, `cookie_get_blocked_count`, `cookie_reset_blocked_count` | Cookie blocking rules and analytics |
+| ~~`cookies`~~ / ~~`cookieBlocking`~~ | — | **Deleted in beta.3 Phase 8c batch 3 (2026-09-12).** They had no callers: `useCookies` / `useCookieBlocking` send their IPC themselves, and now do so through the native `hodosBrowser.bridge.cookie*` / `cache*` functions (15 of them, per-request-id) |
 | `bookmarks` | `bookmark_add`, `bookmark_get`, `bookmark_update`, `bookmark_remove`, `bookmark_search`, `bookmark_get_all`, `bookmark_is_bookmarked`, `bookmark_get_all_tags`, `bookmark_update_last_accessed` | Bookmark CRUD and search |
 | `bookmarks.folders` | `bookmark_folder_create`, `bookmark_folder_list`, `bookmark_folder_update`, `bookmark_folder_remove`, `bookmark_folder_get_tree` | Bookmark folder management |
 
@@ -111,7 +110,7 @@ if (!window.hodosBrowser.overlay?.show) {
 }
 ```
 
-The `wallet`, `cookies`, `cookieBlocking`, `bookmarks`, and `omnibox` namespaces use the same guard (`if (!window.hodosBrowser.xxx)`). The `address.generate` method is an exception — it force-overrides to ensure the promise-based wrapper is always present.
+The `wallet`, `bookmarks`, and `omnibox` namespaces use the same guard (`if (!window.hodosBrowser.xxx)`). The `address.generate` method is an exception — it force-overrides to ensure the promise-based wrapper is always present.
 
 ## macOS Compatibility
 

@@ -1,7 +1,8 @@
 # Phase 8c — per-request ids for the wallet bridge · PHASE CONTRACT
 
 **Workstream:** money-path correctness · **Ticket:** `TICKET_bridge_single_slot_callbacks_race.md`
-**Status:** 🟢 **STAGES 1 + 2 DONE. STAGE 3 IN PROGRESS — batches 1 and 2 landed.**
+**Status:** 🟢 **STAGES 1 + 2 DONE. STAGE 3 IN PROGRESS — batches 1, 2 and 3 landed** (batch 3 = cookies,
+2026-09-12: **19 bridge natives**; `D-11` widened the phase to the hook-owned slots — see `O10`).
 ⛔ **8 native bridge functions, 9 JS methods migrated** — `getStatus`, `sendTransaction`, `getBalance`,
 `getBackupModalState`, `setBackupModalState`, and (batch 2, 2026-09-12) `address.generate` +
 `wallet.generateAddress` (one native `generateAddress` backs both), `getInfo`, `markBackedUp`.
@@ -43,6 +44,7 @@ Stage 1 must land and be reviewed before stages 2–4 are attempted.
 | **O6** | **macOS parity.** Both changed files (`simple_render_process_handler.cpp`, `simple_handler.cpp`) are **shared**, not Windows-only | Unlike 8a/8b this is not Rust-only. Mac must verify the V8 binding and the promise map behave there | ⬜ relay owed — batch 2 also **collapsed** the `#ifdef _WIN32` / `#else` twin copies of the `address_generate` handler (they were byte-identical), and commit 2 deletes bodies in `WalletService_mac.cpp` — Mac's lane, flagged for the relay |
 | **O7** | ⚠️ **RED controls are a wasting asset.** `getBackupModalState` WAS the control for `P8c-A1a`; batch 1 used `getInfo`; **batch 2 used `bookmarks.getAllTags`** (§4d — 2 of 3 rejected at 5,011 ms). The wallet namespace now has **no** legacy method left | Remaining legacy pool for a RED: cookies (15) and bookmarks (14). ⛔ **At 0 remaining there is no legacy control left at all**, and the RED must become a deliberate stub | ⚠️ live |
 | **O8** | 🚨 **`getInfo` and `markBackedUp` were dead at the BACKEND too.** The Rust wallet has no `/wallet/info` and no `/wallet/markBackedUp` route (`main.rs` — both **404**, measured against the dev wallet). C++ wraps the miss as `{success:false, error:"Failed to get wallet info: {}"}`. Their only consumer, `BackupOverlayRoot`, is itself **unreachable**: its only opener (`overlay_show_backup`) is sent from a block App.tsx has commented out. So the whole backup-overlay chain — the page, the route, the IPC, `CreateBackupOverlayWithSeparateProcess` on both platforms, its HWND/WndProc/role slot — is dead | They were migrated anyway (batch 2): the routing is proven and the change is reversible. **Deleting the chain is an overlay-lifecycle change** (CLAUDE.md invariant 8) and cascades into `cef_browser_shell.cpp` / `cef_browser_shell_mac.mm` — not a call to make inside a bridge batch | ✅ **owner: delete (2026-09-12)** — *"I don't think we need it."* The recovery-phrase prompt is `WalletPanelPage`'s create flow. **Windows + shared half done** (§4e): page, route, the four methods and their natives/arms/handlers, `overlay_show_backup`, every `role_ == "backup"` arm, the HWND/WndProc/class registration, the app-file creator, the window-record HWND field. 🍎 **macOS half owed to Mac** (`MAC_RELAY_P8_ROUND.md` M8): the `.mm` creator and its six `GetBackupBrowser()` uses, `g_backup_overlay_window`, then the accessor/static/header decl and the `BrowserWindow` `backup_browser` / `backup_overlay_window` slots, which Windows kept only so the Mac build stays green |
+| **O10** | **Scope: the single-slot pattern lives in 8 hooks too (`D-11`), not only the bridge file** | Doubles the phase (~72 slots vs the ticket's 41); each hook rewrite changes error semantics from "resolve a default on timeout" to "reject" | ✅ **decided 2026-09-12: all live slots, hooks included.** Remaining after batch 3: bookmarks (14, bridge-owned), adblock (6), privacy shield (3), paid cache (2), import (2), profiles (1), settings (1), site permissions (1), recently-closed (1) |
 | **O9** | ⚠️ **`address_generate` blocks the UI thread and cannot reject.** The browser handler calls `WalletService::generateAddress()` **inline** — unlike `get_balance`, which P2a moved off-thread for exactly this reason. With the dev wallet stopped, three calls took **6,168 ms, serialised on the UI thread**, and every one **resolved `{}`** rather than rejecting, because `WalletService::makeHttpRequest` swallows transport failure. `useAddress` then reads `response.address` as `undefined`. ⇒ the `address_generate_error` arm (and `RejectBridgeCall` on this slot) is **unreachable in practice** | Pre-existing on both counts. Same family as `TICKET_wallet_backend_death_is_silent_and_unrecovered.md` | ✅ **fixed 2026-09-12 on owner's call** (`P8c-A4d`): off-thread via the `get_balance` shape, and a missing address is now a **rejection**. The "notice the wallet died and restart it" half is the death ticket, now **assigned to Phase 8 after 8c**. 📏 Side finding: `WalletService::isConnected()` is a **latch** — `WinHttpConnect` allocates a handle without touching the wallet, so it reads true with the wallet dead |
 
 ## 0. Plan-vs-tree delta
@@ -136,6 +138,25 @@ The recipe and the batch-1 close-out both named `markBackedUp` as *"the last `re
 **rejected** (`reject(new Error('mark_wallet_backed_up timed out'))`). Zero `resolve(null)` remained
 anywhere in the wallet namespace; the real offenders are the four cookie reads in `D-9`. Caught by
 the recipe's own rule — *read each one; do not assume* — applied to the recipe.
+
+### 0.9 🚨 `D-11` — the pattern was COPIED into the hooks: ~31 more slots the ticket never counted (batch 3 kickoff, 2026-09-12)
+
+The recipe's remaining list for cookies was the **bridge's** `cookies` / `cookieBlocking` namespaces
+(15 methods). Neither had a caller. `useCookies.ts` and `useCookieBlocking.ts` send the IPC
+themselves and set **the same** `window.on*` globals — a second, live copy of the single-slot race.
+The same copy exists in `useAdblock` (6), `usePrivacyShield` (3, incl. `cookie_check_site_allowed`),
+`usePaidCache` (2), `useImport` (2), `useProfiles` (1), `useSettings` (1, also set from
+`MainBrowserView`), `useSitePermissions` (1) and `TabListOverlayRoot` (1). `useBookmarks` is the
+exception — it really does go through the bridge namespace.
+
+📏 Hook-owned timeout flavours, measured: cookie **writes have no timeout** (a stolen reply hangs
+forever); all six adblock calls and four cookie reads **resolve a wrong default**; the privacy-shield
+calls neither resolve nor reject. ⇒ the ticket's own warning — *"a slot left behind is a slot the next
+person copies"* — had already happened before the ticket was written.
+
+👤 **Owner, 2026-09-12: migrate all live slots, hooks included** (~46 over three to four batches).
+Batch 3 = cookies end to end: delete the dead bridge copies, 15 bridge natives, request id threaded
+through `CookieManager`'s async reply helpers, both hooks call the bridge.
 
 ## 1. Goal
 
@@ -429,6 +450,29 @@ Removed: 513 C++ lines across `simple_handler.cpp`, `simple_render_process_handl
 `simple_app.cpp`, `cef_browser_shell.cpp`, `BrowserWindow.h`, plus the page, the route, four bridge
 methods and their types. ⚠️ **macOS half owed** — relay M8. `GetBackupBrowser()` and the
 `BrowserWindow` backup slots are kept as null shims until it lands, so Mac's build stays green.
+
+### `P8c-A5` — 🟢🔴 stage 3 batch 3: cookies + cookie blocking, end to end (2026-09-12)
+
+15 natives; the two caller-less bridge namespaces deleted; `useCookies` / `useCookieBlocking` call
+the bridge; request id threaded through `CookieManager`'s three async reply helpers. Same harness,
+hard-reloaded header.
+
+| Check | Result |
+|---|---|
+| 15 bridge natives `[native code]`; `hodosBrowser.cookies` / `cookieBlocking` | ✅ 15 / 15 · both `undefined` |
+| `window.on(Cookie\|Cache)*` globals | ✅ none (only `onCookieCheckSiteAllowedResponse`, a later batch) |
+| ×3 concurrent: `cookieGetAll` / `cookieGetBlocklist` / `cookieGetBlockedCount` / `cacheGetSize` / `cookieGetBlockLog` | **3 / 3 each, own replies**; 17 ms for 211 cookies, ≤1 ms for the rest — `cookieGetAll` is the one that goes through CEF's IO-thread visitor, so this is real concurrency, not UI-thread serialisation |
+| block → list → unblock → list on `p8c-batch3-test.invalid` | ✅ in list after block, gone after unblock |
+| 🚨 **Empty jar**: `cookieDeleteAll` (211 deleted) then `cookieGetAll` ×3 | **3 / 3 `[]` in 1 ms.** The legacy hook took **5 s** here and resolved `[]` from its timeout, because CEF never calls the visitor when there is nothing to visit (`cef_cookie.h`). Now answered from `CookieCollector`'s destructor |
+| 🔴 RED — `bookmarks.getAllTags` ×3, still legacy | **5,011 ms, 2 of 3 rejected** — same harness sees the bug on the untouched sibling |
+| Consumer: `/browser-data?tab=cookies` through the rewritten hooks | renders "No cookies found · 24 blocked" (the jar had just been emptied): cookie list **and** block list came through the hooks, nothing stuck on Loading |
+
+Semantics that changed on purpose: a real failure now **rejects** (the hooks record it in `error`),
+where the legacy hooks resolved `[]` / `{count:0}` or hung forever; the five fire-and-forget mount
+fetches in the consumers got a `.catch(() => {})` for that reason. `CookieManager`'s reply log now
+prints length only — it used to write every cookie value on the profile into the log at INFO.
+
+⚠️ Dev-profile note: the empty-jar row wipes the dev cookie jar. Dev only, by design of the harness.
 
 ### O5 — two real latencies
 

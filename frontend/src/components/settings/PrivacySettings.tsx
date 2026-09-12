@@ -34,8 +34,9 @@ const PrivacySettings: React.FC = () => {
   } = useCookieBlocking();
 
   useEffect(() => {
-    fetchBlockList();
-    fetchBlockLog(100, 0);
+    // 8c batch 3: these reject on a real failure now; the hook records `error`.
+    fetchBlockList().catch(() => {});
+    fetchBlockLog(100, 0).catch(() => {});
   }, [fetchBlockList, fetchBlockLog]);
 
   const handleUnblock = async (domain: string) => {

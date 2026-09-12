@@ -18,15 +18,17 @@
 #define LOG_ERROR_COOKIE(msg) Logger::Log(msg, 3, 2)
 
 // ============================================================================
-// Helper: Send a process message with a JSON string argument to the renderer.
-// Must be called on the UI thread.
+// Helper: Send a process message `[requestId, json]` to the renderer.
+// Must be called on the UI thread. Phase 8c: arg 0 is the bridge request id.
 // ============================================================================
 static void SendJsonResponseToRenderer(CefRefPtr<CefBrowser> browser,
                                        const std::string& message_name,
+                                       int requestId,
                                        const std::string& json_str) {
     CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create(message_name);
     CefRefPtr<CefListValue> args = msg->GetArgumentList();
-    args->SetString(0, json_str);
+    args->SetInt(0, requestId);
+    args->SetString(1, json_str);
     browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, msg);
 }
 
@@ -39,17 +41,23 @@ class SendResponseTask : public CefTask {
 public:
     SendResponseTask(CefRefPtr<CefBrowser> browser,
                      const std::string& message_name,
+                     int requestId,
                      const std::string& json_str)
-        : browser_(browser), message_name_(message_name), json_str_(json_str) {}
+        : browser_(browser), message_name_(message_name),
+          request_id_(requestId), json_str_(json_str) {}
 
     void Execute() override {
-        SendJsonResponseToRenderer(browser_, message_name_, json_str_);
-        LOG_INFO_COOKIE("Sent " + message_name_ + ": " + json_str_);
+        SendJsonResponseToRenderer(browser_, message_name_, request_id_, json_str_);
+        // Length only: the cookie dump carries every cookie VALUE on the profile, and this
+        // line used to write all of them into the log at INFO.
+        LOG_INFO_COOKIE("Sent " + message_name_ + " (requestId " + std::to_string(request_id_) +
+                        ", " + std::to_string(json_str_.length()) + " bytes)");
     }
 
 private:
     CefRefPtr<CefBrowser> browser_;
     std::string message_name_;
+    int request_id_;
     std::string json_str_;
 
     IMPLEMENT_REFCOUNTING(SendResponseTask);
@@ -59,11 +67,25 @@ private:
 // CookieCollector - CefCookieVisitor that collects all cookies into JSON.
 // Visit() runs on the IO thread. On the last cookie, posts the JSON response
 // back to the UI thread via SendResponseTask.
+//
+// ⚠️ CEF: "This method may never be called if no cookies are found"
+// (cef_cookie.h, CefCookieVisitor::Visit). With an empty jar no Visit() ever
+// fires, so the reply is posted from the DESTRUCTOR when nothing was sent —
+// CEF releases the visitor once the walk is over. The React hook used to hide
+// this with a 5 s timeout that resolved `[]`; under per-request-id routing
+// there is no such timeout, so the empty case has to be answered here.
 // ============================================================================
 class CookieCollector : public CefCookieVisitor {
 public:
-    explicit CookieCollector(CefRefPtr<CefBrowser> browser)
-        : browser_(browser) {}
+    CookieCollector(CefRefPtr<CefBrowser> browser, int requestId)
+        : browser_(browser), request_id_(requestId) {}
+
+    ~CookieCollector() override {
+        if (!sent_) {
+            CefPostTask(TID_UI,
+                        new SendResponseTask(browser_, "cookie_get_all_response", request_id_, "[]"));
+        }
+    }
 
     bool Visit(const CefCookie& cookie, int count, int total,
                bool& deleteCookie) override {
@@ -123,8 +145,9 @@ public:
         if (count == total - 1) {
             nlohmann::json response = cookies_;
             std::string json_str = response.dump();
+            sent_ = true;
             CefPostTask(TID_UI,
-                        new SendResponseTask(browser_, "cookie_get_all_response", json_str));
+                        new SendResponseTask(browser_, "cookie_get_all_response", request_id_, json_str));
         }
 
         return true; // Continue visiting
@@ -132,6 +155,8 @@ public:
 
 private:
     CefRefPtr<CefBrowser> browser_;
+    int request_id_;
+    bool sent_ = false;
     std::vector<nlohmann::json> cookies_;
 
     IMPLEMENT_REFCOUNTING(CookieCollector);
@@ -144,8 +169,10 @@ private:
 class DeleteCallback : public CefDeleteCookiesCallback {
 public:
     DeleteCallback(CefRefPtr<CefBrowser> browser,
-                   const std::string& response_message_name)
-        : browser_(browser), response_message_name_(response_message_name) {}
+                   const std::string& response_message_name,
+                   int requestId)
+        : browser_(browser), response_message_name_(response_message_name),
+          request_id_(requestId) {}
 
     void OnComplete(int num_deleted) override {
         // Runs on IO thread
@@ -155,15 +182,28 @@ public:
         std::string json_str = response.dump();
 
         CefPostTask(TID_UI,
-                    new SendResponseTask(browser_, response_message_name_, json_str));
+                    new SendResponseTask(browser_, response_message_name_, request_id_, json_str));
     }
 
 private:
     CefRefPtr<CefBrowser> browser_;
     std::string response_message_name_;
+    int request_id_;
 
     IMPLEMENT_REFCOUNTING(DeleteCallback);
 };
+
+// A delete that cannot even start (no cookie manager) used to return WITHOUT a reply,
+// leaving the caller to its timeout — and the writes in the React hook had none.
+static void ReplyDeleteUnavailable(CefRefPtr<CefBrowser> browser,
+                                   const std::string& message_name,
+                                   int requestId) {
+    nlohmann::json response;
+    response["success"] = false;
+    response["deleted"] = 0;
+    response["error"] = "cookie manager unavailable";
+    SendJsonResponseToRenderer(browser, message_name, requestId, response.dump());
+}
 
 // ============================================================================
 // CacheSizeTask - Walks the cache directory on a background thread and sends
@@ -171,8 +211,8 @@ private:
 // ============================================================================
 class CacheSizeTask : public CefTask {
 public:
-    explicit CacheSizeTask(CefRefPtr<CefBrowser> browser)
-        : browser_(browser) {}
+    CacheSizeTask(CefRefPtr<CefBrowser> browser, int requestId)
+        : browser_(browser), request_id_(requestId) {}
 
     void Execute() override {
         int64_t total_bytes = 0;
@@ -225,11 +265,12 @@ public:
         std::string json_str = response.dump();
 
         CefPostTask(TID_UI,
-                    new SendResponseTask(browser_, "cache_get_size_response", json_str));
+                    new SendResponseTask(browser_, "cache_get_size_response", request_id_, json_str));
     }
 
 private:
     CefRefPtr<CefBrowser> browser_;
+    int request_id_;
 
     IMPLEMENT_REFCOUNTING(CacheSizeTask);
 };
@@ -238,29 +279,30 @@ private:
 // CookieManager static method implementations
 // ============================================================================
 
-void CookieManager::HandleGetAllCookies(CefRefPtr<CefBrowser> browser) {
-    LOG_INFO_COOKIE("HandleGetAllCookies called");
+void CookieManager::HandleGetAllCookies(CefRefPtr<CefBrowser> browser, int requestId) {
+    LOG_INFO_COOKIE("HandleGetAllCookies called (requestId " + std::to_string(requestId) + ")");
 
     CefRefPtr<CefCookieManager> manager =
         CefCookieManager::GetGlobalManager(nullptr);
 
     if (!manager) {
         LOG_ERROR_COOKIE("Failed to get global cookie manager");
-        SendJsonResponseToRenderer(browser, "cookie_get_all_response", "[]");
+        SendJsonResponseToRenderer(browser, "cookie_get_all_response", requestId, "[]");
         return;
     }
 
-    CefRefPtr<CookieCollector> collector = new CookieCollector(browser);
+    // The collector answers in every case: from Visit() on the last cookie, or from its
+    // destructor when CEF never called Visit() (empty jar) or VisitAllCookies failed.
+    CefRefPtr<CookieCollector> collector = new CookieCollector(browser, requestId);
     bool result = manager->VisitAllCookies(collector);
 
     if (!result) {
-        LOG_INFO_COOKIE("VisitAllCookies returned false (no cookies or error)");
-        // Send empty array immediately since visitor won't be called
-        SendJsonResponseToRenderer(browser, "cookie_get_all_response", "[]");
+        LOG_INFO_COOKIE("VisitAllCookies returned false (cookies cannot be accessed)");
     }
 }
 
 void CookieManager::HandleDeleteCookie(CefRefPtr<CefBrowser> browser,
+                                        int requestId,
                                         const std::string& url,
                                         const std::string& name) {
     LOG_INFO_COOKIE("HandleDeleteCookie: url=" + hodos::LogSafeUrl(url) + ", name=" + name);
@@ -270,6 +312,7 @@ void CookieManager::HandleDeleteCookie(CefRefPtr<CefBrowser> browser,
 
     if (!manager) {
         LOG_ERROR_COOKIE("Failed to get global cookie manager for delete");
+        ReplyDeleteUnavailable(browser, "cookie_delete_response", requestId);
         return;
     }
 
@@ -281,10 +324,11 @@ void CookieManager::HandleDeleteCookie(CefRefPtr<CefBrowser> browser,
 
     manager->DeleteCookies(
         cookie_url, name,
-        new DeleteCallback(browser, "cookie_delete_response"));
+        new DeleteCallback(browser, "cookie_delete_response", requestId));
 }
 
 void CookieManager::HandleDeleteDomainCookies(CefRefPtr<CefBrowser> browser,
+                                               int requestId,
                                                const std::string& domain) {
     LOG_INFO_COOKIE("HandleDeleteDomainCookies: domain=" + domain);
 
@@ -293,6 +337,7 @@ void CookieManager::HandleDeleteDomainCookies(CefRefPtr<CefBrowser> browser,
 
     if (!manager) {
         LOG_ERROR_COOKIE("Failed to get global cookie manager for domain delete");
+        ReplyDeleteUnavailable(browser, "cookie_delete_domain_response", requestId);
         return;
     }
 
@@ -300,10 +345,10 @@ void CookieManager::HandleDeleteDomainCookies(CefRefPtr<CefBrowser> browser,
     std::string cookie_url = "https://" + domain;
     manager->DeleteCookies(
         cookie_url, "",
-        new DeleteCallback(browser, "cookie_delete_domain_response"));
+        new DeleteCallback(browser, "cookie_delete_domain_response", requestId));
 }
 
-void CookieManager::HandleDeleteAllCookies(CefRefPtr<CefBrowser> browser) {
+void CookieManager::HandleDeleteAllCookies(CefRefPtr<CefBrowser> browser, int requestId) {
     LOG_INFO_COOKIE("HandleDeleteAllCookies called");
 
     CefRefPtr<CefCookieManager> manager =
@@ -311,16 +356,17 @@ void CookieManager::HandleDeleteAllCookies(CefRefPtr<CefBrowser> browser) {
 
     if (!manager) {
         LOG_ERROR_COOKIE("Failed to get global cookie manager for delete all");
+        ReplyDeleteUnavailable(browser, "cookie_delete_all_response", requestId);
         return;
     }
 
     // Empty URL and empty name deletes all cookies
     manager->DeleteCookies(
         "", "",
-        new DeleteCallback(browser, "cookie_delete_all_response"));
+        new DeleteCallback(browser, "cookie_delete_all_response", requestId));
 }
 
-void CookieManager::HandleClearCache(CefRefPtr<CefBrowser> browser) {
+void CookieManager::HandleClearCache(CefRefPtr<CefBrowser> browser, int requestId) {
     LOG_INFO_COOKIE("HandleClearCache called");
 
     // ExecuteDevToolsMethod runs on UI thread (we're already here from OnProcessMessageReceived)
@@ -332,13 +378,13 @@ void CookieManager::HandleClearCache(CefRefPtr<CefBrowser> browser) {
     response["success"] = true;
     std::string json_str = response.dump();
 
-    SendJsonResponseToRenderer(browser, "cache_clear_response", json_str);
+    SendJsonResponseToRenderer(browser, "cache_clear_response", requestId, json_str);
     LOG_INFO_COOKIE("Cache clear executed via CDP, response sent");
 }
 
-void CookieManager::HandleGetCacheSize(CefRefPtr<CefBrowser> browser) {
+void CookieManager::HandleGetCacheSize(CefRefPtr<CefBrowser> browser, int requestId) {
     LOG_INFO_COOKIE("HandleGetCacheSize called");
 
     // Run directory walk on a background thread to avoid blocking UI
-    CefPostTask(TID_FILE_USER_BLOCKING, new CacheSizeTask(browser));
+    CefPostTask(TID_FILE_USER_BLOCKING, new CacheSizeTask(browser, requestId));
 }

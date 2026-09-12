@@ -1,6 +1,22 @@
 import { useState, useCallback } from 'react';
 import type { CookieData, DomainCookieGroup, CookieDeleteResponse, CacheSizeResponse } from '../types/cookies';
 
+// Phase 8c stage 3 batch 3 (2026-09-12): every call goes through the native, per-request-id
+// bridge (`window.hodosBrowser.bridge.cookie*` / `cache*`).
+//
+// The previous version of this hook owned its own `window.on*` single-slot globals — a
+// second copy of the pattern `initWindowBridge.ts` also carried (that copy had no callers
+// and was deleted with this change). Two calls in flight together could steal each
+// other's reply. The writes here had NO timeout at all, so a stolen reply hung the caller
+// forever, and `fetchAllCookies` resolved `[]` after 5 s — partly to paper over CEF never
+// calling the cookie visitor for an empty jar, which `CookieManager.cpp` now answers
+// itself. A genuine failure now REJECTS, and the hook records it in `error`.
+const native = () => {
+  const b = window.hodosBrowser?.bridge;
+  if (!b) throw new Error('cookies: native bridge unavailable');
+  return b;
+};
+
 export const useCookies = () => {
   const [cookies, setCookies] = useState<CookieData[]>([]);
   const [domainGroups, setDomainGroups] = useState<DomainCookieGroup[]>([]);
@@ -29,154 +45,86 @@ export const useCookies = () => {
       .sort((a, b) => b.count - a.count); // Sort by cookie count descending
   }, []);
 
-  const fetchAllCookies = useCallback(() => {
+  const fail = (e: unknown): never => {
+    setError(e instanceof Error ? e.message : String(e));
+    throw e;
+  };
+
+  const fetchAllCookies = useCallback(async (): Promise<CookieData[]> => {
     setLoading(true);
     setError(null);
-    return new Promise<CookieData[]>((resolve, reject) => {
-      // Timeout after 5 seconds (handles case where no cookies exist and callback never fires)
-      const timeout = setTimeout(() => {
-        setLoading(false);
-        setCookies([]);
-        setDomainGroups([]);
-        resolve([]);
-        delete window.onCookieGetAllResponse;
-        delete window.onCookieGetAllError;
-      }, 5000);
-
-      window.onCookieGetAllResponse = (data: CookieData[]) => {
-        clearTimeout(timeout);
-        setCookies(data);
-        setDomainGroups(groupByDomain(data));
-        setLoading(false);
-        resolve(data);
-        delete window.onCookieGetAllResponse;
-        delete window.onCookieGetAllError;
-      };
-
-      window.onCookieGetAllError = (errorMsg: string) => {
-        clearTimeout(timeout);
-        setError(errorMsg);
-        setLoading(false);
-        reject(new Error(errorMsg));
-        delete window.onCookieGetAllResponse;
-        delete window.onCookieGetAllError;
-      };
-
-      window.cefMessage?.send('cookie_get_all', []);
-    });
+    try {
+      const data = await native().cookieGetAll();
+      setCookies(data);
+      setDomainGroups(groupByDomain(data));
+      return data;
+    } catch (e) {
+      return fail(e);
+    } finally {
+      setLoading(false);
+    }
   }, [groupByDomain]);
 
-  const deleteCookie = useCallback((url: string, name: string) => {
-    return new Promise<CookieDeleteResponse>((resolve, reject) => {
-      window.onCookieDeleteResponse = (data: CookieDeleteResponse) => {
-        // Remove deleted cookie from local state
-        setCookies(prev => {
-          const updated = prev.filter(c => !(c.name === name && (c.domain === url || `https://${c.domain}` === url || `http://${c.domain}` === url)));
-          setDomainGroups(groupByDomain(updated));
-          return updated;
+  const deleteCookie = useCallback(async (url: string, name: string): Promise<CookieDeleteResponse> => {
+    try {
+      const data = await native().cookieDelete(url, name);
+      // Remove deleted cookie from local state
+      setCookies(prev => {
+        const updated = prev.filter(c => !(c.name === name && (c.domain === url || `https://${c.domain}` === url || `http://${c.domain}` === url)));
+        setDomainGroups(groupByDomain(updated));
+        return updated;
+      });
+      return data;
+    } catch (e) {
+      return fail(e);
+    }
+  }, [groupByDomain]);
+
+  const deleteDomainCookies = useCallback(async (domain: string): Promise<CookieDeleteResponse> => {
+    try {
+      const data = await native().cookieDeleteDomain(domain);
+      // Remove all cookies for this domain from local state
+      setCookies(prev => {
+        const updated = prev.filter(c => {
+          const cookieDomain = c.domain.startsWith('.') ? c.domain.slice(1) : c.domain;
+          return cookieDomain !== domain;
         });
-        resolve(data);
-        delete window.onCookieDeleteResponse;
-        delete window.onCookieDeleteError;
-      };
-
-      window.onCookieDeleteError = (errorMsg: string) => {
-        setError(errorMsg);
-        reject(new Error(errorMsg));
-        delete window.onCookieDeleteResponse;
-        delete window.onCookieDeleteError;
-      };
-
-      window.cefMessage?.send('cookie_delete', [url, name]);
-    });
+        setDomainGroups(groupByDomain(updated));
+        return updated;
+      });
+      return data;
+    } catch (e) {
+      return fail(e);
+    }
   }, [groupByDomain]);
 
-  const deleteDomainCookies = useCallback((domain: string) => {
-    return new Promise<CookieDeleteResponse>((resolve, reject) => {
-      window.onCookieDeleteDomainResponse = (data: CookieDeleteResponse) => {
-        // Remove all cookies for this domain from local state
-        setCookies(prev => {
-          const updated = prev.filter(c => {
-            const cookieDomain = c.domain.startsWith('.') ? c.domain.slice(1) : c.domain;
-            return cookieDomain !== domain;
-          });
-          setDomainGroups(groupByDomain(updated));
-          return updated;
-        });
-        resolve(data);
-        delete window.onCookieDeleteDomainResponse;
-        delete window.onCookieDeleteDomainError;
-      };
-
-      window.onCookieDeleteDomainError = (errorMsg: string) => {
-        setError(errorMsg);
-        reject(new Error(errorMsg));
-        delete window.onCookieDeleteDomainResponse;
-        delete window.onCookieDeleteDomainError;
-      };
-
-      window.cefMessage?.send('cookie_delete_domain', [domain]);
-    });
-  }, [groupByDomain]);
-
-  const deleteAllCookies = useCallback(() => {
-    return new Promise<CookieDeleteResponse>((resolve, reject) => {
-      window.onCookieDeleteAllResponse = (data: CookieDeleteResponse) => {
-        setCookies([]);
-        setDomainGroups([]);
-        resolve(data);
-        delete window.onCookieDeleteAllResponse;
-        delete window.onCookieDeleteAllError;
-      };
-
-      window.onCookieDeleteAllError = (errorMsg: string) => {
-        setError(errorMsg);
-        reject(new Error(errorMsg));
-        delete window.onCookieDeleteAllResponse;
-        delete window.onCookieDeleteAllError;
-      };
-
-      window.cefMessage?.send('cookie_delete_all', []);
-    });
+  const deleteAllCookies = useCallback(async (): Promise<CookieDeleteResponse> => {
+    try {
+      const data = await native().cookieDeleteAll();
+      setCookies([]);
+      setDomainGroups([]);
+      return data;
+    } catch (e) {
+      return fail(e);
+    }
   }, []);
 
-  const clearCache = useCallback(() => {
-    return new Promise<{ success: boolean }>((resolve, reject) => {
-      window.onCacheClearResponse = (data: { success: boolean }) => {
-        resolve(data);
-        delete window.onCacheClearResponse;
-        delete window.onCacheClearError;
-      };
-
-      window.onCacheClearError = (errorMsg: string) => {
-        setError(errorMsg);
-        reject(new Error(errorMsg));
-        delete window.onCacheClearResponse;
-        delete window.onCacheClearError;
-      };
-
-      window.cefMessage?.send('cache_clear', []);
-    });
+  const clearCache = useCallback(async (): Promise<{ success: boolean }> => {
+    try {
+      return await native().cacheClear();
+    } catch (e) {
+      return fail(e);
+    }
   }, []);
 
-  const getCacheSize = useCallback(() => {
-    return new Promise<CacheSizeResponse>((resolve, reject) => {
-      window.onCacheGetSizeResponse = (data: CacheSizeResponse) => {
-        setCacheSize(data.totalBytes);
-        resolve(data);
-        delete window.onCacheGetSizeResponse;
-        delete window.onCacheGetSizeError;
-      };
-
-      window.onCacheGetSizeError = (errorMsg: string) => {
-        setError(errorMsg);
-        reject(new Error(errorMsg));
-        delete window.onCacheGetSizeResponse;
-        delete window.onCacheGetSizeError;
-      };
-
-      window.cefMessage?.send('cache_get_size', []);
-    });
+  const getCacheSize = useCallback(async (): Promise<CacheSizeResponse> => {
+    try {
+      const data = await native().cacheGetSize();
+      setCacheSize(data.totalBytes);
+      return data;
+    } catch (e) {
+      return fail(e);
+    }
   }, []);
 
   return {

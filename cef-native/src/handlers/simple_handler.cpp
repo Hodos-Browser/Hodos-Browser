@@ -6485,38 +6485,43 @@ bool SimpleHandler::OnProcessMessageReceived(
 
     // ========== COOKIE MANAGEMENT MESSAGES ==========
 
+    // Phase 8c batch 3 — MIGRATED. Arg 0 is the bridge request id; payload args shift
+    // to 1.. and `CookieManager` echoes the id in every reply (`[requestId, json]`).
+
     if (message_name == "cookie_get_all") {
-        CookieManager::HandleGetAllCookies(browser);
+        CookieManager::HandleGetAllCookies(browser, message->GetArgumentList()->GetInt(0));
         return true;
     }
 
     if (message_name == "cookie_delete") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string url = args->GetString(0).ToString();
-        std::string name = args->GetString(1).ToString();
-        CookieManager::HandleDeleteCookie(browser, url, name);
+        const int reqId = args->GetInt(0);
+        std::string url = args->GetString(1).ToString();
+        std::string name = args->GetString(2).ToString();
+        CookieManager::HandleDeleteCookie(browser, reqId, url, name);
         return true;
     }
 
     if (message_name == "cookie_delete_domain") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string domain = args->GetString(0).ToString();
-        CookieManager::HandleDeleteDomainCookies(browser, domain);
+        const int reqId = args->GetInt(0);
+        std::string domain = args->GetString(1).ToString();
+        CookieManager::HandleDeleteDomainCookies(browser, reqId, domain);
         return true;
     }
 
     if (message_name == "cookie_delete_all") {
-        CookieManager::HandleDeleteAllCookies(browser);
+        CookieManager::HandleDeleteAllCookies(browser, message->GetArgumentList()->GetInt(0));
         return true;
     }
 
     if (message_name == "cache_clear") {
-        CookieManager::HandleClearCache(browser);
+        CookieManager::HandleClearCache(browser, message->GetArgumentList()->GetInt(0));
         return true;
     }
 
     if (message_name == "cache_get_size") {
-        CookieManager::HandleGetCacheSize(browser);
+        CookieManager::HandleGetCacheSize(browser, message->GetArgumentList()->GetInt(0));
         return true;
     }
 
@@ -6550,10 +6555,14 @@ bool SimpleHandler::OnProcessMessageReceived(
 
     // ========== COOKIE BLOCKING MESSAGES ==========
 
+    // Phase 8c batch 3 — MIGRATED. Arg 0 is the bridge request id, payload args shift to
+    // 1.., and every reply is `[requestId, json]`.
+
     if (message_name == "cookie_block_domain") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string domain = args->GetString(0).ToString();
-        std::string isWildcardStr = (args->GetSize() > 1) ? args->GetString(1).ToString() : "false";
+        const int reqId = args->GetInt(0);
+        std::string domain = args->GetString(1).ToString();
+        std::string isWildcardStr = (args->GetSize() > 2) ? args->GetString(2).ToString() : "false";
         bool isWildcard = (isWildcardStr == "true");
 
         bool success = CookieBlockManager::GetInstance().AddBlockedDomain(domain, isWildcard, "user");
@@ -6564,14 +6573,16 @@ bool SimpleHandler::OnProcessMessageReceived(
         std::string json_str = response.dump();
 
         CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("cookie_block_domain_response");
-        responseMsg->GetArgumentList()->SetString(0, json_str);
+        responseMsg->GetArgumentList()->SetInt(0, reqId);
+        responseMsg->GetArgumentList()->SetString(1, json_str);
         browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
         return true;
     }
 
     if (message_name == "cookie_unblock_domain") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string domain = args->GetString(0).ToString();
+        const int reqId = args->GetInt(0);
+        std::string domain = args->GetString(1).ToString();
 
         bool success = CookieBlockManager::GetInstance().RemoveBlockedDomain(domain);
 
@@ -6581,23 +6592,27 @@ bool SimpleHandler::OnProcessMessageReceived(
         std::string json_str = response.dump();
 
         CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("cookie_unblock_domain_response");
-        responseMsg->GetArgumentList()->SetString(0, json_str);
+        responseMsg->GetArgumentList()->SetInt(0, reqId);
+        responseMsg->GetArgumentList()->SetString(1, json_str);
         browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
         return true;
     }
 
     if (message_name == "cookie_get_blocklist") {
+        const int reqId = message->GetArgumentList()->GetInt(0);
         std::string json_str = CookieBlockManager::GetInstance().GetBlockedDomains();
 
         CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("cookie_blocklist_response");
-        responseMsg->GetArgumentList()->SetString(0, json_str);
+        responseMsg->GetArgumentList()->SetInt(0, reqId);
+        responseMsg->GetArgumentList()->SetString(1, json_str);
         browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
         return true;
     }
 
     if (message_name == "cookie_allow_third_party") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string domain = args->GetString(0).ToString();
+        const int reqId = args->GetInt(0);
+        std::string domain = args->GetString(1).ToString();
 
         bool success = CookieBlockManager::GetInstance().AddAllowedThirdParty(domain);
 
@@ -6607,14 +6622,16 @@ bool SimpleHandler::OnProcessMessageReceived(
         std::string json_str = response.dump();
 
         CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("cookie_allow_third_party_response");
-        responseMsg->GetArgumentList()->SetString(0, json_str);
+        responseMsg->GetArgumentList()->SetInt(0, reqId);
+        responseMsg->GetArgumentList()->SetString(1, json_str);
         browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
         return true;
     }
 
     if (message_name == "cookie_remove_third_party_allow") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string domain = args->GetString(0).ToString();
+        const int reqId = args->GetInt(0);
+        std::string domain = args->GetString(1).ToString();
 
         bool success = CookieBlockManager::GetInstance().RemoveAllowedThirdParty(domain);
 
@@ -6624,31 +6641,35 @@ bool SimpleHandler::OnProcessMessageReceived(
         std::string json_str = response.dump();
 
         CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("cookie_remove_third_party_allow_response");
-        responseMsg->GetArgumentList()->SetString(0, json_str);
+        responseMsg->GetArgumentList()->SetInt(0, reqId);
+        responseMsg->GetArgumentList()->SetString(1, json_str);
         browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
         return true;
     }
 
     if (message_name == "cookie_get_block_log") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
+        const int reqId = args->GetInt(0);
         int limit = 100;
         int offset = 0;
-        if (args->GetSize() > 0) {
-            try { limit = std::stoi(args->GetString(0).ToString()); } catch (...) {}
-        }
         if (args->GetSize() > 1) {
-            try { offset = std::stoi(args->GetString(1).ToString()); } catch (...) {}
+            try { limit = std::stoi(args->GetString(1).ToString()); } catch (...) {}
+        }
+        if (args->GetSize() > 2) {
+            try { offset = std::stoi(args->GetString(2).ToString()); } catch (...) {}
         }
 
         std::string json_str = CookieBlockManager::GetInstance().GetBlockLog(limit, offset);
 
         CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("cookie_block_log_response");
-        responseMsg->GetArgumentList()->SetString(0, json_str);
+        responseMsg->GetArgumentList()->SetInt(0, reqId);
+        responseMsg->GetArgumentList()->SetString(1, json_str);
         browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
         return true;
     }
 
     if (message_name == "cookie_clear_block_log") {
+        const int reqId = message->GetArgumentList()->GetInt(0);
         bool success = CookieBlockManager::GetInstance().ClearBlockLog();
 
         nlohmann::json response;
@@ -6656,12 +6677,14 @@ bool SimpleHandler::OnProcessMessageReceived(
         std::string json_str = response.dump();
 
         CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("cookie_clear_block_log_response");
-        responseMsg->GetArgumentList()->SetString(0, json_str);
+        responseMsg->GetArgumentList()->SetInt(0, reqId);
+        responseMsg->GetArgumentList()->SetString(1, json_str);
         browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
         return true;
     }
 
     if (message_name == "cookie_get_blocked_count") {
+        const int reqId = message->GetArgumentList()->GetInt(0);
         // Use globally active tab's browser ID (overlays don't have tabs)
         int browser_id = 0;
         auto* active_tab = TabManager::GetInstance().GetActiveTab();
@@ -6675,12 +6698,14 @@ bool SimpleHandler::OnProcessMessageReceived(
         std::string json_str = response.dump();
 
         CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("cookie_blocked_count_response");
-        responseMsg->GetArgumentList()->SetString(0, json_str);
+        responseMsg->GetArgumentList()->SetInt(0, reqId);
+        responseMsg->GetArgumentList()->SetString(1, json_str);
         browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
         return true;
     }
 
     if (message_name == "cookie_reset_blocked_count") {
+        const int reqId = message->GetArgumentList()->GetInt(0);
         int browser_id = browser->GetIdentifier();
         CookieBlockManager::GetInstance().ResetBlockedCount(browser_id);
 
@@ -6689,7 +6714,8 @@ bool SimpleHandler::OnProcessMessageReceived(
         std::string json_str = response.dump();
 
         CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("cookie_reset_blocked_count_response");
-        responseMsg->GetArgumentList()->SetString(0, json_str);
+        responseMsg->GetArgumentList()->SetInt(0, reqId);
+        responseMsg->GetArgumentList()->SetString(1, json_str);
         browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
         return true;
     }

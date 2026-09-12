@@ -51,9 +51,10 @@ export function CookiePanelOverlay() {
   const [toast, setToast] = useState<{ message: string; severity: 'success' | 'error' } | null>(null);
 
   useEffect(() => {
-    fetchAllCookies();
-    fetchBlockList();
-    fetchBlockLog(50, 0);
+    // 8c batch 3: these reject on a real failure now; the hooks record `error`.
+    fetchAllCookies().catch(() => {});
+    fetchBlockList().catch(() => {});
+    fetchBlockLog(50, 0).catch(() => {});
   }, [fetchAllCookies, fetchBlockList, fetchBlockLog]);
 
   // Filter domain groups by search query

@@ -400,7 +400,11 @@ public:
 
     // What the caller passes, if anything. Kept tiny on purpose — the remaining legacy
     // slots are overwhelmingly None or Str, with a handful of Bool.
-    enum class Payload { None, Str, Bool };
+    // Strs (batch 3): forward EVERY argument as a string, in order, as args 1..N. The
+    // cookie and bookmark IPCs take up to four string parameters, and the legacy callers
+    // already stringified numbers and booleans ("true", "100"); the browser handlers
+    // parse them back. Keeping that wire shape is what keeps this a routing change.
+    enum class Payload { None, Str, Bool, Strs };
 
     bool Execute(const CefString& name,
                  CefRefPtr<CefV8Value> object,
@@ -432,6 +436,45 @@ public:
             // `wallet.generateAddress`, which shared the legacy global slot pair with
             // it, was deleted in the same batch.)
             ipcName = "address_generate";
+        // Stage 3 batch 3 — cookies + cookie blocking. Called by the `useCookies` and
+        // `useCookieBlocking` hooks, which used to own their own `window.on*` slots.
+        } else if (method == "cookieGetAll") {
+            ipcName = "cookie_get_all";
+        } else if (method == "cookieDelete") {
+            ipcName = "cookie_delete";
+            payload = Payload::Strs;
+        } else if (method == "cookieDeleteDomain") {
+            ipcName = "cookie_delete_domain";
+            payload = Payload::Strs;
+        } else if (method == "cookieDeleteAll") {
+            ipcName = "cookie_delete_all";
+        } else if (method == "cacheClear") {
+            ipcName = "cache_clear";
+        } else if (method == "cacheGetSize") {
+            ipcName = "cache_get_size";
+        } else if (method == "cookieBlockDomain") {
+            ipcName = "cookie_block_domain";
+            payload = Payload::Strs;
+        } else if (method == "cookieUnblockDomain") {
+            ipcName = "cookie_unblock_domain";
+            payload = Payload::Strs;
+        } else if (method == "cookieGetBlocklist") {
+            ipcName = "cookie_get_blocklist";
+        } else if (method == "cookieAllowThirdParty") {
+            ipcName = "cookie_allow_third_party";
+            payload = Payload::Strs;
+        } else if (method == "cookieRemoveThirdPartyAllow") {
+            ipcName = "cookie_remove_third_party_allow";
+            payload = Payload::Strs;
+        } else if (method == "cookieGetBlockLog") {
+            ipcName = "cookie_get_block_log";
+            payload = Payload::Strs;
+        } else if (method == "cookieClearBlockLog") {
+            ipcName = "cookie_clear_block_log";
+        } else if (method == "cookieGetBlockedCount") {
+            ipcName = "cookie_get_blocked_count";
+        } else if (method == "cookieResetBlockedCount") {
+            ipcName = "cookie_reset_blocked_count";
         }
         // getInfo / markBackedUp / getBackupModalState / setBackupModalState were deleted
         // with the backup overlay (Phase 8c O8, 2026-09-12): their only consumer was
@@ -445,6 +488,15 @@ public:
         if (payload == Payload::Bool && (arguments.empty() || !arguments[0]->IsBool())) {
             exception = method + "() requires a boolean argument";
             return true;
+        }
+        if (payload == Payload::Strs) {
+            for (size_t i = 0; i < arguments.size(); ++i) {
+                if (!arguments[i]->IsString()) {
+                    exception = method + "() takes string arguments only (argument " +
+                                std::to_string(i) + " is not a string)";
+                    return true;
+                }
+            }
         }
 
         CefRefPtr<CefV8Context> context = CefV8Context::GetCurrentContext();
@@ -463,6 +515,10 @@ public:
             msg->GetArgumentList()->SetString(1, arguments[0]->GetStringValue());
         } else if (payload == Payload::Bool) {
             msg->GetArgumentList()->SetBool(1, arguments[0]->GetBoolValue());
+        } else if (payload == Payload::Strs) {
+            for (size_t i = 0; i < arguments.size(); ++i) {
+                msg->GetArgumentList()->SetString(static_cast<size_t>(i + 1), arguments[i]->GetStringValue());
+            }
         }
 
         retval = CefV8Value::CreatePromise();
@@ -935,8 +991,54 @@ void SimpleRenderProcessHandler::OnContextCreated(
     bridgeObject->SetValue("generateAddress",
         CefV8Value::CreateFunction("generateAddress", bridgeHandler),
         V8_PROPERTY_ATTRIBUTE_READONLY);
+    // Stage 3 batch 3 — cookies + cookie blocking (15).
+    bridgeObject->SetValue("cookieGetAll",
+        CefV8Value::CreateFunction("cookieGetAll", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    bridgeObject->SetValue("cookieDelete",
+        CefV8Value::CreateFunction("cookieDelete", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    bridgeObject->SetValue("cookieDeleteDomain",
+        CefV8Value::CreateFunction("cookieDeleteDomain", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    bridgeObject->SetValue("cookieDeleteAll",
+        CefV8Value::CreateFunction("cookieDeleteAll", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    bridgeObject->SetValue("cacheClear",
+        CefV8Value::CreateFunction("cacheClear", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    bridgeObject->SetValue("cacheGetSize",
+        CefV8Value::CreateFunction("cacheGetSize", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    bridgeObject->SetValue("cookieBlockDomain",
+        CefV8Value::CreateFunction("cookieBlockDomain", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    bridgeObject->SetValue("cookieUnblockDomain",
+        CefV8Value::CreateFunction("cookieUnblockDomain", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    bridgeObject->SetValue("cookieGetBlocklist",
+        CefV8Value::CreateFunction("cookieGetBlocklist", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    bridgeObject->SetValue("cookieAllowThirdParty",
+        CefV8Value::CreateFunction("cookieAllowThirdParty", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    bridgeObject->SetValue("cookieRemoveThirdPartyAllow",
+        CefV8Value::CreateFunction("cookieRemoveThirdPartyAllow", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    bridgeObject->SetValue("cookieGetBlockLog",
+        CefV8Value::CreateFunction("cookieGetBlockLog", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    bridgeObject->SetValue("cookieClearBlockLog",
+        CefV8Value::CreateFunction("cookieClearBlockLog", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    bridgeObject->SetValue("cookieGetBlockedCount",
+        CefV8Value::CreateFunction("cookieGetBlockedCount", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    bridgeObject->SetValue("cookieResetBlockedCount",
+        CefV8Value::CreateFunction("cookieResetBlockedCount", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
     hodosBrowser->SetValue("bridge", bridgeObject, V8_PROPERTY_ATTRIBUTE_READONLY);
-    LOG_DEBUG_RENDER("🌉 Bound WalletBridgeV8Handler (4 methods migrated)");
+    LOG_DEBUG_RENDER("🌉 Bound WalletBridgeV8Handler (19 methods migrated)");
 
     hodosBrowser->SetValue("history", historyObject, V8_PROPERTY_ATTRIBUTE_READONLY);
 
@@ -1749,58 +1851,73 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
     }
 
     // ========== COOKIE/CACHE RESPONSE HANDLERS ==========
+    // Phase 8c batch 3: the 15 cookie / cache / cookie-blocking replies below are routed
+    // by request id. `paid_cache_*` and `cookie_check_site_allowed` are still legacy
+    // (hook-owned single slots) and belong to a later batch.
 
     if (message_name == "cookie_get_all_response") {
+        // MIGRATED (Phase 8c stage 3 batch 3). Args: 0 = requestId, 1 = payload.
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string cookiesJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(cookiesJson);
-        std::string js = "if (window.onCookieGetAllResponse) { window.onCookieGetAllResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "cookie_get_all_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
     if (message_name == "cookie_delete_response") {
+        // MIGRATED (Phase 8c stage 3 batch 3). Args: 0 = requestId, 1 = payload.
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onCookieDeleteResponse) { window.onCookieDeleteResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "cookie_delete_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
     if (message_name == "cookie_delete_domain_response") {
+        // MIGRATED (Phase 8c stage 3 batch 3). Args: 0 = requestId, 1 = payload.
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onCookieDeleteDomainResponse) { window.onCookieDeleteDomainResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "cookie_delete_domain_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
     if (message_name == "cookie_delete_all_response") {
+        // MIGRATED (Phase 8c stage 3 batch 3). Args: 0 = requestId, 1 = payload.
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onCookieDeleteAllResponse) { window.onCookieDeleteAllResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "cookie_delete_all_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
     if (message_name == "cache_clear_response") {
+        // MIGRATED (Phase 8c stage 3 batch 3). Args: 0 = requestId, 1 = payload.
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onCacheClearResponse) { window.onCacheClearResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "cache_clear_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
     if (message_name == "cache_get_size_response") {
+        // MIGRATED (Phase 8c stage 3 batch 3). Args: 0 = requestId, 1 = payload.
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onCacheGetSizeResponse) { window.onCacheGetSizeResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "cache_get_size_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
@@ -1825,83 +1942,101 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
     // ========== COOKIE BLOCKING RESPONSE HANDLERS ==========
 
     if (message_name == "cookie_block_domain_response") {
+        // MIGRATED (Phase 8c stage 3 batch 3). Args: 0 = requestId, 1 = payload.
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onCookieBlockDomainResponse) { window.onCookieBlockDomainResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "cookie_block_domain_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
     if (message_name == "cookie_unblock_domain_response") {
+        // MIGRATED (Phase 8c stage 3 batch 3). Args: 0 = requestId, 1 = payload.
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onCookieUnblockDomainResponse) { window.onCookieUnblockDomainResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "cookie_unblock_domain_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
     if (message_name == "cookie_blocklist_response") {
+        // MIGRATED (Phase 8c stage 3 batch 3). Args: 0 = requestId, 1 = payload.
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onCookieBlocklistResponse) { window.onCookieBlocklistResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "cookie_blocklist_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
     if (message_name == "cookie_allow_third_party_response") {
+        // MIGRATED (Phase 8c stage 3 batch 3). Args: 0 = requestId, 1 = payload.
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onCookieAllowThirdPartyResponse) { window.onCookieAllowThirdPartyResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "cookie_allow_third_party_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
     if (message_name == "cookie_remove_third_party_allow_response") {
+        // MIGRATED (Phase 8c stage 3 batch 3). Args: 0 = requestId, 1 = payload.
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onCookieRemoveThirdPartyAllowResponse) { window.onCookieRemoveThirdPartyAllowResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "cookie_remove_third_party_allow_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
     if (message_name == "cookie_block_log_response") {
+        // MIGRATED (Phase 8c stage 3 batch 3). Args: 0 = requestId, 1 = payload.
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onCookieBlockLogResponse) { window.onCookieBlockLogResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "cookie_block_log_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
     if (message_name == "cookie_clear_block_log_response") {
+        // MIGRATED (Phase 8c stage 3 batch 3). Args: 0 = requestId, 1 = payload.
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onCookieClearBlockLogResponse) { window.onCookieClearBlockLogResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "cookie_clear_block_log_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
     if (message_name == "cookie_blocked_count_response") {
+        // MIGRATED (Phase 8c stage 3 batch 3). Args: 0 = requestId, 1 = payload.
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onCookieBlockedCountResponse) { window.onCookieBlockedCountResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "cookie_blocked_count_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
     if (message_name == "cookie_reset_blocked_count_response") {
+        // MIGRATED (Phase 8c stage 3 batch 3). Args: 0 = requestId, 1 = payload.
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onCookieResetBlockedCountResponse) { window.onCookieResetBlockedCountResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "cookie_reset_blocked_count_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 

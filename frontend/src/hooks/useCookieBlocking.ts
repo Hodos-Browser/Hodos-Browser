@@ -9,6 +9,20 @@ import type {
   ClearBlockLogResponse,
 } from '../types/cookieBlocking';
 
+// Phase 8c stage 3 batch 3 (2026-09-12): every call goes through the native, per-request-id
+// bridge (`window.hodosBrowser.bridge.cookie*`). See `useCookies.ts` for the history —
+// this hook owned the same kind of `window.on*` single-slot globals, and four of its reads
+// (`fetchBlockList`, `fetchBlockLog`, `fetchBlockedCount` …) RESOLVED a default on timeout,
+// so a stolen reply produced a silently wrong value. A genuine failure now rejects.
+//
+// ⛔ Arguments cross the bridge as STRINGS, exactly as the legacy IPC sent them
+// (`isWildcard.toString()`, `limit.toString()`); the browser-side handlers parse them.
+const native = () => {
+  const b = window.hodosBrowser?.bridge;
+  if (!b) throw new Error('cookieBlocking: native bridge unavailable');
+  return b;
+};
+
 export const useCookieBlocking = () => {
   const [blockedDomains, setBlockedDomains] = useState<BlockedDomainEntry[]>([]);
   const [blockLog, setBlockLog] = useState<BlockLogEntry[]>([]);
@@ -16,67 +30,33 @@ export const useCookieBlocking = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchBlockList = useCallback(() => {
+  const fail = (e: unknown): never => {
+    setError(e instanceof Error ? e.message : String(e));
+    throw e;
+  };
+
+  const fetchBlockList = useCallback(async (): Promise<BlockedDomainEntry[]> => {
     setLoading(true);
     setError(null);
-    return new Promise<BlockedDomainEntry[]>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        setLoading(false);
-        setBlockedDomains([]);
-        resolve([]);
-        delete window.onCookieBlocklistResponse;
-        delete window.onCookieBlocklistError;
-      }, 5000);
-
-      window.onCookieBlocklistResponse = (data: BlockedDomainEntry[]) => {
-        clearTimeout(timeout);
-        setBlockedDomains(data);
-        setLoading(false);
-        resolve(data);
-        delete window.onCookieBlocklistResponse;
-        delete window.onCookieBlocklistError;
-      };
-
-      window.onCookieBlocklistError = (errorMsg: string) => {
-        clearTimeout(timeout);
-        setError(errorMsg);
-        setLoading(false);
-        reject(new Error(errorMsg));
-        delete window.onCookieBlocklistResponse;
-        delete window.onCookieBlocklistError;
-      };
-
-      window.cefMessage?.send('cookie_get_blocklist', []);
-    });
+    try {
+      const data = await native().cookieGetBlocklist();
+      setBlockedDomains(data);
+      return data;
+    } catch (e) {
+      return fail(e);
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   const blockDomain = useCallback(async (domain: string, isWildcard: boolean): Promise<BlockDomainResponse> => {
     setError(null);
-    const result = await new Promise<BlockDomainResponse>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error('Block domain timeout'));
-        delete window.onCookieBlockDomainResponse;
-        delete window.onCookieBlockDomainError;
-      }, 5000);
-
-      window.onCookieBlockDomainResponse = (data: BlockDomainResponse) => {
-        clearTimeout(timeout);
-        resolve(data);
-        delete window.onCookieBlockDomainResponse;
-        delete window.onCookieBlockDomainError;
-      };
-
-      window.onCookieBlockDomainError = (errorMsg: string) => {
-        clearTimeout(timeout);
-        setError(errorMsg);
-        reject(new Error(errorMsg));
-        delete window.onCookieBlockDomainResponse;
-        delete window.onCookieBlockDomainError;
-      };
-
-      window.cefMessage?.send('cookie_block_domain', [domain, isWildcard.toString()]);
-    });
-
+    let result: BlockDomainResponse;
+    try {
+      result = await native().cookieBlockDomain(domain, isWildcard.toString());
+    } catch (e) {
+      return fail(e);
+    }
     // Re-fetch block list after successful block
     await fetchBlockList();
     return result;
@@ -84,219 +64,89 @@ export const useCookieBlocking = () => {
 
   const unblockDomain = useCallback(async (domain: string): Promise<UnblockDomainResponse> => {
     setError(null);
-    const result = await new Promise<UnblockDomainResponse>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error('Unblock domain timeout'));
-        delete window.onCookieUnblockDomainResponse;
-        delete window.onCookieUnblockDomainError;
-      }, 5000);
-
-      window.onCookieUnblockDomainResponse = (data: UnblockDomainResponse) => {
-        clearTimeout(timeout);
-        resolve(data);
-        delete window.onCookieUnblockDomainResponse;
-        delete window.onCookieUnblockDomainError;
-      };
-
-      window.onCookieUnblockDomainError = (errorMsg: string) => {
-        clearTimeout(timeout);
-        setError(errorMsg);
-        reject(new Error(errorMsg));
-        delete window.onCookieUnblockDomainResponse;
-        delete window.onCookieUnblockDomainError;
-      };
-
-      window.cefMessage?.send('cookie_unblock_domain', [domain]);
-    });
-
+    let result: UnblockDomainResponse;
+    try {
+      result = await native().cookieUnblockDomain(domain);
+    } catch (e) {
+      return fail(e);
+    }
     // Re-fetch block list after successful unblock
     await fetchBlockList();
     return result;
   }, [fetchBlockList]);
 
-  const allowThirdParty = useCallback((domain: string): Promise<AllowThirdPartyResponse> => {
+  const allowThirdParty = useCallback(async (domain: string): Promise<AllowThirdPartyResponse> => {
     setError(null);
-    return new Promise<AllowThirdPartyResponse>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error('Allow third party timeout'));
-        delete window.onCookieAllowThirdPartyResponse;
-        delete window.onCookieAllowThirdPartyError;
-      }, 5000);
-
-      window.onCookieAllowThirdPartyResponse = (data: AllowThirdPartyResponse) => {
-        clearTimeout(timeout);
-        resolve(data);
-        delete window.onCookieAllowThirdPartyResponse;
-        delete window.onCookieAllowThirdPartyError;
-      };
-
-      window.onCookieAllowThirdPartyError = (errorMsg: string) => {
-        clearTimeout(timeout);
-        setError(errorMsg);
-        reject(new Error(errorMsg));
-        delete window.onCookieAllowThirdPartyResponse;
-        delete window.onCookieAllowThirdPartyError;
-      };
-
-      window.cefMessage?.send('cookie_allow_third_party', [domain]);
-    });
+    try {
+      return await native().cookieAllowThirdParty(domain);
+    } catch (e) {
+      return fail(e);
+    }
   }, []);
 
-  const removeThirdPartyAllow = useCallback((domain: string): Promise<AllowThirdPartyResponse> => {
+  const removeThirdPartyAllow = useCallback(async (domain: string): Promise<AllowThirdPartyResponse> => {
     setError(null);
-    return new Promise<AllowThirdPartyResponse>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error('Remove third party allow timeout'));
-        delete window.onCookieRemoveThirdPartyAllowResponse;
-        delete window.onCookieRemoveThirdPartyAllowError;
-      }, 5000);
-
-      window.onCookieRemoveThirdPartyAllowResponse = (data: AllowThirdPartyResponse) => {
-        clearTimeout(timeout);
-        resolve(data);
-        delete window.onCookieRemoveThirdPartyAllowResponse;
-        delete window.onCookieRemoveThirdPartyAllowError;
-      };
-
-      window.onCookieRemoveThirdPartyAllowError = (errorMsg: string) => {
-        clearTimeout(timeout);
-        setError(errorMsg);
-        reject(new Error(errorMsg));
-        delete window.onCookieRemoveThirdPartyAllowResponse;
-        delete window.onCookieRemoveThirdPartyAllowError;
-      };
-
-      window.cefMessage?.send('cookie_remove_third_party_allow', [domain]);
-    });
+    try {
+      return await native().cookieRemoveThirdPartyAllow(domain);
+    } catch (e) {
+      return fail(e);
+    }
   }, []);
 
-  const fetchBlockLog = useCallback((limit: number = 100, offset: number = 0) => {
+  const fetchBlockLog = useCallback(async (limit: number = 100, offset: number = 0): Promise<BlockLogEntry[]> => {
     setLoading(true);
     setError(null);
-    return new Promise<BlockLogEntry[]>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        setLoading(false);
-        setBlockLog([]);
-        resolve([]);
-        delete window.onCookieBlockLogResponse;
-        delete window.onCookieBlockLogError;
-      }, 5000);
-
-      window.onCookieBlockLogResponse = (data: BlockLogEntry[]) => {
-        clearTimeout(timeout);
-        setBlockLog(data);
-        setLoading(false);
-        resolve(data);
-        delete window.onCookieBlockLogResponse;
-        delete window.onCookieBlockLogError;
-      };
-
-      window.onCookieBlockLogError = (errorMsg: string) => {
-        clearTimeout(timeout);
-        setError(errorMsg);
-        setLoading(false);
-        reject(new Error(errorMsg));
-        delete window.onCookieBlockLogResponse;
-        delete window.onCookieBlockLogError;
-      };
-
-      window.cefMessage?.send('cookie_get_block_log', [limit.toString(), offset.toString()]);
-    });
+    try {
+      const data = await native().cookieGetBlockLog(limit.toString(), offset.toString());
+      setBlockLog(data);
+      return data;
+    } catch (e) {
+      return fail(e);
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
-  const clearBlockLog = useCallback((): Promise<ClearBlockLogResponse> => {
+  const clearBlockLog = useCallback(async (): Promise<ClearBlockLogResponse> => {
     setError(null);
-    return new Promise<ClearBlockLogResponse>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error('Clear block log timeout'));
-        delete window.onCookieClearBlockLogResponse;
-        delete window.onCookieClearBlockLogError;
-      }, 5000);
-
-      window.onCookieClearBlockLogResponse = (data: ClearBlockLogResponse) => {
-        clearTimeout(timeout);
-        setBlockLog([]);
-        resolve(data);
-        delete window.onCookieClearBlockLogResponse;
-        delete window.onCookieClearBlockLogError;
-      };
-
-      window.onCookieClearBlockLogError = (errorMsg: string) => {
-        clearTimeout(timeout);
-        setError(errorMsg);
-        reject(new Error(errorMsg));
-        delete window.onCookieClearBlockLogResponse;
-        delete window.onCookieClearBlockLogError;
-      };
-
-      window.cefMessage?.send('cookie_clear_block_log', []);
-    });
+    try {
+      const data = await native().cookieClearBlockLog();
+      setBlockLog([]);
+      return data;
+    } catch (e) {
+      return fail(e);
+    }
   }, []);
 
-  const fetchBlockedCount = useCallback((): Promise<BlockedCountResponse> => {
+  const fetchBlockedCount = useCallback(async (): Promise<BlockedCountResponse> => {
     setError(null);
-    return new Promise<BlockedCountResponse>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        resolve({ count: 0 });
-        delete window.onCookieBlockedCountResponse;
-        delete window.onCookieBlockedCountError;
-      }, 5000);
-
-      window.onCookieBlockedCountResponse = (data: BlockedCountResponse) => {
-        clearTimeout(timeout);
-        setBlockedCount(data.count);
-        resolve(data);
-        delete window.onCookieBlockedCountResponse;
-        delete window.onCookieBlockedCountError;
-      };
-
-      window.onCookieBlockedCountError = (errorMsg: string) => {
-        clearTimeout(timeout);
-        setError(errorMsg);
-        reject(new Error(errorMsg));
-        delete window.onCookieBlockedCountResponse;
-        delete window.onCookieBlockedCountError;
-      };
-
-      window.cefMessage?.send('cookie_get_blocked_count', []);
-    });
+    try {
+      const data = await native().cookieGetBlockedCount();
+      setBlockedCount(data.count);
+      return data;
+    } catch (e) {
+      return fail(e);
+    }
   }, []);
 
-  const resetBlockedCount = useCallback((): Promise<void> => {
+  const resetBlockedCount = useCallback(async (): Promise<void> => {
     setError(null);
-    return new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error('Reset blocked count timeout'));
-        delete window.onCookieResetBlockedCountResponse;
-        delete window.onCookieResetBlockedCountError;
-      }, 5000);
-
-      window.onCookieResetBlockedCountResponse = () => {
-        clearTimeout(timeout);
-        setBlockedCount(0);
-        resolve();
-        delete window.onCookieResetBlockedCountResponse;
-        delete window.onCookieResetBlockedCountError;
-      };
-
-      window.onCookieResetBlockedCountError = (errorMsg: string) => {
-        clearTimeout(timeout);
-        setError(errorMsg);
-        reject(new Error(errorMsg));
-        delete window.onCookieResetBlockedCountResponse;
-        delete window.onCookieResetBlockedCountError;
-      };
-
-      window.cefMessage?.send('cookie_reset_blocked_count', []);
-    });
+    try {
+      await native().cookieResetBlockedCount();
+      setBlockedCount(0);
+    } catch (e) {
+      fail(e);
+    }
   }, []);
 
-  // Poll blocked count periodically (every 2s while mounted) — matches useAdblock pattern
+  // Poll blocked count periodically (every 10s while mounted) — matches useAdblock pattern.
+  // A poll that fails (bridge unavailable, or the 30 s native deadline) records `error`
+  // and is otherwise swallowed here: an interval tick has no caller to reject to.
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   useEffect(() => {
-    fetchBlockedCount();
+    fetchBlockedCount().catch(() => {});
     pollRef.current = setInterval(() => {
-      fetchBlockedCount();
+      fetchBlockedCount().catch(() => {});
     }, 10000);
 
     return () => {

@@ -405,10 +405,10 @@ const MainBrowserView: React.FC = () => {
     // Poll for blocked count + site adblock status every 10 seconds (deferred)
     React.useEffect(() => {
         const deferredId = setTimeout(() => {
-            fetchBlockedCount();
+            fetchBlockedCount().catch(() => {});  // 8c batch 3: rejects on real failure
             if (currentDomain) checkSiteAdblock(currentDomain);
             intervalRef.current = setInterval(() => {
-                fetchBlockedCount();
+                fetchBlockedCount().catch(() => {});
                 if (currentDomain) checkSiteAdblock(currentDomain);
             }, 10000);
         }, 1000);

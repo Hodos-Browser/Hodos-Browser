@@ -31,8 +31,8 @@ Permission decisions are **not** made here or anywhere in C++. The decision engi
 | `useAddress` | BSV address generation + clipboard | V8 | No |
 | `useTransaction` | Send BSV transactions | V8 | No |
 | `useAdblock` | Ad blocking toggle + blocked count | IPC window callbacks | 10s |
-| `useCookieBlocking` | Cookie domain blocking + third-party control | IPC window callbacks | 10s |
-| `useCookies` | Cookie CRUD + browser cache management | IPC window callbacks | No |
+| `useCookieBlocking` | Cookie domain blocking + third-party control | native `hodosBrowser.bridge.cookie*` (per-request-id, Phase 8c batch 3) | 10s |
+| `useCookies` | Cookie CRUD + browser cache management | native `hodosBrowser.bridge.cookie*` / `cache*` (per-request-id, Phase 8c batch 3) | No |
 | `usePrivacyShield` | Composite: adblock + cookie blocking + per-site fingerprinting | Composed hooks + IPC | No |
 | `useSitePermissions` | Web-content (OS-capability) permissions tri-state | IPC window callback | No |
 | `useSettings` | Settings CRUD (browser/privacy/wallet) | IPC window callback | No |
@@ -72,7 +72,7 @@ if (!window.hodosBrowser?.wallet?.getBalance) {
 ```
 
 ### IPC Window Callback Pattern (`cefMessage.send()`)
-Used by: `useAdblock`, `useCookieBlocking`, `useCookies`, `usePaidCache`, `useSettings`, `useProfiles`, `useSitePermissions`, `useImport`, and the direct-IPC parts of `usePrivacyShield`
+Used by (⛔ legacy, Phase 8c is retiring it — `useCookies` / `useCookieBlocking` moved to the native bridge in batch 3): `useAdblock`, `usePaidCache`, `useSettings`, `useProfiles`, `useSitePermissions`, `useImport`, and the direct-IPC parts of `usePrivacyShield`
 
 ```typescript
 // 1. Register callback on window

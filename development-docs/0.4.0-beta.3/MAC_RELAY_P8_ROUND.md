@@ -137,6 +137,11 @@ the recovery phrase under prevent-close and walks into the PIN step, so nothing 
 | **macOS** (yours) | `CreateBackupOverlayWithSeparateProcess()` in `cef_browser_shell_mac.mm` (decl ~619, body ~3435) and its `g_backup_overlay_window` global + the frame-sync / shutdown blocks that touch it (~2310, ~2368, ~5259); the six `SimpleHandler::GetBackupBrowser()` calls (~1618–1691, ~2370, ~5220); `"backup"` in the role list ~5200 | ⬜ owed |
 | **Shared cleanup, after yours lands** | `SimpleHandler::GetBackupBrowser()` + `backup_browser_` (`simple_handler.h/.cpp`), `BrowserWindow::backup_browser` + `backup_overlay_window` and the two role-slot lines in `BrowserWindow.cpp` — kept **only** so your build stays green meanwhile | ⬜ either side, once M8-mac is in |
 
+**Batch 3 (cookies, same day) also touched shared C++:** `src/core/CookieManager.cpp` + `include/core/CookieManager.h`
+(every `Handle*` gained a `requestId`; the cookie visitor now answers the empty-jar case from its destructor),
+`simple_handler.cpp` (15 cookie / cache / cookie-blocking handlers), `simple_render_process_handler.cpp`
+(`Payload::Strs`, 15 natives, 15 arms). Nothing platform-split. Rebuild after your next rebase.
+
 ⚠️ Per the new root-doc rule: this round touched `simple_handler.cpp`, `simple_render_process_handler.cpp`,
 `simple_app.cpp`, `cef_browser_shell.cpp`, `BrowserWindow.h`, `simple_handler.h` — **rebuild after your next
 rebase** before anything else. The `#elif __APPLE__` arms I removed only *referenced* your global; your `.mm`

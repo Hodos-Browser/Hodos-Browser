@@ -24,6 +24,24 @@ declare global {
         generateAddress: () => Promise<AddressData>;
         // (getInfo / markBackedUp / getBackupModalState / setBackupModalState were deleted
         // with the backup overlay, Phase 8c O8.)
+        // Stage 3 batch 3 — cookies + cookie blocking, called by `useCookies` and
+        // `useCookieBlocking`. ⛔ Every argument is a STRING, as the legacy IPC already
+        // sent it (booleans and numbers stringified); the browser handlers parse them.
+        cookieGetAll: () => Promise<CookieData[]>;
+        cookieDelete: (url: string, name: string) => Promise<CookieDeleteResponse>;
+        cookieDeleteDomain: (domain: string) => Promise<CookieDeleteResponse>;
+        cookieDeleteAll: () => Promise<CookieDeleteResponse>;
+        cacheClear: () => Promise<{ success: boolean }>;
+        cacheGetSize: () => Promise<CacheSizeResponse>;
+        cookieBlockDomain: (domain: string, isWildcard: string) => Promise<BlockDomainResponse>;
+        cookieUnblockDomain: (domain: string) => Promise<UnblockDomainResponse>;
+        cookieGetBlocklist: () => Promise<BlockedDomainEntry[]>;
+        cookieAllowThirdParty: (domain: string) => Promise<AllowThirdPartyResponse>;
+        cookieRemoveThirdPartyAllow: (domain: string) => Promise<AllowThirdPartyResponse>;
+        cookieGetBlockLog: (limit: string, offset: string) => Promise<BlockLogEntry[]>;
+        cookieClearBlockLog: () => Promise<ClearBlockLogResponse>;
+        cookieGetBlockedCount: () => Promise<BlockedCountResponse>;
+        cookieResetBlockedCount: () => Promise<{ success: boolean }>;
       };
       // Promise-based since the history-over-IPC move: the render process no longer
       // opens the history database itself, so every call is a round-trip to the
@@ -36,25 +54,9 @@ declare global {
         clearAll: () => Promise<boolean>;
         clearRange: (params: ClearRangeParams) => Promise<boolean>;
       };
-      cookies: {
-        getAll: () => Promise<CookieData[]>;
-        deleteCookie: (url: string, name: string) => Promise<CookieDeleteResponse>;
-        deleteDomainCookies: (domain: string) => Promise<CookieDeleteResponse>;
-        deleteAllCookies: () => Promise<CookieDeleteResponse>;
-        clearCache: () => Promise<{ success: boolean }>;
-        getCacheSize: () => Promise<CacheSizeResponse>;
-      };
-      cookieBlocking: {
-        blockDomain: (domain: string, isWildcard: boolean) => Promise<BlockDomainResponse>;
-        unblockDomain: (domain: string) => Promise<UnblockDomainResponse>;
-        getBlockList: () => Promise<BlockedDomainEntry[]>;
-        allowThirdParty: (domain: string) => Promise<AllowThirdPartyResponse>;
-        removeThirdPartyAllow: (domain: string) => Promise<AllowThirdPartyResponse>;
-        getBlockLog: (limit: number, offset: number) => Promise<BlockLogEntry[]>;
-        clearBlockLog: () => Promise<ClearBlockLogResponse>;
-        getBlockedCount: () => Promise<BlockedCountResponse>;
-        resetBlockedCount: () => Promise<void>;
-      };
+      // ⛔ The `cookies` and `cookieBlocking` namespaces were DELETED in Phase 8c stage 3
+      // batch 3: they had no callers (the hooks send IPC themselves) and duplicated the
+      // hooks' single-slot globals. The hooks now use `bridge.cookie*` above.
       bookmarks: {
         add: (url: string, title: string, folderId?: number, tags?: string[]) => Promise<BookmarkAddResponse>;
         get: (id: number) => Promise<BookmarkData>;
@@ -140,36 +142,18 @@ declare global {
     // (Phase 8c O8): onGetWalletInfoResponse / onGetWalletInfoError,
     // onMarkWalletBackedUpResponse / onMarkWalletBackedUpError,
     // onGetBackupModalStateResponse / onSetBackupModalStateResponse.
-    onCookieGetAllResponse?: (data: CookieData[]) => void;
-    onCookieGetAllError?: (error: string) => void;
-    onCookieDeleteResponse?: (data: CookieDeleteResponse) => void;
-    onCookieDeleteError?: (error: string) => void;
-    onCookieDeleteDomainResponse?: (data: CookieDeleteResponse) => void;
-    onCookieDeleteDomainError?: (error: string) => void;
-    onCookieDeleteAllResponse?: (data: CookieDeleteResponse) => void;
-    onCookieDeleteAllError?: (error: string) => void;
-    onCacheClearResponse?: (data: { success: boolean }) => void;
-    onCacheClearError?: (error: string) => void;
-    onCacheGetSizeResponse?: (data: CacheSizeResponse) => void;
-    onCacheGetSizeError?: (error: string) => void;
-    onCookieBlockDomainResponse?: (data: BlockDomainResponse) => void;
-    onCookieBlockDomainError?: (error: string) => void;
-    onCookieUnblockDomainResponse?: (data: UnblockDomainResponse) => void;
-    onCookieUnblockDomainError?: (error: string) => void;
-    onCookieBlocklistResponse?: (data: BlockedDomainEntry[]) => void;
-    onCookieBlocklistError?: (error: string) => void;
-    onCookieAllowThirdPartyResponse?: (data: AllowThirdPartyResponse) => void;
-    onCookieAllowThirdPartyError?: (error: string) => void;
-    onCookieRemoveThirdPartyAllowResponse?: (data: AllowThirdPartyResponse) => void;
-    onCookieRemoveThirdPartyAllowError?: (error: string) => void;
-    onCookieBlockLogResponse?: (data: BlockLogEntry[]) => void;
-    onCookieBlockLogError?: (error: string) => void;
-    onCookieClearBlockLogResponse?: (data: ClearBlockLogResponse) => void;
-    onCookieClearBlockLogError?: (error: string) => void;
-    onCookieBlockedCountResponse?: (data: BlockedCountResponse) => void;
-    onCookieBlockedCountError?: (error: string) => void;
-    onCookieResetBlockedCountResponse?: () => void;
-    onCookieResetBlockedCountError?: (error: string) => void;
+    // ⛔ REMOVED by Phase 8c stage 3 batch 3 — the 15 cookie / cache / cookie-blocking
+    // calls are routed by request id through `hodosBrowser.bridge`. The `*Error`
+    // variants had never been emitted by C++ at all. Re-declaring any of these would
+    // invite a hook to reintroduce the single-slot race:
+    //   onCookieGetAllResponse/Error, onCookieDeleteResponse/Error,
+    //   onCookieDeleteDomainResponse/Error, onCookieDeleteAllResponse/Error,
+    //   onCacheClearResponse/Error, onCacheGetSizeResponse/Error,
+    //   onCookieBlockDomainResponse/Error, onCookieUnblockDomainResponse/Error,
+    //   onCookieBlocklistResponse/Error, onCookieAllowThirdPartyResponse/Error,
+    //   onCookieRemoveThirdPartyAllowResponse/Error, onCookieBlockLogResponse/Error,
+    //   onCookieClearBlockLogResponse/Error, onCookieBlockedCountResponse/Error,
+    //   onCookieResetBlockedCountResponse/Error
     onBookmarkAddResponse?: (data: BookmarkAddResponse) => void;
     onBookmarkGetResponse?: (data: BookmarkData) => void;
     onBookmarkUpdateResponse?: (data: BookmarkUpdateResponse) => void;
