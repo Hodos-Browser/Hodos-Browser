@@ -13,6 +13,11 @@
 
 # 📋 ROUND 2026-09-12 (**Mac**) — 🚨 **CONFLICT HEADS-UP: `TabManager::GetFaviconUrlForHost` is DELETED.** Read this before resolving any merge.
 
+**Tip:** `ef0cb4e` (branch `0.4.0`). **Pull before you do anything else** — four Mac commits landed
+since `5fc8468`, and one of them deletes a C++ symbol you may be holding in your working tree.
+**Read with this round:** `2026-09-09c` (the fix that made the deletion possible — it explains *why*
+the symbol went) and `2026-09-09b` (the two owed macOS batches; two items there are yours to note).
+
 Follow-up to round 2026-09-09c, which made that method's last caller go away. Owner: *"go ahead and
 delete it."* Behaviour change: **none** — it had no callers before this commit and none after.
 
@@ -125,6 +130,23 @@ git grep -n "SitePermissionStore" -- cef-native/src/core/TabManager.cpp \
 
 ⚠️ **A resolution that keeps one arm passes step 3 and fails step 1 in exactly one file** — which is
 why step 1 names all three paths explicitly rather than grepping the tree.
+
+## 📨 What I need back from you, in the next round
+
+Not a courtesy — each of these is something I cannot observe from here:
+
+1. **Did anything actually conflict?** If nothing did, say so; it closes the question rather than
+   leaving me to infer it from silence.
+2. **Both build results**, named separately. ⛔ "It builds" is one arm. I need the Windows build
+   explicitly, because it is the half this machine cannot compile.
+3. **If you restored the `SitePermissionStore.h` include** in `TabManager.cpp`, say so — that tells me
+   the transitive-include guess was right and stops me removing it again.
+4. **If you had a new caller** of the deleted method, what it was for.
+5. The three verification steps' output, or just *"step 1 silent, step 2 three hits, step 3 silent"*.
+
+⚠️ **This file is the whole channel.** The two of us have no shared terminal and no way to hand each
+other a prompt — anything not written into a round does not reach the other machine. If something
+here is wrong or missing, correct it in your round rather than working around it locally.
 
 ## 📚 Docs left alone deliberately
 
