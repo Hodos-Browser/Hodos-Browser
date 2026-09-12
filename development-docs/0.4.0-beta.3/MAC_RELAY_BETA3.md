@@ -82,6 +82,50 @@ the case above. The likeliest conflict hunk is `TabManager.h` **if you added a m
 `initWindowBridge.ts`, `hodosBrowser.d.ts` — **none of the three files above** — so I expect a clean
 merge. This note exists because "I expect" is not a measurement of your working tree.
 
+## ⭐ Recommended sequence — and why there is nothing for me to merge first
+
+⛔ **The conflict can only happen on YOUR machine.** My side is `0 ahead, 0 behind` `origin/0.4.0`
+with a clean tree — everything here is already pushed. The only unmerged material in this project is
+your **uncommitted working tree**, which I cannot see and cannot resolve from here. So "let Mac pull
+and merge first" is not an available option; there is nothing on my side to pull.
+
+**Do this, in this order:**
+
+1. ⭐ **Commit your WIP to a local branch (or stash it) BEFORE pulling.** A `git pull --rebase` onto a
+   dirty tree either refuses or auto-stashes, and an auto-stash conflict is the worst place to be
+   making decisions about a deletion. With WIP committed, the conflict is an ordinary rebase you can
+   inspect, abort and retry.
+2. Read the three files named above and check whether your WIP touches any of them. If it does not —
+   which is what I expect from P8c's file list — the merge is clean and nothing else here applies.
+3. Resolve to the **deleted** state, including in `TabManager_mac.mm` **which your build will not
+   check**.
+4. Run the verification below. ⛔ Then build **both** platforms before calling it done — one build
+   covers one arm, and that is the whole hazard on this change.
+
+### 📏 Post-merge verification, with its own positive control
+
+```bash
+# 1. the symbol must be gone from all three files — expect NO output, exit 1
+git grep -n "GetFaviconUrlForHost" -- cef-native/include/core/TabManager.h \
+    cef-native/src/core/TabManager.cpp cef-native/src/core/TabManager_mac.mm
+
+# 2. ⛔ POSITIVE CONTROL — the same grep over the same three files for the method that
+#    sits immediately next to the deleted one. Expect 1 hit in EACH of the three.
+#    If this prints nothing, step 1's silence means nothing either.
+git grep -c "UpdateTabFavicon" -- cef-native/include/core/TabManager.h \
+    cef-native/src/core/TabManager.cpp cef-native/src/core/TabManager_mac.mm
+
+# 3. the orphaned include must be gone from both arms — expect NO output
+git grep -n "SitePermissionStore" -- cef-native/src/core/TabManager.cpp \
+    cef-native/src/core/TabManager_mac.mm
+```
+
+📏 Measured here on `065e4b4`: step 1 silent (exit 1), step 2 prints `TabManager.h:1`,
+`TabManager.cpp:1`, `TabManager_mac.mm:1`, step 3 silent.
+
+⚠️ **A resolution that keeps one arm passes step 3 and fails step 1 in exactly one file** — which is
+why step 1 names all three paths explicitly rather than grepping the tree.
+
 ## 📚 Docs left alone deliberately
 
 Every historical mention of `GetFaviconUrlForHost` in the ticket, the 7b contract and rounds 09b/09c
