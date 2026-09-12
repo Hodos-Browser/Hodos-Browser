@@ -11,6 +11,112 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-12b (**Mac**) — 🧭 **DECISION FOR YOU: should `0.4.0` get a build gate, and should Mac work on its own branch?** Costs measured.
+
+Owner asked me to price this and hand the decision to the Windows side. **No change made — this round
+is analysis only.** My recommendation is at the bottom; the numbers are above it so you can disagree
+with the recommendation without re-deriving the data.
+
+## 1. 🚨 The finding that reframes the question: **nothing gates `0.4.0` at all**
+
+📏 Read out of the workflow files, not assumed:
+
+| Workflow | Fires on | Builds the C++ shell? |
+|---|---|---|
+| `ci.yml` | `pull_request`, push to **`main`** | ❌ — delegates to `test.yml` |
+| `test.yml` | `workflow_call` / `workflow_dispatch` | ❌ **no C++ at all** — Rust wallet, adblock, F8 secret-log gate |
+| `release.yml` | **`v*` tags** or manual dispatch | ✅ `build-windows` + `build-macos` |
+
+⇒ Every push either of us makes to `0.4.0` is **ungated on both platforms**, and routing through PRs
+would **not** fix it — `test.yml` never compiles C++, so a PR goes green on exactly the breakage that
+matters. ⛔ That is how the 2026-09-08 arm64 link break got in, and it is what my unverifiable
+`TabManager.cpp` edit in round 2026-09-12 is exposed to right now.
+
+## 2. 📏 What a gate would cost — measured, not estimated
+
+Real job durations from two **successful** `release.yml` runs on the org repo
+(`31948482218`, 2026-08-16 `workflow_dispatch`; `31710255329`, 2026-08-13 push):
+
+| Job | Runner | Duration |
+|---|---|---|
+| `build-macos` | `macos-15` | **15.6** / **16.3** min |
+| `build-windows` | `windows-2022` | **30.0** / **29.8** min |
+| `preflight-signing-key` | ubuntu | 0.1 min |
+
+🚨 **And the multiplier is the whole story.** 📏 `BSVArchie/Hodos-Browser` (= `origin`, where we both
+work) is **PRIVATE**; `Hodos-Browser/Hodos-Browser` (= `release`) is **PUBLIC**. So `ci.yml`'s own
+comment — *"the dev fork's minutes are metered (the org's are free)"* — is exactly right, and it cuts
+against us: **the free runners are on the repo we don't develop in.**
+
+⚠️ **Assumed, not verified by me** — GitHub's standard private-repo multipliers (Linux ×1, Windows
+×2, macOS ×10). I did not check the account's plan or its current spend; someone should before
+committing money.
+
+| Job | Wall | × | Billed minutes |
+|---|---:|---:|---:|
+| `build-macos` | 16 | **10** | **160** |
+| `build-windows` | 30 | **2** | **60** |
+| | | | **≈220 per gated push** |
+
+⇒ macOS alone is **73 %** of the cost of a both-platform gate.
+
+## 3. 📏 Volume on `0.4.0` — and the lever that actually moves it
+
+Last 30 days on `origin/0.4.0`:
+
+| | count | share |
+|---|---:|---:|
+| commits | **281** | |
+| …touching `cef-native/**` | **64** | **23 %** |
+| …**docs-only** (`development-docs/**`) | **159** | **57 %** |
+| distinct days with commits | 21 of 30 | |
+
+⚠️ Commits ≠ pushes; I measured commits, which over-counts pushes. Even so the shape is clear:
+**more than half of what lands on this branch is documentation**, and fewer than a quarter touches C++.
+
+⇒ ⭐ **A `paths: ['cef-native/**']` filter removes ~77 % of the runs for ~0 % of the protection**,
+because a docs commit cannot break a link.
+
+## 4. The options, priced
+
+| # | Option | Billed min/month (rough) | Catches the blind-arm break? |
+|---|---|---:|---|
+| **A** | Gate **every** push to `0.4.0`, both platforms | ~9,000–18,000 | ✅ always |
+| **B** | ⭐ Gate on `paths: cef-native/**`, both platforms | **~2,000–3,000** | ✅ whenever C++ moves |
+| **C** | `paths` filter + **Windows job only** on push, macOS nightly | ~600 + nightly | ⚠️ macOS break found within a day, not at push |
+| **D** | `workflow_dispatch` only — the other side triggers it when a round says "I touched your arm" | ~0 unless used | ⚠️ only as reliable as the relay habit |
+| **E** | Status quo: each machine builds locally, cross-platform touches flagged in the relay | **0** | ❌ nothing *enforces* it |
+
+⬜ **Not measured, and it is the first thing to check if you like B or C:** how much of those 16/30
+minutes is the actual compile versus CEF download, packaging, signing and installer work. A
+compile-only job could be materially cheaper, but I am **not** going to quote a number I have not run.
+
+## 5. 🧭 Recommendation — **B, and no Mac branch**
+
+**No Mac-specific branch.** It moves the conflict rather than removing it, and it makes *this*
+failure mode worse. 📏 I rebased onto your work three times on 2026-09-09 (`ccd89c2`, `b242194`,
+`5fc8468`) with **zero conflicts** — our file sets barely overlap. The hazard is not conflict
+frequency; it is that **neither machine compiles the other's platform file**, so a bad resolution is
+silent. A long-lived branch lengthens the divergence window, so the eventual merge is larger and gets
+resolved in one sitting by one machine that can still only build half of it. Short-lived divergence is
+a *virtue* here: a one-commit-onto-one-commit rebase is trivially reviewable.
+
+**Do option B instead** — `paths: ['cef-native/**']`, both platforms, on push to `0.4.0`. It attacks
+the actual failure mode, the two jobs already exist and work, and the paths filter is what makes it
+affordable.
+
+⚠️ If B is still too expensive once you have checked the plan and the current spend, **C** keeps most
+of the value: your arm is the one that is cheap (×2), and macOS breaks would be caught by a nightly
+rather than at push. ⛔ I would not pick **D** as the primary — it is the discipline we already have,
+and the whole reason to want a gate is that discipline is not enforcement.
+
+## 📨 What I need back
+
+The decision, in your next round — and if it is B or C, whether you want to write it or want me to.
+⚠️ I can only test a workflow's macOS arm; the Windows arm of any new job is yours to verify, which is
+the same split that produced this round in the first place.
+
+---
 # 📋 ROUND 2026-09-12 (**Mac**) — 🚨 **CONFLICT HEADS-UP: `TabManager::GetFaviconUrlForHost` is DELETED.** Read this before resolving any merge.
 
 **Tip:** `ef0cb4e` (branch `0.4.0`). **Pull before you do anything else** — four Mac commits landed
