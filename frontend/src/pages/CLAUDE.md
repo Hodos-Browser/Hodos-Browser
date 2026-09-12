@@ -18,7 +18,6 @@ See root [CLAUDE.md](/CLAUDE.md) for overlay architecture rules, close preventio
 | `BRC100AuthOverlayRoot.tsx` | 970 | BRC-100 auth notification modals: domain approval, payment confirmation, rate limit, certificate disclosure, no-wallet prompt. |
 | `SettingsOverlayRoot.tsx` | 551 | Settings overlay with tabs: browser, privacy, wallet auto-approval limits, profile import. |
 | `NewTabPage.tsx` | 382 | New tab page: search bar, quick-access tile grid with cached favicons. |
-| `BackupOverlayRoot.tsx` | 371 | Backup modal: displays mnemonic, requires checkbox confirmation before close. |
 | `ProfilePickerOverlayRoot.tsx` | 354 | Profile picker dropdown: list profiles, switch, create new (with avatar file upload). |
 | `OmniboxOverlayRoot.tsx` | 308 | Address bar autocomplete dropdown: history matches + search suggestions with favicon icons. |
 | `DownloadsOverlayRoot.tsx` | 219 | Downloads panel: active/completed downloads with progress bars, pause/resume/cancel, open/show-in-folder. |
@@ -54,7 +53,6 @@ Every `*OverlayRoot.tsx` file is a standalone React app root for an overlay subp
 | `WalletPanelPage` | Side panel (full height) | Click-outside (React `handleBackgroundClick`), guarded by `preventClose` |
 | `WalletOverlayRoot` | Side panel | Click-outside (React) |
 | `BRC100AuthOverlayRoot` | Centered modal | C++ manages lifecycle; `overlay_close` IPC |
-| `BackupOverlayRoot` | Centered modal | Checkbox confirmation + `overlay_close` IPC |
 | `SettingsOverlayRoot` | Full page | `settings_close` IPC |
 | `MenuOverlayRoot` | Dropdown | C++ mouse hook (click-outside), Escape key sends `menu_hide`, auto-close after action |
 | `TabContextMenuOverlayRoot` | Dropdown anchored to the cursor | C++ mouse hook (click-outside), Escape sends `tab_context_menu_hide`, C++ hides on every action |
@@ -124,7 +122,6 @@ Every `*OverlayRoot.tsx` file is a standalone React app root for an overlay subp
 | `omniboxQueryUpdate` (CustomEvent) | OmniboxOverlayRoot | New query from address bar |
 | `omniboxSelect` (CustomEvent) | OmniboxOverlayRoot | Arrow key selection |
 | `most_visited_response` | NewTabPage | Most-visited sites data |
-| `allSystemsReady` | BackupOverlayRoot | System initialization complete |
 | `download_state_update` | (via useDownloads) | Download progress updates |
 
 ---
@@ -133,7 +130,7 @@ Every `*OverlayRoot.tsx` file is a standalone React app root for an overlay subp
 
 | Hook | Used By | Purpose |
 |------|---------|---------|
-| `useHodosBrowser()` | MainBrowserView, BackupOverlayRoot | Navigation, wallet API, reload |
+| `useHodosBrowser()` | MainBrowserView | Navigation, wallet API, reload |
 | `useTabManager()` | MainBrowserView | Tab CRUD, switching, reordering, drag tear-off |
 | `useKeyboardShortcuts()` | MainBrowserView | Ctrl+T/W/F, tab switching shortcuts |
 | `useDownloads()` | MainBrowserView, DownloadsOverlayRoot | Download list, progress, actions |
@@ -183,8 +180,7 @@ useEffect(() => {
 ```
 The C++ side also sets `g_wallet_overlay_prevent_close = true` at overlay creation time (synchronous, no race). React sends `wallet_allow_close` once the user reaches a safe state.
 
-### BackupOverlayRoot
-Close is gated by a "I have backed up my recovery phrase" checkbox. The "Done" button only enables after checking the box and calling `markBackedUp()`.
+> `BackupOverlayRoot` (the standalone "Wallet Backup Required" modal, route `/backup`) was **deleted** in beta.3 Phase 8c O8 (2026-09-12). It was the pre-wallet-overlay first-run flow; its only opener sat in a commented-out block in `App.tsx`, and two of the Rust routes it called no longer existed. The recovery-phrase prompt now lives in `WalletPanelPage`'s create flow (mnemonic display under `preventClose`, then the PIN step). The macOS creation function is still present until Mac's relay round removes it.
 
 ### BRC100AuthOverlayRoot
 No React-side close prevention. C++ manages the overlay lifecycle — it stays visible until the user clicks Allow/Deny.

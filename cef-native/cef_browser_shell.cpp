@@ -108,7 +108,6 @@ HINSTANCE g_hResourceModule = nullptr;
 // Global overlay HWNDs for shutdown cleanup
 HWND g_settings_overlay_hwnd = nullptr;
 HWND g_wallet_overlay_hwnd = nullptr;
-HWND g_backup_overlay_hwnd = nullptr;
 HWND g_brc100_auth_overlay_hwnd = nullptr;
 HWND g_settings_menu_overlay_hwnd = nullptr;
 HWND g_omnibox_overlay_hwnd = nullptr;
@@ -621,7 +620,7 @@ void ShutdownApplication() {
         std::vector<BrowserWindow*> allWindows = WindowManager::GetInstance().GetAllWindows();
         const std::string muteRoles[] = {
             "header", "webview", "wallet_panel", "overlay", "settings",
-            "wallet", "backup", "brc100auth", "notification", "settings_menu",
+            "wallet", "brc100auth", "notification", "settings_menu",
             "omnibox", "cookiepanel", "downloadpanel", "profilepanel", "menu"
         };
         for (BrowserWindow* bw : allWindows) {
@@ -639,7 +638,7 @@ void ShutdownApplication() {
         std::vector<BrowserWindow*> allWindows = WindowManager::GetInstance().GetAllWindows();
         for (BrowserWindow* bw : allWindows) {
             if (!bw) continue;
-            for (const auto& role : {"wallet", "backup", "brc100auth", "wallet_panel"}) {
+            for (const auto& role : {"wallet", "brc100auth", "wallet_panel"}) {
                 CefRefPtr<CefBrowser> b = bw->GetBrowserForRole(std::string(role));
                 if (b) {
                     LOG_INFO("🔄 Closing wallet-facing browser: " + std::string(role) + " (window " + std::to_string(bw->window_id) + ")");
@@ -689,7 +688,7 @@ void ShutdownApplication() {
         std::vector<BrowserWindow*> allWindows = WindowManager::GetInstance().GetAllWindows();
         const std::string roles[] = {
             "header", "webview", "wallet_panel", "overlay", "settings",
-            "wallet", "backup", "brc100auth", "notification", "settings_menu",
+            "wallet", "brc100auth", "notification", "settings_menu",
             "omnibox", "cookiepanel", "downloadpanel", "profilepanel", "menu"
         };
         for (BrowserWindow* bw : allWindows) {
@@ -721,12 +720,6 @@ void ShutdownApplication() {
         LOG_INFO("Destroying wallet overlay window...");
         DestroyWindow(g_wallet_overlay_hwnd);
         g_wallet_overlay_hwnd = nullptr;
-    }
-
-    if (g_backup_overlay_hwnd && IsWindow(g_backup_overlay_hwnd)) {
-        LOG_INFO("🔄 Destroying backup overlay window...");
-        DestroyWindow(g_backup_overlay_hwnd);
-        g_backup_overlay_hwnd = nullptr;
     }
 
     if (g_brc100_auth_overlay_hwnd && IsWindow(g_brc100_auth_overlay_hwnd)) {
@@ -901,8 +894,6 @@ void HideAllOverlays() {
     }
     if (g_wallet_overlay_hwnd && IsWindow(g_wallet_overlay_hwnd) && IsWindowVisible(g_wallet_overlay_hwnd))
         ShowWindow(g_wallet_overlay_hwnd, SW_HIDE);
-    if (g_backup_overlay_hwnd && IsWindow(g_backup_overlay_hwnd) && IsWindowVisible(g_backup_overlay_hwnd))
-        ShowWindow(g_backup_overlay_hwnd, SW_HIDE);
     if (g_brc100_auth_overlay_hwnd && IsWindow(g_brc100_auth_overlay_hwnd) && IsWindowVisible(g_brc100_auth_overlay_hwnd))
         ShowWindow(g_brc100_auth_overlay_hwnd, SW_HIDE);
     if (g_notification_overlay_hwnd && IsWindow(g_notification_overlay_hwnd) && IsWindowVisible(g_notification_overlay_hwnd))
@@ -937,7 +928,6 @@ void TransferPrimaryWindow(int newPrimaryId) {
         // Transfer overlay HWNDs
         newWin->settings_overlay_hwnd = oldWin->settings_overlay_hwnd;
         newWin->wallet_overlay_hwnd = oldWin->wallet_overlay_hwnd;
-        newWin->backup_overlay_hwnd = oldWin->backup_overlay_hwnd;
         newWin->brc100_auth_overlay_hwnd = oldWin->brc100_auth_overlay_hwnd;
         newWin->notification_overlay_hwnd = oldWin->notification_overlay_hwnd;
         newWin->settings_menu_overlay_hwnd = oldWin->settings_menu_overlay_hwnd;
@@ -950,7 +940,6 @@ void TransferPrimaryWindow(int newPrimaryId) {
         // Null out old window's overlay HWNDs so they aren't double-freed
         oldWin->settings_overlay_hwnd = nullptr;
         oldWin->wallet_overlay_hwnd = nullptr;
-        oldWin->backup_overlay_hwnd = nullptr;
         oldWin->brc100_auth_overlay_hwnd = nullptr;
         oldWin->notification_overlay_hwnd = nullptr;
         oldWin->settings_menu_overlay_hwnd = nullptr;
@@ -962,7 +951,7 @@ void TransferPrimaryWindow(int newPrimaryId) {
 
         // Transfer overlay browser refs
         const std::string overlayRoles[] = {
-            "wallet_panel", "overlay", "settings", "wallet", "backup",
+            "wallet_panel", "overlay", "settings", "wallet",
             "brc100auth", "notification", "settings_menu", "omnibox",
             "cookiepanel", "downloadpanel", "profilepanel", "menu"
         };
@@ -1146,14 +1135,6 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 SetWindowPos(g_wallet_overlay_hwnd, HWND_TOPMOST,
                     wpX, wpY, wpWidth, wpHeight,
                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
-            }
-
-            // Move backup overlay if it exists and is visible
-            if (g_backup_overlay_hwnd && IsWindow(g_backup_overlay_hwnd) && IsWindowVisible(g_backup_overlay_hwnd)) {
-                SetWindowPos(g_backup_overlay_hwnd, HWND_TOPMOST,
-                    mainRect.left, mainRect.top, width, height,
-                    SWP_NOACTIVATE | SWP_SHOWWINDOW);
-                LOG_DEBUG("🔄 Moved backup overlay to match main window");
             }
 
             // Move BRC-100 auth overlay if it exists and is visible
@@ -1455,20 +1436,6 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                         std::to_string(wpWidth) + "},'*');";
                     wallet_browser->GetMainFrame()->ExecuteJavaScript(js, "", 0);
                 }
-            }
-
-            // Resize backup overlay
-            if (g_backup_overlay_hwnd && IsWindow(g_backup_overlay_hwnd) && IsWindowVisible(g_backup_overlay_hwnd)) {
-                SetWindowPos(g_backup_overlay_hwnd, HWND_TOPMOST,
-                    mainRect.left, mainRect.top, width, height,
-                    SWP_NOACTIVATE | SWP_SHOWWINDOW);
-
-                // Notify CEF browser of resize
-                CefRefPtr<CefBrowser> backup_browser = SimpleHandler::GetBackupBrowser();
-                if (backup_browser) {
-                    backup_browser->GetHost()->WasResized();
-                }
-                LOG_DEBUG("🔄 Resized backup overlay to match main window");
             }
 
             // Resize BRC-100 auth overlay
@@ -1825,7 +1792,6 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 notifyOverlay(SimpleHandler::GetProfilePanelBrowser());
                 notifyOverlay(SimpleHandler::GetMenuBrowser());
                 notifyOverlay(SimpleHandler::GetNotificationBrowser());
-                notifyOverlay(SimpleHandler::GetBackupBrowser());
                 notifyOverlay(SimpleHandler::GetBRC100AuthBrowser());
                 notifyOverlay(SimpleHandler::GetSettingsMenuBrowser());
                 notifyOverlay(SimpleHandler::GetBookmarksPanelBrowser());
@@ -2248,85 +2214,6 @@ LRESULT CALLBACK WalletOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         case WM_IME_ENDCOMPOSITION:
             LOG_DEBUG("⌨️ Wallet Overlay WM_IME_ENDCOMPOSITION - suppressing");
             return 0;
-    }
-    return DefWindowProc(hwnd, msg, wParam, lParam);
-}
-
-LRESULT CALLBACK BackupOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    switch (msg) {
-        case WM_MOUSEACTIVATE:
-            LOG_DEBUG("👆 Backup Overlay HWND received WM_MOUSEACTIVATE");
-            return MA_ACTIVATE;
-
-        case WM_LBUTTONDOWN: {
-            LOG_DEBUG("🖱️ Backup Overlay received WM_LBUTTONDOWN");
-            SetFocus(hwnd);
-            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-            CefMouseEvent mouse_event;
-            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
-            mouse_event.modifiers = 0;
-            CefRefPtr<CefBrowser> backup_browser = SimpleHandler::GetBackupBrowser();
-            if (backup_browser) {
-                backup_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
-                backup_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
-                LOG_DEBUG("🧠 Left-click sent to backup overlay browser");
-            } else {
-                LOG_DEBUG("⚠️ No backup overlay browser to send left-click");
-            }
-            return 0;
-        }
-
-        case WM_RBUTTONDOWN: {
-            LOG_DEBUG("🖱️ Backup Overlay received WM_RBUTTONDOWN");
-            SetFocus(hwnd);
-            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-            CefMouseEvent mouse_event;
-            hodos::ClientToViewPoint(hwnd, pt.x, pt.y, mouse_event.x, mouse_event.y);
-            mouse_event.modifiers = 0;
-            CefRefPtr<CefBrowser> backup_browser = SimpleHandler::GetBackupBrowser();
-            if (backup_browser) {
-                backup_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, false, 1);
-                backup_browser->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, true, 1);
-                LOG_DEBUG("🧠 Right-click sent to backup overlay browser");
-            } else {
-                LOG_DEBUG("⚠️ No backup overlay browser to send right-click");
-            }
-            return 0;
-        }
-
-        case WM_MOUSEWHEEL: {
-            // Added in beta.3 Phase 1. This overlay shipped with NO wheel handler, so its
-            // content could not be scrolled by any means — on a short or scaled screen any
-            // control below the fold was simply unreachable.
-            // WM_MOUSEWHEEL carries SCREEN coordinates: convert to client, then to view.
-            POINT wheelPt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-            ScreenToClient(hwnd, &wheelPt);
-            int wheelDelta = GET_WHEEL_DELTA_WPARAM(wParam);
-            CefMouseEvent wheel_event;
-            hodos::ClientToViewPoint(hwnd, wheelPt.x, wheelPt.y, wheel_event.x, wheel_event.y);
-            wheel_event.modifiers = 0;
-            CefRefPtr<CefBrowser> wheel_browser = SimpleHandler::GetBackupBrowser();
-            if (wheel_browser) {
-                wheel_browser->GetHost()->SendMouseWheelEvent(wheel_event, 0, wheelDelta);
-            }
-            return 0;
-        }
-
-        case WM_CLOSE:
-            LOG_DEBUG("❌ Backup Overlay received WM_CLOSE - destroying window");
-            DestroyWindow(hwnd);
-            return 0;
-
-        case WM_DESTROY:
-            LOG_DEBUG("❌ Backup Overlay received WM_DESTROY - cleaning up");
-            return 0;
-
-        case WM_ACTIVATE:
-            LOG_DEBUG("⚡ Backup HWND activated with state: " + std::to_string(LOWORD(wParam)));
-            break;
-
-        case WM_WINDOWPOSCHANGING:
-            break;
     }
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
@@ -5637,16 +5524,6 @@ static int RunHodosMain(HINSTANCE hInstance, int nCmdShow, void* sandbox_info,
 
     if (!RegisterClass(&walletOverlayClass)) {
         LOG_DEBUG("❌ Failed to register wallet overlay window class. Error: " + std::to_string(GetLastError()));
-    }
-
-    // Register backup overlay window class
-    WNDCLASS backupOverlayClass = {};
-    backupOverlayClass.lpfnWndProc = BackupOverlayWndProc;  // ✅ Backup-specific message handler
-    backupOverlayClass.hInstance = hInstance;
-    backupOverlayClass.lpszClassName = L"CEFBackupOverlayWindow";
-
-    if (!RegisterClass(&backupOverlayClass)) {
-        LOG_DEBUG("❌ Failed to register backup overlay window class. Error: " + std::to_string(GetLastError()));
     }
 
     // Register BRC-100 auth overlay window class

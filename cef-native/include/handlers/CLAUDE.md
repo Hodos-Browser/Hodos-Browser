@@ -41,7 +41,7 @@ This directory contains the header files for CEF's handler hierarchy: applicatio
 | `g_webview_hwnd` | `g_webview_view` | Legacy webview (unused, kept for compat) |
 | `g_settings_overlay_hwnd` | `g_settings_overlay_window` | Settings overlay (`/settings`) |
 | `g_wallet_overlay_hwnd` | `g_wallet_overlay_window` | Wallet overlay (`/wallet-panel`) |
-| `g_backup_overlay_hwnd` | `g_backup_overlay_window` | Backup modal overlay (`/backup`) |
+| — (deleted, 8c O8) | `g_backup_overlay_window` (macOS only, until Mac's round) | Backup modal overlay — removed on Windows 2026-09-12 |
 | `g_brc100_auth_overlay_hwnd` | `g_brc100_auth_overlay_window` | BRC-100 auth dialog (`/brc100-auth`) |
 | `g_notification_overlay_hwnd` | `g_notification_overlay_window` | Notification/prompt toast (`/brc100-auth?type=…` — multiplexed) |
 | `g_settings_menu_overlay_hwnd` | `g_settings_menu_overlay_window` | Settings menu dropdown (`/settings-menu`) |
@@ -66,7 +66,6 @@ Windows — defined in `src/handlers/simple_app.cpp`. Sizes are logical px passe
 |----------|---------|------|-----------------|
 | `CreateSettingsOverlayWithSeparateProcess()` | Settings panel | 450×450 | `SettingsPanelMouseHookProc` (WH_MOUSE_LL) |
 | `CreateWalletOverlay()` | Wallet panel | 400 × height below header | `WM_ACTIVATE` in `WalletOverlayWndProc` + sync `g_wallet_overlay_prevent_close` guard |
-| `CreateBackupOverlayWithSeparateProcess()` | Backup modal | Full main window | `WM_ACTIVATE` + IPC `overlay_close` |
 | `CreateBRC100AuthOverlayWithSeparateProcess()` | Auth dialog | Full main window | `WM_ACTIVATE` + IPC `overlay_close` |
 | `CreateNotificationOverlay()` | Prompt/toast (keep-alive) | Full main window | JS injection, auto-dismiss |
 | `CreateSettingsMenuOverlay()` | Small dropdown | 200×120 | IPC `overlay_close` / `WM_CLOSE` only — **no mouse hook, no `WM_ACTIVATE`** |
@@ -87,7 +86,7 @@ macOS — defined in `cef_browser_shell_mac.mm`. Same 15 overlays since 2026-09-
 |----------|-------------------------------|
 | `CreateSettingsOverlayWithSeparateProcess()` | `CreateSettingsOverlayWithSeparateProcess()` |
 | `CreateWalletOverlayWithSeparateProcess()` | `CreateWalletOverlay()` |
-| `CreateBackupOverlayWithSeparateProcess()` | `CreateBackupOverlayWithSeparateProcess()` |
+| — (deleted, 8c O8) | `CreateBackupOverlayWithSeparateProcess()` (pending Mac's removal) |
 | `CreateBRC100AuthOverlayWithSeparateProcess()` | `CreateBRC100AuthOverlayWithSeparateProcess()` |
 | `CreateNotificationOverlay()` | `CreateNotificationOverlay()` |
 | `CreateSettingsMenuOverlay()` | `CreateSettingsMenuOverlay()` |
@@ -140,7 +139,7 @@ macOS — defined in `cef_browser_shell_mac.mm`. Same 15 overlays since 2026-09-
 | `GetWalletPanelBrowser()` | `wallet_panel_browser` | Wallet panel |
 | `GetSettingsBrowser()` | `settings_browser` | Settings |
 | `GetWalletBrowser()` | `wallet_browser` | Wallet |
-| `GetBackupBrowser()` | `backup_browser` | Backup modal |
+| `GetBackupBrowser()` | `backup_browser` | Backup modal — always `nullptr` on Windows since 8c O8; kept only because `cef_browser_shell_mac.mm` still calls it |
 | `GetBRC100AuthBrowser()` | `brc100_auth_browser` | Auth dialog |
 | `GetNotificationBrowser()` | `notification_browser` | Notification/prompt toast |
 | `GetSettingsMenuBrowser()` | `settings_menu_browser` | Settings menu |

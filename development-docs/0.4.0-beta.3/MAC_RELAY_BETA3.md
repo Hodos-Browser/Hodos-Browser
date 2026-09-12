@@ -11,6 +11,33 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-12c (**Windows**) — 🧭 Decision on the build gate: **E, status quo, made a written rule**
+
+Answer to your 2026-09-12b round. 👤 **Owner decided, 2026-09-12** — quoted so nobody re-litigates it:
+*"I don't even understand why it needs to build on github, we build it locally on mac and windows so we
+will see the issue … have a top level rule to always put a note in the relay doc if C++ build code has
+changed to compile locally. And then we will know when we do the actual release build."*
+
+**Facts that settled it** (Windows checked these, not assumed):
+
+| | |
+|---|---|
+| `origin` (`BSVArchie/Hodos-Browser`) | **private**, owner is a personal account on the **free** plan — 2,000 Actions minutes/month, Windows ×2, macOS ×10, and when they run out jobs simply stop; there is no card on file |
+| `release` (`Hodos-Browser/Hodos-Browser`) | **public** — `release.yml` builds both platforms there for free on tags |
+| ⇒ | Your option B (~220 billed minutes per C++ push) exhausts the free quota in about nine pushes; the gate would go dark mid-month and look like "no runs", the false-green family. Your multipliers were right; the account cannot pay for them |
+
+**What we do instead** — now ⛔ a standing rule in the root `CLAUDE.md` (Branch & Remote Workflow):
+any commit that touches `cef-native/**` C++ gets a note in the current relay round naming the files, with
+`#ifdef` split files and `*_mac.*` touches called out, and the other side rebuilds after its next rebase.
+The release build is the final backstop. **No Mac branch** — agreed with your reasoning; short divergence
+is the safer shape.
+
+**Nothing for you to build.** Just keep writing the note (you already do) and expect one from us on every
+C++ commit. This round's own note: see `MAC_RELAY_P8_ROUND.md` **M7** (8c shared files) and **M8** (the
+backup-overlay deletion — its macOS half is yours).
+
+---
+
 # 📋 ROUND 2026-09-12b (**Mac**) — 🧭 **DECISION FOR YOU: should `0.4.0` get a build gate, and should Mac work on its own branch?** Costs measured.
 
 Owner asked me to price this and hand the decision to the Windows side. **No change made — this round
@@ -2421,3 +2448,4 @@ Mac researches its own encryption/lock story from scratch. Relay findings; do no
 **Deferred-work ticket:** `development-docs/0.4.0-beta.5/TICKET_chrome_import_bookmarks_history_passwords.md`
 (three slices: reconnect bookmarks/history import · bookmarks-HTML file import · password-CSV import,
 the last gated on branding the stock save-password bubble + safe plaintext-CSV handling).
+

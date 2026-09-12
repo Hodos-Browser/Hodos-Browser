@@ -5,7 +5,7 @@
 
 ## Overview
 
-This module contains the six C++/Objective-C++ source files that implement the CEF handler interfaces — the "brain" of the browser shell. `SimpleApp` manages CEF initialization and overlay window creation. `SimpleHandler` implements 12 CEF client interfaces and dispatches **164 IPC message types** from React to C++/Rust. `SimpleRenderProcessHandler` injects the `window.hodosBrowser` / `window.cefMessage` JavaScript APIs and routes **82 IPC response messages** back to React. `MyOverlayRenderHandler` provides platform-specific off-screen rendering for all overlay windows.
+This module contains the six C++/Objective-C++ source files that implement the CEF handler interfaces — the "brain" of the browser shell. `SimpleApp` manages CEF initialization and overlay window creation. `SimpleHandler` implements 12 CEF client interfaces and dispatches **159 IPC message types** from React to C++/Rust. `SimpleRenderProcessHandler` injects the `window.hodosBrowser` / `window.cefMessage` JavaScript APIs and routes **78 IPC response messages** back to React. `MyOverlayRenderHandler` provides platform-specific off-screen rendering for all overlay windows.
 
 All files are cross-platform (Windows + macOS) with `#ifdef _WIN32` / `#elif defined(__APPLE__)` conditionals, except the two `.mm` files which are macOS-only translation units. Headers live in `cef-native/include/handlers/`.
 
@@ -15,9 +15,9 @@ All files are cross-platform (Windows + macOS) with `#ifdef _WIN32` / `#elif def
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `simple_handler.cpp` | 9306 | **Largest file in the project.** Browser-process CEF client implementing 12 interfaces (CefClient, CefLifeSpanHandler, CefDisplayHandler, CefLoadHandler, CefRequestHandler, CefContextMenuHandler, CefDialogHandler, CefKeyboardHandler, CefPermissionHandler, CefDownloadHandler, CefFindHandler, CefJSDialogHandler). Central IPC dispatcher for 164 message types (`OnProcessMessageReceived`). Handles tab creation, navigation, window chrome, overlay lifecycle, wallet operations, downloads, find-in-page, keyboard shortcuts, context menus, HTTP request interception (paid-content cache, ad blocking, cookie filtering, wallet routing), certificate error handling, bookmarks, cookie blocking, site permissions, profile management, browser import, QR scanning, and multi-window tab coordination. |
+| `simple_handler.cpp` | 9306 | **Largest file in the project.** Browser-process CEF client implementing 12 interfaces (CefClient, CefLifeSpanHandler, CefDisplayHandler, CefLoadHandler, CefRequestHandler, CefContextMenuHandler, CefDialogHandler, CefKeyboardHandler, CefPermissionHandler, CefDownloadHandler, CefFindHandler, CefJSDialogHandler). Central IPC dispatcher for 159 message types (`OnProcessMessageReceived`). Handles tab creation, navigation, window chrome, overlay lifecycle, wallet operations, downloads, find-in-page, keyboard shortcuts, context menus, HTTP request interception (paid-content cache, ad blocking, cookie filtering, wallet routing), certificate error handling, bookmarks, cookie blocking, site permissions, profile management, browser import, QR scanning, and multi-window tab coordination. |
 | `simple_app.cpp` | 3356 | CEF application entry point (inherits `CefApp` + `CefBrowserProcessHandler` + `CefRenderProcessHandler`). Configures command-line switches, propagates the active profile to child processes, creates the header browser, restores multi-window sessions from `session.json` (v1 flat + v2 `windows[]` formats), and contains all **14 Windows overlay creation functions**. Everything from line 571 to EOF is inside a single `#ifdef _WIN32` block — macOS equivalents live in `cef_browser_shell_mac.mm`. |
-| `simple_render_process_handler.cpp` | 2340 | Render-process handler. Injects `window.hodosBrowser.*` and `window.cefMessage` V8 APIs in `OnContextCreated()`. Contains 5 V8 handler classes. Pre-caches and injects adblock scriptlets, a `window.chrome` bot-detection stub, the wallet IPC bridge, and the `window.CWI`/`yours`/`panda` shim. Routes 82 IPC response messages from browser process back to JavaScript — legacy ones via `frame->ExecuteJavaScript()`, the Phase 8c migrated ones via `ResolveBridgeCall` / `RejectBridgeCall` on a C++-held promise map. |
+| `simple_render_process_handler.cpp` | 2340 | Render-process handler. Injects `window.hodosBrowser.*` and `window.cefMessage` V8 APIs in `OnContextCreated()`. Contains 5 V8 handler classes. Pre-caches and injects adblock scriptlets, a `window.chrome` bot-detection stub, the wallet IPC bridge, and the `window.CWI`/`yours`/`panda` shim. Routes 78 IPC response messages from browser process back to JavaScript — legacy ones via `frame->ExecuteJavaScript()`, the Phase 8c migrated ones via `ResolveBridgeCall` / `RejectBridgeCall` on a C++-held promise map. |
 | `my_overlay_render_handler.cpp` | 393 | Windows off-screen rendering for overlays. Uses GDI `CreateDIBSection` + `UpdateLayeredWindow` with per-pixel alpha blending. Dynamic bitmap reallocation on resize. Reports true per-monitor DPI via `GetDpiForWindow()`. Removes `WS_EX_TRANSPARENT` after first paint to enable mouse input. |
 | `my_overlay_render_handler.mm` | 384 | macOS off-screen rendering for overlays. Uses `CGImageCreate` + `CALayer.contents` with `dispatch_async` to main thread. Copies CEF buffer via `malloc` to prevent reuse ghosting. Disables Core Animation implicit transitions via `CATransaction`. Supports Retina via `NSScreen.backingScaleFactor`. Adds `DetachView()` (no Windows counterpart). |
 | `simple_handler_mac.mm` | 158 | macOS-only helper for `SimpleHandler::RunContextMenu`. CEF on macOS windowed rendering does not auto-present the `CefMenuModel` built in `OnBeforeContextMenu`, so this converts `CefMenuModel` → `NSMenu` and pops it up via AppKit. Without it, right-clicking a link navigates instead of opening the menu. Defines `HodosContextMenuTarget` (retains the `CefRunContextMenuCallback` until an item is picked or the menu is dismissed). |
@@ -88,7 +88,6 @@ CEF application object. Singleton created in `main()`.
 |----------|---------|----------------|---------|
 | `CreateSettingsOverlayWithSeparateProcess()` | Settings dropdown | 450 × 450 | Mouse hook close; clipboard + DOM paste enabled |
 | `CreateWalletOverlay()` / `ShowWalletOverlay()` / `HideWalletOverlay()` | Wallet panel | 400 × (client height below header) | Keep-alive; prevent-close flag set on creation; clipboard + DOM paste |
-| `CreateBackupOverlayWithSeparateProcess()` | Backup modal | full main window | Native file inputs; clipboard + DOM paste |
 | `CreateBRC100AuthOverlayWithSeparateProcess()` | Auth dialog | full main window | BRC-100 challenge; clipboard + DOM paste |
 | `CreateNotificationOverlay()` | Notifications / prompts | full main window | Keep-alive with JS injection (`window.showNotification()`); `?type=preload` warms the bundle |
 | `CreateSettingsMenuOverlay()` | Settings menu | 200 × 120 | Toggle on repeat click |
@@ -145,7 +144,7 @@ Off-screen rendering for all overlay windows. One instance per overlay.
 
 ## IPC Message Categories — browser process
 
-**164 live message names** dispatched in `SimpleHandler::OnProcessMessageReceived()`. Two additional names — `overlay_hide_NEVER_CALLED_12345` and `overlay_hide_NEVER_CALLED_67890` — are guarded by `if (false && …)` and are dead code; they are **not** counted below.
+**159 live message names** dispatched in `SimpleHandler::OnProcessMessageReceived()`. Two additional names — `overlay_hide_NEVER_CALLED_12345` and `overlay_hide_NEVER_CALLED_67890` — are guarded by `if (false && …)` and are dead code; they are **not** counted below.
 
 | Category | Messages | Count |
 |----------|----------|-------|
@@ -157,11 +156,11 @@ Off-screen rendering for all overlay windows. One instance per overlay.
 | Navigation | `navigate`, `navigate_back`, `navigate_forward`, `navigate_reload`, `cert_error_proceed`, `cert_error_go_back` | 6 |
 | Window chrome | `window_close`, `window_maximize`, `window_minimize`, `window_start_drag` | 4 |
 | Omnibox | `omnibox_create`, `omnibox_create_or_show`, `omnibox_show`, `omnibox_hide`, `omnibox_update_query`, `omnibox_select`, `omnibox_autocomplete` | 7 |
-| Overlay lifecycle | `overlay_show_wallet`, `overlay_show_settings`, `overlay_show_settings_menu`, `overlay_show_brc100_auth`, `overlay_show_backup`, `overlay_close`, `overlay_hide`, `overlay_input`, `toggle_wallet_panel` | 9 |
+| Overlay lifecycle | `overlay_show_wallet`, `overlay_show_settings`, `overlay_show_settings_menu`, `overlay_show_brc100_auth`, `overlay_close`, `overlay_hide`, `overlay_input`, `toggle_wallet_panel` | 8 |
 | Overlay panels | `cookie_panel_show/hide`, `profile_panel_show/hide`, `menu_show/hide/action`, `download_panel_show/hide`, `bookmarks_panel_show/hide`, `siteinfo_panel_show/hide/resize`, `tablist_panel_show/hide`, `tab_context_menu_show/hide/action/request_context` | 20 |
-| Wallet operations | `wallet_call` (Phase 2.5 IPC bridge), `wallet_status_check`, `get_wallet_info`, `get_balance`, `send_transaction`, `address_generate`, `mark_wallet_backed_up`, `wallet_prevent_close`, `wallet_allow_close`, `wallet_delete_cancel`, `wallet_payment_dismissed`, `get_backup_modal_state`, `set_backup_modal_state`, `open_wallet_permissions` | 14 |
+| Wallet operations | `wallet_call` (Phase 2.5 IPC bridge), `wallet_status_check`, `get_balance`, `send_transaction`, `address_generate`, `wallet_prevent_close`, `wallet_allow_close`, `wallet_delete_cancel`, `wallet_payment_dismissed`, `open_wallet_permissions` | 10 |
 
-> ⛔ Deleted in beta.3 Phase 8c batch 2 (no JS sender or no reachable caller): `create_wallet`, `load_wallet`, `get_addresses`, `get_all_addresses`, `get_current_address`, and the whole former "Transactions" row — `create_transaction`, `sign_transaction`, `broadcast_transaction`, `get_transaction_history`. Seven of the wallet messages (`wallet_status_check`, `get_wallet_info`, `get_balance`, `send_transaction`, `address_generate`, `mark_wallet_backed_up`, `get_/set_backup_modal_state`) now carry a **request id in arg 0** and reply through `ResolveBridgeCall` / `RejectBridgeCall` in the render process rather than a `window.on*` global.
+> ⛔ Deleted in beta.3 Phase 8c batch 2 (no JS sender or no reachable caller): `create_wallet`, `load_wallet`, `get_addresses`, `get_all_addresses`, `get_current_address`, and the whole former "Transactions" row — `create_transaction`, `sign_transaction`, `broadcast_transaction`, `get_transaction_history`. Deleted with the backup overlay (8c O8, 2026-09-12): `get_wallet_info`, `mark_wallet_backed_up`, `get_backup_modal_state`, `set_backup_modal_state`, `overlay_show_backup`. The four surviving bridge messages (`wallet_status_check`, `get_balance`, `send_transaction`, `address_generate`) carry a **request id in arg 0** and reply through `ResolveBridgeCall` / `RejectBridgeCall` in the render process rather than a `window.on*` global; `address_generate` also runs its wallet call off the UI thread (8c O9).
 | Settings & profiles | `settings_get_all`, `settings_set`, `settings_update_all`, `settings_close`, `test_settings_message`, `profiles_get_all`, `profiles_create`, `profiles_rename`, `profiles_delete`, `profiles_switch`, `profiles_set_avatar`, `profiles_set_color`, `profiles_set_default` | 13 |
 | Browser import | `import_detect_profiles`, `import_bookmarks`, `import_history`, `import_all` | 4 |
 | Bookmarks | `bookmark_add`, `bookmark_get`, `bookmark_update`, `bookmark_remove`, `bookmark_search`, `bookmark_get_all`, `bookmark_is_bookmarked`, `bookmark_get_all_tags`, `bookmark_update_last_accessed`, `bookmark_folder_create/list/update/remove/get_tree` | 14 |
@@ -177,15 +176,15 @@ Off-screen rendering for all overlay windows. One instance per overlay.
 | Paid content cache | `paid_cache_clear`, `paid_cache_get_size` | 2 |
 | QR scanning | `qr_scan_request`, `qr_found` | 2 |
 | Search & analytics | `google_suggest_request`, `get_most_visited`, `get_session_blocked_total` | 3 |
-| **Total** | | **164** |
+| **Total** | | **159** |
 
 ## IPC Message Categories — render process
 
-**82 message names** handled in `SimpleRenderProcessHandler::OnProcessMessageReceived()`. Most are `*_response` / `*_error` replies to the browser-process messages above; the rest are pushes.
+**78 message names** handled in `SimpleRenderProcessHandler::OnProcessMessageReceived()`. Most are `*_response` / `*_error` replies to the browser-process messages above; the rest are pushes.
 
 | Category | Messages | Count |
 |----------|----------|-------|
-| Wallet / identity replies | `wallet_response`, `wallet_response_chunk` (Phase 2.5 bridge), `wallet_status_check_response`, `create_identity_response`, `get_wallet_info_response`, `get_balance_response/_error`, `identity_status_check_response`, `mark_wallet_backed_up_response`, `mark_identity_backed_up_response`, `get_backup_modal_state_response`, `set_backup_modal_state_response`, `wallet_payment_dismissed` | 13 |
+| Wallet / identity replies | `wallet_response`, `wallet_response_chunk` (Phase 2.5 bridge), `wallet_status_check_response`, `create_identity_response`, `get_balance_response/_error`, `identity_status_check_response`, `mark_identity_backed_up_response`, `wallet_payment_dismissed` | 9 |
 | Addresses | `address_generate_response/_error` | 2 |
 | Transactions | `send_transaction_response/_error` | 2 |
 | Bookmarks | `bookmark_add_response`, `bookmark_get_response`, `bookmark_get_all_response`, `bookmark_get_all_tags_response`, `bookmark_is_bookmarked_response`, `bookmark_remove_response`, `bookmark_search_response`, `bookmark_update_response`, `bookmark_update_last_accessed_response`, `bookmark_folder_create/get_tree/list/remove/update_response` | 14 |
@@ -199,7 +198,7 @@ Off-screen rendering for all overlay windows. One instance per overlay.
 | BRC-100 / payment | `brc100_auth_request`, **`payment_success_indicator`** | 2 |
 | Paid content cache | `paid_cache_clear_response`, `paid_cache_get_size_response` | 2 |
 | QR scanning | `qr_scan_result`, `qr_screen_capture_result`, `qr_screen_capture_starting` | 3 |
-| **Total** | | **82** |
+| **Total** | | **78** |
 
 > ⚠️ **`payment_success_indicator` drives the GOLD PILL** on the tab — the user's primary visual safeguard against silent payment abuse. It fires on every auto-approved payment. Never call it a "green dot"; never let a refactor drop this route.
 
@@ -297,7 +296,7 @@ On macOS the model is popped up manually as an `NSMenu` by `simple_handler_mac.m
 `SimpleHandler::GetResourceRequestHandler()` runs on the IO thread for every request, in this order:
 
 1. **Production frontend serving** — `127.0.0.1:5137` URLs when a `frontend/` dir sits next to the exe → `LocalFileResourceRequestHandler`. Must run first; later handlers would try to network-fetch port 5137, which has no server in production.
-2. **Trusted overlay wallet bypass** — `hodos::IsOurWalletOrigin(url)` from roles `wallet` / `wallet_panel` / `settings` / `backup` → `nullptr` (native CEF handling; avoids `CefURLRequest` forwarding issues on macOS).
+2. **Trusted overlay wallet bypass** — `hodos::IsOurWalletOrigin(url)` from roles `wallet` / `wallet_panel` / `settings` → `nullptr` (native CEF handling; avoids `CefURLRequest` forwarding issues on macOS).
 3. **Paid content cache read hook** (BRC-121) — GET, non-localhost, cache enabled, and not a hard reload (`Cache-Control`/`Pragma: no-cache` from Ctrl+Shift+R) → `CachedContentRequestHandler` serving bytes from SQLite. Short-circuits the entire 402 chain; no payment IPC, no session state change.
 4. **DNT/GPC headers** — injects `DNT: 1` and `Sec-GPC: 1` when the privacy setting is on.
 5. **Ad & tracker blocking** — global toggle + per-site toggle; `AdblockCache::checkCacheOnly()` → `AdblockBlockHandler` on a cached block, `DeferredAdblockHandler` on a cache miss (defers to a background thread so the IO thread stays free). A cached *allow* falls through.
@@ -319,7 +318,7 @@ CefBrowserSettings settings;
 settings.windowless_frame_rate = 30;
 settings.background_color = CefColorSetARGB(0, 0, 0, 0);  // transparent
 settings.javascript = STATE_ENABLED;
-// Only on overlays with text input (wallet, settings, backup, brc100 auth,
+// Only on overlays with text input (wallet, settings, brc100 auth,
 // notification, bookmarks, tablist, profile):
 settings.javascript_access_clipboard = STATE_ENABLED;
 settings.javascript_dom_paste = STATE_ENABLED;
@@ -331,7 +330,7 @@ CefBrowserHost::CreateBrowser(window_info, handler, url, settings, nullptr,
 
 **Keep-alive overlays** (Wallet, Omnibox, Cookie, Download, SiteInfo, TabList, Bookmarks, Menu, Profile): created once, shown/hidden via `ShowWindow(hwnd, SW_SHOW/SW_HIDE)`. Mouse hook installed lazily on show, removed on hide; `WS_EX_TRANSPARENT` cleared on show so clicks land.
 
-**Full-window overlays** (Backup, BRC-100 Auth, Notification): sized from `GetWindowRect(g_hwnd)`, cover the entire main window.
+**Full-window overlays** (BRC-100 Auth, Notification): sized from `GetWindowRect(g_hwnd)`, cover the entire main window. (The Backup modal overlay was deleted on Windows in beta.3 Phase 8c O8; its macOS creation function remains until Mac's relay round removes it.)
 
 **Wallet overlay**: sets `g_wallet_overlay_prevent_close = true` at creation (synchronous C++, no IPC race). Show is suppressed if the overlay was hidden < 200 ms ago — that hide/show race happens because the toolbar click that closes it also steals focus.
 

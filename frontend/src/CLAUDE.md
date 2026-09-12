@@ -16,12 +16,12 @@ The frontend serves two distinct roles simultaneously:
 | File | Lines | Purpose |
 |------|-------|---------|
 | `main.tsx` | 31 | React entry point; mounts `<BrowserRouter>` + `<App />`; imports `bridge/initWindowBridge` as side effect; removes the `#splash` element immediately on overlay routes and exposes `window.removeSplash()` so `MainBrowserView` can dismiss it after first paint on `/` |
-| `App.tsx` | 205 | Route definitions for all 21 routes; BRC-100 auth modal state; registers `window.showBRC100AuthApprovalModal` global |
+| `App.tsx` | 203 | Route definitions for all 20 routes (`/backup` was deleted in beta.3 Phase 8c O8); BRC-100 auth modal state; registers `window.showBRC100AuthApprovalModal` global |
 | `vite-env.d.ts` | 1 | Vite client type reference |
 
 ## Routes
 
-Defined in `App.tsx` — **21 routes**. All are lazy-loaded via `React.lazy` inside a `React.Suspense` boundary **except** `MainBrowserView`, `NewTabPage`, `PaymentPendingPage` and `PaymentFailedPage`, which are eager-loaded (the payment pair deliberately so, to avoid a chunk-fetch flicker when the placeholder/error page swaps in).
+Defined in `App.tsx` — **20 routes**. All are lazy-loaded via `React.lazy` inside a `React.Suspense` boundary **except** `MainBrowserView`, `NewTabPage`, `PaymentPendingPage` and `PaymentFailedPage`, which are eager-loaded (the payment pair deliberately so, to avoid a chunk-fetch flicker when the placeholder/error page swaps in).
 
 | Route | Component | Lines | Context |
 |-------|-----------|-------|---------|
@@ -36,7 +36,6 @@ Defined in `App.tsx` — **21 routes**. All are lazy-loaded via `React.lazy` ins
 | `/wallet-panel` | `WalletPanelPage` | 1619 | Wallet setup/management overlay |
 | `/settings` | `SettingsOverlayRoot` | 577 | Settings overlay subprocess |
 | `/wallet` | `WalletOverlayRoot` | 126 | Wallet dashboard overlay |
-| `/backup` | `BackupOverlayRoot` | 361 | Mnemonic backup modal overlay |
 | `/brc100-auth` | `BRC100AuthOverlayRoot` | 2580 | BRC-100 authentication / permission notifications (type-dispatched prompt overlay) |
 | `/omnibox` | `OmniboxOverlayRoot` | 300 | Address bar autocomplete dropdown |
 | `/privacy-shield` | `PrivacyShieldOverlayRoot` | 92 | Per-domain privacy stats overlay |

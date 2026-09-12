@@ -9,7 +9,6 @@ import PaymentFailedPage from './pages/PaymentFailedPage';
 // Lazy-load overlay and secondary routes (each loads in its own CEF subprocess)
 const SettingsOverlayRoot = React.lazy(() => import('./pages/SettingsOverlayRoot'));
 const WalletOverlayRoot = React.lazy(() => import('./pages/WalletOverlayRoot'));
-const BackupOverlayRoot = React.lazy(() => import('./pages/BackupOverlayRoot'));
 const BRC100AuthOverlayRoot = React.lazy(() => import('./pages/BRC100AuthOverlayRoot'));
 const OmniboxOverlayRoot = React.lazy(() => import('./pages/OmniboxOverlayRoot'));
 const PrivacyShieldOverlayRoot = React.lazy(() => import('./pages/PrivacyShieldOverlayRoot'));
@@ -176,7 +175,6 @@ const App = () => {
           <Route path="/wallet-panel" element={<WalletPanelPage />} />
           <Route path="/settings" element={<SettingsOverlayRoot />} />
           <Route path="/wallet" element={<WalletOverlayRoot />} />
-          <Route path="/backup" element={<BackupOverlayRoot />} />
           <Route path="/brc100-auth" element={<BRC100AuthOverlayRoot />} />
           <Route path="/omnibox" element={<OmniboxOverlayRoot />} />
           <Route path="/privacy-shield" element={<PrivacyShieldOverlayRoot />} />

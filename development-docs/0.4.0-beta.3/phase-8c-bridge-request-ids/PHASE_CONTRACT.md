@@ -42,7 +42,7 @@ Stage 1 must land and be reviewed before stages 2–4 are attempted.
 | **O5** | **The 30 s deadline value** | Chosen as a backstop, not measured against the slowest real wallet call. If any legitimate call can exceed 30 s, this turns a slow success into a failure | ⬜ batch 2 measured `getInfo` 3 ms and `address.generate` 10 ms (§4d) — the **slowest** real call is still unmeasured, and `send_transaction`'s broadcast is the candidate |
 | **O6** | **macOS parity.** Both changed files (`simple_render_process_handler.cpp`, `simple_handler.cpp`) are **shared**, not Windows-only | Unlike 8a/8b this is not Rust-only. Mac must verify the V8 binding and the promise map behave there | ⬜ relay owed — batch 2 also **collapsed** the `#ifdef _WIN32` / `#else` twin copies of the `address_generate` handler (they were byte-identical), and commit 2 deletes bodies in `WalletService_mac.cpp` — Mac's lane, flagged for the relay |
 | **O7** | ⚠️ **RED controls are a wasting asset.** `getBackupModalState` WAS the control for `P8c-A1a`; batch 1 used `getInfo`; **batch 2 used `bookmarks.getAllTags`** (§4d — 2 of 3 rejected at 5,011 ms). The wallet namespace now has **no** legacy method left | Remaining legacy pool for a RED: cookies (15) and bookmarks (14). ⛔ **At 0 remaining there is no legacy control left at all**, and the RED must become a deliberate stub | ⚠️ live |
-| **O8** | 🚨 **`getInfo` and `markBackedUp` were dead at the BACKEND too.** The Rust wallet has no `/wallet/info` and no `/wallet/markBackedUp` route (`main.rs` — both **404**, measured against the dev wallet). C++ wraps the miss as `{success:false, error:"Failed to get wallet info: {}"}`. Their only consumer, `BackupOverlayRoot`, is itself **unreachable**: its only opener (`overlay_show_backup`) is sent from a block App.tsx has commented out. So the whole backup-overlay chain — the page, the route, the IPC, `CreateBackupOverlayWithSeparateProcess` on both platforms, its HWND/WndProc/role slot — is dead | They were migrated anyway (batch 2): the routing is proven and the change is reversible. **Deleting the chain is an overlay-lifecycle change** (CLAUDE.md invariant 8) and cascades into `cef_browser_shell.cpp` / `cef_browser_shell_mac.mm` — not a call to make inside a bridge batch | ⬜ **your call**: delete the backup-overlay chain (its own ticket), or keep it as the shell of a future backup flow |
+| **O8** | 🚨 **`getInfo` and `markBackedUp` were dead at the BACKEND too.** The Rust wallet has no `/wallet/info` and no `/wallet/markBackedUp` route (`main.rs` — both **404**, measured against the dev wallet). C++ wraps the miss as `{success:false, error:"Failed to get wallet info: {}"}`. Their only consumer, `BackupOverlayRoot`, is itself **unreachable**: its only opener (`overlay_show_backup`) is sent from a block App.tsx has commented out. So the whole backup-overlay chain — the page, the route, the IPC, `CreateBackupOverlayWithSeparateProcess` on both platforms, its HWND/WndProc/role slot — is dead | They were migrated anyway (batch 2): the routing is proven and the change is reversible. **Deleting the chain is an overlay-lifecycle change** (CLAUDE.md invariant 8) and cascades into `cef_browser_shell.cpp` / `cef_browser_shell_mac.mm` — not a call to make inside a bridge batch | ✅ **owner: delete (2026-09-12)** — *"I don't think we need it."* The recovery-phrase prompt is `WalletPanelPage`'s create flow. **Windows + shared half done** (§4e): page, route, the four methods and their natives/arms/handlers, `overlay_show_backup`, every `role_ == "backup"` arm, the HWND/WndProc/class registration, the app-file creator, the window-record HWND field. 🍎 **macOS half owed to Mac** (`MAC_RELAY_P8_ROUND.md` M8): the `.mm` creator and its six `GetBackupBrowser()` uses, `g_backup_overlay_window`, then the accessor/static/header decl and the `BrowserWindow` `backup_browser` / `backup_overlay_window` slots, which Windows kept only so the Mac build stays green |
 | **O9** | ⚠️ **`address_generate` blocks the UI thread and cannot reject.** The browser handler calls `WalletService::generateAddress()` **inline** — unlike `get_balance`, which P2a moved off-thread for exactly this reason. With the dev wallet stopped, three calls took **6,168 ms, serialised on the UI thread**, and every one **resolved `{}`** rather than rejecting, because `WalletService::makeHttpRequest` swallows transport failure. `useAddress` then reads `response.address` as `undefined`. ⇒ the `address_generate_error` arm (and `RejectBridgeCall` on this slot) is **unreachable in practice** | Pre-existing on both counts. Same family as `TICKET_wallet_backend_death_is_silent_and_unrecovered.md` | ✅ **fixed 2026-09-12 on owner's call** (`P8c-A4d`): off-thread via the `get_balance` shape, and a missing address is now a **rejection**. The "notice the wallet died and restart it" half is the death ticket, now **assigned to Phase 8 after 8c**. 📏 Side finding: `WalletService::isConnected()` is a **latch** — `WinHttpConnect` allocates a handle without touching the wallet, so it reads true with the wallet dead |
 
 ## 0. Plan-vs-tree delta
@@ -409,6 +409,26 @@ known-dead state is what makes it instant.
 
 📏 `isConnected()` guard tried and **removed**: `WinHttpConnect` never opens a connection, so the flag
 is true with the wallet dead and the guard was a dead branch. The reply is the only signal.
+
+### `P8c-A4e` — 🟢 `O8`: the backup-overlay chain deleted (Windows + shared half), nothing else moved
+
+Owner call 2026-09-12 (*"I don't think we need it"*). Subject: the CDP target list **is** the overlay
+roster on this build (every overlay is pre-created at startup), so it is the right instrument for "did
+any other overlay disappear".
+
+| Check | Result |
+|---|---|
+| CDP targets after the deletion | **11**, the same eleven as before it — header + 10 overlays; no `/backup` (there never was one live, which is the point) |
+| `hodosBrowser.wallet` | exactly `getStatus`, `getBalance`, `sendTransaction` |
+| `hodosBrowser.bridge` | exactly `getStatus`, `getBalance`, `sendTransaction`, `generateAddress` — **4 natives** |
+| `window.on*` of the wallet / address / backup / history families | **none** |
+| Surviving bridge, live | `getStatus` `{exists:true, needsBackup:false}` · `getBalance` keys `balance, bsvPrice` · `address.generate` ×3 → **3 distinct, 38 ms** |
+| The deleted IPC, sent anyway (`cefMessage.send('overlay_show_backup')`) | no-op: 11 targets before and after, header still answers |
+
+Removed: 513 C++ lines across `simple_handler.cpp`, `simple_render_process_handler.cpp`,
+`simple_app.cpp`, `cef_browser_shell.cpp`, `BrowserWindow.h`, plus the page, the route, four bridge
+methods and their types. ⚠️ **macOS half owed** — relay M8. `GetBackupBrowser()` and the
+`BrowserWindow` backup slots are kept as null shims until it lands, so Mac's build stays green.
 
 ### O5 — two real latencies
 

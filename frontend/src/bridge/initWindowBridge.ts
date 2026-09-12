@@ -172,55 +172,12 @@ if (!window.hodosBrowser.wallet) {
     // None had a reachable caller (`useWallet()` had no consumers; `create`'s only call
     // sat inside a commented-out block), and their C++ round trips are gone with them.
     // Wallet creation / recovery is the wallet overlay's `walletFetch` path, not this one.
-
-    // ⭐ MIGRATED — Phase 8c stage 3 batch 2. Was batch 1's RED control: the still-legacy
-    // sibling that proved the harness sees the bug (10,013 ms, 2 of 3 rejected). The
-    // control now has to come from a namespace that is still legacy — contract O7.
     //
-    // ⚠️ The resolved shape is what C++ actually sends — `{ success, wallet: {…} }`,
-    // nested — not the flat object the old declaration claimed. The one consumer
-    // (BackupOverlayRoot) was reading it flat.
-    getInfo: () => {
-      if (!window.hodosBrowser?.bridge?.getInfo) {
-        return Promise.reject(new Error('wallet.getInfo: native bridge unavailable'));
-      }
-      return window.hodosBrowser.bridge.getInfo();
-    },
-
-    // ⭐ MIGRATED — Phase 8c stage 3 batch 2. Records that the user backed up their
-    // recovery phrase.
-    //
-    // ⚠️ The recipe named this as the last `resolve(null)`-on-timeout slot. It was not —
-    // it rejected. Read before deleting, per the recipe's own rule; the actual
-    // resolve-on-timeout offenders left are in the cookie namespace (contract D-9).
-    markBackedUp: () => {
-      if (!window.hodosBrowser?.bridge?.markBackedUp) {
-        return Promise.reject(new Error('wallet.markBackedUp: native bridge unavailable'));
-      }
-      return window.hodosBrowser.bridge.markBackedUp();
-    },
-
-    // ⭐ MIGRATED — Phase 8c stage 3.
-    //
-    // 🚨 The legacy version called `resolve(null)` on timeout, NOT reject — so when a
-    // concurrent caller stole its reply, this returned a silently wrong value with nothing
-    // to catch. Measured: 2 of 3 concurrent callers got  (D-5). Now each caller has
-    // its own promise, and a genuine failure rejects.
-    getBackupModalState: () => {
-      if (!window.hodosBrowser?.bridge?.getBackupModalState) {
-        return Promise.reject(new Error('wallet.getBackupModalState: native bridge unavailable'));
-      }
-      return window.hodosBrowser.bridge.getBackupModalState();
-    },
-
-    // ⭐ MIGRATED — Phase 8c stage 3. First migrated method with a NON-STRING payload:
-    // the boolean rides as arg 1 via `SetBool`, not stringified.
-    setBackupModalState: (shown: boolean) => {
-      if (!window.hodosBrowser?.bridge?.setBackupModalState) {
-        return Promise.reject(new Error('wallet.setBackupModalState: native bridge unavailable'));
-      }
-      return window.hodosBrowser.bridge.setBackupModalState(shown);
-    },
+    // ⛔ DELETED with the backup overlay (Phase 8c O8, owner call 2026-09-12): `getInfo`,
+    // `markBackedUp`, `getBackupModalState`, `setBackupModalState`. Their only consumer
+    // was `BackupOverlayRoot`, whose only opener sat in a commented-out block, and the
+    // Rust routes behind the first two do not exist. The first-run "write down your
+    // recovery phrase" flow lives in `WalletPanelPage` (mnemonic + prevent-close + PIN).
 
     // ⭐ MIGRATED — Phase 8c stage 3. This one RETIRES A WORKAROUND.
     //

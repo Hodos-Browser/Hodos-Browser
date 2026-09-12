@@ -64,7 +64,6 @@ public:
     // Overlay HWNDs (11 total)
     HWND settings_overlay_hwnd = nullptr;
     HWND wallet_overlay_hwnd = nullptr;
-    HWND backup_overlay_hwnd = nullptr;
     HWND brc100_auth_overlay_hwnd = nullptr;
     HWND notification_overlay_hwnd = nullptr;
     HWND settings_menu_overlay_hwnd = nullptr;

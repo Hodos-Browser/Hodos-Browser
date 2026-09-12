@@ -48,7 +48,6 @@ static std::string HwndStr(const void* h) {
 // External global HWND declarations for shutdown cleanup
 extern HWND g_settings_overlay_hwnd;
 extern HWND g_wallet_overlay_hwnd;
-extern HWND g_backup_overlay_hwnd;
 extern HWND g_brc100_auth_overlay_hwnd;
 extern HWND g_omnibox_overlay_hwnd;
 extern HWND g_cookie_panel_overlay_hwnd;
@@ -637,7 +636,7 @@ void ReleaseOverlaysOwnedBy(HWND closing, HWND newOwner) {
     // it is destroyed with the owner (K12) and its g_*_overlay_hwnd dangles. Add it here
     // in the same change that creates it.
     HWND overlays[] = {
-        g_settings_overlay_hwnd, g_wallet_overlay_hwnd, g_backup_overlay_hwnd,
+        g_settings_overlay_hwnd, g_wallet_overlay_hwnd,
         g_brc100_auth_overlay_hwnd, g_notification_overlay_hwnd, g_settings_menu_overlay_hwnd,
         g_omnibox_overlay_hwnd, g_cookie_panel_overlay_hwnd, g_download_panel_overlay_hwnd,
         g_bookmarks_panel_overlay_hwnd, g_tablist_panel_overlay_hwnd,
@@ -1073,78 +1072,6 @@ void HideWalletOverlay() {
 
 
     LOG_INFO_APP("Wallet overlay hidden");
-}
-#endif // _WIN32
-
-#ifdef _WIN32
-void CreateBackupOverlayWithSeparateProcess(HINSTANCE hInstance) {
-    LOG_DEBUG_APP("💾 Creating backup overlay with separate process");
-
-    RECT mainRect;
-    GetWindowRect(g_hwnd, &mainRect);
-    int width = mainRect.right - mainRect.left;
-    int height = mainRect.bottom - mainRect.top;
-
-    HWND backup_hwnd = CreateWindowEx(
-        WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-        L"CEFBackupOverlayWindow",
-        L"Backup Overlay",
-        WS_POPUP | WS_VISIBLE,
-        mainRect.left, mainRect.top, width, height,
-        g_hwnd, nullptr, hInstance, nullptr);
-
-    if (!backup_hwnd) {
-        LOG_ERROR_APP("❌ Failed to create backup overlay HWND. Error: " + std::to_string(GetLastError()));
-        return;
-    }
-
-    LOG_INFO_APP(LogFmt() << "✅ Backup overlay HWND created: " << backup_hwnd);
-
-    // Store HWND for shutdown cleanup
-    g_backup_overlay_hwnd = backup_hwnd;
-
-    // Sync to BrowserWindow 0
-    BrowserWindow* mainWin = WindowManager::GetInstance().GetPrimaryWindow();
-    if (mainWin) mainWin->backup_overlay_hwnd = g_backup_overlay_hwnd;
-
-    LOG_DEBUG_APP("✅ Backup overlay HWND created: " + HwndStr(backup_hwnd));
-
-    CefWindowInfo window_info;
-    window_info.windowless_rendering_enabled = true;
-    window_info.SetAsPopup(backup_hwnd, "BackupOverlay");
-
-    CefBrowserSettings settings;
-    settings.windowless_frame_rate = 30;
-    settings.background_color = CefColorSetARGB(0, 0, 0, 0);
-    settings.javascript = STATE_ENABLED;
-    settings.javascript_access_clipboard = STATE_ENABLED;
-    settings.javascript_dom_paste = STATE_ENABLED;
-
-    CefRefPtr<SimpleHandler> backup_handler(new SimpleHandler("backup"));
-    CefRefPtr<MyOverlayRenderHandler> render_handler = new MyOverlayRenderHandler(backup_hwnd, width, height);
-    backup_handler->SetRenderHandler(render_handler);
-
-    LOG_DEBUG_APP("💾 Backup overlay render handler set for HWND: " + HwndStr(backup_hwnd));
-
-    bool result = CefBrowserHost::CreateBrowser(
-        window_info,
-        backup_handler,
-        "http://127.0.0.1:5137/backup",
-        settings,
-        nullptr,
-        CefRequestContext::GetGlobalContext()
-    );
-
-    if (result) {
-        LOG_DEBUG_APP("✅ Backup overlay browser created with subprocess");
-
-        LONG exStyle = GetWindowLong(backup_hwnd, GWL_EXSTYLE);
-        SetWindowLong(backup_hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
-        LOG_DEBUG_APP("💾 Mouse input ENABLED for backup overlay HWND: " + HwndStr(backup_hwnd));
-
-    } else {
-        LOG_ERROR_APP("❌ Failed to create backup overlay browser");
-    }
 }
 #endif // _WIN32
 

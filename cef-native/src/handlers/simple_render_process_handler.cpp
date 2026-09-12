@@ -427,21 +427,15 @@ public:
             payload = Payload::Str;
         } else if (method == "getBalance") {
             ipcName = "get_balance";
-        } else if (method == "getBackupModalState") {
-            ipcName = "get_backup_modal_state";
-        } else if (method == "setBackupModalState") {
-            ipcName = "set_backup_modal_state";
-            payload = Payload::Bool;
         } else if (method == "generateAddress") {
             // Stage 3 batch 2. Backs `address.generate()`. (Its caller-less twin
             // `wallet.generateAddress`, which shared the legacy global slot pair with
             // it, was deleted in the same batch.)
             ipcName = "address_generate";
-        } else if (method == "getInfo") {
-            ipcName = "get_wallet_info";
-        } else if (method == "markBackedUp") {
-            ipcName = "mark_wallet_backed_up";
         }
+        // getInfo / markBackedUp / getBackupModalState / setBackupModalState were deleted
+        // with the backup overlay (Phase 8c O8, 2026-09-12): their only consumer was
+        // unreachable and two of the Rust routes they called do not exist.
         if (!ipcName) return false;  // unknown method — V8 throws for us
 
         if (payload == Payload::Str && (arguments.empty() || !arguments[0]->IsString())) {
@@ -931,30 +925,18 @@ void SimpleRenderProcessHandler::OnContextCreated(
     bridgeObject->SetValue("sendTransaction",
         CefV8Value::CreateFunction("sendTransaction", bridgeHandler),
         V8_PROPERTY_ATTRIBUTE_READONLY);
-    // Stage 3 batch 1 — the three remaining SHAPES: a read that carried an in-flight
-    // dedupe workaround, the resolve-on-timeout offender, and a non-string payload.
+    // Stage 3 batch 1 — the read that carried an in-flight dedupe workaround. (Its two
+    // batch-1 siblings, the backup-modal-state pair, went with the backup overlay in O8.)
     bridgeObject->SetValue("getBalance",
         CefV8Value::CreateFunction("getBalance", bridgeHandler),
-        V8_PROPERTY_ATTRIBUTE_READONLY);
-    bridgeObject->SetValue("getBackupModalState",
-        CefV8Value::CreateFunction("getBackupModalState", bridgeHandler),
-        V8_PROPERTY_ATTRIBUTE_READONLY);
-    bridgeObject->SetValue("setBackupModalState",
-        CefV8Value::CreateFunction("setBackupModalState", bridgeHandler),
         V8_PROPERTY_ATTRIBUTE_READONLY);
     // Stage 3 batch 2 — the wallet namespace's live remainder. `generateAddress` backs
     // `address.generate()`.
     bridgeObject->SetValue("generateAddress",
         CefV8Value::CreateFunction("generateAddress", bridgeHandler),
         V8_PROPERTY_ATTRIBUTE_READONLY);
-    bridgeObject->SetValue("getInfo",
-        CefV8Value::CreateFunction("getInfo", bridgeHandler),
-        V8_PROPERTY_ATTRIBUTE_READONLY);
-    bridgeObject->SetValue("markBackedUp",
-        CefV8Value::CreateFunction("markBackedUp", bridgeHandler),
-        V8_PROPERTY_ATTRIBUTE_READONLY);
     hodosBrowser->SetValue("bridge", bridgeObject, V8_PROPERTY_ATTRIBUTE_READONLY);
-    LOG_DEBUG_RENDER("🌉 Bound WalletBridgeV8Handler (8 methods migrated)");
+    LOG_DEBUG_RENDER("🌉 Bound WalletBridgeV8Handler (4 methods migrated)");
 
     hodosBrowser->SetValue("history", historyObject, V8_PROPERTY_ATTRIBUTE_READONLY);
 
@@ -1667,55 +1649,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         LOG_DEBUG_RENDER(LogFmt() << "✅ Wallet status response (requestId " << requestId
                                   << "): " << responseJson);
         ResolveBridgeCall(requestId, responseJson);
-        return true;
-    }
-
-    // MIGRATED (Phase 8c stage 3 batch 2). Args: 0 = requestId, 1 = payload.
-    //
-    // The payload carries the recovery phrase (`wallet.mnemonic`), so it is not logged.
-    if (message_name == "get_wallet_info_response") {
-        CefRefPtr<CefListValue> args = message->GetArgumentList();
-        if (!args || args->GetSize() < 2) {
-            LOG_ERROR_RENDER(LogFmt() << "get_wallet_info_response missing args (need 2)");
-            return true;
-        }
-        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
-        return true;
-    }
-
-    // MIGRATED (Phase 8c stage 3 batch 2). Args: 0 = requestId, 1 = payload.
-    if (message_name == "mark_wallet_backed_up_response") {
-        CefRefPtr<CefListValue> args = message->GetArgumentList();
-        if (!args || args->GetSize() < 2) {
-            LOG_ERROR_RENDER(LogFmt() << "mark_wallet_backed_up_response missing args (need 2)");
-            return true;
-        }
-        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
-        return true;
-    }
-
-    // MIGRATED (Phase 8c stage 3 batch 1). Args: 0 = requestId, 1 = payload.
-    //
-    // ⚠️ The legacy JS for this method called resolve(null) on timeout, not reject — so a
-    // losing caller got a SILENTLY WRONG VALUE rather than an error (measured, D-5).
-    if (message_name == "get_backup_modal_state_response") {
-        CefRefPtr<CefListValue> args = message->GetArgumentList();
-        if (!args || args->GetSize() < 2) {
-            LOG_ERROR_RENDER(LogFmt() << "get_backup_modal_state_response missing args (need 2)");
-            return true;
-        }
-        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
-        return true;
-    }
-
-    // MIGRATED (Phase 8c stage 3 batch 1). Args: 0 = requestId, 1 = payload.
-    if (message_name == "set_backup_modal_state_response") {
-        CefRefPtr<CefListValue> args = message->GetArgumentList();
-        if (!args || args->GetSize() < 2) {
-            LOG_ERROR_RENDER(LogFmt() << "set_backup_modal_state_response missing args (need 2)");
-            return true;
-        }
-        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 

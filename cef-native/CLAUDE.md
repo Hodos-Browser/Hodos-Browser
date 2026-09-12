@@ -339,7 +339,7 @@ g_hwnd  (main shell — WS_OVERLAPPEDWINDOW, WndProc = ShellWindowProc)
                           comment. Kept for API compat + teardown.
 ```
 
-**15 overlay HWNDs** (WS_POPUP; all OSR browsers). ⚠️ Ownership is **not** fixed to `g_hwnd` since
+**14 overlay HWNDs** (WS_POPUP; all OSR browsers; 15 before the Backup modal was deleted in 8c O8). ⚠️ Ownership is **not** fixed to `g_hwnd` since
 Phase 3.5 — it follows the requesting window while an overlay is on screen and returns to the primary
 on hide (`OwnOverlayToRequestingWindow` / `ReturnOverlayOwnershipToPrimary` / `ReleaseOverlaysOwnedBy`
 in `simple_app.cpp`). ⛔ A new overlay must be added to `ReleaseOverlaysOwnedBy`'s list or it is
@@ -349,7 +349,6 @@ destroyed with its owner window:
 |-------------|--------------|---------|--------------------------|
 | `g_settings_overlay_hwnd` | `settings` | `SettingsOverlayWndProc` | `SettingsPanelMouseHookProc` |
 | `g_wallet_overlay_hwnd` | `wallet` | `WalletOverlayWndProc` | — (WM_ACTIVATE path) |
-| `g_backup_overlay_hwnd` | `backup` | `BackupOverlayWndProc` | — |
 | `g_brc100_auth_overlay_hwnd` | `brc100auth` | `BRC100AuthOverlayWndProc` | — |
 | `g_notification_overlay_hwnd` | `notification` | `NotificationOverlayWndProc` | — |
 | `g_settings_menu_overlay_hwnd` | `settings_menu` | `SettingsMenuOverlayWndProc` | — |
@@ -363,12 +362,12 @@ destroyed with its owner window:
 | `g_menu_overlay_hwnd` | `menu` | `MenuOverlayWndProc` | `MenuMouseHookProc` |
 | `g_tabmenu_overlay_hwnd` | `tabmenu` | `TabMenuOverlayWndProc` | `TabMenuMouseHookProc` |
 
-That is 15 overlay HWNDs, 15 overlay WndProcs (+ `ShellWindowProc` for the main window) and **10** `WH_MOUSE_LL` click-outside hook procs, all in `cef_browser_shell.cpp`. Note the asymmetry: `BrowserWindow.h` declares **10** `HHOOK` slots — `wallet_mouse_hook` has a slot but no corresponding hook proc, because the wallet overlay closes via its `WM_ACTIVATE` path instead.
+That is 14 overlay HWNDs, 14 overlay WndProcs (+ `ShellWindowProc` for the main window) and **10** `WH_MOUSE_LL` click-outside hook procs, all in `cef_browser_shell.cpp`. Note the asymmetry: `BrowserWindow.h` declares **10** `HHOOK` slots — `wallet_mouse_hook` has a slot but no corresponding hook proc, because the wallet overlay closes via its `WM_ACTIVATE` path instead.
 
 ### Overlay creation functions
 
-**Windows — 15, all in `src/handlers/simple_app.cpp`:**
-`CreateSettingsOverlayWithSeparateProcess`, `CreateWalletOverlay`, `CreateBackupOverlayWithSeparateProcess`, `CreateBRC100AuthOverlayWithSeparateProcess`, `CreateNotificationOverlay`, `CreateSettingsMenuOverlay`, `CreateOmniboxOverlay`, `CreateCookiePanelOverlay`, `CreateDownloadPanelOverlay`, `CreateSiteInfoPanelOverlay`, `CreateTabListPanelOverlay`, `CreateBookmarksPanelOverlay`, `CreateMenuOverlay`, `CreateProfilePanelOverlay`, `CreateTabContextMenuOverlay`.
+**Windows — 14, all in `src/handlers/simple_app.cpp`** (15 until beta.3 Phase 8c O8 deleted the Backup modal on 2026-09-12; macOS still lists 15 until Mac's relay round removes `CreateBackupOverlayWithSeparateProcess` there):
+`CreateSettingsOverlayWithSeparateProcess`, `CreateWalletOverlay`, `CreateBRC100AuthOverlayWithSeparateProcess`, `CreateNotificationOverlay`, `CreateSettingsMenuOverlay`, `CreateOmniboxOverlay`, `CreateCookiePanelOverlay`, `CreateDownloadPanelOverlay`, `CreateSiteInfoPanelOverlay`, `CreateTabListPanelOverlay`, `CreateBookmarksPanelOverlay`, `CreateMenuOverlay`, `CreateProfilePanelOverlay`, `CreateTabContextMenuOverlay`.
 
 Most also have a `Show…Overlay(offset, targetWin)` / `Hide…Overlay()` pair in the same file (wallet, omnibox, cookie, download, siteinfo, tablist, bookmarks, menu, profile). Settings / backup / brc100auth / notification / settings_menu are create-and-show only.
 
@@ -436,7 +435,7 @@ Cross-browser communication (e.g. header find bar → tab search) always routes 
 
 | File | Purpose |
 |------|---------|
-| `cef_browser_shell.cpp` | Windows bootstrap entry `RunWinMain` -> `RunHodosMain` (was `WinMain` pre-150); `ShellWindowProc`; all HWND globals; 15 overlay WndProcs + 10 mouse hooks; `Logger::Initialize` + stdout/stderr redirection; dev safeguard |
+| `cef_browser_shell.cpp` | Windows bootstrap entry `RunWinMain` -> `RunHodosMain` (was `WinMain` pre-150); `ShellWindowProc`; all HWND globals; 14 overlay WndProcs + 10 mouse hooks; `Logger::Initialize` + stdout/stderr redirection; dev safeguard |
 | `cef_browser_shell_mac.mm` | macOS entry `main`; NSWindow/NSView hierarchy; 14 overlay creation functions; event forwarding; multi-window support |
 | `src/handlers/simple_app.cpp` | `SimpleApp` (`OnContextInitialized`, `OnBeforeChildProcessLaunch`, `OnBeforeCommandLineProcessing`, `SetWindowHandles`, `SetMacOSWindow`); `InjectHodosBrowserAPI`; all 15 Windows overlay create/show/hide functions |
 | `src/handlers/simple_handler.cpp` | Browser-process message routing, overlay management, context menus, downloads, find-in-page |
@@ -461,7 +460,7 @@ Cross-browser communication (e.g. header find bar → tab search) always routes 
 
 | File | Identifiers |
 |------|-------------|
-| `cef_browser_shell.cpp` | `RunWinMain` (exported bootstrap entry), `RunHodosMain`, `VerifyCodeSigningAndLoad`, `ShellWindowProc`, `g_hwnd`, `g_header_hwnd`, `g_webview_hwnd`, `g_hResourceModule`, the 15 overlay HWNDs, 15 overlay WndProcs, 10 `…MouseHookProc` click-outside hooks, `Logger::Initialize` + log-path resolution, dev safeguard |
+| `cef_browser_shell.cpp` | `RunWinMain` (exported bootstrap entry), `RunHodosMain`, `VerifyCodeSigningAndLoad`, `ShellWindowProc`, `g_hwnd`, `g_header_hwnd`, `g_webview_hwnd`, `g_hResourceModule`, the 14 overlay HWNDs, 14 overlay WndProcs, 10 `…MouseHookProc` click-outside hooks, `Logger::Initialize` + log-path resolution, dev safeguard |
 | `cef_browser_shell_mac.mm` | `main`, 14 macOS overlay creation functions, NSWindow/NSView hierarchy, `Logger::Initialize` |
 | `src/handlers/simple_render_process_handler.cpp` | `SimpleRenderProcessHandler::OnContextCreated`, and 5 V8 handler classes: `CefMessageSendHandler`, `OverlayCloseHandler`, `OmniboxCloseHandler`, `HistoryV8Handler`, `GoogleSuggestV8Handler` |
 | `include/core/JsStringEscape.h` | `escapeJsonForJs` — the canonical JS-string-literal encoder (header-only; moved out of `simple_render_process_handler.cpp`, which now `#include`s it) |

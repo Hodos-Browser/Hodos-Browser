@@ -28,7 +28,7 @@ The CEF browser loads from `localhost:5137` during development.
 | File | Purpose |
 |------|---------|
 | `src/main.tsx` | React entry; imports `BrowserRouter`, renders `<App />`, imports `bridge/initWindowBridge` |
-| `src/App.tsx` | Router with routes: `/`, `/settings`, `/wallet`, `/backup`, `/brc100-auth`; registers `window.showBRC100AuthApprovalModal` |
+| `src/App.tsx` | Router with routes: `/`, `/settings`, `/wallet`, `/brc100-auth`, …; registers `window.showBRC100AuthApprovalModal` |
 
 ## Extension Points
 

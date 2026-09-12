@@ -117,8 +117,30 @@ Unlike 8a/8b this is **not Rust-only**. Owed to Mac as a verification, not a por
 | ⚠️ **Mac-lane file:** `createWallet`, `loadWallet`, `getAllAddresses`, `getCurrentAddress`, `createTransaction`, `signTransaction`, `broadcastTransaction`, `getTransactionHistory` **deleted** (their only callers were IPC handlers with no JS sender) | `WalletService_mac.cpp` + the shared `WalletService.h` | Build only. Nothing to port; flagged so you do not edit those lines concurrently |
 
 Batch history: stage 1 `getStatus` · stage 2 `sendTransaction` · batch 1 `getBalance`, `get/setBackupModalState` ·
-batch 2 (2026-09-12) `address.generate`, `getInfo`, `markBackedUp` + the deletions above. 34 legacy slots
-(cookies, bookmarks) remain; each further batch will add to this table.
+batch 2 (2026-09-12) `address.generate`, `getInfo`, `markBackedUp` + the deletions above · O9 (same day)
+`address_generate` off the UI thread + rejecting. 34 legacy slots (cookies, bookmarks) remain; each further
+batch will add to this table. ⚠️ Since O8 (below) the surviving bridge natives are **four**: `getStatus`,
+`sendTransaction`, `getBalance`, `generateAddress`.
+
+## M8 — 🍎 O8: the backup-overlay chain is deleted on Windows; **its macOS half is YOURS**
+
+Owner call 2026-09-12: the standalone "Wallet Backup Required" modal (`/backup`) was the pre-wallet-overlay
+first-run flow. Its only opener sat in a commented-out block in `App.tsx`, and two of the Rust routes it
+called (`/wallet/info`, `/wallet/markBackedUp`) do not exist. `WalletPanelPage`'s create flow already shows
+the recovery phrase under prevent-close and walks into the PIN step, so nothing is lost.
+
+**Split on purpose** so neither side breaks a build it cannot compile:
+
+| Side | What was removed | State |
+|---|---|---|
+| **Windows + shared** (done, this round) | `BackupOverlayRoot.tsx` + route; `wallet.getInfo/markBackedUp/get+setBackupModalState` (bridge, types, 4 render arms, 4 browser handlers, the modal-state helpers); `overlay_show_backup`; every `role_ == "backup"` arm in `simple_handler.cpp` **including the `#elif __APPLE__` ones** (`g_backup_overlay_window` externs and assignments); `g_backup_overlay_hwnd`, `BackupOverlayWndProc`, its class registration, the `simple_app.cpp` creator, `BrowserWindow::backup_overlay_hwnd` | ✅ built + smoke-tested on Windows |
+| **macOS** (yours) | `CreateBackupOverlayWithSeparateProcess()` in `cef_browser_shell_mac.mm` (decl ~619, body ~3435) and its `g_backup_overlay_window` global + the frame-sync / shutdown blocks that touch it (~2310, ~2368, ~5259); the six `SimpleHandler::GetBackupBrowser()` calls (~1618–1691, ~2370, ~5220); `"backup"` in the role list ~5200 | ⬜ owed |
+| **Shared cleanup, after yours lands** | `SimpleHandler::GetBackupBrowser()` + `backup_browser_` (`simple_handler.h/.cpp`), `BrowserWindow::backup_browser` + `backup_overlay_window` and the two role-slot lines in `BrowserWindow.cpp` — kept **only** so your build stays green meanwhile | ⬜ either side, once M8-mac is in |
+
+⚠️ Per the new root-doc rule: this round touched `simple_handler.cpp`, `simple_render_process_handler.cpp`,
+`simple_app.cpp`, `cef_browser_shell.cpp`, `BrowserWindow.h`, `simple_handler.h` — **rebuild after your next
+rebase** before anything else. The `#elif __APPLE__` arms I removed only *referenced* your global; your `.mm`
+still defines it, so the macOS build should stay green until you remove your half.
 
 ## M7 — Instrument discipline (unchanged from 7d; all still cost real time)
 

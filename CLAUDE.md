@@ -177,7 +177,7 @@ Bitcoin SV Blockchain (WhatsOnChain, GorillaPool)
 | CEF Shell | C++17, CEF (exact pin: `CEF_VERSION` in `cef-binaries/include/cef_version.h` — read it, don't quote it from memory) | Browser engine, V8 injection, HTTP interception; browser data (history, bookmarks) |
 | Wallet | Rust, Actix-web, SQLite | Crypto, signing, keys, BRC-100 protocol. Signing keys never leave this process — see Invariants #1 for the exact guarantee and its one deliberate exception |
 
-**Overlay Model**: Settings, Wallet Panel, Backup Modal, and BRC-100 Auth each run as separate CEF subprocesses with isolated V8 contexts.
+**Overlay Model**: Settings, Wallet Panel, and BRC-100 Auth each run as separate CEF subprocesses with isolated V8 contexts. (The standalone Backup Modal overlay was deleted in beta.3 Phase 8c O8 — the recovery-phrase prompt is part of the wallet panel's create flow.)
 
 > **⚠️ "CEF-based" ≠ "limited to prebuilt CEF."** We **build our own custom Chromium+CEF from source** (see `development-docs/DevOps-CICD/CEF_BUILD_RUNBOOK.md`). The CEF source-patch mechanism (`cef/patch/patch.cfg`, applied by `patcher.py` during `automate-git.py`) **is stood up and carrying real patches** (P3, 2026-08-05; `PLAN_patch_toolchain.md`). Farbling is now a **Blink patch set** in our CEF fork `Hodos-Browser/cef`, branch `hodos/7871` — C1 Supplement, C3 canvas, C4 WebGL `readPixels`, C5 WebAudio, C6 navigator, all gated on the single `HODOS_FARBLING` condition and registered in the fork's `HODOS_PATCHES.md`. The injected-JavaScript implementation it replaced (`FingerprintScript.h`) was **deleted 2026-08-09**. CEF is our *embedding API*, but the underlying Chromium is **ours to patch** — so capability is bounded by **patch scale + per-Chromium-bump maintenance, NOT by CEF's stock behavior.** When weighing a feature, don't reason "CEF won't let us"; reason "how large is the patch and how much does it churn each Chromium bump." (We remain a CEF *embedder*, not a full fork like Vivaldi — the more we patch the browser-UI layer, the closer we move to fork-level upkeep.)
 
@@ -222,7 +222,7 @@ Overlays are WS_POPUP windows (not children of `g_hwnd`). Each overlay has a dif
 |-----------|-------|-------------------|
 | **Click-outside (Mouse hook)** | `WH_MOUSE_LL` hook in C++ | Dropdown-style overlays (cookie, download, menu, profile, omnibox, …) — roster in `cef-native/src/handlers/CLAUDE.md` |
 | **HWND activation loss (`WM_ACTIVATE`)** | overlay's own WndProc, e.g. `WalletOverlayWndProc` | Wallet — **the primary wallet close path**. Guarded by `g_wallet_overlay_prevent_close` |
-| **IPC `overlay_close`** | React → `simple_handler.cpp` | Only the five full-panel roles: settings, wallet, backup, brc100auth, notification. Wallet and notification **hide** (keep-alive) rather than destroy. Dropdown panels are NOT handled here — each has its own hide IPC (`bookmarks_panel_hide`, `cookie_panel_hide`, `download_panel_hide`, `profile_panel_hide`, `siteinfo_panel_hide`, …). **A new overlay that sends `overlay_close` without a role arm silently no-ops.** |
+| **IPC `overlay_close`** | React → `simple_handler.cpp` | Only the four full-panel roles: settings, wallet, brc100auth, notification (backup was deleted in 8c O8). Wallet and notification **hide** (keep-alive) rather than destroy. Dropdown panels are NOT handled here — each has its own hide IPC (`bookmarks_panel_hide`, `cookie_panel_hide`, `download_panel_hide`, `profile_panel_hide`, `siteinfo_panel_hide`, …). **A new overlay that sends `overlay_close` without a role arm silently no-ops.** |
 | **Focus loss (`WM_ACTIVATEAPP`)** | `cef_browser_shell.cpp` main WndProc (primary window only) | Hides the **wallet**, the **omnibox** and the **site-info hub**. The wallet is *not* exempt — it is spared only while `g_wallet_overlay_prevent_close` is set; `g_file_dialog_active` spares all overlays by breaking out early |
 | **Old overlay cleanup** | Only `CreateSettingsOverlayWithSeparateProcess()` (destroy + recreate) and `CreateSettingsMenuOverlay()` (destroy + return = toggle-close). `CreateNotificationOverlay()` is keep-alive, reusing the HWND and injecting `window.showNotification()`, destroying only a stale HWND. | **Every other overlay — wallet included — takes the keep-alive early return** (`if (hwnd && IsWindow(hwnd)) { Show*Overlay(...); return; }`) and reuses the existing browser |
 
@@ -321,7 +321,7 @@ CEF overlays have quirks with form inputs. Follow these patterns:
 
 ### Reference Implementation
 - `WalletPanelPage.tsx` — working file input for wallet recovery
-- `BackupOverlayRoot.tsx` — working native text inputs
+- `WalletPanelPage.tsx` (recovery grid, PIN input) and `ProfilePickerOverlayRoot.tsx` — working native text inputs
 
 ### Focus & Keyboard Handling (C++ side)
 CEF windowless overlays need explicit focus AND keyboard event forwarding:
@@ -457,6 +457,7 @@ exactly what produces a hasty kill — which is why the script exists.
 - **`origin` = development** (BSVArchie fork). **ALL code changes land here first.** Flow: feature branch → `origin/staging` → `origin/main`. `staging` = integration + where internal test builds are fetched from; `main` = blessed release-candidate.
 - **`release` = the signed-build remote** (Hodos-Browser org; holds the GitHub signing keys). When ready for a **public** build, push `main` → `release` and run `BUILD_AND_RELEASE` there. `release` may be **ahead of** `origin` (e.g., release-specific auto-update commits) — that's tolerated, but **code originates in `origin` first**; `release` only consumes + adds release-specific bits.
 - **Rule:** never author feature code directly on `release`. Internal/beta test builds are versioned `0.3.x-beta` and stay private (fetched locally, not the newest GitHub release); only the deliberate public release is tagged `0.4.0` and pushed to `release`.
+- ⛔ **Rule (owner, 2026-09-12): nothing compiles C++ on push, by decision.** `origin` is a private repo on the free GitHub plan and the release builds run on the public org repo, so there is no CI build of the shell on `0.4.0`. Windows and Mac each compile their own platform locally. Therefore: **any commit that touches `cef-native/**` C++ gets a note in the current `development-docs/0.4.0-beta.3/MAC_RELAY_*.md` round naming the files, so the other side rebuilds after its next rebase.** A shared file with an `#ifdef _WIN32` / `#elif defined(__APPLE__)` split, or a `*_mac.*` file touched from Windows, is flagged explicitly. The release build (`release.yml`, both platforms) is the final backstop. No Mac-specific branch — it lengthens divergence without removing the blind spot.
 - *Open question:* whether `staging` stays a separate branch once `main` has CI-gated PRs — for now KEEP it as the integration / internal-beta branch.
 
 ## Build

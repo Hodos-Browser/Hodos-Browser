@@ -123,7 +123,6 @@ static bool IsOverlayEffectivelyVisible(HWND hwnd) {
     extern void CreateWalletOverlay(HINSTANCE hInstance, bool showImmediately, int iconRightOffset);
     extern void ShowWalletOverlay(int iconRightOffset, BrowserWindow* targetWin = nullptr);
     extern void HideWalletOverlay();
-    extern void CreateBackupOverlayWithSeparateProcess(HINSTANCE hInstance);
 #else
     // macOS global views
     extern NSView* g_webview_view;
@@ -277,19 +276,6 @@ static void InsertTabAfter(int window_id, int after_id, int new_id) {
         order.push_back(new_id);  // anchor vanished mid-flight — append rather than drop
     }
     TabManager::GetInstance().ReorderTabs(order);
-}
-
-// Global backup modal state management
-static bool g_backupModalShown = false;
-
-// Helper functions for backup modal state
-bool getBackupModalShown() {
-    return g_backupModalShown;
-}
-
-void setBackupModalShown(bool shown) {
-    g_backupModalShown = shown;
-    LOG_DEBUG_BROWSER("💾 Backup modal state set to: " + std::to_string(shown));
 }
 
 // ===== Ghost Tab Window for Tear-off Preview =====
@@ -519,6 +505,8 @@ CefRefPtr<CefBrowser> SimpleHandler::GetWalletBrowser() {
     auto* win = WindowManager::GetInstance().GetPrimaryWindow();
     return win ? win->wallet_browser : nullptr;
 }
+// Kept (returns nullptr on Windows) until the macOS half of the backup-overlay deletion
+// lands: cef_browser_shell_mac.mm still calls it. beta.3 Phase 8c O8, 2026-09-12.
 CefRefPtr<CefBrowser> SimpleHandler::GetBackupBrowser() {
     auto* win = WindowManager::GetInstance().GetPrimaryWindow();
     return win ? win->backup_browser : nullptr;
@@ -1623,10 +1611,6 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
         LOG_DEBUG_BROWSER("📡 Overlay URL: " + hodos::LogSafeUrl(browser->GetMainFrame()->GetURL().ToString()));
     }
 
-    if (role_ == "backup") {
-        LOG_DEBUG_BROWSER("📡 Backup URL: " + hodos::LogSafeUrl(browser->GetMainFrame()->GetURL().ToString()));
-    }
-
     // Deferred shield domain injection: when cookie panel finishes loading,
     // inject any pending domain. This fires AFTER React has mounted and registered
     // the setShieldDomain callback, fixing the first-open race condition.
@@ -2069,22 +2053,6 @@ void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
             }
         }, browser_ref), 150);
 
-    } else if (role_ == "backup") {
-        LOG_DEBUG_BROWSER("💾 Backup browser initialized.");
-        LOG_DEBUG_BROWSER("💾 Backup browser initialized. ID: " + std::to_string(browser->GetIdentifier()));
-
-        // CRITICAL: Set focus so keyboard input works in React input fields
-        browser->GetHost()->SetFocus(true);
-        LOG_DEBUG_BROWSER("⌨️ Backup browser focus enabled");
-
-        // Delayed resize/invalidate to fix first-render issue
-        CefRefPtr<CefBrowser> browser_ref = browser;
-        CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b) {
-            if (b && b->GetHost()) {
-                b->GetHost()->WasResized();
-                b->GetHost()->Invalidate(PET_VIEW);
-            }
-        }, browser_ref), 150);
 
     } else if (role_ == "brc100auth") {
         LOG_DEBUG_BROWSER("🔐 BRC-100 Auth browser initialized.");
@@ -4594,162 +4562,6 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
-    if (message_name == "mark_wallet_backed_up") {
-        // Phase 8c stage 3 batch 2 — MIGRATED. Arg 0 is the request id, echoed below.
-        const int mbuRequestId = message->GetArgumentList()->GetInt(0);
-        LOG_DEBUG_BROWSER("✅ Mark wallet as backed up requested");
-
-        nlohmann::json response;
-
-        try {
-            WalletService walletService;
-
-            if (!walletService.isConnected()) {
-                response["success"] = false;
-                response["error"] = "Wallet daemon is not running. Please start the daemon manually.";
-
-                LOG_DEBUG_BROWSER("❌ Cannot mark as backed up - daemon not running");
-            } else {
-                // Mark wallet as backed up
-                bool success = walletService.markWalletBackedUp();
-
-                if (success) {
-                    response["success"] = true;
-                    LOG_DEBUG_BROWSER("✅ Wallet marked as backed up successfully");
-                } else {
-                    response["success"] = false;
-                    response["error"] = "Failed to mark wallet as backed up";
-
-                    LOG_DEBUG_BROWSER("❌ Failed to mark wallet as backed up");
-                }
-            }
-
-        } catch (const std::exception& e) {
-            response["success"] = false;
-            response["error"] = "Failed to mark as backed up: " + std::string(e.what());
-
-            LOG_DEBUG_BROWSER("💥 Error marking wallet as backed up: " + std::string(e.what()));
-        }
-
-        // Send response back to frontend
-        CefRefPtr<CefProcessMessage> cefResponse = CefProcessMessage::Create("mark_wallet_backed_up_response");
-        CefRefPtr<CefListValue> responseArgs = cefResponse->GetArgumentList();
-        responseArgs->SetInt(0, mbuRequestId);
-        responseArgs->SetString(1, response.dump());
-
-        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, cefResponse);
-        LOG_DEBUG_BROWSER("📤 Mark backed up response sent: " + response.dump());
-
-        return true;
-    }
-
-    if (message_name == "get_wallet_info") {
-        // Phase 8c stage 3 batch 2 — MIGRATED. Arg 0 is the request id, echoed below.
-        const int gwiRequestId = message->GetArgumentList()->GetInt(0);
-        LOG_DEBUG_BROWSER("🔍 Get wallet info requested");
-
-        nlohmann::json response;
-
-        try {
-            WalletService walletService;
-
-            if (!walletService.isConnected()) {
-                response["success"] = false;
-                response["error"] = "Wallet daemon is not running. Please start the daemon manually.";
-
-                LOG_DEBUG_BROWSER("❌ Cannot get wallet info - daemon not running");
-            } else {
-                // Get wallet info
-                nlohmann::json walletInfo = walletService.getWalletInfo();
-
-                if (walletInfo.contains("version")) {
-                    response["success"] = true;
-                    response["wallet"] = walletInfo;
-
-                    LOG_DEBUG_BROWSER("✅ Wallet info retrieved successfully");
-                } else {
-                    response["success"] = false;
-                    response["error"] = "Failed to get wallet info: " + walletInfo.dump();
-
-                    LOG_DEBUG_BROWSER("❌ Failed to get wallet info: " + walletInfo.dump());
-                }
-            }
-
-        } catch (const std::exception& e) {
-            response["success"] = false;
-            response["error"] = "Failed to get wallet info: " + std::string(e.what());
-
-            LOG_DEBUG_BROWSER("💥 Error getting wallet info: " + std::string(e.what()));
-        }
-
-        // Send response back to frontend
-        CefRefPtr<CefProcessMessage> cefResponse = CefProcessMessage::Create("get_wallet_info_response");
-        CefRefPtr<CefListValue> responseArgs = cefResponse->GetArgumentList();
-        responseArgs->SetInt(0, gwiRequestId);
-        responseArgs->SetString(1, response.dump());
-
-        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, cefResponse);
-        // Length only: the payload carries the recovery phrase (`wallet.mnemonic`).
-        LOG_DEBUG_BROWSER("📤 Get wallet info response sent (requestId " +
-                          std::to_string(gwiRequestId) + ", " +
-                          std::to_string(response.dump().length()) + " bytes)");
-
-        return true;
-    }
-
-    if (message_name == "get_backup_modal_state") {
-        // Phase 8c stage 3 — MIGRATED. Arg 0 is the request id, echoed below.
-        const int bmsGetRequestId = message->GetArgumentList()->GetInt(0);
-        LOG_DEBUG_BROWSER("📨 Message received: get_backup_modal_state");
-
-        nlohmann::json response;
-        response["shown"] = getBackupModalShown();
-
-        CefRefPtr<CefProcessMessage> cefResponse = CefProcessMessage::Create("get_backup_modal_state_response");
-        CefRefPtr<CefListValue> responseArgs = cefResponse->GetArgumentList();
-        responseArgs->SetInt(0, bmsGetRequestId);
-        responseArgs->SetString(1, response.dump());
-
-        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, cefResponse);
-        LOG_DEBUG_BROWSER("📤 Backup modal state sent: " + response.dump());
-
-        return true;
-    }
-
-    if (message_name == "set_backup_modal_state") {
-        // Phase 8c stage 3 — MIGRATED. Args: 0 = requestId, 1 = shown (bool).
-        const int bmsSetRequestId = message->GetArgumentList()->GetInt(0);
-        LOG_DEBUG_BROWSER("📨 Message received: set_backup_modal_state");
-
-        CefRefPtr<CefListValue> args = message->GetArgumentList();
-        LOG_DEBUG_BROWSER("🔍 Args size: " + std::to_string(args->GetSize()));
-
-        if (args->GetSize() > 0) {
-            LOG_DEBUG_BROWSER("🔍 Arg 0 type: " + std::to_string(args->GetType(0)));
-            LOG_DEBUG_BROWSER("🔍 Arg 0 as string: " + args->GetString(0).ToString());
-            LOG_DEBUG_BROWSER("🔍 Arg 0 as int: " + std::to_string(args->GetInt(0)));
-            LOG_DEBUG_BROWSER("🔍 Arg 0 as double: " + std::to_string(args->GetDouble(0)));
-        }
-
-        bool shown = args->GetBool(1);
-        LOG_DEBUG_BROWSER("🔍 Parsed boolean: " + std::to_string(shown));
-        setBackupModalShown(shown);
-
-        // Send confirmation response
-        nlohmann::json response;
-        response["success"] = true;
-
-        CefRefPtr<CefProcessMessage> cefResponse = CefProcessMessage::Create("set_backup_modal_state_response");
-        CefRefPtr<CefListValue> responseArgs = cefResponse->GetArgumentList();
-        responseArgs->SetInt(0, bmsSetRequestId);
-        responseArgs->SetString(1, response.dump());
-
-        browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, cefResponse);
-        LOG_DEBUG_BROWSER("📤 Backup modal state updated: " + std::to_string(shown));
-
-        return true;
-    }
-
     // ========== WALLET CLOSE PREVENTION (mnemonic display / PIN entry) ==========
     if (message_name == "wallet_prevent_close") {
         extern bool g_wallet_overlay_prevent_close;
@@ -4915,11 +4727,6 @@ bool SimpleHandler::OnProcessMessageReceived(
             target_browser = (walletOwnerWin && walletOwnerWin->wallet_browser)
                 ? walletOwnerWin->wallet_browser : GetWalletBrowser();
             LOG_DEBUG_BROWSER("✅ Found wallet overlay window (global): " + std::to_string(reinterpret_cast<uintptr_t>(target_hwnd)));
-        } else if (role_ == "backup") {
-            extern HWND g_backup_overlay_hwnd;
-            target_hwnd = g_backup_overlay_hwnd;  // in-process (not FindWindow — would match another instance)
-            target_browser = GetBackupBrowser();
-            LOG_DEBUG_BROWSER("✅ Found backup overlay window: " + std::to_string(reinterpret_cast<uintptr_t>(target_hwnd)));
         } else if (role_ == "brc100auth") {
             extern HWND g_brc100_auth_overlay_hwnd;
             target_hwnd = g_brc100_auth_overlay_hwnd;
@@ -4969,7 +4776,6 @@ bool SimpleHandler::OnProcessMessageReceived(
                 // Clear the appropriate browser reference
                 if (role_ == "settings") settings_browser_ = nullptr;
                 else if (role_ == "wallet") wallet_browser_ = nullptr;
-                else if (role_ == "backup") backup_browser_ = nullptr;
                 else if (role_ == "brc100auth") brc100_auth_browser_ = nullptr;
             }
 
@@ -4994,9 +4800,6 @@ bool SimpleHandler::OnProcessMessageReceived(
                     g_settings_mouse_hook = nullptr;
                     LOG_DEBUG_BROWSER("✅ Settings mouse hook removed on overlay_close");
                 }
-            } else if (role_ == "backup") {
-                extern HWND g_backup_overlay_hwnd;
-                g_backup_overlay_hwnd = nullptr;
             } else if (role_ == "brc100auth") {
                 extern HWND g_brc100_auth_overlay_hwnd;
                 g_brc100_auth_overlay_hwnd = nullptr;
@@ -5009,7 +4812,6 @@ bool SimpleHandler::OnProcessMessageReceived(
         extern NSWindow* g_main_window;
         extern NSWindow* g_settings_overlay_window;
         extern NSWindow* g_wallet_overlay_window;
-        extern NSWindow* g_backup_overlay_window;
         extern NSWindow* g_brc100_auth_overlay_window;
         extern NSWindow* g_notification_overlay_window;
 
@@ -5022,9 +4824,6 @@ bool SimpleHandler::OnProcessMessageReceived(
         } else if (role_ == "wallet") {
             target_window = g_wallet_overlay_window;
             target_browser = GetWalletBrowser();
-        } else if (role_ == "backup") {
-            target_window = g_backup_overlay_window;
-            target_browser = GetBackupBrowser();
         } else if (role_ == "brc100auth") {
             target_window = g_brc100_auth_overlay_window;
             target_browser = GetBRC100AuthBrowser();
@@ -5075,7 +4874,6 @@ bool SimpleHandler::OnProcessMessageReceived(
                 // Clear the appropriate browser reference
                 if (role_ == "settings") settings_browser_ = nullptr;
                 else if (role_ == "wallet") wallet_browser_ = nullptr;
-                else if (role_ == "backup") backup_browser_ = nullptr;
                 else if (role_ == "brc100auth") brc100_auth_browser_ = nullptr;
                 else if (role_ == "notification") notification_browser_ = nullptr;
             }
@@ -5089,8 +4887,6 @@ bool SimpleHandler::OnProcessMessageReceived(
                 g_wallet_overlay_window = nullptr;
             } else if (role_ == "settings") {
                 g_settings_overlay_window = nullptr;
-            } else if (role_ == "backup") {
-                g_backup_overlay_window = nullptr;
             } else if (role_ == "brc100auth") {
                 g_brc100_auth_overlay_window = nullptr;
             } else if (role_ == "notification") {
@@ -5147,19 +4943,6 @@ bool SimpleHandler::OnProcessMessageReceived(
         }
 #elif defined(__APPLE__)
         CreateWalletOverlayWithSeparateProcess();
-#endif
-        return true;
-    }
-
-    if (message_name == "overlay_show_backup") {
-        LOG_DEBUG_BROWSER("💾 overlay_show_backup message received from role: " + role_);
-        LOG_DEBUG_BROWSER("💾 Creating backup overlay with separate process");
-
-#ifdef _WIN32
-        extern HINSTANCE g_hInstance;
-        CreateBackupOverlayWithSeparateProcess(g_hInstance);
-#elif defined(__APPLE__)
-        CreateBackupOverlayWithSeparateProcess();
 #endif
         return true;
     }
@@ -6109,10 +5892,6 @@ bool SimpleHandler::OnProcessMessageReceived(
             extern HWND g_wallet_overlay_hwnd;
             target_hwnd = g_wallet_overlay_hwnd;
             LOG_DEBUG_BROWSER("💰 Wallet overlay HWND (global): " + std::to_string(reinterpret_cast<uintptr_t>(target_hwnd)));
-        } else if (role_ == "backup") {
-            extern HWND g_backup_overlay_hwnd;
-            target_hwnd = g_backup_overlay_hwnd;
-            LOG_DEBUG_BROWSER("💾 Backup overlay HWND (global): " + std::to_string(reinterpret_cast<uintptr_t>(target_hwnd)));
         }
 
         if (target_hwnd && IsWindow(target_hwnd)) {
@@ -6130,12 +5909,10 @@ bool SimpleHandler::OnProcessMessageReceived(
 #elif defined(__APPLE__)
         extern NSWindow* g_settings_overlay_window;
         extern NSWindow* g_wallet_overlay_window;
-        extern NSWindow* g_backup_overlay_window;
 
         NSWindow* target_window = nullptr;
         if (role_ == "settings") target_window = g_settings_overlay_window;
         else if (role_ == "wallet") target_window = g_wallet_overlay_window;
-        else if (role_ == "backup") target_window = g_backup_overlay_window;
 
         if (target_window) {
             SetOverlayIgnoresMouseEvents((void*)target_window, !enable);
@@ -8738,7 +8515,7 @@ CefRefPtr<CefResourceRequestHandler> SimpleHandler::GetResourceRequestHandler(
     // role_, and our own overlays only ever load our own URLs — while the
     // anchoring removes the real defect, a query string reaching this branch.
     if (hodos::IsOurWalletOrigin(url) &&
-        (role_ == "wallet" || role_ == "wallet_panel" || role_ == "settings" || role_ == "backup")) {
+        (role_ == "wallet" || role_ == "wallet_panel" || role_ == "settings")) {
         LOG_DEBUG_BROWSER("🔒 Trusted overlay direct wallet request — bypassing all handlers");
         return nullptr;
     }
