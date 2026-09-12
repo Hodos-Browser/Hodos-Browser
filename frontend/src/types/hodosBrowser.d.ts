@@ -33,7 +33,7 @@ declare global {
         getBackupModalState: () => Promise<{ shown: boolean } | null>;
         // ⛔ A real boolean, not a stringified one — it rides as arg 1 via SetBool.
         setBackupModalState: (shown: boolean) => Promise<{ success: boolean } | null>;
-        // Stage 3 batch 2. Backs both `address.generate()` and `wallet.generateAddress()`.
+        // Stage 3 batch 2. Backs `address.generate()`.
         generateAddress: () => Promise<AddressData>;
         // Nested — this is the shape C++ sends, not the flat one the legacy type claimed.
         getInfo: () => Promise<WalletInfoResponse>;
@@ -93,18 +93,15 @@ declare global {
       };
       wallet: {
         getStatus: () => Promise<{ exists: boolean; needsBackup: boolean }>;
-        create: () => Promise<{ success: boolean; wallet?: { mnemonic: string; address?: string; version?: string; backedUp?: boolean }; error?: string }>;
-        load: () => Promise<{ success: boolean; address: string; mnemonic: string; version: string; backedUp: boolean }>;
+        // ⛔ `create`, `load`, `generateAddress`, `getCurrentAddress`, `getAddresses` and
+        // `getTransactionHistory` were DELETED in Phase 8c stage 3 batch 2 (no reachable
+        // caller; C++ round trips removed). Address generation is `address.generate`.
         getInfo: () => Promise<WalletInfoResponse>;
-        generateAddress: () => Promise<AddressData>;
-        getCurrentAddress: () => Promise<AddressData>;
-        getAddresses: () => Promise<AddressData[]>;
         markBackedUp: () => Promise<{ success: boolean; error?: string }>;
         getBackupModalState: () => Promise<{ shown: boolean } | null>;
         setBackupModalState: (shown: boolean) => Promise<{ success: boolean } | null>;
         getBalance: () => Promise<{ balance: number; bsvPrice?: number }>;
         sendTransaction: (data: { recipient: string; amount: number }) => Promise<TransactionResponse>;
-        getTransactionHistory: () => Promise<any[]>;
       };
       address: {
         generate: () => Promise<AddressData>;
@@ -145,21 +142,18 @@ declare global {
     //   onSendTransactionResponse / onSendTransactionError
     // ⛔ REMOVED by Phase 8c stage 3 — getBalance is routed by request id.
     //   onGetBalanceResponse / onGetBalanceError
-    onGetTransactionHistoryResponse?: (data: any[]) => void;
-    onGetTransactionHistoryError?: (error: string) => void;
+    // ⛔ REMOVED by Phase 8c stage 3 batch 2 — the methods were DELETED, not migrated
+    // (no reachable caller):
+    //   onGetTransactionHistoryResponse / onGetTransactionHistoryError
+    //   onCreateWalletResponse / onCreateWalletError
+    //   onLoadWalletResponse / onLoadWalletError
+    //   onGetCurrentAddressResponse / onGetCurrentAddressError
+    //   onGetAddressesResponse / onGetAddressesError
     // ⛔ REMOVED by Phase 8c stage 1 — `wallet.getStatus` no longer uses a global
     // callback slot. Re-declaring these would invite a caller to reintroduce the race.
     //   onWalletStatusResponse / onWalletStatusError
-    onCreateWalletResponse?: (data: { success: boolean; mnemonic: string; address: string; version: string }) => void;
-    onCreateWalletError?: (error: string) => void;
-    onLoadWalletResponse?: (data: { success: boolean; address: string; mnemonic: string; version: string; backedUp: boolean }) => void;
-    onLoadWalletError?: (error: string) => void;
     // ⛔ REMOVED by Phase 8c stage 3 batch 2 — wallet.getInfo is routed by request id.
     //   onGetWalletInfoResponse / onGetWalletInfoError
-    onGetCurrentAddressResponse?: (data: AddressData) => void;
-    onGetCurrentAddressError?: (error: string) => void;
-    onGetAddressesResponse?: (data: AddressData[]) => void;
-    onGetAddressesError?: (error: string) => void;
     // ⛔ REMOVED by Phase 8c stage 3 batch 2 — wallet.markBackedUp is routed by request id.
     //   onMarkWalletBackedUpResponse / onMarkWalletBackedUpError
     // ⛔ REMOVED by Phase 8c stage 3 — both backup-modal-state calls are routed by id.

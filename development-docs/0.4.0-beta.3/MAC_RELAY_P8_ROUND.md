@@ -100,10 +100,25 @@ the fabrication and mark everything `Spendable` without ever erroring. Notes are
 |---|---|
 | 🚨 `token_outputs_destroyed_by_dust_paths` | ✅ **closed this round** |
 | `placeholder_resolution_failure_broadcasts_anyway` | ⬜ open |
-| `bridge_single_slot_callbacks_race` (remainder) | ⬜ open |
+| `bridge_single_slot_callbacks_race` (remainder) | 🚧 **in progress on Windows as Phase 8c** — see M7 |
 
 ⛔ Per `SPRINT_PLAN.md` §4.1 these are a **holding pattern, not a queue anyone pulls from** — a ticket
 is not work until the owner assigns it. Do not start either one.
+
+## M7 — 🍎 Phase 8c (bridge request ids) touches SHARED C++ and one Mac-lane file
+
+Unlike 8a/8b this is **not Rust-only**. Owed to Mac as a verification, not a port
+(`phase-8c-bridge-request-ids/PHASE_CONTRACT.md` `O6`):
+
+| What changed | Where | Mac's job |
+|---|---|---|
+| Per-request-id promise map (`WalletBridgeV8Handler`, `s_pendingBridgeCalls`, `ResolveBridgeCall` / `RejectBridgeCall`) + 8 migrated methods | `simple_render_process_handler.cpp` (shared) | Build, then from CDP on the header page assert `hodosBrowser.bridge.getStatus.toString()` contains `[native code]` and run 3 concurrent `wallet.getBalance()` — expect 3 correct answers, not 2-of-3 |
+| Request-id echo in 8 browser handlers; the `address_generate` handler's byte-identical `#ifdef _WIN32` / `#else` copies **collapsed to one** | `simple_handler.cpp` (shared) | Confirm `address.generate()` still resolves an address on Mac — the `#else` arm you were compiled against is gone, by design |
+| ⚠️ **Mac-lane file:** `createWallet`, `loadWallet`, `getAllAddresses`, `getCurrentAddress`, `createTransaction`, `signTransaction`, `broadcastTransaction`, `getTransactionHistory` **deleted** (their only callers were IPC handlers with no JS sender) | `WalletService_mac.cpp` + the shared `WalletService.h` | Build only. Nothing to port; flagged so you do not edit those lines concurrently |
+
+Batch history: stage 1 `getStatus` · stage 2 `sendTransaction` · batch 1 `getBalance`, `get/setBackupModalState` ·
+batch 2 (2026-09-12) `address.generate`, `getInfo`, `markBackedUp` + the deletions above. 34 legacy slots
+(cookies, bookmarks) remain; each further batch will add to this table.
 
 ## M7 — Instrument discipline (unchanged from 7d; all still cost real time)
 

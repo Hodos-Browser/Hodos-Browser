@@ -125,9 +125,9 @@ if (!window.hodosBrowser.overlay?.hide) {
 // `AddressHandler` — that handler makes a SYNCHRONOUS wallet call on the renderer thread,
 // and this override is what has kept it unreachable. Keep overriding.
 //
-// Under the legacy bridge this and `wallet.generateAddress` shared one global slot pair
-// (`onAddressGenerated` / `onAddressError`), so a call through either could steal the
-// other's reply. Both now go through the same native, id-routed function.
+// Under the legacy bridge this and the (now deleted, caller-less) `wallet.generateAddress`
+// shared one global slot pair (`onAddressGenerated` / `onAddressError`), so a call through
+// either could steal the other's reply. This is now the only entry point.
 window.hodosBrowser.address.generate = () => {
   if (!window.hodosBrowser?.bridge?.generateAddress) {
     return Promise.reject(new Error('address.generate: native bridge unavailable'));
@@ -167,63 +167,11 @@ if (!window.hodosBrowser.wallet) {
       return window.hodosBrowser.bridge.getStatus();
     },
 
-    create: () => {
-      console.log("🆕 JS: Sending create_wallet to native");
-      return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          delete window.onCreateWalletResponse;
-          delete window.onCreateWalletError;
-          reject(new Error('create_wallet timed out'));
-        }, 10000);
-
-        window.onCreateWalletResponse = (data: any) => {
-          clearTimeout(timeout);
-          console.log("✅ Wallet created:", data);
-          resolve(data);
-          delete window.onCreateWalletResponse;
-          delete window.onCreateWalletError;
-        };
-
-        window.onCreateWalletError = (error: string) => {
-          clearTimeout(timeout);
-          console.error("❌ Wallet creation error:", error);
-          reject(new Error(error));
-          delete window.onCreateWalletResponse;
-          delete window.onCreateWalletError;
-        };
-
-        window.cefMessage?.send('create_wallet', []);
-      });
-    },
-
-    load: () => {
-      console.log("📂 JS: Sending load_wallet to native");
-      return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          delete window.onLoadWalletResponse;
-          delete window.onLoadWalletError;
-          reject(new Error('load_wallet timed out'));
-        }, 10000);
-
-        window.onLoadWalletResponse = (data: any) => {
-          clearTimeout(timeout);
-          console.log("✅ Wallet loaded:", data);
-          resolve(data);
-          delete window.onLoadWalletResponse;
-          delete window.onLoadWalletError;
-        };
-
-        window.onLoadWalletError = (error: string) => {
-          clearTimeout(timeout);
-          console.error("❌ Wallet load error:", error);
-          reject(new Error(error));
-          delete window.onLoadWalletResponse;
-          delete window.onLoadWalletError;
-        };
-
-        window.cefMessage?.send('load_wallet', []);
-      });
-    },
+    // ⛔ DELETED in Phase 8c stage 3 batch 2, not migrated: `create`, `load`,
+    // `generateAddress`, `getCurrentAddress`, `getAddresses`, `getTransactionHistory`.
+    // None had a reachable caller (`useWallet()` had no consumers; `create`'s only call
+    // sat inside a commented-out block), and their C++ round trips are gone with them.
+    // Wallet creation / recovery is the wallet overlay's `walletFetch` path, not this one.
 
     // ⭐ MIGRATED — Phase 8c stage 3 batch 2. Was batch 1's RED control: the still-legacy
     // sibling that proved the harness sees the bug (10,013 ms, 2 of 3 rejected). The
@@ -237,77 +185,6 @@ if (!window.hodosBrowser.wallet) {
         return Promise.reject(new Error('wallet.getInfo: native bridge unavailable'));
       }
       return window.hodosBrowser.bridge.getInfo();
-    },
-
-    // ⭐ MIGRATED — Phase 8c stage 3 batch 2. Same IPC and, under the legacy bridge, the
-    // SAME global slot pair as `address.generate` above. One native function backs both.
-    generateAddress: () => {
-      if (!window.hodosBrowser?.bridge?.generateAddress) {
-        return Promise.reject(new Error('wallet.generateAddress: native bridge unavailable'));
-      }
-      return window.hodosBrowser.bridge.generateAddress();
-    },
-
-    getCurrentAddress: () => {
-      console.log("📍 JS: Sending get_current_address to native");
-      return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          delete window.onGetCurrentAddressResponse;
-          delete window.onGetCurrentAddressError;
-          reject(new Error('get_current_address timed out'));
-        }, 10000);
-
-        window.onGetCurrentAddressResponse = (data: any) => {
-          clearTimeout(timeout);
-          console.log("✅ Current address retrieved:", data);
-          resolve(data);
-          delete window.onGetCurrentAddressResponse;
-          delete window.onGetCurrentAddressError;
-        };
-
-        window.onGetCurrentAddressError = (error: string) => {
-          clearTimeout(timeout);
-          console.error("❌ Current address error:", error);
-          reject(new Error(error));
-          delete window.onGetCurrentAddressResponse;
-          delete window.onGetCurrentAddressError;
-        };
-
-        window.cefMessage?.send('get_current_address', []);
-      });
-    },
-
-    getAddresses: () => {
-      console.log("📍 JS: Sending get_addresses to native");
-      return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          delete window.onGetAddressesResponse;
-          delete window.onGetAddressesError;
-          reject(new Error('get_addresses timed out'));
-        }, 10000);
-
-        window.onGetAddressesResponse = (data: any) => {
-          clearTimeout(timeout);
-          console.log("✅ All addresses retrieved:", data);
-          if (data.success) {
-            resolve(data.addresses);
-          } else {
-            reject(new Error(data.error || "Failed to get addresses"));
-          }
-          delete window.onGetAddressesResponse;
-          delete window.onGetAddressesError;
-        };
-
-        window.onGetAddressesError = (error: string) => {
-          clearTimeout(timeout);
-          console.error("❌ Get addresses error:", error);
-          reject(new Error(error));
-          delete window.onGetAddressesResponse;
-          delete window.onGetAddressesError;
-        };
-
-        window.cefMessage?.send('get_addresses', []);
-      });
     },
 
     // ⭐ MIGRATED — Phase 8c stage 3 batch 2. Records that the user backed up their
@@ -379,35 +256,6 @@ if (!window.hodosBrowser.wallet) {
       }
       return window.hodosBrowser.bridge.sendTransaction(JSON.stringify(data));
     },
-
-    getTransactionHistory: () => {
-      console.log("📜 JS: Sending get_transaction_history to native");
-      return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          delete window.onGetTransactionHistoryResponse;
-          delete window.onGetTransactionHistoryError;
-          reject(new Error('get_transaction_history timed out'));
-        }, 10000);
-
-        window.onGetTransactionHistoryResponse = (data: any) => {
-          clearTimeout(timeout);
-          console.log("✅ Transaction history retrieved:", data);
-          resolve(data);
-          delete window.onGetTransactionHistoryResponse;
-          delete window.onGetTransactionHistoryError;
-        };
-
-        window.onGetTransactionHistoryError = (error: string) => {
-          clearTimeout(timeout);
-          console.error("❌ Transaction history error:", error);
-          reject(new Error(error));
-          delete window.onGetTransactionHistoryResponse;
-          delete window.onGetTransactionHistoryError;
-        };
-
-        window.cefMessage?.send('get_transaction_history', []);
-      });
-    }
   };
 }
 

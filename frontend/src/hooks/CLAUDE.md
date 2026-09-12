@@ -26,7 +26,6 @@ Permission decisions are **not** made here or anywhere in C++. The decision engi
 | Hook | Purpose | Communication | Polling |
 |------|---------|---------------|---------|
 | `useHodosBrowser` | Navigation, identity, address generation | V8 + IPC | No |
-| `useWallet` | Wallet lifecycle (create/load/status/balance/send) | `window.hodosBrowser.wallet.*` | No |
 | `useBalance` | Balance + USD conversion | V8 + localStorage cache | No |
 | `useBackgroundBalancePoller` | Keeps balance cache warm for overlays | V8 → localStorage | 30s |
 | `useAddress` | BSV address generation + clipboard | V8 | No |
@@ -49,12 +48,12 @@ Permission decisions are **not** made here or anywhere in C++. The decision engi
 | `useDebounce` | Generic callback debouncing utility | N/A | No |
 | `useBitcoinBrowser` | **Dead file** — byte-identical copy of `useHodosBrowser.ts`, and it even exports the symbol `useHodosBrowser`. Zero importers. | — | — |
 
-**Currently unconsumed by any component/page:** `useWallet` (no importers anywhere in `frontend/src`) and `useBitcoinBrowser` (dead). `useDebounce` has exactly one consumer — `useOmniboxSuggestions`. Everything else is imported by at least one `.tsx` page or component.
+**Currently unconsumed by any component/page:** `useBitcoinBrowser` (dead). `useWallet` — also consumer-less — was **deleted** in beta.3 Phase 8c batch 2 together with the six `window.hodosBrowser.wallet.*` methods only it called. `useDebounce` has exactly one consumer — `useOmniboxSuggestions`. Everything else is imported by at least one `.tsx` page or component.
 
 ## Communication Patterns
 
 ### V8 / Bridge Pattern (`window.hodosBrowser.*`)
-Used by: `useWallet`, `useBalance`, `useBackgroundBalancePoller`, `useAddress`, `useTransaction`, `useHistory`, `useBookmarks`, `useHodosBrowser`, `useOmniboxSuggestions`
+Used by: `useBalance`, `useBackgroundBalancePoller`, `useAddress`, `useTransaction`, `useHistory`, `useBookmarks`, `useHodosBrowser`, `useOmniboxSuggestions`
 
 ```typescript
 // Async bridge call (most hooks)

@@ -376,6 +376,16 @@ rejected** because `WalletService::makeHttpRequest` swallows transport failure. 
 id in that handler is correct by construction (same shape as stage 2's `P8c-A2b`, where it was
 measured), but it is not exercisable without a stub. Recorded as such rather than claimed.
 
+### `P8c-A4c` — 🟢 after commit 2 (the deletions), the surface is exactly what the contract says
+
+Rebuilt and re-measured on the same rig: `hodosBrowser.wallet` holds **exactly** `getStatus`, `getInfo`,
+`markBackedUp`, `getBackupModalState`, `setBackupModalState`, `getBalance`, `sendTransaction`;
+`hodosBrowser.bridge` holds the 8 native functions; **zero** `window.on*` globals of the wallet /
+address / transaction-history families remain on the page. `address.generate` ×3 concurrent →
+**3 / 3 fulfilled, 3 distinct addresses, 32 ms**; `wallet.generateAddress` is `undefined`. The
+harness's own mixed-entry-point row now throws on the deleted twin — which is the correct outcome
+of the deletion, not a regression.
+
 ### O5 — two real latencies
 
 `getInfo` **3 ms**, `address.generate` **10 ms** (single calls, warm). Neither is the slowest real

@@ -224,43 +224,18 @@ nlohmann::json WalletService::getWalletInfo() {
     return makeHttpRequest("GET", "/wallet/info", "");
 }
 
-nlohmann::json WalletService::createWallet() {
-    return makeHttpRequest("POST", "/wallet/create", "");
-}
-
-nlohmann::json WalletService::loadWallet() {
-    return makeHttpRequest("GET", "/wallet/load", "");
-}
-
 bool WalletService::markWalletBackedUp() {
     auto result = makeHttpRequest("POST", "/wallet/markBackedUp", "");
     return result.contains("success") && result["success"].get<bool>();
-}
-
-nlohmann::json WalletService::getAllAddresses() {
-    return makeHttpRequest("GET", "/wallet/addresses", "");
 }
 
 nlohmann::json WalletService::generateAddress() {
     return makeHttpRequest("POST", "/wallet/address/generate", "");
 }
 
-nlohmann::json WalletService::getCurrentAddress() {
-    return makeHttpRequest("GET", "/wallet/address/current", "");
-}
-
-nlohmann::json WalletService::createTransaction(const nlohmann::json& transactionData) {
-    return makeHttpRequest("POST", "/createAction", transactionData.dump());
-}
-
-nlohmann::json WalletService::signTransaction(const nlohmann::json& transactionData) {
-    return makeHttpRequest("POST", "/signAction", transactionData.dump());
-}
-
-nlohmann::json WalletService::broadcastTransaction(const nlohmann::json& transactionData) {
-    return makeHttpRequest("POST", "/processAction", transactionData.dump(),
-                           kWalletBroadcastTimeoutMs);
-}
+// createWallet / loadWallet / getAllAddresses / getCurrentAddress / createTransaction /
+// signTransaction / broadcastTransaction / getTransactionHistory were removed in beta.3
+// Phase 8c batch 2 together with the orphaned IPC handlers that were their only callers.
 
 nlohmann::json WalletService::sendTransaction(const nlohmann::json& transactionData) {
     return makeHttpRequest("POST", "/transaction/send", transactionData.dump(),
@@ -269,8 +244,4 @@ nlohmann::json WalletService::sendTransaction(const nlohmann::json& transactionD
 
 nlohmann::json WalletService::getBalance(const nlohmann::json& balanceData) {
     return makeHttpRequest("GET", "/wallet/balance", "", kWalletBalanceTimeoutMs);
-}
-
-nlohmann::json WalletService::getTransactionHistory() {
-    return makeHttpRequest("GET", "/wallet/transactions", "");
 }

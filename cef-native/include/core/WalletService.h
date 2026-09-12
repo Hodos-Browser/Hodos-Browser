@@ -42,24 +42,22 @@ public:
     bool isHealthy();
 
     // Unified Wallet Methods
+    // (createWallet / loadWallet were removed in beta.3 Phase 8c batch 2: their only callers
+    // were IPC handlers with no reachable JS sender, and the Rust wallet's create path needs
+    // a PIN this client never sent. Wallet creation is the wallet overlay's `wallet_call`.)
     nlohmann::json getWalletStatus();
     nlohmann::json getWalletInfo();
-    nlohmann::json createWallet();
-    nlohmann::json loadWallet();
     bool markWalletBackedUp();
 
     // Address Management
-    nlohmann::json getAllAddresses();
+    // (getAllAddresses / getCurrentAddress removed with their orphaned IPC handlers, 8c batch 2.)
     nlohmann::json generateAddress();
-    nlohmann::json getCurrentAddress();
 
     // Transaction Methods
-    nlohmann::json createTransaction(const nlohmann::json& transactionData);
-    nlohmann::json signTransaction(const nlohmann::json& transactionData);
-    nlohmann::json broadcastTransaction(const nlohmann::json& transactionData);
+    // (createTransaction / signTransaction / broadcastTransaction / getTransactionHistory
+    // removed in 8c batch 2 — full C++ round trips with no JS sender, contract D-6 / D-7.)
     nlohmann::json sendTransaction(const nlohmann::json& transactionData);
     nlohmann::json getBalance(const nlohmann::json& balanceData);
-    nlohmann::json getTransactionHistory();
 
     // Connection management
     bool isConnected();

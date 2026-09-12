@@ -66,7 +66,7 @@ src/
 │   ├── panels/       #   EMPTY of code — only its CLAUDE.md remains
 │   ├── settings/     #   5 settings sub-pages
 │   └── wallet/       #   7 wallet tabs/sidebar + WalletDashboard.css
-├── hooks/            # 23 custom hooks for CEF/wallet communication
+├── hooks/            # 22 custom hooks for CEF/wallet communication
 ├── pages/            # 22 page/overlay components (21 routed, 2 orphaned — see above)
 ├── services/         # 2 modules: balanceCache.ts, walletApi.ts
 ├── styles/           # hodosTheme.ts (colors / fonts / prompt tiers)
@@ -94,9 +94,11 @@ Ten subdirectory docs exist. `services/` and `theme/` have **no** CLAUDE.md — 
 | `types/` | [types/CLAUDE.md](types/CLAUDE.md) | Type definitions, Window API surface, timestamp conventions |
 | `utils/` | [utils/CLAUDE.md](utils/CLAUDE.md) | URL detection, suggestion ranking/merging, BIP-21 URI parsing |
 
-### Hook roster (23)
+### Hook roster (22)
 
-`useAdblock`, `useAddress`, `useBackgroundBalancePoller`, `useBalance`, `useBitcoinBrowser`, `useBookmarks`, `useCookieBlocking`, `useCookies`, `useDebounce`, `useDownloads`, `useHistory`, `useHodosBrowser`, `useImport`, `useKeyboardShortcuts`, `useOmniboxSuggestions`, `usePaidCache`, `usePrivacyShield`, `useProfiles`, `useSettings`, `useSitePermissions`, `useTabManager`, `useTransaction`, `useWallet`.
+`useAdblock`, `useAddress`, `useBackgroundBalancePoller`, `useBalance`, `useBitcoinBrowser`, `useBookmarks`, `useCookieBlocking`, `useCookies`, `useDebounce`, `useDownloads`, `useHistory`, `useHodosBrowser`, `useImport`, `useKeyboardShortcuts`, `useOmniboxSuggestions`, `usePaidCache`, `usePrivacyShield`, `useProfiles`, `useSettings`, `useSitePermissions`, `useTabManager`, `useTransaction`.
+
+> `useWallet` was deleted in beta.3 Phase 8c batch 2 — it had no consumers, and the six `wallet.*` bridge methods only it called went with it.
 
 > `useBitcoinBrowser.ts` exports a function named `useHodosBrowser()` — a duplicate of `hooks/useHodosBrowser.ts`. Nothing imports it; treat it as dead and import from `useHodosBrowser.ts`.
 
@@ -155,7 +157,6 @@ if (res.ok) { const data = await res.json(); }
 | `useTabManager()` | `hooks/useTabManager.ts` | Tab CRUD, switching, reordering, tear-off |
 | `useKeyboardShortcuts()`, `KeyboardShortcutHandlers` | `hooks/useKeyboardShortcuts.ts` | Chrome-like keyboard shortcut handler |
 | `useDownloads()` | `hooks/useDownloads.ts` | Download state and control functions |
-| `useWallet()` | `hooks/useWallet.ts` | Wallet lifecycle (create/load/status/balance/send) |
 | `useBalance()`, `calculateUsdValue()` | `hooks/useBalance.ts` | Balance with localStorage caching + USD conversion |
 | `usePrivacyShield()` | `hooks/usePrivacyShield.ts` | Composite: adblock + cookie blocking state |
 | `useSitePermissions()`, `SitePermState`, `SitePermission` | `hooks/useSitePermissions.ts` | Tri-state (`ask`/`allow`/`block`) web-content capability permissions; codes must match `kSitePermCaps` in `simple_handler.cpp` |

@@ -36,7 +36,8 @@ window.hodosBrowser.history    // Synchronous history queries
 window.hodosBrowser.cookies    // Async cookie CRUD
 window.hodosBrowser.cookieBlocking  // Domain block/allow management
 window.hodosBrowser.bookmarks  // Bookmark + folder CRUD with tags
-window.hodosBrowser.wallet     // Wallet status, create, load, send, balance
+window.hodosBrowser.wallet     // Wallet status, info, backup state, send, balance
+window.hodosBrowser.bridge     // Phase 8c native promise-returning functions behind wallet.* / address.generate
 window.hodosBrowser.address    // Address generation
 window.hodosBrowser.navigation // URL navigation
 window.hodosBrowser.overlay    // Overlay show/hide/close

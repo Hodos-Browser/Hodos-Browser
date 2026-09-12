@@ -47,7 +47,7 @@ Newer APIs (cookies, cookie blocking, bookmarks) add a 5-second timeout that aut
 | `navigation` | `navigate` | URL navigation from React to CEF |
 | `overlay` | `overlay_show_settings`, `overlay_show_brc100_auth`, `overlay_close`, `overlay_hide`, `overlay_input` | Overlay lifecycle control (show/hide/close/input toggle) |
 | `address` | `address_generate` | BSV address generation |
-| `wallet` | `wallet_status_check`, `create_wallet`, `load_wallet`, `get_wallet_info`, `address_generate`, `get_current_address`, `get_addresses`, `mark_wallet_backed_up`, `get_backup_modal_state`, `set_backup_modal_state`, `get_balance`, `send_transaction`, `get_transaction_history` | Full wallet operations |
+| `wallet` | `wallet_status_check`, `get_wallet_info`, `mark_wallet_backed_up`, `get_backup_modal_state`, `set_backup_modal_state`, `get_balance`, `send_transaction` — all seven now route by request id through `hodosBrowser.bridge` (Phase 8c), not through `window.on*` globals. `create_wallet`, `load_wallet`, `get_current_address`, `get_addresses`, `get_transaction_history` were deleted in 8c batch 2 (no reachable caller) | Wallet operations that are not `walletFetch` |
 | `omnibox` | `omnibox_show`, `omnibox_hide`, `omnibox_create_or_show` | Address bar overlay control |
 | `cookies` | `cookie_get_all`, `cookie_delete`, `cookie_delete_domain`, `cookie_delete_all`, `cache_clear`, `cache_get_size` | Cookie and cache management |
 | `cookieBlocking` | `cookie_block_domain`, `cookie_unblock_domain`, `cookie_get_blocklist`, `cookie_allow_third_party`, `cookie_remove_third_party_allow`, `cookie_get_block_log`, `cookie_clear_block_log`, `cookie_get_blocked_count`, `cookie_reset_blocked_count` | Cookie blocking rules and analytics |

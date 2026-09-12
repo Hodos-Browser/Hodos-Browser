@@ -433,8 +433,9 @@ public:
             ipcName = "set_backup_modal_state";
             payload = Payload::Bool;
         } else if (method == "generateAddress") {
-            // Stage 3 batch 2. Shared by `address.generate()` and `wallet.generateAddress()`,
-            // which under the legacy bridge also shared ONE global slot pair.
+            // Stage 3 batch 2. Backs `address.generate()`. (Its caller-less twin
+            // `wallet.generateAddress`, which shared the legacy global slot pair with
+            // it, was deleted in the same batch.)
             ipcName = "address_generate";
         } else if (method == "getInfo") {
             ipcName = "get_wallet_info";
@@ -942,7 +943,7 @@ void SimpleRenderProcessHandler::OnContextCreated(
         CefV8Value::CreateFunction("setBackupModalState", bridgeHandler),
         V8_PROPERTY_ATTRIBUTE_READONLY);
     // Stage 3 batch 2 — the wallet namespace's live remainder. `generateAddress` backs
-    // BOTH `address.generate()` and `wallet.generateAddress()`.
+    // `address.generate()`.
     bridgeObject->SetValue("generateAddress",
         CefV8Value::CreateFunction("generateAddress", bridgeHandler),
         V8_PROPERTY_ATTRIBUTE_READONLY);
@@ -1450,10 +1451,11 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
 
     // MIGRATED (Phase 8c stage 3 batch 2). Args: 0 = requestId, 1 = address JSON.
     //
-    // ⚠️ Two JS entry points share this IPC — `hodosBrowser.address.generate()` (the live
-    // one, behind WalletPanel's receive flow) and `wallet.generateAddress()`. Under the
-    // legacy bridge they also shared ONE global slot pair, so a call through either could
-    // steal the other's reply. Both now resolve through `bridge.generateAddress`.
+    // ⚠️ Two JS entry points used to share this IPC — `hodosBrowser.address.generate()`
+    // (the live one, behind WalletPanel's receive flow) and `wallet.generateAddress()` —
+    // and under the legacy bridge they also shared ONE global slot pair, so a call
+    // through either could steal the other's reply. The caller-less twin was deleted;
+    // `address.generate()` resolves through `bridge.generateAddress`.
     //
     // This file used to carry this arm TWICE (the second copy unreachable); the
     // duplicate was removed with the migration rather than migrated in parallel.
@@ -1527,98 +1529,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         return true;
     }
 
-    // Transaction Response Handlers
-
-        if (message_name == "create_transaction_response") {
-        CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0);
-
-        LOG_DEBUG_RENDER(LogFmt() << "✅ Create transaction response received: " << responseJson);
-        LOG_DEBUG_RENDER(LogFmt() << "🔍 Browser ID: " << browser->GetIdentifier());
-        LOG_DEBUG_RENDER(LogFmt() << "🔍 Frame URL: " << hodos::LogSafeUrl(frame->GetURL().ToString()));
-        LOG_DEBUG_RENDER("✅ Create transaction response received: " + responseJson);
-        LOG_DEBUG_RENDER("🔍 Browser ID: " + std::to_string(browser->GetIdentifier()));
-        LOG_DEBUG_RENDER("🔍 Frame URL: " + hodos::LogSafeUrl(frame->GetURL().ToString()));
-
-        // Execute JavaScript to call the callback function directly
-        std::string js = "if (window.onCreateTransactionResponse) { window.onCreateTransactionResponse(" + responseJson + "); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-
-        return true;
-    }
-
-    if (message_name == "create_transaction_error") {
-        CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string errorMessage = args->GetString(0);
-
-        LOG_DEBUG_RENDER("❌ Create transaction error received: " + errorMessage);
-
-        // Execute JavaScript to handle the error
-        std::string js = "if (window.onCreateTransactionError) { window.onCreateTransactionError('" + errorMessage + "'); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-
-        return true;
-    }
-
-    if (message_name == "sign_transaction_response") {
-        CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0);
-
-        LOG_DEBUG_RENDER(LogFmt() << "✅ Sign transaction response received: " << responseJson);
-        LOG_DEBUG_RENDER(LogFmt() << "🔍 Browser ID: " << browser->GetIdentifier());
-        LOG_DEBUG_RENDER(LogFmt() << "🔍 Frame URL: " << hodos::LogSafeUrl(frame->GetURL().ToString()));
-        LOG_DEBUG_RENDER("✅ Sign transaction response received: " + responseJson);
-        LOG_DEBUG_RENDER("🔍 Browser ID: " + std::to_string(browser->GetIdentifier()));
-        LOG_DEBUG_RENDER("🔍 Frame URL: " + hodos::LogSafeUrl(frame->GetURL().ToString()));
-
-        // Execute JavaScript to dispatch the response event
-        std::string js = "window.dispatchEvent(new CustomEvent('cefMessageResponse', { detail: { message: 'sign_transaction_response', args: ['" + responseJson + "'] } }));";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-
-        return true;
-    }
-
-    if (message_name == "sign_transaction_error") {
-        CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string errorMessage = args->GetString(0);
-
-        LOG_DEBUG_RENDER(LogFmt() << "❌ Sign transaction error received: " << errorMessage);
-
-        // Execute JavaScript to handle the error
-        std::string js = "if (window.onSignTransactionError) { window.onSignTransactionError('" + errorMessage + "'); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-
-        return true;
-    }
-
-    if (message_name == "broadcast_transaction_response") {
-        CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0);
-
-        LOG_DEBUG_RENDER(LogFmt() << "✅ Broadcast transaction response received: " << responseJson);
-        LOG_DEBUG_RENDER(LogFmt() << "🔍 Browser ID: " << browser->GetIdentifier());
-        LOG_DEBUG_RENDER(LogFmt() << "🔍 Frame URL: " << hodos::LogSafeUrl(frame->GetURL().ToString()));
-
-        // Execute JavaScript to dispatch the response event
-        std::string js = "window.dispatchEvent(new CustomEvent('cefMessageResponse', { detail: { message: 'broadcast_transaction_response', args: ['" + responseJson + "'] } }));";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-
-        return true;
-    }
-
-    if (message_name == "broadcast_transaction_error") {
-        CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string errorMessage = args->GetString(0);
-
-        LOG_DEBUG_RENDER(LogFmt() << "❌ Broadcast transaction error received: " << errorMessage);
-
-        // Execute JavaScript to handle the error
-        std::string js = "if (window.onBroadcastTransactionError) { window.onBroadcastTransactionError('" + errorMessage + "'); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-
-        return true;
-    }
-
     // MIGRATED (Phase 8c stage 2 — the money path). Routed by request id.
     // Args: 0 = requestId (echoed by the browser process), 1 = result JSON.
     if (message_name == "send_transaction_response") {
@@ -1683,34 +1593,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
             return true;
         }
         RejectBridgeCall(args->GetInt(0), args->GetString(1).ToString());
-        return true;
-    }
-
-    if (message_name == "get_transaction_history_response") {
-        CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0);
-
-        LOG_DEBUG_RENDER(LogFmt() << "✅ Get transaction history response received: " << responseJson);
-        LOG_DEBUG_RENDER(LogFmt() << "🔍 Browser ID: " << browser->GetIdentifier());
-        LOG_DEBUG_RENDER(LogFmt() << "🔍 Frame URL: " << hodos::LogSafeUrl(frame->GetURL().ToString()));
-
-        // Execute JavaScript to dispatch the response event
-        std::string js = "window.dispatchEvent(new CustomEvent('cefMessageResponse', { detail: { message: 'get_transaction_history_response', args: ['" + responseJson + "'] } }));";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-
-        return true;
-    }
-
-    if (message_name == "get_transaction_history_error") {
-        CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string errorMessage = args->GetString(0);
-
-        LOG_DEBUG_RENDER(LogFmt() << "❌ Get transaction history error received: " << errorMessage);
-
-        // Execute JavaScript to handle the error
-        std::string js = "if (window.onGetTransactionHistoryError) { window.onGetTransactionHistoryError('" + errorMessage + "'); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-
         return true;
     }
 
@@ -1788,32 +1670,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         return true;
     }
 
-    if (message_name == "create_wallet_response") {
-        CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0);
-
-        LOG_DEBUG_RENDER(LogFmt() << "✅ Create wallet response received: " << responseJson);
-
-        // Execute JavaScript to call the callback function directly
-        std::string js = "if (window.onCreateWalletResponse) { window.onCreateWalletResponse(" + responseJson + "); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-
-        return true;
-    }
-
-    if (message_name == "load_wallet_response") {
-        CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0);
-
-        LOG_DEBUG_RENDER(LogFmt() << "✅ Load wallet response received: " << responseJson);
-
-        // Execute JavaScript to call the callback function directly
-        std::string js = "if (window.onLoadWalletResponse) { window.onLoadWalletResponse(" + responseJson + "); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-
-        return true;
-    }
-
     // MIGRATED (Phase 8c stage 3 batch 2). Args: 0 = requestId, 1 = payload.
     //
     // The payload carries the recovery phrase (`wallet.mnemonic`), so it is not logged.
@@ -1827,32 +1683,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         return true;
     }
 
-    if (message_name == "get_all_addresses_response") {
-        CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0);
-
-        LOG_DEBUG_RENDER(LogFmt() << "✅ Get all addresses response received: " << responseJson);
-
-        // Execute JavaScript to call the callback function directly
-        std::string js = "if (window.onGetAllAddressesResponse) { window.onGetAllAddressesResponse(" + responseJson + "); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-
-        return true;
-    }
-
-    if (message_name == "get_current_address_response") {
-        CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0);
-
-        LOG_DEBUG_RENDER(LogFmt() << "✅ Get current address response received: " << responseJson);
-
-        // Execute JavaScript to call the callback function directly
-        std::string js = "if (window.onGetCurrentAddressResponse) { window.onGetCurrentAddressResponse(" + responseJson + "); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-
-        return true;
-    }
-
     // MIGRATED (Phase 8c stage 3 batch 2). Args: 0 = requestId, 1 = payload.
     if (message_name == "mark_wallet_backed_up_response") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
@@ -1861,19 +1691,6 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
             return true;
         }
         ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
-        return true;
-    }
-
-    if (message_name == "get_addresses_response") {
-        CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0);
-
-        LOG_DEBUG_RENDER(LogFmt() << "✅ Get addresses response received: " << responseJson);
-
-        // Execute JavaScript to call the callback function directly
-        std::string js = "if (window.onGetAddressesResponse) { window.onGetAddressesResponse(" + responseJson + "); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-
         return true;
     }
 

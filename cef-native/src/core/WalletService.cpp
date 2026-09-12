@@ -408,34 +408,6 @@ nlohmann::json WalletService::getWalletInfo() {
     }
 }
 
-nlohmann::json WalletService::createWallet() {
-    LOG_INFO_BROWSER(LogFmt() << "🔍 Creating new wallet via Rust wallet...");
-
-    auto response = makeHttpRequest("POST", "/wallet/create");
-
-    if (response.contains("success") && response["success"].get<bool>()) {
-        LOG_INFO_BROWSER(LogFmt() << "✅ Wallet created successfully");
-        return response;
-    } else {
-        LOG_ERROR_BROWSER(LogFmt() << "❌ Failed to create wallet from Rust wallet");
-        return nlohmann::json::object();
-    }
-}
-
-nlohmann::json WalletService::loadWallet() {
-    LOG_INFO_BROWSER(LogFmt() << "🔍 Loading wallet from Rust wallet...");
-
-    auto response = makeHttpRequest("POST", "/wallet/load");
-
-    if (response.contains("success") && response["success"].get<bool>()) {
-        LOG_INFO_BROWSER(LogFmt() << "✅ Wallet loaded successfully");
-        return response;
-    } else {
-        LOG_ERROR_BROWSER(LogFmt() << "❌ Failed to load wallet from Rust wallet");
-        return nlohmann::json::object();
-    }
-}
-
 bool WalletService::markWalletBackedUp() {
     LOG_INFO_BROWSER(LogFmt() << "🔍 Marking wallet as backed up...");
 
@@ -451,34 +423,6 @@ bool WalletService::markWalletBackedUp() {
 }
 
 // Address Management Methods
-
-nlohmann::json WalletService::getAllAddresses() {
-    LOG_DEBUG_BROWSER(LogFmt() << "🔍 Getting all addresses from Rust wallet...");
-
-    auto response = makeHttpRequest("GET", "/wallet/addresses");
-
-    if (response.is_array()) {
-        LOG_INFO_BROWSER(LogFmt() << "✅ Addresses retrieved successfully");
-        return response;
-    } else {
-        LOG_ERROR_BROWSER(LogFmt() << "❌ Failed to get addresses from Rust wallet");
-        return nlohmann::json::array();
-    }
-}
-
-nlohmann::json WalletService::getCurrentAddress() {
-    LOG_DEBUG_BROWSER(LogFmt() << "🔍 Getting current address from Rust wallet...");
-
-    auto response = makeHttpRequest("GET", "/wallet/address/current");
-
-    if (response.contains("address")) {
-        LOG_INFO_BROWSER(LogFmt() << "✅ Current address retrieved successfully");
-        return response;
-    } else {
-        LOG_ERROR_BROWSER(LogFmt() << "❌ Failed to get current address from Rust wallet");
-        return nlohmann::json::object();
-    }
-}
 
 nlohmann::json WalletService::generateAddress() {
     LOG_INFO_BROWSER(LogFmt() << "🔍 Generating new address from Rust wallet...");
@@ -496,64 +440,6 @@ nlohmann::json WalletService::generateAddress() {
 
 
 // Transaction Methods Implementation
-
-nlohmann::json WalletService::createTransaction(const nlohmann::json& transactionData) {
-    // P0-A1: the request body is no longer logged -- it carries destination addresses
-    // and amounts, and this ran unconditionally in production.
-    LOG_DEBUG_BROWSER("💰 Creating transaction via Rust wallet...");
-
-    auto response = makeHttpRequest("POST", "/transaction/create", transactionData.dump());
-
-    if (response.contains("txid")) {
-        const std::string txid = response["txid"].get<std::string>();
-        LOG_INFO_BROWSER("✅ Transaction created successfully: " + txid);
-        return response;
-    } else {
-        // P0-A8: the error FIELD, not the whole envelope.
-        const std::string err = response.value("error", std::string("unknown error"));
-        LOG_ERROR_BROWSER("❌ Failed to create transaction: " + err);
-        return response; // Return the error envelope
-    }
-}
-
-nlohmann::json WalletService::signTransaction(const nlohmann::json& transactionData) {
-    // P0-A1: the request body is no longer logged -- it carries destination addresses
-    // and amounts, and this ran unconditionally in production.
-    LOG_DEBUG_BROWSER("✍️ Signing transaction via Rust wallet...");
-
-    auto response = makeHttpRequest("POST", "/transaction/sign", transactionData.dump());
-
-    if (response.contains("txid")) {
-        const std::string txid = response["txid"].get<std::string>();
-        LOG_INFO_BROWSER("✅ Transaction signed successfully: " + txid);
-        return response;
-    } else {
-        // P0-A8: the error FIELD, not the whole envelope.
-        const std::string err = response.value("error", std::string("unknown error"));
-        LOG_ERROR_BROWSER("❌ Failed to sign transaction: " + err);
-        return response; // Return the error envelope
-    }
-}
-
-nlohmann::json WalletService::broadcastTransaction(const nlohmann::json& transactionData) {
-    // P0-A1: the request body is no longer logged -- it carries destination addresses
-    // and amounts, and this ran unconditionally in production.
-    LOG_DEBUG_BROWSER("📡 Broadcasting transaction via Rust wallet...");
-
-    auto response = makeHttpRequest("POST", "/transaction/broadcast", transactionData.dump(),
-                                    kWalletBroadcastTimeoutMs);
-
-    if (response.contains("txid")) {
-        const std::string txid = response["txid"].get<std::string>();
-        LOG_INFO_BROWSER("✅ Transaction broadcast successfully: " + txid);
-        return response;
-    } else {
-        // P0-A8: the error FIELD, not the whole envelope.
-        const std::string err = response.value("error", std::string("unknown error"));
-        LOG_ERROR_BROWSER("❌ Failed to broadcast transaction: " + err);
-        return response; // Return the error envelope
-    }
-}
 
 nlohmann::json WalletService::getBalance(const nlohmann::json& balanceData) {
     // P0-A1: this is the hottest path in the browser -- 13,643 calls in one dev log,
@@ -586,21 +472,6 @@ nlohmann::json WalletService::getBalance(const nlohmann::json& balanceData) {
         nlohmann::json errorResponse;
         errorResponse["error"] = "Failed to fetch total balance";
         return errorResponse;
-    }
-}
-
-nlohmann::json WalletService::getTransactionHistory() {
-    LOG_DEBUG_BROWSER("📜 Getting transaction history from Rust wallet...");
-
-    auto response = makeHttpRequest("GET", "/transaction/history");
-
-    if (response.is_array() || response.contains("transactions")) {
-        LOG_DEBUG_BROWSER("✅ Transaction history retrieved successfully");
-        return response;
-    } else {
-        const std::string err = response.value("error", std::string("unknown error"));
-        LOG_ERROR_BROWSER("❌ Failed to get transaction history: " + err);
-        return response; // Return the error envelope
     }
 }
 
