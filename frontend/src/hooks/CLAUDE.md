@@ -8,7 +8,7 @@
 This directory holds **23 `.ts` hook files** (22 live + 1 dead duplicate). They encapsulate all communication between the React frontend and the C++ CEF shell / Rust wallet backend, using three communication patterns:
 
 1. **V8 / bridge calls** (`window.hodosBrowser.*`) — Namespaced functions either injected into the V8 JavaScript context by C++ (`simple_render_process_handler.cpp`) or, where C++ hasn't injected them, defined as `cefMessage` promise wrappers by `bridge/initWindowBridge.ts` under its guard pattern. Used for wallet, history, bookmarks, address generation, navigation, and Google Suggest.
-2. **IPC Window Callbacks** (`cefMessage.send()` → `window.onXxxResponse`) — Asynchronous message passing to C++ with responses delivered via global window callbacks. Used for adblock, cookies, settings, profiles, site permissions, paid-content cache, and imports.
+2. **IPC Window Callbacks** (`cefMessage.send()` → `window.onXxxResponse`) — ⛔ **No per-call slot of this shape remains** (beta.3 Phase 8c, batches 1–6): adblock, cookies, cookie blocking, bookmarks, the privacy shield and the paid-content cache all moved to native `hodosBrowser.bridge.*` functions routed by request id. What is left are **subscription-shaped** listeners installed once per mount that C++ re-emits into after every change: settings, profiles, site permissions, import. Do not add a new per-call `window.onXxxResponse`.
 3. **PostMessage Events** (`window.addEventListener('message', …)`) — Continuous state pushes from C++. Used for downloads and the tab manager.
 
 **No hook opens an HTTP connection to the Rust wallet and no hook hardcodes a wallet port.** Hooks reach the wallet through `window.hodosBrowser.wallet.*`; that IPC lands in C++, and **C++ owns the wallet port** — `127.0.0.1:31301` release / `31401` under `HODOS_DEV=1` (source of truth: `cef-native/include/core/PortConfig.h`; adblock is `31302` / `31402`).
@@ -30,7 +30,7 @@ Permission decisions are **not** made here or anywhere in C++. The decision engi
 | `useBackgroundBalancePoller` | Keeps balance cache warm for overlays | V8 → localStorage | 30s |
 | `useAddress` | BSV address generation + clipboard | V8 | No |
 | `useTransaction` | Send BSV transactions | V8 | No |
-| `useAdblock` (native `hodosBrowser.bridge.adblock*`, per-request-id since Phase 8c batch 5) | Ad blocking toggle + blocked count | IPC window callbacks | 10s |
+| `useAdblock` | Ad blocking toggle + blocked count | native `hodosBrowser.bridge.adblock*` (per-request-id, Phase 8c batch 5) | 10s |
 | `useCookieBlocking` | Cookie domain blocking + third-party control | native `hodosBrowser.bridge.cookie*` (per-request-id, Phase 8c batch 3) | 10s |
 | `useCookies` | Cookie CRUD + browser cache management | native `hodosBrowser.bridge.cookie*` / `cache*` (per-request-id, Phase 8c batch 3) | No |
 | `usePrivacyShield` | Composite: adblock + cookie blocking + per-site fingerprinting | Composed hooks + native `bridge.cookieCheckSiteAllowed` / `bridge.fingerprintGetSiteEnabled` (Phase 8c batch 5); `fingerprint_set_site_enabled` stays fire-and-forget IPC | No |
@@ -41,7 +41,7 @@ Permission decisions are **not** made here or anywhere in C++. The decision engi
 | `useBookmarks` | Bookmark list state over the bookmark bridge | `window.hodosBrowser.bookmarks` | No |
 | `useDownloads` | Download tracking + controls | IPC postMessage | No |
 | `useTabManager` | Tab lifecycle, reordering, payment badge | IPC postMessage | 30s (safety net) |
-| `usePaidCache` | BRC-121 paid-content cache size + clear | IPC window callbacks | No |
+| `usePaidCache` | BRC-121 paid-content cache size + clear | native `hodosBrowser.bridge.paidCache*` (per-request-id, Phase 8c batch 6) | No |
 | `useImport` | Import bookmarks/history from other browsers | IPC window callbacks | No |
 | `useOmniboxSuggestions` | History + Google autocomplete for omnibox | V8 + custom events | No |
 | `useKeyboardShortcuts` | Global keyboard shortcut registration | DOM events | No |
@@ -71,24 +71,20 @@ if (!window.hodosBrowser?.wallet?.getBalance) {
 }
 ```
 
-### IPC Window Callback Pattern (`cefMessage.send()`)
-Used by (⛔ legacy, Phase 8c is retiring it — `useCookies` / `useCookieBlocking` moved to the native bridge in batch 3): `useAdblock`, `usePaidCache`, `useSettings`, `useProfiles`, `useSitePermissions`, `useImport`, and the direct-IPC parts of `usePrivacyShield`
+### IPC Window Callback Pattern (`cefMessage.send()`) — subscription shape only
+Used by: `useSettings`, `useProfiles`, `useSitePermissions`, `useImport` (and `TabListOverlayRoot` for recently-closed tabs). ⛔ The **one-shot, per-call** form of this pattern — register a global, send, delete the global on reply, race a timeout — was retired by Phase 8c (batches 1–6, 2026-09-08 → 2026-09-13) because a single global slot cannot tell two in-flight callers apart. Every former per-call hook now calls a native `hodosBrowser.bridge.*` function.
 
 ```typescript
-// 1. Register callback on window
-window.onCookieBlocklistResponse = (data: string) => {
-  const parsed = JSON.parse(data);
-  resolve(parsed);
-};
-// 2. Send IPC message
-window.cefMessage.send('cookie_get_blocklist', []);
-// 3. Timeout fallback (3-5 seconds typical)
-setTimeout(() => reject(new Error('Timeout')), 5000);
+// Subscription shape: installed once per mount; C++ re-emits the authoritative state
+// after every get / set / reset, and the last emit winning is the intended semantics.
+useEffect(() => {
+  window.onSettingsResponse = (data) => setSettings(data);
+  window.cefMessage?.send('settings_get_all');
+  return () => { window.onSettingsResponse = undefined; };
+}, []);
 ```
 
-C++ dispatches IPC in `simple_handler.cpp`, calls `frame->ExecuteJavaScript()` to invoke the window callback.
-
-Two hooks deliberately keep a **persistent** (not one-shot) callback because C++ re-emits the authoritative state after every mutation: `useSitePermissions` (`onSitePermissionsResponse`) and `useSettings` (`onSettingsResponse`).
+C++ dispatches IPC in `simple_handler.cpp` and calls `frame->ExecuteJavaScript()` to invoke the window callback.
 
 ### PostMessage Pattern
 Used by: `useDownloads`, `useTabManager`

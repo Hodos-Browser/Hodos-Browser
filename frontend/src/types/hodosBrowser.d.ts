@@ -58,6 +58,9 @@ declare global {
         adblockCheckScriptletsEnabled: (domain: string) => Promise<{ domain: string; scriptletsEnabled: boolean }>;
         cookieCheckSiteAllowed: (domain: string) => Promise<{ domain: string; allowed: boolean }>;
         fingerprintGetSiteEnabled: (domain: string) => Promise<{ domain: string; enabled: boolean }>;
+        // Stage 3 batch 6 — paid-content cache (usePaidCache). The last per-call pair.
+        paidCacheGetSize: () => Promise<{ totalBytes: number; enabled: boolean }>;
+        paidCacheClear: () => Promise<{ success: boolean; totalBytes: number }>;
       };
       // Promise-based since the history-over-IPC move: the render process no longer
       // opens the history database itself, so every call is a round-trip to the

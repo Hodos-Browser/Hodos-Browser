@@ -519,6 +519,12 @@ public:
         } else if (method == "fingerprintGetSiteEnabled") {
             ipcName = "fingerprint_get_site_enabled";
             payload = Payload::Strs;
+        // Stage 3 batch 6 — the paid-content cache pair (`usePaidCache`), the last
+        // per-call legacy slots in the tree.
+        } else if (method == "paidCacheGetSize") {
+            ipcName = "paid_cache_get_size";
+        } else if (method == "paidCacheClear") {
+            ipcName = "paid_cache_clear";
         }
         // getInfo / markBackedUp / getBackupModalState / setBackupModalState were deleted
         // with the backup overlay (Phase 8c O8, 2026-09-12): their only consumer was
@@ -1122,8 +1128,15 @@ void SimpleRenderProcessHandler::OnContextCreated(
     bridgeObject->SetValue("fingerprintGetSiteEnabled",
         CefV8Value::CreateFunction("fingerprintGetSiteEnabled", bridgeHandler),
         V8_PROPERTY_ATTRIBUTE_READONLY);
+    // Stage 3 batch 6 — paid-content cache (2).
+    bridgeObject->SetValue("paidCacheGetSize",
+        CefV8Value::CreateFunction("paidCacheGetSize", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    bridgeObject->SetValue("paidCacheClear",
+        CefV8Value::CreateFunction("paidCacheClear", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
     hodosBrowser->SetValue("bridge", bridgeObject, V8_PROPERTY_ATTRIBUTE_READONLY);
-    LOG_DEBUG_RENDER("🌉 Bound WalletBridgeV8Handler (32 methods migrated)");
+    LOG_DEBUG_RENDER("🌉 Bound WalletBridgeV8Handler (34 methods migrated)");
 
     hodosBrowser->SetValue("history", historyObject, V8_PROPERTY_ATTRIBUTE_READONLY);
 
@@ -2007,20 +2020,24 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
     }
 
     if (message_name == "paid_cache_clear_response") {
+        // MIGRATED (Phase 8c stage 3 batch 6). Args: 0 = requestId, 1 = payload.
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onPaidCacheClearResponse) { window.onPaidCacheClearResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "paid_cache_clear_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
     if (message_name == "paid_cache_get_size_response") {
+        // MIGRATED (Phase 8c stage 3 batch 6). Args: 0 = requestId, 1 = payload.
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onPaidCacheGetSizeResponse) { window.onPaidCacheGetSizeResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "paid_cache_get_size_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 

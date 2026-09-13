@@ -38,7 +38,7 @@ window.onFooError = (error: string) => {
 window.cefMessage?.send('foo_action', [args]);
 ```
 
-⛔ Phase 8c is replacing this whole pattern with native, per-request-id promise functions on `window.hodosBrowser.bridge` (C++ holds the promise; no `window.on*` global at all). **Nothing in this file uses `window.on*` any more** as of batch 4 (2026-09-13): `wallet.*`, `address.generate`, every cookie / cache / cookie-blocking call, and `bookmarks.*` all go through the bridge. `useAdblock` and `usePrivacyShield` followed in batch 5. The remaining per-call legacy slots live in `usePaidCache`, `useImport` and `TabListOverlayRoot`; `useProfiles`, `useSettings` and `useSitePermissions` use persistent push listeners (a different shape, not a per-call race). Do not add new `window.on*` slots.
+⛔ Phase 8c is replacing this whole pattern with native, per-request-id promise functions on `window.hodosBrowser.bridge` (C++ holds the promise; no `window.on*` global at all). **Nothing in this file uses `window.on*` any more** as of batch 4 (2026-09-13): `wallet.*`, `address.generate`, every cookie / cache / cookie-blocking call, and `bookmarks.*` all go through the bridge. `useAdblock` and `usePrivacyShield` followed in batch 5. `usePaidCache` followed in batch 6 — **no per-call legacy slot remains in `frontend/src`.** `useProfiles`, `useSettings`, `useSitePermissions`, `useImport`, `TabListOverlayRoot` and the download-folder dialog use persistent push listeners (a subscription shape C++ re-emits into, not a per-call race). Do not add new `window.on*` slots.
 
 ## API Namespaces in `initWindowBridge.ts`
 

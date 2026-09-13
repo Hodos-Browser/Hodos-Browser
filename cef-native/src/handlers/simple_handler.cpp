@@ -6527,7 +6527,10 @@ bool SimpleHandler::OnProcessMessageReceived(
 
     // ========== PAID CONTENT CACHE (Phase 1 BRC-121) ==========
 
+    // Phase 8c batch 6 — MIGRATED (the last per-call legacy pair). Arg 0 is the bridge
+    // request id, echoed in arg 0 of the reply.
     if (message_name == "paid_cache_clear") {
+        const int reqId = message->GetArgumentList()->GetInt(0);
         PaidContentCache::GetInstance().Clear();
         nlohmann::json response;
         response["success"] = true;
@@ -6535,12 +6538,14 @@ bool SimpleHandler::OnProcessMessageReceived(
         std::string json_str = response.dump();
         CefRefPtr<CefProcessMessage> msg =
             CefProcessMessage::Create("paid_cache_clear_response");
-        msg->GetArgumentList()->SetString(0, json_str);
+        msg->GetArgumentList()->SetInt(0, reqId);
+        msg->GetArgumentList()->SetString(1, json_str);
         browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, msg);
         return true;
     }
 
     if (message_name == "paid_cache_get_size") {
+        const int reqId = message->GetArgumentList()->GetInt(0);
         int64_t total = PaidContentCache::GetInstance().GetTotalSize();
         nlohmann::json response;
         response["totalBytes"] = total;
@@ -6548,7 +6553,8 @@ bool SimpleHandler::OnProcessMessageReceived(
         std::string json_str = response.dump();
         CefRefPtr<CefProcessMessage> msg =
             CefProcessMessage::Create("paid_cache_get_size_response");
-        msg->GetArgumentList()->SetString(0, json_str);
+        msg->GetArgumentList()->SetInt(0, reqId);
+        msg->GetArgumentList()->SetString(1, json_str);
         browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, msg);
         return true;
     }

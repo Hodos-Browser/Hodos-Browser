@@ -152,6 +152,12 @@ your next rebase.
 request id: the six `adblock_*`, `cookie_check_site_allowed`, `fingerprint_get_site_enabled`),
 `simple_render_process_handler.cpp` (8 natives, 8 arms). Nothing platform-split. Rebuild after your next rebase.
 
+**Batch 6 (paid cache, 2026-09-13, the last per-call pair) touched shared C++:** `simple_handler.cpp`
+(`paid_cache_get_size` / `paid_cache_clear` echo the id), `simple_render_process_handler.cpp` (2 natives, 2 arms).
+**34 natives total; stage 3 is complete.** Nothing platform-split. Rebuild after your next rebase — and once
+you have, the one 8c row that is yours is a single concurrency check on macOS: 3 concurrent
+`hodosBrowser.wallet.getBalance()` from CDP on the header page, expecting 3 correct answers (M7).
+
 ⚠️ Per the new root-doc rule: this round touched `simple_handler.cpp`, `simple_render_process_handler.cpp`,
 `simple_app.cpp`, `cef_browser_shell.cpp`, `BrowserWindow.h`, `simple_handler.h` — **rebuild after your next
 rebase** before anything else. The `#elif __APPLE__` arms I removed only *referenced* your global; your `.mm`

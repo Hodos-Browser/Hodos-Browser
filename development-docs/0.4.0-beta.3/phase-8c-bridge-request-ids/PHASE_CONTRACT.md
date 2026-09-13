@@ -1,8 +1,12 @@
 # Phase 8c — per-request ids for the wallet bridge · PHASE CONTRACT
 
 **Workstream:** money-path correctness · **Ticket:** `TICKET_bridge_single_slot_callbacks_race.md`
-**Status:** 🟢 **STAGES 1 + 2 DONE. STAGE 3 IN PROGRESS — batches 1, 2 and 3 landed** (batch 3 = cookies,
-2026-09-12: **19 bridge natives**; `D-11` widened the phase to the hook-owned slots — see `O10`).
+**Status:** 🟢 **STAGES 1–3 COMPLETE (2026-09-13); stage 4 absorbed into the batches.** Six batches after the
+mechanism: wallet, backup-overlay deletion, cookies, bookmarks, adblock + privacy shield, paid cache.
+**34 bridge natives; zero per-call `window.on*` slots remain** (`P8c-A8`). Open at phase close: the
+owner-bound register rows `O1` (two txids, real money), `O2` (a genuinely late reply), `O5` (30 s
+deadline vs the slowest real call), `O6` (macOS verification — relay M7/M8), and the G11 baseline
+lowering that O8's deletion earned (its own commit, per working rule 6).
 ⛔ **8 native bridge functions, 9 JS methods migrated** — `getStatus`, `sendTransaction`, `getBalance`,
 `getBackupModalState`, `setBackupModalState`, and (batch 2, 2026-09-12) `address.generate` +
 `wallet.generateAddress` (one native `generateAddress` backs both), `getInfo`, `markBackedUp`.
@@ -535,6 +539,33 @@ Semantics changed on purpose: the six adblock calls used to resolve a made-up de
 the two privacy reads dropped their slot without resolving at all. All eight now reject on a real
 failure; click handlers and mount reads that fire-and-forget got a `.catch`, and hook state only moves
 on a real reply.
+
+### `P8c-A8` — 🟢 stage 3 batch 6: the paid-content cache pair, and the last per-call slot in the tree (2026-09-13)
+
+| Check | Result |
+|---|---|
+| `paidCacheGetSize` / `paidCacheClear` native; **34 natives total**; no `onPaidCache*` globals | ✅ |
+| ⭐ **Batch 5's RED, re-run on the migrated native** — `paidCacheGetSize` ×3 | **3 / 3 real replies, 3 ms** (was 2 of 3 rejected at 3,003 ms) |
+| clear → size | 20,645 B → `{success:true, totalBytes:0}` → 0 B ✅ |
+| 🟢 **`P8c-A3` observed directly** — two raw `paid_cache_get_size` sends with **no request id** (so the browser replies with id 0) bracketing one real bridge call | the real call resolved its own payload in 1 ms; `cef_debug.log` gained **exactly two** `bridge response for unknown requestId 0 — discarded, not misrouted` lines. An unknown-id reply is dropped, never delivered to whoever is waiting |
+| Consumer: `/browser-data?tab=cache` through `usePaidCache` | "Paid Content 0 B" card rendered |
+
+🔴 **RED for this batch = `P8c-A7`'s RED row**, measured one commit earlier on this exact slot
+(3 concurrent `paid_cache_get_size` under the legacy code → 2 of 3 rejected). `O7` said the final
+batch's RED would have to be a stub; it did not come to that, because batch 5 measured batch 6's slot
+before batch 6 migrated it. ⭐ That is the pattern the whole stage settled into: each batch's RED
+reproduces the *next* batch's hook code verbatim, so every slot was seen failing before it was fixed.
+
+### ✅ Stage 3 is COMPLETE — no per-call `window.on*` slot remains in `frontend/src`
+
+Per-call slots migrated or deleted, in order: wallet (5 + 3 migrated, 6 deleted), backup overlay
+(4 deleted with the overlay), cookies (15), bookmarks (5 migrated, 9 deleted), adblock + privacy
+shield (8), paid cache (2). Remaining `window.on*` assignments are all **subscription-shaped**
+(`D-13`): `useSettings`, `useProfiles`, `useSitePermissions`, `useImport`, `TabListOverlayRoot`'s
+recently-closed list, and `DownloadSettings`' native-folder-dialog callback — installed once per mount,
+re-emitted into by C++, last emit wins by design. **Stage 4** ("delete the declarations wholesale")
+was absorbed into the batches: every retired declaration in `hodosBrowser.d.ts` is already a
+`⛔ REMOVED` comment naming the batch, so nothing is left to delete.
 
 ### O5 — two real latencies
 

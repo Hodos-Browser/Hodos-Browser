@@ -117,11 +117,12 @@ const entries = window.hodosBrowser.history.get({ limit: 50 });
 ```
 
 ### 2. IPC Callbacks (`cefMessage.send()` → `window.onXxxResponse`) — ⛔ legacy, being retired by Phase 8c
-Asynchronous message passing with one-shot global callbacks. Still used by the paid-cache and import hooks as per-call slots, and by the profiles, settings and site-permissions hooks as PERSISTENT push listeners (C++ re-emits the full list after every change — not a per-call slot). Cookies, cookie blocking, bookmarks, adblock and the privacy shield moved to the bridge in Phase 8c.
+Asynchronous message passing with one-shot global callbacks. ⛔ No per-call slot of this shape is left as of Phase 8c batch 6 (2026-09-13). What remains are SUBSCRIPTION-shaped listeners installed once per mount that C++ re-emits into after every change — settings, profiles, site permissions, import, recently-closed, and the download-folder dialog callback. Do not add a new per-call `window.onXxxResponse`; use a `hodosBrowser.bridge` native (see bridge/CLAUDE.md).
 
 ```typescript
-window.onPaidCacheGetSizeResponse = (data) => { resolve(data); };
-window.cefMessage?.send('paid_cache_get_size', []);
+// subscription shape (settings): installed once, C++ re-emits after every change
+window.onSettingsResponse = (data) => setSettings(data);
+window.cefMessage?.send('settings_get_all');
 ```
 
 ### 3. PostMessage Events
