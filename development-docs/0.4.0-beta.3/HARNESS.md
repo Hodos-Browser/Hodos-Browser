@@ -100,6 +100,17 @@ reads *"baseline lowered by Phase 3.5"*. It was written when the phase was plann
 false. Correcting it is an edit to the instrument and therefore belongs in that same separate commit,
 not in the change it describes.
 
+### ✅ `G11` **60 → 59**, 2026-09-13 — lowered by beta.3 Phase 8c `O8`, in its own commit
+
+Phase 8c's `O8` deleted the dead backup-overlay chain (`267b079`). One of the lines that went with it
+was `CreateBackupOverlayWithSeparateProcess()`'s `WindowManager::GetInstance().GetPrimaryWindow()`
+lookup in `cef-native/src/handlers/simple_app.cpp`, and `preflight.ps1` reported
+*"59 violations, BELOW baseline 60 — lower the baseline"* on every run after it. Per this section and
+working rule #6 the baseline was **not** touched inside `267b079`; this commit lowers it, and while it
+is in the instrument it also retires the stale *"lowered by Phase 3.5"* owner text above (measured
+false by K4 — same commit, as that note asked). Re-measured by the script itself, and `-NegativeControl`
+re-run: the probe line must take the count to `60 > 59` and go red.
+
 ## 5. Execution loop
 
 ```
@@ -171,6 +182,7 @@ wrong reason.**
 | `G3` | F8 secret-log gate, Rust | **0** | 0 | ported from `test.yml` | — |
 | `G4` | F8 secret-log gate, C++ | **0** | 0 | ported from `test.yml` | — |
 | `G5` | full wallet HTTP response bodies reaching a sink | ~~15~~ → **0** | 0 | Phase 0 | ✅ Phase 0, 2026-08-18 |
+| `G11` | window-scoped work resolved through a process-global (`GetPrimaryWindow()` / `GetActiveTab()`) | ~~60~~ → **59** | 0 | Phase 3 (WS2) | ✅ beta.3 Phase 8c `O8`, 2026-09-13 (one site, with the backup-overlay deletion); beta.4 drives to 0 |
 | `G12` | unanchored host:port URL matchers on the wallet trust boundary | **4** | 0 | Phase 5 | — (driven to 0 by beta.4 W8) |
 
 ⭐ `G2` deliberately **does not** flag a prefix check — `rfind(X, 0) == 0` or `find(X) != 0`. Those

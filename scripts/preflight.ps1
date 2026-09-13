@@ -161,7 +161,7 @@ $Gates = @(
     [pscustomobject]@{
         Id       = 'G11'
         Name     = 'Window-scoped work resolved through a process-global (the wrong-window bug)'
-        Owner    = 'Phase 3 (WS2); baseline lowered by Phase 3.5, driven to target by beta.4'
+        Owner    = 'Phase 3 (WS2); 60 -> 59 by beta.3 Phase 8c O8 (2026-09-13); driven to target by beta.4'
         # A second launch of the SAME profile does not start a second process -- it forwards
         # over a named pipe and opens a second WINDOW in the running one. So any code that
         # asks a process-global "which window am I?" can act on the wrong one. MEASURED
@@ -195,7 +195,14 @@ $Gates = @(
         # Phase 3 fixed the two REPORTED symptoms (Ctrl+F/Ctrl+L, fullscreen) but those sites
         # used GetHeaderBrowser()/g_is_fullscreen, not the two patterns matched here, so the
         # count is unchanged by Phase 3 -- that is expected, not a failure to fix anything.
-        Baseline = 60
+        # (Phase 3.5 did not move it either -- HARNESS.md section 4 records why: its file and
+        # its globals are outside this gate's paths and pattern.)
+        #
+        # 2026-09-13, beta.3 Phase 8c O8: 59, MEASURED BY THIS SCRIPT after the backup-overlay
+        # deletion removed CreateBackupOverlayWithSeparateProcess()'s GetPrimaryWindow() lookup
+        # in simple_app.cpp. Lowered in its own commit per HARNESS.md section 4 / working rule 6,
+        # with -NegativeControl re-run.
+        Baseline = 59
         Target   = 0
         Paths    = @('cef-native/src/handlers', 'cef-native/src/core')
         Include  = @('*.cpp', '__preflight_probe.cpp')
