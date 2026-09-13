@@ -38,7 +38,7 @@ window.onFooError = (error: string) => {
 window.cefMessage?.send('foo_action', [args]);
 ```
 
-Bookmarks add a 5-second timeout that auto-rejects if no response arrives. ⛔ Phase 8c is replacing this whole pattern with native, per-request-id promise functions on `window.hodosBrowser.bridge` (C++ holds the promise; no `window.on*` global at all). Migrated so far: `wallet.getStatus/getBalance/sendTransaction`, `address.generate`, and every cookie / cache / cookie-blocking call. Do not add new `window.on*` slots.
+⛔ Phase 8c is replacing this whole pattern with native, per-request-id promise functions on `window.hodosBrowser.bridge` (C++ holds the promise; no `window.on*` global at all). **Nothing in this file uses `window.on*` any more** as of batch 4 (2026-09-13): `wallet.*`, `address.generate`, every cookie / cache / cookie-blocking call, and `bookmarks.*` all go through the bridge. The remaining legacy slots live in hooks (`useAdblock`, `usePrivacyShield`, `usePaidCache`, `useImport`, `useProfiles`, `useSettings`, `useSitePermissions`) and `TabListOverlayRoot`. Do not add new `window.on*` slots.
 
 ## API Namespaces in `initWindowBridge.ts`
 
@@ -50,8 +50,7 @@ Bookmarks add a 5-second timeout that auto-rejects if no response arrives. ⛔ P
 | `wallet` | `wallet_status_check`, `get_balance`, `send_transaction` — all three route by request id through `hodosBrowser.bridge` (Phase 8c), not through `window.on*` globals. `create_wallet`, `load_wallet`, `get_current_address`, `get_addresses`, `get_transaction_history` were deleted in 8c batch 2 (no reachable caller); `get_wallet_info`, `mark_wallet_backed_up`, `get/set_backup_modal_state` went with the backup overlay (8c O8) | Wallet operations that are not `walletFetch` |
 | `omnibox` | `omnibox_show`, `omnibox_hide`, `omnibox_create_or_show` | Address bar overlay control |
 | ~~`cookies`~~ / ~~`cookieBlocking`~~ | — | **Deleted in beta.3 Phase 8c batch 3 (2026-09-12).** They had no callers: `useCookies` / `useCookieBlocking` send their IPC themselves, and now do so through the native `hodosBrowser.bridge.cookie*` / `cache*` functions (15 of them, per-request-id) |
-| `bookmarks` | `bookmark_add`, `bookmark_get`, `bookmark_update`, `bookmark_remove`, `bookmark_search`, `bookmark_get_all`, `bookmark_is_bookmarked`, `bookmark_get_all_tags`, `bookmark_update_last_accessed` | Bookmark CRUD and search |
-| `bookmarks.folders` | `bookmark_folder_create`, `bookmark_folder_list`, `bookmark_folder_update`, `bookmark_folder_remove`, `bookmark_folder_get_tree` | Bookmark folder management |
+| `bookmarks` | `bookmark_add`, `bookmark_remove`, `bookmark_search`, `bookmark_get_all`, `bookmark_is_bookmarked` — all five route by request id through `hodosBrowser.bridge.bookmark*` (Phase 8c batch 4, 2026-09-13). `bookmark_get`, `bookmark_update`, `bookmark_get_all_tags`, `bookmark_update_last_accessed` and the five `bookmark_folder_*` IPCs were **deleted** (no caller); `BookmarkManager`'s folder/tag SQL remains | Bookmark CRUD and search used by `useBookmarks` |
 
 ## BRC-100 Bridge (`brc100.ts`)
 

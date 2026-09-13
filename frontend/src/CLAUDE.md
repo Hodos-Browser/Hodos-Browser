@@ -117,7 +117,7 @@ const entries = window.hodosBrowser.history.get({ limit: 50 });
 ```
 
 ### 2. IPC Callbacks (`cefMessage.send()` → `window.onXxxResponse`) — ⛔ legacy, being retired by Phase 8c
-Asynchronous message passing with one-shot global callbacks. Used for cookies, cookie blocking, settings, profiles, bookmarks.
+Asynchronous message passing with one-shot global callbacks. Still used by the adblock, privacy-shield, paid-cache, import, profiles, settings and site-permissions hooks; cookies, cookie blocking and bookmarks moved to the bridge in Phase 8c.
 
 ```typescript
 window.onAdblockBlockedCountResponse = (data) => { resolve(data); };

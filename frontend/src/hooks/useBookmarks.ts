@@ -41,24 +41,17 @@ export function useBookmarks() {
         if (!b) { setError('Bookmark API not available'); return; }
         setLoading(true);
         setError(null);
-        // Retry on slow machines: under a saturated UI thread (slow Win10) the getAll IPC
-        // round-trip can exceed its timeout and the late response is dropped, otherwise
-        // leaving the list silently empty. Re-request a couple of times before giving up.
-        for (let attempt = 0; attempt < 3; attempt++) {
-            try {
-                const res = await b.getAll(undefined, 200, 0);
-                setBookmarks(res.bookmarks ?? []);
-                setError(null);
-                setLoading(false);
-                return;
-            } catch (err) {
-                if (attempt === 2) {
-                    setError(err instanceof Error ? err.message : 'Failed to load bookmarks');
-                    setLoading(false);
-                } else {
-                    await new Promise(r => setTimeout(r, 400));
-                }
-            }
+        // Phase 8c batch 4: this used to retry three times because, under the single
+        // global callback slot, a reply that arrived after the 15 s timeout was DROPPED
+        // and the list stayed silently empty. The bridge resolves a late reply to its own
+        // promise, so the retry — a workaround for the defect itself — is retired.
+        try {
+            const res = await b.getAll(undefined, 200, 0);
+            setBookmarks(res.bookmarks ?? []);
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Failed to load bookmarks');
+        } finally {
+            setLoading(false);
         }
     }, []);
 

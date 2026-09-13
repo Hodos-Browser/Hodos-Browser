@@ -158,6 +158,18 @@ person copies"* — had already happened before the ticket was written.
 Batch 3 = cookies end to end: delete the dead bridge copies, 15 bridge natives, request id threaded
 through `CookieManager`'s async reply helpers, both hooks call the bridge.
 
+### 0.10 🚨 `D-12` — the bridge's JSON→V8 converter flattened nested payloads (batch 4, 2026-09-13)
+
+`ResolveBridgeCall` resolves through `jsonToV8`, which **by design** delivers any nested object or
+array inside an object as its `.dump()` string — the `identity.get` contract, whose callers parse it
+themselves. The legacy path evaluated the reply as a JSON **literal** (`window.on*(` + json + `)`), so
+nested values arrived as real objects and arrays. ⇒ every bridge reply since stage 1 was a silent
+contract change for any nested payload. Caught by batch 4's round trip: `bookmarks.getAll().bookmarks`
+came back as a **string** and `.find` threw. Fix: `jsonToV8(j, deep)`; the bridge passes `deep = true`,
+`identity.get` keeps its default. Stages 1–3 audited for exposure: `getStatus`, `getBalance`,
+`generateAddress` and every cookie payload are flat or top-level arrays of flat objects; see the
+`P8c-A6` row for `sendTransaction`.
+
 ## 1. Goal
 
 No bridge reply is ever delivered to the wrong caller, and no caller reports a failure that did not
@@ -473,6 +485,25 @@ fetches in the consumers got a `.catch(() => {})` for that reason. `CookieManage
 prints length only — it used to write every cookie value on the profile into the log at INFO.
 
 ⚠️ Dev-profile note: the empty-jar row wipes the dev cookie jar. Dev only, by design of the harness.
+
+### `P8c-A6` — 🟢🔴 stage 3 batch 4: bookmarks (2026-09-13), and the `D-12` converter fix
+
+Five natives behind the five `useBookmarks` calls; nine caller-less bookmark IPCs deleted at the
+bridge, handler and arm; `BookmarkManager`'s folder/tag SQL untouched. The 15 s `getAll` timeout and
+the hook's 3× retry retired (both were workarounds for a late reply being dropped by the slot).
+
+| Check | Result |
+|---|---|
+| 5 natives `[native code]`; namespace is exactly `add, getAll, isBookmarked, remove, search`; no `onBookmark*` globals | ✅ |
+| ×3 concurrent `getAll` / `isBookmarked` / `search` through the namespace | **3 / 3 own replies each, ≤2 ms** |
+| 🚨 **Nested shapes** — `getAll().bookmarks`, `bookmark.tags`, `cookieGetBlockLog()` entries | **First run: `bookmarks` was a STRING** (`.find is not a function`). `D-12`: the converter dumped nested values. After `jsonToV8(…, deep = true)`: `bookmarks` array ✅, `tags` array ✅, block-log entries objects ✅ |
+| add → isBookmarked → search → remove → isBookmarked | add ✅ (id 12), bookmarked ✅, removed ✅ — then **still bookmarked**: the first (failed) run had already added the same URL as id 11, and `search` returned that older duplicate first. Removing every entry for the URL ⇒ `isBookmarked` **false** ✅. Harness residue, not a defect |
+| 🔴 RED — the hook-owned adblock slot, reproduced **verbatim from `useAdblock.ts`** (3 concurrent `adblock_get_blocked_count`, resolve-on-timeout at 3 s) | **3,010 ms: 2 of 3 got the TIMEOUT DEFAULT, 1 got data** — the silent-wrong-value flavour, live, on the next batch's own code |
+| Consumer: the `/bookmarks` overlay through `useBookmarks` | list rendered (four real bookmarks), no error state |
+
+⭐ **The RED control moved to the hooks**, as `O7` predicted: nothing in `initWindowBridge.ts` is
+legacy any more, so from here every RED is a hook-owned slot reproduced verbatim — which is also the
+kickoff evidence for the batch that migrates it.
 
 ### O5 — two real latencies
 

@@ -333,7 +333,12 @@ void ResolveBridgeCall(int requestId, const std::string& json) {
 
     pending.context->Enter();
     try {
-        pending.promise->ResolvePromise(jsonToV8(nlohmann::json::parse(json)));
+        // ⛔ deep = true: the legacy path evaluated the reply as a JSON LITERAL
+        // (`window.on*(` + json + `)`), so nested objects and arrays arrived as objects
+        // and arrays. `jsonToV8`'s default keeps them as dumped strings for the
+        // identity.get contract, which is NOT this contract — batch 4 found
+        // `bookmarks.getAll().bookmarks` arriving as a string that way.
+        pending.promise->ResolvePromise(jsonToV8(nlohmann::json::parse(json), /*deep=*/true));
     } catch (const std::exception& e) {
         pending.promise->RejectPromise(pending.method + ": bad response — " + e.what());
     }
@@ -475,6 +480,22 @@ public:
             ipcName = "cookie_get_blocked_count";
         } else if (method == "cookieResetBlockedCount") {
             ipcName = "cookie_reset_blocked_count";
+        // Stage 3 batch 4 — the five bookmark calls `useBookmarks` makes.
+        } else if (method == "bookmarkAdd") {
+            ipcName = "bookmark_add";
+            payload = Payload::Strs;
+        } else if (method == "bookmarkRemove") {
+            ipcName = "bookmark_remove";
+            payload = Payload::Strs;
+        } else if (method == "bookmarkSearch") {
+            ipcName = "bookmark_search";
+            payload = Payload::Strs;
+        } else if (method == "bookmarkGetAll") {
+            ipcName = "bookmark_get_all";
+            payload = Payload::Strs;
+        } else if (method == "bookmarkIsBookmarked") {
+            ipcName = "bookmark_is_bookmarked";
+            payload = Payload::Strs;
         }
         // getInfo / markBackedUp / getBackupModalState / setBackupModalState were deleted
         // with the backup overlay (Phase 8c O8, 2026-09-12): their only consumer was
@@ -1037,8 +1058,24 @@ void SimpleRenderProcessHandler::OnContextCreated(
     bridgeObject->SetValue("cookieResetBlockedCount",
         CefV8Value::CreateFunction("cookieResetBlockedCount", bridgeHandler),
         V8_PROPERTY_ATTRIBUTE_READONLY);
+    // Stage 3 batch 4 — bookmarks (5).
+    bridgeObject->SetValue("bookmarkAdd",
+        CefV8Value::CreateFunction("bookmarkAdd", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    bridgeObject->SetValue("bookmarkRemove",
+        CefV8Value::CreateFunction("bookmarkRemove", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    bridgeObject->SetValue("bookmarkSearch",
+        CefV8Value::CreateFunction("bookmarkSearch", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    bridgeObject->SetValue("bookmarkGetAll",
+        CefV8Value::CreateFunction("bookmarkGetAll", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    bridgeObject->SetValue("bookmarkIsBookmarked",
+        CefV8Value::CreateFunction("bookmarkIsBookmarked", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
     hodosBrowser->SetValue("bridge", bridgeObject, V8_PROPERTY_ATTRIBUTE_READONLY);
-    LOG_DEBUG_RENDER("🌉 Bound WalletBridgeV8Handler (19 methods migrated)");
+    LOG_DEBUG_RENDER("🌉 Bound WalletBridgeV8Handler (24 methods migrated)");
 
     hodosBrowser->SetValue("history", historyObject, V8_PROPERTY_ATTRIBUTE_READONLY);
 
@@ -2133,130 +2170,62 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
     }
 
     // ========== BOOKMARK RESPONSE HANDLERS ==========
+    // Phase 8c batch 4: the five replies below are routed by request id. The nine other
+    // bookmark IPCs (get / update / tags / last-accessed / folders) had no JS caller and
+    // were deleted at the IPC layer; BookmarkManager's folder + tag SQL is untouched.
 
     if (message_name == "bookmark_add_response") {
+        // MIGRATED (Phase 8c stage 3 batch 4). Args: 0 = requestId, 1 = payload.
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onBookmarkAddResponse) { window.onBookmarkAddResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-        return true;
-    }
-
-    if (message_name == "bookmark_get_response") {
-        CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onBookmarkGetResponse) { window.onBookmarkGetResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-        return true;
-    }
-
-    if (message_name == "bookmark_update_response") {
-        CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onBookmarkUpdateResponse) { window.onBookmarkUpdateResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "bookmark_add_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
     if (message_name == "bookmark_remove_response") {
+        // MIGRATED (Phase 8c stage 3 batch 4). Args: 0 = requestId, 1 = payload.
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onBookmarkRemoveResponse) { window.onBookmarkRemoveResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "bookmark_remove_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
     if (message_name == "bookmark_search_response") {
+        // MIGRATED (Phase 8c stage 3 batch 4). Args: 0 = requestId, 1 = payload.
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onBookmarkSearchResponse) { window.onBookmarkSearchResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "bookmark_search_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
     if (message_name == "bookmark_get_all_response") {
+        // MIGRATED (Phase 8c stage 3 batch 4). Args: 0 = requestId, 1 = payload.
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onBookmarkGetAllResponse) { window.onBookmarkGetAllResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "bookmark_get_all_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
     if (message_name == "bookmark_is_bookmarked_response") {
+        // MIGRATED (Phase 8c stage 3 batch 4). Args: 0 = requestId, 1 = payload.
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onBookmarkIsBookmarkedResponse) { window.onBookmarkIsBookmarkedResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-        return true;
-    }
-
-    if (message_name == "bookmark_get_all_tags_response") {
-        CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onBookmarkGetAllTagsResponse) { window.onBookmarkGetAllTagsResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-        return true;
-    }
-
-    if (message_name == "bookmark_update_last_accessed_response") {
-        CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onBookmarkUpdateLastAccessedResponse) { window.onBookmarkUpdateLastAccessedResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-        return true;
-    }
-
-    if (message_name == "bookmark_folder_create_response") {
-        CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onBookmarkFolderCreateResponse) { window.onBookmarkFolderCreateResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-        return true;
-    }
-
-    if (message_name == "bookmark_folder_list_response") {
-        CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onBookmarkFolderListResponse) { window.onBookmarkFolderListResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-        return true;
-    }
-
-    if (message_name == "bookmark_folder_update_response") {
-        CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onBookmarkFolderUpdateResponse) { window.onBookmarkFolderUpdateResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-        return true;
-    }
-
-    if (message_name == "bookmark_folder_remove_response") {
-        CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onBookmarkFolderRemoveResponse) { window.onBookmarkFolderRemoveResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
-        return true;
-    }
-
-    if (message_name == "bookmark_folder_get_tree_response") {
-        CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onBookmarkFolderGetTreeResponse) { window.onBookmarkFolderGetTreeResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "bookmark_is_bookmarked_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 

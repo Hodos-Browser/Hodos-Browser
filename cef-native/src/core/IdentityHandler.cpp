@@ -47,12 +47,12 @@ CefRefPtr<CefV8Value> jsonScalarToV8(const nlohmann::json& v) {
 
 }  // namespace
 
-CefRefPtr<CefV8Value> jsonToV8(const nlohmann::json& j) {
+CefRefPtr<CefV8Value> jsonToV8(const nlohmann::json& j, bool deep) {
     // Array + top-level-scalar support was added for the history-over-IPC move (2a).
     if (j.is_array()) {
         CefRefPtr<CefV8Value> arr = CefV8Value::CreateArray(static_cast<int>(j.size()));
         for (size_t i = 0; i < j.size(); ++i) {
-            arr->SetValue(static_cast<int>(i), jsonToV8(j[i]));
+            arr->SetValue(static_cast<int>(i), jsonToV8(j[i], deep));
         }
         return arr;
     }
@@ -64,6 +64,9 @@ CefRefPtr<CefV8Value> jsonToV8(const nlohmann::json& j) {
             const auto& value = it.value();
             if (CefRefPtr<CefV8Value> scalar = jsonScalarToV8(value)) {
                 obj->SetValue(key, scalar, V8_PROPERTY_ATTRIBUTE_NONE);
+            } else if (deep) {
+                // Phase 8c bridge: a faithful literal, the way `window.on*(<json>)` was.
+                obj->SetValue(key, jsonToV8(value, true), V8_PROPERTY_ATTRIBUTE_NONE);
             } else {
                 // Nested object/array. Kept as the .dump() string ON PURPOSE — the
                 // existing identity.get / wallet-info callers parse it that way, and

@@ -142,6 +142,12 @@ the recovery phrase under prevent-close and walks into the PIN step, so nothing 
 `simple_handler.cpp` (15 cookie / cache / cookie-blocking handlers), `simple_render_process_handler.cpp`
 (`Payload::Strs`, 15 natives, 15 arms). Nothing platform-split. Rebuild after your next rebase.
 
+**Batch 4 (bookmarks, 2026-09-13) touched shared C++:** `simple_handler.cpp` (5 bookmark handlers migrated,
+9 deleted), `simple_render_process_handler.cpp` (5 natives, 5 arms, 9 arms deleted, and `ResolveBridgeCall`
+now converts with `jsonToV8(…, deep = true)`), `src/core/IdentityHandler.cpp` + `include/core/IdentityHandler.h`
+(`jsonToV8` gained a `deep` flag; `identity.get` keeps the old default). Nothing platform-split. Rebuild after
+your next rebase.
+
 ⚠️ Per the new root-doc rule: this round touched `simple_handler.cpp`, `simple_render_process_handler.cpp`,
 `simple_app.cpp`, `cef_browser_shell.cpp`, `BrowserWindow.h`, `simple_handler.h` — **rebuild after your next
 rebase** before anything else. The `#elif __APPLE__` arms I removed only *referenced* your global; your `.mm`

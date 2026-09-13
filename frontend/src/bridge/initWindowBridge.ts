@@ -255,249 +255,35 @@ if (!(window.hodosBrowser as any).omnibox) {
 // ==========================================
 // BOOKMARK API
 // ==========================================
+// ⭐ MIGRATED — Phase 8c stage 3 batch 4 (2026-09-13). The five methods `useBookmarks`
+// calls go through the native, per-request-id bridge. Numbers are still stringified here
+// exactly as the legacy IPC sent them (the browser handlers parse them), so this is a
+// routing change only. The 15 s `getAll` timeout and the hook's 3x retry existed because
+// a late reply used to be DROPPED by the single global slot; a late reply now resolves its
+// own promise, so both are gone.
+//
+// ⛔ DELETED, not migrated (no caller anywhere in `frontend/src`): `get`, `update`,
+// `getAllTags`, `updateLastAccessed` and `folders.*`. Their C++ IPC handlers and reply arms
+// went with them; `BookmarkManager`'s folder + tag SQL was left in place (reported as
+// orphaned, not deleted).
 if (!(window.hodosBrowser as any).bookmarks) {
+  const native = () => {
+    const b = window.hodosBrowser?.bridge;
+    if (!b) throw new Error('bookmarks: native bridge unavailable');
+    return b;
+  };
   (window.hodosBrowser as any).bookmarks = {
-    add: (url: string, title: string, folderId?: number, tags?: string[]) => {
-      return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          reject(new Error('Bookmark add timeout'));
-          delete window.onBookmarkAddResponse;
-        }, 5000);
+    add: (url: string, title: string, folderId?: number, tags?: string[]) =>
+      native().bookmarkAdd(url, title, folderId?.toString() ?? '', JSON.stringify(tags ?? [])),
 
-        window.onBookmarkAddResponse = (data: any) => {
-          clearTimeout(timeout);
-          resolve(data);
-          delete window.onBookmarkAddResponse;
-        };
+    remove: (id: number) => native().bookmarkRemove(id.toString()),
 
-        window.cefMessage?.send('bookmark_add', [url, title, folderId?.toString() ?? '', JSON.stringify(tags ?? [])]);
-      });
-    },
+    search: (query: string, limit?: number, offset?: number) =>
+      native().bookmarkSearch(query, (limit ?? 50).toString(), (offset ?? 0).toString()),
 
-    get: (id: number) => {
-      return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          reject(new Error('Bookmark get timeout'));
-          delete window.onBookmarkGetResponse;
-        }, 5000);
+    getAll: (folderId?: number, limit?: number, offset?: number) =>
+      native().bookmarkGetAll((folderId ?? -1).toString(), (limit ?? 50).toString(), (offset ?? 0).toString()),
 
-        window.onBookmarkGetResponse = (data: any) => {
-          clearTimeout(timeout);
-          resolve(data);
-          delete window.onBookmarkGetResponse;
-        };
-
-        window.cefMessage?.send('bookmark_get', [id.toString()]);
-      });
-    },
-
-    update: (id: number, fields: { title?: string; url?: string; folderId?: number | null; tags?: string[] }) => {
-      return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          reject(new Error('Bookmark update timeout'));
-          delete window.onBookmarkUpdateResponse;
-        }, 5000);
-
-        window.onBookmarkUpdateResponse = (data: any) => {
-          clearTimeout(timeout);
-          resolve(data);
-          delete window.onBookmarkUpdateResponse;
-        };
-
-        window.cefMessage?.send('bookmark_update', [id.toString(), JSON.stringify(fields)]);
-      });
-    },
-
-    remove: (id: number) => {
-      return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          reject(new Error('Bookmark remove timeout'));
-          delete window.onBookmarkRemoveResponse;
-        }, 5000);
-
-        window.onBookmarkRemoveResponse = (data: any) => {
-          clearTimeout(timeout);
-          resolve(data);
-          delete window.onBookmarkRemoveResponse;
-        };
-
-        window.cefMessage?.send('bookmark_remove', [id.toString()]);
-      });
-    },
-
-    search: (query: string, limit?: number, offset?: number) => {
-      return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          reject(new Error('Bookmark search timeout'));
-          delete window.onBookmarkSearchResponse;
-        }, 5000);
-
-        window.onBookmarkSearchResponse = (data: any) => {
-          clearTimeout(timeout);
-          resolve(data);
-          delete window.onBookmarkSearchResponse;
-        };
-
-        window.cefMessage?.send('bookmark_search', [query, (limit ?? 50).toString(), (offset ?? 0).toString()]);
-      });
-    },
-
-    getAll: (folderId?: number, limit?: number, offset?: number) => {
-      return new Promise((resolve, reject) => {
-        // 15s (was 5s): on slow Win10 the synchronous SQLite read + IPC round-trip can run
-        // long under a saturated UI thread; a too-short timeout dropped the response and
-        // left the list empty. useBookmarks.refresh() also retries on top of this.
-        const timeout = setTimeout(() => {
-          reject(new Error('Bookmark getAll timeout'));
-          delete window.onBookmarkGetAllResponse;
-        }, 15000);
-
-        window.onBookmarkGetAllResponse = (data: any) => {
-          clearTimeout(timeout);
-          resolve(data);
-          delete window.onBookmarkGetAllResponse;
-        };
-
-        window.cefMessage?.send('bookmark_get_all', [(folderId ?? -1).toString(), (limit ?? 50).toString(), (offset ?? 0).toString()]);
-      });
-    },
-
-    isBookmarked: (url: string) => {
-      return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          reject(new Error('Bookmark isBookmarked timeout'));
-          delete window.onBookmarkIsBookmarkedResponse;
-        }, 5000);
-
-        window.onBookmarkIsBookmarkedResponse = (data: any) => {
-          clearTimeout(timeout);
-          resolve(data);
-          delete window.onBookmarkIsBookmarkedResponse;
-        };
-
-        window.cefMessage?.send('bookmark_is_bookmarked', [url]);
-      });
-    },
-
-    getAllTags: () => {
-      return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          reject(new Error('Bookmark getAllTags timeout'));
-          delete window.onBookmarkGetAllTagsResponse;
-        }, 5000);
-
-        window.onBookmarkGetAllTagsResponse = (data: any) => {
-          clearTimeout(timeout);
-          resolve(data);
-          delete window.onBookmarkGetAllTagsResponse;
-        };
-
-        window.cefMessage?.send('bookmark_get_all_tags', []);
-      });
-    },
-
-    updateLastAccessed: (id: number) => {
-      return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          reject(new Error('Bookmark updateLastAccessed timeout'));
-          delete window.onBookmarkUpdateLastAccessedResponse;
-        }, 5000);
-
-        window.onBookmarkUpdateLastAccessedResponse = (data: any) => {
-          clearTimeout(timeout);
-          resolve(data);
-          delete window.onBookmarkUpdateLastAccessedResponse;
-        };
-
-        window.cefMessage?.send('bookmark_update_last_accessed', [id.toString()]);
-      });
-    },
-
-    folders: {
-      create: (name: string, parentId?: number) => {
-        return new Promise((resolve, reject) => {
-          const timeout = setTimeout(() => {
-            reject(new Error('Bookmark folder create timeout'));
-            delete window.onBookmarkFolderCreateResponse;
-          }, 5000);
-
-          window.onBookmarkFolderCreateResponse = (data: any) => {
-            clearTimeout(timeout);
-            resolve(data);
-            delete window.onBookmarkFolderCreateResponse;
-          };
-
-          window.cefMessage?.send('bookmark_folder_create', [name, (parentId ?? -1).toString()]);
-        });
-      },
-
-      list: (parentId?: number) => {
-        return new Promise((resolve, reject) => {
-          const timeout = setTimeout(() => {
-            reject(new Error('Bookmark folder list timeout'));
-            delete window.onBookmarkFolderListResponse;
-          }, 5000);
-
-          window.onBookmarkFolderListResponse = (data: any) => {
-            clearTimeout(timeout);
-            resolve(data);
-            delete window.onBookmarkFolderListResponse;
-          };
-
-          window.cefMessage?.send('bookmark_folder_list', [(parentId ?? -1).toString()]);
-        });
-      },
-
-      update: (id: number, name: string) => {
-        return new Promise((resolve, reject) => {
-          const timeout = setTimeout(() => {
-            reject(new Error('Bookmark folder update timeout'));
-            delete window.onBookmarkFolderUpdateResponse;
-          }, 5000);
-
-          window.onBookmarkFolderUpdateResponse = (data: any) => {
-            clearTimeout(timeout);
-            resolve(data);
-            delete window.onBookmarkFolderUpdateResponse;
-          };
-
-          window.cefMessage?.send('bookmark_folder_update', [id.toString(), name]);
-        });
-      },
-
-      remove: (id: number) => {
-        return new Promise((resolve, reject) => {
-          const timeout = setTimeout(() => {
-            reject(new Error('Bookmark folder remove timeout'));
-            delete window.onBookmarkFolderRemoveResponse;
-          }, 5000);
-
-          window.onBookmarkFolderRemoveResponse = (data: any) => {
-            clearTimeout(timeout);
-            resolve(data);
-            delete window.onBookmarkFolderRemoveResponse;
-          };
-
-          window.cefMessage?.send('bookmark_folder_remove', [id.toString()]);
-        });
-      },
-
-      getTree: () => {
-        return new Promise((resolve, reject) => {
-          const timeout = setTimeout(() => {
-            reject(new Error('Bookmark folder getTree timeout'));
-            delete window.onBookmarkFolderGetTreeResponse;
-          }, 5000);
-
-          window.onBookmarkFolderGetTreeResponse = (data: any) => {
-            clearTimeout(timeout);
-            resolve(data);
-            delete window.onBookmarkFolderGetTreeResponse;
-          };
-
-          window.cefMessage?.send('bookmark_folder_get_tree', []);
-        });
-      },
-    },
+    isBookmarked: (url: string) => native().bookmarkIsBookmarked(url),
   };
 }

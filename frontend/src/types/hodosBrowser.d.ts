@@ -4,7 +4,7 @@ import type { TransactionResponse, BroadcastResponse } from './transaction';
 import type { HistoryEntry, HistorySearchParams, HistoryGetParams, ClearRangeParams, HistoryEntryWithFrecency } from './history';
 import type { CookieData, CookieDeleteResponse, CacheSizeResponse } from './cookies';
 import type { BlockedDomainEntry, BlockLogEntry, BlockDomainResponse, UnblockDomainResponse, AllowThirdPartyResponse, BlockedCountResponse, ClearBlockLogResponse } from './cookieBlocking';
-import type { BookmarkData, FolderData, BookmarkAddResponse, BookmarkUpdateResponse, BookmarkRemoveResponse, BookmarkSearchResponse, BookmarkGetAllResponse, BookmarkIsBookmarkedResponse, FolderCreateResponse, FolderUpdateResponse, FolderRemoveResponse } from './bookmarks';
+import type { BookmarkAddResponse, BookmarkRemoveResponse, BookmarkSearchResponse, BookmarkGetAllResponse, BookmarkIsBookmarkedResponse } from './bookmarks';
 
 declare global {
   interface Window {
@@ -42,6 +42,12 @@ declare global {
         cookieClearBlockLog: () => Promise<ClearBlockLogResponse>;
         cookieGetBlockedCount: () => Promise<BlockedCountResponse>;
         cookieResetBlockedCount: () => Promise<{ success: boolean }>;
+        // Stage 3 batch 4 — bookmarks. Strings only, as the legacy IPC sent them.
+        bookmarkAdd: (url: string, title: string, folderId: string, tagsJson: string) => Promise<BookmarkAddResponse>;
+        bookmarkRemove: (id: string) => Promise<BookmarkRemoveResponse>;
+        bookmarkSearch: (query: string, limit: string, offset: string) => Promise<BookmarkSearchResponse>;
+        bookmarkGetAll: (folderId: string, limit: string, offset: string) => Promise<BookmarkGetAllResponse>;
+        bookmarkIsBookmarked: (url: string) => Promise<BookmarkIsBookmarkedResponse>;
       };
       // Promise-based since the history-over-IPC move: the render process no longer
       // opens the history database itself, so every call is a round-trip to the
@@ -57,23 +63,15 @@ declare global {
       // ⛔ The `cookies` and `cookieBlocking` namespaces were DELETED in Phase 8c stage 3
       // batch 3: they had no callers (the hooks send IPC themselves) and duplicated the
       // hooks' single-slot globals. The hooks now use `bridge.cookie*` above.
+      // Phase 8c batch 4: the five live methods, each a one-line wrapper over
+      // `bridge.bookmark*`. `get`, `update`, `getAllTags`, `updateLastAccessed` and
+      // `folders.*` were DELETED (no caller).
       bookmarks: {
         add: (url: string, title: string, folderId?: number, tags?: string[]) => Promise<BookmarkAddResponse>;
-        get: (id: number) => Promise<BookmarkData>;
-        update: (id: number, fields: { title?: string; url?: string; folderId?: number | null; tags?: string[] }) => Promise<BookmarkUpdateResponse>;
         remove: (id: number) => Promise<BookmarkRemoveResponse>;
         search: (query: string, limit?: number, offset?: number) => Promise<BookmarkSearchResponse>;
         getAll: (folderId?: number, limit?: number, offset?: number) => Promise<BookmarkGetAllResponse>;
         isBookmarked: (url: string) => Promise<BookmarkIsBookmarkedResponse>;
-        getAllTags: () => Promise<string[]>;
-        updateLastAccessed: (id: number) => Promise<BookmarkUpdateResponse>;
-        folders: {
-          create: (name: string, parentId?: number) => Promise<FolderCreateResponse>;
-          list: (parentId?: number) => Promise<{ folders: FolderData[] }>;
-          update: (id: number, name: string) => Promise<FolderUpdateResponse>;
-          remove: (id: number) => Promise<FolderRemoveResponse>;
-          getTree: () => Promise<FolderData[]>;
-        };
       };
       identity: {
         get: () => Promise<IdentityResult>;
@@ -154,20 +152,12 @@ declare global {
     //   onCookieRemoveThirdPartyAllowResponse/Error, onCookieBlockLogResponse/Error,
     //   onCookieClearBlockLogResponse/Error, onCookieBlockedCountResponse/Error,
     //   onCookieResetBlockedCountResponse/Error
-    onBookmarkAddResponse?: (data: BookmarkAddResponse) => void;
-    onBookmarkGetResponse?: (data: BookmarkData) => void;
-    onBookmarkUpdateResponse?: (data: BookmarkUpdateResponse) => void;
-    onBookmarkRemoveResponse?: (data: BookmarkRemoveResponse) => void;
-    onBookmarkSearchResponse?: (data: BookmarkSearchResponse) => void;
-    onBookmarkGetAllResponse?: (data: BookmarkGetAllResponse) => void;
-    onBookmarkIsBookmarkedResponse?: (data: BookmarkIsBookmarkedResponse) => void;
-    onBookmarkGetAllTagsResponse?: (data: string[]) => void;
-    onBookmarkUpdateLastAccessedResponse?: (data: BookmarkUpdateResponse) => void;
-    onBookmarkFolderCreateResponse?: (data: FolderCreateResponse) => void;
-    onBookmarkFolderListResponse?: (data: { folders: FolderData[] }) => void;
-    onBookmarkFolderUpdateResponse?: (data: FolderUpdateResponse) => void;
-    onBookmarkFolderRemoveResponse?: (data: FolderRemoveResponse) => void;
-    onBookmarkFolderGetTreeResponse?: (data: FolderData[]) => void;
+    // ⛔ REMOVED by Phase 8c stage 3 batch 4 — the five live bookmark calls are routed by
+    // request id through `hodosBrowser.bridge`; the other nine were deleted outright.
+    //   onBookmarkAddResponse, onBookmarkGetResponse, onBookmarkUpdateResponse,
+    //   onBookmarkRemoveResponse, onBookmarkSearchResponse, onBookmarkGetAllResponse,
+    //   onBookmarkIsBookmarkedResponse, onBookmarkGetAllTagsResponse,
+    //   onBookmarkUpdateLastAccessedResponse, onBookmarkFolder{Create,List,Update,Remove,GetTree}Response
     allSystemsReady?: boolean;
      __overlayReady?: boolean;
   }
