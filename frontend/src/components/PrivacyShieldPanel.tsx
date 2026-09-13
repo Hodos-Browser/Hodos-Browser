@@ -55,27 +55,30 @@ const PrivacyShieldPanel: React.FC<PrivacyShieldPanelProps> = ({ domain, showCou
   const globalFingerprintEnabled = settings?.privacy?.fingerprintProtection !== false;
   const globalOverrideText = 'Disabled globally in Privacy Settings. Per-site toggle has no effect.';
 
+  // 8c batch 5: the toggles reject on a real native failure now (they used to resolve
+  // `false` on timeout); a click handler has nowhere to rethrow to, so swallow here —
+  // the toggle state only moves on a real reply.
   const handleMasterToggle = () => {
     if (domain) {
-      toggleMaster(domain, !masterEnabled);
+      toggleMaster(domain, !masterEnabled).catch(() => {});
     }
   };
 
   const handleAdblockToggle = () => {
     if (domain) {
-      toggleSiteAdblock(domain, !adblockEnabled);
+      toggleSiteAdblock(domain, !adblockEnabled).catch(() => {});
     }
   };
 
   const handleCookieToggle = () => {
     if (domain) {
-      toggleCookieBlocking(domain, !cookieBlockingEnabled);
+      toggleCookieBlocking(domain, !cookieBlockingEnabled).catch(() => {});
     }
   };
 
   const handleScriptletToggle = () => {
     if (domain) {
-      toggleScriptlets(domain, !scriptletsEnabled);
+      toggleScriptlets(domain, !scriptletsEnabled).catch(() => {});
     }
   };
 

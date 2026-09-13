@@ -1,15 +1,21 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 
-declare global {
-  interface Window {
-    onAdblockBlockedCountResponse?: (data: { count: number }) => void;
-    onAdblockResetBlockedCountResponse?: (data: { success: boolean }) => void;
-    onAdblockSiteToggleResponse?: (data: { domain: string; adblockEnabled: boolean; success: boolean }) => void;
-    onAdblockScriptletToggleResponse?: (data: { domain: string; scriptletsEnabled: boolean; success: boolean }) => void;
-    onAdblockCheckSiteEnabledResponse?: (data: { domain: string; adblockEnabled: boolean }) => void;
-    onAdblockCheckScriptletsEnabledResponse?: (data: { domain: string; scriptletsEnabled: boolean }) => void;
-  }
-}
+// Phase 8c stage 3 batch 5 (2026-09-13): every call goes through the native, per-request-id
+// bridge (`window.hodosBrowser.bridge.adblock*`).
+//
+// The previous version owned six `window.on*` single-slot globals, and EVERY one of them
+// resolved a made-up default on timeout — 0 blocked, "toggle failed", "enabled" — so two
+// calls in flight together handed one caller a silently wrong answer. Measured before this
+// change (contract P8c-A6 RED): 3 concurrent `adblock_get_blocked_count`, 2 of 3 got the
+// 3 s default. A genuine failure now REJECTS; the state setters only run on a real reply.
+//
+// ⛔ Booleans cross the bridge as the strings "true" / "false", exactly as the legacy IPC
+// sent them; the browser handlers parse them.
+const native = () => {
+  const b = window.hodosBrowser?.bridge;
+  if (!b) throw new Error('adblock: native bridge unavailable');
+  return b;
+};
 
 export const useAdblock = () => {
   const [blockedCount, setBlockedCount] = useState<number>(0);
@@ -17,125 +23,50 @@ export const useAdblock = () => {
   const [scriptletsEnabled, setScriptletsEnabled] = useState<boolean>(true);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Fetch blocked count via IPC
-  const fetchBlockedCount = useCallback(() => {
-    return new Promise<number>((resolve) => {
-      const timeout = setTimeout(() => {
-        resolve(0);
-        delete window.onAdblockBlockedCountResponse;
-      }, 3000);
-
-      window.onAdblockBlockedCountResponse = (data: { count: number }) => {
-        clearTimeout(timeout);
-        setBlockedCount(data.count);
-        resolve(data.count);
-        delete window.onAdblockBlockedCountResponse;
-      };
-
-      window.cefMessage?.send('adblock_get_blocked_count', '');
-    });
+  // Blocked count for the globally active tab (C++ resolves the tab; overlays have none)
+  const fetchBlockedCount = useCallback(async (): Promise<number> => {
+    const data = await native().adblockGetBlockedCount();
+    setBlockedCount(data.count);
+    return data.count;
   }, []);
 
-  // Reset blocked count via IPC
-  const resetBlockedCount = useCallback(() => {
-    return new Promise<void>((resolve) => {
-      const timeout = setTimeout(() => {
-        resolve();
-        delete window.onAdblockResetBlockedCountResponse;
-      }, 3000);
-
-      window.onAdblockResetBlockedCountResponse = () => {
-        clearTimeout(timeout);
-        setBlockedCount(0);
-        resolve();
-        delete window.onAdblockResetBlockedCountResponse;
-      };
-
-      window.cefMessage?.send('adblock_reset_blocked_count', '');
-    });
+  const resetBlockedCount = useCallback(async (): Promise<void> => {
+    await native().adblockResetBlockedCount();
+    setBlockedCount(0);
   }, []);
 
-  // Toggle adblock for a domain via IPC → C++ local JSON
-  const toggleSiteAdblock = useCallback((domain: string, enabled: boolean) => {
-    return new Promise<boolean>((resolve) => {
-      const timeout = setTimeout(() => {
-        resolve(false);
-        delete window.onAdblockSiteToggleResponse;
-      }, 5000);
-
-      window.onAdblockSiteToggleResponse = (data) => {
-        clearTimeout(timeout);
-        setAdblockEnabled(data.adblockEnabled);
-        resolve(data.success);
-        delete window.onAdblockSiteToggleResponse;
-      };
-
-      window.cefMessage?.send('adblock_site_toggle', [domain, enabled.toString()]);
-    });
+  // Toggle adblock for a domain → C++ local JSON
+  const toggleSiteAdblock = useCallback(async (domain: string, enabled: boolean): Promise<boolean> => {
+    const data = await native().adblockSiteToggle(domain, enabled.toString());
+    setAdblockEnabled(data.adblockEnabled);
+    return data.success;
   }, []);
 
-  // Toggle scriptlet injection for a domain via IPC → C++ local JSON
-  const toggleScriptlets = useCallback((domain: string, enabled: boolean) => {
-    return new Promise<boolean>((resolve) => {
-      const timeout = setTimeout(() => {
-        resolve(false);
-        delete window.onAdblockScriptletToggleResponse;
-      }, 5000);
-
-      window.onAdblockScriptletToggleResponse = (data) => {
-        clearTimeout(timeout);
-        setScriptletsEnabled(data.scriptletsEnabled);
-        resolve(data.success);
-        delete window.onAdblockScriptletToggleResponse;
-      };
-
-      window.cefMessage?.send('adblock_scriptlet_toggle', [domain, enabled.toString()]);
-    });
+  // Toggle scriptlet injection for a domain → C++ local JSON
+  const toggleScriptlets = useCallback(async (domain: string, enabled: boolean): Promise<boolean> => {
+    const data = await native().adblockScriptletToggle(domain, enabled.toString());
+    setScriptletsEnabled(data.scriptletsEnabled);
+    return data.success;
   }, []);
 
-  // Check per-site scriptlet status via IPC → C++ local JSON
-  const checkScriptlets = useCallback((domain: string) => {
-    return new Promise<boolean>((resolve) => {
-      const timeout = setTimeout(() => {
-        resolve(true);
-        delete window.onAdblockCheckScriptletsEnabledResponse;
-      }, 3000);
-
-      window.onAdblockCheckScriptletsEnabledResponse = (data) => {
-        clearTimeout(timeout);
-        setScriptletsEnabled(data.scriptletsEnabled);
-        resolve(data.scriptletsEnabled);
-        delete window.onAdblockCheckScriptletsEnabledResponse;
-      };
-
-      window.cefMessage?.send('adblock_check_scriptlets_enabled', [domain]);
-    });
+  const checkScriptlets = useCallback(async (domain: string): Promise<boolean> => {
+    const data = await native().adblockCheckScriptletsEnabled(domain);
+    setScriptletsEnabled(data.scriptletsEnabled);
+    return data.scriptletsEnabled;
   }, []);
 
-  // Check per-site adblock status via IPC → C++ local JSON
-  const checkSiteAdblock = useCallback((domain: string) => {
-    return new Promise<boolean>((resolve) => {
-      const timeout = setTimeout(() => {
-        resolve(true);
-        delete window.onAdblockCheckSiteEnabledResponse;
-      }, 3000);
-
-      window.onAdblockCheckSiteEnabledResponse = (data) => {
-        clearTimeout(timeout);
-        setAdblockEnabled(data.adblockEnabled);
-        resolve(data.adblockEnabled);
-        delete window.onAdblockCheckSiteEnabledResponse;
-      };
-
-      window.cefMessage?.send('adblock_check_site_enabled', [domain]);
-    });
+  const checkSiteAdblock = useCallback(async (domain: string): Promise<boolean> => {
+    const data = await native().adblockCheckSiteEnabled(domain);
+    setAdblockEnabled(data.adblockEnabled);
+    return data.adblockEnabled;
   }, []);
 
-  // Poll blocked count periodically (every 2s while mounted)
+  // Poll blocked count periodically (every 10s while mounted). An interval tick has no
+  // caller to reject to, so a failed poll is swallowed; the next tick tries again.
   useEffect(() => {
-    fetchBlockedCount();
+    fetchBlockedCount().catch(() => {});
     pollRef.current = setInterval(() => {
-      fetchBlockedCount();
+      fetchBlockedCount().catch(() => {});
     }, 10000);
 
     return () => {

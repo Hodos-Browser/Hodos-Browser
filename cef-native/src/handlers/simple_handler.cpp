@@ -6721,8 +6721,10 @@ bool SimpleHandler::OnProcessMessageReceived(
     }
 
     if (message_name == "cookie_check_site_allowed") {
+        // Phase 8c batch 5 — MIGRATED. Arg 0 is the bridge request id; payload args shifted to 1..
+        const int reqId = message->GetArgumentList()->GetInt(0);
         CefRefPtr<CefListValue> csa_args = message->GetArgumentList();
-        std::string domain = (csa_args->GetSize() > 0) ? csa_args->GetString(0).ToString() : "";
+        std::string domain = (csa_args->GetSize() > 1) ? csa_args->GetString(2).ToString() : "";
 
         bool allowed = false;
         if (!domain.empty()) {
@@ -6735,7 +6737,8 @@ bool SimpleHandler::OnProcessMessageReceived(
         std::string json_str = response.dump();
 
         CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("cookie_check_site_allowed_response");
-        responseMsg->GetArgumentList()->SetString(0, json_str);
+        responseMsg->GetArgumentList()->SetInt(0, reqId);
+        responseMsg->GetArgumentList()->SetString(1, json_str);
         browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
         return true;
     }
@@ -6743,6 +6746,8 @@ bool SimpleHandler::OnProcessMessageReceived(
     // ========== ADBLOCK MESSAGES (Sprint 8c) ==========
 
     if (message_name == "adblock_get_blocked_count") {
+        // Phase 8c batch 5 — MIGRATED. Arg 0 is the bridge request id; payload args shifted to 1..
+        const int reqId = message->GetArgumentList()->GetInt(0);
         // Use globally active tab's browser ID (overlays don't have tabs)
         int browser_id = 0;
         auto* active_tab = TabManager::GetInstance().GetActiveTab();
@@ -6755,12 +6760,15 @@ bool SimpleHandler::OnProcessMessageReceived(
         response["count"] = count;
 
         CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("adblock_blocked_count_response");
-        responseMsg->GetArgumentList()->SetString(0, response.dump());
+        responseMsg->GetArgumentList()->SetInt(0, reqId);
+        responseMsg->GetArgumentList()->SetString(1, response.dump());
         browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
         return true;
     }
 
     if (message_name == "adblock_reset_blocked_count") {
+        // Phase 8c batch 5 — MIGRATED. Arg 0 is the bridge request id; payload args shifted to 1..
+        const int reqId = message->GetArgumentList()->GetInt(0);
         // Use globally active tab's browser ID (overlays don't have tabs)
         int browser_id = 0;
         auto* active_tab = TabManager::GetInstance().GetActiveTab();
@@ -6773,15 +6781,18 @@ bool SimpleHandler::OnProcessMessageReceived(
         response["success"] = true;
 
         CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("adblock_reset_blocked_count_response");
-        responseMsg->GetArgumentList()->SetString(0, response.dump());
+        responseMsg->GetArgumentList()->SetInt(0, reqId);
+        responseMsg->GetArgumentList()->SetString(1, response.dump());
         browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
         return true;
     }
 
     if (message_name == "adblock_site_toggle") {
+        // Phase 8c batch 5 — MIGRATED. Arg 0 is the bridge request id; payload args shifted to 1..
+        const int reqId = message->GetArgumentList()->GetInt(0);
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string domain = args->GetString(0).ToString();
-        std::string enabledStr = args->GetString(1).ToString();
+        std::string domain = args->GetString(1).ToString();
+        std::string enabledStr = args->GetString(2).ToString();
         bool enabled = (enabledStr == "true" || enabledStr == "1");
 
         LOG_DEBUG_BROWSER("🛡️ Adblock site toggle: " + domain + " → " + (enabled ? "ON" : "OFF"));
@@ -6796,7 +6807,8 @@ bool SimpleHandler::OnProcessMessageReceived(
         response["success"] = true;
 
         CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("adblock_site_toggle_response");
-        responseMsg->GetArgumentList()->SetString(0, response.dump());
+        responseMsg->GetArgumentList()->SetInt(0, reqId);
+        responseMsg->GetArgumentList()->SetString(1, response.dump());
         if (browser && browser->GetMainFrame()) {
             browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
         }
@@ -6805,8 +6817,10 @@ bool SimpleHandler::OnProcessMessageReceived(
 
     // Check adblock site-enabled state (GET equivalent via IPC)
     if (message_name == "adblock_check_site_enabled") {
+        // Phase 8c batch 5 — MIGRATED. Arg 0 is the bridge request id; payload args shifted to 1..
+        const int reqId = message->GetArgumentList()->GetInt(0);
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string domain = args->GetString(0).ToString();
+        std::string domain = args->GetString(1).ToString();
 
         bool enabled = AdblockCache::GetInstance().isSiteEnabled(domain);
 
@@ -6815,7 +6829,8 @@ bool SimpleHandler::OnProcessMessageReceived(
         response["adblockEnabled"] = enabled;
 
         CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("adblock_check_site_enabled_response");
-        responseMsg->GetArgumentList()->SetString(0, response.dump());
+        responseMsg->GetArgumentList()->SetInt(0, reqId);
+        responseMsg->GetArgumentList()->SetString(1, response.dump());
         if (browser && browser->GetMainFrame()) {
             browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
         }
@@ -6824,8 +6839,10 @@ bool SimpleHandler::OnProcessMessageReceived(
 
     // Per-site fingerprint protection toggle — get current state
     if (message_name == "fingerprint_get_site_enabled") {
+        // Phase 8c batch 5 — MIGRATED. Arg 0 is the bridge request id; payload args shifted to 1..
+        const int reqId = message->GetArgumentList()->GetInt(0);
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string domain = args->GetString(0).ToString();
+        std::string domain = args->GetString(1).ToString();
         bool enabled = FingerprintProtection::GetInstance().IsSiteEnabled(domain);
 
         nlohmann::json response;
@@ -6834,7 +6851,8 @@ bool SimpleHandler::OnProcessMessageReceived(
 
         CefRefPtr<CefProcessMessage> responseMsg =
             CefProcessMessage::Create("fingerprint_get_site_enabled_response");
-        responseMsg->GetArgumentList()->SetString(0, response.dump());
+        responseMsg->GetArgumentList()->SetInt(0, reqId);
+        responseMsg->GetArgumentList()->SetString(1, response.dump());
         if (browser && browser->GetMainFrame()) {
             browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
         }
@@ -6852,9 +6870,11 @@ bool SimpleHandler::OnProcessMessageReceived(
 
     // Sprint 10b: Per-site scriptlet toggle
     if (message_name == "adblock_scriptlet_toggle") {
+        // Phase 8c batch 5 — MIGRATED. Arg 0 is the bridge request id; payload args shifted to 1..
+        const int reqId = message->GetArgumentList()->GetInt(0);
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string domain = args->GetString(0).ToString();
-        std::string enabledStr = args->GetString(1).ToString();
+        std::string domain = args->GetString(1).ToString();
+        std::string enabledStr = args->GetString(2).ToString();
         bool enabled = (enabledStr == "true" || enabledStr == "1");
 
         LOG_DEBUG_BROWSER("💉 Scriptlet toggle: " + domain + " → " + (enabled ? "ON" : "OFF"));
@@ -6869,7 +6889,8 @@ bool SimpleHandler::OnProcessMessageReceived(
         response["success"] = true;
 
         CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("adblock_scriptlet_toggle_response");
-        responseMsg->GetArgumentList()->SetString(0, response.dump());
+        responseMsg->GetArgumentList()->SetInt(0, reqId);
+        responseMsg->GetArgumentList()->SetString(1, response.dump());
         if (browser && browser->GetMainFrame()) {
             browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
         }
@@ -6878,8 +6899,10 @@ bool SimpleHandler::OnProcessMessageReceived(
 
     // Check scriptlet-enabled state (GET equivalent via IPC)
     if (message_name == "adblock_check_scriptlets_enabled") {
+        // Phase 8c batch 5 — MIGRATED. Arg 0 is the bridge request id; payload args shifted to 1..
+        const int reqId = message->GetArgumentList()->GetInt(0);
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string domain = args->GetString(0).ToString();
+        std::string domain = args->GetString(1).ToString();
 
         bool enabled = AdblockCache::GetInstance().isScriptletsEnabled(domain);
 
@@ -6888,7 +6911,8 @@ bool SimpleHandler::OnProcessMessageReceived(
         response["scriptletsEnabled"] = enabled;
 
         CefRefPtr<CefProcessMessage> responseMsg = CefProcessMessage::Create("adblock_check_scriptlets_enabled_response");
-        responseMsg->GetArgumentList()->SetString(0, response.dump());
+        responseMsg->GetArgumentList()->SetInt(0, reqId);
+        responseMsg->GetArgumentList()->SetString(1, response.dump());
         if (browser && browser->GetMainFrame()) {
             browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, responseMsg);
         }

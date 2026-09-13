@@ -148,6 +148,10 @@ now converts with `jsonToV8(…, deep = true)`), `src/core/IdentityHandler.cpp` 
 (`jsonToV8` gained a `deep` flag; `identity.get` keeps the old default). Nothing platform-split. Rebuild after
 your next rebase.
 
+**Batch 5 (adblock + privacy shield, 2026-09-13) touched shared C++:** `simple_handler.cpp` (8 handlers echo the
+request id: the six `adblock_*`, `cookie_check_site_allowed`, `fingerprint_get_site_enabled`),
+`simple_render_process_handler.cpp` (8 natives, 8 arms). Nothing platform-split. Rebuild after your next rebase.
+
 ⚠️ Per the new root-doc rule: this round touched `simple_handler.cpp`, `simple_render_process_handler.cpp`,
 `simple_app.cpp`, `cef_browser_shell.cpp`, `BrowserWindow.h`, `simple_handler.h` — **rebuild after your next
 rebase** before anything else. The `#elif __APPLE__` arms I removed only *referenced* your global; your `.mm`

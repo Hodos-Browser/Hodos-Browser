@@ -275,7 +275,7 @@ const SiteInfoOverlayRoot: React.FC = () => {
                         <Switch
                             size="small"
                             checked={shield.masterEnabled}
-                            onChange={(e) => shield.toggleMaster(host, e.target.checked)}
+                            onChange={(e) => shield.toggleMaster(host, e.target.checked).catch(() => {})}
                             sx={{
                                 '& .MuiSwitch-switchBase.Mui-checked': { color: '#dfbd69' },
                                 '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': { backgroundColor: '#dfbd69' },

@@ -1,13 +1,21 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useAdblock } from './useAdblock';
 import { useCookieBlocking } from './useCookieBlocking';
 
-declare global {
-  interface Window {
-    onCookieCheckSiteAllowedResponse?: (data: { domain: string; allowed: boolean }) => void;
-    onFingerprintSiteEnabledResponse?: (data: { domain: string; enabled: boolean }) => void;
-  }
-}
+// Phase 8c stage 3 batch 5 (2026-09-13): the two reads this hook owned
+// (`cookie_check_site_allowed`, `fingerprint_get_site_enabled`) go through the native,
+// per-request-id bridge. Their old `window.on*` slots neither resolved nor rejected on
+// timeout — they just dropped the handler, and `checkCookieSiteAllowed` carried an
+// in-flight dedupe (`checkPendingRef`) because the single slot could not tell two callers
+// apart. Both are gone: each call owns its promise now.
+//
+// `fingerprint_set_site_enabled` is unchanged — it is fire-and-forget with no reply, so
+// there is nothing to route.
+const native = () => {
+  const b = window.hodosBrowser?.bridge;
+  if (!b) throw new Error('privacyShield: native bridge unavailable');
+  return b;
+};
 
 // `refreshKey` lets a keep-alive overlay force a re-fetch of per-site shield state
 // every time it's shown (not just when the domain changes). Without it, reopening an
@@ -20,7 +28,6 @@ export const usePrivacyShield = (domain: string, refreshKey: number = 0) => {
 
   // Whether third-party cookies are allowed (i.e. cookie blocking is bypassed) for this domain
   const [cookieSiteAllowed, setCookieSiteAllowed] = useState<boolean>(false);
-  const checkPendingRef = useRef(false);
 
   // Per-site fingerprint protection state
   const [fingerprintSiteEnabled, setFingerprintSiteEnabledState] = useState(true);
@@ -29,57 +36,36 @@ export const usePrivacyShield = (domain: string, refreshKey: number = 0) => {
   // Cookie blocking is "enabled" when the site is NOT in the allow list
   const cookieBlockingEnabled = !cookieSiteAllowed;
 
-  // Check cookie site allowed status via IPC
-  const checkCookieSiteAllowed = useCallback((d: string) => {
-    if (!d || checkPendingRef.current) return;
-    checkPendingRef.current = true;
-
-    const timeout = setTimeout(() => {
-      checkPendingRef.current = false;
-      delete window.onCookieCheckSiteAllowedResponse;
-    }, 3000);
-
-    window.onCookieCheckSiteAllowedResponse = (data) => {
-      clearTimeout(timeout);
-      checkPendingRef.current = false;
-      setCookieSiteAllowed(data.allowed);
-      delete window.onCookieCheckSiteAllowedResponse;
-    };
-
-    window.cefMessage?.send('cookie_check_site_allowed', [d]);
+  const checkCookieSiteAllowed = useCallback(async (d: string): Promise<boolean> => {
+    if (!d) return false;
+    const data = await native().cookieCheckSiteAllowed(d);
+    setCookieSiteAllowed(data.allowed);
+    return data.allowed;
   }, []);
 
   // Check on mount, when domain changes, and whenever refreshKey bumps (re-show).
+  // Mount-time reads have no caller to reject to; a failure leaves the previous state.
   useEffect(() => {
     if (domain) {
-      checkCookieSiteAllowed(domain);
-      adblock.checkSiteAdblock(domain);
-      adblock.checkScriptlets(domain);
+      checkCookieSiteAllowed(domain).catch(() => {});
+      adblock.checkSiteAdblock(domain).catch(() => {});
+      adblock.checkScriptlets(domain).catch(() => {});
     }
   }, [domain, refreshKey, checkCookieSiteAllowed, adblock.checkSiteAdblock, adblock.checkScriptlets]);
 
-  // Fetch per-site fingerprint enabled state when domain changes
+  // Fetch per-site fingerprint enabled state when domain changes. The reply is keyed by
+  // request id now, but the effect can still be superseded by a later domain before its
+  // reply lands — `alive` plus the domain check keep a stale reply from being applied.
   useEffect(() => {
     setFingerprintNeedsReload(false);
-
-    const timeout = setTimeout(() => {
-      delete window.onFingerprintSiteEnabledResponse;
-    }, 3000);
-
-    window.onFingerprintSiteEnabledResponse = (data) => {
-      clearTimeout(timeout);
-      if (data.domain === domain) {
+    if (!domain) return;
+    let alive = true;
+    native().fingerprintGetSiteEnabled(domain).then((data) => {
+      if (alive && data.domain === domain) {
         setFingerprintSiteEnabledState(data.enabled);
       }
-      delete window.onFingerprintSiteEnabledResponse;
-    };
-
-    window.cefMessage?.send('fingerprint_get_site_enabled', [domain]);
-
-    return () => {
-      clearTimeout(timeout);
-      delete window.onFingerprintSiteEnabledResponse;
-    };
+    }).catch(() => {});
+    return () => { alive = false; };
   }, [domain, refreshKey]);
 
   // Toggle cookie blocking for site
@@ -95,7 +81,7 @@ export const usePrivacyShield = (domain: string, refreshKey: number = 0) => {
     }
   }, [cookie.allowThirdParty, cookie.removeThirdPartyAllow]);
 
-  // Toggle per-site fingerprint protection
+  // Toggle per-site fingerprint protection (fire-and-forget IPC; no reply exists)
   const toggleFingerprintSite = useCallback((d: string, enabled: boolean) => {
     window.cefMessage?.send('fingerprint_set_site_enabled', [d, enabled.toString()]);
     setFingerprintSiteEnabledState(enabled);

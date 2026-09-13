@@ -377,7 +377,7 @@ const MainBrowserView: React.FC = () => {
         // Defer site adblock check — not needed for initial render
         const id = setTimeout(() => {
             if (currentDomain) {
-                checkSiteAdblock(currentDomain);
+                checkSiteAdblock(currentDomain).catch(() => {});  // 8c batch 5: rejects on real failure
             }
         }, 0);
         return () => clearTimeout(id);
@@ -406,10 +406,10 @@ const MainBrowserView: React.FC = () => {
     React.useEffect(() => {
         const deferredId = setTimeout(() => {
             fetchBlockedCount().catch(() => {});  // 8c batch 3: rejects on real failure
-            if (currentDomain) checkSiteAdblock(currentDomain);
+            if (currentDomain) checkSiteAdblock(currentDomain).catch(() => {});  // 8c batch 5
             intervalRef.current = setInterval(() => {
                 fetchBlockedCount().catch(() => {});
-                if (currentDomain) checkSiteAdblock(currentDomain);
+                if (currentDomain) checkSiteAdblock(currentDomain).catch(() => {});
             }, 10000);
         }, 1000);
         const intervalRef = { current: null as ReturnType<typeof setInterval> | null };

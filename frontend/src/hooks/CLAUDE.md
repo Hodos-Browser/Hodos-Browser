@@ -30,10 +30,10 @@ Permission decisions are **not** made here or anywhere in C++. The decision engi
 | `useBackgroundBalancePoller` | Keeps balance cache warm for overlays | V8 → localStorage | 30s |
 | `useAddress` | BSV address generation + clipboard | V8 | No |
 | `useTransaction` | Send BSV transactions | V8 | No |
-| `useAdblock` | Ad blocking toggle + blocked count | IPC window callbacks | 10s |
+| `useAdblock` (native `hodosBrowser.bridge.adblock*`, per-request-id since Phase 8c batch 5) | Ad blocking toggle + blocked count | IPC window callbacks | 10s |
 | `useCookieBlocking` | Cookie domain blocking + third-party control | native `hodosBrowser.bridge.cookie*` (per-request-id, Phase 8c batch 3) | 10s |
 | `useCookies` | Cookie CRUD + browser cache management | native `hodosBrowser.bridge.cookie*` / `cache*` (per-request-id, Phase 8c batch 3) | No |
-| `usePrivacyShield` | Composite: adblock + cookie blocking + per-site fingerprinting | Composed hooks + IPC | No |
+| `usePrivacyShield` | Composite: adblock + cookie blocking + per-site fingerprinting | Composed hooks + native `bridge.cookieCheckSiteAllowed` / `bridge.fingerprintGetSiteEnabled` (Phase 8c batch 5); `fingerprint_set_site_enabled` stays fire-and-forget IPC | No |
 | `useSitePermissions` | Web-content (OS-capability) permissions tri-state | IPC window callback | No |
 | `useSettings` | Settings CRUD (browser/privacy/wallet) | IPC window callback | No |
 | `useProfiles` | Browser profile management | IPC window callback | No |

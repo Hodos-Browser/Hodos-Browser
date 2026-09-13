@@ -48,6 +48,16 @@ declare global {
         bookmarkSearch: (query: string, limit: string, offset: string) => Promise<BookmarkSearchResponse>;
         bookmarkGetAll: (folderId: string, limit: string, offset: string) => Promise<BookmarkGetAllResponse>;
         bookmarkIsBookmarked: (url: string) => Promise<BookmarkIsBookmarkedResponse>;
+        // Stage 3 batch 5 — adblock + privacy shield (used by useAdblock / usePrivacyShield).
+        // Booleans cross as "true" / "false" strings, as the legacy IPC sent them.
+        adblockGetBlockedCount: () => Promise<{ count: number }>;
+        adblockResetBlockedCount: () => Promise<{ success: boolean }>;
+        adblockSiteToggle: (domain: string, enabled: string) => Promise<{ domain: string; adblockEnabled: boolean; success: boolean }>;
+        adblockScriptletToggle: (domain: string, enabled: string) => Promise<{ domain: string; scriptletsEnabled: boolean; success: boolean }>;
+        adblockCheckSiteEnabled: (domain: string) => Promise<{ domain: string; adblockEnabled: boolean }>;
+        adblockCheckScriptletsEnabled: (domain: string) => Promise<{ domain: string; scriptletsEnabled: boolean }>;
+        cookieCheckSiteAllowed: (domain: string) => Promise<{ domain: string; allowed: boolean }>;
+        fingerprintGetSiteEnabled: (domain: string) => Promise<{ domain: string; enabled: boolean }>;
       };
       // Promise-based since the history-over-IPC move: the render process no longer
       // opens the history database itself, so every call is a round-trip to the

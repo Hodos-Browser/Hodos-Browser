@@ -170,6 +170,16 @@ came back as a **string** and `.find` threw. Fix: `jsonToV8(j, deep)`; the bridg
 `generateAddress` and every cookie payload are flat or top-level arrays of flat objects; see the
 `P8c-A6` row for `sendTransaction`.
 
+### 0.11 📏 `D-13` — three of the "hook-owned slots" are push listeners, not per-call slots (batch 5 kickoff, 2026-09-13)
+
+`useProfiles` (`onProfilesResult`), `useSettings` (`onSettingsResponse`) and `useSitePermissions`
+(`onSitePermissionsResponse`) install their handler **once** in an effect and C++ re-emits the full
+authoritative list after every get / set / reset. That is a subscription, not a request: there is no
+per-call promise to misroute, and the last emit winning is the intended semantics. ⇒ `D-11`'s ~31
+overcounts by 3. They stay as they are (a different shape; converting them to a proper event API is
+not this phase's defect). The per-call remainder after batch 5: `usePaidCache` (2), `useImport` (2),
+`TabListOverlayRoot` (1).
+
 ## 1. Goal
 
 No bridge reply is ever delivered to the wrong caller, and no caller reports a failure that did not
@@ -504,6 +514,27 @@ the hook's 3× retry retired (both were workarounds for a late reply being dropp
 ⭐ **The RED control moved to the hooks**, as `O7` predicted: nothing in `initWindowBridge.ts` is
 legacy any more, so from here every RED is a hook-owned slot reproduced verbatim — which is also the
 kickoff evidence for the batch that migrates it.
+
+### `P8c-A7` — 🟢🔴 stage 3 batch 5: adblock + privacy shield (2026-09-13)
+
+Eight natives; `useAdblock` and `usePrivacyShield` rewritten onto the bridge; the
+`checkPendingRef` in-flight dedupe retired; `fingerprint_set_site_enabled` left as the
+fire-and-forget IPC it is (no reply exists to route).
+
+| Check | Result |
+|---|---|
+| 8 natives `[native code]`; no `onAdblock*` / `onCookieCheckSiteAllowed*` / `onFingerprintSiteEnabled*` globals | ✅ |
+| ⭐ **Batch 4's RED, re-run on the migrated native** — `adblockGetBlockedCount` ×3 | **3 / 3 real replies, 1 ms** (was: 2 of 3 handed the 3 s default) |
+| ×3 concurrent `adblockCheckSiteEnabled` / `adblockCheckScriptletsEnabled` / `cookieCheckSiteAllowed` / `fingerprintGetSiteEnabled` | 3 / 3 own replies each, ≤1 ms |
+| Site toggle off → check → on → check; scriptlets likewise, on `p8c-batch5.invalid` | false / false / true / true, both families ✅ |
+| 🔴 RED — `usePaidCache.refresh` reproduced **verbatim** (reject at 3 s), ×3 concurrent | **3,003 ms, 2 of 3 rejected** `paid_cache_get_size timeout` — the next batch's bug, live |
+| Consumer: `/privacy-shield` overlay with a domain set through the C++-injected hook | five switches rendered for `example.com`, all four rows present |
+
+Semantics changed on purpose: the six adblock calls used to resolve a made-up default on timeout
+(0 blocked, "toggle failed", "enabled") — the silent-wrong-value flavour, now measured twice — and
+the two privacy reads dropped their slot without resolving at all. All eight now reject on a real
+failure; click handlers and mount reads that fire-and-forget got a `.catch`, and hook state only moves
+on a real reply.
 
 ### O5 — two real latencies
 

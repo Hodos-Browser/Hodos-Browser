@@ -496,6 +496,29 @@ public:
         } else if (method == "bookmarkIsBookmarked") {
             ipcName = "bookmark_is_bookmarked";
             payload = Payload::Strs;
+        // Stage 3 batch 5 — the adblock + privacy-shield slots the hooks owned.
+        } else if (method == "adblockGetBlockedCount") {
+            ipcName = "adblock_get_blocked_count";
+        } else if (method == "adblockResetBlockedCount") {
+            ipcName = "adblock_reset_blocked_count";
+        } else if (method == "adblockSiteToggle") {
+            ipcName = "adblock_site_toggle";
+            payload = Payload::Strs;
+        } else if (method == "adblockScriptletToggle") {
+            ipcName = "adblock_scriptlet_toggle";
+            payload = Payload::Strs;
+        } else if (method == "adblockCheckSiteEnabled") {
+            ipcName = "adblock_check_site_enabled";
+            payload = Payload::Strs;
+        } else if (method == "adblockCheckScriptletsEnabled") {
+            ipcName = "adblock_check_scriptlets_enabled";
+            payload = Payload::Strs;
+        } else if (method == "cookieCheckSiteAllowed") {
+            ipcName = "cookie_check_site_allowed";
+            payload = Payload::Strs;
+        } else if (method == "fingerprintGetSiteEnabled") {
+            ipcName = "fingerprint_get_site_enabled";
+            payload = Payload::Strs;
         }
         // getInfo / markBackedUp / getBackupModalState / setBackupModalState were deleted
         // with the backup overlay (Phase 8c O8, 2026-09-12): their only consumer was
@@ -1074,8 +1097,33 @@ void SimpleRenderProcessHandler::OnContextCreated(
     bridgeObject->SetValue("bookmarkIsBookmarked",
         CefV8Value::CreateFunction("bookmarkIsBookmarked", bridgeHandler),
         V8_PROPERTY_ATTRIBUTE_READONLY);
+    // Stage 3 batch 5 — adblock (6) + privacy shield (2).
+    bridgeObject->SetValue("adblockGetBlockedCount",
+        CefV8Value::CreateFunction("adblockGetBlockedCount", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    bridgeObject->SetValue("adblockResetBlockedCount",
+        CefV8Value::CreateFunction("adblockResetBlockedCount", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    bridgeObject->SetValue("adblockSiteToggle",
+        CefV8Value::CreateFunction("adblockSiteToggle", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    bridgeObject->SetValue("adblockScriptletToggle",
+        CefV8Value::CreateFunction("adblockScriptletToggle", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    bridgeObject->SetValue("adblockCheckSiteEnabled",
+        CefV8Value::CreateFunction("adblockCheckSiteEnabled", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    bridgeObject->SetValue("adblockCheckScriptletsEnabled",
+        CefV8Value::CreateFunction("adblockCheckScriptletsEnabled", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    bridgeObject->SetValue("cookieCheckSiteAllowed",
+        CefV8Value::CreateFunction("cookieCheckSiteAllowed", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
+    bridgeObject->SetValue("fingerprintGetSiteEnabled",
+        CefV8Value::CreateFunction("fingerprintGetSiteEnabled", bridgeHandler),
+        V8_PROPERTY_ATTRIBUTE_READONLY);
     hodosBrowser->SetValue("bridge", bridgeObject, V8_PROPERTY_ATTRIBUTE_READONLY);
-    LOG_DEBUG_RENDER("🌉 Bound WalletBridgeV8Handler (24 methods migrated)");
+    LOG_DEBUG_RENDER("🌉 Bound WalletBridgeV8Handler (32 methods migrated)");
 
     hodosBrowser->SetValue("history", historyObject, V8_PROPERTY_ATTRIBUTE_READONLY);
 
@@ -2078,67 +2126,81 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
     }
 
     if (message_name == "cookie_check_site_allowed_response") {
+        // MIGRATED (Phase 8c stage 3 batch 5). Args: 0 = requestId, 1 = payload.
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onCookieCheckSiteAllowedResponse) { window.onCookieCheckSiteAllowedResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "cookie_check_site_allowed_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
     // ========== ADBLOCK RESPONSE HANDLERS (Sprint 8c) ==========
 
     if (message_name == "adblock_blocked_count_response") {
+        // MIGRATED (Phase 8c stage 3 batch 5). Args: 0 = requestId, 1 = payload.
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onAdblockBlockedCountResponse) { window.onAdblockBlockedCountResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "adblock_blocked_count_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
     if (message_name == "adblock_reset_blocked_count_response") {
+        // MIGRATED (Phase 8c stage 3 batch 5). Args: 0 = requestId, 1 = payload.
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onAdblockResetBlockedCountResponse) { window.onAdblockResetBlockedCountResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "adblock_reset_blocked_count_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
     if (message_name == "adblock_site_toggle_response") {
+        // MIGRATED (Phase 8c stage 3 batch 5). Args: 0 = requestId, 1 = payload.
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onAdblockSiteToggleResponse) { window.onAdblockSiteToggleResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "adblock_site_toggle_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
     if (message_name == "adblock_scriptlet_toggle_response") {
+        // MIGRATED (Phase 8c stage 3 batch 5). Args: 0 = requestId, 1 = payload.
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onAdblockScriptletToggleResponse) { window.onAdblockScriptletToggleResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "adblock_scriptlet_toggle_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
     if (message_name == "adblock_check_site_enabled_response") {
+        // MIGRATED (Phase 8c stage 3 batch 5). Args: 0 = requestId, 1 = payload.
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onAdblockCheckSiteEnabledResponse) { window.onAdblockCheckSiteEnabledResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "adblock_check_site_enabled_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
     if (message_name == "fingerprint_get_site_enabled_response") {
+        // MIGRATED (Phase 8c stage 3 batch 5). Args: 0 = requestId, 1 = payload.
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onFingerprintSiteEnabledResponse) { window.onFingerprintSiteEnabledResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "fingerprint_get_site_enabled_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
@@ -2161,11 +2223,13 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
     }
 
     if (message_name == "adblock_check_scriptlets_enabled_response") {
+        // MIGRATED (Phase 8c stage 3 batch 5). Args: 0 = requestId, 1 = payload.
         CefRefPtr<CefListValue> args = message->GetArgumentList();
-        std::string responseJson = args->GetString(0).ToString();
-        std::string escaped = escapeJsonForJs(responseJson);
-        std::string js = "if (window.onAdblockCheckScriptletsEnabledResponse) { window.onAdblockCheckScriptletsEnabledResponse(JSON.parse('" + escaped + "')); }";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        if (!args || args->GetSize() < 2) {
+            LOG_ERROR_RENDER(LogFmt() << "adblock_check_scriptlets_enabled_response missing args (need 2)");
+            return true;
+        }
+        ResolveBridgeCall(args->GetInt(0), args->GetString(1).ToString());
         return true;
     }
 
