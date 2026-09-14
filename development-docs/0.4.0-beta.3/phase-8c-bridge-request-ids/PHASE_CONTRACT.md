@@ -50,7 +50,8 @@ Stage 1 must land and be reviewed before stages 2–4 are attempted.
 | **O8** | 🚨 **`getInfo` and `markBackedUp` were dead at the BACKEND too.** The Rust wallet has no `/wallet/info` and no `/wallet/markBackedUp` route (`main.rs` — both **404**, measured against the dev wallet). C++ wraps the miss as `{success:false, error:"Failed to get wallet info: {}"}`. Their only consumer, `BackupOverlayRoot`, is itself **unreachable**: its only opener (`overlay_show_backup`) is sent from a block App.tsx has commented out. So the whole backup-overlay chain — the page, the route, the IPC, `CreateBackupOverlayWithSeparateProcess` on both platforms, its HWND/WndProc/role slot — is dead | They were migrated anyway (batch 2): the routing is proven and the change is reversible. **Deleting the chain is an overlay-lifecycle change** (CLAUDE.md invariant 8) and cascades into `cef_browser_shell.cpp` / `cef_browser_shell_mac.mm` — not a call to make inside a bridge batch | ✅ **owner: delete (2026-09-12)** — *"I don't think we need it."* The recovery-phrase prompt is `WalletPanelPage`'s create flow. **Windows + shared half done** (§4e): page, route, the four methods and their natives/arms/handlers, `overlay_show_backup`, every `role_ == "backup"` arm, the HWND/WndProc/class registration, the app-file creator, the window-record HWND field. 🍎 **macOS half owed to Mac** (`MAC_RELAY_P8_ROUND.md` M8): the `.mm` creator and its six `GetBackupBrowser()` uses, `g_backup_overlay_window`, then the accessor/static/header decl and the `BrowserWindow` `backup_browser` / `backup_overlay_window` slots, which Windows kept only so the Mac build stays green |
 | **O10** | **Scope: the single-slot pattern lives in 8 hooks too (`D-11`), not only the bridge file** | Doubles the phase (~72 slots vs the ticket's 41); each hook rewrite changes error semantics from "resolve a default on timeout" to "reject" | ✅ **decided 2026-09-12: all live slots, hooks included.** Remaining after batch 3: bookmarks (14, bridge-owned), adblock (6), privacy shield (3), paid cache (2), import (2), profiles (1), settings (1), site permissions (1), recently-closed (1) |
 | **O9** | ⚠️ **`address_generate` blocks the UI thread and cannot reject.** The browser handler calls `WalletService::generateAddress()` **inline** — unlike `get_balance`, which P2a moved off-thread for exactly this reason. With the dev wallet stopped, three calls took **6,168 ms, serialised on the UI thread**, and every one **resolved `{}`** rather than rejecting, because `WalletService::makeHttpRequest` swallows transport failure. `useAddress` then reads `response.address` as `undefined`. ⇒ the `address_generate_error` arm (and `RejectBridgeCall` on this slot) is **unreachable in practice** | Pre-existing on both counts. Same family as `TICKET_wallet_backend_death_is_silent_and_unrecovered.md` | ✅ **fixed 2026-09-12 on owner's call** (`P8c-A4d`): off-thread via the `get_balance` shape, and a missing address is now a **rejection**. The "notice the wallet died and restart it" half is the death ticket, now **assigned to Phase 8 after 8c**. 📏 Side finding: `WalletService::isConnected()` is a **latch** — `WinHttpConnect` allocates a handle without touching the wallet, so it reads true with the wallet dead |
-| **O11** | 📏 `BridgeCallDeadlineTask` logs its harmless no-op (call already answered) with the O2 words — `bridge error for unknown requestId N — discarded, not misrouted`, 63 of them in a 2-minute window vs one real late reply (§4k) | Pre-existing since batch 1; cosmetic but it degrades the one log line O2 relies on | ⬜ two-line fix (return early when the id is absent), any later 8c tidy commit |
+| **O11** | 📏 `BridgeCallDeadlineTask` logs its harmless no-op (call already answered) with the O2 words — `bridge error for unknown requestId N — discarded, not misrouted`, 63 of them in a 2-minute window vs one real late reply (§4k) | Pre-existing since batch 1; cosmetic but it degrades the one log line O2 relies on | ✅ **fixed 2026-09-14** (`P8c-A10a`, §4m): 63 → 2 lines in the same two-minute window, and both survivors are genuine late replies |
+| **O12** | 🚨 **All three `TID_FILE_*` ids are ONE thread in the browser process** (`D-15`, §4m). A send held 50 s stalled a concurrent `getBalance` until it finished; the wallet panel's balance rejected at 45 s. Sourced to libcef's shared single-thread runners + Chromium's FOREGROUND environment key | Found by O11's own window (the second timeout was a `getBalance`). The money path must not queue behind, or ahead of, cookie/adblock/balance work | ✅ **fixed 2026-09-14** (`P8c-A10b`): sends run on a dedicated `CefThread`. Residual (other file tasks still share one thread) reported, assigned to 8d |
 
 ## 0. Plan-vs-tree delta
 
@@ -686,6 +687,63 @@ self-send outputs credited.
 ⛔ **The RED is the row that matters.** It is the exact shape a "helpful" future edit would take —
 *dedupe the send like the balance* — and it turns two user intents into one silent transaction. The
 warning above `sendTransaction` in `initWindowBridge.ts` now has a measured txid behind it.
+
+## 4m. O11 + O12 — closing the deadline-task log noise, and the one-thread finding it exposed (2026-09-14)
+
+### `P8c-A10a` — 🟢🔴 O11: the deadline task no longer logs its no-op
+
+`BridgeCallDeadlineTask::Execute` now returns before `RejectBridgeCall` when the id is no longer
+pending. Same instrument as §4k (`HODOS_BRIDGE_REPLY_DELAY_MS=50000`, a two-minute window of the
+render log):
+
+| | bridge calls in window | `timed out` warnings | `discarded, not misrouted` lines |
+|---|---|---|---|
+| 🔴 before (`9b56ac5`) | ~120 | 1 | **63** — 62 deadline no-ops + 1 real late reply |
+| 🟢 after | 123 | 2 | **2** — both genuine late replies (see below) |
+
+### 🚨 `D-15` — the second late reply was a `getBalance`, and it exposed that ALL CEF file tasks share ONE thread
+
+The GREEN window above had **two** timeouts, not one: request 12 (`sendTransaction`, held by the seam)
+**and** request 2 (`getBalance`, from the wallet panel), both at the same instant. Browser log:
+`get_balance` received at :45.884 and :15.109, their `Balance fetch ok` lines only at :35.899 / :35.918 —
+**immediately after** the held send's reply at :35.891. The balance tasks were queued behind the sleeping
+send on `TID_FILE_USER_BLOCKING`.
+
+Moving the send to `TID_FILE_USER_VISIBLE` changed **nothing** (balance still rejected at 45,008 ms).
+Sourced, not inferred: libcef creates all three file runners with
+`base::ThreadPool::CreateSingleThreadTaskRunner(...)` in SHARED mode
+(`libcef/browser/chrome/chrome_browser_main_extra_parts_cef.cc :: PreMainMessageLoopRun`), and
+Chromium keys shared single-thread runners by *environment*, where `USER_VISIBLE` and `USER_BLOCKING`
+are both `FOREGROUND` (`base/task/thread_pool/pooled_single_thread_task_runner_manager.cc ::
+GetEnvironmentIndexForTraits`). ⇒ in this process, every `CefPostTask(TID_FILE_*)` — balance polls from
+every overlay, address generation, cookie enumeration, the adblock fetches — runs on **one thread**, FIFO.
+`cef_types.h` documents the three ids as priorities and says nothing about sharing, which is how this
+was missed by P2a, O9 and §4k alike.
+
+**Consequence before the fix:** a broadcast using its full `kWalletBroadcastTimeoutMs` (30 s), or a hung
+wallet on the send path, stalled every other wallet call for that long. Strictly better than 8c's starting
+point (the send held the **UI** thread), but still a money-path stall on a shared resource.
+
+### `P8c-A10b` — 🟢🔴 O12: the send has its own thread
+
+Fix: a process-wide `CefThread` (`"hodos-wallet-send"`, `cef_thread.h` — *"for tasks that require a
+dedicated thread"*), created lazily on the UI thread, `stoppable=false` (leaked at shutdown by design;
+no cross-platform shutdown hook is shared by the two entry points, and a send in flight at exit dies
+with the wallet child). Sends serialise only among themselves.
+
+Harness: seam at 50 s, one held send, then `getBalance` every 5 s from the header during the hold.
+
+| | first balance issued 2 s into the hold |
+|---|---|
+| 🔴 `TID_FILE_USER_BLOCKING` (`9b56ac5`) | **rejected at 45,013 ms** (`getBalance: timed out after 45s`) |
+| 🔴 `TID_FILE_USER_VISIBLE` (intermediate build, never committed) | **rejected at 45,008 ms** — same thread |
+| 🟢 dedicated `CefThread` | __O12_GREEN__ |
+
+📏 **Residual, reported not fixed:** the shared file thread is still one thread for everything *else*
+posted to it (balance, address, cookies, adblock). Nothing there blocks for 30 s by design — the
+wallet transport timeouts are 2 s / 5 s — but a hung wallet on `get_balance` (P2's M5 scenario) now
+stalls the *other* file tasks for 2 s instead of the UI. That is P2's threat model one level down and
+belongs with the wallet-death work (8d), not here.
 
 ## 5. Blast radius
 

@@ -379,14 +379,18 @@ public:
     explicit BridgeCallDeadlineTask(int requestId) : requestId_(requestId) {}
 
     void Execute() override {
-        // Only a call that is STILL pending gets here in any meaningful sense — but log
-        // before the no-op check so a genuine timeout is visible. A browser process that
-        // stopped answering is exactly the kind of failure that must not be silent.
-        if (s_pendingBridgeCalls.count(requestId_)) {
-            LOG_WARNING_RENDER("🌉 bridge call " + std::to_string(requestId_) +
-                               " (" + s_pendingBridgeCalls[requestId_].method +
-                               ") timed out — the browser process never replied");
-        }
+        // The common case: the call was answered long ago and this task is a no-op.
+        // Return BEFORE touching RejectBridgeCall, or its "unknown requestId — discarded,
+        // not misrouted" line fires once per bridge call, 45 s after the fact. 8c O11
+        // measured 63 of those in a two-minute window against ONE genuine late reply,
+        // which buried the one line that O2 (a late reply is discarded) is proven by.
+        if (!s_pendingBridgeCalls.count(requestId_)) return;
+
+        // A browser process that stopped answering is exactly the kind of failure that
+        // must not be silent.
+        LOG_WARNING_RENDER("🌉 bridge call " + std::to_string(requestId_) +
+                           " (" + s_pendingBridgeCalls[requestId_].method +
+                           ") timed out — the browser process never replied");
         RejectBridgeCall(requestId_,
                          "timed out after " + std::to_string(kBridgeCallTimeoutMs / 1000) + "s");
     }

@@ -70,6 +70,7 @@
 #include "include/cef_v8.h"
 #include "include/wrapper/cef_closure_task.h"
 #include "include/cef_task.h"
+#include "include/cef_thread.h"  // 8c O12: the dedicated wallet-send thread
 #include "include/internal/cef_types.h"  // For CEF_WOD_* constants
 #include "base/cef_callback.h"
 #include "base/internal/cef_callback_internal.h"
@@ -6265,8 +6266,36 @@ bool SimpleHandler::OnProcessMessageReceived(
             }, target, resultStr, ok, reqId));
         };
 
-        CefPostTask(TID_FILE_USER_BLOCKING,
-                    base::BindOnce(sendAndDeliver, browser, sendRequestId, transactionDataJson, kReplyDelayMs));
+        // 8c O12 (2026-09-14): NOT a TID_FILE_* id. ⛔ All three CEF file ids are ONE thread
+        // in this process: libcef creates them with base::ThreadPool::CreateSingleThreadTaskRunner
+        // in SHARED mode (chrome_browser_main_extra_parts_cef.cc), and Chromium keys shared
+        // single-thread runners by environment, where USER_VISIBLE and USER_BLOCKING are both
+        // FOREGROUND (pooled_single_thread_task_runner_manager.cc :: GetEnvironmentIndexForTraits).
+        // 📏 Measured twice: a send held 50 s on TID_FILE_USER_BLOCKING, and then on
+        // TID_FILE_USER_VISIBLE, stalled a concurrent get_balance until it finished — the
+        // wallet panel's balance rejected at the 45 s deadline both times. A broadcast may
+        // legitimately take up to kWalletBroadcastTimeoutMs, so the money path gets a
+        // dedicated CefThread (cef_thread.h: "for tasks that require a dedicated thread").
+        //
+        // Created lazily here, on the UI thread, once per process. stoppable=false: the
+        // thread is leaked at shutdown by design — there is no cross-platform shutdown hook
+        // both entry points share, and a send in flight at exit dies with the wallet child
+        // (job object / SIGTERM) anyway.
+        static CefRefPtr<CefThread> s_walletSendThread;
+        if (!s_walletSendThread) {
+            s_walletSendThread = CefThread::CreateThread("hodos-wallet-send", TP_NORMAL, ML_TYPE_DEFAULT,
+                                                         /*stoppable=*/false, COM_INIT_MODE_NONE);
+        }
+        if (!s_walletSendThread) {
+            LOG_ERROR_BROWSER("❌ send_transaction: could not create the wallet-send thread");
+            CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("send_transaction_error");
+            response->GetArgumentList()->SetInt(0, sendRequestId);
+            response->GetArgumentList()->SetString(1, "wallet-send thread unavailable");
+            browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
+            return true;
+        }
+        s_walletSendThread->GetTaskRunner()->PostTask(CefCreateClosureTask(
+            base::BindOnce(sendAndDeliver, browser, sendRequestId, transactionDataJson, kReplyDelayMs)));
         return true;
     }
     // All wallet handlers now cross-platform (WalletService has platform implementations)
