@@ -34,6 +34,20 @@ cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
 
 The M136 tree it replaced is archived whole at `C:\cef\cef150\m136_cef_binaries_FULL_backup`.
 
+> ⭐ **An engine pin is a TAG on the fork, never a branch** (beta.3 Phase 9, 2026-09-14). `refs/tags/pin-<sha7>/7871`
+> on `Hodos-Browser/cef` — the last path component must be the CEF branch number, because `cef/tools/cef_version.py`
+> derives the version's branch field from the commit's *decoration* (`CEF_BUILD_RUNBOOK.md`, "From the 2026-08-10 pin
+> tagging"). The working branch is `hodos/7871`. All three shipped engines are now tagged: `pin-c636546/7871`,
+> `pin-7dd0357/7871` (P4e), `pin-9ccef04/7871` (P4f, **shipping**). ⚠️ The two `pin-*` **branches** still exist
+> alongside the tags (deliberately left; deleting them is a separate decision) — always spell the tag as
+> `refs/tags/pin-…/7871` so git never has to guess which ref you mean. Verify with `git ls-remote --tags origin`,
+> never by assuming a push landed.
+>
+> 📦 **Built binaries per engine:** `g9ccef04` and `g7dd0357` exist as versioned `cef-binaries` release assets on the
+> org repo. `c636546` has **no** versioned asset (its Windows zip was clobbered on 2026-08-14); its only built copy is the
+> local directory `cef-binaries-backup-gc636546/` on the Windows build host — 👤 owner decision 2026-09-14: **keep it**,
+> revisit at the 0.4.0 release. The source is tagged, so it is rebuildable (~5 h).
+
 **macOS took the same bump on 2026-08-09**, staging the `dfe5a2343` distribution built on this box.
 Its M136 tree is archived at `/Volumes/CEFBuild/artifacts/cef-binaries-M136-backup` (2587 files) and
 is also still downloadable as `cef-binaries-macos.tar.bz2` from the `cef-binaries` release — worth

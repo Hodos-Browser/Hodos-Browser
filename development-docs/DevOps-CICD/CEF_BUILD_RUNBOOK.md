@@ -1198,6 +1198,24 @@ and that the wrapper lib and `libcef.dll` are present.
 4. Prove it with a `workflow_dispatch` validation run (`BUILD_AND_RELEASE.md` Step 3b) before any
    tag. That builds both platforms, asserts the engine out of both artifacts, and publishes nothing.
 
+### ⭐ The source pin is a tag, not a branch (2026-09-14)
+
+Every engine we ship is pinned on the fork (`Hodos-Browser/cef`) by an **immutable tag**
+`refs/tags/pin-<sha7>/<branch>`, e.g. `pin-9ccef04/7871`. The working branch is `hodos/<branch>`. ⛔ Never
+a `pin-*` branch: a branch is mutable by anyone with write access and one `push --force` or a mistyped
+branch name away from no longer identifying the engine users are running.
+
+- The **name is constrained**: the last path component must be exactly the CEF branch number, or
+  `cef_version.py` emits a plausible-but-wrong version string (see "From the 2026-08-10 pin tagging" above —
+  `hodos/7871-c636546` is the trap row).
+- Tags are lightweight, matching `pin-c636546/7871`. Create and push with full refspecs:
+  `git tag pin-<sha7>/7871 <sha>` then `git push origin refs/tags/pin-<sha7>/7871:refs/tags/pin-<sha7>/7871`.
+- ⛔ **Verify by re-querying the remote** — `git ls-remote --tags origin` — not by trusting the push output.
+  Done for `pin-9ccef04/7871` and `pin-7dd0357/7871` on 2026-09-14 (beta.3 Phase 9, `P9-B1`): absent before,
+  present after, version string unchanged at `150.0.43-7871.3576+g9ccef04+…`.
+- The two legacy `pin-*` **branches** were left in place (owner, 2026-09-14); until they are removed, a bare
+  `pin-9ccef04/7871` is ambiguous between tag and branch — spell the namespace.
+
 ## Output file checklist (must be present after staging)
 `libcef.dll`, `chrome_elf.dll`, `d3dcompiler_47.dll`, `icudtl.dat`, `libEGL.dll`, `libGLESv2.dll`,
 `snapshot_blob.bin`, `v8_context_snapshot.bin`, `vk_swiftshader.dll`, `vk_swiftshader_icd.json`,

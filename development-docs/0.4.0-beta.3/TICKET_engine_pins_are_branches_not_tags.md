@@ -2,7 +2,7 @@
 
 **Filed:** 2026-08-17, during 0.4.0 archiving
 **Severity:** reproducibility — the source ref for the engine we ship can move
-**Status:** OPEN — beta.3, cheap
+**Status:** ✅ CLOSED 2026-09-14 (beta.3 Phase 9, `P9-B1`) — tags pushed and re-queried; convention recorded. Branches deliberately **kept** (owner); backup dir **kept** (owner). See `phase-9-release-readiness/PHASE_CONTRACT.md`.
 **Sprint:** 📌 Phase 9 (release readiness) — bundled 2026-08-31.
 **Effort:** minutes (push two tags), plus a convention note
 
@@ -75,7 +75,7 @@ it is rebuildable — at roughly a five-hour build.
 
 ## Acceptance
 
-- [ ] `git ls-remote --tags` shows tags for all three engines
-- [ ] `pin-*` branches removed
-- [ ] convention recorded in `CEF_BUILD_RUNBOOK.md`
-- [ ] decide the fate of `cef-binaries-backup-gc636546/` — it is the only built copy of that engine
+- [x] `git ls-remote --tags` shows tags for all three engines — 📏 re-queried 2026-09-14: `pin-c636546/7871`, `pin-7dd0357/7871`, `pin-9ccef04/7871` at the listed SHAs
+- [ ] `pin-*` branches removed — ⏸️ **deliberately not done** in Phase 9 (owner instruction); a bare name is ambiguous until they go, so every command spells `refs/tags/…`
+- [x] convention recorded in `CEF_BUILD_RUNBOOK.md` ("The source pin is a tag, not a branch") and `cef-native/CLAUDE.md` pin section
+- [x] decide the fate of `cef-binaries-backup-gc636546/` — 👤 **keep**, recorded in `cef-native/CLAUDE.md`; revisit at the 0.4.0 release
