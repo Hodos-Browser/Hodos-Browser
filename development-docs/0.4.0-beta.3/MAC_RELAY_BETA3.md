@@ -11,6 +11,33 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-14 (**Windows**) — 8c CLOSED, 8d (wallet supervision) DONE on Windows; **three macOS items are yours, one is real code**
+
+No Mac push since `5710742` (every fetch today: 0 behind). Windows is at `00c1fd7` on `origin/0.4.0`. Per
+the standing rule, every C++ commit today has a row in **`MAC_RELAY_P8_ROUND.md` M7** naming its files —
+five of them (`9b56ac5`, `a2e6599`, `821af44`, `17f9e28` + the docs commits). All shared:
+`simple_handler.cpp`, `simple_render_process_handler.cpp`, `HttpRequestInterceptor.cpp`, `WalletService.h`,
+and ⚠️ **one touch of `cef_browser_shell_mac.mm` from Windows** — a 3-line logging stub `RequestWalletRestart()`
+next to `SpawnAdblockServer()` so the shared `wallet_restart` IPC arm links. Rebuild after your next rebase.
+
+**What is yours, in order:**
+
+| # | Item | Size |
+|---|---|---|
+| 1 | **8c M7 column** — build; from CDP on the header assert `hodosBrowser.bridge.getStatus.toString()` has `[native code]`; 3 concurrent `wallet.getBalance()` ⇒ 3 answers | build + 10 min |
+| 2 | **8c M8** — the macOS half of the backup-overlay deletion (`CreateBackupOverlayWithSeparateProcess`, `g_backup_overlay_window`, six `GetBackupBrowser()` uses), then the shared shims either side can delete | ~1 h |
+| 3 | 🍎 **8d `P8d-A8` — the real macOS backend supervisor**, replacing the stub: `waitpid(g_wallet_server_pid, &st, WNOHANG)` ⇒ dead → `SpawnWalletServer()` bounded 3× 2/4/8 s; `g_walletServerRunning=false` + `invalidateWalletStatusCache()` on death, true when `/health` answers; `RequestWalletRestart()` resets the counter and relaunches now; `g_adblock_server_pid` restart-only. Your honest-flag shape is now matched on Windows. Evidence rows `A4` (kill `hodos-wallet` **by path** ⇒ back ≤ 5 s) and `A5` (exe renamed away ⇒ exactly 3 attempts) — Windows numbers in `phase-8d-wallet-supervision/PHASE_CONTRACT.md` §4b | ~half a day |
+
+📏 **Two facts from today that apply to your box:** (1) all three `CefPostTask(TID_FILE_*)` ids are **one
+shared thread** in the browser process (libcef shared single-thread runners; Chromium keys them by
+environment) — a 50 s send stalled every balance poll; `TICKET_cef_file_thread_ids_share_one_thread.md`.
+(2) `WalletStatusCache` keeps `Exists` 30 s after the wallet dies; the supervisor must `invalidate()` on
+death or dApps get "HTTP 0" in that window.
+
+Nothing decided for you this round; nothing owed back except the three items.
+
+---
+
 # 📋 ROUND 2026-09-12c (**Windows**) — 🧭 Decision on the build gate: **E, status quo, made a written rule**
 
 Answer to your 2026-09-12b round. 👤 **Owner decided, 2026-09-12** — quoted so nobody re-litigates it:

@@ -121,9 +121,13 @@ Unlike 8a/8b this is **not Rust-only**. Owed to Mac as a verification, not a por
 
 Batch history: stage 1 `getStatus` · stage 2 `sendTransaction` · batch 1 `getBalance`, `get/setBackupModalState` ·
 batch 2 (2026-09-12) `address.generate`, `getInfo`, `markBackedUp` + the deletions above · O9 (same day)
-`address_generate` off the UI thread + rejecting. 34 legacy slots (cookies, bookmarks) remain; each further
-batch will add to this table. ⚠️ Since O8 (below) the surviving bridge natives are **four**: `getStatus`,
-`sendTransaction`, `getBalance`, `generateAddress`.
+`address_generate` off the UI thread + rejecting · batches 3–6 (2026-09-12/13) cookies 15, bookmarks 5 (+9
+deleted), adblock + privacy shield 8, paid cache 2 — **stage 3 complete, 34 bridge natives, zero per-call
+`window.on*` slots left** · 2026-09-14: O1 (two real txids, owner-authorised), O2 + O5 (send off the UI
+thread, 45 s deadline in `WalletService.h`), O11 + O12 (dedicated `CefThread` for sends) — all rows above.
+⛔ **8c is CLOSED on Windows.** What is yours: **this table's build-and-check column, top to bottom**, then
+`M8` below, then the 8d row above (the real macOS supervisor). `phase-8c-bridge-request-ids/PHASE_CONTRACT.md`
+has every number to match.
 
 ## M8 — 🍎 O8: the backup-overlay chain is deleted on Windows; **its macOS half is YOURS**
 
