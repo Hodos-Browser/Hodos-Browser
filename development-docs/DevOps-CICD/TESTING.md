@@ -275,6 +275,11 @@ defaults to off in release, and drop `--remote-allow-origins=*` from production 
 > **Update 2026-08-04:** owner-approved in principle. Design + open questions:
 > `development-docs/0.4.0/DEVTOOLS_SECURITY_DESIGN.md`. Key correction: closing the port does NOT
 > disable DevTools — all four entry points use in-process `ShowDevTools()`.
+>
+> **Update 2026-09-14 (beta.3 Phase 9):** D2 + D3 **built** — the port and the `--remote-allow-origins=*`
+> switch are now dev-only (`hodos::IsDevEnv()`); release binds nothing. This §14.6 harness is unaffected
+> (dev, 9322). ⚠️ The near-miss above stays worth reading: a machine with a pre-Phase-9 install still has
+> 9222 open, one digit from the dev port.
 
 ---
 

@@ -5595,6 +5595,15 @@ static int RunHodosMain(HINSTANCE hInstance, int nCmdShow, void* sandbox_info,
     // Picker mode owns no profile -> disable (0) so it can't collide with a
     // running profile's DevTools port.
     //
+    // ⛔ DEV ONLY (D2, development-docs/0.4.0/DEVTOOLS_SECURITY_DESIGN.md, owner-approved
+    // 2026-08-04, built beta.3 Phase 9). CDP is an unauthenticated control channel: any
+    // local process can enumerate targets, run script in ANY origin — the wallet and
+    // BRC-100 auth overlays are ordinary `type:"page"` targets to it — and read live
+    // cookies. Release therefore binds NOTHING; only HODOS_DEV=1 gets a port (9322 for
+    // Default, +100 on the per-profile offset). DevTools itself (F12 / Inspect) is
+    // unaffected — every entry point is in-process ShowDevTools() and never touches
+    // this port. The release-shaped proof is INSTALL_TEST_BATCH.md row I8.
+    //
     // ⚠️ TRIPWIRE — this block is the ONLY code path that can set navigator.webdriver = true.
     // Blink's AutomationControlled feature (which backs navigator.webdriver) is off by
     // default and is switched on by exactly four things
@@ -5653,7 +5662,9 @@ static int RunHodosMain(HINSTANCE hInstance, int nCmdShow, void* sandbox_info,
     // Dev build offsets the DevTools port (+100) so it never collides with the
     // installed build's port — both otherwise use 9222 for the Default profile,
     // and the 2nd instance to start would fail to bind it.
-    if (hodos::IsDevEnv() && settings.remote_debugging_port != 0) {
+    if (!hodos::IsDevEnv()) {
+        settings.remote_debugging_port = 0;   // D2: release binds no debug port at all
+    } else if (settings.remote_debugging_port != 0) {
         settings.remote_debugging_port += 100;
     }
     LOG_INFO("Remote debugging port: " + std::to_string(settings.remote_debugging_port));

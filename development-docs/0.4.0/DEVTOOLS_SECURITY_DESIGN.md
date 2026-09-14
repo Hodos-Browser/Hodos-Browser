@@ -1,6 +1,6 @@
 # DevTools & remote debugging — security design
 
-**Status:** owner-approved in principle (2026-08-04), **not implemented**. Four decisions below.
+**Status:** owner-approved 2026-08-04. **D2 + D3 BUILT 2026-09-14** (beta.3 Phase 9, Windows shell + shared `simple_app.cpp`; the `cef_browser_shell_mac.mm` port block is Mac's mirror — relay `MAC_RELAY_BETA3.md` round 2026-09-14b). **D4 = the same phase's last commit** (see `0.4.0-beta.3/phase-9-release-readiness/PHASE_CONTRACT.md`). The release-shaped proof of D2/D3 is `INSTALL_TEST_BATCH.md` **I8** (owed). Four decisions below.
 **Origin:** surfaced by the 2a history smoke — see `DevOps-CICD/TESTING.md` §14.6/§14.7.
 **Product constraint:** DevTools is a **product feature**. BSV developers should be able to
 troubleshoot the dApps they build inside Hodos. A dev-only solution is explicitly rejected.
@@ -50,9 +50,8 @@ Everything here was read from the tree on 2026-08-04, not inferred.
 - Both trace to the **initial commit** (`cc6cf19`, 2025-11-18) — inherited from the old repo, never
   a deliberate security decision. `f9408fd` later adjusted the port only to stop dev/prod colliding.
 
-**Nothing in this repo depends on either.** `grep` over `frontend/e2e`, `scripts/`, `.github/` for
-`9222`, `remote-debugging`, `connectOverCDP`, `remote-allow-origins` returns nothing. Removal is
-low-risk. (The smoke harness in TESTING.md §14.6 uses the **dev** port, which D2 keeps.)
+~~**Nothing in this repo depends on either.**~~ ⛔ **Corrected 2026-09-14 — half of that is now false.** Nothing depends on the *port* in release, still true. But the **dev** tooling depends on `--remote-allow-origins=*`: every farbling harness under `development-docs/0.4.0/chromium-rebuild/` attaches with `websocket-client`, which sends an `Origin: http://127.0.0.1:9322` header by default, and Chromium's `content/browser/devtools/devtools_http_handler.cc :: OnWebSocketRequest` 403s an Origin-bearing upgrade that is not allow-listed (read in the local 7871 tree). So D3 lands in the shape its own fallback clause describes: the switch stays **inside the dev branch**. `grep` over `frontend/e2e`, `scripts/`, `.github/` for
+`9222`, `remote-debugging`, `connectOverCDP`, `remote-allow-origins` still returns nothing; the consumers are the Python harnesses and they run on dev builds only. (The smoke harness in TESTING.md §14.6 uses the **dev** port, which D2 keeps.)
 
 ## 3. Threat model — what actually changes
 
@@ -86,7 +85,7 @@ reach a wallet-trusted origin. **D4 is the defense against the user being the at
 No change to any of the four entry points. It is the product feature, and per §3 it grants web
 content nothing it did not already have.
 
-### D2 — Close the remote debugging port in release
+### D2 — Close the remote debugging port in release ✅ built 2026-09-14 (Windows; macOS relayed)
 
 Gate `settings.remote_debugging_port` so release ships with it **off**. Dev keeps 9322 unchanged
 (the smoke harness and our own workflow depend on it).
@@ -97,10 +96,10 @@ longer attach to a *user's installed* browser to diagnose — "reproduce it in a
 supported path. (Rejected: (b) an explicit default-off setting — more surface for a door we do not
 currently need. Revisit only if support hits a case that genuinely cannot be reproduced.)
 
-### D3 — Drop `--remote-allow-origins=*` from production
+### D3 — Drop `--remote-allow-origins=*` from production ✅ built 2026-09-14 (shared file, both platforms)
 
-Remove the unconditional append in `OnBeforeCommandLineProcessing`. Nothing in the repo needs it
-(§2). If a dev workflow turns out to need it, re-add it **inside the dev branch only**.
+Remove the unconditional append in `OnBeforeCommandLineProcessing`. ~~Nothing in the repo needs it
+(§2).~~ If a dev workflow turns out to need it, re-add it **inside the dev branch only** — ⭐ **that is the shape that shipped**: the dev harnesses need it (§2 correction), so the append is gated on `hodos::IsDevEnv()`.
 
 ### D4 — Scope DevTools away from privileged origins
 

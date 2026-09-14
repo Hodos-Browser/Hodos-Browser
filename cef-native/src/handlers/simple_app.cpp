@@ -109,7 +109,14 @@ void SimpleApp::OnBeforeCommandLineProcessing(const CefString& process_type,
         std::wcout << L"--lang already present" << std::endl;
     }
 
-    command_line->AppendSwitchWithValue("remote-allow-origins", "*");
+    // ⛔ DEV ONLY (D3, DEVTOOLS_SECURITY_DESIGN.md). This switch removes Chromium's Origin
+    // check on the CDP WebSocket upgrade (content/browser/devtools/devtools_http_handler.cc
+    // :: OnWebSocketRequest 403s any Origin-bearing upgrade not listed here). Dev needs it:
+    // the farbling harnesses attach through websocket-client, which sends an Origin header
+    // by default. Release has no debug port (cef_browser_shell.cpp, D2) and gets no switch.
+    if (hodos::IsDevEnv()) {
+        command_line->AppendSwitchWithValue("remote-allow-origins", "*");
+    }
 
     // Fix first-render black screen issue - disable GPU compositing for reliable rendering
     command_line->AppendSwitch("disable-gpu-compositing");
