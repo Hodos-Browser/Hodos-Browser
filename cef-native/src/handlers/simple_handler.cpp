@@ -3491,15 +3491,10 @@ bool SimpleHandler::OnProcessMessageReceived(
                 active_tab->browser->GetHost()->Print();
             }
         } else if (action == "devtools") {
+            // D4: every DevTools entry point goes through ShowOrFocusDevTools (role gate + dedup).
             auto* active_tab = TabManager::GetInstance().GetActiveTab();
             if (active_tab && active_tab->browser) {
-                CefWindowInfo windowInfo;
-#ifdef _WIN32
-                windowInfo.SetAsPopup(nullptr, "Developer Tools");
-#endif
-                // macOS: default CefWindowInfo — ShowDevTools creates a new top-level window
-                CefBrowserSettings devSettings;
-                active_tab->browser->GetHost()->ShowDevTools(windowInfo, nullptr, devSettings, CefPoint());
+                ShowOrFocusDevTools(active_tab->browser);
             }
         } else if (action == "zoom_in") {
             auto* active_tab = GetZoomTargetTab();
@@ -4980,14 +4975,10 @@ bool SimpleHandler::OnProcessMessageReceived(
     }
 
     if (message_name == "devtools") {
+        // D4: every DevTools entry point goes through ShowOrFocusDevTools (role gate + dedup).
         auto* active_tab = TabManager::GetInstance().GetActiveTab();
         if (active_tab && active_tab->browser) {
-            CefWindowInfo windowInfo;
-#ifdef _WIN32
-            windowInfo.SetAsPopup(nullptr, "Developer Tools");
-#endif
-            CefBrowserSettings devSettings;
-            active_tab->browser->GetHost()->ShowDevTools(windowInfo, nullptr, devSettings, CefPoint());
+            ShowOrFocusDevTools(active_tab->browser);
         }
         return true;
     }
@@ -9290,6 +9281,25 @@ void SimpleHandler::ShowOrFocusDevTools(CefRefPtr<CefBrowser> browser) {
         return;
     }
 
+    // ⛔ D4 (development-docs/0.4.0/DEVTOOLS_SECURITY_DESIGN.md, owner-approved 2026-08-04,
+    // built beta.3 Phase 9): DevTools only on TAB browsers — web content. The header and every
+    // overlay (wallet, brc100auth, …) are wallet-trusted origins; a console there is not
+    // "inspecting a page", it is executing script inside the trust boundary the permission
+    // engine is built on — and it is the surface the "paste this into the console" scam
+    // needs. Role-only, resolved from the browser being inspected (menu/IPC arrive on the
+    // header's handler but target the active tab), never from a URL. A tab that navigates to
+    // an internal page stays inspectable — deliberate, per the design's Q2.
+    std::string target_role;
+    if (CefRefPtr<CefClient> client = browser->GetHost()->GetClient()) {
+        // SimpleHandler is the only CefClient in this shell; DevTools windows get nullptr.
+        target_role = static_cast<SimpleHandler*>(client.get())->role_;
+    }
+    if (!hodos::IsTabRole(target_role)) {
+        LOG_INFO_BROWSER("DevTools refused on role=" + (target_role.empty() ? std::string("<none>") : target_role) +
+                         " (D4: only tab browsers are inspectable)");
+        return;
+    }
+
     // Check if DevTools already open
     if (!browser->GetHost()->HasDevTools()) {
         CefWindowInfo windowInfo;
@@ -9361,9 +9371,9 @@ void SimpleHandler::OnBeforeContextMenu(CefRefPtr<CefBrowser> browser,
             model->AddItem(MENU_ID_CUSTOM_PASTE, "Paste");
             model->AddSeparator();
             model->AddItem(MENU_ID_CUSTOM_SELECT_ALL, "Select All");
-            model->AddSeparator();
         }
-        model->AddItem(MENU_ID_DEV_TOOLS_INSPECT, "Inspect Element");
+        // D4: no "Inspect Element" on the header or any overlay — ShowOrFocusDevTools would
+        // refuse it anyway (role gate); do not offer what will be refused.
         return;
     }
 
@@ -9535,7 +9545,7 @@ bool SimpleHandler::OnContextMenuCommand(CefRefPtr<CefBrowser> browser,
                                          EventFlags event_flags) {
     LOG_DEBUG_BROWSER("Context menu command: " + std::to_string(command_id) + " (role: " + role_ + ")");
 
-    // --- Inspect Element (all windows) ---
+    // --- Inspect Element (tab browsers only; D4 gate inside) ---
     if (command_id == MENU_ID_DEV_TOOLS_INSPECT) {
         ShowOrFocusDevTools(browser);
         return true;

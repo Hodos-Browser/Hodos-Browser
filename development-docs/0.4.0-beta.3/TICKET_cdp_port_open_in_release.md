@@ -2,7 +2,7 @@
 
 **Filed:** 2026-08-17 (found while sourcing the beta.2 farbling rotation token)
 **Severity:** security — an unauthenticated local control channel over the browser, in shipped builds
-**Status:** 🚧 beta.3 Phase 9 — **D2 + D3 LANDED 2026-09-14** (Windows shell + shared `simple_app.cpp`; dev halves measured `P9-A1`/`P9-A2`); **D4 = the phase's last commit**; release-shaped proof = `INSTALL_TEST_BATCH.md` **I8** (owed); macOS `.mm` mirror = relay item. Contract: `phase-9-release-readiness/PHASE_CONTRACT.md`
+**Status:** 🚧 beta.3 Phase 9 — **D2 + D3 LANDED 2026-09-14** (Windows shell + shared `simple_app.cpp`; dev halves measured `P9-A1`/`P9-A2`); **D4 LANDED 2026-09-14** (`P9-A3`, posted-F12 instrument, RED seen on a gate-less build); release-shaped proof = `INSTALL_TEST_BATCH.md` **I8** (owed); macOS `.mm` mirror = relay item. Contract: `phase-9-release-readiness/PHASE_CONTRACT.md`
 **Sprint:** 📌 Phase 9 (release readiness) — bundled 2026-08-31.
 **Design already exists:** `development-docs/0.4.0/DEVTOOLS_SECURITY_DESIGN.md` (2026-08-04)
 
@@ -98,7 +98,7 @@ port at all. A "nothing listening" result from a browser that failed to start is
 
 - [ ] release build: nothing listening on 9222 (measured, with the dev-build positive control) — ⏳ **I8** (install batch, owed by Phase 9). Dev positive control 📏 2026-09-14: 9322 bound by the build-dir exe; picker mode on the same binary ⇒ port 0, nothing bound
 - [ ] release build: F12 / Ctrl+Shift+I / menu / right-click Inspect all still open DevTools on web pages
-- [ ] release build: wallet overlay offers no Inspect Element and refuses DevTools if invoked — D4, Phase 9's last commit (`P9-A3`)
+- [x] release build: wallet overlay offers no Inspect Element and refuses DevTools if invoked — D4 landed (`P9-A3`): refusal measured on the dev build by posted F12 (`DevTools refused on role=wallet`), gate-less build opened it; the context-menu half is the owner's right-click (I8 also lists it)
 - [x] dev build unchanged — every CDP harness still runs on 9322 — 📏 2026-09-14: `/json/version` answers, `websocket-client` attaches with its default `Origin` header (and with a foreign one), effective browser command line carries `--remote-allow-origins=*`; the rotation harness's own run is `P9-C1`
 - [ ] macOS binding confirmed independently
 - [x] `DEVTOOLS_SECURITY_DESIGN.md` status line moved off "not implemented" (2026-09-14)
