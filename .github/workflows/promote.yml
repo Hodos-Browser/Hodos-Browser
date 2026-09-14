@@ -399,6 +399,27 @@ jobs:
       # The token carries the raw hashes and the engine string, and the steps
       # below re-derive all four contracts from them. `verdict=` is ignored on
       # purpose: a token that says PASS but whose hashes say otherwise fails.
+      #
+      # WHICH ENGINE (beta.3 Phase 9, 2026-09-14). The token's engine= field is
+      # CEF_VERSION as read by the harness's require_engine() -- e.g.
+      # 150.0.43-7871.3576+g9ccef04+chromium-150.0.7871.187 -- and the gate
+      # requires the "+g<sha>+" fragment to equal the fork SHA that THIS tag's
+      # release.yml builds against (derived from its env.CEF_ASSET lines, the
+      # single definition per arm). Until 2026-09-14 the field carried the
+      # Chromium version ("Chrome/150.0.7871.187") and the gate only checked
+      # major >= 150 -- which every P4-era engine satisfies, so a token measured
+      # on P4e (no worker farbling, no convertToBlob, three unhooked audio
+      # readers) passed a P4f gate unchanged. A token in the old shape is now
+      # REFUSED: it cannot say which engine it measured.
+      #
+      # ⚠️ WHAT THIS GATE STILL CANNOT SEE. The token is produced on the build
+      # host against a LOCAL DEV BUILD, staged on the same CEF distribution as
+      # CI's asset; the thing promoted is the CI-built, signed installer. Same
+      # tree, same engine, different bytes -- and the gate has no way to tell.
+      # That is inherent to measuring on the build host (the block above says
+      # why it must). "Farbling gate green" therefore means "this engine, this
+      # tree, measured on the build host" -- NOT "the promoted installer was
+      # measured". Recorded so nobody upgrades the claim.
       # =====================================================================
       - name: Farbling gate — waiver check
         if: env.ALREADY_PUBLIC != 'true'
@@ -462,6 +483,27 @@ jobs:
             echo "::error::If this really is an M136 build, use farbling_gate_waiver instead."
             exit 1
           fi
+
+          # Bind it to OUR engine — the fork SHA this tag's release.yml builds against.
+          # Successive forks share a Chromium version (P4e g7dd0357 and P4f g9ccef04 are
+          # both 150.0.7871.187), so the major above is a floor, not an identity. The
+          # expected SHA is read from the checked-out release.yml, never typed here;
+          # both arms must agree or the workflow itself is inconsistent.
+          EXPECT_SHAS=$(grep -oE 'CEF_ASSET: *cef-binaries-(windows|macos)-[0-9][0-9.]*-g[0-9a-f]+\.' .github/workflows/release.yml \
+                        | grep -oE -- '-g[0-9a-f]+\.' | sed -e 's/^-//' -e 's/\.$//' | sort -u || true)
+          case "$(printf '%s\n' "$EXPECT_SHAS" | grep -c '^g' || true)" in
+            1) EXPECT_SHA="$EXPECT_SHAS" ;;
+            0) echo "::error::Cannot derive the expected engine: no env.CEF_ASSET line of the form cef-binaries-<os>-<ver>-g<sha>.<ext> in .github/workflows/release.yml at this tag."; exit 1 ;;
+            *) echo "::error::release.yml's two arms name different engines ($(printf '%s' "$EXPECT_SHAS" | tr '\n' ' ')) — fix release.yml before promoting."; exit 1 ;;
+          esac
+          case "$ENGINE" in
+            *"+${EXPECT_SHA}+"*) ;;
+            *)
+              echo "::error::Token reports engine '${ENGINE}', but this tag's release.yml builds against fork ${EXPECT_SHA} (expected the token's engine= to contain '+${EXPECT_SHA}+')."
+              echo "::error::Either the rotation was measured on a different engine (re-run it on a build staged on ${EXPECT_SHA}), or the token predates 2026-09-14 and carries only the Chromium version — re-run farbling_seed_rotation_check.py, which now prints CEF_VERSION."
+              exit 1 ;;
+          esac
+          echo "engine binding OK: token engine '${ENGINE}' carries +${EXPECT_SHA}+ (release.yml env.CEF_ASSET)"
 
           split() { printf '%s' "$1" | tr '/' ' ' ; }
           read -r EX_A EX_B EX_C <<< "$(split "$EXEMPT")"

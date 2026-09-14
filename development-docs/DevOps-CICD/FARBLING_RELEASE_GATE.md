@@ -8,18 +8,27 @@
 > re-derived successfully by `promote.yml` in dry run **`32050154040`** — the gate's first-ever
 > execution in CI.
 >
-> ⛔ **But it has TWO known weaknesses. Read these before treating a green gate as proof.**
+> ⛔ **It had TWO known weaknesses. One is closed; read the other before treating a green gate as proof.**
 >
-> 1. **The engine binding does not bind to our engine.** The token's `engine=` field carries the
+> 1. ~~**The engine binding does not bind to our engine.** The token's `engine=` field carries the
 >    **Chromium** version (`Chrome/150.0.7871.187`), not `CEF_VERSION`, so the gate's `≥150` check
->    admits *any* P4-era engine. A token measured on **P4e** — which has no worker farbling, no
->    `convertToBlob` coverage and three unhooked audio readers — passes a **P4f** gate unchanged.
->    Ticket: `0.4.0-beta.3/TICKET_farbling_gate_engine_binding.md`.
+>    admits *any* P4-era engine.~~ ✅ **CLOSED 2026-09-14 (beta.3 Phase 9, `P9-C1`/`P9-C2`).** The harness
+>    now calls `require_engine()` before launching (header **and** the loaded `libcef.dll` — md5 on Windows,
+>    LC_UUID on macOS — must agree, and `--expect-cef` can pin it), and the token's `engine=` is
+>    `CEF_VERSION` (`150.0.43-7871.3576+g9ccef04+chromium-150.0.7871.187`). `promote.yml` derives the
+>    expected `g<sha>` from the tag's own `release.yml` `env.CEF_ASSET` lines and refuses any token whose
+>    `engine=` does not carry `+g<sha>+` — including every pre-2026-09-14 token. Measured locally with the
+>    step's shell body: real token PASS; `g7dd0357`-edited token, `Chrome/150…` token, garbage and a
+>    sub-150 string all REFUSED. Ticket: `0.4.0-beta.3/TICKET_farbling_gate_engine_binding.md`.
 > 2. **The gate measures a build that is not the build being promoted.** The token comes from a
 >    local **dev** build on the build host; what ships is the **CI-built, signed installer**. Same
 >    tree and same staged CEF, different bytes, and nothing detects a mismatch. This is inherent to
 >    running the measurement on the build host — a deliberate trade (§ below), but it must not be
 >    misread as "the promoted artifact was measured".
+>
+>    ⭐ Now stated in `promote.yml`'s own block comment ("WHAT THIS GATE STILL CANNOT SEE"), so a
+>    green gate is read as *"this engine, this tree, measured on the build host"* — not *"the promoted
+>    installer was measured"*.
 >
 > ⚠️ Also note the token deliberately carries **canvas only**, so the gate re-derives one vector of
 > the four the harness measures. A green gate is not a substitute for reading the harness output.
@@ -91,9 +100,15 @@ Prerequisites on the build host: the dev stack up (Rust wallet, `npm run dev`, b
 python development-docs/0.4.0/chromium-rebuild/farbling_seed_rotation_check.py `
     --exe "<repo>\cef-native\build\bin\Release\HodosBrowser.exe" `
     --profile-dir "$env:APPDATA\HodosBrowserDev\Default" `
-    --port 9322 --dev `
-    --log "$env:APPDATA\HodosBrowserDev\logs\debug_output.log"
+    --port 9322 --dev --expect-cef +g9ccef04 `
+    --log "$env:APPDATA\HodosBrowserDev\logs"
 ```
+
+`--expect-cef` pins the engine the run must be measured on (the `+g<sha>` fragment of `CEF_VERSION`);
+`--log` takes the logs **directory** — the shell logs per PID since beta.3 Phase 2, and a fixed filename
+silently skipped the `role: tab_` subject cross-check. The harness refuses **before launching** if the
+header cannot be read, if it does not contain the expected fragment, or if the `libcef.dll` next to
+`--exe` is not the staged distribution's (md5 on Windows, LC_UUID on macOS).
 
 Takes ~6 minutes (three kill/relaunch cycles). It restores the original
 `fingerprint_settings.json` on every exit path, including failure.
@@ -101,8 +116,11 @@ Takes ~6 minutes (three kill/relaunch cycles). It restores the original
 On success it prints one line to paste into `promote.yml`:
 
 ```
-FARBLING-ROTATION-v1 engine=Chrome/150.0.7871.187 exempt=…/…/… large=…/…/… farbled=…/…/… verdict=PASS
+FARBLING-ROTATION-v1 engine=150.0.43-7871.3576+g9ccef04+chromium-150.0.7871.187 exempt=…/…/… large=…/…/… farbled=…/…/… verdict=PASS
 ```
+
+⛔ `engine=` is `CEF_VERSION` (since 2026-09-14), not the CDP `Browser` string — the latter cannot tell
+P4e from P4f, and the gate now refuses it.
 
 ### ⛔ The negative control is not optional
 
@@ -131,9 +149,11 @@ Report both halves: *"passes, and fails when farbling is disabled."*
 
 ⭐ **Unlike the MS Defender attestation, this is verified rather than trusted.** The token
 carries the raw hashes and the engine string, and the gate re-derives all four contracts
-from them — controls stable, A≠B, A=A′ — plus an engine check that rejects anything below
-Chrome 150. The token's own `verdict=` field is **ignored**; a token claiming PASS whose
-hashes say otherwise fails.
+from them — controls stable, A≠B, A=A′ — plus **two** engine checks: a floor (major ≥ 150, so an M136
+token is rejected) and, since 2026-09-14, an **identity** check — the token's `engine=` must contain
+`+g<sha>+` for the fork SHA the tag's `release.yml` `env.CEF_ASSET` names (both arms must agree, or
+the gate refuses on the workflow's own inconsistency). The token's own `verdict=` field is
+**ignored**; a token claiming PASS whose hashes say otherwise fails.
 
 Verified against every failure mode (2026-08-09): good token passes; a constant-seed token
 fails on unlinkability; a non-deterministic token fails on determinism; a moved control
@@ -213,8 +233,11 @@ before the flip.
   CDP binds **only** for the profile literally named `Default`
   (`cef_browser_shell_mac.mm :: main` → `remote_debugging_port = (profileId=="Default") ? 9222 : 0`,
   `+100` under dev = 9322), so no other profile can be driven.
-- **If the fork is rebased**, re-run before promoting. The gate binds to the engine major
-  version, not the fork commit, so a rebase within 150 will not be caught automatically.
+- **If the fork is rebased**, re-run before promoting. ~~The gate binds to the engine major
+  version, not the fork commit, so a rebase within 150 will not be caught automatically.~~ ✅ Since
+  2026-09-14 the gate binds to the fork SHA in `release.yml`'s `env.CEF_ASSET`, so a token from the
+  previous engine **is** caught — but only once `env.CEF_ASSET` has been bumped to the new asset
+  (`CEF_BUILD_RUNBOOK.md`, "Order of operations"). Bump first, then measure.
 
 ## 7. Related
 
