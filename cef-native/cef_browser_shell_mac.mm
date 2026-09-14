@@ -5427,6 +5427,16 @@ static void SpawnWalletServer() {
     LOG_INFO("Wallet server launched with PID: " + std::to_string(g_wallet_server_pid));
 }
 
+// Phase 8d (2026-09-14) — 🍎 STUB, Mac's lane. The shared `wallet_restart` IPC arm in
+// simple_handler.cpp calls this; on Windows it resets the supervisor's attempt counter and
+// relaunches the wallet child (cef_browser_shell.cpp :: RequestWalletRestart). The macOS
+// supervisor (waitpid(g_wallet_server_pid, WNOHANG) + SpawnWalletServer(), bounded) is the
+// relay item for phase-8d-wallet-supervision; until it lands this only logs, so the shared
+// file links. ⛔ Do not delete — the link depends on it.
+void RequestWalletRestart() {
+    LOG_WARNING("wallet_restart requested — macOS wallet supervision not yet implemented (Phase 8d relay item)");
+}
+
 static void SpawnAdblockServer() {
     if (QuickAdblockHealthCheck()) {
         LOG_INFO("Adblock engine already running (dev mode) - skipping launch");

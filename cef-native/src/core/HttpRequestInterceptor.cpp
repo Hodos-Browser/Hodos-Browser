@@ -2946,6 +2946,14 @@ void warmWalletStatusCache() {
     WalletStatusCache::GetInstance().walletExists();
 }
 
+// Phase 8d stage 2: the supervisor calls this the moment it sees the wallet child die (or come
+// back). 📏 Without it a cached `Exists` outlives the wallet by POSITIVE_CACHE_SECS (30 s), and
+// every dApp call in that window is forwarded to a dead port and fails as "HTTP 0" — neither
+// NO_WALLET nor WALLET_UNAVAILABLE (contract D-8).
+void invalidateWalletStatusCache() {
+    WalletStatusCache::GetInstance().invalidate();
+}
+
 void warmBSVPriceCache() {
     BSVPriceCache::GetInstance().getPrice();
 }

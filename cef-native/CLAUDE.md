@@ -435,7 +435,7 @@ Cross-browser communication (e.g. header find bar → tab search) always routes 
 
 | File | Purpose |
 |------|---------|
-| `cef_browser_shell.cpp` | Windows bootstrap entry `RunWinMain` -> `RunHodosMain` (was `WinMain` pre-150); `ShellWindowProc`; all HWND globals; 14 overlay WndProcs + 10 mouse hooks; `Logger::Initialize` + stdout/stderr redirection; dev safeguard |
+| `cef_browser_shell.cpp` | Windows bootstrap entry `RunWinMain` -> `RunHodosMain` (was `WinMain` pre-150); `ShellWindowProc`; all HWND globals; 14 overlay WndProcs + 10 mouse hooks; `Logger::Initialize` + stdout/stderr redirection; dev safeguard; **Phase 8d backend supervisor** (`BackendSupervisorLoop` on a detached `std::thread`, 2 s period — ⛔ never `TID_FILE_*`; `RelaunchWalletProcess` / `RelaunchAdblockProcess` bounded 3× with 2/4/8 s backoff; `RequestWalletRestart` for the panel's `wallet_restart` IPC; `HODOS_NO_SUPERVISE=1` rig seam; `g_walletServerRunning` is now honest — never forced true) |
 | `cef_browser_shell_mac.mm` | macOS entry `main`; NSWindow/NSView hierarchy; 14 overlay creation functions; event forwarding; multi-window support |
 | `src/handlers/simple_app.cpp` | `SimpleApp` (`OnContextInitialized`, `OnBeforeChildProcessLaunch`, `OnBeforeCommandLineProcessing`, `SetWindowHandles`, `SetMacOSWindow`); `InjectHodosBrowserAPI`; all 15 Windows overlay create/show/hide functions |
 | `src/handlers/simple_handler.cpp` | Browser-process message routing, overlay management, context menus, downloads, find-in-page |

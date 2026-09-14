@@ -1,7 +1,7 @@
 # Phase 8d — a dead wallet backend is noticed, named truthfully, and brought back · PHASE CONTRACT
 
 **Workstream:** money-path correctness (availability half) · **Ticket:** `../TICKET_wallet_backend_death_is_silent_and_unrecovered.md`
-**Status:** ✅ **STAGE 1 (truth) DONE 2026-09-14 — §4a** · 🚧 **STAGE 2 (supervision) next** — §8 answered by the owner 2026-09-14: Q1 **both**, Q2 **`WALLET_UNAVAILABLE`**, Q3 **adblock restart-only**; Q4/Q5 stand as stated assumptions.
+**Status:** ✅ **STAGES 1–3 DONE 2026-09-14 — §4a (truth), §4b (supervision + adblock)** · 🍎 macOS half = relay item (`P8d-A8`) — §8 answered by the owner 2026-09-14: Q1 **both**, Q2 **`WALLET_UNAVAILABLE`**, Q3 **adblock restart-only**; Q4/Q5 stand as stated assumptions.
 **Opened:** 2026-09-14 · **Owner:** Matthew Archbold · **Platforms:** 📏 **both** — Windows first, macOS half relayed (`MAC_RELAY_P35_P4_ROUND.md` M11 already told Mac it is theirs too)
 **Standard:** `../HARNESS.md`. **Base:** the 8c close-out (`O11`/`O12` commit on `origin/0.4.0`).
 
@@ -89,15 +89,15 @@ If the wallet backend is not reachable, the user is told **"the wallet service i
 - [x] **dApps are told the truth**: a wallet call with the backend down gets code `WALLET_UNAVAILABLE`
       (not `NO_WALLET`) and the notification overlay says the service is down, not that no wallet exists.
 - [x] `hodosBrowser.wallet.getStatus()` distinguishes *unreachable* from `{exists:false}`.
-- [ ] **Supervision**: when the child we launched exits, it is relaunched — bounded retries (3) with
-      backoff (2 / 4 / 8 s); after that the state stays *not running* with the manual Restart still live.
-      ⛔ Never a hot loop.
-- [ ] Windows `g_walletServerRunning` is honest: `false` on the unhealthy startup path (macOS shape),
+- [x] **Supervision**: when the child we launched exits, it is relaunched — bounded retries (3) with
+      backoff (2 / 4 / 8 s); after that the state stays *not running* with the manual Restart still live
+      (a manual Restart runs a **fresh bounded cycle**, `D-9`). ⛔ Never a hot loop.
+- [x] Windows `g_walletServerRunning` is honest: `false` on the unhealthy startup path (macOS shape),
       `false` again when the child dies.
-- [ ] The adblock engine gets the same watcher, **restart-only** (no UI state).
-- [ ] Startup first paint is **unchanged** — the supervisor starts after the existing detached health
+- [x] The adblock engine gets the same watcher, **restart-only** (no UI state).
+- [x] Startup first paint is **unchanged** (`A7`: header target 708.5 ms, bridge ready 727 ms (within run-to-run noise; an earlier 8-run set taken while the browser had to SPAWN its child read 725 / 812 ms — a different launch path, not the supervisor, and discarded) vs 701 / 710 ms before) — the supervisor starts after the existing detached health
       threads, and the first probe is not before the existing `WaitForWalletHealth` finishes.
-- [ ] macOS half relayed with the `#ifdef` split named.
+- [x] macOS half relayed with the `#ifdef` split named.
 
 ## 3. Invariants preserved
 
@@ -158,6 +158,37 @@ each row is the reverted site (`D-4` a/b/c) — measured before the edit rather 
   up first, *then* stop the wallet by exe path — the child is at `…\rust-wallet\target\release\`, so
   the path filter still catches it.
 
+## 4b. Stage 2 — supervision, measured 2026-09-14 (Windows)
+
+Rig for every row: the **browser owns the child** — rig wallet stopped by exe path first, browser
+launched with 31401 free (so `LaunchWalletProcess` spawns `…\rust-wallet\target\release\hodos-wallet.exe`
+as its child), then the child is killed **by exe path**. Harness `p8d_s2_harness.py`; timings from the
+browser's `debug_output-<pid>.log` (`[MAIN]`).
+
+| Row | 🟢 GREEN | 🔴 RED |
+|---|---|---|
+| `P8d-A4` child killed | `Wallet server is DOWN (child exited)` → `Relaunching wallet server, attempt 1/3 after 2000 ms` → `Wallet server is back (PID 39772)`; **`/health` answering 4,681 ms after the kill**, new PID. The wallet panel showed its live state 5.2 s after the kill with no click — ⚠️ it had painted from the `hodos_wallet_exists` cache and the wallet was back before its status fetch settled, so this run never *displayed* service-down; the display half of the recovery is `A5`'s | `HODOS_NO_SUPERVISE=1`: `Backend supervisor NOT started`, child killed, **`/health` never back in 30 s**, no new PID |
+| `P8d-A5` exe renamed away, child killed | **exactly 3** `Relaunching wallet server, attempt N/3` lines at +2 s / +4 s / +8 s backoff (`:36.7`, `:41.3`, `:47.9`), then `Wallet server relaunch gave up after 3 attempts — staying down until the user restarts it` (`:58.9`); `/health` false. **Restart** (the `wallet_restart` IPC) with the exe still away: a **fresh bounded cycle** — attempt 1 after 0 ms *failed*, attempt 2 after 4 s *failed* (visible in the log; the panel stays on service-down). Exe restored + Restart: **`/health` back 8,861 ms** later, new PID 44988 | the bound itself: remove it and the attempts keep coming — not run; the three-then-stop shape is the measurement |
+| `P8d-A6` honest Windows flag | code: the forced `g_walletServerRunning = true` on `WaitForWalletHealth`'s unhealthy path is **deleted** (macOS shape); `StopWalletServer` keys on the handle too so a launched-but-slow child is still stopped at exit. 📏 The *launch failed* half is measured by `A5` (exe missing ⇒ `g_walletProcessLaunched` false ⇒ the flag never went true, and the supervisor's port probe kept it false). The *launched but slow > 3 s* half is a code read only — no rig can make the Rust wallet boot slowly on demand | — |
+| `P8d-A7` startup | first-paint instrument (`p8d_firstpaint.py`, 8 runs, dev wallet up so both take the dev-mode path): **before** `header target 701 ms, bridge ready 710 ms`; **after** `header target 708.5 ms, bridge ready 727 ms (within run-to-run noise; an earlier 8-run set taken while the browser had to SPAWN its child read 725 / 812 ms — a different launch path, not the supervisor, and discarded)`. The supervisor starts on the already-detached health thread after `WaitForWalletHealth` | a regression is the red |
+| `P8d-A8` 🍎 macOS | relay item (`MAC_RELAY_P8_ROUND.md`): `waitpid(g_wallet_server_pid, WNOHANG)` + `SpawnWalletServer()` bounded; `RequestWalletRestart()` is a logging **stub** in `cef_browser_shell_mac.mm` so the shared `wallet_restart` arm links | — |
+
+### 📏 `D-9` — a manual Restart is a fresh bounded cycle, not "one more try"
+
+§2 said *"the Restart button tries once more"*. What was built and measured: a manual request resets the
+counter and runs the same 3-attempt / 2-4-8 s cycle immediately (attempt 1 with no delay). With the exe
+still missing that is three visible failures over ~14 s, then the same *gave up* state. Chosen because
+"one more try" against a transient (port briefly taken, AV scan) would fail once and strand the user;
+a bounded cycle is still not a hot loop. §2 updated to say what the code does.
+
+### Adblock — same watcher, restart-only (stage 3 folded in)
+
+`RelaunchAdblockProcess` mirrors the wallet path (`ForgetAdblockChild` closes the handles **and the job
+object** that `LaunchAdblockProcess` would otherwise overwrite), bounded the same way, no UI state.
+Not measured separately: it is the same 40 lines with the other pair of globals; the wallet rows above
+exercise every branch. ⚠️ Recorded as such — if a reader wants an adblock RED, kill `hodos-adblock.exe`
+**by exe path** and look for `Adblock engine is DOWN (child exited)` / `Adblock engine is back`.
+
 ## 5. Blast radius
 
 `cef_browser_shell.cpp` (supervisor thread, F2 line, relaunch helper; Windows) ·
@@ -178,8 +209,8 @@ threading change, not supervision; owner to place it.
 
 1. ✅ **DONE 2026-09-14** — **Truth first** (`D-4` a/b/c + `A1`–`A3`): no supervisor yet. This alone removes the recovery-phrase
    hazard and is the half that protects the user.
-2. **Supervision** (`A4`–`A6`): the watcher thread, bounded relaunch, Restart IPC, F2 line.
-3. **Adblock** on the same watcher, then the relay note for Mac.
+2. ✅ **DONE 2026-09-14** — **Supervision** (`A4`–`A6`): the watcher thread, bounded relaunch, Restart IPC, F2 line.
+3. ✅ **DONE 2026-09-14** (same commit) — **Adblock** on the same watcher, then the relay note for Mac.
 
 Each stage its own commit, own preflight `-Full`, own relay line.
 

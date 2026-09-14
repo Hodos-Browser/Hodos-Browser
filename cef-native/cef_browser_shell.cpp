@@ -218,6 +218,12 @@ std::atomic<bool> g_adblockServerRunning{false};
 HANDLE g_adblockJobObject = nullptr;
 static bool g_adblockProcessLaunched = false;  // Set by LaunchAdblockProcess
 
+// Phase 8d — backend supervision (defined after the launch/stop functions below).
+void StartBackendSupervisor();   // detached thread; started after the startup health wait
+void StopBackendSupervisor();    // sets the stop flag; called before StopWalletServer at shutdown
+void RequestWalletRestart();     // the wallet panel's "Restart wallet service" (wallet_restart IPC)
+void invalidateWalletStatusCache();  // HttpRequestInterceptor.cpp — drop the 30 s "exists" cache on death
+
 // Set true at the top of ShutdownApplication() so the (detached) silent-update
 // staging thread stops downloading / logging before Logger teardown. Polled by
 // that thread and threaded into StagePendingUpdate's abort check. (Commit 4d.)
@@ -3953,12 +3959,17 @@ void WaitForWalletHealth() {
     }
 
     LOG_WARNING("Wallet server did not become healthy within ~3s - continuing anyway");
-    g_walletServerRunning = true;  // Process was launched, just slow to start
+    // Phase 8d (F2): the flag stays FALSE — the macOS shape. It used to be forced true here
+    // ("Process was launched, just slow to start"), a latch that lied for the life of the
+    // process. The supervisor flips it to true the moment /health answers, and back to
+    // false if the child dies.
 }
 
 // Stop the Rust wallet server subprocess — graceful first, forceful fallback
 void StopWalletServer() {
-    if (!g_walletServerRunning) return;
+    // Phase 8d: the flag is honest now, so a child that launched but never became healthy
+    // has flag=false AND a live handle — still ours to stop. Key on the handle too.
+    if (!g_walletServerRunning && !g_walletServerProcess.hProcess) return;
 
     if (g_walletServerProcess.hProcess) {
         // Step 1: Try graceful shutdown via HTTP (lets wallet flush SQLite WAL)
@@ -4146,6 +4157,219 @@ void WaitForAdblockHealth() {
     // (it will respond to /check once ready; AdblockCache will get false until then)
     LOG_INFO("Adblock engine launched but still loading — ad blocking available once ready");
     g_adblockServerRunning = true;
+}
+
+// ============================================================================
+// Phase 8d — backend supervision (Windows). Contract:
+// development-docs/0.4.0-beta.3/phase-8d-wallet-supervision/PHASE_CONTRACT.md
+//
+// Until 8d the wallet and adblock children were spawned once at startup and never looked at
+// again. If one died, the browser carried on with a stale "running" flag and every dApp was
+// told "no wallet" (ticket TICKET_wallet_backend_death_is_silent_and_unrecovered.md).
+//
+// Shape (prior art: Brave's Tor launcher, Chromium's service-process crash counters):
+//   - one detached std::thread, period 2 s. ⛔ NOT a CefPostDelayedTask(TID_FILE_*) loop: all
+//     three file ids are ONE shared thread in this process (8c O12) and a probe that blocks
+//     would stall balance / cookie / adblock tasks behind it. Same shape as the 6d
+//     post-update health probe thread — touches no CEF.
+//   - death = the child handle is signalled. If we did NOT launch the child (dev rig:
+//     `cargo run`, or the exe was missing) there is no handle: report only, from the port.
+//   - relaunch is BOUNDED: 3 attempts, 2 / 4 / 8 s backoff, then it stays down with the
+//     manual Restart still live. ⛔ Never a hot loop — the exe may be quarantined or the port
+//     taken, and a respawn loop there is worse than the outage.
+//   - on death the interceptor's WalletStatusCache is invalidated, or a cached "exists"
+//     outlives the wallet by 30 s and dApp calls fail as "HTTP 0" (contract D-8).
+//   - HODOS_NO_SUPERVISE=1 (rig only, read once in the browser process) disables the thread:
+//     the negative control for P8d-A4.
+// ============================================================================
+std::atomic<bool> g_supervisorStarted{false};
+std::atomic<bool> g_supervisorStop{false};
+std::atomic<bool> g_walletRestartRequested{false};
+static const int kSupervisorPeriodMs = 2000;
+static const int kRelaunchMaxAttempts = 3;
+static const int kRelaunchBackoffMs[kRelaunchMaxAttempts] = {2000, 4000, 8000};
+
+static bool ChildExited(const PROCESS_INFORMATION& pi) {
+    return pi.hProcess && WaitForSingleObject(pi.hProcess, 0) == WAIT_OBJECT_0;
+}
+
+// Interruptible sleep so shutdown never waits on a backoff.
+static void SupervisorSleep(int ms) {
+    for (int t = 0; t < ms && !g_supervisorStop; t += 100) Sleep(100);
+}
+
+// Drop the dead child's handles and job object so LaunchWalletProcess starts clean.
+// ⛔ LaunchWalletProcess overwrites g_walletJobObject without closing it — this is the close.
+static void ForgetWalletChild() {
+    if (g_walletServerProcess.hProcess) {
+        CloseHandle(g_walletServerProcess.hProcess);
+        CloseHandle(g_walletServerProcess.hThread);
+        ZeroMemory(&g_walletServerProcess, sizeof(PROCESS_INFORMATION));
+    }
+    if (g_walletJobObject) { CloseHandle(g_walletJobObject); g_walletJobObject = nullptr; }
+    g_walletProcessLaunched = false;
+}
+
+static void ForgetAdblockChild() {
+    if (g_adblockServerProcess.hProcess) {
+        CloseHandle(g_adblockServerProcess.hProcess);
+        CloseHandle(g_adblockServerProcess.hThread);
+        ZeroMemory(&g_adblockServerProcess, sizeof(PROCESS_INFORMATION));
+    }
+    if (g_adblockJobObject) { CloseHandle(g_adblockJobObject); g_adblockJobObject = nullptr; }
+    g_adblockProcessLaunched = false;
+}
+
+// One relaunch attempt. True when /health answers (or someone else is already on the port).
+static bool RelaunchWalletProcess() {
+    ForgetWalletChild();
+    LaunchWalletProcess();
+    if (g_walletServerRunning) return true;        // port was already listening (dev mode)
+    if (!g_walletProcessLaunched) return false;     // exe missing or CreateProcess failed
+    for (int i = 0; i < 12 && !g_supervisorStop; i++) {
+        Sleep(500);
+        if (QuickHealthCheck()) { g_walletServerRunning = true; return true; }
+    }
+    return false;
+}
+
+static bool RelaunchAdblockProcess() {
+    ForgetAdblockChild();
+    LaunchAdblockProcess();
+    if (g_adblockServerRunning) return true;
+    if (!g_adblockProcessLaunched) return false;
+    for (int i = 0; i < 12 && !g_supervisorStop; i++) {
+        Sleep(500);
+        if (QuickAdblockHealthCheck()) { g_adblockServerRunning = true; return true; }
+    }
+    return false;
+}
+
+static void BackendSupervisorLoop() {
+    LOG_INFO("Backend supervisor started (period " + std::to_string(kSupervisorPeriodMs) +
+             " ms; relaunch bounded to " + std::to_string(kRelaunchMaxAttempts) + " attempts, 2/4/8 s backoff)");
+    // "Owned" = we launched it at least once, so a relaunch is ours to attempt. A dev-rig
+    // wallet (`cargo run`) is not owned: report only — until the user presses Restart, which
+    // launches our own child exactly as startup would with the port free.
+    bool walletOwned = g_walletProcessLaunched;
+    bool adblockOwned = g_adblockProcessLaunched;
+    int walletAttempts = 0, adblockAttempts = 0;
+    bool walletGaveUp = false, adblockGaveUp = false;
+
+    while (!g_supervisorStop) {
+        SupervisorSleep(kSupervisorPeriodMs);
+        if (g_supervisorStop) break;
+
+        // ---------------- wallet ----------------
+        const bool manual = g_walletRestartRequested.exchange(false);
+        if (manual) { walletOwned = true; walletAttempts = 0; walletGaveUp = false; }
+
+        const bool walletDead = g_walletProcessLaunched
+            ? ChildExited(g_walletServerProcess)
+            : !IsPortListening(hodos::WalletPort());
+
+        if (walletDead || manual) {
+            if (g_walletServerRunning) {
+                LOG_WARNING(std::string("Wallet server is DOWN (") +
+                            (g_walletProcessLaunched ? "child exited" : "port not listening") + ")");
+            }
+            g_walletServerRunning = false;
+            invalidateWalletStatusCache();
+
+            if (walletOwned && !walletGaveUp) {
+                if (walletAttempts < kRelaunchMaxAttempts) {
+                    const int delay = manual ? 0 : kRelaunchBackoffMs[walletAttempts];
+                    walletAttempts++;
+                    LOG_INFO("Relaunching wallet server, attempt " + std::to_string(walletAttempts) + "/" +
+                             std::to_string(kRelaunchMaxAttempts) + " after " + std::to_string(delay) + " ms");
+                    SupervisorSleep(delay);
+                    if (g_supervisorStop) break;
+                    if (RelaunchWalletProcess()) {
+                        LOG_INFO("Wallet server is back (PID " + std::to_string(g_walletServerProcess.dwProcessId) + ")");
+                        walletAttempts = 0;
+                        invalidateWalletStatusCache();
+                    } else {
+                        LOG_WARNING("Wallet server relaunch attempt " + std::to_string(walletAttempts) + " failed");
+                    }
+                } else {
+                    walletGaveUp = true;
+                    LOG_ERROR("Wallet server relaunch gave up after " + std::to_string(kRelaunchMaxAttempts) +
+                              " attempts — staying down until the user restarts it");
+                }
+            }
+        } else if (!g_walletServerRunning) {
+            // Alive (our child, or the port came back on its own — a dev-rig restart, or the
+            // slow startup that WaitForWalletHealth gave up on). Flip the honest flag.
+            if (IsPortListening(hodos::WalletPort())) {
+                g_walletServerRunning = true;
+                walletAttempts = 0; walletGaveUp = false;
+                invalidateWalletStatusCache();
+                LOG_INFO("Wallet server is reachable again");
+            }
+        }
+
+        // ---------------- adblock (restart-only, no UI) ----------------
+        const bool adblockDead = g_adblockProcessLaunched
+            ? ChildExited(g_adblockServerProcess)
+            : !IsPortListening(hodos::AdblockPort());
+        if (adblockDead) {
+            if (g_adblockServerRunning) {
+                LOG_WARNING(std::string("Adblock engine is DOWN (") +
+                            (g_adblockProcessLaunched ? "child exited" : "port not listening") + ")");
+            }
+            g_adblockServerRunning = false;
+            if (adblockOwned && !adblockGaveUp) {
+                if (adblockAttempts < kRelaunchMaxAttempts) {
+                    const int delay = kRelaunchBackoffMs[adblockAttempts];
+                    adblockAttempts++;
+                    LOG_INFO("Relaunching adblock engine, attempt " + std::to_string(adblockAttempts) + "/" +
+                             std::to_string(kRelaunchMaxAttempts) + " after " + std::to_string(delay) + " ms");
+                    SupervisorSleep(delay);
+                    if (g_supervisorStop) break;
+                    if (RelaunchAdblockProcess()) {
+                        LOG_INFO("Adblock engine is back (PID " + std::to_string(g_adblockServerProcess.dwProcessId) + ")");
+                        adblockAttempts = 0;
+                    } else {
+                        LOG_WARNING("Adblock engine relaunch attempt " + std::to_string(adblockAttempts) + " failed");
+                    }
+                } else {
+                    adblockGaveUp = true;
+                    LOG_ERROR("Adblock engine relaunch gave up after " + std::to_string(kRelaunchMaxAttempts) + " attempts");
+                }
+            }
+        } else if (!g_adblockServerRunning && IsPortListening(hodos::AdblockPort())) {
+            g_adblockServerRunning = true;
+            adblockAttempts = 0; adblockGaveUp = false;
+            LOG_INFO("Adblock engine is reachable again");
+        }
+    }
+    LOG_INFO("Backend supervisor stopped");
+}
+
+void StartBackendSupervisor() {
+    // ⛔ Read ONCE, in the browser process (a sandboxed child does not inherit the environment).
+    static const bool kNoSupervise = [] {
+        const char* v = std::getenv("HODOS_NO_SUPERVISE");
+        return v && std::string(v) == "1";
+    }();
+    if (kNoSupervise) {
+        LOG_WARNING("⚠️ HODOS_NO_SUPERVISE=1 — backend supervisor NOT started (P8d-A4 negative control)");
+        return;
+    }
+    if (g_supervisorStarted.exchange(true)) return;
+    std::thread(BackendSupervisorLoop).detach();
+}
+
+void StopBackendSupervisor() {
+    g_supervisorStop = true;
+}
+
+void RequestWalletRestart() {
+    if (!g_supervisorStarted) {
+        LOG_WARNING("wallet_restart requested but the supervisor is not running (HODOS_NO_SUPERVISE, or before startup finished)");
+        return;
+    }
+    g_walletRestartRequested = true;
 }
 
 // Stop the adblock engine subprocess — graceful first, forceful fallback
@@ -5808,6 +6032,9 @@ static int RunHodosMain(HINSTANCE hInstance, int nCmdShow, void* sandbox_info,
     std::thread walletThread([]() {
         LOG_INFO("Polling wallet server health...");
         WaitForWalletHealth();
+        // Phase 8d: supervision begins only after the startup health wait, on this already
+        // detached thread — nothing is added to the critical path (P8d-A7 measures it).
+        StartBackendSupervisor();
     });
 
     std::thread adblockThread([]() {
@@ -6031,6 +6258,8 @@ static int RunHodosMain(HINSTANCE hInstance, int nCmdShow, void* sandbox_info,
     }
 
     // Stop child servers before CEF shutdown (defensive — may already be stopped)
+    // Phase 8d: tell the supervisor first, or it relaunches what we are about to stop.
+    StopBackendSupervisor();
     LOG_INFO("Stopping wallet server...");
     StopWalletServer();
     LOG_INFO("Stopping adblock engine...");

@@ -269,6 +269,14 @@ export default function WalletPanelPage() {
       });
   }
 
+  // Phase 8d stage 2: while the service is down, re-check every 5 s so the panel returns to
+  // its live state on its own once the supervisor (or the user) has brought the wallet back.
+  useEffect(() => {
+    if (walletStatus !== 'service-down') return;
+    const id = setInterval(() => refreshStatus(false), 5000);
+    return () => clearInterval(id);
+  }, [walletStatus]);
+
   // Keep-alive: reset UI state on hide (so next open is clean)
   useEffect(() => {
     const handleHidden = (e: MessageEvent) => {
@@ -886,10 +894,17 @@ export default function WalletPanelPage() {
         </p>
         <HodosButton
           variant="primary"
-          onClick={() => { setWalletStatus('loading'); refreshStatus(false); }}
+          onClick={() => {
+            // Stage 2: ask the supervisor to relaunch the child; the service-down poll
+            // below picks the recovery up. A dev-rig wallet we did not launch cannot be
+            // relaunched — the poll still notices when it comes back.
+            window.cefMessage?.send('wallet_restart', []);
+            setWalletStatus('loading');
+            setTimeout(() => refreshStatus(false), 3000);
+          }}
           style={{ width: '100%' }}
         >
-          Try again
+          Restart wallet service
         </HodosButton>
       </div>
     </div>

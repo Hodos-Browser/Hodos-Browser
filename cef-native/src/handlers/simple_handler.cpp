@@ -4588,6 +4588,16 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // Phase 8d stage 2: the wallet panel's "Restart wallet service" button. The supervisor
+    // (cef_browser_shell.cpp / cef_browser_shell_mac.mm) owns the child process; this only asks.
+    // No reply — the panel re-reads /wallet/status on its own poll.
+    if (message_name == "wallet_restart") {
+        extern void RequestWalletRestart();
+        LOG_INFO_BROWSER("🔄 wallet_restart requested from browser ID: " + std::to_string(browser->GetIdentifier()));
+        RequestWalletRestart();
+        return true;
+    }
+
     // ========== QR CODE SCANNING (Phase 1: DOM scan) ==========
     if (message_name == "qr_scan_request") {
         LOG_INFO_BROWSER("📷 QR scan requested from role: " + role_);
