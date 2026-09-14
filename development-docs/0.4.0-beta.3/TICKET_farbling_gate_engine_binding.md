@@ -2,7 +2,7 @@
 
 **Filed:** 2026-08-17, during the beta.2 release run
 **Severity:** gate weakness, not a shipped-product defect
-**Status:** OPEN — beta.3
+**Status:** ✅ CLOSED 2026-09-14 (beta.3 Phase 9, `P9-C1` harness + `P9-C2` gate, two commits per rule 6). See `phase-9-release-readiness/PHASE_CONTRACT.md` §4.
 **Sprint:** 📌 Phase 9 (release readiness) — bundled 2026-08-31.
 **Owner decision needed:** no. This is a straight fix; only the sequencing is a choice.
 
@@ -132,11 +132,11 @@ Recommendation: **1 + 2 now, 3 only if the CDP-port decision lands in a way that
 
 ## Acceptance
 
-- [ ] `engine=` in the token carries `CEF_VERSION`, including the fork SHA
-- [ ] gate refuses a P4e token and a garbage token; still passes the real one — **measured**
-- [ ] line 73's usage note matches the code
-- [ ] the dev-build-vs-shipped-installer gap is stated in the gate's own comment
-- [ ] `FARBLING_RELEASE_GATE.md` updated to match
+- [x] `engine=` in the token carries `CEF_VERSION`, including the fork SHA — 📏 real run 2026-09-14: `engine=150.0.43-7871.3576+g9ccef04+chromium-150.0.7871.187`; `require_engine()` is called before launch and also ties the header to the loaded `libcef.dll` (md5) on Windows
+- [x] gate refuses a P4e token and a garbage token; still passes the real one — **measured** 2026-09-14 by running the step's `run:` body under bash locally: real token exit 0; `+g7dd0357+` edit exit 1; legacy `Chrome/150.0.7871.187` exit 1; `banana` exit 1; sub-150 exit 1
+- [x] line 73's usage note matches the code
+- [x] the dev-build-vs-shipped-installer gap is stated in the gate's own comment ("WHAT THIS GATE STILL CANNOT SEE")
+- [x] `FARBLING_RELEASE_GATE.md` updated to match
 
 ## Provenance
 

@@ -71,7 +71,9 @@ All four native vectors, measured in one page visit so they share the same three
 
 ⚠️ Only meaningful against a build whose CEF actually carries those patches. Against an
 older binary farbling is absent and this correctly reports RED — check `CEF_VERSION`
-(printed as `engine=`) before believing a failure. Release builds and, until it rebuilds,
+(it IS the token's `engine=` field since 2026-09-14; `require_engine()` refuses before launch if
+it cannot be read, if `--expect-cef` does not match, or if the libcef next to `--exe` is not the
+staged distribution's) before believing a failure. Release builds and, until it rebuilds,
 macOS are still M136, where every one of these is inert by construction.
 
 ⚠️ **The `FARBLING-ROTATION-v1` token deliberately still carries the canvas figures only.**
@@ -86,6 +88,7 @@ at that check: their ranges are far too small for it to be anything but flaky.
 
 import argparse
 import ctypes
+import hashlib
 import json
 import os
 import secrets
@@ -642,8 +645,35 @@ def engine_identity(exe=None, binaries_root=None):
                            % (staged if os.path.exists(staged) else "MISSING",
                               _app_framework_binary(exe) or "MISSING"))
     else:
-        info["why"] = "non-darwin: use md5(app libcef.dll) == md5(distrib) per §FF2"
+        # Windows (§FF2): the DLL next to --exe must BE the staged distribution's DLL. This is
+        # the half that was a comment until beta.3 Phase 9 -- the header alone reports the
+        # engine you INTENDED; only the loaded binary says which one you measured.
+        app_dll = (os.path.join(os.path.dirname(os.path.abspath(exe)), "libcef.dll")
+                   if exe else None)
+        staged_dll = os.path.join(binaries_root, "Release", "libcef.dll")
+        app_md5 = _md5(app_dll) if app_dll and os.path.exists(app_dll) else None
+        staged_md5 = _md5(staged_dll) if os.path.exists(staged_dll) else None
+        info["app_uuid"], info["staged_uuid"] = app_md5, staged_md5
+        if app_md5 and staged_md5:
+            info["chain_ok"] = (app_md5 == staged_md5)
+            info["why"] = ("app libcef.dll == staged distrib (md5 %s)" % app_md5
+                           if info["chain_ok"] else
+                           "⛔ app libcef.dll md5 %s != staged %s -- the app is NOT running the "
+                           "staged engine; restage/rebuild before trusting any result"
+                           % (app_md5, staged_md5))
+        else:
+            info["why"] = ("could not hash both libcef.dll copies (staged=%s app=%s)"
+                           % (staged_dll if staged_md5 else "MISSING",
+                              app_dll if app_md5 else "MISSING"))
     return info
+
+
+def _md5(path):
+    h = hashlib.md5()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def require_engine(exe=None, binaries_root=None, expect=None, label="subject"):
@@ -664,12 +694,11 @@ def require_engine(exe=None, binaries_root=None, expect=None, label="subject"):
     if expect and expect not in info["cef_version"]:
         raise SystemExit("%s REFUSED: CEF_VERSION %r does not contain expected %r"
                          % (label, info["cef_version"], expect))
-    if sys.platform == "darwin":
-        if info["chain_ok"] is None:
-            raise SystemExit("%s REFUSED: %s" % (label, info["why"]))
-        if not info["chain_ok"]:
-            raise SystemExit("%s REFUSED: %s" % (label, info["why"]))
-        print("    engine: %s" % info["why"])
+    # Both platforms: the header names the engine, the loaded binary proves it (LC_UUID on
+    # macOS, md5 of libcef.dll on Windows). Either half unreadable or mismatched => refuse.
+    if info["chain_ok"] is None or not info["chain_ok"]:
+        raise SystemExit("%s REFUSED: %s" % (label, info["why"]))
+    print("    engine: %s" % info["why"])
     return info
 
 
@@ -679,10 +708,9 @@ def engine_version(port):
     ⚠️ This is the CHROMIUM version and it does NOT identify our engine -- see
     cef_version() above. Do not use it alone to assert you measured a rebuilt binary.
 
-    Carried into the attestation token so the release gate can reject a result produced
-    against the wrong engine. On M136 the farbling patches do not exist at all, so a
-    rotation run there is guaranteed to fail -- but a result pasted from a DIFFERENT
-    machine's 150 build would otherwise be indistinguishable from this build's.
+    Printed for the record only. ⛔ Since 2026-09-14 it is NOT the token's `engine=` field --
+    that carries CEF_VERSION from require_engine(), because this string cannot tell P4e
+    from P4f and promote.yml has to (TICKET_farbling_gate_engine_binding.md).
     """
     try:
         with urllib.request.urlopen(
@@ -816,6 +844,14 @@ def check_role_in_log(log_path, host):
     """
     if not log_path or not os.path.exists(log_path):
         return None
+    if os.path.isdir(log_path):
+        # Since beta.3 Phase 2 the shell logs per PID (logs/debug_output-<pid>.log); a fixed
+        # filename silently disabled this subject check. Given the directory, take the newest.
+        cands = [os.path.join(log_path, f) for f in os.listdir(log_path)
+                 if f.startswith("debug_output") and f.endswith(".log")]
+        if not cands:
+            return None
+        log_path = max(cands, key=os.path.getmtime)
     try:
         with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
             lines = fh.readlines()[-4000:]
@@ -876,7 +912,8 @@ def run_phase(label, seed_hex, args):
     for who, v in (("exempt ", ex), ("farbled", fa)):
         print(f"    {who} canvas={v['small']}/{v['large']}  webgl={v['glSmall']}/{v['glLarge']}"
               f"  audio={v['audio']}  mem={v['deviceMemory']}  cores={v['cores']}")
-    return {"exempt": ex, "farbled": fa, "engine": engine_version(args.port)}
+    print(f"    CDP reports {engine_version(args.port)} (Chromium version -- not the engine id)")
+    return {"exempt": ex, "farbled": fa, "engine": args.engine_id}
 
 
 def main():
@@ -901,12 +938,19 @@ def main():
                          "as --profile= so the startup picker never appears; picker mode "
                          "disables the CDP port entirely.")
     ap.add_argument("--log", default=None,
-                    help="debug_output.log, for the role: subject cross-check")
+                    help="debug_output.log, or the logs DIRECTORY (newest debug_output*.log is "
+                         "used -- the shell logs per PID), for the role: subject cross-check")
     ap.add_argument("--settle", type=float, default=10.0,
                     help="seconds to let the browser finish opening its overlays")
     ap.add_argument("--negative-control", action="store_true",
                     help="disable farbling for the farbled domain and assert this "
                          "harness goes RED. Exit 0 only if it does.")
+    ap.add_argument("--expect-cef", default=None,
+                    help="REFUSE to run unless CEF_VERSION contains this (e.g. +g9ccef04). "
+                         "engine_version() cannot tell P4e from P4f -- both are Chromium "
+                         "150.0.7871.187 -- so this is the only subject assertion that "
+                         "distinguishes our engines. Whatever CEF_VERSION says becomes the "
+                         "token's engine= field.")
     args = ap.parse_args()
 
     if not os.path.isfile(args.exe):
@@ -917,6 +961,11 @@ def main():
         args.profile_id = os.path.basename(os.path.normpath(args.profile_dir))
     print(f"launching profile '{args.profile_id}' explicitly (skips the startup picker, "
           f"which would disable the CDP port)")
+
+    # Subject assertion FIRST, before any browser is launched: which engine, tied to the
+    # binary --exe actually loads. Its CEF_VERSION is what the token carries.
+    args.engine_id = require_engine(args.exe, expect=args.expect_cef,
+                                    label="seed-rotation subject")["cef_version"]
 
     original = read_settings(args.profile_dir)
     original_seed = original.get("profileSeed")
