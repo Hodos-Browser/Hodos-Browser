@@ -9,6 +9,7 @@
 #include "../../include/core/NavigationHandler.h"
 #include "../../include/core/AddressHandler.h"
 #include "../../include/core/JsStringEscape.h"  // F6: canonical escapeJsonForJs encoder
+#include "../../include/core/WalletService.h"   // kBridgeCallTimeoutMs (8c O5), owned next to the transport timeouts
 
 #include "wrapper/cef_helpers.h"
 #include "include/cef_task.h"
@@ -362,7 +363,11 @@ void RejectBridgeCall(int requestId, const std::string& error) {
 // ⚠️ Deliberately generous. Some wallet calls reach the network, and a deadline that
 // kills legitimate slow work is its own defect. This is a backstop against a browser
 // process that never replies — not a latency budget.
-static const int64_t kBridgeCallTimeoutMs = 30000;
+//
+// The value lives in WalletService.h as `kBridgeCallTimeoutMs`, next to the transport
+// timeouts it has to beat, with a static_assert that it clears the broadcast timeout.
+// beta.3 Phase 8c O5: it used to be a local 30 000 here, equal to the 30 000 ms broadcast
+// timeout — so a slow broadcast could be reported "timed out" while it was completing.
 
 // Rejects one bridge call if it is still pending when the deadline fires.
 //

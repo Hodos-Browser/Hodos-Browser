@@ -104,7 +104,7 @@ author to reintroduce the race.
 
 1. **The request id must be read BEFORE the `try`.** `send_transaction`'s catch echoes it; read after
    a parse that throws, the error path has no id and the caller hangs to the **30 s deadline** instead
-   of rejecting. Measured: 82 ms with the hoist, would have been 30 s without.
+   of rejecting. Measured: 82 ms with the hoist, would have been 30 s without (the deadline is **45 s** since O5, 2026-09-14 — `kBridgeCallTimeoutMs` now lives in `WalletService.h` beside the broadcast timeout it must clear).
 2. **Check the legacy method's timeout behaviour before deleting it.** The class has **two** flavours:
    `getInfo` *rejects*, `getBackupModalState` *resolved `null`* — a silent wrong value. ⛔ One
    `resolve(null)` remains, in **`markBackedUp`**, which records that the user backed up their

@@ -30,6 +30,17 @@ inline constexpr int kWalletBalanceTimeoutMs = 2000;
 // timeout here aborts a send the user asked for. Matches the pre-beta.3 macOS constant.
 inline constexpr int kWalletBroadcastTimeoutMs = 30000;
 
+// How long a Phase 8c bridge call (`hodosBrowser.bridge.*`, resolved by request id in the
+// render process) may stay unanswered before it is rejected. It is a backstop against a
+// browser process that never replies, NOT a latency budget — and it MUST clear the slowest
+// transport timeout above with margin, or a slow-but-successful broadcast gets reported to
+// the user as "timed out" while the money is in fact leaving. beta.3 Phase 8c O5 found the
+// two equal at 30 000 ms, which is exactly that defect. Owned here, next to the number it
+// has to beat, so the relationship is checked by the compiler.
+inline constexpr int64_t kBridgeCallTimeoutMs = 45000;
+static_assert(kBridgeCallTimeoutMs > kWalletBroadcastTimeoutMs + 5000,
+              "the bridge deadline must clear the broadcast timeout with margin (8c O5)");
+
 class WalletService {
 public:
     WalletService();

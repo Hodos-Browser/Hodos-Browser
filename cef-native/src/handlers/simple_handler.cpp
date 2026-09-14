@@ -79,6 +79,7 @@
 #include <iostream>
 #include <string>
 #include <sstream>
+#include <chrono>
 #include <nlohmann/json.hpp>
 
 #include "../../include/core/Logger.h"
@@ -6160,158 +6161,112 @@ bool SimpleHandler::OnProcessMessageReceived(
     if (message_name == "send_transaction") {
         LOG_DEBUG_BROWSER("🚀 Send transaction requested from browser ID: " + std::to_string(browser->GetIdentifier()));
 
-        // Phase 8c stage 2 — MIGRATED to per-request-id routing.
-        // Args: 0 = requestId, 1 = transaction JSON.
+        // Phase 8c stage 2 — MIGRATED to per-request-id routing. Args: 0 = requestId,
+        // 1 = transaction JSON.
         //
-        // ⛔ Read BEFORE the try. The catch below sends `send_transaction_error`, and it
-        // has to echo the same id — if this were read inside the try, an exception thrown
-        // before it would leave the error path with no id to reply on, and the caller's
-        // promise would hang until the 30 s deadline instead of rejecting immediately.
+        // ⛔ Read BEFORE anything that can throw. Every reply path below echoes it; without
+        // it the caller's promise would hang to the bridge deadline instead of rejecting.
         const int sendRequestId = message->GetArgumentList()->GetInt(0);
 
-        try {
-            // Parse transaction data from message arguments
-            CefRefPtr<CefListValue> args = message->GetArgumentList();
-            LOG_DEBUG_BROWSER("🔍 send_transaction: args->GetSize() = " + std::to_string(args->GetSize()));
+        // 8c O5 (2026-09-14): the wallet call runs OFF the UI thread, the `get_balance` /
+        // `address_generate` shape. It used to run inline here with a 30 s transport
+        // timeout — a 30 s freeze of every window in the process on a slow broadcast, the
+        // P2a-A2 class of defect, on the money path. The transaction body is no longer
+        // logged either (P0-A1: it carries the destination and the amount).
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        if (args->GetSize() < 2) {
+            LOG_DEBUG_BROWSER("❌ send_transaction: no transaction data (args " +
+                              std::to_string(args->GetSize()) + ")");
+            CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("send_transaction_error");
+            response->GetArgumentList()->SetInt(0, sendRequestId);
+            response->GetArgumentList()->SetString(1, "No transaction data provided");
+            browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
+            return true;
+        }
+        const std::string transactionDataJson = args->GetString(1).ToString();
+        LOG_DEBUG_BROWSER("🔍 send_transaction: payload " + std::to_string(transactionDataJson.length()) +
+                          " bytes (requestId " + std::to_string(sendRequestId) + ")");
 
-            if (args->GetSize() > 1) {
-                std::string transactionDataJson = args->GetString(1);
-                LOG_DEBUG_BROWSER("🔍 send_transaction: received JSON = " + transactionDataJson);
+        // ⚠️ Rig-only seam, read ONCE in the browser process (never in a child): delays the
+        // send reply by N ms on the blocking thread so a "late reply" can be produced
+        // without money — 8c O2 (a reply after the deadline is discarded, not misrouted)
+        // and O5 (a slow-but-successful send must still resolve). Same family as
+        // HODOS_WALLET_SYNC_UI above. Unset in production.
+        static const int kReplyDelayMs = [] {
+            const char* v = std::getenv("HODOS_BRIDGE_REPLY_DELAY_MS");
+            if (!v) return 0;
+            try { return std::stoi(v); } catch (...) { return 0; }
+        }();
 
-                nlohmann::json transactionData = nlohmann::json::parse(transactionDataJson);
-
-                // Call WalletService to send transaction
-                LOG_DEBUG_BROWSER("🔍 About to call WalletService::sendTransaction");
+        // Captureless so it can be bound into a CEF task; the id and payload travel as
+        // PARAMETERS. Everything that can throw is inside, and every path replies.
+        auto sendAndDeliver = [](CefRefPtr<CefBrowser> target, int reqId, std::string payloadJson, int delayMs) {
+            std::string resultStr;
+            bool ok = true;
+            try {
+                nlohmann::json transactionData = nlohmann::json::parse(payloadJson);
                 WalletService walletService;
+                nlohmann::json result = walletService.sendTransaction(transactionData);
 
-                LOG_DEBUG_BROWSER("🔍 Calling sendTransaction...");
-                std::cout.flush();
-                std::cerr.flush();
-
-                nlohmann::json result;
-                try {
-                    LOG_DEBUG_BROWSER("🔍 About to call walletService.sendTransaction()...");
-                    std::cout.flush();
-                    result = walletService.sendTransaction(transactionData);
-                    LOG_DEBUG_BROWSER("✅ sendTransaction returned successfully");
-                    std::cout.flush();
-                } catch (const std::exception& e) {
-                    LOG_DEBUG_BROWSER("❌ Exception in sendTransaction: " + std::string(e.what()));
-                    std::cout.flush();
-                    throw;
-                } catch (...) {
-                    LOG_DEBUG_BROWSER("❌ Unknown exception in sendTransaction");
-                    std::cout.flush();
-                    throw;
-                }
-
-                LOG_DEBUG_BROWSER("🔍 About to dump result...");
-                std::string resultStr;
-                try {
-                    // Check if result is valid before dumping
-                    if (result.is_null() || result.empty()) {
-                        LOG_DEBUG_BROWSER("⚠️ Result is null or empty, using default error");
-                        resultStr = "{\"success\":false,\"error\":\"Invalid response from wallet\"}";
-                    } else {
-                        resultStr = result.dump();
-                        LOG_DEBUG_BROWSER("✅ Result dumped, length: " + std::to_string(resultStr.length()));
-
-                        // Truncate if too long (CEF has message size limits)
-                        const size_t MAX_MESSAGE_SIZE = 512; // Keep it small
-                        if (resultStr.length() > MAX_MESSAGE_SIZE) {
-                            LOG_DEBUG_BROWSER("⚠️ Result too long (" + std::to_string(resultStr.length()) + "), truncating");
-                            // Try to preserve the error message if it exists
-                            if (result.contains("error") && result["error"].is_string()) {
-                                std::string errorMsg = result["error"].get<std::string>();
-                                if (errorMsg.length() > 100) {
-                                    errorMsg = errorMsg.substr(0, 100) + "...";
-                                }
-                                resultStr = "{\"success\":false,\"error\":\"" + errorMsg + "\",\"status\":\"failed\"}";
-                            } else {
-                                resultStr = resultStr.substr(0, MAX_MESSAGE_SIZE) + "...(truncated)";
-                            }
+                if (result.is_null() || result.empty()) {
+                    resultStr = "{\"success\":false,\"error\":\"Invalid response from wallet\"}";
+                } else {
+                    resultStr = result.dump();
+                    // CEF process messages have size limits; keep the reply small but keep
+                    // the error text the user needs to read.
+                    const size_t MAX_MESSAGE_SIZE = 512;
+                    if (resultStr.length() > MAX_MESSAGE_SIZE) {
+                        if (result.contains("error") && result["error"].is_string()) {
+                            std::string errorMsg = result["error"].get<std::string>();
+                            if (errorMsg.length() > 100) errorMsg = errorMsg.substr(0, 100) + "...";
+                            nlohmann::json compact;
+                            compact["success"] = false;
+                            compact["error"] = errorMsg;
+                            compact["status"] = "failed";
+                            resultStr = compact.dump();
+                        } else {
+                            nlohmann::json compact;
+                            compact["success"] = result.value("success", false);
+                            if (result.contains("txid")) compact["txid"] = result["txid"];
+                            compact["truncated"] = true;
+                            resultStr = compact.dump();
                         }
                     }
-                } catch (const std::exception& e) {
-                    LOG_DEBUG_BROWSER("❌ Exception dumping result: " + std::string(e.what()));
-                    resultStr = "{\"success\":false,\"error\":\"Failed to serialize response\"}";
-                } catch (...) {
-                    LOG_DEBUG_BROWSER("❌ Unknown exception dumping result");
-                    resultStr = "{\"success\":false,\"error\":\"Unknown error\"}";
                 }
-
-                LOG_DEBUG_BROWSER("✅ Transaction result received, length: " + std::to_string(resultStr.length()));
-
-                // Send result back to the requesting browser
-                LOG_DEBUG_BROWSER("🔍 Creating process message");
-                CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("send_transaction_response");
-                if (!response) {
-                    LOG_DEBUG_BROWSER("❌ Failed to create process message");
-                    throw std::runtime_error("Failed to create process message");
-                }
-
-                LOG_DEBUG_BROWSER("🔍 Getting argument list");
-                CefRefPtr<CefListValue> responseArgs = response->GetArgumentList();
-                if (!responseArgs) {
-                    LOG_DEBUG_BROWSER("❌ Failed to get argument list");
-                    throw std::runtime_error("Failed to get argument list");
-                }
-
-                LOG_DEBUG_BROWSER("🔍 Setting string argument (length: " + std::to_string(resultStr.length()) + ")");
-                std::cout.flush();
-
-                // Check if string is too large (CEF has limits)
-                if (resultStr.length() > 1000000) { // 1MB limit
-                    LOG_DEBUG_BROWSER("⚠️ Response too large, truncating error message");
-                    nlohmann::json truncated = result;
-                    if (truncated.contains("error") && truncated["error"].is_string()) {
-                        std::string error = truncated["error"].get<std::string>();
-                        if (error.length() > 500) {
-                            error = error.substr(0, 500) + "... (truncated)";
-                            truncated["error"] = error;
-                        }
-                    }
-                    resultStr = truncated.dump();
-                }
-
-                try {
-                    responseArgs->SetInt(0, sendRequestId);
-                    responseArgs->SetString(1, resultStr);
-                    LOG_DEBUG_BROWSER("✅ String argument set successfully");
-                } catch (const std::exception& e) {
-                    LOG_DEBUG_BROWSER("❌ Failed to set string argument: " + std::string(e.what()));
-                    throw;
-                }
-                std::cout.flush();
-
-                LOG_DEBUG_BROWSER("🔍 Getting main frame");
-                CefRefPtr<CefFrame> mainFrame = browser->GetMainFrame();
-                if (!mainFrame) {
-                    LOG_DEBUG_BROWSER("❌ Failed to get main frame");
-                    throw std::runtime_error("Failed to get main frame");
-                }
-
-                LOG_DEBUG_BROWSER("🔍 Sending process message to renderer");
-                mainFrame->SendProcessMessage(PID_RENDERER, response);
-                LOG_DEBUG_BROWSER("📤 Transaction response sent back to browser");
-            } else {
-                LOG_DEBUG_BROWSER("❌ send_transaction: No arguments provided, args->GetSize() = " + std::to_string(args->GetSize()));
-                throw std::runtime_error("No transaction data provided");
+            } catch (const std::exception& e) {
+                resultStr = e.what();
+                ok = false;
+            } catch (...) {
+                resultStr = "unknown error";
+                ok = false;
             }
 
-        } catch (const std::exception& e) {
-            LOG_DEBUG_BROWSER("❌ Send transaction failed: " + std::string(e.what()));
+            if (delayMs > 0) {
+                LOG_WARNING_BROWSER("⚠️ HODOS_BRIDGE_REPLY_DELAY_MS=" + std::to_string(delayMs) +
+                                    " — holding send reply (requestId " + std::to_string(reqId) + ")");
+                std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+            }
 
-            // Send error response — echoing the id read before the try, so the caller's
-            // promise rejects now rather than waiting out the 30 s deadline.
-            CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create("send_transaction_error");
-            CefRefPtr<CefListValue> responseArgs = response->GetArgumentList();
-            responseArgs->SetInt(0, sendRequestId);
-            responseArgs->SetString(1, e.what());
+            // Length only: the result carries the txid and, on failure, wallet error text.
+            LOG_DEBUG_BROWSER(std::string("🚀 Send transaction ") + (ok ? "reply" : "FAILED") +
+                              " (requestId " + std::to_string(reqId) + ", " +
+                              std::to_string(resultStr.length()) + " bytes)");
 
-            browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
-        }
+            CefPostTask(TID_UI, base::BindOnce([](CefRefPtr<CefBrowser> b, std::string p, bool good, int rid) {
+                // The browser may have closed while the wallet was working.
+                if (!b) return;
+                CefRefPtr<CefFrame> frame = b->GetMainFrame();
+                if (!frame) return;
+                CefRefPtr<CefProcessMessage> response = CefProcessMessage::Create(
+                    good ? "send_transaction_response" : "send_transaction_error");
+                response->GetArgumentList()->SetInt(0, rid);
+                response->GetArgumentList()->SetString(1, p);
+                frame->SendProcessMessage(PID_RENDERER, response);
+            }, target, resultStr, ok, reqId));
+        };
 
+        CefPostTask(TID_FILE_USER_BLOCKING,
+                    base::BindOnce(sendAndDeliver, browser, sendRequestId, transactionDataJson, kReplyDelayMs));
         return true;
     }
     // All wallet handlers now cross-platform (WalletService has platform implementations)

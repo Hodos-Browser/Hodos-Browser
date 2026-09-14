@@ -4,8 +4,8 @@
 **Status:** 🟢 **STAGES 1–3 COMPLETE (2026-09-13); stage 4 absorbed into the batches.** Six batches after the
 mechanism: wallet, backup-overlay deletion, cookies, bookmarks, adblock + privacy shield, paid cache.
 **34 bridge natives; zero per-call `window.on*` slots remain** (`P8c-A8`). Open at phase close: the
-owner-bound register rows `O1` (two txids, real money), `O2` (a genuinely late reply), `O5` (30 s
-deadline vs the slowest real call), `O6` (macOS verification — relay M7/M8), and the G11 baseline
+owner-bound register rows `O1` (two txids, real money), ~~`O2` (a genuinely late reply), `O5` (30 s
+deadline vs the slowest real call)~~ — **O2 + O5 closed 2026-09-14, `P8c-A9` (§4k)**, `O6` (macOS verification — relay M7/M8), and the G11 baseline
 lowering that O8's deletion earned (its own commit, per working rule 6).
 ⛔ **8 native bridge functions, 9 JS methods migrated** — `getStatus`, `sendTransaction`, `getBalance`,
 `getBackupModalState`, `setBackupModalState`, and (batch 2, 2026-09-12) `address.generate` +
@@ -41,15 +41,16 @@ Stage 1 must land and be reviewed before stages 2–4 are attempted.
 | # | Needs your eyes on | Why it cannot be settled by me | State |
 |---|---|---|---|
 | **O1** | **`P8c-A2` — two *successful* sends produce two txids.** `M8` in `../PAYMENT_TEST_BATCH.md` | Needs **real money**, twice. Its RED (apply `getBalance`'s dedupe ⇒ one send) is the row that catches the worst possible way to finish this phase | ⬜ owed |
-| **O2** | **A genuinely *late* reply** — one that arrives *after* the deadline already rejected — is discarded, not misrouted | The deadline test proved "reply never arrives". "Arrives late" is a different path and needs an induced delay. Free to run; just not run yet | ⬜ owed |
+| **O2** | **A genuinely *late* reply** — one that arrives *after* the deadline already rejected — is discarded, not misrouted | The deadline test proved "reply never arrives". "Arrives late" is a different path and needs an induced delay. Free to run; just not run yet | ✅ **observed 2026-09-14** (`P8c-A9c`, §4k): reply held **50 s** by the rig seam ⇒ caller rejected at **45,011 ms** (`timed out after 45s`), the real reply landed 5 s later and the render log says `bridge response for unknown requestId 9 — discarded, not misrouted`. Nobody else received it |
 | **O3** | **Orphaned round trips.** `create_transaction` (`D-6`) turned out to have company: `sign_transaction`, `broadcast_transaction` and `get_all_addresses` have **no JS sender**, and `wallet.create` / `load` / `generateAddress` / `getCurrentAddress` / `getAddresses` / `getTransactionHistory` have **no reachable caller** (`D-7`) | Deleting live-looking C++ is a call I should not make alone | ✅ **decided 2026-09-12** — delete all ten (batch 2, commit 2). Every batch-2 deletion is a JS method, its C++ handler, its render arm(s), and the `WalletService` method it orphans on **both** platforms |
 | **O4** | **How many of the 41 do we actually migrate?** | Several (bookmark folder CRUD, cache size) are UI-driven and unlikely to race. My lean is *all* — a slot left behind is a slot the next person copies — but it is real work for little risk reduction | ✅ **answered 2026-09-12:** every slot with a call site is migrated; a slot with none is **deleted**, which is the stronger form of "never copied" |
-| **O5** | **The 30 s deadline value** | Chosen as a backstop, not measured against the slowest real wallet call. If any legitimate call can exceed 30 s, this turns a slow success into a failure | ⬜ batch 2 measured `getInfo` 3 ms and `address.generate` 10 ms (§4d) — the **slowest** real call is still unmeasured, and `send_transaction`'s broadcast is the candidate |
+| **O5** | **The 30 s deadline value** | Chosen as a backstop, not measured against the slowest real wallet call. If any legitimate call can exceed 30 s, this turns a slow success into a failure | ✅ **fixed 2026-09-14** (`P8c-A9`, §4k). 🚨 It was **not** a backstop: `kWalletBroadcastTimeoutMs` = 30 000 and the deadline = 30 000 were **equal**, so a broadcast that used its whole budget and then succeeded would have been reported "timed out" to the user while the money left. The deadline is now `kBridgeCallTimeoutMs` = **45 000** in `WalletService.h`, next to the number it must beat, with `static_assert(kBridgeCallTimeoutMs > kWalletBroadcastTimeoutMs + 5000)`. And `send_transaction` ran the wallet call **inline on the UI thread** (the P2a-A2 defect, on the money path) — now the `get_balance` shape. RED/GREEN measured |
 | **O6** | **macOS parity.** Both changed files (`simple_render_process_handler.cpp`, `simple_handler.cpp`) are **shared**, not Windows-only | Unlike 8a/8b this is not Rust-only. Mac must verify the V8 binding and the promise map behave there | ⬜ relay owed — batch 2 also **collapsed** the `#ifdef _WIN32` / `#else` twin copies of the `address_generate` handler (they were byte-identical), and commit 2 deletes bodies in `WalletService_mac.cpp` — Mac's lane, flagged for the relay |
 | **O7** | ⚠️ **RED controls are a wasting asset.** `getBackupModalState` WAS the control for `P8c-A1a`; batch 1 used `getInfo`; **batch 2 used `bookmarks.getAllTags`** (§4d — 2 of 3 rejected at 5,011 ms). The wallet namespace now has **no** legacy method left | Remaining legacy pool for a RED: cookies (15) and bookmarks (14). ⛔ **At 0 remaining there is no legacy control left at all**, and the RED must become a deliberate stub | ⚠️ live |
 | **O8** | 🚨 **`getInfo` and `markBackedUp` were dead at the BACKEND too.** The Rust wallet has no `/wallet/info` and no `/wallet/markBackedUp` route (`main.rs` — both **404**, measured against the dev wallet). C++ wraps the miss as `{success:false, error:"Failed to get wallet info: {}"}`. Their only consumer, `BackupOverlayRoot`, is itself **unreachable**: its only opener (`overlay_show_backup`) is sent from a block App.tsx has commented out. So the whole backup-overlay chain — the page, the route, the IPC, `CreateBackupOverlayWithSeparateProcess` on both platforms, its HWND/WndProc/role slot — is dead | They were migrated anyway (batch 2): the routing is proven and the change is reversible. **Deleting the chain is an overlay-lifecycle change** (CLAUDE.md invariant 8) and cascades into `cef_browser_shell.cpp` / `cef_browser_shell_mac.mm` — not a call to make inside a bridge batch | ✅ **owner: delete (2026-09-12)** — *"I don't think we need it."* The recovery-phrase prompt is `WalletPanelPage`'s create flow. **Windows + shared half done** (§4e): page, route, the four methods and their natives/arms/handlers, `overlay_show_backup`, every `role_ == "backup"` arm, the HWND/WndProc/class registration, the app-file creator, the window-record HWND field. 🍎 **macOS half owed to Mac** (`MAC_RELAY_P8_ROUND.md` M8): the `.mm` creator and its six `GetBackupBrowser()` uses, `g_backup_overlay_window`, then the accessor/static/header decl and the `BrowserWindow` `backup_browser` / `backup_overlay_window` slots, which Windows kept only so the Mac build stays green |
 | **O10** | **Scope: the single-slot pattern lives in 8 hooks too (`D-11`), not only the bridge file** | Doubles the phase (~72 slots vs the ticket's 41); each hook rewrite changes error semantics from "resolve a default on timeout" to "reject" | ✅ **decided 2026-09-12: all live slots, hooks included.** Remaining after batch 3: bookmarks (14, bridge-owned), adblock (6), privacy shield (3), paid cache (2), import (2), profiles (1), settings (1), site permissions (1), recently-closed (1) |
 | **O9** | ⚠️ **`address_generate` blocks the UI thread and cannot reject.** The browser handler calls `WalletService::generateAddress()` **inline** — unlike `get_balance`, which P2a moved off-thread for exactly this reason. With the dev wallet stopped, three calls took **6,168 ms, serialised on the UI thread**, and every one **resolved `{}`** rather than rejecting, because `WalletService::makeHttpRequest` swallows transport failure. `useAddress` then reads `response.address` as `undefined`. ⇒ the `address_generate_error` arm (and `RejectBridgeCall` on this slot) is **unreachable in practice** | Pre-existing on both counts. Same family as `TICKET_wallet_backend_death_is_silent_and_unrecovered.md` | ✅ **fixed 2026-09-12 on owner's call** (`P8c-A4d`): off-thread via the `get_balance` shape, and a missing address is now a **rejection**. The "notice the wallet died and restart it" half is the death ticket, now **assigned to Phase 8 after 8c**. 📏 Side finding: `WalletService::isConnected()` is a **latch** — `WinHttpConnect` allocates a handle without touching the wallet, so it reads true with the wallet dead |
+| **O11** | 📏 `BridgeCallDeadlineTask` logs its harmless no-op (call already answered) with the O2 words — `bridge error for unknown requestId N — discarded, not misrouted`, 63 of them in a 2-minute window vs one real late reply (§4k) | Pre-existing since batch 1; cosmetic but it degrades the one log line O2 relies on | ⬜ two-line fix (return early when the id is absent), any later 8c tidy commit |
 
 ## 0. Plan-vs-tree delta
 
@@ -570,7 +571,8 @@ was absorbed into the batches: every retired declaration in `hodosBrowser.d.ts` 
 ### O5 — two real latencies
 
 `getInfo` **3 ms**, `address.generate` **10 ms** (single calls, warm). Neither is the slowest real
-call; the 30 s deadline remains unmeasured against `send_transaction`'s broadcast.
+call; the 30 s deadline remains unmeasured against `send_transaction`'s broadcast. → **Resolved in §4k:** the
+slowest real call is bounded by `kWalletBroadcastTimeoutMs` (30 s) and the deadline was *equal* to it.
 
 ### ⭐ What this batch retired
 
@@ -583,6 +585,83 @@ call; the 30 s deadline remains unmeasured against `send_transaction`'s broadcas
   backedUp}`; C++ has always sent `{success, wallet:{…}}`. `BackupOverlayRoot` read it flat, so its
   `mnemonic` was `undefined`. The type now says what the wire carries and the one consumer reads it
   nested — moot while the overlay is unreachable (`O8`), but the type must not lie.
+
+## 4k. O2 + O5 — the money path off the UI thread, and a deadline that clears the broadcast timeout (2026-09-14)
+
+### 🚨 `D-14` — the deadline was not a backstop; it was equal to the broadcast timeout
+
+`kBridgeCallTimeoutMs` was a file-local `30000` in the render handler. `kWalletBroadcastTimeoutMs`
+(`WalletService.h`) is `30000`. `send_transaction` → `WalletService::sendTransaction` →
+`/transaction/send` with that timeout. So the one call that is *allowed* to be slow — because it is
+broadcasting real money — had exactly zero margin: a send that used its budget and then succeeded
+would be **rejected to the caller as "timed out"** while the transaction went out anyway. Worse, the
+handler ran the wallet call **inline on the browser UI thread**, the P2a-A2 defect that P2 fixed for
+`get_balance` and O9 fixed for `address_generate`, still live on the money path: every window in the
+process froze for the length of the call.
+
+**Fix.** (1) `kBridgeCallTimeoutMs = 45000` now lives in `WalletService.h` beside the transport timeouts
+it must beat, with `static_assert(kBridgeCallTimeoutMs > kWalletBroadcastTimeoutMs + 5000, …)` — the
+relationship is checked by the compiler, not by the next reader. The render handler includes it.
+(2) `send_transaction` uses the `get_balance` shape: captureless lambda on `TID_FILE_USER_BLOCKING`,
+request id and payload as parameters, reply hopped to `TID_UI`; every path replies with the id. The
+512-byte compaction and the `Invalid response from wallet` shape are unchanged. (3) The
+`received JSON = <full transaction body>` DEBUG line is gone — it put the destination and amount in
+a plaintext log (P0-A1 family); the reply is logged by length only.
+(4) A **rig-only seam**, `HODOS_BRIDGE_REPLY_DELAY_MS`, read once in the browser process (same family
+as `HODOS_WALLET_SYNC_UI`), sleeps on the blocking thread before posting the send reply — the only way
+to manufacture a *late* reply without money. Unset in production.
+
+### `P8c-A9a` — 🟢🔴 off the UI thread, same harness, same conditions, only the binary differs
+
+Subject: header page (`http://127.0.0.1:5137/`), one `wallet.sendTransaction({recipient:'p8c-o25-invalid',
+amount:1})` — the wallet rejects the field, nothing can move — with a concurrent `/json/list` probe (the
+UI-thread instrument from O9). **Dev wallet stopped by exe path**, so the call fails at transport.
+
+| | send | probe |
+|---|---|---|
+| 🔴 **RED** — binary before this change (`d7f1287` lineage) | fulfilled `{success:false,error:"Invalid response from wallet"}` in **2,053 ms** | **one** sample, **2,061 ms** — the UI thread was held for the whole call |
+| 🟢 **GREEN** — this change | same payload, 3,593 ms (transport failure path, wallet down) | **17** samples, max **18 ms**, median 17 ms |
+
+### `P8c-A9b` — 🟢 O5: a reply slower than the OLD deadline now resolves
+
+Wallet **up**, browser launched with `HODOS_BRIDGE_REPLY_DELAY_MS=35000`. The wallet answered in
+milliseconds (its own error for the unknown `recipient` field — proof it was reached and nothing was
+sent); the reply was then held 35 s.
+
+| | |
+|---|---|
+| result | **fulfilled at 35,009 ms** with the wallet's error text, not a timeout |
+| probe during the hold | 158 samples, max 21 ms |
+| browser log | `holding send reply (requestId 9)` at :08.010 → `Send transaction reply (requestId 9, 151 bytes)` at :43.010 |
+
+Under the previous 30 s deadline this exact reply would have been rejected at 30 s and the real
+answer discarded — the O2 path below, on a *successful* send.
+
+### `P8c-A9c` — 🟢 O2: a reply that arrives AFTER the deadline is discarded, not misrouted
+
+Same, with `HODOS_BRIDGE_REPLY_DELAY_MS=50000`, request id **9**:
+
+| when (07:17/18) | where | line |
+|---|---|---|
+| :08.655 | render | `bridge sendTransaction -> send_transaction (requestId 9)` |
+| :08.657 | browser | `HODOS_BRIDGE_REPLY_DELAY_MS=50000 — holding send reply (requestId 9)` |
+| :53.665 | render | `[WARN] bridge call 9 (sendTransaction) timed out — the browser process never replied` — caller rejected `timed out after 45s` at **45,011 ms** |
+| :58.662 | browser | `Send transaction reply (requestId 9, 151 bytes)` — the real answer, 5 s late |
+| :58.663 | render | `bridge response for unknown requestId 9 — discarded, not misrouted` |
+
+Probe during the whole 45 s: 204 samples, max 22 ms. 🔴 The RED for this row is `P8c-A9b`: the same
+mechanism, the same seam, a reply that beats the deadline **is** delivered — so "discarded" here is the
+deadline, not a lost message.
+
+### 📏 Side observation — the deadline task's no-op is logged with the same words (report, not fixed)
+
+`BridgeCallDeadlineTask::Execute` always calls `RejectBridgeCall`, and when the call was answered long
+ago `TakeBridgeCall` logs `bridge error for unknown requestId N — discarded, not misrouted` at DEBUG.
+In the 2-minute window of `A9c` there were **63** such lines (one per bridge call, 45 s after each
+poll), against **one** genuine late reply. The wording cannot tell a real late `_error` reply from the
+deadline's harmless no-op; a reader grepping for the O2 line will find the no-ops first. Two-line
+fix (return early when the id is absent) — **not** made here (rule 3; it is not this change's code).
+Registered as `O11`.
 
 ## 5. Blast radius
 

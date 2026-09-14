@@ -140,7 +140,7 @@ export const useCookieBlocking = () => {
   }, []);
 
   // Poll blocked count periodically (every 10s while mounted) — matches useAdblock pattern.
-  // A poll that fails (bridge unavailable, or the 30 s native deadline) records `error`
+  // A poll that fails (bridge unavailable, or the 45 s native deadline) records `error`
   // and is otherwise swallowed here: an interval tick has no caller to reject to.
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   useEffect(() => {
