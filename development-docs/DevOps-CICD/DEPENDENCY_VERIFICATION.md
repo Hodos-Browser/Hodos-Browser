@@ -10,6 +10,37 @@
 - Every **quarterly security point-release** within the pinned LTS — lighter pass (most deps unchanged; confirm nothing shifted).
 - See `CEF_BUILD_RUNBOOK.md` for the surrounding build flow and the LTS cadence rationale.
 
+### ⭐ The policy — pin exactly, review on a cadence, bump deliberately (beta.3 Phase 9, 2026-09-14)
+
+`TICKET_dependency_freshness_review.md` named the gap: the pins were a **freeze at the moment we took
+control** (every DEP-1 comment says *"records current behaviour rather than changing it"*), and a freeze
+with no scheduled thaw is how a known-vulnerable OpenSSL ships without anyone deciding to. So:
+
+1. **Keep the freeze.** Nothing floats. A pin and a bump never share a commit.
+2. **Review at every engine bump and at least quarterly** — the bump is already a whole-stack
+   revalidation, so it is the natural checkpoint (`CEF_VERSION_UPDATE_TRACKER.md`, *Process for CEF
+   Version Updates*, step 3 names this file). Quarterly means a calendar entry, not "when someone
+   remembers": the next one is due **2026-12-14** or the next engine bump, whichever is first.
+3. **A review is a table, one row per pinned dependency**, appended below under *Freshness review —
+   \<date\>*: current pin · latest stable **on the branch we track** (not the newest major — the OpenSSL
+   3.6-vs-4.0 lesson below) · whether any advisory affects the pinned version *as we use it* · the
+   decision, **hold** or **bump**, with the reason. For runtimes read the EOL schedule, not the version.
+4. **Run the advisory tools, do not just read release pages:** `cargo audit` + `cargo outdated
+   --root-deps-only` in both Rust workspaces, `npm audit` in `frontend/`, and
+   `scripts/libcef_export_coexistence.ps1` (this folder) for the libcef symbol surface. `test.yml`
+   runs the first two but they are `continue-on-error` + `|| true`, and the dev fork's Actions quota has
+   been exhausted since 2026-08-14 — a review on this box is the only run that has ever been read.
+5. **Prefer newest-stable-that-builds over minimum-required.** Nobody consumes Hodos as a library;
+   staying near current shrinks the eventual jump.
+6. ⛔ **A review reports. A bump is a separate, owner-approved change** with the build re-run and the
+   relevant rigs (`SILENT_UPDATE_TEST_PLAN.md` Stage 1 for the updater libraries) re-executed. A
+   money-handling binary is never upgraded as a side effect of a review.
+7. **macOS float — accepted in writing (owner, 2026-09-14).** `Brewfile` cannot pin a formula version, so
+   the macOS build's OpenSSL / sqlite3 / nlohmann-json are whatever Homebrew ships on build day. For
+   0.4.0 this is **accepted**, and the release notes' reproducibility section must say so. The
+   escalation the Brewfile already names — a `brew extract` into a Hodos tap — is Mac's call: relayed
+   in `0.4.0-beta.3/MAC_RELAY_BETA3.md` (round 2026-09-14b) for the Mac side to recommend for or against.
+
 ## The dependency inventory (Hodos-owned)
 | Layer | Dependency | Where pinned |
 |-------|-----------|--------------|
@@ -202,6 +233,78 @@ you are; **EOL tells you whether you are getting security fixes at all.**
 ⛔ **And read the branch, not just the number.** OpenSSL `3.6.3` vs `4.0.1` looks alarming and is
 fine. A raw latest-vs-pinned diff will generate false alarms on any project with parallel maintained
 branches.
+
+
+### Freshness review — 2026-09-14 (the second; beta.3 Phase 9, `P9-D1`)
+
+Run on the Windows build host against the pins as of `43e4b90`. ⛔ **Report only — nothing was bumped.**
+Every "bump" below is a recommendation for the owner; the rule (policy item 6) is that a money-handling
+binary is never upgraded as a side effect of a review. Tools: `cargo audit` 0.22.2, `cargo outdated`
+0.19.0 (both installed on this box 2026-09-14 — they were not before, and CI's copies have not run since
+2026-08-14), `npm audit` (npm on Node v23.10.0), `scripts/libcef_export_coexistence.ps1`.
+
+#### Pinned C++ / toolchain / installer / updater set
+
+| Dependency | Pinned | Latest on the branch we track | Advisory affecting the pin *as we use it*? | Decision |
+|---|---|---|---|---|
+| **OpenSSL** (vcpkg) | `3.6.3` | **`3.6.4`** (2026-08-25, security patch release — CVE-2026-18798 QUIC, -63072 CMS, -63076 CMP, -14456/-14457, -54874 DTLS, -54876 OCSP; worst *Moderate*). 4.0.2 is the other branch | **Not in our call surface.** The shell uses OpenSSL only for `EVP` (Ed25519 verify in `UpdateStager`/`UpdateFs`), `SHA` and `HMAC` (`FarblingPolicy`) — no TLS, QUIC, CMS, CMP, DTLS or OCSP. Both Rust binaries use `rustls` / schannel, not OpenSSL | 🟡 **bump recommended, not urgent** — the vcpkg registry HEAD already carries `openssl 3.6.4#0`; it needs the `overrides` line *and* a newer `builtin-baseline` (ours is 2026-08-03, before 3.6.4 existed), then a `workflow_dispatch` validation build |
+| **SQLite** (vcpkg) | `3.53.4` | `3.53.4` (sqlite.org amalgamation 3530400) | none | ✅ hold |
+| **nlohmann-json** (vcpkg) | `3.12.0#2` | `3.12.0` (registry `#2`) | none | ✅ hold |
+| **Rust toolchain** | `1.97.1` | `1.98.1` (2026-09-03) | none (compiler) | 🟡 hold; take at the next engine bump per policy item 5 |
+| **Node** (build only) | `22` | 22 maintenance to **2027-04-30**; 24 is the current LTS (maint. 2026-10-20 → 2028-04-30) | none — build-time only | ✅ hold (EOL far enough); reconsider 24 in 2027 Q1 |
+| **Inno Setup** | `6.7.1` (Chocolatey) | upstream `7.1.0`; Chocolatey's list was not re-queried today (its OData filter returned nothing) — 2026-08-17 recorded `6.7.1` as Chocolatey's newest | none known | ⏸️ hold (major compiler change; `hodos-browser.iss` untested on 7.x) |
+| **WinSparkle** | dll `0.8.1` shipped, tool `0.9.4` | `0.9.4` | none | ✅ hold |
+| **Sparkle** (macOS) | `2.9.6` | **`2.10.0`** (2026-09-13 — bumps *its own* minimum deployment target to macOS 12.0, matches our floor; updater fixes) | none | 🟡 hold for 0.4.0 — 2.9.6 is still unverified on a real macOS build (C1 in `HUMAN_TEST_QUEUE.md`); do not stack a second updater bump on an unverified one. Relayed to Mac |
+| **CI runners** | `windows-2022` / `macos-15` | — | — | ✅ hold |
+| **vcpkg baseline** | `fbb17a16…` (2026-08-03) | registry HEAD | see OpenSSL | 🟡 moves with the OpenSSL bump, not alone |
+
+#### Rust crates — `cargo audit` (both workspaces)
+
+| Workspace | Advisory | Crate @ pinned | What it is | Reaches us? | Decision |
+|---|---|---|---|---|---|
+| wallet | **RUSTSEC-2026-0098 / -0099 / -0104** | `rustls-webpki 0.101.7` | X.509 **name constraints incorrectly accepted** (×2) + reachable panic in CRL parsing | 🚨 **Yes.** This is the certificate validator behind `reqwest 0.11` (`rustls-tls`) — every outbound HTTPS the wallet makes (WhatsOnChain, GorillaPool, MessageBox, price APIs). A mis-accepted name constraint is a server-authentication weakness on the path that feeds balances and broadcasts | 🔴 **bump recommended — owner decision.** Patched only in `0.103.12+`, i.e. `rustls 0.23` ⇒ **`reqwest 0.11 → 0.12+`** (latest 0.13.5; the `rustls-tls` feature is renamed there). A real change to the HTTP client of a money-handling binary: its own phase, full wallet test suite, `authfetch`/MessageBox smoke |
+| wallet + adblock | **RUSTSEC-2026-0258** | `h2 0.3.27` | HTTP/2 unbounded empty DATA frames (DoS, client side) | partially — only against a malicious/compromised HTTPS server we connect to | 🟡 same bump path (`h2 0.4` comes with `reqwest 0.12`) |
+| wallet + adblock | **RUSTSEC-2026-0009** | `time 0.3.44` / `0.3.41` | DoS via stack exhaustion parsing untrusted time strings (CVSS 6.8) | low — no untrusted time-string parsing found on our paths, but it is transitive and cheap | 🟡 `cargo update -p time` (≥0.3.47, semver-compatible) — owner's call, trivially reversible |
+| wallet | **RUSTSEC-2026-0007** | `bytes 1.10.1` | integer overflow in `BytesMut::reserve` | low | 🟡 `cargo update -p bytes` (≥1.11.1, semver-compatible) |
+| both | warnings | `rustls-pemfile 1.0.4` unmaintained · `rand 0.8/0.9` unsound with a custom logger · `anyhow 1.0.102` unsound `downcast_mut` · `rmp-serde 0.15.5` unsound `Raw`/`RawRef` · `js-sys`/`wasm-bindgen` yanked (adblock, transitive) | recorded; none affect a code path we use (`rand::rng()` with a custom logger is not our shape; `rmp-serde` `Raw` types unused) | 📝 hold, re-check next review |
+
+`cargo outdated --root-deps-only`: wallet has 30 root deps behind (majors: `reqwest` 0.11→0.13, `rusqlite`
+0.30→0.40, `secp256k1` 0.28→0.33, `thiserror` 1→2, `dirs` 5→7, `flexi_logger` 0.29→0.31, `rand` 0.8→0.10,
+the RustCrypto set `aes`/`aes-gcm`/`hmac`/`pbkdf2`/`sha2`/`cbc`/`ripemd` one minor each); adblock has 10
+(`adblock` 0.10.3→0.13.3 — held deliberately for the MSRV graph, see Lessons). ⛔ `secp256k1` and the
+RustCrypto crates are **crypto/signing** — invariant #3, never bumped without the owner and the full
+signing test set.
+
+#### Frontend — `npm audit` (16: 11 high, 3 moderate, 2 low; all have an in-range `npm audit fix`)
+
+| Package (runtime or build?) | Range | Advisories | Decision |
+|---|---|---|---|
+| **`react-router` / `react-router-dom`** 7.6.1 (**runtime**, in the shipped bundle) | ≤7.17.0 | 13 — SSR XSS, CSRF in server actions, open redirect via `//` and backslash in `<Link>`/`useNavigate`, DoS via path expansion | 🟡 most are SSR / server-action paths we do not have (no SSR, no loaders from the network); the open-redirect ones are reachable only if we ever navigate to untrusted paths inside our own UI. **Bump recommended** (7.18.3, in-range) — owner's call, needs the overlay smoke |
+| `vite` 6.3.5, `rollup`, `postcss`, `@babel/core` (**build / dev server**) | vite ≤6.4.2 | dev-server file read / path traversal / `server.fs.deny` bypass on Windows; rollup path-traversal write; postcss XSS in stringify | 🟡 dev-server exposure is the **build host**, not users; `vite` 6.4.3 is in-range. Bump with the react-router one |
+| `browserslist`, `minimatch`, `brace-expansion`, `flatted`, `js-yaml`, `nanoid`, `ajv`, `yaml`, `@humanfs/node`, `@eslint/plugin-kit` (build tooling) | various | ReDoS / prototype pollution / memory growth | 🟡 all in-range fixes; none ship |
+
+`npm outdated`: React 19.1→19.3, MUI 7.3.9→9.4 (major), TypeScript 5.8→7.0 (major), Vite 6→8 (major),
+`@vitejs/plugin-react` 4→6 (major). ⛔ The Vite/TS majors are build-target changes — `vite.config.ts`
+`build.target: 'chrome150'` must survive any Vite bump (it is the engine binding).
+
+#### Symbol coexistence — re-measured, now scripted
+
+`scripts/libcef_export_coexistence.ps1` (this folder) against the shipped `cef-binaries/Release/libcef.dll`
+(292,293,632 B, md5 `8c761ddc87d3461dabb7e03087975d8f`, the P4f `g9ccef04` engine): **247 exports, 240
+`cef_*`, 1 crypto/sqlite (`sqlite3_dbdata_init`)** — identical to 2026-08-17. Negative control: the same
+script on `HodosBrowser.dll` (which *does* link our OpenSSL/SQLite, statically) reports 1 export, 0 `cef_*`,
+0 crypto — a different shape, so the script measures the file it is pointed at. Conclusion unchanged: ABI
+coexistence, not version matching; never link the shell against Chromium's copies.
+
+#### What this review changes
+
+- **Two owner decisions surfaced:** the `reqwest 0.11 → 0.12+` bump (closes the three `rustls-webpki`
+  advisories on the wallet's TLS path — the one item here that is a server-authentication weakness rather
+  than a DoS), and the cheap `cargo update -p time -p bytes`. Neither done here.
+- OpenSSL 3.6.4 is a recommended, non-urgent bump (no affected API in our use).
+- The CI audit lane is still triple-neutered and dark; this review on the build host is the only advisory
+  run anyone has read. Flipping `test.yml`'s audits to blocking is an instrument change and belongs to the
+  Actions-quota decision, not to this review.
 
 ### Lessons
 - **A crate pin without a compiler pin is half a pin.** `adblock-engine` already had exact crate

@@ -2,7 +2,7 @@
 
 **Filed:** 2026-08-17, answering "did we update dependencies after CEF 150?"
 **Severity:** process gap — no CVE/freshness path on a money-handling binary
-**Status:** OPEN — beta.3, cheap
+**Status:** ✅ CLOSED 2026-09-14 (beta.3 Phase 9, `P9-D1`) — policy + second review pass in `DevOps-CICD/DEPENDENCY_VERIFICATION.md`, export count scripted, tracker checkpoint added, macOS float accepted in writing (owner) and relayed to Mac for the tap recommendation. ⚠️ Two of this ticket's claims were already stale by 2026-08-17 (Node 20; no `browserslist`/`engines`) — the first review fixed them. 🔴 The review surfaced an owner decision: `reqwest 0.11 → 0.12+` to clear three `rustls-webpki` advisories on the wallet's TLS path. **Nothing bumped here.**
 **Sprint:** 📌 Phase 9 (release readiness) — bundled 2026-08-31.
 **Effort:** a documented cadence + one review pass
 
@@ -163,8 +163,7 @@ one platform, and anyone reasoning about reproducibility should know which.
 
 ## Acceptance
 
-- [ ] policy written into `DEPENDENCY_VERIFICATION.md` (it currently records *what* is pinned, not
-      *when we re-look*)
-- [ ] one review pass done against the current pins, with the table from item 3
-- [ ] macOS float either accepted in writing or escalated to a tap
-- [ ] review checkpoint added to the Chromium-bump checklist in `CEF_VERSION_UPDATE_TRACKER.md`
+- [x] policy written into `DEPENDENCY_VERIFICATION.md` ("The policy — pin exactly, review on a cadence, bump deliberately"; next review due 2026-12-14 or the next engine bump)
+- [x] one review pass done against the current pins, with the table from item 3 ("Freshness review — 2026-09-14"; `cargo audit`/`cargo outdated`/`npm audit` run, export count re-measured by script with its negative control)
+- [x] macOS float **accepted in writing** (owner, 2026-09-14; policy item 7, `Brewfile` comment); the tap question relayed to Mac (`MAC_RELAY_BETA3.md` round 2026-09-14b)
+- [x] review checkpoint added to the Chromium-bump checklist in `CEF_VERSION_UPDATE_TRACKER.md` (step 3)

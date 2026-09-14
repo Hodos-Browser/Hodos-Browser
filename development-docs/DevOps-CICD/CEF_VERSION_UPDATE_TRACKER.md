@@ -448,7 +448,7 @@ money-handling browser.
 
 1. Check this document for investigation items
 2. Build from source with `proprietary_codecs=true ffmpeg_branding=Chrome`
-3. **Align the toolchain** — note the toolset the new CEF is built with; rebuild vcpkg static deps + the CEF wrapper on it; re-run `DEPENDENCY_VERIFICATION.md`; and **re-pin the CI runner images** (`runs-on:`) to one shipping that toolset (never `windows-latest`/`macos-latest`). See *"Toolchain (MSVC) & Dependency Alignment"* above.
+3. **Align the toolchain** — note the toolset the new CEF is built with; rebuild vcpkg static deps + the CEF wrapper on it; re-run `DEPENDENCY_VERIFICATION.md` — ⭐ **including its freshness review** (one hold/bump row per pin, `cargo audit` / `cargo outdated` / `npm audit` run, `scripts/libcef_export_coexistence.ps1` re-measured against the new `libcef.dll` — its policy section says what a review is; the bump is the checkpoint that thaws the freeze); and **re-pin the CI runner images** (`runs-on:`) to one shipping that toolset (never `windows-latest`/`macos-latest`). See *"Toolchain (MSVC) & Dependency Alignment"* above.
 4. **Re-check the macOS minimum version** — look up the new Chromium's oldest supported macOS, `vtool`-measure the prebuilt CEF framework's real `minos`, set our published minimum = `max(those)` in `CMakeLists.txt` + both plists, apply it via `-DCMAKE_OSX_DEPLOYMENT_TARGET=` on the configure line, and confirm the CI `minos` guard passes. See *"macOS Minimum Deployment Version"* above.
 5. Run full test suite (Minimal + Standard site verification from CLAUDE.md)
 6. Specifically test: Google Sign-In, OAuth flows, media playback, ad blocking, fingerprint protection

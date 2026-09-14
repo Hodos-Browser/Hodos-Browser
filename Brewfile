@@ -15,6 +15,9 @@
 # Version-exactness on macOS is therefore still weaker than the Windows vcpkg
 # pin. If macOS dependency drift ever breaks a build, the escalation is a
 # `brew extract` into a Hodos tap — tracked in DEPENDENCY_VERIFICATION.md.
+# Decision (owner, 2026-09-14, beta.3 Phase 9): the float is ACCEPTED for 0.4.0
+# and stated in the release notes; the tap is the Mac side's recommendation to
+# make (relayed). DEPENDENCY_VERIFICATION.md, policy item 7.
 #
 # Usage:  brew bundle --file=Brewfile
 
