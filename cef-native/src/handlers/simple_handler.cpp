@@ -4514,6 +4514,10 @@ bool SimpleHandler::OnProcessMessageReceived(
         nlohmann::json response;
         response["exists"] = false;
         response["needsBackup"] = true;
+        // Phase 8d: `exists:false` used to be the answer for BOTH "no wallet" and "the wallet
+        // service did not answer". The caller must be able to tell them apart — only a reply
+        // that actually came from the wallet flips this to true.
+        response["serviceReachable"] = false;
 
         try {
             LOG_DEBUG_BROWSER("🔄 Attempting to get wallet status...");
@@ -4524,10 +4528,16 @@ bool SimpleHandler::OnProcessMessageReceived(
             // Call WalletService to get wallet status
             nlohmann::json walletStatus = walletService.getWalletStatus();
 
-            if (walletStatus.contains("exists")) {
+            // ⛔ `WalletService::getWalletStatus` FABRICATES {exists:false, error:"Failed to
+            // connect to Rust wallet"} when the wallet is unreachable (its only caller is this
+            // handler). A reply with `error` never came from the wallet — 📏 measured: with the
+            // dev wallet stopped this arm reported serviceReachable:true until the `error`
+            // check was added.
+            if (walletStatus.contains("exists") && !walletStatus.contains("error")) {
                 bool exists = walletStatus["exists"].get<bool>();
                 response["exists"] = exists;
                 response["needsBackup"] = !exists; // If wallet doesn't exist, needs backup
+                response["serviceReachable"] = true;
 
                 LOG_DEBUG_BROWSER("📁 Wallet exists: " + std::string(exists ? "YES" : "NO"));
             } else {

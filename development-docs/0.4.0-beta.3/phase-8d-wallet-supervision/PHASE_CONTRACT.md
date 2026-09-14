@@ -1,7 +1,7 @@
 # Phase 8d — a dead wallet backend is noticed, named truthfully, and brought back · PHASE CONTRACT
 
 **Workstream:** money-path correctness (availability half) · **Ticket:** `../TICKET_wallet_backend_death_is_silent_and_unrecovered.md`
-**Status:** 🚧 **STAGE 1 (truth) IN PROGRESS** — §8 answered by the owner 2026-09-14: Q1 **both**, Q2 **`WALLET_UNAVAILABLE`**, Q3 **adblock restart-only**; Q4/Q5 stand as stated assumptions.
+**Status:** ✅ **STAGE 1 (truth) DONE 2026-09-14 — §4a** · 🚧 **STAGE 2 (supervision) next** — §8 answered by the owner 2026-09-14: Q1 **both**, Q2 **`WALLET_UNAVAILABLE`**, Q3 **adblock restart-only**; Q4/Q5 stand as stated assumptions.
 **Opened:** 2026-09-14 · **Owner:** Matthew Archbold · **Platforms:** 📏 **both** — Windows first, macOS half relayed (`MAC_RELAY_P35_P4_ROUND.md` M11 already told Mac it is theirs too)
 **Standard:** `../HARNESS.md`. **Base:** the 8c close-out (`O11`/`O12` commit on `origin/0.4.0`).
 
@@ -83,12 +83,12 @@ If the wallet backend is not reachable, the user is told **"the wallet service i
 
 ## 2. Done means
 
-- [ ] **The wallet panel never shows create/recover because of a transport failure.** With the backend
+- [x] **The wallet panel never shows create/recover because of a transport failure.** With the backend
       stopped it shows *"Wallet service not running"* with a **Restart** action. `hodos_wallet_exists`
       is not cleared by a transport failure.
-- [ ] **dApps are told the truth**: a wallet call with the backend down gets code `WALLET_UNAVAILABLE`
+- [x] **dApps are told the truth**: a wallet call with the backend down gets code `WALLET_UNAVAILABLE`
       (not `NO_WALLET`) and the notification overlay says the service is down, not that no wallet exists.
-- [ ] `hodosBrowser.wallet.getStatus()` distinguishes *unreachable* from `{exists:false}`.
+- [x] `hodosBrowser.wallet.getStatus()` distinguishes *unreachable* from `{exists:false}`.
 - [ ] **Supervision**: when the child we launched exits, it is relaunched — bounded retries (3) with
       backoff (2 / 4 / 8 s); after that the state stays *not running* with the manual Restart still live.
       ⛔ Never a hot loop.
@@ -123,6 +123,41 @@ If the wallet backend is not reachable, the user is told **"the wallet service i
 | `P8d-A7` | First paint unchanged with the supervisor on | P3's first-paint instrument, 8-run medians | — (a regression IS the red) |
 | `P8d-A8` | 🍎 macOS: A1 + A4 | relay | — |
 
+## 4a. Stage 1 — truth, measured 2026-09-14
+
+Rig: dev wallet **stopped by exe path** (installed wallet on 31301 untouched), dev browser + Vite up.
+Harness `p8d_s1_harness.py`: header `getStatus()`; the wallet overlay (`/wallet-panel`) hard-reloaded
+with a returning user's cache seeded (`hodos_wallet_exists=true`), then its text and cache read; an
+external https tab (`example.com`) calling `window.__hodos_walletCall('getPublicKey', …)`.
+
+| Row | 🔴 RED — before stage 1 | 🟢 GREEN — stage 1 |
+|---|---|---|
+| `P8d-A3` `getStatus()` | `{"exists": false, "needsBackup": true}` | `{"exists": false, "needsBackup": true, "serviceReachable": false}` |
+| `P8d-A1` wallet panel | text **"No Wallet Found … Create New Wallet / Recover Hodos Wallet / Recover from Centbee"**; `hodos_wallet_exists` **cleared** (`None`) | text **"Wallet service not running … Try again"**; `hodos_wallet_exists` **kept** (`true`); no Create / Recover |
+| `P8d-A2` dApp call | rejected: *"getPublicKey failed: No wallet exists. Please create or recover a wallet first."* | rejected: *"getPublicKey failed: Hodos wallet service is not running."* (code `WALLET_UNAVAILABLE`) |
+
+RED is the tree at the kickoff commit; GREEN is the same harness on the stage-1 build. The RED for
+each row is the reverted site (`D-4` a/b/c) — measured before the edit rather than by reverting after.
+
+### 📏 Two things the GREEN run taught, both recorded, one deferred
+
+- 🚨 **`D-4` has a fourth site (d):** `WalletService::getWalletStatus()` **fabricates**
+  `{exists:false, needsBackup:true, error:"Failed to connect to Rust wallet"}` on a connection failure.
+  The first stage-1 build keyed `serviceReachable` on the presence of `exists` and therefore reported
+  **`serviceReachable:true` with the wallet dead**. Fixed at its only caller (`wallet_status_check`):
+  a reply carrying `error` never came from the wallet.
+- 📏 **`D-8` — the status cache outlives the wallet by up to 30 s.** `WalletStatusCache` caches
+  `Exists` for `POSITIVE_CACHE_SECS = 30`. Stopped the wallet 8 s after the browser had warmed the
+  cache ⇒ the dApp call was **forwarded to Rust** and failed as *"getPublicKey failed: HTTP 0"* —
+  neither `NO_WALLET` nor `WALLET_UNAVAILABLE`. 35 s later the same call got
+  *"Hodos wallet service is not running."* Pre-existing; the honest window is bounded by the TTL.
+  ⇒ **Stage 2 must call `WalletStatusCache::invalidate()` the moment the supervisor sees the child die**
+  (the method already exists), which closes the window to one probe interval.
+- 📏 Relaunching the browser with the port free makes it **spawn its own wallet child** (the dev
+  fallback path in `LaunchWalletProcess`). For every "wallet down" measurement the order is: browser
+  up first, *then* stop the wallet by exe path — the child is at `…\rust-wallet\target\release\`, so
+  the path filter still catches it.
+
 ## 5. Blast radius
 
 `cef_browser_shell.cpp` (supervisor thread, F2 line, relaunch helper; Windows) ·
@@ -141,7 +176,7 @@ threading change, not supervision; owner to place it.
 
 ## 7. Staging
 
-1. **Truth first** (`D-4` a/b/c + `A1`–`A3`): no supervisor yet. This alone removes the recovery-phrase
+1. ✅ **DONE 2026-09-14** — **Truth first** (`D-4` a/b/c + `A1`–`A3`): no supervisor yet. This alone removes the recovery-phrase
    hazard and is the half that protects the user.
 2. **Supervision** (`A4`–`A6`): the watcher thread, bounded relaunch, Restart IPC, F2 line.
 3. **Adblock** on the same watcher, then the relay note for Mac.

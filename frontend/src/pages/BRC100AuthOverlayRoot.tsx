@@ -1586,6 +1586,59 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     );
   }
 
+  // ── Wallet service unavailable (Phase 8d) ──
+  // The backend process is not reachable. ⛔ Deliberately NOT the `no_wallet` card: that one
+  // says "You don't have a wallet yet", which on a dead backend is what sends a user to
+  // their recovery phrase. "Open wallet" lands on the panel's service-down card.
+  if (notificationType === 'wallet_unavailable') {
+    return (
+      <div style={overlayBackdrop}>
+        <div style={cardStyle}>
+          <HodosWalletHeader />
+          <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '20px' }}>
+            {pageFaviconUrl && !faviconError ? (
+              <img
+                src={pageFaviconUrl}
+                width={32}
+                height={32}
+                style={{ borderRadius: 4, flexShrink: 0 }}
+                onError={() => setFaviconError(true)}
+                alt=""
+              />
+            ) : (
+              <div style={avatarStyle}>{getDomainInitial(notificationDomain)}</div>
+            )}
+            <div>
+              <div style={{ fontSize: '16px', fontWeight: 700, color: COLORS.textDark }}>
+                {cleanDomain}
+              </div>
+              <div style={{ fontSize: '13px', color: COLORS.textMuted, marginTop: '2px' }}>
+                wants to use your wallet
+              </div>
+            </div>
+          </div>
+
+          <p style={{ margin: '0 0 10px', fontSize: '14px', color: COLORS.textMuted, lineHeight: 1.6 }}>
+            The Hodos wallet service is not running, so this request could not be answered.
+          </p>
+          <p style={{ margin: '0 0 24px', fontSize: '14px', color: COLORS.textMuted, lineHeight: 1.6 }}>
+            Your wallet and keys are untouched — this is the background process, not your funds.
+            Open the wallet to try again, or restart Hodos.
+          </p>
+
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px' }}>
+            <HodosButton variant="secondary" onClick={handleNoWalletDismiss}>
+              Dismiss
+            </HodosButton>
+            <HodosButton variant="primary" onClick={handleNoWalletSetup}>
+              Open wallet
+            </HodosButton>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // ── Payment confirmation notification ──
   if (notificationType === 'payment_confirmation') {
     return (

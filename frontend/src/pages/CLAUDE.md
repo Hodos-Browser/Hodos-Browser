@@ -14,8 +14,8 @@ See root [CLAUDE.md](/CLAUDE.md) for overlay architecture rules, close preventio
 | File | Lines | Purpose |
 |------|-------|---------|
 | `MainBrowserView.tsx` | 990 | Main browser chrome: tab bar, address bar, nav buttons, toolbar icons. Orchestrates overlay creation via IPC triggers. PeerPay polling + download toasts. |
-| `WalletPanelPage.tsx` | 1677 | Wallet setup overlay: create, recover (12-word mnemonic), backup import, Centbee legacy recovery, PIN creation/unlock, wallet deletion. |
-| `BRC100AuthOverlayRoot.tsx` | 970 | BRC-100 auth notification modals: domain approval, payment confirmation, rate limit, certificate disclosure, no-wallet prompt. |
+| `WalletPanelPage.tsx` | 1677 | Wallet setup overlay: create, recover (12-word mnemonic), backup import, Centbee legacy recovery, PIN creation/unlock, wallet deletion. **Phase 8d (2026-09-14):** a `service-down` state ("Wallet service not running" + *Try again*) for any transport failure or `exists`-less body — ⛔ never the create/recover screen — and only an explicit `exists:false` clears `hodos_wallet_exists`. One classifier, `refreshStatus()`, for mount / `wallet_shown` / retry |
+| `BRC100AuthOverlayRoot.tsx` | 970 | BRC-100 auth notification modals: domain approval, payment confirmation, rate limit, certificate disclosure, no-wallet prompt. **Phase 8d:** notification type `wallet_unavailable` (dead wallet service; *Dismiss* / *Open wallet*), distinct from `no_wallet` |
 | `SettingsOverlayRoot.tsx` | 551 | Settings overlay with tabs: browser, privacy, wallet auto-approval limits, profile import. |
 | `NewTabPage.tsx` | 382 | New tab page: search bar, quick-access tile grid with cached favicons. |
 | `ProfilePickerOverlayRoot.tsx` | 354 | Profile picker dropdown: list profiles, switch, create new (with avatar file upload). |

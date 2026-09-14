@@ -307,14 +307,21 @@ public:
     static constexpr int TRANSIENT_CACHE_SECS = 2;      // FetchFailed
 
     // P2 perf fix: mutex released before blocking I/O to allow concurrent cached reads
-    bool walletExists() {
+    bool walletExists() { return status() == Status::Exists; }
+
+    // Phase 8d (2026-09-14): the three-way answer, for callers that must tell "the wallet
+    // service is not running" apart from "no wallet exists". ⛔ Until 8d every caller
+    // collapsed FetchFailed into "no wallet" — the message that sends a user with a merely
+    // dead backend to their recovery phrase. The classification was always here; it was
+    // thrown away one line later.
+    Status status() {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             auto now = std::chrono::steady_clock::now();
             int ttl_secs = (lastStatus_ == Status::FetchFailed)
                 ? TRANSIENT_CACHE_SECS : POSITIVE_CACHE_SECS;
             if (valid_ && (now - lastCheck_) < std::chrono::seconds(ttl_secs)) {
-                return lastStatus_ == Status::Exists;
+                return lastStatus_;
             }
         }
         Status s = fetchWalletStatus();
@@ -324,7 +331,7 @@ public:
             valid_ = true;
             lastCheck_ = std::chrono::steady_clock::now();
         }
-        return s == Status::Exists;
+        return s;
     }
 
     void invalidate() {
@@ -2376,12 +2383,26 @@ void HandleIpcWalletCall(
     }
 
     // 2. No wallet — send NO_WALLET error. Matches Open()'s L2121.
-    if (!WalletStatusCache::GetInstance().walletExists()) {
-        LOG_DEBUG_HTTP("🔒 IPC: no wallet exists, rejecting request from " + origin);
-        sendWalletResponseIpc(capturedFrame, requestId, false,
-            "{\"error\":\"No wallet exists. Please create or recover a wallet first.\","
-            "\"code\":\"NO_WALLET\",\"status\":\"error\"}");
-        return;
+    //
+    // Phase 8d: a wallet SERVICE that cannot be reached is a different fact from a wallet
+    // that does not exist, and the dApp is told which. `NO_WALLET` on a dead backend made
+    // sites tell the user to install a wallet they already have.
+    {
+        const auto walletState = WalletStatusCache::GetInstance().status();
+        if (walletState == WalletStatusCache::Status::FetchFailed) {
+            LOG_WARNING_HTTP("🔒 IPC: wallet service unreachable, rejecting request from " + origin);
+            sendWalletResponseIpc(capturedFrame, requestId, false,
+                "{\"error\":\"Hodos wallet service is not running.\","
+                "\"code\":\"WALLET_UNAVAILABLE\",\"status\":\"error\"}");
+            return;
+        }
+        if (walletState == WalletStatusCache::Status::DoesNotExist) {
+            LOG_DEBUG_HTTP("🔒 IPC: no wallet exists, rejecting request from " + origin);
+            sendWalletResponseIpc(capturedFrame, requestId, false,
+                "{\"error\":\"No wallet exists. Please create or recover a wallet first.\","
+                "\"code\":\"NO_WALLET\",\"status\":\"error\"}");
+            return;
+        }
     }
 
     // 3. Domain trust lookup.
@@ -2439,18 +2460,39 @@ bool AsyncWalletResourceHandler::Open(CefRefPtr<CefRequest> request,
     }
 
     // No wallet → no point showing domain approval modal; show notification instead
-    if (!WalletStatusCache::GetInstance().walletExists()) {
-        LOG_DEBUG_HTTP("🔒 No wallet exists — rejecting BRC-100 request from " + requestDomain_);
-        onHTTPResponseReceived(
-            R"({"error":"No wallet exists. Please create or recover a wallet first.","code":"NO_WALLET","status":"error"})");
-        // Show once per domain per session (tracked separately from PendingRequestManager
-        // so stale no_wallet entries don't block domain_approval after wallet creation)
-        if (!NoWalletNotificationTracker::GetInstance().hasShownForDomain(requestDomain_)) {
-            NoWalletNotificationTracker::GetInstance().markShown(requestDomain_);
-            CefPostTask(TID_UI, new CreateNotificationOverlayTask("no_wallet", requestDomain_));
+    //
+    // Phase 8d: split by what is actually true. A dead wallet SERVICE gets its own code and
+    // its own notification (`wallet_unavailable`) — the `no_wallet` card says "You don't have
+    // a wallet yet. Would you like to set one up?", which on a dead backend is the message
+    // that sends a user to their recovery phrase. Tracked once per domain per session under
+    // a distinct key so the two cards do not suppress each other.
+    {
+        const auto walletState = WalletStatusCache::GetInstance().status();
+        if (walletState == WalletStatusCache::Status::FetchFailed) {
+            LOG_WARNING_HTTP("🔒 Wallet service unreachable — rejecting BRC-100 request from " + requestDomain_);
+            onHTTPResponseReceived(
+                R"({"error":"Hodos wallet service is not running.","code":"WALLET_UNAVAILABLE","status":"error"})");
+            const std::string trackerKey = "unavailable:" + requestDomain_;
+            if (!NoWalletNotificationTracker::GetInstance().hasShownForDomain(trackerKey)) {
+                NoWalletNotificationTracker::GetInstance().markShown(trackerKey);
+                CefPostTask(TID_UI, new CreateNotificationOverlayTask("wallet_unavailable", requestDomain_));
+            }
+            handle_request = true;
+            return true;
         }
-        handle_request = true;
-        return true;
+        if (walletState == WalletStatusCache::Status::DoesNotExist) {
+            LOG_DEBUG_HTTP("🔒 No wallet exists — rejecting BRC-100 request from " + requestDomain_);
+            onHTTPResponseReceived(
+                R"({"error":"No wallet exists. Please create or recover a wallet first.","code":"NO_WALLET","status":"error"})");
+            // Show once per domain per session (tracked separately from PendingRequestManager
+            // so stale no_wallet entries don't block domain_approval after wallet creation)
+            if (!NoWalletNotificationTracker::GetInstance().hasShownForDomain(requestDomain_)) {
+                NoWalletNotificationTracker::GetInstance().markShown(requestDomain_);
+                CefPostTask(TID_UI, new CreateNotificationOverlayTask("no_wallet", requestDomain_));
+            }
+            handle_request = true;
+            return true;
+        }
     }
 
     // Phase 2.6-G — C++ Open() is now a THIN PROXY. Domain-trust and all kind
@@ -4946,9 +4988,18 @@ bool TryHandleBrc121_402(CefRefPtr<CefBrowser> browser,
                   + " → server " + serverPubkey.substr(0, 16) + "...");
 
     // No wallet → can't pay. Page sees the 402 (may show its own UI / sign-in).
-    if (!WalletStatusCache::GetInstance().walletExists()) {
-        LOG_DEBUG_HTTP("💰 BRC-121: no wallet — falling through to native 402");
-        return false;
+    // Phase 8d: same outcome either way, but the log says which — a dead service is a
+    // supervision event, a missing wallet is not.
+    {
+        const auto walletState = WalletStatusCache::GetInstance().status();
+        if (walletState == WalletStatusCache::Status::FetchFailed) {
+            LOG_WARNING_HTTP("💰 BRC-121: wallet service unreachable — falling through to native 402");
+            return false;
+        }
+        if (walletState == WalletStatusCache::Status::DoesNotExist) {
+            LOG_DEBUG_HTTP("💰 BRC-121: no wallet — falling through to native 402");
+            return false;
+        }
     }
 
     auto perm = DomainPermissionCache::GetInstance().getPermission(domain);

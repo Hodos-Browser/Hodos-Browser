@@ -114,8 +114,11 @@ export default function WalletPanelPage() {
   const cachedExists = localStorage.getItem('hodos_wallet_exists') === 'true';
   const initialStatus = cachedExists ? 'exists' : 'loading';
 
-  const [walletStatus, setWalletStatus] = useState<'loading' | 'exists' | 'no-wallet' | 'locked'>(
-    initialStatus as 'loading' | 'exists' | 'no-wallet' | 'locked'
+  // Phase 8d: 'service-down' = the wallet SERVICE did not answer. ⛔ Not 'no-wallet': that
+  // state renders Create / Recover, which on a merely dead backend invites the user to
+  // restore from their recovery phrase to fix a process that needs restarting.
+  const [walletStatus, setWalletStatus] = useState<'loading' | 'exists' | 'no-wallet' | 'locked' | 'service-down'>(
+    initialStatus as 'loading' | 'exists' | 'no-wallet' | 'locked' | 'service-down'
   );
 
   // Fetch and cache identity key in localStorage (called after wallet creation/recovery).
@@ -226,30 +229,45 @@ export default function WalletPanelPage() {
     // `cachedExists` still seeds `initialStatus` above, so the first paint is unchanged and
     // there is no loading flash — this fetch only corrects it.
     console.log('[WalletPanel] Fetching wallet status from backend...');
+    refreshStatus(true);
+  }, []);
+
+  // Phase 8d (2026-09-14): one classifier for every status read (mount, wallet_shown,
+  // "Try again"). Three answers, not two:
+  //   {exists:true}   → exists / locked   (+ cache the flag and identity key on mount)
+  //   {exists:false}  → no-wallet          (the wallet ANSWERED and there is none)
+  //   anything else   → service-down       (transport failure, or a body without `exists`
+  //                                          — the interceptor's outer timeout returns
+  //                                          {"error":"Wallet request timeout"} as HTTP 200)
+  // ⛔ Only an explicit exists:false clears `hodos_wallet_exists`. 📏 Measured before this:
+  // with the dev wallet stopped the panel showed "No Wallet Found" + Create / Recover and
+  // cleared the cache, so the NEXT open painted "no wallet" before even asking.
+  function refreshStatus(fromMount: boolean) {
     walletFetch('/wallet/status')
       .then(r => r.json())
       .then(data => {
         console.log('[WalletPanel] Wallet status response:', JSON.stringify(data));
         if (data.exists && data.locked) {
-          localStorage.setItem('hodos_wallet_exists', 'true');
-          cacheIdentityKey();
+          if (fromMount) { localStorage.setItem('hodos_wallet_exists', 'true'); cacheIdentityKey(); }
           setWalletStatus('locked');
         } else if (data.exists) {
-          localStorage.setItem('hodos_wallet_exists', 'true');
-          cacheIdentityKey();
+          if (fromMount) { localStorage.setItem('hodos_wallet_exists', 'true'); cacheIdentityKey(); }
           setWalletStatus('exists');
-        } else {
+        } else if (data.exists === false) {
           localStorage.removeItem('hodos_wallet_exists');
           localStorage.removeItem('hodos_identity_key');
           setWalletStatus('no-wallet');
           console.log('[WalletPanel] No wallet found — showing create/recover UI');
+        } else {
+          console.warn('[WalletPanel] Wallet service did not answer (no `exists` in body) — service-down');
+          setWalletStatus('service-down');
         }
       })
       .catch((err) => {
-        console.error('[WalletPanel] Failed to fetch wallet status:', err);
-        setWalletStatus('no-wallet');
+        console.error('[WalletPanel] Failed to reach the wallet service:', err);
+        setWalletStatus('service-down');
       });
-  }, []);
+  }
 
   // Keep-alive: reset UI state on hide (so next open is clean)
   useEffect(() => {
@@ -276,18 +294,7 @@ export default function WalletPanelPage() {
     const handleShown = (e: MessageEvent) => {
       if (e.data?.type === 'wallet_shown') {
         console.log('[WalletPanel] wallet_shown — refreshing status');
-        walletFetch('/wallet/status')
-          .then(r => r.json())
-          .then(data => {
-            if (data.exists && data.locked) {
-              setWalletStatus('locked');
-            } else if (data.exists) {
-              setWalletStatus('exists');
-            } else {
-              setWalletStatus('no-wallet');
-            }
-          })
-          .catch(() => {});
+        refreshStatus(false);
       }
     };
     window.addEventListener('message', handleHidden);
@@ -845,6 +852,48 @@ export default function WalletPanelPage() {
   );
 
   // --- Render functions ---
+
+  // Phase 8d: the wallet SERVICE is not reachable. Says so, offers a retry, and never
+  // mentions creating or recovering a wallet — the wallet and its keys are untouched.
+  // (Stage 2 wires "Restart" to the supervisor; until then this re-checks.)
+  const renderServiceDown = () => (
+    <div style={{
+      background: tokens.bgSurface,
+      borderRadius: '12px',
+      width: '380px',
+      border: `2px solid ${tokens.gold}`,
+      cursor: 'default',
+      fontFamily: tokens.fontUi,
+    }} onClick={e => e.stopPropagation()}>
+      <div style={{
+        background: '#000000',
+        color: tokens.textPrimary,
+        padding: '12px 24px',
+        borderRadius: '12px 12px 0 0',
+        borderBottom: `2px solid ${tokens.gold}`,
+        display: 'flex',
+        alignItems: 'center',
+        gap: '12px',
+      }}>
+        <img src="/Hodos_Gold_Wallet_Icon.svg" alt="Hodos Wallet" style={{ height: '28px', width: 'auto' }} />
+      </div>
+      <div style={{ padding: '32px 24px', textAlign: 'center', background: tokens.bgSurface }}>
+        <div style={{ fontSize: '48px', marginBottom: '16px' }}>&#x1F50C;</div>
+        <h3 style={{ margin: '0 0 8px', color: tokens.textPrimary, fontSize: '18px' }}>Wallet service not running</h3>
+        <p style={{ color: tokens.textSecondary, fontSize: '14px', margin: '0 0 24px', lineHeight: 1.6 }}>
+          Hodos could not reach its wallet service. Your wallet and keys are untouched — this is the
+          background process, not your funds. Try again, or restart Hodos.
+        </p>
+        <HodosButton
+          variant="primary"
+          onClick={() => { setWalletStatus('loading'); refreshStatus(false); }}
+          style={{ width: '100%' }}
+        >
+          Try again
+        </HodosButton>
+      </div>
+    </div>
+  );
 
   const renderNoWallet = () => (
     <div style={{
@@ -1622,6 +1671,7 @@ export default function WalletPanelPage() {
       {walletStatus === 'loading' && renderLoading()}
       {walletStatus === 'locked' && renderLocked()}
       {walletStatus === 'no-wallet' && renderNoWallet()}
+      {walletStatus === 'service-down' && renderServiceDown()}
       {walletStatus === 'exists' && <WalletPanel onClose={handleClose} />}
     </div>
   );

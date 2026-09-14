@@ -132,6 +132,8 @@ SettingsManager& SettingsManager::GetInstance() {
 
 **Meyer's singletons local to `HttpRequestInterceptor.cpp` (4):** `DomainPermissionCache`, `WalletStatusCache`, `BSVPriceCache`, `NoWalletNotificationTracker`. These are file-scope classes with no header — reach them through the free functions in `HttpRequestInterceptor.h` (`warmDomainPermissionCache`, `warmWalletStatusCache`, `warmBSVPriceCache`, `invalidateDomainPermissionCache`, `clearDomainPermissionCache`, `GetDomainIdentityKeyDisclosureAllowed`).
 
+⭐ **Phase 8d stage 1 (2026-09-14):** `WalletStatusCache::status()` exposes the three-way answer (`Exists` / `DoesNotExist` / `FetchFailed`) that `walletExists()` collapses to a bool. The IPC gate, the BRC-100 gate and the BRC-121 path now reply **`WALLET_UNAVAILABLE`** ("Hodos wallet service is not running.") — and the BRC-100 gate raises the **`wallet_unavailable`** notification, tracked once per domain under an `unavailable:` key — on `FetchFailed`, and `NO_WALLET` only on `DoesNotExist`. ⛔ Before 8d a dead backend was reported to every dApp as *no wallet*.
+
 **`unique_ptr` singleton (1):** `TabManager` — lazy `std::unique_ptr<TabManager>` init in `GetInstance()` (`TabManager.cpp` / `TabManager_mac.mm`), not Meyer's.
 
 **Header-only singletons used from here but owned by `include/core/`:** `AdblockCache`, `FingerprintProtection`, `PendingRequestManager` (`PendingAuthRequest.h`), `PendingPermissionManager` (`PendingPermissionRequest.h`).

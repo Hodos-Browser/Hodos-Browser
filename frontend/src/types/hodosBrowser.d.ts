@@ -15,7 +15,7 @@ declare global {
       // before the page's JS runs, and `initWindowBridge.ts` guards its whole wallet
       // block with `if (!window.hodosBrowser.wallet)`.
       bridge?: {
-        getStatus: () => Promise<{ exists: boolean; needsBackup: boolean }>;
+        getStatus: () => Promise<{ exists: boolean; needsBackup: boolean; serviceReachable?: boolean }>;  // serviceReachable: Phase 8d — false = the wallet service did not answer; `exists` is then unknown, not false
         // ⛔ Takes a JSON STRING, not an object — the caller stringifies, matching what
         // the legacy path already put on the wire.
         sendTransaction: (payloadJson: string) => Promise<TransactionResponse>;
@@ -91,7 +91,7 @@ declare global {
         markBackedUp: () => Promise<string>;
       };
       wallet: {
-        getStatus: () => Promise<{ exists: boolean; needsBackup: boolean }>;
+        getStatus: () => Promise<{ exists: boolean; needsBackup: boolean; serviceReachable?: boolean }>;  // serviceReachable: Phase 8d — false = the wallet service did not answer; `exists` is then unknown, not false
         // ⛔ `create`, `load`, `generateAddress`, `getCurrentAddress`, `getAddresses` and
         // `getTransactionHistory` were DELETED in Phase 8c stage 3 batch 2 (no reachable
         // caller; C++ round trips removed). Address generation is `address.generate`.
