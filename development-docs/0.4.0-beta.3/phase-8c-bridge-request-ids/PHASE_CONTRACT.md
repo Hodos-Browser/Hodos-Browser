@@ -4,7 +4,7 @@
 **Status:** 🟢 **STAGES 1–3 COMPLETE (2026-09-13); stage 4 absorbed into the batches.** Six batches after the
 mechanism: wallet, backup-overlay deletion, cookies, bookmarks, adblock + privacy shield, paid cache.
 **34 bridge natives; zero per-call `window.on*` slots remain** (`P8c-A8`). Open at phase close: the
-owner-bound register rows `O1` (two txids, real money), ~~`O2` (a genuinely late reply), `O5` (30 s
+owner-bound register rows ~~`O1` (two txids, real money)~~ — **done 2026-09-14, `P8c-A2` §4l** — ~~`O2` (a genuinely late reply), `O5` (30 s
 deadline vs the slowest real call)~~ — **O2 + O5 closed 2026-09-14, `P8c-A9` (§4k)**, `O6` (macOS verification — relay M7/M8), and the G11 baseline
 lowering that O8's deletion earned (its own commit, per working rule 6).
 ⛔ **8 native bridge functions, 9 JS methods migrated** — `getStatus`, `sendTransaction`, `getBalance`,
@@ -40,7 +40,7 @@ Stage 1 must land and be reviewed before stages 2–4 are attempted.
 
 | # | Needs your eyes on | Why it cannot be settled by me | State |
 |---|---|---|---|
-| **O1** | **`P8c-A2` — two *successful* sends produce two txids.** `M8` in `../PAYMENT_TEST_BATCH.md` | Needs **real money**, twice. Its RED (apply `getBalance`'s dedupe ⇒ one send) is the row that catches the worst possible way to finish this phase | ⬜ owed |
+| **O1** | **`P8c-A2` — two *successful* sends produce two txids.** `M8` in `../PAYMENT_TEST_BATCH.md` | Needs **real money**, twice. Its RED (apply `getBalance`'s dedupe ⇒ one send) is the row that catches the worst possible way to finish this phase | ✅ **done 2026-09-14** (§4l): GREEN two distinct txids `d81a6892…` / `796a9d93…`, both on chain; RED (dedupe re-applied, then reverted) ⇒ both promises carried `eb4b3d41…`, **one** send. Owner-authorised, self-send, ~3,600 sats in fees |
 | **O2** | **A genuinely *late* reply** — one that arrives *after* the deadline already rejected — is discarded, not misrouted | The deadline test proved "reply never arrives". "Arrives late" is a different path and needs an induced delay. Free to run; just not run yet | ✅ **observed 2026-09-14** (`P8c-A9c`, §4k): reply held **50 s** by the rig seam ⇒ caller rejected at **45,011 ms** (`timed out after 45s`), the real reply landed 5 s later and the render log says `bridge response for unknown requestId 9 — discarded, not misrouted`. Nobody else received it |
 | **O3** | **Orphaned round trips.** `create_transaction` (`D-6`) turned out to have company: `sign_transaction`, `broadcast_transaction` and `get_all_addresses` have **no JS sender**, and `wallet.create` / `load` / `generateAddress` / `getCurrentAddress` / `getAddresses` / `getTransactionHistory` have **no reachable caller** (`D-7`) | Deleting live-looking C++ is a call I should not make alone | ✅ **decided 2026-09-12** — delete all ten (batch 2, commit 2). Every batch-2 deletion is a JS method, its C++ handler, its render arm(s), and the `WalletService` method it orphans on **both** platforms |
 | **O4** | **How many of the 41 do we actually migrate?** | Several (bookmark folder CRUD, cache size) are UI-driven and unlikely to race. My lean is *all* — a slot left behind is a slot the next person copies — but it is real work for little risk reduction | ✅ **answered 2026-09-12:** every slot with a call site is migrated; a slot with none is **deleted**, which is the stronger form of "never copied" |
@@ -380,7 +380,7 @@ must be read for its timeout behaviour rather than assumed.
 
 | ID | | Tier |
 |---|---|---|
-| `P8c-A2` | Two concurrent `sendTransaction` calls produce **two** on-chain sends. RED: apply `getBalance`'s dedupe ⇒ **one**. ⛔ Subject is two distinct **txids**, not two resolved promises | T2 — **stage 2**, and it belongs in `../PAYMENT_TEST_BATCH.md` |
+| `P8c-A2` | Two concurrent `sendTransaction` calls produce **two** on-chain sends. RED: apply `getBalance`'s dedupe ⇒ **one**. ⛔ Subject is two distinct **txids**, not two resolved promises | T2 — **stage 2**, and it belongs in `../PAYMENT_TEST_BATCH.md`. 🟢🔴 **Observed 2026-09-14, §4l** |
 | `P8c-A3` | A reply arriving after its caller gave up is discarded, not misrouted | 🟢 **exercised as a side effect of `A1b`**: after the deadline rejected both calls their map entries were gone, so the mechanism is the same one proven there. ⚠️ A reply genuinely arriving *late* (rather than never) is still unobserved |
 
 ---
@@ -662,6 +662,30 @@ poll), against **one** genuine late reply. The wording cannot tell a real late `
 deadline's harmless no-op; a reader grepping for the O2 line will find the no-ops first. Two-line
 fix (return early when the id is absent) — **not** made here (rule 3; it is not this change's code).
 Registered as `O11`.
+
+## 4l. O1 — `P8c-A2` observed with real money, 2026-09-14 (owner: *"yes go do it"*)
+
+Subject: two **concurrent** `wallet.sendTransaction({toAddress, amount: 1000})` from the header page
+(`Promise.allSettled`, same tick), dev wallet (mainnet, 49 spendable outputs, 28,548,353 sats before),
+destination = a fresh address of the same wallet, so the 1,000 sats come back. Header hard-reloaded
+before each round; `bridge.sendTransaction` confirmed `[native code]` after the reload.
+
+| | promise 1 | promise 2 | on chain (WhatsOnChain `tx/hash`) |
+|---|---|---|---|
+| 🟢 **GREEN** — the tree as pushed (`9b56ac5`) | `d81a6892…fbf6e13b`, 3,076 ms | `796a9d93…de9217b1`, 3,076 ms | **both 200**, two distinct txids |
+| 🔴 **RED** — `getBalance`'s old in-flight dedupe re-applied to the send wrapper for one run, then reverted (`git diff` on the bridge file empty) | `eb4b3d41…b335dda5`, 1,383 ms | **the same** `eb4b3d41…b335dda5` | one tx on chain — the second caller was handed the first caller's txid and **no second send happened** |
+
+Full txids: GREEN `d81a6892582708d28b1b87e66bf2fcc036b47c044f14a98cc36c84c3fbf6e13b` and
+`796a9d9384b6277f58f3b3e18071fc0b02a41921c0d7f02a5f6f33f2de9217b1`; RED
+`eb4b3d416d3eac7fab6515308f1840400a754d3a8257163cc52c2a11b335dda5`. Both GREEN transactions were
+accepted, so the two concurrent `createAction`s selected **disjoint inputs** (the P0.7 reservation held
+under concurrency — a fact this test was not designed for but did establish). Cost of the sitting:
+three sends × (1,000-sat service fee + ~200 sat miner fee); balance 28,548,353 → 28,543,753 with the
+self-send outputs credited.
+
+⛔ **The RED is the row that matters.** It is the exact shape a "helpful" future edit would take —
+*dedupe the send like the balance* — and it turns two user intents into one silent transaction. The
+warning above `sendTransaction` in `initWindowBridge.ts` now has a measured txid behind it.
 
 ## 5. Blast radius
 
