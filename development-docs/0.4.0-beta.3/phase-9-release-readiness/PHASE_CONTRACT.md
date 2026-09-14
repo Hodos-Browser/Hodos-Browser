@@ -5,7 +5,7 @@
 `../TICKET_farbling_gate_engine_binding.md` · `../TICKET_dependency_freshness_review.md` ·
 (🍎 Mac, relayed) `../TICKET_appcast_missing_minimum_system_version.md` ·
 (⛔ not here — `INSTALL_TEST_BATCH.md` I5) `../TICKET_stray_log_in_install_root.md`
-**Status:** 🚧 IN PROGRESS — kickoff `fba4c7a`; 👤 owner answered §8 2026-09-14 (all seven, recorded there).
+**Status:** ✅ **SIGNED OFF (Windows) 2026-09-14** — kickoff `fba4c7a`; ticket 2 `3b2a0c5`; ticket 1 D2+D3 `67a9ab6`, D4 `df90e5d`; ticket 3 harness `3769455` + gate `43e4b90` (rule 6); ticket 4 `6be6409`. 🍎 **Pending Mac:** the 🚦 appcast blocker and the CDP `.mm` mirror (`MAC_RELAY_BETA3.md` round 2026-09-14b). ⏳ **Owed:** `I8` (install batch) and the owner's right-click on the wallet overlay (`P9-A3` T3 half). 👤 owner answered §8 (all seven, recorded there).
 **Opened:** 2026-09-14 · **Owner:** Matthew Archbold · **Platforms:** Windows for every commit here; macOS owes the two
 mirror items in the relay (appcast floor, CDP-port `.mm` block)
 **Standard:** `../HARNESS.md`. **Base:** `8e39abc` (+ `4a5c275`, the session prompt) on `origin/0.4.0`,
@@ -288,17 +288,17 @@ DevTools entry points; none is on the wallet-call, payment, overlay-close or ses
 
 ## Sign-off
 
-- [ ] Every evidence row GREEN **and** its RED observed (I8 owed, visibly)
-- [ ] `scripts/preflight.ps1 -Full` run — result + date recorded below
-- [ ] `scripts/preflight.ps1 -NegativeControl` run — every T0 gate seen to fail
-- [ ] `../REGRESSION_SET.md` run in full at this boundary — result recorded
-- [ ] Adversarial review complete, four questions answered in writing
-- [ ] No baseline moved (`../HARNESS.md` §4) — confirm, do not assume
-- [ ] Commit messages cite the row IDs they satisfy
+- [x] Every evidence row GREEN **and** its RED observed (I8 owed, visibly; `P9-A2`'s RED lives in I8; `P9-A3`'s right-click half is the owner's eyes)
+- [x] `scripts/preflight.ps1 -Full` run — result + date recorded below
+- [x] `scripts/preflight.ps1 -NegativeControl` run — every T0 gate seen to fail
+- [ ] `../REGRESSION_SET.md` run in full at this boundary — **INCOMPLETE** (T1 halves via preflight; T2/T3 halves SKIPPED, §9)
+- [x] Adversarial review complete, four questions answered in writing (§9)
+- [x] No baseline moved (`../HARNESS.md` §4) — confirmed: every gate at baseline in all three `-Full` runs; `-NegativeControl` detected `60 > 59` and `5 > 4`
+- [x] Commit messages cite the row IDs they satisfy (`P9-A1`/`A2` in `67a9ab6`, `P9-A3` in `df90e5d`, `P9-B1` in `3b2a0c5`, `P9-C1` in `3769455`, `P9-C2` in `43e4b90`, `P9-D1` in `6be6409`)
 
 | Item | Result | Date | By |
 |---|---|---|---|
-| preflight -Full | | | |
-| preflight -NegativeControl | | | |
-| regression set | | | |
-| adversarial review | | | |
+| preflight -Full | **PASS** ×3 — after ticket 1 (`67a9ab6`), after ticket 3 (`43e4b90`), after ticket 4 + D4 (`6be6409`/`df90e5d`); 15 checks each, 0 skipped | 2026-09-14 | Claude (Windows) |
+| preflight -NegativeControl | **all 8 gates seen to fail** (`1>0` ×5, `3>2`, `60>59`, `5>4`), probes cleaned | 2026-09-14 | Claude (Windows) |
+| regression set | **INCOMPLETE** — T1 halves green inside preflight; T2/T3 halves SKIPPED (§9), not rounded up | 2026-09-14 | Claude (Windows) |
+| adversarial review | done, §9 — one instrument rejected (CDP key dispatch), one gate bug caught by its own local run (`tr`) | 2026-09-14 | Claude (Windows) |

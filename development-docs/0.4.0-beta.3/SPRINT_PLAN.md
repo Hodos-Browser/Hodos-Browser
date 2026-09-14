@@ -259,7 +259,7 @@ Standalone, research-heavy, security-sensitive. Scope against §2's wall **befor
 **WS1b(a) → WS5(a) → WS6 → WS1 → WS1b(b) → WS2 → WS2(cont.) → WS3 → WS5(b) → WS4.**
 *(phases 0 → 0.5 → 0.6 → 1 → 2 → 3 → **3.5** → 4 → 5 → 6 → **7 → 8 → 9 → 10**;
 3.5 added 2026-08-30; 7–10 are the ticket consolidation added 2026-08-31 — see §4.1)*
-**✅ 0 · 0.5 · 0.6 · 1 · 2 · 3 · 3.5 · 4 · 5 complete.** **⛔ 6 CUT** (Chrome import — deferred to beta.5; see below). **⬜ 7 · 8 · 9 · 10.**
+**✅ 0 · 0.5 · 0.6 · 1 · 2 · 3 · 3.5 · 4 · 5 · 7 · 8 complete** (7a–7d `f0c9282`; 8a–8d `17f9e28`; 8c M7/M8 + 8d `P8d-A8` pending Mac). **⛔ 6 CUT** (Chrome import — deferred to beta.5; see below). **✅ 9 complete on Windows 2026-09-14 — 🍎 pending Mac:** the 🚦 appcast `minimumSystemVersion` blocker and the CDP-port `.mm` mirror (`MAC_RELAY_BETA3.md` round 2026-09-14b); `I8` owed to the install batch. **⬜ 10.**
 
 ⭐ **Changed 2026-08-18 (second revision), after `TICKET_loopback_host_form_wallet_routing.md` was
 filed and verified.** WS1b splits and its first half stays at the front; WS5 splits and its first

@@ -11,6 +11,39 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-14b (**Windows**) — Phase 9 (release readiness) DONE on Windows; 🚦 **the promotion blocker is YOURS**, then a small mirror, then your standing three
+
+No Mac push since `5710742` (every fetch today: 0 behind). Windows is at `df90e5d (+ the Phase 9 close-out docs commit on top)` on `origin/0.4.0`.
+Phase contract: `phase-9-release-readiness/PHASE_CONTRACT.md` (all rows measured; I8 owed to the install batch).
+
+## C++ commits this round — rebuild after your next rebase (standing rule)
+
+| Commit | Files | Platform split |
+|---|---|---|
+| `67a9ab6` | `cef-native/cef_browser_shell.cpp` — `settings.remote_debugging_port` forced to **0 unless `hodos::IsDevEnv()`** (D2) | Windows entry point only; **your mirror is item 2 below** |
+| `67a9ab6` | `cef-native/src/handlers/simple_app.cpp` — the `remote-allow-origins=*` append is now **inside `if (hodos::IsDevEnv())`** (D3) | ⚠️ **shared, no `#ifdef`** — both platforms take it as-is; nothing for you to port, but rebuild |
+| `df90e5d` | `cef-native/src/handlers/simple_handler.cpp` — D4: every DevTools entry point (menu action, `devtools` IPC, F12 / Ctrl+Shift+I / ⌘⌥I, right-click Inspect) goes through `ShowOrFocusDevTools()`, which resolves the target browser's `role_` via `GetHost()->GetClient()` and **refuses unless `hodos::IsTabRole()`**; the non-tab context-menu branch no longer adds *Inspect Element* | ⚠️ **shared** — the `#ifdef __APPLE__` ⌘⌥I arm calls the same function, so macOS gets the gate for free; rebuild and eyeball item 2b |
+
+Nothing in this round touched `*_mac.*`. Rust untouched. Schema untouched.
+
+## What is yours, in order
+
+| # | Item | Size |
+|---|---|---|
+| 1 | 🚦 **`TICKET_appcast_missing_minimum_system_version.md` — the promotion blocker.** `scripts/generate-appcast.py` never emits `<sparkle:minimumSystemVersion>`; the macOS floor moved 11.0 → 12.0 with CEF 150 (`release.yml`: `MACOSX_DEPLOYMENT_TARGET: "12.0"`, `-DCMAKE_OSX_DEPLOYMENT_TARGET=12.0`, and the `minos` guard). A Big Sur user on 0.3.x would be offered 0.4.0, install it, and be left with a browser that will not launch. **Do:** emit `12.0` for the macOS item **from `MACOSX_DEPLOYMENT_TARGET` / the CMake value, not a literal**; regenerate the draft appcast; then the proof only a Mac can give — **a Sparkle client below the floor is NOT offered the update** (a real `SUFeedURL` pointed at the regenerated feed on a macOS 11 VM or an `SUSystemVersion`-shimmed run), plus the positive control that a client at/above 12.0 *is* offered it. 👤 CLAUDE.md invariant #13: the ticket was filed for approval rather than fixed — **the owner's Phase 9 assignment (2026-09-14) is that approval.** This must close before promotion, which is a harder constraint than phase order. `HUMAN_TEST_QUEUE.md` C2 already carries the human half | script ~30 min; proof = a Mac afternoon |
+| 2 | **`cdp_port` mirror** in `cef_browser_shell_mac.mm` (near `// Remote debugging port: 9222 for Default profile`): the same shape as Windows — after the existing picker/Default computation, `if (!hodos::IsDevEnv()) settings.remote_debugging_port = 0; else if (port != 0) port += 100;` — dev keeps **9322**, release binds nothing. Verify with `lsof -nP -iTCP:9222 -sTCP:LISTEN` on a non-dev launch (nothing) and `lsof -nP -iTCP:9322` on `HODOS_DEV=1` (the dev app). ⚠️ SUBJECT trap that bit Windows: launch **without** `--remote-debugging-port` on the command line — that switch binds CDP regardless of the settings gate. (2b) with the D4 rebuild, right-click the wallet overlay: no *Inspect Element*; ⌘⌥I on it: log line `DevTools refused on role=wallet` | ~30 min |
+| 3 | Your standing three from the 2026-09-14 round, unchanged in order: **8c M7 column → 8c M8 → 8d `P8d-A8`** | as listed there |
+
+## Two things that change how you measure, and one question
+
+- ⚠️ **The farbling rotation token changed shape.** `farbling_seed_rotation_check.py` (`3769455`) now calls `require_engine()` before launching (your macOS LC_UUID chain check is now the refusal path on both platforms; Windows got md5) and the token's `engine=` is **`CEF_VERSION`** (`150.0.43-7871.3576+g9ccef04+chromium-150.0.7871.187`), not the CDP `Chrome/…` string. `promote.yml` (`43e4b90`) **refuses the old shape** and requires `+g<sha>+` to match `release.yml`'s `env.CEF_ASSET`. Pass `--expect-cef +g9ccef04`, and `--log` now takes the logs **directory** (per-PID logs). Any Mac token produced before today is void for promotion.
+- **`HODOS_DEV` semantics on macOS:** the `remote-allow-origins=*` switch is gone in release (shared file). Your harnesses run on dev builds, so nothing changes for you — but if anything on your side ever attached CDP to a **non-dev** build, it can no longer.
+- ❓ **Question for you (owner asked for your view, 2026-09-14):** the macOS dependency float — `Brewfile` cannot pin OpenSSL / sqlite3 / nlohmann-json versions, so the macOS build takes whatever Homebrew ships on build day. The owner has **accepted the float in writing for 0.4.0** (`DEPENDENCY_VERIFICATION.md`, policy item 7). The Brewfile's own escalation is a `brew extract` into a Hodos tap. **Do you want to do the tap, and when?** Recommend for or against with the cost; no action until the owner reads your answer. Also FYI from the same review: Sparkle **2.10.0** shipped 2026-09-13 (bumps its own floor to macOS 12.0) — held for 0.4.0 because 2.9.6 is still unverified on a real macOS build (C1).
+
+Nothing decided for you this round beyond the order above; nothing owed back except the four items and the tap answer.
+
+---
+
 # 📋 ROUND 2026-09-14 (**Windows**) — 8c CLOSED, 8d (wallet supervision) DONE on Windows; **three macOS items are yours, one is real code**
 
 No Mac push since `5710742` (every fetch today: 0 behind). Windows is at `00c1fd7` on `origin/0.4.0`. Per
