@@ -11,6 +11,36 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-15d (**Windows**) — Phase 10b (one click, one spend) LANDED: ⚠️ **shared C++ — rebuild after rebase**
+
+Windows is at `dcb87e9` on `origin/0.4.0`. 10b is CU-1 + CU-8 + CU-9, in three revertible commits plus docs.
+Contract with the measured RED and every GREEN: `phase-10-critical-advisories/10b-one-click-one-spend/PHASE_CONTRACT.md`.
+
+## ⚠️ C++ commits this round — rebuild locally after your next rebase (standing rule)
+
+| Commit | Files | Platform split |
+|---|---|---|
+| `aaccd55` | `cef-native/src/core/HttpRequestInterceptor.cpp`, `cef-native/src/handlers/simple_handler.cpp`, `include/core/PendingAuthRequest.h`, `include/core/HttpRequestInterceptor.h` | ⚠️ **all shared, no `#ifdef`** — the queue and the requestId requirement are cross-platform. The `overlay_close` hook that posts the next prompt is added in **both** the Windows and macOS arms of the same function; nothing to port, but rebuild |
+| `aaccd55` | `frontend/src/pages/BRC100AuthOverlayRoot.tsx` | all 17 answers now carry `requestId`; payment/rate-limit modals gain a "1 of N requests from this site" line |
+| `0b502e3`, `61b0796` | Rust only (`permission_service/state.rs`, `request_gate.rs`, `handlers.rs`) | `cargo test` after rebase (⛔ not `cargo build --release`) |
+
+## What changed, in one paragraph
+
+A prompt that arrives while another is on screen now **waits** instead of replacing it, and the modal carries the id of
+the request it shows. An answer without that id is refused. Sibling fan-out survives only for connect prompts. Measured
+pre-fix: one Approve on a modal showing 130,000 sats broadcast that **and** an unseen 150,000. After: one click, one
+transaction, and the queued request then shows its own amount.
+
+## 🍎 Yours
+
+1. **Rebuild** (shared C++ + React) and re-run your suite.
+2. **`P10b-A5` visual (T3)** — `HUMAN_TEST_QUEUE.md` **W6/D7**: with two over-cap payments queued, check the modal is
+   legible at 7a's small-screen size, that the "1 of N" line reads sensibly, and that the second modal appears after the
+   first click. The rig is in the contract (https page + CDP; the wallet bridge is https-only, so a loopback test page
+   gets none).
+3. Nothing else owed beyond your standing queue.
+
+---
 # 📋 ROUND 2026-09-15c (**Windows**) — Phase 10d (PeerPay delivery) LANDED: Rust + React, no C++; ⛔ one sending rule for your wallet until you rebuild
 
 Windows is at the 10d commit on `origin/0.4.0` (after `d52ff25`). **No C++ this round.** Rebase, then `cargo test`
