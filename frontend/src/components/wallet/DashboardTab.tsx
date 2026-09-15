@@ -98,6 +98,8 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
   const [failureNotification, setFailureNotification] = useState<{ count: number; amount: number } | null>(null);
   // beta.3 Phase 10a — invalid incoming PeerPay messages rejected (one per sender)
   const [rejectedCount, setRejectedCount] = useState(0);
+  // beta.3 Phase 10d — sent payments whose recipient was not notified
+  const [undeliverableCount, setUndeliverableCount] = useState(0);
   const notificationRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const prevNotificationCount = useRef(0);
 
@@ -193,13 +195,14 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
         .then((data: { unread_count?: number; unread_amount?: number;
                        receive_count?: number; receive_amount?: number;
                        failure_count?: number; failure_amount?: number;
-                       rejected_count?: number }) => {
+                       rejected_count?: number; undeliverable_count?: number }) => {
           const receiveCount = data.receive_count || 0;
           const receiveAmount = data.receive_amount || 0;
           const failureCount = data.failure_count || 0;
           const failureAmount = data.failure_amount || 0;
           const totalCount = (data.unread_count || 0);
           setRejectedCount(data.rejected_count || 0);
+          setUndeliverableCount(data.undeliverable_count || 0);
 
           if (receiveCount > 0) {
             setNotification({ count: receiveCount, amount: receiveAmount });
@@ -290,6 +293,8 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
   const handleDismissNotification = () => {
     setNotification(null);
     setFailureNotification(null);
+    setRejectedCount(0);
+    setUndeliverableCount(0);
     prevNotificationCount.current = 0;
     walletFetch('/wallet/peerpay/dismiss', { method: 'POST' }).catch(() => {});
     if ((window as any).cefMessage?.send) {
@@ -423,9 +428,21 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
             </div>
           )}
 
-          {/* Rejected incoming payment banner (beta.3 10a — one per sender, quiet, no modal) */}
+          {/* Recipient-not-notified banner (beta.3 10d — yellow; Retry / Copy details on the Activity row) */}
+          {undeliverableCount > 0 && (
+            <div className="wd-notification-bar wd-notification-warning">
+              <span className="wd-notification-text">
+                {undeliverableCount} payment{undeliverableCount > 1 ? 's' : ''} sent but the recipient was not notified — see Activity
+              </span>
+              <button className="wd-notification-dismiss" onClick={handleDismissNotification}>
+                Dismiss
+              </button>
+            </div>
+          )}
+
+          {/* Rejected incoming payment banner (beta.3 10a — one per sender, quiet, no modal; yellow per 10d palette) */}
           {rejectedCount > 0 && (
-            <div className="wd-notification-bar wd-notification-failure">
+            <div className="wd-notification-bar wd-notification-warning">
               <span className="wd-notification-text">
                 Rejected {rejectedCount} invalid incoming payment{rejectedCount > 1 ? 's' : ''} — nothing was credited
               </span>

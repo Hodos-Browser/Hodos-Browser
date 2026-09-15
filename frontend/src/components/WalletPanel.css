@@ -1341,6 +1341,23 @@
   background: #b71c1c;
 }
 
+/* Yellow "needs you" banner variant (beta.3 10d) — recipient not notified,
+   invalid incoming payment rejected. Red stays for money that failed. */
+.peerpay-banner-warning {
+  border-left-color: #f9a825;
+  background: linear-gradient(135deg, #1a160a 0%, #221d11 100%);
+  color: #ffe082;
+}
+
+.peerpay-banner-warning .peerpay-dismiss-button {
+  background: #f9a825;
+  color: #1a160a;
+}
+
+.peerpay-banner-warning .peerpay-dismiss-button:hover {
+  background: #f57f17;
+}
+
 .peerpay-banner-content {
   margin-bottom: 6px;
   font-weight: 500;

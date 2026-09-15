@@ -1934,6 +1934,34 @@
   border-color: #ef5350;
 }
 
+/* Yellow "needs you" notification (beta.3 10d) — recipient not notified,
+   invalid incoming payment rejected. Red stays for money that failed. */
+.wd-notification-bar.wd-notification-warning {
+  background: rgba(249, 168, 37, 0.12);
+  border-color: #f9a825;
+}
+
+.wd-notification-warning .wd-notification-text {
+  color: #fdd835;
+}
+
+.wd-notification-warning .wd-notification-dismiss {
+  border-color: rgba(249, 168, 37, 0.4);
+  color: #fdd835;
+}
+
+.wd-notification-warning .wd-notification-dismiss:hover {
+  background: rgba(249, 168, 37, 0.2);
+  border-color: #fdd835;
+}
+
+/* Activity row: recipient-not-notified sub-line */
+.wd-activity-undelivered {
+  color: #fdd835;
+  font-size: 11px;
+  margin-top: 2px;
+}
+
 /* ---- Responsive ---- */
 @media (max-width: 900px) {
   .wd-dashboard {

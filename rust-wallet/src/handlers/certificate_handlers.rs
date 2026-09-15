@@ -2798,6 +2798,7 @@ async fn create_certificate_transaction(
     let selected_utxos = crate::handlers::select_utxos_with_preference(
         Some(&confirmed_utxos), &all_utxos, total_needed,
         None, // No consolidation for certificate transactions
+        None, // Not a bundle-carrying send
     );
     if selected_utxos.is_empty() {
         return Err(CertificateError::Database(format!(
@@ -4187,6 +4188,7 @@ pub async fn publish_certificate(
             randomize_outputs: Some(false), // PushDrop must be output 0
             send_max: None,
             send_with: None,
+            prefer_small_parents: None,
         }),
         input_beef: None,
         lock_time: None,
@@ -4509,6 +4511,7 @@ async fn unpublish_certificate_core(
         let selected = crate::handlers::select_utxos_with_preference(
             Some(&confirmed_utxos), &all_utxos, amount_needed,
             None, // No consolidation for certificate transactions
+            None, // Not a bundle-carrying send
         );
         if selected.is_empty() {
             return Err("Insufficient funds for unpublish fee".to_string());

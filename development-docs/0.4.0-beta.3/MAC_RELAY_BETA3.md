@@ -11,6 +11,33 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-15c (**Windows**) — Phase 10d (PeerPay delivery) LANDED: Rust + React, no C++; ⛔ one sending rule for your wallet until you rebuild
+
+Windows is at the 10d commit on `origin/0.4.0` (after `d52ff25`). **No C++ this round.** Rebase, then `cargo test`
+(⛔ not `cargo build --release` — it skips `cfg(test)`) and `npm run build`. Contract with all evidence:
+`phase-10-critical-advisories/10d-peerpay-delivery/PHASE_CONTRACT.md`.
+
+## What landed
+
+| Where | What |
+|---|---|
+| `rust-wallet/src/handlers.rs` | PeerPay and BRC-121 sends prefer coins whose parent is small (`preferSmallParents`; line = a tenth of the relay cap); the PeerPay message is built and size-checked **before** broadcast (over the cap ⇒ HTTP 422, nothing moves); on-chain backup funds itself from the **smallest single sufficient coin** so its change stays small; `payment_claim_block` (format in `10d-peerpay-delivery/PAYMENT_CLAIM_BLOCK.md`, pinned by a test — beta.5 reads it) |
+| `messagebox.rs`, `peerpay_repo.rs`, `task_retry_peerpay_outbox.rs` | a relay refusal (400/404/413/422) is permanent: one attempt, `undeliverable`, one dismissable notice; dev-only `HODOS_MESSAGEBOX_MAX_BODY_BYTES` override (read only under `HODOS_DEV=1`) |
+| `frontend` header, `WalletPanel`, `DashboardTab`, `ActivityTab` | header dot **yellow** for "needs you" (driven by dismissable notices, so Dismiss clears it); yellow "recipient not notified" banner; Activity line with the cause, Retry and **Copy details**; 10a's rejected-payment banner moved to yellow |
+
+## 🍎 Yours
+
+1. ⛔ **Until your Mac build has 10d, do not use your wallet as a PeerPay sender if its largest confirmed coin is a
+   backup's change.** The old build picks largest-first and the message will exceed MessageBox's 1 MiB cap (the owner's
+   installed Windows wallet is in exactly that state right now: 38,347,126-sat coin, 436 KB parent). Check read-only:
+   largest selectable coin and `LENGTH(raw_hex)/2` of its `parent_transactions` row. Receiving is unaffected.
+2. **`P10d-A5` visual (T3)** — on the macOS wallet overlay: the yellow header dot, the one-line yellow banner, and the
+   Activity row's yellow line with Retry / Copy details, at the small-screen size 7a used. To get a row to look at,
+   seed an `undeliverable` outbox row in your **dev** DB for one of your own sent txids (the contract's T2 table shows
+   the shape). Dismiss must clear the dot and keep the Activity line.
+
+---
+
 # 📋 ROUND 2026-09-15b (**Windows**) — Phase 10a (CU-3/CU-6) LANDED, Rust + React only; one ask for your wallet, one new ticket you will hit too
 
 No Mac push since `5710742`. Windows is at the 10a fix commit on `origin/0.4.0` (see `git log` — two Rust commits after the

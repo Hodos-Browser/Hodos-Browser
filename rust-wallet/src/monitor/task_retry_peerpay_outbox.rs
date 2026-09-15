@@ -41,6 +41,14 @@ pub async fn run(state: &web::Data<AppState>, _client: &reqwest::Client) -> Resu
     // 2. Get due outbox entries (brief DB lock)
     let entries = {
         let db = state.database.lock().map_err(|e| format!("DB lock: {}", e))?;
+        // beta.3 Phase 10d (`P10d-A5`): every payment whose recipient was not told
+        // ('exhausted' retries, or 'undeliverable') gets ONE dismissable notification
+        // row — that row, not the outbox, drives the yellow header dot, so Dismiss
+        // clears it. Idempotent (INSERT OR IGNORE on `undeliverable:{txid}`); also
+        // covers rows that went 'exhausted' before this build existed.
+        if let Err(e) = PeerPayRepository::backfill_undeliverable_notifications(db.connection()) {
+            warn!("TaskRetryPeerPayOutbox: notification backfill failed: {}", e);
+        }
         PeerPayRepository::get_due_outbox_entries(db.connection())
             .map_err(|e| format!("Failed to query outbox: {}", e))?
     };
@@ -81,9 +89,17 @@ pub async fn run(state: &web::Data<AppState>, _client: &reqwest::Client) -> Resu
                     &entry.txid[..16.min(entry.txid.len())], entry.retry_count + 1, e);
 
                 let db = state.database.lock().map_err(|e| format!("DB lock: {}", e))?;
-                if let Err(db_err) = PeerPayRepository::update_outbox_retry_failed(
-                    db.connection(), entry.id, entry.retry_count
-                ) {
+                // beta.3 Phase 10d (`P10d-A4`): a refusal (4xx) is permanent for
+                // these bytes — one attempt, then `undeliverable` + the yellow
+                // notification. Only transient failures keep the retry schedule.
+                let result = if e.is_permanent() {
+                    warn!("   🚫 Relay refused txid {} — marking undeliverable (no further retries)",
+                        &entry.txid[..16.min(entry.txid.len())]);
+                    PeerPayRepository::mark_outbox_undeliverable(db.connection(), entry.id)
+                } else {
+                    PeerPayRepository::update_outbox_retry_failed(db.connection(), entry.id, entry.retry_count)
+                };
+                if let Err(db_err) = result {
                     error!("   ❌ Failed to update outbox retry: {}", db_err);
                 }
                 failed_count += 1;

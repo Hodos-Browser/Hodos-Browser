@@ -28,6 +28,12 @@ interface ActivityItem {
   source: string;
   outbox_failed?: boolean;
   outbox_retrying?: boolean;
+  // beta.3 Phase 10d — the relay refused the payment message
+  outbox_undeliverable?: boolean;
+  outbox_cause?: 'message_too_large' | 'relay_refused';
+  // The payment claim block (10d-peerpay-delivery/PAYMENT_CLAIM_BLOCK.md) — copied
+  // verbatim; the beta.5 "Claim a payment" tool reads exactly this.
+  outbox_claim_block?: Record<string, unknown>;
 }
 
 interface ActivityResponse {
@@ -146,6 +152,14 @@ const ActivityTab: React.FC = () => {
     }
   };
 
+  const [copiedClaimTxid, setCopiedClaimTxid] = useState<string | null>(null);
+  const handleCopyClaimBlock = (item: ActivityItem) => {
+    if (!item.outbox_claim_block) return;
+    navigator.clipboard.writeText(JSON.stringify(item.outbox_claim_block, null, 2)).catch(() => {});
+    setCopiedClaimTxid(item.txid);
+    setTimeout(() => setCopiedClaimTxid(null), 2000);
+  };
+
   const handleRetryNotification = async (txid: string) => {
     setRetryingTxid(txid);
     try {
@@ -253,6 +267,13 @@ const ActivityTab: React.FC = () => {
                     <span className="wd-activity-date">{formatDate(item.timestamp)}</span>
                     <span className={`wd-activity-status ${item.status}`}>{item.status}</span>
                   </div>
+                  {item.outbox_undeliverable && (
+                    <div className="wd-activity-undelivered">
+                      {item.outbox_cause === 'message_too_large'
+                        ? 'Recipient not notified: payment message too large to deliver'
+                        : 'Recipient not notified: the message relay refused it'}
+                    </div>
+                  )}
                 </div>
                 <div className="wd-activity-center">
                   {item.txid && (
@@ -283,13 +304,25 @@ const ActivityTab: React.FC = () => {
                           onClick={(e) => { e.stopPropagation(); handleRetryNotification(item.txid); }}
                           disabled={retryingTxid === item.txid}
                           title="Recipient wasn't notified. Retry sending the notification."
-                          style={{ color: '#ed6c02', fontSize: '11px' }}
+                          style={{ color: '#fdd835', fontSize: '11px' }}
                         >
                           {retryingTxid === item.txid ? 'Retrying...' : 'Retry notification'}
                         </HodosButton>
                       )}
+                      {item.outbox_undeliverable && item.outbox_claim_block && (
+                        <HodosButton
+                          variant="ghost"
+                          size="small"
+                          className="wd-retry-btn"
+                          onClick={(e) => { e.stopPropagation(); handleCopyClaimBlock(item); }}
+                          title="Copy the payment details so you can send them to the recipient yourself."
+                          style={{ color: '#fdd835', fontSize: '11px' }}
+                        >
+                          {copiedClaimTxid === item.txid ? 'Copied' : 'Copy details'}
+                        </HodosButton>
+                      )}
                       {item.outbox_retrying && (
-                        <span style={{ color: '#ed6c02', fontSize: '11px', marginLeft: '4px' }} title="Notification delivery in progress">
+                        <span style={{ color: '#fdd835', fontSize: '11px', marginLeft: '4px' }} title="Notification delivery in progress">
                           Notifying...
                         </span>
                       )}

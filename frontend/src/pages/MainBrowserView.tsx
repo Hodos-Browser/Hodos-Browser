@@ -194,7 +194,8 @@ const MainBrowserView: React.FC = () => {
     // Downloads — only need icon visibility state; overlay handles controls
     const { downloads, hasDownloads, hasActiveDownloads } = useDownloads();
 
-    // PeerPay notification state — dot on wallet button (green=receive, red=failure, amber=outbox warning)
+    // PeerPay notification state — dot on wallet button (green=receive, red=failure, yellow=needs you:
+    // recipient not notified or invalid incoming payment rejected — beta.3 10d)
     const [hasUnreadPayments, setHasUnreadPayments] = useState(false);
     const [hasFailedPayments, setHasFailedPayments] = useState(false);
     const [hasOutboxWarnings, setHasOutboxWarnings] = useState(false);
@@ -210,7 +211,8 @@ const MainBrowserView: React.FC = () => {
                     const resp = await walletFetch('/wallet/peerpay/status');
                     if (resp.ok) {
                         const data = await resp.json();
-                        setHasOutboxWarnings((data.outbox_warning_count || 0) > 0);
+                        // 10d: the yellow state comes from DISMISSABLE notice rows, so Dismiss clears the dot.
+                        setHasOutboxWarnings(((data.undeliverable_count || 0) + (data.rejected_count || 0)) > 0);
                         if (data.unread_count > 0) {
                             setHasUnreadPayments(true);
                             setUnreadPaymentCount(data.unread_count);
@@ -960,7 +962,7 @@ const MainBrowserView: React.FC = () => {
                         invisible={!hasUnreadPayments && !hasOutboxWarnings}
                         sx={{
                             '& .MuiBadge-badge': {
-                                backgroundColor: hasFailedPayments ? '#d32f2f' : hasOutboxWarnings ? '#ed6c02' : '#2e7d32',
+                                backgroundColor: hasFailedPayments ? '#d32f2f' : hasOutboxWarnings ? '#fbc02d' : '#2e7d32',
                                 minWidth: 8,
                                 height: 8,
                                 borderRadius: '50%',

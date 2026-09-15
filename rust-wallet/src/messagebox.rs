@@ -60,6 +60,62 @@ pub enum MessageBoxError {
 
     #[error("API error: {0}")]
     Api(String),
+
+    /// beta.3 Phase 10d — the relay refused the message with a 4xx. Unlike a
+    /// timeout or a 5xx this will not succeed on retry with the same bytes
+    /// (413 = body over the cap is the case that was measured live).
+    #[error("MessageBox rejected the message ({status}): {body}")]
+    Rejected { status: u16, body: String },
+}
+
+impl MessageBoxError {
+    /// A failure that retrying the same message cannot fix. Drives the outbox's
+    /// `undeliverable` status (`P10d-A4`).
+    pub fn is_permanent(&self) -> bool {
+        matches!(self, MessageBoxError::Rejected { .. })
+    }
+}
+
+/// The public MessageBox host's `maxMessageBodyBytes` (`ts-stack/infra/message-box-server`,
+/// `resourceConfig.maxMessageBodyBytes`; measured 2026-09-15 as the 413 text
+/// "Message bodies must not exceed 1048576 bytes"). Under `HODOS_DEV=1` only,
+/// `HODOS_MESSAGEBOX_MAX_BODY_BYTES` overrides it so the refuse path can be driven
+/// with a small real payment (`P10d-A2` T2). A production binary scrubs `HODOS_DEV`
+/// (`main.rs :: enforce_dev_prod_isolation`), so the override cannot reach users.
+pub const MESSAGEBOX_MAX_BODY_BYTES: usize = 1_048_576;
+
+pub fn messagebox_max_body_bytes() -> usize {
+    if std::env::var("HODOS_DEV").as_deref() == Ok("1") {
+        if let Some(n) = std::env::var("HODOS_MESSAGEBOX_MAX_BODY_BYTES").ok().and_then(|s| s.parse::<usize>().ok()) {
+            return n;
+        }
+    }
+    MESSAGEBOX_MAX_BODY_BYTES
+}
+
+#[cfg(test)]
+mod permanence_tests {
+    use super::MessageBoxError;
+
+    /// `P10d-A4` — a refusal is permanent; a server error or transport failure is not.
+    #[test]
+    fn a4_rejection_is_permanent_api_error_is_not() {
+        assert!(MessageBoxError::Rejected { status: 413, body: "too large".into() }.is_permanent());
+        assert!(!MessageBoxError::Api("sendMessage failed (503): busy".into()).is_permanent());
+        assert!(!MessageBoxError::Encryption("x".into()).is_permanent());
+    }
+}
+
+/// Exact size of the `message.body` string the server measures, for a plaintext
+/// of `plaintext_len` bytes: BRC-2 adds a 32-byte IV and a 16-byte tag, the
+/// result is base64'd, and wrapped as `{"encryptedMessage":"…"}`. Pure — used to
+/// refuse a PeerPay BEFORE broadcasting (`P10d-A2`).
+pub fn wire_body_len(plaintext_len: usize) -> usize {
+    const BRC2_OVERHEAD: usize = 32 + 16;
+    const WRAPPER: usize = r#"{"encryptedMessage":""}"#.len();
+    let cipher_len = plaintext_len + BRC2_OVERHEAD;
+    let b64_len = 4 * ((cipher_len + 2) / 3);
+    WRAPPER + b64_len
 }
 
 impl MessageBoxClient {
@@ -121,6 +177,13 @@ impl MessageBoxClient {
         if !response.status().is_success() {
             let status = response.status().as_u16();
             let body = response.text().await.unwrap_or_default();
+            // The relay refused THIS message; retrying the same bytes cannot help
+            // (P10d-A4): 413 body over the cap (measured), 400/422 malformed,
+            // 404 unknown box. 401/403/429 and 5xx stay transient — auth, rate
+            // limit and server trouble do recover on retry.
+            if matches!(status, 400 | 404 | 413 | 422) {
+                return Err(MessageBoxError::Rejected { status, body });
+            }
             return Err(MessageBoxError::Api(format!("sendMessage failed ({}): {}", status, body)));
         }
 

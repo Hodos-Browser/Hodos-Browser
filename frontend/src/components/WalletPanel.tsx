@@ -150,6 +150,8 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
   const [failureNotification, setFailureNotification] = useState<{ count: number; amount: number } | null>(null);
   // beta.3 Phase 10a — invalid incoming PeerPay messages rejected (one per sender)
   const [rejectedCount, setRejectedCount] = useState(0);
+  // beta.3 Phase 10d — sent payments whose recipient was not notified
+  const [undeliverableCount, setUndeliverableCount] = useState(0);
 
   // Self-poll peerpay status every 10s while panel is visible (live updates)
   useEffect(() => {
@@ -158,7 +160,7 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
         .then(r => r.json())
         .then((data: { receive_count?: number; receive_amount?: number;
                        failure_count?: number; failure_amount?: number;
-                       rejected_count?: number }) => {
+                       rejected_count?: number; undeliverable_count?: number }) => {
           const rc = data.receive_count || 0;
           const ra = data.receive_amount || 0;
           const fc = data.failure_count || 0;
@@ -166,6 +168,7 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
           setPeerpayNotification(rc > 0 ? { count: rc, amount: ra } : null);
           setFailureNotification(fc > 0 ? { count: fc, amount: fa } : null);
           setRejectedCount(data.rejected_count || 0);
+          setUndeliverableCount(data.undeliverable_count || 0);
         })
         .catch(() => {});
     };
@@ -178,6 +181,7 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
     setPeerpayNotification(null);
     setFailureNotification(null);
     setRejectedCount(0);
+    setUndeliverableCount(0);
     walletFetch('/wallet/peerpay/dismiss', { method: 'POST' }).catch(() => {});
     // Notify header to clear the dot
     if (window.cefMessage?.send) {
@@ -716,9 +720,25 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
         </div>
       )}
 
-      {/* Rejected incoming payment banner (beta.3 10a — one per sender, quiet, no modal) */}
+      {/* Recipient-not-notified banner (beta.3 10d — yellow, one line; Retry / Copy details live on the Activity row) */}
+      {undeliverableCount > 0 && (
+        <div className="peerpay-banner-light peerpay-banner-warning">
+          <div className="peerpay-banner-content">
+            <span>
+              {undeliverableCount} payment{undeliverableCount > 1 ? 's' : ''} sent but the recipient was not notified — see Activity
+            </span>
+          </div>
+          <div className="peerpay-banner-actions">
+            <HodosButton variant="ghost" size="small" className="peerpay-dismiss-button" onClick={handleDismissPeerpay}>
+              Dismiss
+            </HodosButton>
+          </div>
+        </div>
+      )}
+
+      {/* Rejected incoming payment banner (beta.3 10a — one per sender, quiet, no modal; yellow per 10d palette) */}
       {rejectedCount > 0 && (
-        <div className="peerpay-banner-light peerpay-banner-failure">
+        <div className="peerpay-banner-light peerpay-banner-warning">
           <div className="peerpay-banner-content">
             <span>
               Rejected {rejectedCount} invalid incoming payment{rejectedCount > 1 ? 's' : ''} — nothing was credited

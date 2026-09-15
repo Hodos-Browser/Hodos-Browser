@@ -42,6 +42,23 @@ impl<'a> ParentTransactionRepository<'a> {
     }
 
     /// Cache a parent transaction (utxo_id can be None for external transactions)
+    /// beta.3 Phase 10d (`P10d-A1`) — raw byte size of each cached parent, by txid.
+    /// Txids not in the cache are simply absent from the map (callers treat
+    /// "unknown" as small). `raw_hex` is hex, so bytes = LENGTH / 2.
+    pub fn get_sizes_by_txid(&self, txids: &[String]) -> std::collections::HashMap<String, usize> {
+        let mut sizes = std::collections::HashMap::new();
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT LENGTH(raw_hex) / 2 FROM parent_transactions WHERE txid = ?1"
+        ) else { return sizes; };
+        for txid in txids {
+            if sizes.contains_key(txid) { continue; }
+            if let Ok(n) = stmt.query_row([txid], |row| row.get::<_, i64>(0)) {
+                sizes.insert(txid.clone(), n.max(0) as usize);
+            }
+        }
+        sizes
+    }
+
     pub fn upsert(&self, utxo_id: Option<i64>, txid: &str, raw_hex: &str) -> CacheResult<i64> {
         let cached_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)

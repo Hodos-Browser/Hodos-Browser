@@ -4380,6 +4380,16 @@ pub struct CreateActionOptions {
     /// broadcast both together.
     #[serde(rename = "sendWith", default)]
     pub send_with: Option<Vec<String>>,
+
+    /// Hodos extension (beta.3 Phase 10d, `P10d-A1`). Set by the two internal
+    /// callers whose transaction travels as a BEEF over a size-capped channel
+    /// (PeerPay over MessageBox, BRC-121 in an HTTP header): coin selection
+    /// then prefers inputs whose parent transaction is small, so one large
+    /// parent (an on-chain backup) does not make the bundle undeliverable.
+    /// Ordinary sends leave it unset and select exactly as before. Harmless if
+    /// a dApp sets it — it only reorders the preference.
+    #[serde(rename = "preferSmallParents", default)]
+    pub prefer_small_parents: Option<bool>,
 }
 
 // Response structure for /createAction - full BRC-100 spec
@@ -5250,11 +5260,24 @@ pub(crate) async fn create_action_internal(
                 // Normal: greedy selection with confirmed preference + lazy consolidation.
                 // Consolidation adds small UTXOs (≤5000 sats) to reduce UTXO count over time.
                 // Candidates come from the same filtered pool — all guards already applied.
+                // beta.3 Phase 10d (`P10d-A1`): a bundle-carrying caller asks for
+                // small-parent inputs first. The map is built only then, so an
+                // ordinary send does no extra query and selects exactly as before.
+                let parent_sizes: Option<std::collections::HashMap<String, usize>> =
+                    if req.options.as_ref().and_then(|o| o.prefer_small_parents).unwrap_or(false) {
+                        let db = state.database.lock().unwrap();
+                        let repo = crate::database::ParentTransactionRepository::new(db.connection());
+                        let txids: Vec<String> = all_utxos.iter().map(|u| u.txid.clone()).collect();
+                        Some(repo.get_sizes_by_txid(&txids))
+                    } else {
+                        None
+                    };
                 selected_utxos = select_utxos_with_preference(
                     confirmed_utxos.as_deref(),
                     &all_utxos,
                     wallet_amount_needed,
                     Some(&CONSOLIDATION_FOR_SENDS),
+                    parent_sizes.as_ref(),
                 );
             }
 
@@ -7351,10 +7374,11 @@ pub(crate) fn select_utxos_with_preference(
     all_utxos: &[UTXO],
     amount_needed: i64,
     consolidation: Option<&ConsolidationConfig>,
+    parent_sizes: Option<&std::collections::HashMap<String, usize>>,
 ) -> Vec<UTXO> {
     // Try confirmed-only first if available
     if let Some(confirmed) = confirmed_utxos {
-        let selection = select_utxos_greedy(confirmed, amount_needed, consolidation);
+        let selection = select_utxos_greedy(confirmed, amount_needed, consolidation, parent_sizes);
         if !selection.is_empty() {
             log::info!("   ✅ Selected {} UTXOs from CONFIRMED transactions only", selection.len());
             return selection;
@@ -7363,7 +7387,144 @@ pub(crate) fn select_utxos_with_preference(
     }
 
     // Fallback to all UTXOs
-    select_utxos_greedy(all_utxos, amount_needed, consolidation)
+    select_utxos_greedy(all_utxos, amount_needed, consolidation, parent_sizes)
+}
+
+/// beta.3 Phase 10d (`P10d-A1`) — a parent transaction at or above this many bytes
+/// makes a bundle-carrying send (PeerPay over MessageBox, BRC-121 header) risk the
+/// channel's cap: the BEEF must carry the parent in full (BRC-62), and the wire
+/// cost is ≈ 4.7× the BEEF bytes under a 1 MiB relay limit (≈ 220 KB of BEEF).
+/// Coins whose parent is this large are selected LAST for such sends.
+///
+/// A tenth of the relay cap (≈ 105 KB at 1 MiB): half the ≈ 220 KB a single parent
+/// could reach before the message no longer fits. Derived from the cap, not fixed,
+/// so the dev-only cap override (`messagebox_max_body_bytes`) scales both together
+/// and a dev wallet with a small backup can reproduce the real proportions (`P10d-A7`).
+pub(crate) fn large_parent_bytes() -> usize {
+    crate::messagebox::messagebox_max_body_bytes() / 10
+}
+
+/// True when the coin's parent transaction is known to be large. Unknown parents
+/// (not in the local cache) count as small — the preference is an ordering, not a
+/// guarantee, and the pre-broadcast size check (`P10d-A2`) is the hard stop.
+fn has_large_parent(utxo: &UTXO, parent_sizes: Option<&std::collections::HashMap<String, usize>>) -> bool {
+    parent_sizes
+        .and_then(|m| m.get(&utxo.txid))
+        .map(|&n| n >= large_parent_bytes())
+        .unwrap_or(false)
+}
+
+/// beta.3 Phase 10d (`P10d-A3`) — funding for a transaction whose change must stay
+/// SMALL (the on-chain backup): the smallest single coin that covers the need, else
+/// the smallest coins accumulated until they do. Largest-first would hand the
+/// backup the wallet's biggest coin and leave its change — a coin with a 400 KB
+/// parent — as the first pick for every later send. Token-reserved outputs are
+/// never touched (same floor as the greedy selector).
+pub(crate) fn select_utxos_smallest_sufficient(available: &[UTXO], amount_needed: i64) -> Vec<UTXO> {
+    let mut coins: Vec<UTXO> = available.iter()
+        .filter(|u| !is_token_reserved_value(u.satoshis))
+        .cloned()
+        .collect();
+    coins.sort_by(|a, b| a.satoshis.cmp(&b.satoshis));
+    if let Some(single) = coins.iter().find(|u| u.satoshis >= amount_needed) {
+        return vec![single.clone()];
+    }
+    let mut selected = Vec::new();
+    let mut total = 0i64;
+    for u in &coins {
+        selected.push(u.clone());
+        total += u.satoshis;
+        if total >= amount_needed {
+            return selected;
+        }
+    }
+    Vec::new()
+}
+
+#[cfg(test)]
+mod peerpay_selection_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn coin(txid: &str, satoshis: i64) -> UTXO {
+        UTXO {
+            txid: txid.to_string(),
+            vout: 2,
+            satoshis,
+            script: "76a914".to_string() + &"ab".repeat(20) + "88ac",
+            address_index: 0,
+            custom_instructions: None,
+            confirmed: true,
+        }
+    }
+
+    /// The installed wallet's real shape on 2026-09-15: the backup's change is the
+    /// largest coin and its parent is 436 KB; ordinary coins have small parents.
+    fn wallet() -> (Vec<UTXO>, HashMap<String, usize>) {
+        let coins = vec![
+            coin("backup_change", 38_347_126),
+            coin("report", 23_721_396),
+            coin("paid_content", 2_273_287),
+        ];
+        let sizes = HashMap::from([
+            ("backup_change".to_string(), 436_221usize),
+            ("report".to_string(), 555),
+            ("paid_content".to_string(), 259),
+        ]);
+        (coins, sizes)
+    }
+
+    fn picked(v: &[UTXO]) -> Vec<&str> { v.iter().map(|u| u.txid.as_str()).collect() }
+
+    /// `P10d-A1` — a bundle-carrying send does not take the large-parent coin when
+    /// clean coins cover the amount.
+    #[test]
+    fn a1_bundle_send_skips_the_large_parent_coin() {
+        let (coins, sizes) = wallet();
+        let sel = select_utxos_with_preference(None, &coins, 600_000, None, Some(&sizes));
+        assert_eq!(picked(&sel), vec!["report"]);
+    }
+
+    /// Control: an ordinary send is unchanged — still largest first, backup change included.
+    #[test]
+    fn a1_ordinary_send_order_is_unchanged() {
+        let (coins, _) = wallet();
+        let sel = select_utxos_with_preference(None, &coins, 600_000, None, None);
+        assert_eq!(picked(&sel), vec!["backup_change"]);
+    }
+
+    /// When clean coins cannot cover it, the large-parent coin is still usable (last);
+    /// the pre-broadcast size check is the hard stop, not selection.
+    #[test]
+    fn a1_large_parent_coin_is_used_last_not_never() {
+        let (coins, sizes) = wallet();
+        let sel = select_utxos_with_preference(None, &coins, 30_000_000, None, Some(&sizes));
+        assert_eq!(picked(&sel), vec!["report", "paid_content", "backup_change"]);
+    }
+
+    /// `P10d-A3` — backup funding takes the smallest single coin that covers it, so its
+    /// change is small; the wallet's largest coin is untouched.
+    #[test]
+    fn a3_backup_funding_is_smallest_sufficient() {
+        let coins = vec![coin("large", 38_347_126), coin("mid", 2_273_287), coin("small", 60_000), coin("tiny", 5_000)];
+        assert_eq!(picked(&select_utxos_smallest_sufficient(&coins, 50_000)), vec!["small"]);
+        // A single coin is preferred over combining small ones: the backup's fee is
+        // estimated for ONE funding input (`do_onchain_backup` step 6), so extra
+        // inputs would underpay the fee rate. The largest coin is still untouched.
+        assert_eq!(picked(&select_utxos_smallest_sufficient(&coins, 64_000)), vec!["mid"]);
+        // no single coin covers it ⇒ smallest accumulated until it does
+        let small_only = vec![coin("a", 30_000), coin("b", 20_000), coin("c", 40_000)];
+        assert_eq!(picked(&select_utxos_smallest_sufficient(&small_only, 45_000)), vec!["b", "a"]);
+        // insufficient ⇒ empty (caller reports insufficient funds)
+        assert!(select_utxos_smallest_sufficient(&coins, 100_000_000).is_empty());
+    }
+
+    /// The 1-sat floor still holds on the new selector (R-DUST).
+    #[test]
+    fn a3_smallest_sufficient_never_takes_a_token_reserved_output() {
+        let coins = vec![coin("ordinal", 1), coin("small", 60_000)];
+        assert_eq!(picked(&select_utxos_smallest_sufficient(&coins, 1)), vec!["small"]);
+    }
 }
 
 /// Everything `send_max` may drain: all outputs except token-reserved ones.
@@ -7384,6 +7545,7 @@ fn select_utxos_greedy(
     available: &[UTXO],
     amount_needed: i64,
     consolidation: Option<&ConsolidationConfig>,
+    parent_sizes: Option<&std::collections::HashMap<String, usize>>,
 ) -> Vec<UTXO> {
     let mut selected = Vec::new();
     let mut total: i64 = 0;
@@ -7399,7 +7561,14 @@ fn select_utxos_greedy(
         .filter(|u| !is_token_reserved_value(u.satoshis))
         .cloned()
         .collect();
-    sorted_utxos.sort_by(|a, b| b.satoshis.cmp(&a.satoshis));
+    // beta.3 Phase 10d (`P10d-A1`): for bundle-carrying sends, coins with a large
+    // parent sort AFTER every clean coin; within each group largest-first as before.
+    // With `parent_sizes == None` the order is byte-identical to the old one.
+    sorted_utxos.sort_by(|a, b| {
+        has_large_parent(a, parent_sizes)
+            .cmp(&has_large_parent(b, parent_sizes))
+            .then_with(|| b.satoshis.cmp(&a.satoshis))
+    });
 
     for utxo in &sorted_utxos {
         selected.push(utxo.clone());
@@ -7407,6 +7576,13 @@ fn select_utxos_greedy(
 
         if total >= amount_needed {
             break;
+        }
+    }
+    if parent_sizes.is_some() {
+        let large = selected.iter().filter(|u| has_large_parent(u, parent_sizes)).count();
+        if large > 0 {
+            log::warn!("   ⚠️  Bundle-carrying send had to use {} input(s) with a large parent (≥ {} bytes) — no clean coins covered the amount",
+                large, large_parent_bytes());
         }
     }
 
@@ -7441,7 +7617,7 @@ fn select_utxos_greedy(
 
 // Backwards-compatible wrapper for existing callers
 fn select_utxos(available: &[UTXO], amount_needed: i64) -> Vec<UTXO> {
-    select_utxos_greedy(available, amount_needed, None)
+    select_utxos_greedy(available, amount_needed, None, None)
 }
 
 // Options for /signAction (per SDK spec: SignActionOptions)
@@ -8814,6 +8990,7 @@ pub async fn process_action(
             randomize_outputs: None,
             send_max: None,
             send_with: None,
+            prefer_small_parents: None,
         }),
         input_beef: None,
         lock_time: None,
@@ -10302,6 +10479,7 @@ pub async fn send_transaction(
             randomize_outputs: Some(true), // Default behavior
             send_max: if send_max { Some(true) } else { None },
             send_with: None,
+            prefer_small_parents: None,
         }),
         input_beef: None,
         lock_time: None,
@@ -12994,6 +13172,41 @@ pub async fn wallet_activity(
         })
         .unwrap_or_default();
 
+    // beta.3 Phase 10d (`P10d-A5`): rows the relay refused. The cause is derived
+    // from the stored payload (too large vs refused); the claim block is the
+    // canonical format the beta.5 "Claim a payment" tool reads
+    // (10d-peerpay-delivery/PAYMENT_CLAIM_BLOCK.md) — built only by
+    // `payment_claim_block`.
+    let our_identity_key_hex = crate::database::get_master_public_key_from_db(&db)
+        .map(|k| hex::encode(k))
+        .unwrap_or_default();
+    let outbox_undeliverable: std::collections::HashMap<String, serde_json::Value> =
+        crate::database::PeerPayRepository::get_outbox_entries_by_status(db.connection(), "undeliverable")
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| {
+                let wire = crate::messagebox::wire_body_len(e.payload_bytes.len());
+                let cap = crate::messagebox::messagebox_max_body_bytes();
+                let cause = if wire > cap { "message_too_large" } else { "relay_refused" };
+                let token: serde_json::Value = serde_json::from_slice(&e.payload_bytes).unwrap_or_default();
+                let claim_block = payment_claim_block(
+                    &e.txid,
+                    PEERPAY_PAYMENT_OUTPUT_INDEX,
+                    &our_identity_key_hex,
+                    token["customInstructions"]["derivationPrefix"].as_str().unwrap_or(""),
+                    token["customInstructions"]["derivationSuffix"].as_str().unwrap_or(""),
+                    e.amount_satoshis,
+                    &e.recipient_pubkey_hex,
+                );
+                (e.txid, serde_json::json!({
+                    "cause": cause,
+                    "claim_block": claim_block,
+                    "message_bytes": wire,
+                    "cap_bytes": cap,
+                }))
+            })
+            .collect();
+
     // 1. Query sent transactions
     let mut sent_items: Vec<serde_json::Value> = Vec::new();
     if filter == "all" || filter == "sent" {
@@ -13054,6 +13267,16 @@ pub async fn wallet_activity(
                     }
                     if outbox_pending.contains(&txid) {
                         item["outbox_retrying"] = serde_json::json!(true);
+                    }
+                    if let Some(u) = outbox_undeliverable.get(&txid) {
+                        // 10d: same Retry affordance as `outbox_failed`, plus the cause and
+                        // the copy-details block.
+                        item["outbox_failed"] = serde_json::json!(true);
+                        item["outbox_undeliverable"] = serde_json::json!(true);
+                        item["outbox_cause"] = u["cause"].clone();
+                        item["outbox_message_bytes"] = u["message_bytes"].clone();
+                        item["outbox_cap_bytes"] = u["cap_bytes"].clone();
+                        item["outbox_claim_block"] = u["claim_block"].clone();
                     }
                 }
 
@@ -13125,7 +13348,9 @@ pub async fn wallet_activity(
                 // Check peerpay_received for source and sender info
                 let (source, sender_key) = if let Some(ref tid) = txid {
                     let result = db.connection().query_row(
-                        "SELECT source, sender_identity_key FROM peerpay_received WHERE txid = ?1 LIMIT 1",
+                        // 10a/10d notice rows ('rejected', 'undeliverable') are not receipts.
+                        "SELECT source, sender_identity_key FROM peerpay_received
+                         WHERE txid = ?1 AND notification_type NOT IN ('rejected', 'undeliverable') LIMIT 1",
                         rusqlite::params![tid],
                         |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
                     );
@@ -13946,10 +14171,19 @@ pub async fn do_onchain_backup(
         drop(db);
 
         if amount_needed > 0 {
-            let selected = select_utxos_with_preference(
-                Some(&confirmed_utxos), &all_utxos, amount_needed,
-                None, // No consolidation for backup transactions
-            );
+            // beta.3 Phase 10d (`P10d-A3`): the backup's change must stay SMALL, so
+            // fund it from the smallest coin(s) that cover the need, confirmed first.
+            // Largest-first handed the backup the wallet's biggest coin and left its
+            // change — with a 400 KB parent — as the first pick for every later send.
+            let selected = {
+                let from_confirmed = select_utxos_smallest_sufficient(&confirmed_utxos, amount_needed);
+                if !from_confirmed.is_empty() {
+                    from_confirmed
+                } else {
+                    log::info!("   ℹ️  Insufficient confirmed UTXOs for backup funding, including unconfirmed");
+                    select_utxos_smallest_sufficient(&all_utxos, amount_needed)
+                }
+            };
             if selected.is_empty() {
                 log::warn!("   ⚠️  Insufficient funds for on-chain backup (need {} sats)", amount_needed);
                 return Err(format!("Insufficient funds (need ~{} sats)", amount_needed));
@@ -17799,6 +18033,123 @@ pub struct PeerpaySendRequest {
     pub amount_satoshis: i64,
 }
 
+/// beta.3 Phase 10d (`P10d-A2`) — would a PeerPay payment token of `payload_len`
+/// plaintext bytes fit the relay's body cap once BRC-2 encrypted and wrapped?
+/// `Err((wire_bytes, cap))` means refuse before broadcasting. Pure.
+pub(crate) fn peerpay_message_fits(payload_len: usize, cap: usize) -> Result<(), (usize, usize)> {
+    let wire = crate::messagebox::wire_body_len(payload_len);
+    if wire > cap { Err((wire, cap)) } else { Ok(()) }
+}
+
+#[cfg(test)]
+mod peerpay_message_fits_tests {
+    use super::*;
+
+    /// The live 2026-09-15 case: a 1,764,588-byte token cannot fit 1 MiB.
+    #[test]
+    fn a2_the_measured_oversized_token_is_refused() {
+        let r = peerpay_message_fits(1_764_588, crate::messagebox::MESSAGEBOX_MAX_BODY_BYTES);
+        let (wire, cap) = r.expect_err("the 1.76 MB token must be refused");
+        assert_eq!(cap, 1_048_576);
+        assert!(wire > 2_300_000 && wire < 2_400_000, "wire estimate {} should be ≈2.35 MB", wire);
+    }
+
+    /// Control: an ordinary PeerPay token (≈20 KB BEEF ⇒ ≈75 KB token) fits.
+    #[test]
+    fn a2_an_ordinary_token_fits() {
+        assert!(peerpay_message_fits(75_000, crate::messagebox::MESSAGEBOX_MAX_BODY_BYTES).is_ok());
+    }
+
+    /// The boundary is the server's measure (`Buffer.byteLength(body) > max`):
+    /// exactly at the cap fits, one byte over does not.
+    #[test]
+    fn a2_boundary_matches_the_server_rule() {
+        let wire_of = crate::messagebox::wire_body_len;
+        let cap = wire_of(100_000);
+        assert!(peerpay_message_fits(100_000, cap).is_ok());
+        assert!(peerpay_message_fits(100_003, cap).is_err());
+    }
+
+    /// `wire_body_len` against the real encoding: base64 of (32 IV + ct + 16 tag)
+    /// inside `{"encryptedMessage":"…"}`, compared with an actual serde render.
+    #[test]
+    fn wire_body_len_equals_the_serialized_body() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+        for n in [0usize, 1, 2, 3, 100, 4_999] {
+            let fake_cipher = vec![0u8; n + 48];
+            let body = serde_json::to_string(&serde_json::json!({ "encryptedMessage": BASE64.encode(&fake_cipher) })).unwrap();
+            assert_eq!(crate::messagebox::wire_body_len(n), body.len(), "plaintext {}", n);
+        }
+    }
+}
+
+/// `peerpay_send` builds with `randomize_outputs: false`, so the recipient's
+/// output is always vout 0.
+pub(crate) const PEERPAY_PAYMENT_OUTPUT_INDEX: u32 = 0;
+
+pub(crate) const PAYMENT_CLAIM_BLOCK_TYPE: &str = "hodos-payment-claim";
+pub(crate) const PAYMENT_CLAIM_BLOCK_VERSION: u32 = 1;
+
+/// beta.3 Phase 10d (`P10d-A5`) — the ONE builder of the payment claim block a
+/// sender copies when a PeerPay message could not be delivered.
+///
+/// ⛔ Canonical format: `development-docs/0.4.0-beta.3/phase-10-critical-advisories/
+/// 10d-peerpay-delivery/PAYMENT_CLAIM_BLOCK.md`. The beta.5 "Claim a payment" tool
+/// reads exactly these names (owner decision 2026-09-15). Blocks users have
+/// already copied must keep working: add fields and bump the version, never rename.
+/// The names are BRC-100 `internalizeAction`'s (`paymentRemittance`, `outputIndex`).
+pub(crate) fn payment_claim_block(
+    txid: &str,
+    output_index: u32,
+    sender_identity_key_hex: &str,
+    derivation_prefix: &str,
+    derivation_suffix: &str,
+    amount_satoshis: i64,
+    recipient_identity_key_hex: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": PAYMENT_CLAIM_BLOCK_TYPE,
+        "version": PAYMENT_CLAIM_BLOCK_VERSION,
+        "txid": txid,
+        "outputIndex": output_index,
+        "senderIdentityKey": sender_identity_key_hex,
+        "derivationPrefix": derivation_prefix,
+        "derivationSuffix": derivation_suffix,
+        "amountSatoshis": amount_satoshis,
+        "recipientIdentityKey": recipient_identity_key_hex,
+    })
+}
+
+#[cfg(test)]
+mod payment_claim_block_tests {
+    use super::*;
+
+    /// Golden keys: this test failing means the format in PAYMENT_CLAIM_BLOCK.md
+    /// and the beta.5 reader are now out of step with what users have copied.
+    #[test]
+    fn claim_block_has_exactly_the_canonical_fields() {
+        let b = payment_claim_block("aa", 0, "02bb", "p", "s", 700, "03cc");
+        let mut keys: Vec<&str> = b.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        keys.sort();
+        assert_eq!(keys, vec![
+            "amountSatoshis", "derivationPrefix", "derivationSuffix", "outputIndex",
+            "recipientIdentityKey", "senderIdentityKey", "txid", "type", "version",
+        ]);
+        assert_eq!(b["type"], "hodos-payment-claim");
+        assert_eq!(b["version"], 1);
+    }
+
+    /// The three remittance fields must deserialize straight into the
+    /// internalizeAction type the claim tool will call — same names, no mapping.
+    #[test]
+    fn claim_block_remittance_fields_are_internalize_action_names() {
+        let b = payment_claim_block("aa", 0, "02bb", "p", "s", 700, "03cc");
+        let r: PaymentRemittance = serde_json::from_value(b.clone()).expect("paymentRemittance names");
+        assert_eq!((r.sender_identity_key.as_str(), r.derivation_prefix.as_str(), r.derivation_suffix.as_str()), ("02bb", "p", "s"));
+        assert_eq!(b["outputIndex"], 0);
+    }
+}
+
 /// POST /wallet/peerpay/send — Send BSV to an identity key via BRC-29 + MessageBox
 ///
 /// Correct implementation:
@@ -17961,6 +18312,8 @@ pub async fn peerpay_send(
             randomize_outputs: Some(false),  // PeerPay assumes payment at output index 0
             send_max: None,
             send_with: None,
+            // 10d `P10d-A1`: the BEEF travels over MessageBox (1 MiB cap) — avoid large parents.
+            prefer_small_parents: Some(true),
         }),
         input_beef: None,
         lock_time: None,
@@ -18031,6 +18384,50 @@ pub async fn peerpay_send(
 
     let atomic_beef_hex = hex::encode(&atomic_beef_bytes);
 
+    // Build PaymentToken (the content sent via MessageBox)
+    // Per BRC-29 spec: transaction must be AtomicBEEF as number[] (JSON array of byte values).
+    // PeerPay does `new Uint8Array(payment.token.transaction)` so it must be an array, not base64.
+    //
+    // beta.3 Phase 10d (`P10d-A2`): built BEFORE broadcasting, so a message the relay
+    // would refuse is caught while no coins have moved. Before 10d the order was
+    // broadcast → build → send, and an oversized message stranded the payment on chain
+    // with the recipient never told (live, 2026-09-15, txid 3798109e…).
+    let tx_array: Vec<serde_json::Value> = atomic_beef_bytes.iter()
+        .map(|b| serde_json::Value::Number((*b as u64).into()))
+        .collect();
+    let payment_token = serde_json::json!({
+        "customInstructions": {
+            "derivationPrefix": derivation_prefix,
+            "derivationSuffix": derivation_suffix
+        },
+        "transaction": tx_array,
+        "amount": req.amount_satoshis
+    });
+    let payload_bytes = serde_json::to_vec(&payment_token).unwrap_or_default();
+
+    if let Err((wire, cap)) = peerpay_message_fits(payload_bytes.len(), crate::messagebox::messagebox_max_body_bytes()) {
+        log::warn!("   🚫 PeerPay refused BEFORE broadcast: message would be {} bytes, relay cap is {} (BEEF {} bytes)",
+            wire, cap, atomic_beef_bytes.len());
+        // Same cleanup as a failed broadcast (ghost outputs first, then inputs — the
+        // Ghost Transaction Safety Rules order): the transaction was never sent.
+        {
+            let db = state.database.lock().unwrap();
+            let output_repo = crate::database::OutputRepository::new(db.connection());
+            let _ = output_repo.disable_by_txid(&txid);
+            let _ = output_repo.restore_by_spending_description(&txid);
+            let tx_repo = crate::database::TransactionRepository::new(db.connection());
+            let _ = tx_repo.update_broadcast_status(&txid, "failed");
+        }
+        state.balance_cache.invalidate();
+        return HttpResponse::UnprocessableEntity().json(serde_json::json!({
+            "success": false,
+            "code": "ERR_PEERPAY_MESSAGE_TOO_LARGE",
+            "error": "This payment was not sent: the coins it would use make the payment message too large to deliver. No funds moved. Try again after your wallet's next confirmation, or send to an address instead.",
+            "messageBytes": wire,
+            "capBytes": cap
+        }));
+    }
+
     // Broadcast the transaction
     match broadcast_transaction(&atomic_beef_hex, &state.services, Some(&state.database), Some(&txid)).await {
         Ok(msg) => {
@@ -18085,24 +18482,8 @@ pub async fn peerpay_send(
         }
     }
 
-    // Build PaymentToken (the content sent via MessageBox)
-    // Per BRC-29 spec: transaction must be AtomicBEEF as number[] (JSON array of byte values).
-    // PeerPay does `new Uint8Array(payment.token.transaction)` so it must be an array, not base64.
-    let tx_array: Vec<serde_json::Value> = atomic_beef_bytes.iter()
-        .map(|b| serde_json::Value::Number((*b as u64).into()))
-        .collect();
-    let payment_token = serde_json::json!({
-        "customInstructions": {
-            "derivationPrefix": derivation_prefix,
-            "derivationSuffix": derivation_suffix
-        },
-        "transaction": tx_array,
-        "amount": req.amount_satoshis
-    });
-
-    let payload_bytes = serde_json::to_vec(&payment_token).unwrap_or_default();
-
-    // Send via encrypted MessageBox (BRC-2 + BRC-103)
+    // Send via encrypted MessageBox (BRC-2 + BRC-103). The payment token was built
+    // and size-checked before broadcasting (10d `P10d-A2`, above).
     let mb_client = crate::messagebox::MessageBoxClient::new(master_privkey, master_pubkey);
     match mb_client.send_message(&recipient_pubkey, "payment_inbox", &payload_bytes).await {
         Ok(_) => {
@@ -18110,16 +18491,23 @@ pub async fn peerpay_send(
         }
         Err(e) => {
             // Non-fatal — transaction is already broadcast on-chain.
-            // Queue for background retry so recipient eventually gets notified.
-            log::warn!("   ⚠️  MessageBox delivery failed, queuing for retry: {}", e);
             let db = state.database.lock().unwrap();
-            if let Err(db_err) = crate::database::PeerPayRepository::insert_outbox(
-                db.connection(),
-                &txid,
-                &hex::encode(&recipient_pubkey),
-                &payload_bytes,
-                req.amount_satoshis,
-            ) {
+            // 10d `P10d-A4`: a refusal is permanent for these bytes — record it as
+            // undeliverable at once (yellow notice, Retry / Copy details) instead of
+            // queuing twenty retries that cannot succeed. Transient failures still
+            // queue for background retry so the recipient eventually gets notified.
+            let queued = if e.is_permanent() {
+                log::warn!("   🚫 MessageBox refused the payment message — recorded as undeliverable: {}", e);
+                crate::database::PeerPayRepository::insert_outbox_undeliverable(
+                    db.connection(), &txid, &hex::encode(&recipient_pubkey), &payload_bytes, req.amount_satoshis,
+                )
+            } else {
+                log::warn!("   ⚠️  MessageBox delivery failed, queuing for retry: {}", e);
+                crate::database::PeerPayRepository::insert_outbox(
+                    db.connection(), &txid, &hex::encode(&recipient_pubkey), &payload_bytes, req.amount_satoshis,
+                )
+            };
+            if let Err(db_err) = queued {
                 log::error!("   ❌ Failed to queue outbox entry: {}", db_err);
             }
         }
@@ -18206,18 +18594,25 @@ pub async fn peerpay_status(
     let (rejected_count, _) = crate::database::PeerPayRepository::get_undismissed_summary_by_type(conn, "rejected")
         .unwrap_or((0, 0));
 
+    // beta.3 Phase 10d — sent payments whose MessageBox notice the relay refused
+    // (one dismissable row per txid; the Activity row keeps Retry / Copy details).
+    let (undeliverable_count, undeliverable_amount) = crate::database::PeerPayRepository::get_undismissed_summary_by_type(conn, "undeliverable")
+        .unwrap_or((0, 0));
+
     let (outbox_warning_count, outbox_warning_amount, outbox_pending_count) =
         crate::database::PeerPayRepository::get_outbox_summary(conn)
             .unwrap_or((0, 0, 0));
 
     HttpResponse::Ok().json(serde_json::json!({
-        "unread_count": receive_count + failure_count + rejected_count,
+        "unread_count": receive_count + failure_count + rejected_count + undeliverable_count,
         "unread_amount": receive_amount + failure_amount,
         "receive_count": receive_count,
         "receive_amount": receive_amount,
         "failure_count": failure_count,
         "failure_amount": failure_amount,
         "rejected_count": rejected_count,
+        "undeliverable_count": undeliverable_count,
+        "undeliverable_amount": undeliverable_amount,
         "outbox_warning_count": outbox_warning_count,
         "outbox_warning_amount": outbox_warning_amount,
         "outbox_pending_count": outbox_pending_count,
@@ -18634,6 +19029,8 @@ pub async fn pay_402(
             randomize_outputs: Some(false),
             send_max: None,
             send_with: None,
+            // 10d `P10d-A1`: the BEEF travels base64 in an HTTP header — avoid large parents.
+            prefer_small_parents: Some(true),
         }),
         input_beef: None,
         lock_time: None,
@@ -19094,6 +19491,7 @@ pub async fn paymail_send(
             randomize_outputs: Some(!is_p2p),
             send_max: None,
             send_with: None,
+            prefer_small_parents: None,
         }),
         input_beef: None,
         lock_time: None,
@@ -20268,7 +20666,7 @@ mod token_reserved_selection_tests {
     /// the pass that would reach a 1-satoshi carrier FIRST.
     #[test]
     fn consolidation_pass_does_not_sweep_up_the_carrier() {
-        let selected = select_utxos_greedy(&wallet(), 10_000, Some(&CONSOLIDATION_FOR_SENDS));
+        let selected = select_utxos_greedy(&wallet(), 10_000, Some(&CONSOLIDATION_FOR_SENDS), None);
 
         assert!(!picked(&selected).contains(&"ordinal"),
             "consolidation pass must not add the carrier: {:?}", picked(&selected));
@@ -20286,13 +20684,13 @@ mod token_reserved_selection_tests {
 
         // One satoshi more than the ordinary coins can cover: only the carrier could
         // close the gap, and it must not be allowed to.
-        let selected = select_utxos_greedy(&all, ordinary_total + 1, None);
+        let selected = select_utxos_greedy(&all, ordinary_total + 1, None, None);
         assert!(selected.is_empty(),
             "insufficient funds is the correct answer; spending the carrier is not: {:?}",
             picked(&selected));
 
         // Control: one satoshi less and the selection succeeds without the carrier.
-        let ok = select_utxos_greedy(&all, ordinary_total, None);
+        let ok = select_utxos_greedy(&all, ordinary_total, None, None);
         assert!(!ok.is_empty(), "the same call succeeds when the target is reachable");
         assert!(!picked(&ok).contains(&"ordinal"));
     }
@@ -20305,12 +20703,12 @@ mod token_reserved_selection_tests {
         let mut all = wallet();
         all[1] = utxo("ordinal", 2); // one satoshi above the floor — no longer reserved
 
-        let consolidated = select_utxos_greedy(&all, 10_000, Some(&CONSOLIDATION_FOR_SENDS));
+        let consolidated = select_utxos_greedy(&all, 10_000, Some(&CONSOLIDATION_FOR_SENDS), None);
         assert!(picked(&consolidated).contains(&"ordinal"),
             "at 2 sats the same output IS consolidated — if not, the A5 tests are vacuous");
 
         let ordinary_total: i64 = all.iter().map(|u| u.satoshis).sum();
-        let drained = select_utxos_greedy(&all, ordinary_total, None);
+        let drained = select_utxos_greedy(&all, ordinary_total, None, None);
         assert!(picked(&drained).contains(&"ordinal"),
             "at 2 sats a full drain DOES reach it");
     }
@@ -20349,6 +20747,6 @@ mod token_reserved_selection_tests {
     fn two_sat_outputs_remain_ordinary_value() {
         let all = vec![utxo("two", 2), utxo("one", 1)];
         assert_eq!(picked(&select_all_spendable(&all)), vec!["two"]);
-        assert_eq!(picked(&select_utxos_greedy(&all, 2, None)), vec!["two"]);
+        assert_eq!(picked(&select_utxos_greedy(&all, 2, None, None)), vec!["two"]);
     }
 }

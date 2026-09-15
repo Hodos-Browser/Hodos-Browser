@@ -278,6 +278,104 @@ impl PeerPayRepository {
     }
 
     /// Get outbox entries that are due for retry (status='pending' and next_retry_at <= now).
+    /// beta.3 Phase 10d (`P10d-A4`) — the relay refused the message (4xx); the
+    /// same bytes will never deliver, so stop retrying and show it. Also writes
+    /// the one dismissable notification row the header dot and panel banner
+    /// read (`undeliverable:{txid}`, `notification_type = 'undeliverable'`),
+    /// so the dot can be cleared by Dismiss while the Activity row keeps the
+    /// Retry / Copy-details affordances from the outbox row itself.
+    pub fn mark_outbox_undeliverable(conn: &Connection, id: i64) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        conn.execute(
+            "UPDATE peerpay_outbox SET status = 'undeliverable', updated_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )?;
+        let (txid, amount): (String, i64) = conn.query_row(
+            "SELECT txid, amount_satoshis FROM peerpay_outbox WHERE id = ?1",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Self::insert_undeliverable_notification(conn, &txid, amount)
+    }
+
+    /// Insert an outbox row that is undeliverable from the start (the first
+    /// delivery attempt was refused with a 4xx) — one row, one notification,
+    /// no retry schedule.
+    pub fn insert_outbox_undeliverable(
+        conn: &Connection,
+        txid: &str,
+        recipient_pubkey_hex: &str,
+        payload_bytes: &[u8],
+        amount_satoshis: i64,
+    ) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        conn.execute(
+            "INSERT OR IGNORE INTO peerpay_outbox (
+                txid, recipient_pubkey_hex, payload_bytes, amount_satoshis,
+                status, retry_count, next_retry_at, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, 'undeliverable', 1, ?5, ?5, ?5)",
+            params![txid, recipient_pubkey_hex, payload_bytes, amount_satoshis, now],
+        )?;
+        Self::insert_undeliverable_notification(conn, txid, amount_satoshis)
+    }
+
+    fn insert_undeliverable_notification(conn: &Connection, txid: &str, amount: i64) -> Result<()> {
+        let message_id = format!("undeliverable:{}", txid);
+        conn.execute(
+            "INSERT OR IGNORE INTO peerpay_received (
+                message_id, sender_identity_key, amount_satoshis,
+                derivation_prefix, derivation_suffix, txid,
+                source, notification_type, price_usd_cents
+            ) VALUES (?1, 'self', ?2, '', '', ?3, 'peerpay', 'undeliverable', NULL)",
+            params![message_id, amount, txid],
+        )?;
+        Ok(())
+    }
+
+    /// One `undeliverable:{txid}` notification per outbox row whose recipient was
+    /// not told (`exhausted` or `undeliverable`). `INSERT OR IGNORE`, so a row the
+    /// user dismissed stays dismissed. Returns how many were added.
+    pub fn backfill_undeliverable_notifications(conn: &Connection) -> Result<usize> {
+        let rows = conn.execute(
+            "INSERT OR IGNORE INTO peerpay_received (
+                message_id, sender_identity_key, amount_satoshis,
+                derivation_prefix, derivation_suffix, txid,
+                source, notification_type, price_usd_cents
+            )
+            SELECT 'undeliverable:' || txid, 'self', amount_satoshis, '', '', txid,
+                   'peerpay', 'undeliverable', NULL
+            FROM peerpay_outbox WHERE status IN ('exhausted', 'undeliverable')",
+            [],
+        )?;
+        Ok(rows)
+    }
+
+    /// Outbox rows in a given status, newest first — the Activity tab reads
+    /// `undeliverable` rows to show the cause and the copy-details block.
+    pub fn get_outbox_entries_by_status(conn: &Connection, status: &str) -> Result<Vec<OutboxEntry>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, txid, recipient_pubkey_hex, payload_bytes, amount_satoshis, retry_count
+             FROM peerpay_outbox WHERE status = ?1 ORDER BY updated_at DESC"
+        )?;
+        let entries = stmt.query_map(params![status], |row| {
+            Ok(OutboxEntry {
+                id: row.get(0)?,
+                txid: row.get(1)?,
+                recipient_pubkey_hex: row.get(2)?,
+                payload_bytes: row.get(3)?,
+                amount_satoshis: row.get(4)?,
+                retry_count: row.get(5)?,
+            })
+        })?.collect::<Result<Vec<_>>>()?;
+        Ok(entries)
+    }
+
     pub fn get_due_outbox_entries(conn: &Connection) -> Result<Vec<OutboxEntry>> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -349,9 +447,11 @@ impl PeerPayRepository {
 
     /// Get summary of outbox entries: (exhausted_count, exhausted_total_sats, pending_count)
     pub fn get_outbox_summary(conn: &Connection) -> Result<(i64, i64, i64)> {
+        // 'exhausted' (retries ran out) and 'undeliverable' (relay refused, 10d)
+        // both mean "the recipient was not told" — one warning count.
         let (exhausted_count, exhausted_amount) = conn.query_row(
             "SELECT COALESCE(COUNT(*), 0), COALESCE(SUM(amount_satoshis), 0)
-             FROM peerpay_outbox WHERE status = 'exhausted'",
+             FROM peerpay_outbox WHERE status IN ('exhausted', 'undeliverable')",
             [],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
         )?;
@@ -375,7 +475,7 @@ impl PeerPayRepository {
 
         let rows = conn.execute(
             "UPDATE peerpay_outbox SET status = 'pending', retry_count = 0, next_retry_at = ?1, updated_at = ?1
-             WHERE txid = ?2 AND status = 'exhausted'",
+             WHERE txid = ?2 AND status IN ('exhausted', 'undeliverable')",
             params![now + 5, txid],
         )?;
         Ok(rows)
