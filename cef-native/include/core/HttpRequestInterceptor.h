@@ -130,7 +130,9 @@ private:
 // Global functions for BRC-100 auth modal
 void sendAuthRequestDataToOverlay();
 void handleAuthResponse(const std::string& requestId, const std::string& responseData);
-void handleAuthResponse(const std::string& responseData);  // legacy overload
+// beta.3 Phase 10b — post the oldest queued prompt when nothing live is on screen.
+// Called from the notification overlay_close arms and on a shown prompt's timeout.
+void ShowNextQueuedPrompt();
 
 // Phase 1.5 Step 1 — privacy-perimeter "Always allow for this site" opt-ins.
 // In-memory cache only for key-linkage; identity-key now persists via the new

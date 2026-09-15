@@ -782,8 +782,11 @@ std::string FaviconParamForDomain(const std::string& domain) {
 class CreateNotificationOverlayTask : public CefTask {
 public:
     CreateNotificationOverlayTask(const std::string& type, const std::string& domain,
-                                   const std::string& extraParams = "")
-        : type_(type), domain_(domain), extraParams_(extraParams) {}
+                                   const std::string& extraParams = "",
+                                   const std::string& requestId = "",
+                                   int queuedFromSite = 0)
+        : type_(type), domain_(domain), extraParams_(extraParams),
+          requestId_(requestId), queuedFromSite_(queuedFromSite) {}
     void Execute() override {
         LOG_DEBUG_HTTP("🔔 CreateNotificationOverlayTask executing for " + type_ + " / " + domain_);
         g_pendingModalDomain = domain_;
@@ -831,6 +834,12 @@ public:
         // why one append covers them all. The permission-prompt path in
         // simple_handler.cpp builds its own query and calls the same helper.
         extra += FaviconParamForDomain(domain_);
+
+        // beta.3 Phase 10b — the modal is told WHICH pending request it shows, and
+        // sends that id back with the user's answer. C++ resolves only that id
+        // (CU-1: one click used to resolve every pending prompt for the domain).
+        if (!requestId_.empty()) extra += "&requestId=" + urlEncode(requestId_);
+        if (queuedFromSite_ > 0) extra += "&queuedFromSite=" + std::to_string(queuedFromSite_);
 #ifdef _WIN32
         extern HINSTANCE g_hInstance;
         CreateNotificationOverlay(g_hInstance, type_, domain_, extra);
@@ -842,6 +851,8 @@ private:
     std::string type_;
     std::string domain_;
     std::string extraParams_;
+    std::string requestId_;
+    int queuedFromSite_ = 0;
     IMPLEMENT_REFCOUNTING(CreateNotificationOverlayTask);
     DISALLOW_COPY_AND_ASSIGN(CreateNotificationOverlayTask);
 };
@@ -1244,6 +1255,49 @@ static PendingAuthRequest buildPendingAuthRequest(
     return req;
 }
 
+// ============================================================================
+// beta.3 Phase 10b — one prompt on screen at a time (owner decision 2026-09-15: Queue).
+// ============================================================================
+//
+// Every prompt that owns a modal is registered here. If another live prompt is on
+// screen, the new one WAITS instead of replacing it; the next one is posted when
+// the shown prompt is answered (overlay_close) or times out. Each post carries its
+// requestId, and the approve/deny message must return it — so a click can only
+// ever resolve the request whose amount was on screen. CU-1, measured 2026-09-15:
+// one Approve on a modal showing 130,000 sats broadcast that AND an unseen 150,000.
+static std::string enqueuePrompt(PendingAuthRequest req, const std::string& overlayType,
+                                 const std::string& extraParams) {
+    req.overlayType = overlayType;
+    req.overlayExtraParams = extraParams;
+    const std::string domain = req.domain;
+    bool showNow = false;
+    int queuedFromSite = 0;
+    std::string requestId = PendingRequestManager::GetInstance().addPromptRequest(
+        std::move(req), showNow, queuedFromSite);
+    if (showNow) {
+        CefPostTask(TID_UI, new CreateNotificationOverlayTask(
+            overlayType, domain, extraParams, requestId, queuedFromSite));
+    } else {
+        LOG_INFO_HTTP("⏳ " + overlayType + " for " + domain + " queued behind the prompt on screen (requestId: "
+                      + requestId + ")");
+    }
+    return requestId;
+}
+
+// Post the oldest waiting prompt, if nothing live is on screen. Called when the
+// notification overlay closes (both platforms, simple_handler.cpp) and when a shown
+// prompt times out.
+void ShowNextQueuedPrompt() {
+    PendingAuthRequest next;
+    int queuedFromSite = 0;
+    if (!PendingRequestManager::GetInstance().takeNextQueuedPrompt(next, queuedFromSite)) return;
+    LOG_INFO_HTTP("⏭️ Showing next queued prompt " + next.overlayType + " for " + next.domain
+                  + " (requestId: " + next.requestId + ", " + std::to_string(queuedFromSite)
+                  + " more waiting from this site)");
+    CefPostTask(TID_UI, new CreateNotificationOverlayTask(
+        next.overlayType, next.domain, next.overlayExtraParams, next.requestId, queuedFromSite));
+}
+
 std::string openDomainApprovalModal(const ModalContext& ctx, const ResumeContext& resume) {
     LOG_DEBUG_HTTP("🔒 Triggering domain approval for " + ctx.domain);
 
@@ -1267,7 +1321,7 @@ std::string openDomainApprovalModal(const ModalContext& ctx, const ResumeContext
         return requestId;
     }
 
-    CefPostTask(TID_UI, new CreateNotificationOverlayTask("domain_approval", ctx.domain));
+    CefPostTask(TID_UI, new CreateNotificationOverlayTask("domain_approval", ctx.domain, "", requestId));
     LOG_DEBUG_HTTP("🔒 Domain approval needed for: " + ctx.domain
                    + " requesting " + ctx.method + " " + ctx.endpoint);
     return requestId;
@@ -1291,7 +1345,7 @@ std::string openBRC100AuthApprovalModal(const ModalContext& ctx, const ResumeCon
         return requestId;
     }
 
-    CefPostTask(TID_UI, new CreateNotificationOverlayTask("domain_approval", ctx.domain));
+    CefPostTask(TID_UI, new CreateNotificationOverlayTask("domain_approval", ctx.domain, "", requestId));
     LOG_DEBUG_HTTP("🔐 BRC-100 auth approval needed for: " + ctx.domain
                    + " requesting " + ctx.method + " " + ctx.endpoint);
     return requestId;
@@ -1401,7 +1455,7 @@ std::string openManifestConnectBundleModal(const ModalContext& ctx, const Resume
     std::string extraParams = "&manifest=" + urlEncode(j.dump());
 
     CefPostTask(TID_UI, new CreateNotificationOverlayTask(
-        "manifest_connect_bundle", ctx.domain, extraParams));
+        "manifest_connect_bundle", ctx.domain, extraParams, requestId));
     LOG_DEBUG_HTTP("📦 manifest_connect_bundle notification queued (requestId: " + requestId + ")");
     return requestId;
 }
@@ -1409,19 +1463,14 @@ std::string openManifestConnectBundleModal(const ModalContext& ctx, const Resume
 std::string openIdentityKeyRevealModal(const ModalContext& ctx, const ResumeContext& resume) {
     LOG_DEBUG_HTTP("🛡️ Triggering identity_key_reveal for " + ctx.domain);
 
-    std::string requestId = PendingRequestManager::GetInstance().addRequest(
-        buildPendingAuthRequest("identity_key_reveal", ctx, resume));
-
-    CefPostTask(TID_UI, new CreateNotificationOverlayTask("identity_key_reveal", ctx.domain));
+    std::string requestId = enqueuePrompt(
+        buildPendingAuthRequest("identity_key_reveal", ctx, resume), "identity_key_reveal", "");
     LOG_DEBUG_HTTP("🛡️ identity_key_reveal notification queued (requestId: " + requestId + ")");
     return requestId;
 }
 
 std::string openKeyLinkageRevealModal(const ModalContext& ctx, const ResumeContext& resume) {
     LOG_DEBUG_HTTP("🛡️ Triggering key_linkage_reveal for " + ctx.domain + " endpoint=" + ctx.endpoint);
-
-    std::string requestId = PendingRequestManager::GetInstance().addRequest(
-        buildPendingAuthRequest("key_linkage_reveal", ctx, resume));
 
     // Verifier + linkage kind + (specific) protocol/keyID — best-effort body parse.
     std::string verifier;
@@ -1456,7 +1505,8 @@ std::string openKeyLinkageRevealModal(const ModalContext& ctx, const ResumeConte
     if (!protocolName.empty()) extraParams += "&protocol=" + urlEncode(protocolName);
     if (!keyId.empty())        extraParams += "&keyID=" + urlEncode(keyId);
 
-    CefPostTask(TID_UI, new CreateNotificationOverlayTask("key_linkage_reveal", ctx.domain, extraParams));
+    std::string requestId = enqueuePrompt(
+        buildPendingAuthRequest("key_linkage_reveal", ctx, resume), "key_linkage_reveal", extraParams);
     LOG_DEBUG_HTTP("🛡️ key_linkage_reveal notification queued (requestId: " + requestId + ", kind=" + linkageKind + ")");
     return requestId;
 }
@@ -1464,9 +1514,8 @@ std::string openKeyLinkageRevealModal(const ModalContext& ctx, const ResumeConte
 std::string openPaymentConfirmationModal(const ModalContext& ctx, const ResumeContext& resume,
                                    const std::string& extraParams) {
     LOG_DEBUG_HTTP("💰 Triggering payment_confirmation for " + ctx.domain);
-    std::string requestId = PendingRequestManager::GetInstance().addRequest(
-        buildPendingAuthRequest("payment_confirmation", ctx, resume));
-    CefPostTask(TID_UI, new CreateNotificationOverlayTask("payment_confirmation", ctx.domain, extraParams));
+    std::string requestId = enqueuePrompt(
+        buildPendingAuthRequest("payment_confirmation", ctx, resume), "payment_confirmation", extraParams);
     LOG_DEBUG_HTTP("💰 payment_confirmation notification queued (requestId: " + requestId + ")");
     return requestId;
 }
@@ -1474,9 +1523,8 @@ std::string openPaymentConfirmationModal(const ModalContext& ctx, const ResumeCo
 std::string openRateLimitExceededModal(const ModalContext& ctx, const ResumeContext& resume,
                                  const std::string& extraParams) {
     LOG_DEBUG_HTTP("⏱️ Triggering rate_limit_exceeded for " + ctx.domain);
-    std::string requestId = PendingRequestManager::GetInstance().addRequest(
-        buildPendingAuthRequest("rate_limit_exceeded", ctx, resume));
-    CefPostTask(TID_UI, new CreateNotificationOverlayTask("rate_limit_exceeded", ctx.domain, extraParams));
+    std::string requestId = enqueuePrompt(
+        buildPendingAuthRequest("rate_limit_exceeded", ctx, resume), "rate_limit_exceeded", extraParams);
     LOG_DEBUG_HTTP("⏱️ rate_limit_exceeded notification queued (requestId: " + requestId + ")");
     return requestId;
 }
@@ -1484,9 +1532,8 @@ std::string openRateLimitExceededModal(const ModalContext& ctx, const ResumeCont
 std::string openProtocolPermissionPromptModal(const ModalContext& ctx, const ResumeContext& resume,
                                         const std::string& extraParams) {
     LOG_DEBUG_HTTP("🔒 Triggering protocol_permission_prompt for " + ctx.domain);
-    std::string requestId = PendingRequestManager::GetInstance().addRequest(
-        buildPendingAuthRequest("protocol_permission_prompt", ctx, resume));
-    CefPostTask(TID_UI, new CreateNotificationOverlayTask("protocol_permission_prompt", ctx.domain, extraParams));
+    std::string requestId = enqueuePrompt(
+        buildPendingAuthRequest("protocol_permission_prompt", ctx, resume), "protocol_permission_prompt", extraParams);
     LOG_DEBUG_HTTP("🔒 protocol_permission_prompt notification queued (requestId: " + requestId + ")");
     return requestId;
 }
@@ -1494,9 +1541,8 @@ std::string openProtocolPermissionPromptModal(const ModalContext& ctx, const Res
 std::string openBasketPermissionPromptModal(const ModalContext& ctx, const ResumeContext& resume,
                                       const std::string& extraParams) {
     LOG_DEBUG_HTTP("🧺 Triggering basket_permission_prompt for " + ctx.domain);
-    std::string requestId = PendingRequestManager::GetInstance().addRequest(
-        buildPendingAuthRequest("basket_permission_prompt", ctx, resume));
-    CefPostTask(TID_UI, new CreateNotificationOverlayTask("basket_permission_prompt", ctx.domain, extraParams));
+    std::string requestId = enqueuePrompt(
+        buildPendingAuthRequest("basket_permission_prompt", ctx, resume), "basket_permission_prompt", extraParams);
     LOG_DEBUG_HTTP("🧺 basket_permission_prompt notification queued (requestId: " + requestId + ")");
     return requestId;
 }
@@ -1504,9 +1550,8 @@ std::string openBasketPermissionPromptModal(const ModalContext& ctx, const Resum
 std::string openCounterpartyPermissionPromptModal(const ModalContext& ctx, const ResumeContext& resume,
                                             const std::string& extraParams) {
     LOG_DEBUG_HTTP("🤝 Triggering counterparty_permission_prompt for " + ctx.domain);
-    std::string requestId = PendingRequestManager::GetInstance().addRequest(
-        buildPendingAuthRequest("counterparty_permission_prompt", ctx, resume));
-    CefPostTask(TID_UI, new CreateNotificationOverlayTask("counterparty_permission_prompt", ctx.domain, extraParams));
+    std::string requestId = enqueuePrompt(
+        buildPendingAuthRequest("counterparty_permission_prompt", ctx, resume), "counterparty_permission_prompt", extraParams);
     LOG_DEBUG_HTTP("🤝 counterparty_permission_prompt notification queued (requestId: " + requestId + ")");
     return requestId;
 }
@@ -1515,9 +1560,6 @@ std::string openCertificateDisclosureModal(const ModalContext& ctx, const Resume
                                      const CertDisclosureInfo& info) {
     LOG_DEBUG_HTTP("📋 Triggering certificate_disclosure for " + ctx.domain
                    + " (" + std::to_string(info.fieldsToReveal.size()) + " fields)");
-
-    std::string requestId = PendingRequestManager::GetInstance().addRequest(
-        buildPendingAuthRequest("certificate_disclosure", ctx, resume));
 
     // P0.5 panel #3 — urlEncode each field name. They come from the dApp's
     // disclosure request and land in the same showNotification('<query>') JS
@@ -1539,7 +1581,8 @@ std::string openCertificateDisclosureModal(const ModalContext& ctx, const Resume
         extraParams += "&certifier=" + urlEncode(info.certifier);
     }
 
-    CefPostTask(TID_UI, new CreateNotificationOverlayTask("certificate_disclosure", ctx.domain, extraParams));
+    std::string requestId = enqueuePrompt(
+        buildPendingAuthRequest("certificate_disclosure", ctx, resume), "certificate_disclosure", extraParams);
     LOG_DEBUG_HTTP("📋 certificate_disclosure notification queued (requestId: " + requestId
                    + ", fields: " + fieldsList + ")");
     return requestId;
@@ -2356,6 +2399,8 @@ void postIpcAuthTimeout(const std::string& requestId,
         if (!PendingRequestManager::GetInstance().popRequest(requestId, req)) return;
         sendWalletResponseIpc(frame, requestId, false, errorJson);
         LOG_DEBUG_HTTP("⏰ IPC auth timeout fired for " + requestId);
+        // 10b: the prompt on screen expired — let the next waiting one take the overlay.
+        if (req.shown) ShowNextQueuedPrompt();
     }, requestId, frame, errorJson), delayMs);
 }
 
@@ -3614,10 +3659,16 @@ void handleAuthResponse(const std::string& requestId, const std::string& respons
         LOG_DEBUG_HTTP("🔐 Domain " + domain + " blocked in-memory for this session");
     }
 
-    // 2. Resolve ALL remaining queued requests for this domain.
-    // These are requests that arrived while the modal was showing.
-    if (!domain.empty()) {
-        auto siblings = PendingRequestManager::GetInstance().popAllForDomain(domain);
+    // 2. Resolve the queued CONNECT requests for this domain — requests that arrived
+    // while a connect modal was showing and are re-issued without a token.
+    //
+    // ⛔ beta.3 Phase 10b (CU-1): never for a kind prompt. A payment / rate-limit /
+    // scoped-grant / certificate / key prompt's siblings each hold their OWN single-use
+    // approval id in headersOnApprove, so resuming them here signed amounts the user
+    // never saw (measured 2026-09-15: one Approve on 130,000 sats also broadcast an
+    // unseen 150,000). Those siblings stay queued and are shown one at a time.
+    if (!domain.empty() && PendingRequestManager::isConnectPromptType(req.type)) {
+        auto siblings = PendingRequestManager::GetInstance().popConnectForDomain(domain);
         if (!siblings.empty()) {
             LOG_DEBUG_HTTP("🔐 Resolving " + std::to_string(siblings.size()) + " queued request(s) for domain: " + domain +
                            (isRejection ? " (rejected)" : " (approved)"));
@@ -3661,17 +3712,6 @@ void handleAuthResponse(const std::string& requestId, const std::string& respons
     }
 
     g_pendingModalDomain = "";
-}
-
-// Legacy overload — resolves the requestId from the domain (backward compat for overlay_show_brc100_auth path)
-void handleAuthResponse(const std::string& responseData) {
-    std::string requestId = PendingRequestManager::GetInstance().getRequestIdForDomain(g_pendingModalDomain);
-    if (requestId.empty()) {
-        LOG_DEBUG_HTTP("🔐 handleAuthResponse (legacy): no pending request found for domain: " + g_pendingModalDomain);
-        g_pendingModalDomain = "";
-        return;
-    }
-    handleAuthResponse(requestId, responseData);
 }
 
 // Function to send auth request data to overlay (called after overlay loads)
@@ -5017,7 +5057,7 @@ bool TryHandleBrc121_402(CefRefPtr<CefBrowser> browser,
         LOG_DEBUG_HTTP("💰 BRC-121: domain trust='" + perm.trustLevel
                        + "' — firing domain_approval modal");
         bool modalAlreadyShowing = PendingRequestManager::GetInstance().hasPendingForDomain(domain);
-        PendingRequestManager::GetInstance().addRequest(
+        const std::string brc121ConnectId = PendingRequestManager::GetInstance().addRequest(
             domain, "GET", url, "", nullptr, "domain_approval");
         // Register this browser+url so simple_handler.cpp's approval IPC can
         // navigate us back here after the user accepts. Without this, CEF
@@ -5031,7 +5071,9 @@ bool TryHandleBrc121_402(CefRefPtr<CefBrowser> browser,
         // a proper placeholder URL with the right amount.
         SetPendingBrc121PriceForDomain(domain, satoshis);
         if (!modalAlreadyShowing) {
-            CefPostTask(TID_UI, new CreateNotificationOverlayTask("domain_approval", domain));
+            // 10b: the modal must carry the id it answers.
+            PendingRequestManager::GetInstance().markShown(brc121ConnectId);
+            CefPostTask(TID_UI, new CreateNotificationOverlayTask("domain_approval", domain, "", brc121ConnectId));
         }
         return false;  // Page sees 402 once; OnLoadError swaps the
                        // failed-load page for /payment-pending; reload after
@@ -5125,12 +5167,15 @@ bool TryHandleBrc121_402(CefRefPtr<CefBrowser> browser,
         // arms it (PENDING → ARMED) when the user clicks Approve.
         SetBrc121PendingApproval(url, approvalId);
         bool modalAlreadyShowing = PendingRequestManager::GetInstance().hasPendingForDomain(domain);
-        PendingRequestManager::GetInstance().addRequest(
+        const std::string brc121PromptId = PendingRequestManager::GetInstance().addRequest(
             domain, "GET", url, "", nullptr, promptType);
         registerPendingBrc121Reload(domain, browser, url);
         SetPendingBrc121PriceForDomain(domain, satoshis);
         if (!modalAlreadyShowing) {
-            CefPostTask(TID_UI, new CreateNotificationOverlayTask(promptType, domain, extraParams));
+            // 10b: the modal must carry the id it answers. Siblings for this domain are
+            // not shown; approving arms only THIS url and the reload re-gates the rest.
+            PendingRequestManager::GetInstance().markShown(brc121PromptId);
+            CefPostTask(TID_UI, new CreateNotificationOverlayTask(promptType, domain, extraParams, brc121PromptId));
         }
         return false;
     }

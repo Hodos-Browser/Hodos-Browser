@@ -4782,6 +4782,10 @@ bool SimpleHandler::OnProcessMessageReceived(
             // itself never sets it, so it cannot re-open itself forever.
             if (PendingPermissionManager::GetInstance().consumePreempted()) {
                 ReshowParkedPermissionPrompt();
+            } else {
+                // beta.3 Phase 10b — the answered prompt is gone; post the next waiting one.
+                extern void ShowNextQueuedPrompt();
+                ShowNextQueuedPrompt();
             }
         } else if (target_hwnd && IsWindow(target_hwnd)) {
             LOG_DEBUG_BROWSER("✅ Found " + role_ + " overlay window: " + std::to_string(reinterpret_cast<uintptr_t>(target_hwnd)));
@@ -4880,6 +4884,10 @@ bool SimpleHandler::OnProcessMessageReceived(
             // itself never sets it, so it cannot re-open itself forever.
             if (PendingPermissionManager::GetInstance().consumePreempted()) {
                 ReshowParkedPermissionPrompt();
+            } else {
+                // beta.3 Phase 10b — the answered prompt is gone; post the next waiting one.
+                extern void ShowNextQueuedPrompt();
+                ShowNextQueuedPrompt();
             }
         } else if (target_window) {
             LOG_DEBUG_BROWSER("✅ Found " + role_ + " overlay window");
@@ -5185,18 +5193,19 @@ bool SimpleHandler::OnProcessMessageReceived(
                 }
 
                 // Look up the pending request
-                PendingAuthRequest pendingReq;
-                bool found = false;
-                if (!requestId.empty()) {
-                    found = PendingRequestManager::GetInstance().getRequest(requestId, pendingReq);
-                } else {
-                    // Legacy fallback: find by modal domain
-                    extern std::string g_pendingModalDomain;
-                    requestId = PendingRequestManager::GetInstance().getRequestIdForDomain(g_pendingModalDomain);
-                    if (!requestId.empty()) {
-                        found = PendingRequestManager::GetInstance().getRequest(requestId, pendingReq);
-                    }
+                //
+                // ⛔ beta.3 Phase 10b (CU-1): the answer must name the request it answers.
+                // The old fallback resolved "the pending request for the modal's domain" —
+                // an arbitrary entry of an unordered map — so one click could land on a
+                // request whose amount was never on screen. A message without a requestId
+                // is refused and resolves nothing; the prompt stays pending (and times out).
+                if (requestId.empty()) {
+                    LOG_WARNING_BROWSER("🛡️ brc100_auth_response without requestId from role " + role_
+                                        + " — refused, nothing resolved (10b)");
+                    return true;
                 }
+                PendingAuthRequest pendingReq;
+                bool found = PendingRequestManager::GetInstance().getRequest(requestId, pendingReq);
 
                 if (approved) {
                     LOG_DEBUG_BROWSER("🔐 User approved auth request");
@@ -5357,13 +5366,8 @@ bool SimpleHandler::OnProcessMessageReceived(
                 } else {
                     LOG_DEBUG_BROWSER("🔐 User rejected auth request");
 
-                    if (!requestId.empty()) {
-                        extern void handleAuthResponse(const std::string& requestId, const std::string& responseData);
-                        handleAuthResponse(requestId, "{\"error\":\"User rejected authentication\",\"status\":\"error\"}");
-                    } else {
-                        extern void handleAuthResponse(const std::string& responseData);
-                        handleAuthResponse("{\"error\":\"User rejected authentication\",\"status\":\"error\"}");
-                    }
+                    extern void handleAuthResponse(const std::string& requestId, const std::string& responseData);
+                    handleAuthResponse(requestId, "{\"error\":\"User rejected authentication\",\"status\":\"error\"}");
 
                     // BRC-121 polish: if this was a modal that had stashed a
                     // pending reload (domain_approval OR — per B+3 — over-cap
@@ -5447,7 +5451,10 @@ bool SimpleHandler::OnProcessMessageReceived(
                 //      silently dropped here (assumed to all be BRC-121).
                 //   3. True BRC-121 entries (nullptr handler, http:// endpoint) —
                 //      handled separately via TriggerPendingBrc121Reloads below.
-                auto drained = PendingRequestManager::GetInstance().popAllForDomain(domain);
+                // 10b (CU-1, fifth site): drain only CONNECT entries. A kind prompt pending
+                // for this domain carries its own single-use approval in headersOnApprove,
+                // and ResumeDrainedApprovedRequest would replay it without its own click.
+                auto drained = PendingRequestManager::GetInstance().popConnectForDomain(domain);
                 int forwarded = 0;
                 int brc121_entries = 0;
                 extern bool ResumeDrainedApprovedRequest(const PendingAuthRequest& req);
@@ -5525,7 +5532,10 @@ bool SimpleHandler::OnProcessMessageReceived(
                 // per resumeKind so HTTP, IPC, and kInternal entries all
                 // resume (the legacy code path only handled HTTP entries with
                 // ForwardPendingWalletRequest and silently dropped the rest).
-                auto drained = PendingRequestManager::GetInstance().popAllForDomain(domain);
+                // 10b (CU-1, fifth site): drain only CONNECT entries. A kind prompt pending
+                // for this domain carries its own single-use approval in headersOnApprove,
+                // and ResumeDrainedApprovedRequest would replay it without its own click.
+                auto drained = PendingRequestManager::GetInstance().popConnectForDomain(domain);
                 int forwarded = 0;
                 int brc121_entries = 0;
                 extern bool ResumeDrainedApprovedRequest(const PendingAuthRequest& req);

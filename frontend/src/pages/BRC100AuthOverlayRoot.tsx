@@ -559,6 +559,11 @@ const BRC100AuthOverlayRoot: React.FC = () => {
   // them. ON = behaviour (a), an informed opt-in.
   const savedPrefillFromManifestRef = useRef<boolean>(false);
 
+  // beta.3 Phase 10b — the pending request this modal shows, and how many more
+  // prompts from the same site are waiting behind it (one prompt on screen at a time).
+  const requestIdRef = useRef<string>('');
+  const [queuedFromSite, setQueuedFromSite] = useState<number>(0);
+
   // Apply notification params from a query string (used by both initial load and JS injection)
   const applyParams = (queryString: string) => {
     const params = new URLSearchParams(queryString);
@@ -574,6 +579,10 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     // shape, same overlay. `|| ''` is the reset.
     setPageFaviconUrl(params.get('favicon') || '');
     setPermRequestId(params.get('requestId') || '');
+    // beta.3 Phase 10b — every answer names the request it answers (C++ refuses one
+    // without). A ref, because the answer handlers can run from injection callbacks.
+    requestIdRef.current = params.get('requestId') || '';
+    setQueuedFromSite(parseInt(params.get('queuedFromSite') || '0') || 0);
     setGrantsLocalAccess(params.get('grantsLocalAccess') === '1');
     setLocalAccessShown(false);   // re-earned on every show, never inherited
     setPermSubmitted(false);  // fresh prompt → re-enable buttons
@@ -860,7 +869,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
         ]);
         // Tell the interceptor to forward the pending request
         window.cefMessage.send('brc100_auth_response', [
-          JSON.stringify({ approved: true, whitelist: true, localAccessAcknowledged: localAccessShown }),
+          JSON.stringify({ requestId: requestIdRef.current, approved: true, whitelist: true, localAccessAcknowledged: localAccessShown }),
         ]);
       }
       window.cefMessage?.send('overlay_close', []);
@@ -890,7 +899,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
           }),
         ]);
         window.cefMessage.send('brc100_auth_response', [
-          JSON.stringify({ approved: true, whitelist: true, localAccessAcknowledged: localAccessShown }),
+          JSON.stringify({ requestId: requestIdRef.current, approved: true, whitelist: true, localAccessAcknowledged: localAccessShown }),
         ]);
       }
       window.cefMessage?.send('overlay_close', []);
@@ -904,7 +913,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     try {
       if (window.cefMessage) {
         window.cefMessage.send('brc100_auth_response', [
-          JSON.stringify({ approved: false, whitelist: false }),
+          JSON.stringify({ requestId: requestIdRef.current, approved: false, whitelist: false }),
         ]);
       }
       window.cefMessage?.send('overlay_close', []);
@@ -918,7 +927,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     try {
       if (window.cefMessage) {
         window.cefMessage.send('brc100_auth_response', [
-          JSON.stringify({ approved: true }),
+          JSON.stringify({ requestId: requestIdRef.current, approved: true }),
         ]);
       }
       window.cefMessage?.send('overlay_close', []);
@@ -932,7 +941,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     try {
       if (window.cefMessage) {
         window.cefMessage.send('brc100_auth_response', [
-          JSON.stringify({ approved: false }),
+          JSON.stringify({ requestId: requestIdRef.current, approved: false }),
         ]);
       }
       window.cefMessage?.send('overlay_close', []);
@@ -956,7 +965,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     try {
       if (window.cefMessage) {
         window.cefMessage.send('brc100_auth_response', [
-          JSON.stringify({
+          JSON.stringify({ requestId: requestIdRef.current,
             approved: true,
             modifyLimits: {
               perTxLimitCents: settings.perTxLimitCents,
@@ -1039,7 +1048,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     try {
       if (window.cefMessage) {
         window.cefMessage.send('brc100_auth_response', [
-          JSON.stringify({ approved: true }),
+          JSON.stringify({ requestId: requestIdRef.current, approved: true }),
         ]);
       }
       window.cefMessage?.send('overlay_close', []);
@@ -1057,7 +1066,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
         window.cefMessage.send('grant_scoped_permission', [JSON.stringify(payload)]);
         // Then approve this request so the page gets its response.
         window.cefMessage.send('brc100_auth_response', [
-          JSON.stringify({ approved: true }),
+          JSON.stringify({ requestId: requestIdRef.current, approved: true }),
         ]);
       }
       window.cefMessage?.send('overlay_close', []);
@@ -1070,7 +1079,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     try {
       if (window.cefMessage) {
         window.cefMessage.send('brc100_auth_response', [
-          JSON.stringify({ approved: false }),
+          JSON.stringify({ requestId: requestIdRef.current, approved: false }),
         ]);
       }
       window.cefMessage?.send('overlay_close', []);
@@ -1097,7 +1106,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
         }
         // Forward the proveCertificate request to Rust with only selected fields
         window.cefMessage.send('brc100_auth_response', [
-          JSON.stringify({ approved: true, selectedFields }),
+          JSON.stringify({ requestId: requestIdRef.current, approved: true, selectedFields }),
         ]);
       }
       window.cefMessage?.send('overlay_close', []);
@@ -1111,7 +1120,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     try {
       if (window.cefMessage) {
         window.cefMessage.send('brc100_auth_response', [
-          JSON.stringify({ approved: false }),
+          JSON.stringify({ requestId: requestIdRef.current, approved: false }),
         ]);
       }
       window.cefMessage?.send('overlay_close', []);
@@ -1158,7 +1167,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
           }),
         ]);
         window.cefMessage.send('brc100_auth_response', [
-          JSON.stringify({ approved: true }),
+          JSON.stringify({ requestId: requestIdRef.current, approved: true }),
         ]);
       }
       window.cefMessage?.send('overlay_close', []);
@@ -1171,7 +1180,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     try {
       if (window.cefMessage) {
         window.cefMessage.send('brc100_auth_response', [
-          JSON.stringify({ approved: false }),
+          JSON.stringify({ requestId: requestIdRef.current, approved: false }),
         ]);
       }
       window.cefMessage?.send('overlay_close', []);
@@ -1190,7 +1199,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
           }),
         ]);
         window.cefMessage.send('brc100_auth_response', [
-          JSON.stringify({ approved: true }),
+          JSON.stringify({ requestId: requestIdRef.current, approved: true }),
         ]);
       }
       window.cefMessage?.send('overlay_close', []);
@@ -1203,7 +1212,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     try {
       if (window.cefMessage) {
         window.cefMessage.send('brc100_auth_response', [
-          JSON.stringify({ approved: false }),
+          JSON.stringify({ requestId: requestIdRef.current, approved: false }),
         ]);
       }
       window.cefMessage?.send('overlay_close', []);
@@ -1361,7 +1370,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
       // existing domain_approval flow uses; PendingRequestManager drains
       // all queued requests on approval.
       if (window.cefMessage) {
-        window.cefMessage.send('brc100_auth_response', [JSON.stringify({
+        window.cefMessage.send('brc100_auth_response', [JSON.stringify({ requestId: requestIdRef.current,
           approved: true,
           localAccessAcknowledged: localAccessShown,
           whitelist: true,
@@ -1460,7 +1469,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
   const handleManifestDecline = () => {
     try {
       if (window.cefMessage) {
-        window.cefMessage.send('brc100_auth_response', [JSON.stringify({
+        window.cefMessage.send('brc100_auth_response', [JSON.stringify({ requestId: requestIdRef.current,
           approved: false,
           whitelist: false,
         })]);
@@ -1666,6 +1675,13 @@ const BRC100AuthOverlayRoot: React.FC = () => {
               <div style={{ fontSize: '13px', color: COLORS.textMuted, marginTop: '2px' }}>
                 is requesting a payment
               </div>
+              {/* beta.3 Phase 10b — a burst is shown one request at a time; say so, so a
+                  second modal after this click reads as expected, not as a glitch. */}
+              {queuedFromSite > 0 && (
+                <div style={{ fontSize: '12px', color: COLORS.textMuted, marginTop: '2px' }}>
+                  1 of {queuedFromSite + 1} requests from this site — each is approved separately
+                </div>
+              )}
             </div>
           </div>
 
@@ -1957,6 +1973,11 @@ const BRC100AuthOverlayRoot: React.FC = () => {
               <div style={{ fontSize: '13px', color: COLORS.textMuted, marginTop: '2px' }}>
                 {limitCopy.subtitle}
               </div>
+              {queuedFromSite > 0 && (
+                <div style={{ fontSize: '12px', color: COLORS.textMuted, marginTop: '2px' }}>
+                  1 of {queuedFromSite + 1} requests from this site — each is approved separately
+                </div>
+              )}
             </div>
           </div>
 

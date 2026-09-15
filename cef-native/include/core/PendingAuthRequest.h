@@ -54,6 +54,17 @@ struct PendingAuthRequest {
     // page-side IPC promise — the resource handler delivers the response
     // directly through CEF's URLRequest pipeline.
     std::string originalIpcRequestId;
+
+    // beta.3 Phase 10b — one prompt on screen at a time. The notification overlay
+    // is a single keep-alive page, so a second prompt posted while one is shown
+    // used to REPLACE it on screen while both stayed pending — and one click then
+    // resolved both (CU-1, measured). Now a prompt that arrives while another is
+    // shown waits here and is posted when the shown one is resolved or expires.
+    std::string overlayType;          // non-empty ⇒ this entry owns a modal (kind or connect)
+    std::string overlayExtraParams;   // the query extras to post it with, later
+    bool shown = false;               // its modal is (or was last) on screen
+    std::chrono::steady_clock::time_point shownAt{};
+    uint64_t seq = 0;                 // arrival order, for FIFO
 };
 
 class PendingRequestManager {
@@ -127,8 +138,56 @@ public:
         }
         std::string id = generateId();
         req.requestId = id;
+        req.seq = counter_;
+        // 10b: the first connect entry for a domain owns the modal on screen.
+        if (wasFirstForDomain) { req.shown = true; req.shownAt = std::chrono::steady_clock::now(); }
         requests_[id] = std::move(req);
         return id;
+    }
+
+    // beta.3 Phase 10b — register a prompt that owns a modal. `showNow` is true
+    // only when no other live prompt is on screen; otherwise the entry waits for
+    // `takeNextQueuedPrompt`. `queuedFromSite` counts the OTHER waiting prompts
+    // from the same domain (the modal's "1 of N" line). One lock for the check
+    // and the insert — the P0.8-A4 check-then-act lesson.
+    std::string addPromptRequest(PendingAuthRequest req, bool& showNow, int& queuedFromSite) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        showNow = !anyLiveShownLocked();
+        std::string id = generateId();
+        req.requestId = id;
+        req.seq = counter_;
+        if (showNow) { req.shown = true; req.shownAt = std::chrono::steady_clock::now(); }
+        queuedFromSite = countWaitingForDomainLocked(req.domain, id);
+        requests_[id] = std::move(req);
+        return id;
+    }
+
+    // Pick the oldest waiting prompt, mark it shown, and hand back a copy to post.
+    // Returns false while another live prompt is still on screen, or none waits.
+    bool takeNextQueuedPrompt(PendingAuthRequest& out, int& queuedFromSite) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (anyLiveShownLocked()) return false;
+        PendingAuthRequest* best = nullptr;
+        for (auto& pair : requests_) {
+            auto& r = pair.second;
+            if (r.shown || r.overlayType.empty()) continue;
+            if (!best || r.seq < best->seq) best = &r;
+        }
+        if (!best) return false;
+        best->shown = true;
+        best->shownAt = std::chrono::steady_clock::now();
+        out = *best;
+        queuedFromSite = countWaitingForDomainLocked(best->domain, best->requestId);
+        return true;
+    }
+
+    // Mark an entry as on screen (posts that bypass addPromptRequest).
+    void markShown(const std::string& requestId) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = requests_.find(requestId);
+        if (it == requests_.end()) return;
+        it->second.shown = true;
+        it->second.shownAt = std::chrono::steady_clock::now();
     }
 
     // Retrieve and remove a request by ID
@@ -202,6 +261,30 @@ public:
         return false;
     }
 
+    // beta.3 Phase 10b — the connect-prompt types, the only ones whose queued
+    // siblings may be resumed by one decision (they are re-issued WITHOUT a token
+    // and re-evaluated fresh). A kind prompt (payment, rate limit, scoped grant,
+    // certificate, key reveal) carries its own single-use approval and must be
+    // answered by its own click.
+    static bool isConnectPromptType(const std::string& type) {
+        return type == "domain_approval" || type == "brc100_auth" || type == "manifest_connect_bundle";
+    }
+
+    // Pop only the connect-type requests for a domain; kind prompts stay queued.
+    std::vector<PendingAuthRequest> popConnectForDomain(const std::string& domain) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::vector<PendingAuthRequest> result;
+        for (auto it = requests_.begin(); it != requests_.end(); ) {
+            if (it->second.domain == domain && isConnectPromptType(it->second.type)) {
+                result.push_back(it->second);
+                it = requests_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        return result;
+    }
+
     // Pop ALL requests for a domain (returns vector). Used when user approves —
     // resolves every queued request for that domain, not just the first.
     std::vector<PendingAuthRequest> popAllForDomain(const std::string& domain) {
@@ -231,6 +314,31 @@ public:
 
 private:
     PendingRequestManager() : counter_(0) {}
+
+    // A shown prompt older than the prompt timeout no longer holds the screen:
+    // the HTTP-transport timeout does not pop its entry, and an abandoned modal
+    // must not stall every later prompt.
+    static constexpr int kShownPromptExpiryMs = 600000;  // == kPromptAuthTimeoutMs
+
+    bool anyLiveShownLocked() const {
+        const auto now = std::chrono::steady_clock::now();
+        for (const auto& pair : requests_) {
+            const auto& r = pair.second;
+            if (!r.shown) continue;
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - r.shownAt).count()
+                    < kShownPromptExpiryMs) return true;
+        }
+        return false;
+    }
+
+    int countWaitingForDomainLocked(const std::string& domain, const std::string& excludeId) const {
+        int n = 0;
+        for (const auto& pair : requests_) {
+            const auto& r = pair.second;
+            if (pair.first != excludeId && r.domain == domain && !r.shown && !r.overlayType.empty()) ++n;
+        }
+        return n;
+    }
     PendingRequestManager(const PendingRequestManager&) = delete;
     PendingRequestManager& operator=(const PendingRequestManager&) = delete;
 
