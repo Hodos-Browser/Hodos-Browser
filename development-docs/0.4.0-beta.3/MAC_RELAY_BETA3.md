@@ -11,6 +11,40 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-15b (**Windows**) — Phase 10a (CU-3/CU-6) LANDED, Rust + React only; one ask for your wallet, one new ticket you will hit too
+
+No Mac push since `5710742`. Windows is at the 10a fix commit on `origin/0.4.0` (see `git log` — two Rust commits after the
+kickoff docs `42aac69`: `57812cf` extraction, then the fix). **No C++ in this round** — nothing to rebuild in `cef-native`;
+your queue from 2026-09-14b is unchanged and still first.
+
+## What landed (rebase, then `cargo test` — ⛔ not `cargo build --release`, it skips `cfg(test)`)
+
+| Where | What |
+|---|---|
+| `rust-wallet/src/beef.rs` | `from_atomic_beef_bytes` is **strict**: the declared subject must hash to a transaction in the bundle, and nothing may follow the bundle. New `subject_transaction(txid)`, `from_bytes_consumed`. Plain `from_bytes` unchanged (providers/overlay parsers untouched) |
+| `monitor/task_check_peerpay.rs` | credit resolved by the pure `resolve_brc29_credit` from the **subject** transaction; message `amount` cross-checked; rejects recorded once per sender (`peerpay_received.notification_type='rejected'`, quiet banner, no modal) |
+| `handlers.rs` | `store_derived_utxo` never rewrites an existing row (identical re-delivery is a no-op); `internalize_action` requires Atomic BEEF, rejects subject mismatch **before** any broadcast, and returns 400 `ERR_NO_OUTPUTS_OWNED` instead of 200-with-nothing |
+| `monitor/task_sync_pending.rs` + `output_repo.rs` | stale promotion compares the chain's output (value + script) with the row — a mismatch takes the dropped-tx path (delete + red notification), never `confirmed = 1` |
+| `frontend` `WalletPanel.tsx`, `DashboardTab.tsx` | the "Rejected N invalid incoming payment(s)" banner; `peerpay/status` now returns `rejected_count` |
+
+Evidence, REDs and GREENs: `phase-10-critical-advisories/10a-peerpay-atomic-subject/PHASE_CONTRACT.md` §4 and the blocks under it.
+
+## 🍎 Your two items from this round
+
+1. **`P10a-A5` poller half — you as sender.** Send a few hundred sats by PeerPay from your Mac dev wallet to the Windows dev
+   wallet's identity key `020b95583e18ac933d89a131f399890098dc1b3d4a8abcdde3eec4a7b191d2521e` and tell us the txid; we watch
+   the poller credit it once with the right amount. ⚠️ Read item 2 first — if your inputs have long unconfirmed ancestry the
+   message will not deliver either.
+2. 🚨 **New ticket you will hit: `TICKET_peerpay_message_exceeds_messagebox_limit.md`.** The owner's live send from the
+   installed wallet went on chain but its MessageBox message is **1.76 MB** (a 495 KB Atomic BEEF serialised as a JSON array of
+   integers) and MessageBox rejects it with **413 > 1 MiB** — retried forever, recipient never told, sats sitting at an address
+   the recipient cannot derive. Recovered by hand into the dev wallet via `/internalizeAction`. Sender-side fix (base64 body,
+   refuse before broadcast when over the cap) is **not scheduled yet** — owner's call.
+
+Nothing else owed back this round.
+
+---
+
 # 📋 ROUND 2026-09-15 (**Windows**) — plan change: Phases 10–13 re-cut; 🚨 three money-path advisories are the new Phase 10; your queue is unchanged and still first
 
 No Mac push since `5710742`. Windows is at the commit that carries this note (see `git log`). **Your order from

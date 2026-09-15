@@ -7269,22 +7269,25 @@ pub fn store_derived_utxo(
     ).unwrap_or(false);
 
     if exists {
-        log::info!("      Output {}:{} already exists, updating", txid, vout);
-        conn.execute(
-            "UPDATE outputs SET
-                sender_identity_key = ?1, derivation_prefix = ?2, derivation_suffix = ?3,
-                custom_instructions = ?4, spendable = 1, updated_at = ?5
-             WHERE txid = ?6 AND vout = ?7",
-            rusqlite::params![
-                sender_identity_key,
-                db_derivation_prefix,
-                db_derivation_suffix,
-                custom_instructions.to_string(),
-                now,
-                txid,
-                vout as i32,
-            ],
-        ).map_err(|e| format!("Failed to update output: {}", e))?;
+        // beta.3 Phase 10a (CU-3, `P10a-A3`) — a receive never rewrites a row.
+        // The old UPDATE branch replaced the derivation fields and forced
+        // spendable = 1, so a message naming a txid:vout we already own could
+        // change which key we derive for it and re-mark a spent coin spendable.
+        // Byte-identical re-delivery (same value, same script) is a no-op; anything
+        // else is refused and left for the caller to log.
+        let (stored_sats, stored_script): (i64, Option<Vec<u8>>) = conn.query_row(
+            "SELECT satoshis, locking_script FROM outputs WHERE txid = ?1 AND vout = ?2",
+            rusqlite::params![txid, vout as i32],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).map_err(|e| format!("Failed to read existing output: {}", e))?;
+        if stored_sats == satoshis && stored_script.as_deref() == Some(locking_script.as_slice()) {
+            log::info!("      Output {}:{} already stored with the same value and script — nothing to do", txid, vout);
+            return Ok(());
+        }
+        return Err(format!(
+            "Output {}:{} already exists with a different value or script (stored {} sats) — refusing to overwrite",
+            txid, vout, stored_sats
+        ));
     } else {
         // Insert with confirmed=0. The output starts unconfirmed because we don't
         // know if the parent tx was actually mined. TaskSyncPending will promote to
@@ -12057,6 +12060,36 @@ pub async fn internalize_action(
     // Phase 2: Full BEEF parsing with ancestry validation
     // Try multiple formats: Atomic BEEF (base64/hex) -> Standard BEEF -> Raw transaction
 
+    // beta.3 Phase 10a (CU-6) — BRC-100 internalizeAction carries `tx: AtomicBEEF`.
+    // Decide up front, on the raw bytes, so a strict-parser rejection (subject not
+    // in the bundle, trailing bytes) is returned as the error it is instead of
+    // degrading into the plain-BEEF / raw-transaction fallbacks below, and so a
+    // non-Atomic payload is refused rather than accepted on a lucky parse.
+    {
+        use base64::{Engine as _, engine::general_purpose};
+        let raw: Option<Vec<u8>> = hex::decode(&tx_string).ok()
+            .or_else(|| general_purpose::STANDARD.decode(&tx_string).ok());
+        let is_atomic = raw.as_ref()
+            .map(|b| b.len() >= 36 && b[0..4] == crate::beef::ATOMIC_BEEF_MARKER)
+            .unwrap_or(false);
+        if !is_atomic {
+            log::warn!("   ⚠️  internalizeAction tx is not Atomic BEEF — rejected (BRC-100 requires AtomicBEEF)");
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "status": "error",
+                "code": "ERR_INVALID_BEEF",
+                "description": "tx must be Atomic BEEF (BRC-95 header + BEEF bundle)"
+            }));
+        }
+        if let Err(e) = crate::beef::Beef::from_atomic_beef_bytes(raw.as_deref().unwrap_or(&[])) {
+            log::warn!("   ⚠️  internalizeAction Atomic BEEF rejected: {}", e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "status": "error",
+                "code": "ERR_INVALID_BEEF",
+                "description": format!("Invalid Atomic BEEF: {}", e)
+            }));
+        }
+    }
+
     let (main_tx_bytes, parsed_beef, has_beef, is_atomic_beef) = {
         // Try Atomic BEEF from base64 first
         if let Ok((subject_txid, beef)) = crate::beef::Beef::from_atomic_beef_base64(&tx_string) {
@@ -12066,19 +12099,21 @@ pub async fn internalize_action(
             log::info!("   Parent transactions: {}", beef.parent_transactions().len());
             log::info!("   Has SPV proofs: {}", beef.has_proofs());
 
-            match beef.main_transaction() {
+            // beta.3 Phase 10a (CU-6) — the transaction we credit is the one the
+            // header names, found by hash (the strict parser guarantees it is in
+            // the bundle). A bundle whose last transaction is not the subject is
+            // refused outright instead of warn-and-continue.
+            match beef.subject_transaction(&subject_txid).cloned() {
                 Some(tx_bytes) => {
-                    // Calculate main TXID to verify it matches subject TXID
-                    use sha2::{Sha256, Digest};
-                    let first_hash = Sha256::digest(&tx_bytes);
-                    let second_hash = Sha256::digest(&first_hash);
-                    let main_txid = hex::encode(second_hash.iter().rev().copied().collect::<Vec<u8>>());
-
-                    if main_txid != subject_txid {
-                        log::warn!("   ⚠️  Subject TXID mismatch: expected {}, got {}", subject_txid, main_txid);
+                    if beef.main_transaction() != Some(&tx_bytes) {
+                        log::warn!("   ⚠️  Subject TXID {} is not the last transaction in the bundle — rejected", subject_txid);
+                        return HttpResponse::BadRequest().json(serde_json::json!({
+                            "status": "error",
+                            "code": "ERR_SUBJECT_MISMATCH",
+                            "description": "Atomic BEEF subject txid is not the bundle's final transaction"
+                        }));
                     }
-
-                    (tx_bytes.clone(), Some(beef), true, true)
+                    (tx_bytes, Some(beef), true, true)
                 }
                 None => {
                     log::error!("   Atomic BEEF has no main transaction");
@@ -12102,19 +12137,18 @@ pub async fn internalize_action(
                         log::info!("   Parent transactions: {}", beef.parent_transactions().len());
                         log::info!("   Has SPV proofs: {}", beef.has_proofs());
 
-                        match beef.main_transaction() {
+                        // beta.3 Phase 10a (CU-6) — same rule as the base64 arm above.
+                        match beef.subject_transaction(&subject_txid).cloned() {
                             Some(tx_bytes) => {
-                                // Calculate main TXID to verify it matches subject TXID
-                                use sha2::{Sha256, Digest};
-                                let first_hash = Sha256::digest(&tx_bytes);
-                                let second_hash = Sha256::digest(&first_hash);
-                                let main_txid = hex::encode(second_hash.iter().rev().copied().collect::<Vec<u8>>());
-
-                                if main_txid != subject_txid {
-                                    log::warn!("   ⚠️  Subject TXID mismatch: expected {}, got {}", subject_txid, main_txid);
+                                if beef.main_transaction() != Some(&tx_bytes) {
+                                    log::warn!("   ⚠️  Subject TXID {} is not the last transaction in the bundle — rejected", subject_txid);
+                                    return HttpResponse::BadRequest().json(serde_json::json!({
+                                        "status": "error",
+                                        "code": "ERR_SUBJECT_MISMATCH",
+                                        "description": "Atomic BEEF subject txid is not the bundle's final transaction"
+                                    }));
                                 }
-
-                                (tx_bytes.clone(), Some(beef), true, true)
+                                (tx_bytes, Some(beef), true, true)
                             }
                             None => {
                                 log::error!("   Atomic BEEF has no main transaction");
@@ -12676,6 +12710,18 @@ pub async fn internalize_action(
 
         // Update total received logging
         log::info!("   🧺 Total from basket insertions: {} outputs processed", insertion_map.len());
+    }
+
+    // beta.3 Phase 10a (CU-6, `P10a-A6`) — a transaction that pays nothing we own
+    // is not internalized. Returning 200 here used to record a stranger's
+    // transaction as an incoming action worth 0 sats.
+    if total_received == 0 {
+        log::warn!("   ⚠️  internalizeAction: no output belongs to this wallet — rejected (txid {})", txid);
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "status": "error",
+            "code": "ERR_NO_OUTPUTS_OWNED",
+            "description": "No output of this transaction belongs to this wallet"
+        }));
     }
 
     // Store in action storage
@@ -18156,17 +18202,22 @@ pub async fn peerpay_status(
     let (failure_count, failure_amount) = crate::database::PeerPayRepository::get_undismissed_summary_by_type(conn, "failure")
         .unwrap_or((0, 0));
 
+    // beta.3 Phase 10a — rejected incoming PeerPay messages (one row per sender).
+    let (rejected_count, _) = crate::database::PeerPayRepository::get_undismissed_summary_by_type(conn, "rejected")
+        .unwrap_or((0, 0));
+
     let (outbox_warning_count, outbox_warning_amount, outbox_pending_count) =
         crate::database::PeerPayRepository::get_outbox_summary(conn)
             .unwrap_or((0, 0, 0));
 
     HttpResponse::Ok().json(serde_json::json!({
-        "unread_count": receive_count + failure_count,
+        "unread_count": receive_count + failure_count + rejected_count,
         "unread_amount": receive_amount + failure_amount,
         "receive_count": receive_count,
         "receive_amount": receive_amount,
         "failure_count": failure_count,
         "failure_amount": failure_amount,
+        "rejected_count": rejected_count,
         "outbox_warning_count": outbox_warning_count,
         "outbox_warning_amount": outbox_warning_amount,
         "outbox_pending_count": outbox_pending_count,

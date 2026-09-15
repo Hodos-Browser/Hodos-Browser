@@ -105,18 +105,28 @@ pub(crate) enum CreditReject {
     NoMainTransaction,
     TxParse(String),
     NoMatchingOutput,
+    /// The message's own `amount` field disagrees with the output it points at.
+    AmountMismatch { declared: i64, found: i64 },
 }
 
-/// Resolve the credit for one message from its Atomic BEEF bytes and the
-/// BRC-42 child public key we derived for it. Pure — no DB, no network.
-pub(crate) fn resolve_brc29_credit(tx_bytes: &[u8], child_pubkey: &[u8]) -> Result<Brc29Credit, CreditReject> {
+/// Resolve the credit for one message from its Atomic BEEF bytes, the BRC-42
+/// child public key we derived for it, and the amount the message declares
+/// (`None` / `0` = not declared). Pure — no DB, no network.
+pub(crate) fn resolve_brc29_credit(
+    tx_bytes: &[u8],
+    child_pubkey: &[u8],
+    declared_amount: Option<i64>,
+) -> Result<Brc29Credit, CreditReject> {
     use sha2::{Sha256, Digest};
     use ripemd::Ripemd160;
 
+    // Strict parser: rejects trailing bytes and a subject that hashes to no
+    // transaction in the bundle (CU-3). The credit is read from the SUBJECT
+    // transaction — the one the on-chain check is about — never from the last.
     let (subject_txid, beef) = crate::beef::Beef::from_atomic_beef_bytes(tx_bytes)
         .map_err(CreditReject::NotAtomicBeef)?;
 
-    let main_tx_bytes = beef.main_transaction()
+    let main_tx_bytes = beef.subject_transaction(&subject_txid)
         .cloned()
         .ok_or(CreditReject::NoMainTransaction)?;
 
@@ -137,6 +147,11 @@ pub(crate) fn resolve_brc29_credit(tx_bytes: &[u8], child_pubkey: &[u8]) -> Resu
             && output.script[24] == 0xac
             && &output.script[3..23] == pubkey_hash.as_slice()
         {
+            if let Some(declared) = declared_amount.filter(|a| *a > 0) {
+                if declared != output.value {
+                    return Err(CreditReject::AmountMismatch { declared, found: output.value });
+                }
+            }
             return Ok(Brc29Credit {
                 subject_txid,
                 vout: i as u32,
@@ -149,6 +164,38 @@ pub(crate) fn resolve_brc29_credit(tx_bytes: &[u8], child_pubkey: &[u8]) -> Resu
     }
 
     Err(CreditReject::NoMatchingOutput)
+}
+
+/// beta.3 Phase 10a (`P10a-A7`, owner decision 2026-09-15) — an invalid incoming
+/// payment is rejected, written to the wallet log as the audit line, and the user
+/// is told **once per sender per wallet session** through the quiet notification
+/// list — never a modal, because the inbox is writable by anyone who knows the
+/// identity key and a modal per fake would be an attention-DoS handed to them.
+///
+/// The per-session dedupe is in-process; the DB row is `INSERT OR IGNORE` on
+/// `reject:{sender}`, so a dismissed sender only re-notifies after a restart.
+fn record_rejected_message(conn: &rusqlite::Connection, sender: &str, message_id: &str, why: &str) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static NOTIFIED_SENDERS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+    let sender_prefix = &sender[..16.min(sender.len())];
+    warn!("🚫 PeerPay REJECTED — sender {}… message {}…: {}",
+        sender_prefix, &message_id[..16.min(message_id.len())], why);
+
+    let first_this_session = NOTIFIED_SENDERS
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .map(|mut set| set.insert(sender.to_string()))
+        .unwrap_or(false);
+    if !first_this_session {
+        return;
+    }
+    match PeerPayRepository::insert_rejected_notification(conn, sender) {
+        Ok(true) => info!("   🔔 Rejected-payment notification recorded for sender {}…", sender_prefix),
+        Ok(false) => debug!("   Rejected-payment notification for sender {}… already present", sender_prefix),
+        Err(e) => warn!("   Failed to record rejected-payment notification: {}", e),
+    }
 }
 
 /// Run the TaskCheckPeerPay task
@@ -251,7 +298,6 @@ pub async fn run(state: &web::Data<AppState>, _client: &reqwest::Client) -> Resu
             }
         };
 
-        let amount = token.amount.unwrap_or(0);
         let tx_bytes = match token.transaction_bytes {
             Some(b) => b,
             None => {
@@ -301,14 +347,20 @@ pub async fn run(state: &web::Data<AppState>, _client: &reqwest::Client) -> Resu
         let child_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &child_secret).serialize().to_vec();
 
         // Parse the envelope and find our output (pure — see resolve_brc29_credit)
-        let credit = match resolve_brc29_credit(&tx_bytes, &child_pubkey) {
+        let credit = match resolve_brc29_credit(&tx_bytes, &child_pubkey, token.amount) {
             Ok(c) => c,
             Err(reason) => {
-                match &reason {
-                    CreditReject::NotAtomicBeef(e) => warn!("TaskCheckPeerPay: not Atomic BEEF, trying raw tx: {}", e),
-                    CreditReject::NoMainTransaction => warn!("TaskCheckPeerPay: BEEF has no main transaction"),
-                    CreditReject::TxParse(e) => warn!("TaskCheckPeerPay: failed to parse transaction: {}", e),
-                    CreditReject::NoMatchingOutput => warn!("TaskCheckPeerPay: no matching P2PKH output found for derived key"),
+                let why = match &reason {
+                    CreditReject::NotAtomicBeef(e) => format!("not a valid Atomic BEEF: {}", e),
+                    CreditReject::NoMainTransaction => "BEEF has no main transaction".to_string(),
+                    CreditReject::TxParse(e) => format!("failed to parse transaction: {}", e),
+                    CreditReject::NoMatchingOutput => "no output pays the key derived for this message".to_string(),
+                    CreditReject::AmountMismatch { declared, found } => format!(
+                        "message declares {} sats but the output pays {}", declared, found),
+                };
+                {
+                    let db = state.database.lock().map_err(|e| format!("DB lock: {}", e))?;
+                    record_rejected_message(db.connection(), &msg.sender, &msg.message_id, &why);
                 }
                 message_ids_to_ack.push(msg.message_id.clone());
                 continue;
@@ -413,8 +465,16 @@ pub async fn run(state: &web::Data<AppState>, _client: &reqwest::Client) -> Resu
                     let _ = PeerPayRepository::remove_pending_verification(db.connection(), &msg.message_id);
                 }
                 Err(e) => {
+                    // beta.3 Phase 10a (`P10a-A3`) — this now includes "already
+                    // exists with a different value or script", which is a
+                    // rejection to record and acknowledge, not a transient error
+                    // to retry every tick forever.
                     error!("   ❌ Failed to store PeerPay output: {}", e);
-                    // Don't acknowledge — retry next tick
+                    if e.contains("refusing to overwrite") {
+                        record_rejected_message(db.connection(), &msg.sender, &msg.message_id, &e);
+                        message_ids_to_ack.push(msg.message_id.clone());
+                    }
+                    // Anything else (DB busy, etc.): don't acknowledge — retry next tick
                     continue;
                 }
             }
@@ -491,4 +551,214 @@ pub async fn run(state: &web::Data<AppState>, _client: &reqwest::Client) -> Resu
     }
 
     Ok(())
+}
+
+// ============================================================================
+// beta.3 Phase 10a — CU-3. The envelope's declared subject txid is what the
+// poller checks on chain, so the credited value MUST be read from the
+// transaction that hashes to it, never from "the last one in the bundle".
+// Every envelope below is hand-built; the subject hash is computed here,
+// independently of beef.rs.
+// ============================================================================
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Sha256, Digest};
+    use ripemd::Ripemd160;
+
+    fn push_varint(v: &mut Vec<u8>, n: u64) {
+        if n < 0xfd { v.push(n as u8); } else { v.push(0xfd); v.extend(&(n as u16).to_le_bytes()); }
+    }
+
+    /// Minimal raw transaction: version 1, one dummy input, the given outputs, locktime 0.
+    fn raw_tx(prev_txid_byte: u8, outputs: &[(i64, Vec<u8>)]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend(&1u32.to_le_bytes());
+        push_varint(&mut v, 1);
+        v.extend(&[prev_txid_byte; 32]);
+        v.extend(&0u32.to_le_bytes());
+        push_varint(&mut v, 0);
+        v.extend(&0xffff_ffffu32.to_le_bytes());
+        push_varint(&mut v, outputs.len() as u64);
+        for (value, script) in outputs {
+            v.extend(&value.to_le_bytes());
+            push_varint(&mut v, script.len() as u64);
+            v.extend(script);
+        }
+        v.extend(&0u32.to_le_bytes());
+        v
+    }
+
+    /// Display-format txid, computed here so the test does not trust beef.rs's hashing.
+    fn txid_hex(tx: &[u8]) -> String {
+        let h = Sha256::digest(&Sha256::digest(tx));
+        hex::encode(h.iter().rev().copied().collect::<Vec<u8>>())
+    }
+
+    fn p2pkh(pubkey: &[u8]) -> Vec<u8> {
+        let h = Ripemd160::digest(&Sha256::digest(pubkey));
+        let mut s = vec![0x76, 0xa9, 0x14];
+        s.extend(h.as_slice());
+        s.extend(&[0x88, 0xac]);
+        s
+    }
+
+    fn our_key() -> Vec<u8> {
+        let secp = secp256k1::Secp256k1::new();
+        let sk = secp256k1::SecretKey::from_slice(&[0x11u8; 32]).unwrap();
+        secp256k1::PublicKey::from_secret_key(&secp, &sk).serialize().to_vec()
+    }
+
+    /// A P2PKH script to a key that is not ours (the script only hashes the bytes).
+    fn stranger_script() -> Vec<u8> { p2pkh(&[0x02u8; 33]) }
+
+    /// Atomic envelope whose header names `subject`; bundle = `parents` then `last`.
+    fn envelope(subject: &str, parents: &[Vec<u8>], last: Vec<u8>) -> Vec<u8> {
+        let mut beef = crate::beef::Beef::new();
+        for p in parents { beef.add_parent_transaction(p.clone()); }
+        beef.set_main_transaction(last);
+        hex::decode(beef.to_atomic_beef_hex(subject).unwrap()).unwrap()
+    }
+
+    fn summary(r: &Result<Brc29Credit, CreditReject>) -> String {
+        match r {
+            Ok(c) => format!("CREDITED {} sats at {}:{}", c.satoshis, c.subject_txid, c.vout),
+            Err(e) => format!("rejected: {:?}", e),
+        }
+    }
+
+    /// `P10a-A1` — the attack. Header names A (a real, mined transaction that
+    /// pays nobody we own); the last transaction is fabricated B paying us
+    /// 1,000,000 sats. The only correct answer is a rejection: A is the
+    /// subject and A pays us nothing.
+    #[test]
+    fn a1_credit_is_read_from_the_subject_transaction_not_the_last_one() {
+        let a = raw_tx(0xaa, &[(1, stranger_script())]);
+        let b = raw_tx(0xbb, &[(1_000_000, p2pkh(&our_key()))]);
+        let env = envelope(&txid_hex(&a), &[a.clone()], b);
+
+        let r = resolve_brc29_credit(&env, &our_key(), None);
+
+        // Post-fix the credit is read from A, and A has no output for our key.
+        assert!(matches!(r, Err(CreditReject::NoMatchingOutput)), "subject A pays us nothing, yet: {}", summary(&r));
+    }
+
+    /// `P10a-A1` (second shape) — the header names a txid that is in no
+    /// transaction of the bundle at all.
+    #[test]
+    fn a1_subject_absent_from_the_bundle_is_rejected() {
+        let a = raw_tx(0xaa, &[(1, stranger_script())]);
+        let b = raw_tx(0xbb, &[(1_000_000, p2pkh(&our_key()))]);
+        let c = raw_tx(0xcc, &[(5, stranger_script())]);
+        let env = envelope(&txid_hex(&c), &[a], b);
+
+        let r = resolve_brc29_credit(&env, &our_key(), None);
+
+        assert!(matches!(&r, Err(CreditReject::NotAtomicBeef(e)) if e.contains("not a transaction in the bundle")),
+            "subject C is not in the bundle, yet: {}", summary(&r));
+    }
+
+    /// `P10a-A2` — one byte after the last transaction.
+    #[test]
+    fn a2_trailing_byte_after_the_bundle_is_rejected() {
+        let b = raw_tx(0xbb, &[(700, p2pkh(&our_key()))]);
+        let mut env = envelope(&txid_hex(&b), &[], b);
+        env.push(0x00);
+
+        let r = resolve_brc29_credit(&env, &our_key(), None);
+
+        assert!(matches!(&r, Err(CreditReject::NotAtomicBeef(e)) if e.contains("trailing byte")),
+            "trailing byte accepted: {}", summary(&r));
+    }
+
+    /// The two-sided control for A1, and the unit half of `P10a-A5`: a genuine
+    /// envelope (subject = the paying transaction) is credited with that
+    /// transaction's value and vout, exactly once.
+    #[test]
+    fn genuine_envelope_is_credited_with_the_subject_value() {
+        let a = raw_tx(0xaa, &[(1, stranger_script())]);
+        let b = raw_tx(0xbb, &[(5, stranger_script()), (700, p2pkh(&our_key()))]);
+        let env = envelope(&txid_hex(&b), &[a], b.clone());
+
+        let c = resolve_brc29_credit(&env, &our_key(), Some(700)).expect("genuine credit");
+
+        assert_eq!(c.subject_txid, txid_hex(&b));
+        assert_eq!((c.vout, c.satoshis), (1, 700));
+        assert_eq!(c.credited_tx_bytes, b, "the broadcast bytes must be the subject's");
+    }
+
+    /// `P10a-A5`'s RED half — the message's own `amount` disagrees with the
+    /// output it points at.
+    #[test]
+    fn a5_declared_amount_mismatch_is_rejected() {
+        let b = raw_tx(0xbb, &[(700, p2pkh(&our_key()))]);
+        let env = envelope(&txid_hex(&b), &[], b);
+
+        let r = resolve_brc29_credit(&env, &our_key(), Some(701));
+        assert!(matches!(r, Err(CreditReject::AmountMismatch { declared: 701, found: 700 })), "{}", summary(&r));
+
+        // 0 / absent = "not declared", not "declared zero".
+        assert!(resolve_brc29_credit(&env, &our_key(), Some(0)).is_ok());
+        assert!(resolve_brc29_credit(&env, &our_key(), None).is_ok());
+    }
+}
+
+// ============================================================================
+// beta.3 Phase 10a — `P10a-A3`: a receive never rewrites an existing outputs
+// row. Lives here (bin crate) because `store_derived_utxo` is in `handlers`,
+// which the lib test target does not compile. Uses the real WalletDatabase on
+// a temp file because that is the type the function takes.
+// ============================================================================
+#[cfg(test)]
+mod store_derived_utxo_tests {
+    fn wallet_db() -> crate::database::WalletDatabase {
+        let path = std::env::temp_dir().join(format!("hodos_p10a_a3_{}.db", uuid::Uuid::new_v4()));
+        let db = crate::database::WalletDatabase::new(path).unwrap();
+        db.connection().execute(
+            "INSERT INTO users (userId, identity_key, active_storage, created_at, updated_at)
+             VALUES (1, 'test_identity_key', 'local', 0, 0)",
+            [],
+        ).unwrap();
+        db
+    }
+
+    /// Everything a receive could change, read back by value.
+    fn derived_row(db: &crate::database::WalletDatabase, txid: &str) -> (i64, Vec<u8>, String, String, i64, Option<String>) {
+        db.connection().query_row(
+            "SELECT satoshis, locking_script, sender_identity_key, derivation_suffix, spendable, custom_instructions
+             FROM outputs WHERE txid = ?1 AND vout = 0",
+            [txid],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+        ).unwrap()
+    }
+
+    #[test]
+    fn a3_receive_for_an_existing_output_never_rewrites_the_row() {
+        let db = wallet_db();
+        let txid = "aa".repeat(32);
+        let script = "76a914".to_string() + &"11".repeat(20) + "88ac";
+        let first = serde_json::json!({
+            "type": "brc29_payment", "senderIdentityKey": "02".to_string() + &"aa".repeat(32),
+            "derivationPrefix": "p1", "derivationSuffix": "s1"
+        });
+        crate::handlers::store_derived_utxo(&db, &txid, 0, 500, &script, &[], &first).unwrap();
+        // The coin has since been spent (or reserved): spendable = 0.
+        db.connection().execute("UPDATE outputs SET spendable = 0 WHERE txid = ?1", [&txid]).unwrap();
+        let before = derived_row(&db, &txid);
+
+        // A second message names the same txid:vout with a different value,
+        // sender and derivation — the CU-3 overwrite.
+        let attacker = serde_json::json!({
+            "type": "brc29_payment", "senderIdentityKey": "02".to_string() + &"bb".repeat(32),
+            "derivationPrefix": "p2", "derivationSuffix": "s2"
+        });
+        let r = crate::handlers::store_derived_utxo(&db, &txid, 0, 1_000_000, &script, &[], &attacker);
+
+        assert!(r.is_err(), "overwrite accepted: {:?}", r);
+        assert_eq!(derived_row(&db, &txid), before, "row changed by a refused receive");
+
+        // Byte-identical re-delivery (same value + script) is a harmless no-op.
+        assert!(crate::handlers::store_derived_utxo(&db, &txid, 0, 500, &script, &[], &attacker).is_ok());
+        assert_eq!(derived_row(&db, &txid), before);
+    }
 }

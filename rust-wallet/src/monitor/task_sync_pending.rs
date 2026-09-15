@@ -385,6 +385,60 @@ async fn cache_parent_transactions(state: &web::Data<AppState>, txids: &[String]
     }
 }
 
+/// Does the chain's view of `txid:vout` (a WhatsOnChain `tx/hash/{txid}` body)
+/// carry exactly the value and locking script we stored for it?
+///
+/// beta.3 Phase 10a (CU-3 fix 4). A txid commits to its outputs, so "this txid is
+/// mined" proves the stored value only if the value was read from THAT
+/// transaction. The stale-promotion path used to check the txid alone; this is
+/// the comparison it was missing. Pure — driven by `P10a-A4`'s unit tests.
+pub(crate) fn chain_output_matches(body: &serde_json::Value, vout: u32, satoshis: i64, script: &[u8]) -> bool {
+    let Some(vouts) = body.get("vout").and_then(|v| v.as_array()) else { return false; };
+    let Some(out) = vouts.iter().find(|o| o.get("n").and_then(|n| n.as_u64()) == Some(vout as u64)) else { return false; };
+    // WoC reports value in BSV as a float; round to the satoshi.
+    let chain_sats = out.get("value").and_then(|v| v.as_f64()).map(|bsv| (bsv * 100_000_000.0).round() as i64);
+    let chain_script = out.get("scriptPubKey").and_then(|s| s.get("hex")).and_then(|h| h.as_str());
+    chain_sats == Some(satoshis) && chain_script == Some(hex::encode(script).as_str())
+}
+
+#[cfg(test)]
+mod stale_promotion_tests {
+    use super::chain_output_matches;
+    use serde_json::json;
+
+    fn body() -> serde_json::Value {
+        json!({ "txid": "aa", "confirmations": 4, "vout": [
+            { "n": 0, "value": 0.0, "scriptPubKey": { "hex": "006a" } },
+            { "n": 1, "value": 0.99637619, "scriptPubKey": { "hex": "76a914b3c3d3e3f30000000000000000000000000000000088ac" } }
+        ]})
+    }
+    fn script() -> Vec<u8> { hex::decode("76a914b3c3d3e3f30000000000000000000000000000000088ac").unwrap() }
+
+    /// `P10a-A4` — the row the dev-wallet RED promoted: value off by one sat.
+    #[test]
+    fn a4_value_mismatch_is_not_a_match() {
+        assert!(!chain_output_matches(&body(), 1, 99_637_620, &script()));
+    }
+
+    #[test]
+    fn a4_script_mismatch_is_not_a_match() {
+        let mut other = script(); other[5] ^= 0x01;
+        assert!(!chain_output_matches(&body(), 1, 99_637_619, &other));
+    }
+
+    #[test]
+    fn a4_missing_vout_is_not_a_match() {
+        assert!(!chain_output_matches(&body(), 7, 99_637_619, &script()));
+        assert!(!chain_output_matches(&json!({}), 1, 99_637_619, &script()));
+    }
+
+    /// The control: the genuine row matches, including float→satoshi rounding.
+    #[test]
+    fn genuine_row_matches() {
+        assert!(chain_output_matches(&body(), 1, 99_637_619, &script()));
+    }
+}
+
 /// Check for stale unconfirmed outputs (> 30 min without confirmation)
 /// Before deleting, verify with WoC whether the tx is actually gone from mempool
 /// or just slow to confirm (e.g., large backup txs with minimum fee rate).
@@ -394,7 +448,7 @@ async fn check_stale_unconfirmed(state: &web::Data<AppState>) -> Result<(), Stri
         .map(|p| (p * 100.0) as i64);
 
     // Read stale candidates from DB (brief lock)
-    let stale_candidates: Vec<(String, u32, i64)> = {
+    let stale_candidates: Vec<(String, u32, i64, Vec<u8>)> = {
         let db = state.database.lock().map_err(|e| format!("DB lock: {}", e))?;
         let output_repo = OutputRepository::new(db.connection());
         output_repo.get_stale_unconfirmed(state.current_user_id, UNCONFIRMED_CHECK_SECS)
@@ -409,8 +463,8 @@ async fn check_stale_unconfirmed(state: &web::Data<AppState>) -> Result<(), Stri
     let unique_txids: Vec<String> = {
         let mut seen = std::collections::HashSet::new();
         stale_candidates.iter()
-            .filter(|(txid, _, _)| seen.insert(txid.clone()))
-            .map(|(txid, _, _)| txid.clone())
+            .filter(|(txid, _, _, _)| seen.insert(txid.clone()))
+            .map(|(txid, _, _, _)| txid.clone())
             .collect()
     };
 
@@ -419,7 +473,10 @@ async fn check_stale_unconfirmed(state: &web::Data<AppState>) -> Result<(), Stri
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
-    let mut confirmed_txids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // beta.3 Phase 10a (CU-3 fix 4, `P10a-A4`) — keep the whole WoC body for a
+    // confirmed txid, not just the fact of confirmation: promotion below compares
+    // the chain's output at txid:vout with the stored row before trusting it.
+    let mut confirmed_bodies: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
     let mut still_pending_txids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for txid in &unique_txids {
@@ -434,7 +491,7 @@ async fn check_stale_unconfirmed(state: &web::Data<AppState>) -> Result<(), Stri
                         if confirmations > 0 {
                             info!("   ✅ Stale tx {}... is now confirmed ({} confirmations)",
                                 &txid[..std::cmp::min(16, txid.len())], confirmations);
-                            confirmed_txids.insert(txid.clone());
+                            confirmed_bodies.insert(txid.clone(), body);
                         } else {
                             info!("   ⏳ Stale tx {}... still in mempool — not deleting",
                                 &txid[..std::cmp::min(16, txid.len())]);
@@ -470,13 +527,24 @@ async fn check_stale_unconfirmed(state: &web::Data<AppState>) -> Result<(), Stri
         let db = state.database.lock().map_err(|e| format!("DB lock: {}", e))?;
         let output_repo = OutputRepository::new(db.connection());
 
-        for (txid, vout, satoshis) in &stale_candidates {
-            if confirmed_txids.contains(txid) {
+        for (txid, vout, satoshis, script) in &stale_candidates {
+            // Promote only when the chain's output at txid:vout IS the stored row
+            // (value + script). A mined txid whose output differs from what we
+            // stored is a phantom, and is handled exactly like a dropped tx.
+            let chain_body = confirmed_bodies.get(txid);
+            let mismatch = chain_body
+                .map(|body| !chain_output_matches(body, *vout, *satoshis, script))
+                .unwrap_or(false);
+            if mismatch {
+                warn!("   🚫 Stale output {}:{} — txid is mined but the chain's output differs from the stored row ({} sats) — NOT promoted",
+                      &txid[..std::cmp::min(16, txid.len())], vout, satoshis);
+            }
+            if chain_body.is_some() && !mismatch {
                 let _ = output_repo.mark_output_confirmed(txid, *vout as i32);
-            } else if still_pending_txids.contains(txid) {
+            } else if still_pending_txids.contains(txid) && !mismatch {
                 // Still in mempool — leave it alone
             } else {
-                // Truly failed (404 from WoC) — delete and notify
+                // Truly failed (404 from WoC), or a value/script mismatch — delete and notify
                 if let Err(e) = PeerPayRepository::insert_failure_notification(
                     db.connection(), txid, *vout as i64, *satoshis, price_usd_cents,
                 ) {
@@ -487,8 +555,9 @@ async fn check_stale_unconfirmed(state: &web::Data<AppState>) -> Result<(), Stri
                     warn!("   Failed to delete unconfirmed output {}:{}: {}", txid, vout, e);
                 }
                 failed_unconfirmed += 1;
-                warn!("   🔴 Unconfirmed output {}:{} ({} sats) confirmed failed — tx dropped from mempool",
-                      &txid[..std::cmp::min(16, txid.len())], vout, satoshis);
+                warn!("   🔴 Unconfirmed output {}:{} ({} sats) confirmed failed — {}",
+                      &txid[..std::cmp::min(16, txid.len())], vout, satoshis,
+                      if mismatch { "chain output differs from the stored row" } else { "tx dropped from mempool" });
             }
         }
     } // DB lock dropped

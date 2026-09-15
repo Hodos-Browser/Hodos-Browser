@@ -66,14 +66,113 @@ per envelope ⇒ ten).
 
 | ID | 🟢 GREEN — must be true | 🔴 RED — must be *seen* to fail, and how | 🎯 SUBJECT | Tier | Result |
 |---|---|---|---|---|---|
-| `P10a-A1` | Unit: Atomic BEEF whose header names tx **A** (mined) and whose last tx is fabricated **B** paying our derived key ⇒ **rejected**, `store_derived_utxo` not called | Same envelope on the pre-fix code ⇒ `store_derived_utxo` called with **B's** value — observed in the test before the fix | the test constructs both transactions and asserts the *call*, not a log line; the subject hash is computed by the test independently of `beef.rs` | T1 | ⬜ **planned:** `cargo test` on the extracted resolver (`D-10`) — commit 1 extracts with today's logic and the test is RED (returns B's vout/value under A's txid); commit 2 binds the subject and the same test is GREEN |
-| `P10a-A2` | Unit: valid envelope + 1 trailing byte ⇒ rejected; plain (non-Atomic) BEEF where Atomic is required ⇒ rejected | pre-fix: trailing byte accepted (`from_bytes` never checks the cursor); plain BEEF **already** rejected by `from_atomic_beef_bytes`'s magic check but **accepted by `internalize_action`**'s plain-BEEF arms | same; the plain-BEEF half is asserted at the `internalize_action` boundary | T1 | ⬜ **planned:** two unit tests; the plain-BEEF half via the extracted resolver called with `require_atomic = true` |
-| `P10a-A3` | Unit: a receive for an existing `txid:vout` ⇒ refused, row byte-identical | pre-fix: UPDATE branch rewrites derivation fields and `spendable` | row compared before/after by value | T1 | ⬜ **planned:** in-memory SQLite (`WalletDatabase` test ctor, as `handlers.rs:9606` tests do): insert a row with `spendable = 0` and derivation X, call `store_derived_utxo` with derivation Y ⇒ RED today shows Y + `spendable = 1`; GREEN shows `Err` and the row unchanged |
-| `P10a-A4` | Unit/T2: stale unconfirmed row whose txid is mined but whose stored value ≠ chain ⇒ **not** promoted, flagged | pre-fix: `mark_output_confirmed` called | the promotion path is driven with a stubbed chain answer whose output differs from the row | T1/T2 | ⬜ **planned:** extract the "does the chain's output match the row" decision from `check_stale_unconfirmed` into a pure function taking the fetched output (`value`, `script`) and the row; T1 on that; T2 = one dev-wallet run with a hand-inserted unconfirmed row naming a real mined txid:vout of someone else's value ⇒ log line "not promoted, mismatch" and `confirmed` still 0 |
-| `P10a-A5` | **Live, two wallets:** a genuine PeerPay (a few hundred sats) from wallet B ⇒ credited once in wallet A, correct amount, `peerpay_received` once; the message `amount` cross-check passes | Send the same envelope with the message `amount` edited ⇒ rejected (the cross-check has teeth) | wallet A's `outputs` row and the MessageBox message id; both wallets on dev ports | T2 | ⬜ (real money, `PAYMENT_TEST_BATCH.md`) **planned:** Mac dev wallet → Windows dev wallet (relay ask), or the owner's second wallet; the RED half is a T1 on the resolver with `amount` ≠ output value, because editing a live MessageBox message means re-sending it |
-| `P10a-A6` | `internalize_action`: subject mismatch ⇒ error; nothing credited ⇒ non-200 | pre-fix: 200 with `total_received == 0` | the HTTP status and body, not the log | T1/T2 | ⬜ **planned:** T2 with `curl` against the dev wallet on 31401: a mismatched Atomic envelope ⇒ today 200 (RED seen), after ⇒ 400 `ERR_SUBJECT_MISMATCH`; an envelope paying nobody we own ⇒ today 200 with `total_received: 0`, after ⇒ 400 |
+| `P10a-A1` | Unit: Atomic BEEF whose header names tx **A** (mined) and whose last tx is fabricated **B** paying our derived key ⇒ **rejected**, `store_derived_utxo` not called | Same envelope on the pre-fix code ⇒ `store_derived_utxo` called with **B's** value — observed in the test before the fix | the test constructs both transactions and asserts the *call*, not a log line; the subject hash is computed by the test independently of `beef.rs` | T1 | ✅ **GREEN, RED seen** 2026-09-15 — RED on `57812cf`: `CREDITED 1000000 sats at <A's txid>:0`; GREEN: `NoMatchingOutput` (details below the table) |
+| `P10a-A2` | Unit: valid envelope + 1 trailing byte ⇒ rejected; plain (non-Atomic) BEEF where Atomic is required ⇒ rejected | pre-fix: trailing byte accepted (`from_bytes` never checks the cursor); plain BEEF **already** rejected by `from_atomic_beef_bytes`'s magic check but **accepted by `internalize_action`**'s plain-BEEF arms | same; the plain-BEEF half is asserted at the `internalize_action` boundary | T1 (+T2 for the plain-BEEF half) | ✅ **GREEN, RED seen** — trailing byte: RED `CREDITED 700 sats`, GREEN `NotAtomicBeef("…trailing byte(s)…")`; plain BEEF: RED HTTP 200 from `/internalizeAction`, GREEN 400 `ERR_INVALID_BEEF` (the poller already refused it) |
+| `P10a-A3` | Unit: a receive for an existing `txid:vout` ⇒ refused, row byte-identical | pre-fix: UPDATE branch rewrites derivation fields and `spendable` | row compared before/after by value | T1 | ✅ **GREEN, RED seen** — RED (fix stashed): `overwrite accepted: Ok(())`; GREEN: `Err("…refusing to overwrite")`, row byte-identical, identical re-delivery a no-op |
+| `P10a-A4` | Unit/T2: stale unconfirmed row whose txid is mined but whose stored value ≠ chain ⇒ **not** promoted, flagged | pre-fix: `mark_output_confirmed` called | the promotion path is driven with a stubbed chain answer whose output differs from the row | T1/T2 | ✅ **GREEN, RED seen** — T2 RED (pre-fix wallet): phantom `2cf90ef4…:1` value+1 ⇒ `Marked output … as confirmed`, `confirmed=1`; T2 GREEN (fixed wallet): `NOT promoted`, row deleted, red notification; T1 `chain_output_matches` ×4 |
+| `P10a-A5` | **Live, two wallets:** a genuine PeerPay (a few hundred sats) from wallet B ⇒ credited once in wallet A, correct amount, `peerpay_received` once; the message `amount` cross-check passes | Send the same envelope with the message `amount` edited ⇒ rejected (the cross-check has teeth) | wallet A's `outputs` row and the MessageBox message id; both wallets on dev ports | T2 | 🟡 **INCOMPLETE — poller half OWED** (`PAYMENT_TEST_BATCH.md` M9). Real send made 2026-09-15 (`3798109e…4ab55`, 613,685 sats) but the sender's MessageBox message is 1.76 MB and rejected with 413 (ticket filed); credited **once, correct amount, genuine 495 KB envelope** via `/internalizeAction` instead — the accept-side control holds. Amount cross-check teeth: T1 |
+| `P10a-A6` | `internalize_action`: subject mismatch ⇒ error; nothing credited ⇒ non-200 | pre-fix: 200 with `total_received == 0` | the HTTP status and body, not the log | T1/T2 | ✅ **GREEN, RED seen** — T2 probe, pre-fix: stranger's mined tx ⇒ 200 `unconfirmed` (+ a `transactions` row); mismatch ⇒ warn-only then the fabricated bytes sent to WoC (400 `ERR_BROADCAST_FAILED`). Fixed: 400 `ERR_NO_OUTPUTS_OWNED` / `ERR_SUBJECT_MISMATCH` (no broadcast) / `ERR_INVALID_BEEF`; nothing written |
 
 **Two-sided rows:** A1 (reject fabricated) and A5 (accept genuine) are each other's control.
+
+### RED observed — 2026-09-15, on `57812cf` (extraction only, defect intact)
+
+`cargo test --release task_check_peerpay`, tests written against the correct behaviour, run on today's logic:
+
+```
+a1_credit_is_read_from_the_subject_transaction_not_the_last_one ... FAILED
+  subject A pays us nothing, yet: CREDITED 1000000 sats at fb91db3f…3b1549:0   ← A's txid, B's value
+a1_subject_absent_from_the_bundle_is_rejected ... FAILED
+  subject C is not in the bundle, yet: CREDITED 1000000 sats at a8209218…b1808a:0
+a2_trailing_byte_after_the_bundle_is_rejected ... FAILED
+  trailing byte accepted: CREDITED 700 sats at 249ff285…ba255a:0
+genuine_envelope_is_credited_with_the_subject_value ... ok          ← the control passes pre-fix too
+a5_declared_amount_mismatch_is_rejected ... ok                       ← new check, not a pre-existing behaviour
+test result: FAILED. 2 passed; 3 failed
+```
+
+The first line is CU-3 exactly: the value of the fabricated last transaction, filed under the mined subject's txid.
+
+`P10a-A6` RED, T2 — pre-fix dev wallet (`57812cf` binary, `HODOS_DEV=1`, 31401), `scratchpad/p10a_a6_probe.py`
+posting envelopes built from one real mined transaction `2cf90ef4…4186` (block 966893, a stranger's) with no
+`X-Requesting-Domain`:
+
+```
+self_consistent   HTTP 200  {"txid":"2cf90ef4…4186","status":"unconfirmed"}   ← log: "Total received: 0 … No outputs belong to our wallet!"
+subject_mismatch  HTTP 400  ERR_BROADCAST_FAILED … provider whatsonchain returned status 400   ← log: "⚠️ Subject TXID mismatch: expected 2cf9…, got 3ebe…" then the FABRICATED bytes were sent to WoC
+trailing_byte     HTTP 200  (accepted)
+plain_beef        HTTP 200  (accepted where BRC-100 says tx is AtomicBEEF)
+```
+
+Side effect to undo after the fix: the three 200s each wrote a `transactions` row (`id 788`, status `unproven`, 0 sats) into the dev DB.
+
+`P10a-A4` RED, T2 — same pre-fix dev wallet. `scratchpad/p10a_a4_phantom.py insert` wrote an `outputs` row for the
+same mined `2cf90ef4…4186:1` with `satoshis = 99637620` (chain: **99637619**), `confirmed = 0`, `created_at` two hours
+old. On the next `TaskSyncPending` tick after the startup sweep:
+
+```
+INFO task_sync_pending    ✅ Stale tx 2cf90ef4ac84cfe7... is now confirmed (4 confirmations)
+INFO output_repo          ✅ Marked output 2cf90ef4ac84cfe7:1 as confirmed
+inspect → ('2cf90ef4…4186', 1, 99637620, confirmed=1, spendable=1)
+```
+
+A row whose value the chain contradicts was promoted into the coin-selectable set on the strength of the txid alone. Row deleted immediately after (`cleanup`).
+
+`P10a-A3` RED, T1 — `git stash push -- rust-wallet/src/handlers.rs` (fix removed, test kept), `cargo test a3_receive_for_an_existing_output`:
+
+```
+store_derived_utxo_tests::a3_receive_for_an_existing_output_never_rewrites_the_row ... FAILED
+  overwrite accepted: Ok(())      ← a second message for the same txid:vout with a different sender/derivation/value returned Ok and rewrote the row
+```
+
+### GREEN — same tests, fix in place (`cargo test --release`, bin target **546 passed, 0 failed**; lib 468)
+
+`a1_credit_is_read_from_the_subject_transaction_not_the_last_one` ⇒ `NoMatchingOutput` · `a1_subject_absent_from_the_bundle_is_rejected` ⇒ `NotAtomicBeef("…not a transaction in the bundle")` · `a2_trailing_byte_after_the_bundle_is_rejected` ⇒ `NotAtomicBeef("…trailing byte(s)…")` · `genuine_envelope_is_credited_with_the_subject_value` (control, still ok) · `a5_declared_amount_mismatch_is_rejected` · `a3_receive_for_an_existing_output_never_rewrites_the_row` (Err + row byte-identical; identical re-delivery is a no-op) · `stale_promotion_tests::{a4_value_mismatch_is_not_a_match, a4_script_mismatch_is_not_a_match, a4_missing_vout_is_not_a_match, genuine_row_matches}`. The pre-existing `beef.rs :: test_beef_roundtrip` (real BRC-62 transactions through `to_atomic_beef_hex`) still passes, so the strict parser accepts a genuine envelope.
+
+`P10a-A6` GREEN, T2 — fixed dev wallet binary, same probe, same envelopes:
+
+```
+self_consistent   HTTP 400  ERR_NO_OUTPUTS_OWNED   "No output of this transaction belongs to this wallet"
+subject_mismatch  HTTP 400  ERR_SUBJECT_MISMATCH   — and the log shows NO broadcast attempt between the reject and the next request
+trailing_byte     HTTP 400  ERR_INVALID_BEEF       "Atomic BEEF has 1 trailing byte(s) after the bundle"
+plain_beef        HTTP 400  ERR_INVALID_BEEF       "tx must be Atomic BEEF (BRC-95 header + BEEF bundle)"
+```
+
+Nothing was written to `transactions` by any of the four (checked by count before/after).
+
+`P10a-A4` GREEN, T2 — same phantom row re-inserted (`satoshis 99637620`, chain 99637619), fixed dev wallet, next stale tick:
+
+```
+INFO  ✅ Stale tx 2cf90ef4ac84cfe7... is now confirmed (5 confirmations)
+WARN  🚫 Stale output 2cf90ef4ac84cfe7:1 — txid is mined but the chain's output differs from the stored row (99637620 sats) — NOT promoted
+WARN  🔴 Unconfirmed output 2cf90ef4ac84cfe7:1 (99637620 sats) confirmed failed — …
+inspect → outputs row gone; notification ('fail:2cf90ef4…:1', 'failure', 99637620)
+```
+
+The phantom took the same path as a dropped transaction: deleted, red notification, never coin-selectable. Notification row cleaned up after.
+
+`P10a-A5` — **INCOMPLETE for the poller path, owed; the credit itself is GREEN through `internalize_action`.** 2026-09-15 the
+owner sent **613,685 sats** (≈ $0.10) from the installed Windows wallet to the dev wallet's identity key
+`020b9558…521e`: txid `3798109e5612bc7e8bc1ebffc02d5c60a0b6e0d96ac84bf916542a3157d4ab55`, on chain (vout 0 → the BRC-29
+derived address, 1,000-sat treasury fee, change). The dev poller polled `payment_inbox` 26+ times and saw **0 messages**,
+because the **sender's** MessageBox delivery fails every attempt:
+
+```
+sendMessage failed (413): ERR_MESSAGE_BODY_TOO_LARGE "Message bodies must not exceed 1048576 bytes."   (installed wallet log, outbox attempts 1–4+)
+```
+
+The queued payload is **1,764,588 bytes**: a 494,725-byte Atomic BEEF serialised as a **JSON array of integers** (~3.6×
+inflation; base64 would be ~660 KB and would fit). Our tree does the same (`handlers.rs :: peerpay_send`,
+`"transaction": tx_array`) — filed as `../../TICKET_peerpay_message_exceeds_messagebox_limit.md`. Not a 10a defect and not
+fixed here; it means **no PeerPay from this sender can reach any recipient** until it is.
+
+Recovery (real money, dev wallet): the sender's queued remittance (`derivationPrefix`/`Suffix`, read-only from the installed
+DB) plus the BEEF were POSTed to the fixed dev wallet's `/internalizeAction` as a `wallet payment` remittance ⇒ **HTTP 200**,
+`outputs` row `3798109e…:0 = 613,685 sats`, sender `029dce5a…`, derivation `2-3241645161d8 / <prefix> <suffix>`, balance
++613,685. So the strict parser and the subject binding accepted a **genuine 495 KB envelope from a real wallet** and credited
+it **once with the correct amount** — the accept-side control A1 needed, through the second of the two callers. The poller
+half of A5 (message `amount` cross-check live, `peerpay_received` once) is owed: either 🍎 Mac's wallet as sender (small
+ancestry) or this sender after the ticket's fix; the amount cross-check's teeth are shown at T1 (`a5_declared_amount_mismatch_is_rejected`).
 
 ## 5. Blast radius
 
@@ -103,7 +202,9 @@ One Rust commit; revert restores the pre-fix parser and promotion. No schema cha
 
 | Item | Result | Date | By |
 |---|---|---|---|
-| preflight -Full | | | |
-| preflight -NegativeControl | | | |
-| regression set | | | |
-| adversarial review | | | |
+| preflight -Full | **PASS** — all checks ran and passed (T0 gates at baseline, T1a/T1b/T1c, T1d frontend build) | 2026-09-15 | Windows |
+| preflight -NegativeControl | n/a — no gate pattern or baseline touched by 10a (rule 6) | 2026-09-15 | Windows |
+| regression set | ⬜ runs at the Phase 10 boundary (after 10c), T2 halves included | | |
+| adversarial review | ⬜ one panel over 10a+10b+10c after all three land (`HARNESS.md` §6) | | |
+
+**Status 2026-09-15:** 10a landed on Windows as two Rust commits (`57812cf` extraction; fix commit follows). Rows A1–A4, A6 GREEN with RED seen; A5 poller half owed (`PAYMENT_TEST_BATCH.md` M9, sender ticket). 🍎 Mac: rebuild + `cargo test`; A5 as sender when the relay asks.

@@ -96,6 +96,8 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
   // Notification state (incoming payments)
   const [notification, setNotification] = useState<{ count: number; amount: number } | null>(null);
   const [failureNotification, setFailureNotification] = useState<{ count: number; amount: number } | null>(null);
+  // beta.3 Phase 10a — invalid incoming PeerPay messages rejected (one per sender)
+  const [rejectedCount, setRejectedCount] = useState(0);
   const notificationRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const prevNotificationCount = useRef(0);
 
@@ -190,12 +192,14 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
         .then(r => r.json())
         .then((data: { unread_count?: number; unread_amount?: number;
                        receive_count?: number; receive_amount?: number;
-                       failure_count?: number; failure_amount?: number }) => {
+                       failure_count?: number; failure_amount?: number;
+                       rejected_count?: number }) => {
           const receiveCount = data.receive_count || 0;
           const receiveAmount = data.receive_amount || 0;
           const failureCount = data.failure_count || 0;
           const failureAmount = data.failure_amount || 0;
           const totalCount = (data.unread_count || 0);
+          setRejectedCount(data.rejected_count || 0);
 
           if (receiveCount > 0) {
             setNotification({ count: receiveCount, amount: receiveAmount });
@@ -412,6 +416,18 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
               <span className="wd-notification-text">
                 {failureNotification.count} payment{failureNotification.count > 1 ? 's' : ''} failed to confirm:{' '}
                 {formatBsv(failureNotification.amount)} BSV
+              </span>
+              <button className="wd-notification-dismiss" onClick={handleDismissNotification}>
+                Dismiss
+              </button>
+            </div>
+          )}
+
+          {/* Rejected incoming payment banner (beta.3 10a — one per sender, quiet, no modal) */}
+          {rejectedCount > 0 && (
+            <div className="wd-notification-bar wd-notification-failure">
+              <span className="wd-notification-text">
+                Rejected {rejectedCount} invalid incoming payment{rejectedCount > 1 ? 's' : ''} — nothing was credited
               </span>
               <button className="wd-notification-dismiss" onClick={handleDismissNotification}>
                 Dismiss

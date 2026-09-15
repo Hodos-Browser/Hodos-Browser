@@ -536,7 +536,9 @@ impl<'a> OutputRepository<'a> {
 
     /// Get unconfirmed outputs older than the given timeout.
     /// Used by TaskSyncPending to detect unconfirmed receives that failed to confirm.
-    pub fn get_stale_unconfirmed(&self, user_id: i64, timeout_secs: i64) -> Result<Vec<(String, u32, i64)>> {
+    /// Returns `(txid, vout, satoshis, locking_script)` — the script travels with
+    /// the row so stale promotion can compare it with the chain (beta.3 10a).
+    pub fn get_stale_unconfirmed(&self, user_id: i64, timeout_secs: i64) -> Result<Vec<(String, u32, i64, Vec<u8>)>> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -544,12 +546,17 @@ impl<'a> OutputRepository<'a> {
         let cutoff = now - timeout_secs;
 
         let mut stmt = self.conn.prepare(
-            "SELECT txid, vout, satoshis FROM outputs
+            "SELECT txid, vout, satoshis, locking_script FROM outputs
              WHERE user_id = ?1 AND confirmed = 0 AND spendable = 1 AND created_at < ?2 AND txid IS NOT NULL"
         )?;
         let results = stmt.query_map(
             rusqlite::params![user_id, cutoff],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, i64>(2)?)),
+            |row| Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u32>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<Vec<u8>>>(3)?.unwrap_or_default(),
+            )),
         )?.filter_map(|r| r.ok()).collect();
         Ok(results)
     }

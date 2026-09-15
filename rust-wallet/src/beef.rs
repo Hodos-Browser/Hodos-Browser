@@ -96,7 +96,27 @@ impl Beef {
         let txid_hex = hex::encode(&txid_le);
 
         // Parse standard BEEF structure (rest of bytes)
-        let beef = Self::from_bytes(&bytes[36..])?;
+        let body = &bytes[36..];
+        let (beef, consumed) = Self::from_bytes_consumed(body)?;
+
+        // beta.3 Phase 10a (CU-3) — an Atomic envelope is a claim about ONE
+        // transaction: the one whose hash is the declared subject. The bundle
+        // must contain it, and nothing may follow the bundle. Without the first
+        // check, "subject is on chain" proves nothing about the transaction a
+        // caller reads the value from; without the second, an envelope can carry
+        // bytes no parser ever looked at.
+        if consumed != body.len() {
+            return Err(format!(
+                "Atomic BEEF has {} trailing byte(s) after the bundle",
+                body.len() - consumed
+            ));
+        }
+        if beef.find_txid(&txid_hex).is_none() {
+            return Err(format!(
+                "Atomic BEEF subject {} is not a transaction in the bundle",
+                txid_hex
+            ));
+        }
 
         Ok((txid_hex, beef))
     }
@@ -122,6 +142,14 @@ impl Beef {
     /// Handles both standard BEEF (0100beef/0200beef) and Atomic BEEF (01010101) formats.
     /// For Atomic BEEF, the 36-byte header (4 bytes marker + 32 bytes txid) is stripped.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        Self::from_bytes_consumed(bytes).map(|(beef, _)| beef)
+    }
+
+    /// `from_bytes`, also returning how many input bytes the bundle occupied so
+    /// a strict caller (`from_atomic_beef_bytes`) can refuse trailing bytes.
+    /// Plain `from_bytes` keeps ignoring them — provider responses and overlay
+    /// payloads are parsed with it and must not start failing on padding.
+    pub fn from_bytes_consumed(bytes: &[u8]) -> Result<(Self, usize), String> {
         // Check if this is Atomic BEEF format (BRC-95)
         // Atomic BEEF starts with 01010101 followed by 32-byte txid, then standard BEEF
         let actual_bytes = if bytes.len() >= 36 && bytes[0..4] == ATOMIC_BEEF_MARKER {
@@ -220,17 +248,27 @@ impl Beef {
             }
         }
 
-        Ok(Beef {
+        let stripped_header = bytes.len() - actual_bytes.len();
+        let consumed = stripped_header + cursor.position() as usize;
+
+        Ok((Beef {
             version,
             bumps,
             transactions,
             tx_to_bump,
-        })
+        }, consumed))
     }
 
     /// Get the main transaction (last in the array)
     pub fn main_transaction(&self) -> Option<&Vec<u8>> {
         self.transactions.last()
+    }
+
+    /// The transaction an Atomic BEEF's header names, found by hashing — never
+    /// by position. `from_atomic_beef_bytes` guarantees it exists; callers that
+    /// credit or store anything read value, vout and script from THIS one.
+    pub fn subject_transaction(&self, subject_txid: &str) -> Option<&Vec<u8>> {
+        self.find_txid(subject_txid).map(|i| &self.transactions[i])
     }
 
     /// Get parent transactions (all except the last)

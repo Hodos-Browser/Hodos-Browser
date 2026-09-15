@@ -155,6 +155,31 @@ impl PeerPayRepository {
         Ok(())
     }
 
+    /// beta.3 Phase 10a (`P10a-A7`, owner decision 2026-09-15) — one quiet
+    /// notification when an incoming PeerPay message is rejected as invalid
+    /// (fabricated envelope, amount mismatch, overwrite attempt).
+    ///
+    /// `message_id` is `reject:{sender identity key}`, so `INSERT OR IGNORE`
+    /// makes it **one row per sender**, however many fakes that sender posts —
+    /// the inbox is writable by anyone who knows the identity key, so a row per
+    /// envelope would hand an attacker a badge counter. `notification_type =
+    /// 'rejected'`; amount 0 (nothing was credited).
+    pub fn insert_rejected_notification(
+        conn: &Connection,
+        sender_identity_key: &str,
+    ) -> Result<bool> {
+        let message_id = format!("reject:{}", sender_identity_key);
+        let rows = conn.execute(
+            "INSERT OR IGNORE INTO peerpay_received (
+                message_id, sender_identity_key, amount_satoshis,
+                derivation_prefix, derivation_suffix, txid,
+                source, notification_type, price_usd_cents
+            ) VALUES (?1, ?2, 0, '', '', NULL, 'peerpay', 'rejected', NULL)",
+            params![message_id, sender_identity_key],
+        )?;
+        Ok(rows > 0)
+    }
+
     /// Dismiss all notifications matching a txid prefix (e.g., `utxo:{txid}:%`).
     ///
     /// Used to auto-dismiss green receive notifications when a red failure
