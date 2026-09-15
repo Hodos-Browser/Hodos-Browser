@@ -18729,6 +18729,57 @@ pub struct Pay402ReuseEntry {
 const PAY402_REUSE_TTL_MS: u128 = 25_000;
 
 /// POST /wallet/pay402 — Build a BRC-121 payment for the requesting page.
+/// beta.3 Phase 10b (CU-9, `P10b-A7`) — the reuse-don't-recreate cache key.
+///
+/// Was `(original_url, satoshis)`: a SECOND connected site asking for the same URL
+/// and amount within 25 s was handed the first site's unbroadcast signed BEEF.
+/// The requesting domain and the paid server's key are part of the identity of a
+/// payment, so they are part of the key. Kept as the String half of the existing
+/// `(String, i64)` key so `AppState.pay402_reuse`'s type does not change.
+pub(crate) fn pay402_reuse_key(requesting_domain: &str, server_pubkey_hex: &str, original_url: &str) -> String {
+    // A NUL cannot occur in a host, a hex key or a URL, so fields cannot bleed together.
+    format!("{}\u{0}{}\u{0}{}", requesting_domain, server_pubkey_hex, original_url)
+}
+
+/// `X-Requesting-Domain`, or "" for an internal caller.
+fn requesting_domain(http_req: &HttpRequest) -> &str {
+    http_req.headers().get("X-Requesting-Domain").and_then(|v| v.to_str().ok()).unwrap_or("")
+}
+
+#[cfg(test)]
+mod pay402_reuse_key_tests {
+    use super::pay402_reuse_key;
+
+    /// `P10b-A7` — two sites, same URL and server: different keys.
+    #[test]
+    fn a7_another_site_never_shares_the_cached_payment() {
+        let url = "https://paid.example/article/1";
+        let server = "02".to_string() + &"ab".repeat(32);
+        assert_ne!(pay402_reuse_key("site-a.example", &server, url), pay402_reuse_key("site-b.example", &server, url));
+    }
+
+    #[test]
+    fn a7_another_server_key_never_shares_the_cached_payment() {
+        let url = "https://paid.example/article/1";
+        assert_ne!(pay402_reuse_key("site-a.example", &("02".to_string() + &"ab".repeat(32)), url),
+                   pay402_reuse_key("site-a.example", &("03".to_string() + &"ab".repeat(32)), url));
+    }
+
+    /// Control: the same site retrying the same payment still hits the cache.
+    #[test]
+    fn a7_same_site_same_server_same_url_reuses() {
+        let url = "https://paid.example/article/1";
+        let server = "02".to_string() + &"ab".repeat(32);
+        assert_eq!(pay402_reuse_key("site-a.example", &server, url), pay402_reuse_key("site-a.example", &server, url));
+    }
+
+    /// Fields cannot bleed into each other.
+    #[test]
+    fn a7_fields_do_not_collide() {
+        assert_ne!(pay402_reuse_key("a", "b", "c"), pay402_reuse_key("", "a", "bc"));
+    }
+}
+
 pub async fn pay_402(
     state: web::Data<AppState>,
     http_req: HttpRequest,
@@ -18858,7 +18909,7 @@ pub async fn pay_402(
     // user from leaking orphan unbroadcast transactions on every Try Again.
     // Bounded by the BRC-121 server-side x-bsv-time 30s freshness window.
     if let Some(ref orig_url) = req.original_url {
-        let key = (orig_url.clone(), req.satoshis);
+        let key = (pay402_reuse_key(requesting_domain(&http_req), &req.server_pubkey_hex, orig_url), req.satoshis);
         let now_ms_check: u128 = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
@@ -19157,7 +19208,7 @@ pub async fn pay_402(
             .pay402_reuse
             .lock()
             .unwrap()
-            .insert((orig_url.clone(), req.satoshis), entry);
+            .insert((pay402_reuse_key(requesting_domain(&http_req), &req.server_pubkey_hex, orig_url), req.satoshis), entry);
     }
 
     HttpResponse::Ok().json(serde_json::json!({
