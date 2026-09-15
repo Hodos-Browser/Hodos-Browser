@@ -8,7 +8,7 @@ contracts, no file-level design. That is the microscope pass's output, and writi
 mean writing it twice — once uninformed. If you are tempted to specify an interface, put the
 *question* in the sprint's "Owed to microscope" table instead.
 
-**Order — settled:** 1 Guard → 2 1Sat → 3 OpNS → 4 Backup → tickets. Reasoning in `README.md`.
+**Order — settled:** **0 `reqwest` TLS bump (👤 added 2026-09-15, first)** → 1 Guard → 2 1Sat → 3 OpNS → 4 Backup → tickets. Reasoning in `README.md`; sprint 0's outline and research notes in `sprint-0-reqwest-tls-bump/README.md` — it needs its own scoping pass before any code.
 
 ---
 

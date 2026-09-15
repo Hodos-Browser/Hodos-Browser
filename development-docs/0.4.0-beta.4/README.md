@@ -17,6 +17,7 @@ beta.3 is browser-shell work — overlays, DPI, window identity, logging, the tr
 
 | # | Sprint | Folder | One-line goal |
 |---|---|---|---|
+| **0** | **`reqwest` 0.11 → 0.12+** — the wallet's TLS certificate validator | `sprint-0-reqwest-tls-bump/` | Every outbound HTTPS call validates the server with a library that has no open advisories, without changing what the wallet sends or signs. 👤 **Added 2026-09-15 by owner decision** from the beta.3 Phase 9 dependency review; sits *ahead of* the settled 1–4 order because it is a money-path dependency change, not an asset-layer feature |
 | 1 | **UTXO safety guard** | `sprint-1-utxo-safety-guard/` | No path — automatic or manual — can spend an output the wallet has not classified as spendable |
 | 2 | **1Sat Ordinals** | `sprint-2-1sat-ordinals/` | Hold, display, receive and deliberately transfer 1Sat ordinals to BRC-147 + BRC-150 |
 | 3 | **OpNS unique names** | `sprint-3-opns-naming/` | Resolve and register OpNS names against BRC-174, with a live overlay proof-of-concept |
