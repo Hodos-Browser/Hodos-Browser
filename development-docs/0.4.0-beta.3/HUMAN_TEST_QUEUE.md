@@ -1,4 +1,9 @@
-# 🧑 Human test queue — macOS
+# 🧑 Human test queue — macOS and Windows
+
+> ⭐ **Windows rows added 2026-09-15** (section W, at the end of the lettered sections). Owner: *"keep track of
+> everything we still need to check … getting eyes on the yellow dot and those types of things that need humans."*
+> ⛔ **Rule from now on:** any evidence row a phase marks *T3 / visual / human* gets a row here **in the same commit**
+> that records it as owed. A human check that lives only inside a phase contract is how the orange dot shipped.
 
 **What this is.** Every check that is owed on macOS and **cannot be run by an agent session**, with
 the reason it cannot, gathered in one place so it can be worked as a single sitting at a machine
@@ -92,6 +97,32 @@ Source: `MAC_RELAY_P3_ROUND.md` M2.1, `MAC_RELAY_P35_P4_ROUND.md` M2.
 | E1 | **`R-GOLD` / `R-COUNT`** — the gold-pill payment indicator and its count | Needs a real payment. Owed at every boundary so far |
 | E2 | **`WS1(b)`** — the two-display case | 👤 Owner: the Mac is normally a laptop on its own; a monitor can be plugged in when needed |
 | E3 | **DPI matrix cells #4 / #6 / #9** | ⚠️ Not run on **either** platform |
+
+---
+
+## D (continued) — macOS visual rows added by Phase 10
+
+| # | Check | Pass looks like | Source |
+|---|---|---|---|
+| D7 | **`P10d-A5` visual — "recipient not notified"** on the macOS wallet overlay and advanced wallet | Yellow header dot (not orange, not red); one-line yellow banner; Activity row shows the yellow cause line with **Retry** and **Copy details**; **Dismiss clears the dot and the Activity line stays**; readable at 7a's small-screen size. Seed an `undeliverable` outbox row in your **dev** DB for one of your own sent txids (shape: `10d-peerpay-delivery/PHASE_CONTRACT.md` T2 table) | `MAC_RELAY_BETA3.md` round 2026-09-15c |
+| D8 | **`P10a` rejected-payment banner** now yellow | Reads as "needs you", not an error | same |
+
+---
+
+## W. Windows — needs a human at this machine
+
+Same limits apply on Windows: **`SendInput` mouse clicks are dropped in the agent session** (moves work — memory
+`reference_sendinput_clicks_blocked_in_agent_env`), CDP input enters below the native layer, and visual judgement is
+not an agent's claim (L4).
+
+| # | Check | Pass looks like | Source | State |
+|---|---|---|---|---|
+| W1 | **`P10d-A5` visual — "recipient not notified"** in the dev browser (wallet overlay + advanced wallet) | Yellow header dot; yellow one-line banner; Activity row: yellow cause line, **Retry**, **Copy details** (pastes the claim block JSON); **Dismiss clears the dot**, the Activity line stays; nothing clipped | `10d-peerpay-delivery/PHASE_CONTRACT.md` | ⬜ owed — needs a seeded `undeliverable` row on the dev wallet (the agent can seed it; a person looks) |
+| W2 | **`P10a` rejected-payment banner** (now yellow) | One quiet banner per sender; no modal | `10a-peerpay-atomic-subject/PHASE_CONTRACT.md` | ⬜ owed — needs a seeded `rejected` notice |
+| W3 | **`P9-A3` T3 — right-click the wallet overlay** | No *Inspect Element* item; F12 on the overlay does nothing | `phase-9-release-readiness/PHASE_CONTRACT.md` | ⬜ owed (owner) |
+| W4 | **DPI matrix cells #4 / #6 / #9** | See `E3` — not run on either platform | `DevOps-CICD/DPI_RESOLUTION_TEST_MATRIX.md` | ⬜ owed |
+| W5 | **`R-GOLD` / `R-COUNT`** with a real payment — the gold pill on the originating tab; counters reset on tab close | See `E1`; the Windows half is `PAYMENT_TEST_BATCH.md` M1/M2 | `REGRESSION_SET.md` | ⬜ owed at every boundary |
+| W6 | ⭐ **10b — the burst prompt** (added when 10b's modal changes): the queued payment modal shows *its own* amount and a **"1 of N"** line; the next one appears after the click; readable at the small-screen size | — | `10b-one-click-one-spend/PHASE_CONTRACT.md` | ⬜ lands with 10b |
 
 ---
 
