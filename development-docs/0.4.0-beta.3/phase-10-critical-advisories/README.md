@@ -2,7 +2,7 @@
 
 **Opened:** 2026-09-15, by owner decision, from `../CRITICAL_UPDATES.md` (three BSV Association advisories against
 their TypeScript stack; Hodos ships none of those packages but implements the same protocols, and a code review
-found the same bug shapes). **Status:** ⬜ PLANNED — kickoff not run. **Standard:** `../HARNESS.md`.
+found the same bug shapes). **Status:** 🚧 IN PROGRESS — kickoff `42aac69` (2026-09-15); **10a ✅ Windows**; 10d contracted; 10b, 10c next. **Standard:** `../HARNESS.md`.
 **Base:** `origin/0.4.0` at the Phase 9 close (`07f9fcf`) plus the 2026-09-15 dependency bumps (`ec6353e`).
 
 > ⛔ **Everything in `CRITICAL_UPDATES.md` is a code reading.** Nothing was built, run or exploited. The kickoff
@@ -34,7 +34,10 @@ could hit on day one. The visual leftovers (now Phase 11) wait.
 |---|---|---|---|---|
 | **10a** | CU-3 fabricated PeerPay credited and auto-confirmed; CU-6 `internalizeAction` accepts the wrong transaction (shares the Atomic BEEF subject binding) | Rust: `beef.rs`, `monitor/task_check_peerpay.rs`, `monitor/task_sync_pending.rs`, `handlers.rs :: store_derived_utxo` / `internalize_action` | unit tests on hand-built Atomic BEEF envelopes + a live PeerPay from a second wallet | `10a-peerpay-atomic-subject/PHASE_CONTRACT.md` |
 | **10b** | CU-1 one Approve releases every pending prompt for the domain; CU-8 check-then-act race on the counters; CU-9 402 reuse cache keyed on URL+sats only | C++ `HttpRequestInterceptor.cpp` (shared, both platforms) + React `BRC100AuthOverlayRoot.tsx` + Rust `request_gate.rs` / `handlers.rs :: pay_402` | a local test dApp page that fires concurrent `createAction` calls over the per-tx cap, dev wallet with real (small) money or `noSend` | `10b-one-click-one-spend/PHASE_CONTRACT.md` |
-| **10c** | CU-2 a paymail P2P host can replace the approved amount with any outputs; `http://` capability URLs accepted | Rust `handlers.rs :: paymail_send`, `paymail.rs` | a local stub paymail host (bsvalias `.well-known` + P2P destination endpoint) returning crafted outputs; `noSend` | `10c-paymail-outputs/PHASE_CONTRACT.md` |
+| **10c** | CU-2 a paymail P2P host can replace the approved amount with any outputs; `http://` capability URLs accepted | Rust `handlers.rs :: paymail_send`, `paymail.rs` | a local stub paymail host (bsvalias `.well-known` + P2P destination endpoint) returning crafted outputs; ⚠️ no `noSend` exists on this endpoint — see the contract's `D-2`/`D-6` | `10c-paymail-outputs/PHASE_CONTRACT.md` |
+| **10d** ⭐ added 2026-09-15 | A PeerPay message over MessageBox's 1 MiB cap is broadcast anyway and never delivered (found live during `P10a-A5`: the owner's send, 495 KB BEEF with a 433 KB backup parent, 413 ×20, recipient never told); the header dot goes orange with no words | Rust `handlers.rs :: peerpay_send` / `do_onchain_backup`, `output_repo.rs` selection, `task_retry_peerpay_outbox.rs` + React header/panel/activity | dev wallet; the owner's real 1.76 MB payload seeded into the dev outbox; one real dev backup | `10d-peerpay-delivery/PHASE_CONTRACT.md` |
+
+**Order (owner, 2026-09-15): 10a ✅ → 10d → 10b → 10c.** 10a landed on Windows as `57812cf` + `a91a34a` (A5's poller half owed, `PAYMENT_TEST_BATCH.md` M9). 10d runs before 10b because its RED is live right now and it touches the same PeerPay path 10a just hardened.
 
 ⚠️ **Paymail is live in the UI** (`TransactionForm.tsx` resolves handles and posts to `/wallet/paymail/send`), so
 10c is a shipped path, not a dormant one.

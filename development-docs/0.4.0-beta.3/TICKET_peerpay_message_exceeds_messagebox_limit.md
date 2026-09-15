@@ -1,6 +1,16 @@
 # TICKET — a PeerPay message can exceed MessageBox's 1 MiB cap, so the payment lands on chain but the recipient is never told
 
-**Filed:** 2026-09-15, during beta.3 Phase 10a `P10a-A5` · **Owner:** Matthew Archbold · **Status:** 🔴 OPEN — **measured**, not a code reading
+**Filed:** 2026-09-15, during beta.3 Phase 10a `P10a-A5` · **Owner:** Matthew Archbold · **Status:** 📌 **SCHEDULED as beta.3 Phase 10d** (`phase-10-critical-advisories/10d-peerpay-delivery/PHASE_CONTRACT.md`), ordered 10a → 10d → 10b → 10c by the owner 2026-09-15 — **measured**, not a code reading
+
+> ⚠️ **Corrections after the first diagnosis (2026-09-15, later the same day, measured):** the sender had **zero**
+> unconfirmed coins. The 495 KB bundle is 11 mined parents in full (BRC-62 requires them) and one of them is our own
+> **433 KB on-chain backup transaction** whose change the send spent — coin selection is largest-first, so a backup's
+> change is picked first for the next send. ⛔ **Base64 is not available to us:** the BSVA receiver does
+> `new Uint8Array(token.transaction)` (our own sender comment of 2026-03-09 records that we tried base64 and it broke
+> interop). The upstream issues live in Marston `Standards/BRCs/drafts/peerpay-messagebox-size-and-encoding/`.
+> 👤 Owner decisions: keep the array; prefer small-parent inputs for bundle-carrying sends; refuse before broadcast;
+> **no de-taint self-send** (it re-triggers a backup — loop); instead **backup funding picks smallest-sufficient coins**;
+> housekeeping stays fee-exempt; yellow dot + banner + Activity line + Retry + Copy details; claim box = owner to decide.
 **Severity:** 🔴 High on the money path — the sats leave the sender and sit at an address the recipient cannot derive
 **Layer:** Rust `handlers.rs :: peerpay_send` (sender) · `monitor/task_retry_peerpay_outbox.rs` (retries the same oversized body forever, then `exhausted`)
 
