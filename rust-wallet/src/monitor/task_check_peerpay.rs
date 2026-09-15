@@ -77,6 +77,80 @@ fn parse_payment_token(data: &[u8]) -> Result<PaymentToken, String> {
     })
 }
 
+/// What one PeerPay message resolves to before any I/O: the transaction the
+/// credit is read from, and our output inside it.
+///
+/// beta.3 Phase 10a (`P10a-A1`) — extracted from `run` so the parse → bind →
+/// match step is a pure function a unit test can drive with a hand-built
+/// envelope and assert on the *value*, not a log line.
+pub(crate) struct Brc29Credit {
+    /// Display-format txid the poller checks on chain and stores the output under.
+    pub subject_txid: String,
+    pub vout: u32,
+    pub satoshis: i64,
+    /// Locking script of the credited output.
+    pub script: Vec<u8>,
+    /// Raw bytes of the transaction the credit was read from — the poller
+    /// broadcasts these when the subject is not yet on chain.
+    pub credited_tx_bytes: Vec<u8>,
+    /// The parsed bundle, kept for the parent-transaction cache.
+    pub beef: crate::beef::Beef,
+}
+
+/// Why a message is not credited. Every arm is acknowledged (dropped) by the
+/// poller — none of these is a transient condition worth a retry.
+#[derive(Debug)]
+pub(crate) enum CreditReject {
+    NotAtomicBeef(String),
+    NoMainTransaction,
+    TxParse(String),
+    NoMatchingOutput,
+}
+
+/// Resolve the credit for one message from its Atomic BEEF bytes and the
+/// BRC-42 child public key we derived for it. Pure — no DB, no network.
+pub(crate) fn resolve_brc29_credit(tx_bytes: &[u8], child_pubkey: &[u8]) -> Result<Brc29Credit, CreditReject> {
+    use sha2::{Sha256, Digest};
+    use ripemd::Ripemd160;
+
+    let (subject_txid, beef) = crate::beef::Beef::from_atomic_beef_bytes(tx_bytes)
+        .map_err(CreditReject::NotAtomicBeef)?;
+
+    let main_tx_bytes = beef.main_transaction()
+        .cloned()
+        .ok_or(CreditReject::NoMainTransaction)?;
+
+    let parsed_tx = crate::beef::ParsedTransaction::from_bytes(&main_tx_bytes)
+        .map_err(CreditReject::TxParse)?;
+
+    // Expected P2PKH script from the derived pubkey
+    let sha_hash = Sha256::digest(child_pubkey);
+    let pubkey_hash = Ripemd160::digest(&sha_hash);
+
+    for (i, output) in parsed_tx.outputs.iter().enumerate() {
+        // P2PKH: OP_DUP OP_HASH160 <20 bytes> OP_EQUALVERIFY OP_CHECKSIG
+        if output.script.len() == 25
+            && output.script[0] == 0x76
+            && output.script[1] == 0xa9
+            && output.script[2] == 0x14
+            && output.script[23] == 0x88
+            && output.script[24] == 0xac
+            && &output.script[3..23] == pubkey_hash.as_slice()
+        {
+            return Ok(Brc29Credit {
+                subject_txid,
+                vout: i as u32,
+                satoshis: output.value,
+                script: output.script.clone(),
+                credited_tx_bytes: main_tx_bytes,
+                beef,
+            });
+        }
+    }
+
+    Err(CreditReject::NoMatchingOutput)
+}
+
 /// Run the TaskCheckPeerPay task
 pub async fn run(state: &web::Data<AppState>, _client: &reqwest::Client) -> Result<(), String> {
     // Get our master keys
@@ -226,70 +300,25 @@ pub async fn run(state: &web::Data<AppState>, _client: &reqwest::Client) -> Resu
         };
         let child_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &child_secret).serialize().to_vec();
 
-        // Parse Atomic BEEF
-        let (subject_txid, beef) = match crate::beef::Beef::from_atomic_beef_bytes(&tx_bytes) {
-            Ok(result) => result,
-            Err(e) => {
-                // Try as raw transaction hex in base64
-                warn!("TaskCheckPeerPay: not Atomic BEEF, trying raw tx: {}", e);
+        // Parse the envelope and find our output (pure — see resolve_brc29_credit)
+        let credit = match resolve_brc29_credit(&tx_bytes, &child_pubkey) {
+            Ok(c) => c,
+            Err(reason) => {
+                match &reason {
+                    CreditReject::NotAtomicBeef(e) => warn!("TaskCheckPeerPay: not Atomic BEEF, trying raw tx: {}", e),
+                    CreditReject::NoMainTransaction => warn!("TaskCheckPeerPay: BEEF has no main transaction"),
+                    CreditReject::TxParse(e) => warn!("TaskCheckPeerPay: failed to parse transaction: {}", e),
+                    CreditReject::NoMatchingOutput => warn!("TaskCheckPeerPay: no matching P2PKH output found for derived key"),
+                }
                 message_ids_to_ack.push(msg.message_id.clone());
                 continue;
             }
         };
-
-        let main_tx_bytes = match beef.main_transaction() {
-            Some(tx) => tx.clone(),
-            None => {
-                warn!("TaskCheckPeerPay: BEEF has no main transaction");
-                message_ids_to_ack.push(msg.message_id.clone());
-                continue;
-            }
-        };
-
-        // Parse transaction to find our output
-        let parsed_tx = match crate::beef::ParsedTransaction::from_bytes(&main_tx_bytes) {
-            Ok(tx) => tx,
-            Err(e) => {
-                warn!("TaskCheckPeerPay: failed to parse transaction: {}", e);
-                message_ids_to_ack.push(msg.message_id.clone());
-                continue;
-            }
-        };
-
-        // Calculate expected P2PKH script from derived pubkey
-        use sha2::{Sha256, Digest};
-        use ripemd::Ripemd160;
-
-        let sha_hash = Sha256::digest(&child_pubkey);
-        let pubkey_hash = Ripemd160::digest(&sha_hash);
-
-        // Find matching output
-        let mut found_output = false;
-        let mut found_vout = 0u32;
-        let mut found_satoshis = 0i64;
-
-        for (i, output) in parsed_tx.outputs.iter().enumerate() {
-            // P2PKH: OP_DUP OP_HASH160 <20 bytes> OP_EQUALVERIFY OP_CHECKSIG
-            if output.script.len() == 25
-                && output.script[0] == 0x76
-                && output.script[1] == 0xa9
-                && output.script[2] == 0x14
-                && output.script[23] == 0x88
-                && output.script[24] == 0xac
-                && &output.script[3..23] == pubkey_hash.as_slice()
-            {
-                found_output = true;
-                found_vout = i as u32;
-                found_satoshis = output.value;
-                break;
-            }
-        }
-
-        if !found_output {
-            warn!("TaskCheckPeerPay: no matching P2PKH output found for derived key");
-            message_ids_to_ack.push(msg.message_id.clone());
-            continue;
-        }
+        let subject_txid = credit.subject_txid.clone();
+        let found_vout = credit.vout;
+        let found_satoshis = credit.satoshis;
+        let main_tx_bytes = credit.credited_tx_bytes.clone();
+        let beef = credit.beef;
 
         // ========================================================================
         // SECURITY: Verify transaction exists on-chain before storing as spendable.
@@ -374,7 +403,7 @@ pub async fn run(state: &web::Data<AppState>, _client: &reqwest::Client) -> Resu
                 &subject_txid,
                 found_vout,
                 found_satoshis,
-                &hex::encode(&parsed_tx.outputs[found_vout as usize].script),
+                &hex::encode(&credit.script),
                 &child_pubkey,
                 &custom_instructions,
             ) {
@@ -417,6 +446,7 @@ pub async fn run(state: &web::Data<AppState>, _client: &reqwest::Client) -> Resu
                 let parent_tx_repo = ParentTransactionRepository::new(db.connection());
 
                 // Cache all transactions from the BEEF (parents + main tx)
+                use sha2::{Sha256, Digest};
                 for tx_raw in &beef.transactions {
                     let hash1 = Sha256::digest(tx_raw);
                     let hash2 = Sha256::digest(&hash1);
