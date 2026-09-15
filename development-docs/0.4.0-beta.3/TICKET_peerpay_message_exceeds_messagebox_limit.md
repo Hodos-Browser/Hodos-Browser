@@ -10,7 +10,7 @@
 > interop). The upstream issues live in Marston `Standards/BRCs/drafts/peerpay-messagebox-size-and-encoding/`.
 > 👤 Owner decisions: keep the array; prefer small-parent inputs for bundle-carrying sends; refuse before broadcast;
 > **no de-taint self-send** (it re-triggers a backup — loop); instead **backup funding picks smallest-sufficient coins**;
-> housekeeping stays fee-exempt; yellow dot + banner + Activity line + Retry + Copy details; claim box = owner to decide.
+> housekeeping stays fee-exempt; yellow dot + banner + Activity line + Retry + Copy details (the payment claim block, `phase-10-critical-advisories/10d-peerpay-delivery/PAYMENT_CLAIM_BLOCK.md`); **claim box moved to beta.5** (`0.4.0-beta.5/TOOLS_TAB_claim_a_payment.md`, visible Tools tab).
 **Severity:** 🔴 High on the money path — the sats leave the sender and sit at an address the recipient cannot derive
 **Layer:** Rust `handlers.rs :: peerpay_send` (sender) · `monitor/task_retry_peerpay_outbox.rs` (retries the same oversized body forever, then `exhausted`)
 
