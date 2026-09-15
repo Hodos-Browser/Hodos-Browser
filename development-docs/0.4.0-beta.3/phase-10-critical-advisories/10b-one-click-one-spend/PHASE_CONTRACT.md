@@ -1,7 +1,7 @@
 # Phase 10b — one Approve resolves one request, everywhere a call can arrive · PHASE CONTRACT
 
 **Workstream:** critical advisories (money path) · **Source:** `../../CRITICAL_UPDATES.md` §1.1 (CU-1) + §2 (CU-8, CU-9)
-**Status:** ⬜ NOT STARTED — stub from the template; the kickoff fills `D-n`, verifies every symbol, and turns each ⬜ into a run.
+**Status:** ✅ **LANDED on Windows 2026-09-15** — every row GREEN with its RED observed; `P10b-A7`'s T2 half deliberately not run (recorded below). Kickoff deltas `D-1`..`D-8` verified on `b63aacf`.
 **Opened:** 2026-09-15 · **Owner:** Matthew Archbold · **Platforms:** C++ shared (`HttpRequestInterceptor.cpp`) + React + Rust — both platforms; Mac rebuilds and eyeballs the modal
 **Standard:** `../../HARNESS.md`.
 
@@ -30,12 +30,12 @@ limits are as silent as they are today.
 
 ## 2. Done means
 
-- [ ] Every approve/deny message carries the `requestId` it answers; a message without one is rejected
-- [ ] `popAllForDomain` fan-out remains **only** for connect-type prompts (`domain_approval`, `brc100_auth`, `manifest_connect_bundle`), where siblings are re-issued *without* a token and re-evaluated
-- [ ] Kind prompts (payment, rate-limit, protocol, certificate, key) never resume a sibling with its own token
-- [ ] Superseded prompts are handled per the design decision below — the user sees the burst **once**
-- [ ] The counter snapshot, decision and record happen under one write lock (CU-8)
-- [ ] The 402 reuse cache key includes the requesting domain and the server key (CU-9)
+- [x] Every approve/deny message carries the `requestId` it answers; a message without one is rejected
+- [x] `popAllForDomain` fan-out remains **only** for connect-type prompts (`domain_approval`, `brc100_auth`, `manifest_connect_bundle`), where siblings are re-issued *without* a token and re-evaluated
+- [x] Kind prompts (payment, rate-limit, protocol, certificate, key) never resume a sibling with its own token
+- [x] Superseded prompts are handled per the design decision below — the user sees the burst **once**
+- [x] The counter snapshot, decision and record happen under one write lock (CU-8)
+- [x] The 402 reuse cache key includes the requesting domain and the server key (CU-9)
 
 ## 2a. The design question — the owner's burst requirement, made concrete
 
@@ -87,6 +87,64 @@ modal that produced the click.**
 | `P10b-A7` | CU-9: two connected sites request the same 402 URL + sats within 25 s ⇒ the second gets its own signed BEEF (or a denial), never the first site's | Pre-fix: the same unbroadcast BEEF is handed to the second site | cache key logged; BEEF bytes compared | T1/T2 | ⬜ **planned:** T1 on the extracted key function; T2 = two `curl` calls to `/wallet/pay402` on 31401 with different `X-Requesting-Domain` (both approved rows), same `original_url` + sats ⇒ today `"reused": true` on the second (RED seen, no broadcast — pay402 never broadcasts), after ⇒ distinct txids or 403 |
 | `P10b-A8` | Every arrival path (IPC, HTTP BRC-100, BRC-121 retry, internal paymail/PeerPay) is enumerated and each is shown to carry the `requestId` binding | A path left on the fallback is the RED — the enumeration must find zero | grep + one probe per path | T0/T2 | ⬜ **planned:** the `D-4` enumeration is the list (five sites, not four); T0 = `grep -c getRequestIdForDomain` in `cef-native/src` reaches the number of *deliberately kept* sites (target: only `sendAuthRequestDataToOverlay`); T2 = one probe per path from the A1/A3/A7 runs plus one BRC-121 402 page |
 
+### RED observed — `P10b-A1` / `A2`, 2026-09-15, pre-fix build (dev browser `HodosBrowser.exe` of 2026-09-14, dev wallet 31401)
+
+**Rig (deviation from the kickoff plan, recorded):** the wallet bridge and `window.CWI` are injected on **https**
+pages only (`simple_render_process_handler.cpp`, "Secure context (https://) only"), so `http://testdapp.localhost` gets
+no bridge (measured: `typeof window.__hodos_walletCall === "undefined"`). Instead of installing a local CA, the Phase 0.5
+method was used: a real external https page (`https://example.com/`) in the dev tab, rig helpers injected over CDP
+(`scratchpad/p10b_lib.js`), approve clicked with React `element.click()` on the notification overlay
+(`scratchpad/p10b_click.py`). Connect prompt approved through the real modal; then `example.com`'s row set to
+`perTxLimitCents: 1` so the test payments are over the cap but pay the dev wallet's **own** address (cost = fees).
+
+```
+fireBurst(<dev address>, [150000, 130000])         both calls concurrent, over the 1-cent cap
+wallet  16:34:01.261  engine Prompt (payment) minted approval id=7c27a19b… reason=per_tx_limit
+wallet  16:34:01.263  engine Prompt (payment) minted approval id=91c69eba… reason=per_tx_limit
+modal   "example.com is requesting a payment  $0.02  130.000k sats … Deny  Modify Limits  Approve"   ← ONE amount shown
+click   Approve ×1
+C++     16:34:20.895  brc100_auth_response … User approved auth request
+C++     16:34:20.895  Resolving 1 queued request(s) for domain: example.com (approved)
+C++     16:34:20.895  kInternal resume for queued sibling req-378548071-3 endpoint=/createAction
+wallet  16:34:20.896  X-User-Approved consumed (payment) … id=7c27a1…   + "skipping spending-limit defense-in-depth"
+wallet  16:34:22.886  X-User-Approved consumed (payment) … id=91c69e…   + "skipping spending-limit defense-in-depth"
+tx      97feb0f8ee1c64c87c5acc34dba845f33a74879555006e2a841ae228ec04b3ee   150,000 sats   ← NEVER SHOWN
+tx      a19fa3d9b76f1e155b4fec7c48b01f57127a89b5ad7b42205c63c5c6aa21bd7a   130,000 sats   ← the amount shown
+```
+
+One click, two broadcasts, one of them an amount the user never saw. CU-1 as written, on today's tree.
+
+### GREEN — the fix, measured 2026-09-15 on the rebuilt dev browser + dev wallet
+
+**What changed (design: 👤 owner's Queue, §2a).** Every prompt that owns a modal is registered with the
+overlay type and its extras; the post carries its `requestId` (and `queuedFromSite`). A prompt that arrives while
+another is on screen **waits** instead of replacing it, and the next is posted when the shown one is answered
+(`overlay_close`, both platforms) or times out. The answer must name the request it answers — a
+`brc100_auth_response` without a `requestId` is refused and resolves nothing. Sibling fan-out survives **only**
+for connect prompts (`popConnectForDomain`), including the fifth site found at kickoff
+(`add_domain_permission` / `_advanced`). The payment and rate-limit modals show "1 of N requests from this site"
+when others wait.
+
+| Row | GREEN run | RED |
+|---|---|---|
+| `P10b-A1` | Same burst, same amounts, same click: modal showed **150.000k sats**; Approve ×1 ⇒ **one** `X-User-Approved consumed`, **one** transaction `734f1dd57d97…` (150,000), **no** sibling-resume line. C++: `⏳ payment_confirmation for example.com queued behind the prompt on screen (req-379257944-2)` | pre-fix, above: 2 consumed, 2 txids, one amount shown |
+| `P10b-A2` | After that click the queued request took the overlay by itself — `⏭️ Showing next queued prompt payment_confirmation … (req-379257944-2, 0 more waiting)` — modal showed **130.000k sats**, its own amount. **Deny** ⇒ site got `createAction failed: User rejected authentication`, still exactly one transaction, balance moved only by the approved one | pre-fix it was broadcast with no second click (the 150,000 above) |
+| `P10b-A3` | Cap restored to $1.00; **5 concurrent** payments (20k–24k sats) ⇒ **5** `payment.auto_approved` audit lines, **0** `consent.prompt_shown`, **5** `💰 OnWalletCallSuccess … cefBrowserId=2 → tabId=1` (gold pill, right tab), 5 transactions | the same page and amounts at a 1-cent cap prompt every time (`A1`, same session) |
+| `P10b-A4` | Permission revoked + C++ cache invalidated from an internal origin; **3 concurrent** `getVersion` ⇒ **1** `🔒 Domain approval needed`, 2 × `Modal already pending … queued`; one **Allow** ⇒ `Drained 3 pending request(s) … (3 resumed, 0 BRC-121)`, all three promises `RESOLVED` | `P0.8-A4`'s negative control (atomic check-and-add removed ⇒ three overlays in 56 ms, measured 2026-08-21) |
+| `P10b-A5` | With the 130,000-sat modal up, injected `cefMessage.send('brc100_auth_response', [JSON.stringify({approved:true})])` over CDP ⇒ `🛡️ brc100_auth_response without requestId from role notification — refused, nothing resolved (10b)`; no approval consumed, transaction count unchanged, modal still up | pre-fix the same id-less message is exactly what the React modal sent, and it resolved **both** payments (the A1 RED) |
+| `P10b-A6` | T1, `state.rs :: a6_one_lock_decision_never_exceeds_the_session_cap`: 20 threads × 90 cents against a 1000-cent session cap ⇒ **exactly 11 Silent, 25 rounds running**, counters `spent=990, count=11` | `a6_red_three_step_sequence_lets_the_whole_burst_go_silent` drives the **production** primitives in the pre-10b order with a barrier after the snapshot ⇒ **20 of 20 silent** (printed). Negative control on the fix: split the lock again (snapshot, sleep 10 ms, re-lock) ⇒ GREEN test FAILED `left: 20, right: 11` |
+| `P10b-A7` | T1, `handlers.rs :: pay402_reuse_key_tests`: two sites / two server keys ⇒ different keys; same site + server + url ⇒ same key (control); fields cannot collide | Negative control: key reverted to `original_url` alone ⇒ `a7_another_site_…` and `a7_another_server_key_…` **FAILED**, the same-site control stayed green. ⚠️ **T2 not run** — a live two-site 402 would mint two unbroadcast nosend transactions and reserve coins; recorded as T1-only, not as a pass |
+| `P10b-A8` | Every `CreateNotificationOverlayTask` post now carries a requestId (grep, 9 sites): queue helper, show-next, both connect openers, manifest bundle, both BRC-121 posts. The two that do not — `wallet_unavailable`, `no_wallet` — are informational cards that send **no** `brc100_auth_response` (grep). Arrival paths: IPC `wallet_call`, HTTP `Open()`, BRC-121 (own registry, queue-per-URL), internal paymail/PeerPay (no domain ⇒ never prompts), and the connect-approval drain now connect-only | a path left on the domain fallback is the RED — `getRequestIdForDomain` has **one** caller left, `sendAuthRequestDataToOverlay`, on the dead `overlay_show_brc100_auth` chain (see residuals) |
+
+### Residuals — found while doing this, not fixed here
+
+1. ⛔ **`overlay_show_brc100_auth` is dead code.** `initWindowBridge.ts` only ever *reads* `window.pendingBRC100AuthRequest`; nothing sets it. That chain keeps `storePendingAuthRequest` and the last `getRequestIdForDomain` caller alive. **Reported, not deleted** (working rule 3).
+2. The audit line `consent.prompt_shown` is written when a prompt is *raised*, not when it is displayed — a queued prompt logs it too. `R-INTEXT` counts these, so changing it is an instrument edit and belongs in its own commit.
+3. `💰 OnWalletCallSuccess` (the gold pill) also fires for a **user-approved** payment, not only an auto-approved one. Pre-existing; the pill means "a payment succeeded on this tab".
+4. Payments under one cent record `cents=0` (measured: 20k sats ⇒ `payment.auto_approved cents=0`) — CU-7's truncation, already scheduled for beta.4.
+5. A **cross-domain** kind prompt still replaces the screen when a *connect* prompt is posted (connect openers do not queue). The invariant holds — the replaced prompt cannot be resolved by the new modal's click — but it is invisible until it times out.
+6. `domain_permission_invalidate` drains **all** pending entries for a domain, including kind prompts, without answering them; those callers wait for the timeout. Pre-existing.
+
 **Two-sided rows:** A1 (over-limit ⇒ one signature per click) and A3 (within-limit ⇒ silent) are each other's
 control, and together become `R-ONE-CLICK-ONE-SPEND` in `REGRESSION_SET.md` (own commit, rule 6).
 
@@ -120,7 +178,7 @@ Three commits (C++/React binding + fan-out; Rust lock; Rust cache key), each ind
 
 | Item | Result | Date | By |
 |---|---|---|---|
-| preflight -Full | | | |
-| preflight -NegativeControl | | | |
-| regression set | | | |
-| adversarial review | | | |
+| preflight -Full | **PASS** — all checks ran (T0 gates, cargo test ×2, hodos_tests, frontend build, T1e/T1f/T1g) | 2026-09-15 | Windows |
+| preflight -NegativeControl | n/a — no gate pattern or baseline touched (rule 6) | 2026-09-15 | Windows |
+| regression set | ⬜ runs at the Phase 10 boundary (after 10c), T2 halves included; `R-ONE-CLICK-ONE-SPEND` added in its own commit `5102335` | | |
+| adversarial review | ⬜ one panel over 10a+10b+10c+10d after 10c lands | | |
