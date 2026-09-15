@@ -120,6 +120,39 @@ BRC-147's rule properly belongs in `hodos_permission_engine`, which is beta.4's 
 
 ---
 
+## R-ONE-CLICK-ONE-SPEND — one Approve signs exactly what it was shown
+
+> ⭐ **Added 2026-09-15, in its own commit after Phase 10b landed** (`aaccd55` + `0b502e3` + `61b0796`), per working
+> rule 6. From `CRITICAL_UPDATES.md` CU-1 and CU-8; source contract
+> `phase-10-critical-advisories/10b-one-click-one-spend/PHASE_CONTRACT.md`.
+
+The two halves are each other's control: a burst that crosses a limit must produce one signature per click, and a
+burst that stays inside the limits must stay silent. A fix that satisfies one by breaking the other is the real risk.
+
+| | |
+|---|---|
+| **GREEN (over-limit)** | An external site fires **2** concurrent payments over the per-transaction cap; the modal names one amount; **one** Approve ⇒ exactly **one** `X-User-Approved consumed`, **one** txid, and that txid's amount is the amount the modal showed. The other request then takes the overlay **by itself**, showing **its own** amount; it is only signed if it gets its own click |
+| **GREEN (within limits)** | **5** concurrent payments inside the per-tx, session and rate limits ⇒ **5** silent txids, **0** `consent.prompt_shown`, **5** gold pills on the originating tab |
+| **GREEN (connect)** | A site with no permission fires **3** calls ⇒ **1** connect modal; one Allow ⇒ all three resume (connect siblings are re-issued **without** a token and re-evaluated) |
+| **GREEN (no id, no answer)** | A `brc100_auth_response` injected without a `requestId` resolves nothing and leaves the modal up |
+| **GREEN (counters)** | `cargo test --lib a6_` — 20 concurrent payments against a session cap admit exactly the number that fits, repeated |
+| **RED** | Measured 2026-09-15 on the pre-10b build: one Approve on a 130,000-sat modal ⇒ `Resolving 1 queued request(s)`, two approvals consumed, two broadcasts (the unseen one was 150,000 sats). Cheap re-reds that need no money: remove the requestId requirement in `simple_handler`'s `brc100_auth_response` arm (an id-less answer resolves again); revert `handleAuthResponse`'s connect-only gate (a kind sibling resumes); split `decide_and_record_payment`'s lock (`a6_one_lock…` fails `left: 20, right: 11`) |
+| **SUBJECT** | The **transactions actually created** (`transactions` rows + WhatsOnChain) and the wallet's `X-User-Approved consumed` lines — never the HTTP status, never the number of resolved promises. The modal's rendered amount is read from the overlay over CDP, not assumed |
+| **Tier** | T2 (real money, cents — `PAYMENT_TEST_BATCH.md`) + T1 for the counters and the 402 key |
+
+⭐ **Rig, so this is re-runnable.** The wallet bridge is injected on **https** pages only, so a loopback test page gets
+none: drive a real external https page in the dev tab and inject the helpers over CDP
+(`scratchpad/p10b_lib.js`, `p10b_click.py`; the pattern is Phase 0.5's). Set the site's
+`perTxLimitCents` to **1** so an over-cap payment costs cents, and pay **the dev wallet's own address** so only fees
+are spent. React `element.click()` on the overlay is the approve instrument (`HUMAN_TEST_QUEUE.md` says so;
+`Input.dispatchMouseEvent` is barred).
+
+⚠️ **What this check does NOT cover:** the modal being *legible* (that is the human row `W6`), and a cross-domain
+kind prompt displaced by a connect prompt (residual 5 in the 10b contract — the invariant holds, the prompt is just
+invisible until it times out).
+
+---
+
 ## R-PEERPAY-DELIVERY — a PeerPay either delivers its message or never leaves the wallet
 
 > ⭐ **Added 2026-09-15, in its own commit after Phase 10d landed (`ed51099`)**, per working rule 6. Owner-requested
