@@ -508,6 +508,17 @@ impl PermissionService {
             .session_counters
             .read()
             .expect("session_counters lock poisoned");
+        Self::snapshot_locked(&guard, browser_id, domain, now)
+    }
+
+    /// The snapshot rule, shared by the read path above and the atomic
+    /// `decide_and_record_payment` below so the two can never disagree.
+    fn snapshot_locked(
+        guard: &HashMap<i32, SessionCounters>,
+        browser_id: i32,
+        domain: &str,
+        now: i64,
+    ) -> SessionCounters {
         match guard.get(&browser_id) {
             Some(c) if c.domain == domain => {
                 // Apply 60s rate window expiry on read so the engine sees the
@@ -565,16 +576,54 @@ impl PermissionService {
             .write()
             .expect("session_counters lock poisoned");
         let entry = Self::get_or_create_for_write(&mut guard, browser_id, domain, now);
+        Self::bump_payment_counters(entry, now);
+    }
 
-        // Rate window expiry — matches C++ SessionManager::incrementRateCounter
-        // L60-68. Window reset BEFORE the increment so this call is counted in
-        // the new window, not as the last call of the expired one.
+    /// Rate window expiry — matches C++ SessionManager::incrementRateCounter
+    /// L60-68. Window reset BEFORE the increment so this call is counted in
+    /// the new window, not as the last call of the expired one.
+    fn bump_payment_counters(entry: &mut SessionCounters, now: i64) {
         if now - entry.minute_window_start >= RATE_LIMIT_WINDOW_SECS {
             entry.payment_requests_this_minute = 0;
             entry.minute_window_start = now;
         }
         entry.payment_requests_this_minute += 1;
         entry.payment_count_this_session += 1;
+    }
+
+    /// beta.3 Phase 10b (CU-8, `P10b-A6`) — snapshot the counters, decide, and on
+    /// `Silent` record the spend, all under ONE write lock.
+    ///
+    /// The engine path used to take a read-lock snapshot, decide with the lock
+    /// released, then record under two separate write locks. Actix runs parallel
+    /// workers, so N concurrent calls could all read "nothing spent" before any
+    /// recorded, and more than the session cap's worth went silent. `build_ctx`
+    /// turns the locked snapshot into the engine context (pure — it must not take
+    /// this lock); `decide` is the pure engine and takes no lock either.
+    pub fn decide_and_record_payment<F>(
+        &self,
+        browser_id: i32,
+        domain: &str,
+        cents: i64,
+        now: i64,
+        build_ctx: F,
+    ) -> (PermissionDecision, SessionCounters, PermissionContext)
+    where
+        F: FnOnce(&SessionCounters) -> PermissionContext,
+    {
+        let mut guard = self
+            .session_counters
+            .write()
+            .expect("session_counters lock poisoned");
+        let counters = Self::snapshot_locked(&guard, browser_id, domain, now);
+        let ctx = build_ctx(&counters);
+        let decision = self.decide(&ctx);
+        if matches!(decision, PermissionDecision::Silent { .. }) {
+            let entry = Self::get_or_create_for_write(&mut guard, browser_id, domain, now);
+            Self::bump_payment_counters(entry, now);
+            entry.spent_cents += cents;
+        }
+        (decision, counters, ctx)
     }
 
     /// Drop counters for `browser_id`. Fired from C++ via
@@ -637,6 +686,83 @@ fn generate_approval_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ------------------------------------------------------------------
+    // beta.3 Phase 10b — CU-8 (`P10b-A6`): the session cap under a burst.
+    // $10.00 session cap, $1.00 per-tx cap, 20 concurrent 90-cent payments ⇒
+    // exactly 11 may go silent (11 × 90 = 990 ≤ 1000; a 12th would be 1080).
+    // ------------------------------------------------------------------
+    fn approved_row() -> crate::database::DomainPermission {
+        let mut p = crate::database::DomainPermission::defaults(1, "burst.example");
+        p.trust_level = "approved".to_string();
+        p.per_tx_limit_cents = 100;
+        p.per_session_limit_cents = 1000;
+        p.rate_limit_per_min = 10_000;
+        p.max_tx_per_session = 10_000;
+        p
+    }
+
+    fn ctx_for(row: &crate::database::DomainPermission, c: &SessionCounters) -> PermissionContext {
+        super::super::context_builder::build_payment_context(
+            Some(row), 90, true, c.spent_cents, c.payment_requests_this_minute, c.payment_count_this_session,
+        )
+    }
+
+    const THREADS: usize = 20;
+    const EXPECTED_SILENT: usize = 11;
+
+    /// RED half, built from the PRODUCTION primitives in the pre-10b order
+    /// (snapshot → decide → increment + record). A barrier after the snapshot
+    /// forces the interleaving Actix's parallel workers can produce by chance:
+    /// every call reads "nothing spent" before any records.
+    #[test]
+    fn a6_red_three_step_sequence_lets_the_whole_burst_go_silent() {
+        let svc = Arc::new(PermissionService::new());
+        let row = Arc::new(approved_row());
+        let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+        let now = 1_700_000_000;
+        let handles: Vec<_> = (0..THREADS).map(|_| {
+            let (svc, row, barrier) = (svc.clone(), row.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                let c = svc.get_session_counters_snapshot(7, "burst.example", now);
+                barrier.wait();
+                let d = svc.decide(&ctx_for(&row, &c));
+                let silent = matches!(d, PermissionDecision::Silent { .. });
+                if silent {
+                    svc.increment_payment_rate_counter(7, "burst.example", now);
+                    svc.record_spending(7, "burst.example", 90, now);
+                }
+                silent
+            })
+        }).collect();
+        let silent = handles.into_iter().filter(|_| true).map(|h| h.join().unwrap()).filter(|s| *s).count();
+        println!("P10b-A6 RED: old three-step sequence let {} of {} go silent (cap allows {})", silent, THREADS, EXPECTED_SILENT);
+        assert!(silent > EXPECTED_SILENT, "the race must be observable with the old sequence; got {}", silent);
+    }
+
+    /// GREEN: the same burst through the one-lock method. Repeated, because a
+    /// race that is fixed by luck passes once.
+    #[test]
+    fn a6_one_lock_decision_never_exceeds_the_session_cap() {
+        for round in 0..25 {
+            let svc = Arc::new(PermissionService::new());
+            let row = Arc::new(approved_row());
+            let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+            let now = 1_700_000_000;
+            let handles: Vec<_> = (0..THREADS).map(|_| {
+                let (svc, row, barrier) = (svc.clone(), row.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let (d, _, _) = svc.decide_and_record_payment(7, "burst.example", 90, now, |c| ctx_for(&row, c));
+                    matches!(d, PermissionDecision::Silent { .. })
+                })
+            }).collect();
+            let silent = handles.into_iter().map(|h| h.join().unwrap()).filter(|s| *s).count();
+            assert_eq!(silent, EXPECTED_SILENT, "round {}", round);
+            let c = svc.get_session_counters_snapshot(7, "burst.example", now);
+            assert_eq!((c.spent_cents, c.payment_count_this_session), (990, 11), "round {}", round);
+        }
+    }
 
     fn sample_approval(id: &str, expires_at: i64) -> PendingApproval {
         PendingApproval {

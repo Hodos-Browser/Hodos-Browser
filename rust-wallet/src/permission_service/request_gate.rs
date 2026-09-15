@@ -1147,32 +1147,30 @@ pub fn dispatch_payment_with_amount(
     };
 
     let now = chrono::Utc::now().timestamp();
-    let counters = permission.get_session_counters_snapshot(payment.browser_id, &domain, now);
 
-    let ctx = context_builder::build_payment_context(
-        perm_row.as_ref(),
+    // beta.3 Phase 10b (CU-8, `P10b-A6`): snapshot, decision and — on Silent — the
+    // rate/count bump and spend record happen under ONE write lock. The three
+    // separate steps let concurrent calls all read "nothing spent" before any
+    // recorded, so more than the session cap's worth could go silent.
+    // Recording at gate-Silent time is unchanged (Phase 2.6-E.fix2 B1):
+    // conservative — a payment that later fails to build still counts.
+    let (decision, counters, ctx) = permission.decide_and_record_payment(
+        payment.browser_id,
+        &domain,
         payment.cents,
-        payment.bsv_price_available,
-        counters.spent_cents,
-        counters.payment_requests_this_minute,
-        counters.payment_count_this_session,
+        now,
+        |c| context_builder::build_payment_context(
+            perm_row.as_ref(),
+            payment.cents,
+            payment.bsv_price_available,
+            c.spent_cents,
+            c.payment_requests_this_minute,
+            c.payment_count_this_session,
+        ),
     );
-    let decision = permission.decide(&ctx);
 
     match decision {
         PermissionDecision::Silent { .. } => {
-            // C++ incremented rate + count at gate time (Open path L2552-2553).
-            // Mirror that here so a Silent decision bumps the in-window counters
-            // immediately — subsequent calls in the same minute see the updated
-            // count without waiting for the response cycle.
-            permission.increment_payment_rate_counter(payment.browser_id, &domain, now);
-            // Phase 2.6-E.fix2 (B1): record the session spend so the cumulative
-            // per-session DOLLAR cap actually enforces (previously dead —
-            // record_spending had no production caller, so session_spent_cents
-            // stayed 0). Recorded at gate-Silent time alongside the rate/count
-            // counters — conservative: a payment that later fails to build still
-            // counts toward the cap, the safe direction for a spending guard.
-            permission.record_spending(payment.browser_id, &domain, payment.cents, now);
             log::debug!(
                 "🔓 engine Silent (payment) for domain={} endpoint={} cents={} sats={} session_spent_now={}",
                 domain, endpoint, payment.cents, payment.satoshis,
