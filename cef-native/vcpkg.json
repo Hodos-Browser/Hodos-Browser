@@ -9,10 +9,10 @@
     "sqlite3",
     "openssl"
   ],
-  "builtin-baseline": "fbb17a16a9728780088493ea7ffd965ccd50ea45",
+  "builtin-baseline": "9e44ec0e9f247d77c230ced0ee66c76296837807",
   "overrides": [
     { "name": "nlohmann-json", "version": "3.12.0", "port-version": 2 },
     { "name": "sqlite3", "version": "3.53.4", "port-version": 0 },
-    { "name": "openssl", "version": "3.6.3", "port-version": 0 }
+    { "name": "openssl", "version": "3.6.4", "port-version": 0 }
   ]
 }
