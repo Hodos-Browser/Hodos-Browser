@@ -120,6 +120,43 @@ BRC-147's rule properly belongs in `hodos_permission_engine`, which is beta.4's 
 
 ---
 
+## R-PEERPAY-DELIVERY — a PeerPay either delivers its message or never leaves the wallet
+
+> ⭐ **Added 2026-09-15, in its own commit after Phase 10d landed (`ed51099`)**, per working rule 6. Owner-requested
+> after the live failure: a PeerPay spent the change of a 433 KB on-chain backup, its message was refused by
+> MessageBox (413 > 1 MiB) twenty times, and the recipient was never told. Source:
+> `phase-10-critical-advisories/10d-peerpay-delivery/PHASE_CONTRACT.md`.
+
+Two halves, so the free one runs at **every** boundary and the real-money one is **scheduled**, not skipped.
+
+### Half 1 — every boundary (free: nothing leaves the wallet)
+
+| | |
+|---|---|
+| **GREEN** | `cargo test --release` rows green: `peerpay_selection_tests` (bundle send skips the large-parent coin; ordinary send order unchanged; large-parent coin used last, not never; backup funding smallest single sufficient; 1-sat floor on the new selector), `peerpay_message_fits_tests` (the live 1,764,588-byte token is refused; ordinary token fits; boundary equals the server's rule; `wire_body_len` equals a real serde render), `permanence_tests`, `payment_claim_block_tests`. **Plus** the dev wallet with `HODOS_DEV=1 HODOS_MESSAGEBOX_MAX_BODY_BYTES=2000`: `POST /wallet/peerpay/send` 700 sats ⇒ **422 `ERR_PEERPAY_MESSAGE_TOO_LARGE`**, spendable sats equal before and after, 0 `pending-%` reservations, no new outbox row, the built txid **404** on WhatsOnChain |
+| **RED** | Per test: remove the fix it guards (threshold → never large; size check → never refuse; selector → largest first; `is_permanent` → false; rename one claim-block field) ⇒ that test FAILS while its control stays green. For the dev-wallet run: build with the call site's check disabled (`peerpay_message_fits(0, usize::MAX)`) ⇒ the same send **broadcasts** (costs one small PeerPay — run it only when the refuse path's code changed, otherwise cite the last observation) |
+| **SUBJECT** | The selection set and the size decision themselves (unit); for the dev run, the **dev DB snapshot before/after** and **WhatsOnChain for the txid** — never the HTTP status alone |
+| **Tier** | T1 + T2 (no money on the GREEN) |
+
+### Half 2 — release candidate, and any phase touching coin selection, backups, PeerPay or MessageBox (real money)
+
+| | |
+|---|---|
+| **GREEN** | A wallet whose real on-chain backup is **> 220 KB** runs a backup, **then** sends a PeerPay of a few hundred sats to a second wallet, **no cap override** ⇒ every input's parent is under `large_parent_bytes()`; the message delivers first try (no outbox row); the recipient's poller credits it **once** with the right amount |
+| **RED** | Observed live 2026-09-15 on the pre-10d build: backup `8142e84f…` then PeerPay `3798109e…` ⇒ 433 KB parent selected, 413 ×20, recipient never told. Re-running the RED needs a pre-10d build and strands a payment — do not re-run it; cite it |
+| **SUBJECT** | Recipient's `outputs` + `peerpay_received` rows; WhatsOnChain sizes of every input's parent; the sender's outbox table |
+| **Tier** | T2, `PAYMENT_TEST_BATCH.md` **M10** |
+
+⛔ **Designed not to break anything else.** Nothing oversized is ever broadcast on purpose — the failing condition is
+made by *shrinking the cap* for one dev launch. The override is read only under `HODOS_DEV=1`, which a production binary
+scrubs. A refused send leaves no outbox row, notice or reserved coin. Each run asserts the wallet was left clean.
+
+⚠️ **A dev wallet cannot run Half 2 honestly without a cap override**: its backup is small (78,944 B on 2026-09-15), under
+the production large-parent line. The 10d dev run used a 250 KB cap (line 25 KB) to reproduce the proportions — valid for
+the mechanism, not for the production numbers, which is why Half 2 is owed at the RC on a real-size wallet.
+
+---
+
 ## Boundary run record
 
 | Phase boundary | Date | R-INTEXT | R-GOLD | R-CLOSE | R-PERIM | R-COUNT | R-UPDATE |
