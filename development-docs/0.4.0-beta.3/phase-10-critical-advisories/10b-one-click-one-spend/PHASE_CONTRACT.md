@@ -53,7 +53,7 @@ Options for what the user sees when a burst crosses a limit, for the owner to pi
 | **D** | **Deny superseded** prompts immediately with a clear error; the site retries | one modal (the latest); earlier ones get a denial | earlier requests fail fast with "superseded"; a retry goes through the engine fresh | simplest, hardest to abuse; a site that batches must retry |
 | **S** | **Summarise**: one modal listing all pending requests for the domain with their amounts and a total; Approve signs all *listed*, Deny denies all | one modal per burst, with the full list | all wait for one answer | matches "tell the user once"; the approval must bind to the *set* (a fresh request arriving after the modal opened is **not** included), and the modal must be re-rendered if the set changes |
 
-⭐ Recommendation to discuss at kickoff: **S with a cap** (list up to N, deny the rest with "retry"), because it is
+⭐ Recommendation (2026-09-15, put to the owner; kickoff confirms): **S with a cap** as the target, Q as the fallback (list up to N, deny the rest with "retry"), because it is
 the only shape where "one notification per burst" and "one click never signs something the user did not see"
 are both true. Q is the fallback if S's set-binding proves fragile. D is the fallback if either slips.
 ⛔ Whatever is chosen, the invariant is the same: **a signature exists only for an amount the user saw on the

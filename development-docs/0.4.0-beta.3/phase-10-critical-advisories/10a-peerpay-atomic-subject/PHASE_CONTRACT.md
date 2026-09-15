@@ -28,6 +28,17 @@ by a receive.
 - [ ] `internalize_action` rejects a subject mismatch and returns an error when nothing was credited
 - [ ] Automatic PeerPay acceptance is **still on** (owner decision — no stopgap)
 
+## 2a. Open decision — what the user sees when a fabricated payment is rejected
+
+👤 Owner asked 2026-09-15. Recommendation (to confirm at kickoff): **reject, record, and tell the user once —
+without a modal.** Always write an audit line and an Activity entry ("rejected an invalid incoming payment
+from <sender key prefix>"), and raise **one** non-blocking notification per sender identity key per session.
+Why not silent: a genuine sender with a broken wallet would otherwise never learn their payment was dropped, and
+a user being targeted deserves to know. Why not a modal: the inbox is writable by anyone who knows the identity
+key, so a modal per fake is an attention-DoS handed to the attacker. Row `P10a-A7` then reads: fabricated envelope
+⇒ rejected + one notification; ten fabricated envelopes from one sender ⇒ still one notification (RED: notify
+per envelope ⇒ ten).
+
 ## 3. Invariants preserved
 
 | ID | Invariant | Why this phase could break it |
