@@ -452,5 +452,12 @@ money-handling browser.
 4. **Re-check the macOS minimum version** — look up the new Chromium's oldest supported macOS, `vtool`-measure the prebuilt CEF framework's real `minos`, set our published minimum = `max(those)` in `CMakeLists.txt` + both plists, apply it via `-DCMAKE_OSX_DEPLOYMENT_TARGET=` on the configure line, and confirm the CI `minos` guard passes. See *"macOS Minimum Deployment Version"* above.
 5. Run full test suite (Minimal + Standard site verification from CLAUDE.md)
 6. Specifically test: Google Sign-In, OAuth flows, media playback, ad blocking, fingerprint protection
-7. Update this document with findings
-8. Update `CLAUDE.md` x.com media section if codec situation changes
+7. **TAAL ARC API key check** (owner, 2026-09-15 — per **Chromium bump**, not per build): confirm the key the wallet
+   ships (`rust-wallet/src/services/providers/arc_taal.rs`, or the CI secret once it moves out of source) is not
+   expired or revoked — a real broadcast through `arc_taal` on the dev wallet, not a read of the console — and
+   rotate it if it is. ⚠️ **Then ask the owner, in writing, before proceeding:** *do we keep the hardcoded /
+   build-secret key method, or has TAAL shipped a better mechanism (per-install keys, key-less ARC, a different
+   broadcaster)?* Record the answer here. Background: the key was found in the public release repo on 2026-09-15
+   (`0.4.0-beta.3/CRITICAL_UPDATES.md` §3) and rotated.
+8. Update this document with findings
+9. Update `CLAUDE.md` x.com media section if codec situation changes

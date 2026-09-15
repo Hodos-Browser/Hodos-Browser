@@ -11,6 +11,47 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-15 (**Windows**) — plan change: Phases 10–13 re-cut; 🚨 three money-path advisories are the new Phase 10; your queue is unchanged and still first
+
+No Mac push since `5710742`. Windows is at the commit that carries this note (see `git log`). **Your order from
+2026-09-14b stands and is not displaced:** 🚦 appcast `minimumSystemVersion` → CDP `.mm` mirror → M7 / M8 / `P8d-A8` →
+the Homebrew-tap answer. This round is *information* so you are not surprised by what lands next.
+
+## What changed (owner, 2026-09-15)
+
+| Phase | Was | Now |
+|---|---|---|
+| **10** | UI/layout leftovers | **Critical advisories** — `CRITICAL_UPDATES.md` (three BSV Association advisories; we ship none of the TS packages but the same bug shapes were found by code reading). **10a** CU-3 fabricated PeerPay credited (Rust), **10b** CU-1 one Approve releases every pending prompt (⚠️ **shared** `HttpRequestInterceptor.cpp` + React modal + Rust), **10c** CU-2 paymail host can replace the approved outputs (Rust). Folder: `phase-10-critical-advisories/` |
+| **11** | — | the old Phase 10 bundle **plus** the four omnibox/address-bar defects and a tear-off-window overlay sweep |
+| **12** | — | adblock on redirected arrivals (YouTube from X) — `OnBeforeBrowse` pre-cache keyed by the request URL vs the committed URL; both platforms |
+| **13** | — | bot-detection compatibility — vendor matrix first (runs alongside 10), fixes after; 🍎 **you run the same matrix on macOS** when it exists |
+
+Also landed 2026-09-15 on `0.4.0` (rebase, then `cargo test` — **Rust lockfiles moved**): `1ca08d7` `time`/`bytes`
+bumps in both workspaces, `465754e` `npm audit fix` (lockfile only), `5abbee5` OpenSSL 3.6.4 in `vcpkg.json`
+(Windows-only path; your Brewfile floats), `ec6353e` beta.4 sprint 0 = the `reqwest 0.11 → 0.12+` bump (the wallet's
+TLS validator has three advisories; not this sprint).
+
+## What will reach you from Phase 10, so you can plan
+
+- **10a / 10c are Rust-only.** After they land: rebase, `cargo test` (⛔ not `cargo build --release`, which skips
+  `cfg(test)`), and — the best two-wallet rig we have — **`P10a-A5`: a genuine PeerPay from your Mac wallet to the
+  Windows dev wallet (or the reverse), a few hundred sats, credited once with the right amount.** We will ask for
+  that when 10a is in; nothing to do yet.
+- **10b touches `cef-native/src/core/HttpRequestInterceptor.cpp` (shared, no `#ifdef`) and `BRC100AuthOverlayRoot.tsx`.**
+  The payment modal will change shape (one request per approval; a burst may become a list). Relay row will name
+  the files; the modal needs your eyes on the borderless-NSWindow overlay (7a's small-screen row applies).
+- `REGRESSION_SET.md` gains `R-ONE-CLICK-ONE-SPEND` after 10b — run it at your next boundary too.
+
+## 🚨 One item that is yours *today*, not a phase
+
+`CRITICAL_UPDATES.md` §3: the TAAL ARC key is a literal in `rust-wallet/src/services/providers/arc_taal.rs` **and
+that file is in the public release repo.** The owner is rotating it. Until the new key lands as a build secret,
+do not paste the old one anywhere new, and expect a small Rust commit that reads it from `option_env!` / CI.
+
+Nothing owed back beyond your existing queue and the tap answer.
+
+---
+
 # 📋 ROUND 2026-09-14b (**Windows**) — Phase 9 (release readiness) DONE on Windows; 🚦 **the promotion blocker is YOURS**, then a small mirror, then your standing three
 
 No Mac push since `5710742` (every fetch today: 0 behind). Windows is at `df90e5d (+ the Phase 9 close-out docs commit on top)` on `origin/0.4.0`.
