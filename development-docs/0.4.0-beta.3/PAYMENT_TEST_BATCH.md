@@ -66,7 +66,7 @@ It is batched because the *rig* is the cost, not because the rows are release-on
 `P8b-A1` needs `update_spending_description_batch` to fail on demand, in a **release** build (the dev
 browser is release), so `#[cfg(test)]` cannot reach it.
 
-⇒ Gate the fault flag on **`HODOS_DEV`**, not on a bare env var. `main.rs :: enforce_dev_prod_isolation`
+⇒ Gate the fault flag on **`HODOS_DEV`**, not on a bare env var. `main.rs :: enforce_dev_safeguard`
 already guarantees a production binary **scrubs `HODOS_DEV` and forces prod**, so a shipped build can
 never enter the branch. That reuses an existing safeguard instead of inventing a riskier one.
 

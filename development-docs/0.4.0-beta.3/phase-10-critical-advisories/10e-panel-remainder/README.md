@@ -63,7 +63,13 @@ Fails closed, so it is a consent **outage**, not a spend bypass. Fix is routing 
 through `enqueuePrompt` so one mechanism owns what is on screen. ⚠️ C++, shared, so it needs a Mac
 relay note.
 
-### 3. 🟠 The *"1 of N"* line never appears in the common case · new, from the human sitting
+### 3. ✅ DONE 2026-09-16 — the *"1 of N"* line never appears in the common case
+
+> ✅ `0bc64d4`. The count is pushed to the open modal when a request queues behind it, via a
+> dedicated `window.updateQueuedCount` that sets ONE number — never a re-`showNotification()`,
+> which would reset the modal's state and flash it blank. Measured on one modal: no line with a
+> single request, "1 of 3" after two more arrived, and frozen at "1 of 3" with the receiving hook
+> deleted at runtime (the pre-fix behaviour).
 
 `queuedFromSite` is computed once at enqueue/take time and frozen into the modal, so the **first**
 prompt of a burst always shows 0 and a **two**-request burst can never show the line at all. 👤 The
@@ -71,7 +77,11 @@ owner asked for that line specifically in the 10b design decision. Informational
 
 Likely same fix as item 2: if one mechanism owns the screen, it can also recount on each show.
 
-### 4. 🟡 A transport margin on the PeerPay size check · `F2-10d`
+### 4. ✅ DONE 2026-09-16 — the PeerPay size check measures the whole request · `F2-10d`
+
+> ✅ `10c772d`. Not a guessed margin: `wire_request_len` models the exact envelope and is checked
+> against a real serde render across six payload sizes and three box names. `a2_boundary_matches_
+> the_server_rule` was re-pinned to the binding limit in the same commit, alone, with the reason.
 
 `wire_body_len` is exact for `message.body`, but the relay also runs `bodyParser.json({ limit: 1 MiB })`
 over the **whole** request, and our body sits inside a ~223-byte wrapper. There is a narrow window
@@ -82,14 +92,12 @@ and that test's baseline do not land in the same commit as anything else.
 
 ### 5. 🟡 Small, cheap, and easy to lose
 
-- `F3-10b` — `isConnectPromptType` and `isDomainTrustPrompt` disagree about `brc100_auth`. Currently
-  unreachable (`PromptType::Brc100Auth` is never constructed) but **one enum arm from re-opening
-  CU-1**. Either delete the arm or add the type to `isDomainTrustPrompt`.
-- `F3-10a` — the rejected-sender dedupe is keyed on sender only and is **permanent, not per session**,
-  so a dismissed sender can never notify again while a fresh key costs an attacker nothing. 👤 Owner's
-  call on how loud this surface should be.
-- `F9-10d` — four docs cite `main.rs :: enforce_dev_prod_isolation`; the function is
-  `enforce_dev_safeguard`.
+- ✅ `F3-10b` DONE `4ce1a8e` — there is now ONE list, `core/PromptTypes.h`, and a test asserting the
+  invariant against the real functions rather than a mirror of them.
+- ✅ `F3-10a` DONE `684ee17` — the dedupe is the DB row itself, no in-process state. One visible notice
+  per sender at a time; Dismiss silences it; a LATER rejection raises it once more. ⚠️ Key rotation
+  still adds a row each — DB growth, not an attention flood, and capping could hide a genuine notice.
+- ✅ `F9-10d` DONE — corrected in all five places (four docs plus a source comment).
 - Uneven gap between the two ghost buttons in the Activity row (different internal padding). 👤 Owner
   accepted it for now.
 

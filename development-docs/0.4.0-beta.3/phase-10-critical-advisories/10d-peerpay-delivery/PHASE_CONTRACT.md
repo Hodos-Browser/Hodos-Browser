@@ -111,7 +111,7 @@ Two halves, so the cheap one runs at every boundary and the real-money one is sc
 
 ⛔ **Designed not to break anything else** (owner concern 2026-09-15):
 1. **Nothing oversized is ever broadcast on purpose.** The failing condition is produced by *shrinking the cap* for one dev launch, never by building a large transaction. A refused send is aborted before broadcast, so there is no stranded payment, no outbox row and no notification left behind.
-2. **The override cannot reach users.** It is read only under `HODOS_DEV=1`, which a production binary scrubs (`main.rs :: enforce_dev_prod_isolation`); it is set on the launch command for that run, not in any profile or file.
+2. **The override cannot reach users.** It is read only under `HODOS_DEV=1`, which a production binary scrubs (`main.rs :: enforce_dev_safeguard`); it is set on the launch command for that run, not in any profile or file.
 3. **Each run asserts it left the wallet clean**: no `undeliverable` / `pending` outbox rows created, no `pending-%` reservations, balance unchanged (refuse half) or changed by exactly the send + fee (end-to-end half).
 4. **The end-to-end half does not force a large parent** — it runs the ordinary backup the wallet makes anyway, which is exactly the real-world trigger.
 

@@ -25,7 +25,7 @@ cargo check              # Fast type-check without building
 
 **Ports** (`main.rs :: wallet_port`): binds `127.0.0.1:31301` in release, `127.0.0.1:31401` under `HODOS_DEV=1`, so a dev wallet and the installed wallet can run side by side. The cross-layer source of truth for every port is `cef-native/include/core/PortConfig.h` (adblock engine is 31302 / 31402). Any reference to "3301"/"3302" is wrong.
 
-**Dev/prod guard** (`main.rs :: enforce_dev_prod_isolation`, runs first in `main()`): a dev-build path without `HODOS_DEV=1` aborts; a stray `HODOS_DEV=1` on a non-dev-build binary is scrubbed and forced to prod.
+**Dev/prod guard** (`main.rs :: enforce_dev_safeguard`, runs first in `main()`): a dev-build path without `HODOS_DEV=1` aborts; a stray `HODOS_DEV=1` on a non-dev-build binary is scrubbed and forced to prod.
 
 **Dev storage**: `%APPDATA%/HodosBrowserDev/wallet/wallet.db`
 **Production storage**: `%APPDATA%/HodosBrowser/wallet/wallet.db`

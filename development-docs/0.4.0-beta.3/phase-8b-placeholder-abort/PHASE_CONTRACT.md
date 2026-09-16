@@ -136,7 +136,7 @@ One `git revert`. No schema, no migration, no persisted state.
 
 | # | Item |
 |---|---|
-| 1 | ⬜ **`A1` live run + fault-injection seam** — now scheduled as `M4` in `../PAYMENT_TEST_BATCH.md`, with the seam design (gate on `HODOS_DEV`, which `enforce_dev_prod_isolation` already guarantees a production binary cannot see). |
+| 1 | ⬜ **`A1` live run + fault-injection seam** — now scheduled as `M4` in `../PAYMENT_TEST_BATCH.md`, with the seam design (gate on `HODOS_DEV`, which `enforce_dev_safeguard` already guarantees a production binary cannot see). |
 | 2 | ⚠️ **BRC-121 paid-retry audit not done.** §5.3 asks whether an abort can strand a paid retry or double-mint a payment. The five abort sites are all pre-broadcast, so no payment has been *made* at the abort point — but `pay_402` / `broadcast_nosend` were **not** traced. Code reading, not a measurement, and it is the one place an abort could plausibly cost money. |
 | 3 | ⚠️ **`Ok(0)` gap** (`D-4`) — needs the reserved count threaded through. |
 | 4 | ⚠️ **`do_onchain_backup` still has the original defect**, by necessity (`D-2`). Fixing it means moving the resolution before the broadcast, which is a restructure of that function and its rollback path — a separate ticket if it is worth doing. |

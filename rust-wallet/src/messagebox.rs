@@ -81,7 +81,7 @@ impl MessageBoxError {
 /// "Message bodies must not exceed 1048576 bytes"). Under `HODOS_DEV=1` only,
 /// `HODOS_MESSAGEBOX_MAX_BODY_BYTES` overrides it so the refuse path can be driven
 /// with a small real payment (`P10d-A2` T2). A production binary scrubs `HODOS_DEV`
-/// (`main.rs :: enforce_dev_prod_isolation`), so the override cannot reach users.
+/// (`main.rs :: enforce_dev_safeguard`), so the override cannot reach users.
 pub const MESSAGEBOX_MAX_BODY_BYTES: usize = 1_048_576;
 
 pub fn messagebox_max_body_bytes() -> usize {

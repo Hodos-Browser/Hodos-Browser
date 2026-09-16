@@ -11,6 +11,67 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-16 (**Windows**) — the human sitting, 10e, and ⚠️ **five shared C++ commits**
+
+Phase 10's code is complete. Yesterday's four-reviewer panel was followed by an hour of the owner
+actually clicking, and **the clicking found three defects the panel did not**. Everything below is
+landed and pushed.
+
+## ⚠️ C++ this round — rebuild after your next rebase (standing rule). All shared, no `#ifdef`.
+
+| Commit | What |
+|---|---|
+| `12c76bd` | The HTTP-path approval timeout now POPS its pending entry (its IPC twin always did), plus a freshness skip in the prompt queue. ⛔ Without it an expired prompt could reach the screen later and Approve would re-issue and **broadcast**, into a response the page was told had timed out |
+| `8e50208` | A timed-out prompt answers the **page-supplied** request id, not the C++ prompt id. The dApp's promise never settled before this — it hung forever. `resumeIpcResponse` got this fix in 2.6-C.5; the timeout path never did |
+| `d2c1e0a` | Connect prompts no longer take the screen just because they are first for their own domain. One site could otherwise blank the consent surface for 10 minutes |
+| `0bc64d4` | The "1 of N" line is pushed live to the open modal (C++ **and** `BRC100AuthOverlayRoot.tsx`) |
+| `4ce1a8e` | New header `include/core/PromptTypes.h` + `tests/prompt_type_agreement_test.cpp`. ⚠️ Adds a file to `tests/CMakeLists.txt` |
+
+Rust-only (just `cargo test`): `0e8ea27`, `0f52aea`, `07c69de`, `14a553a`, `10c772d`, `684ee17`.
+React-only: `ddf8c04`, `6b6e92f`.
+
+## 🚨 The three the panel could not have found
+
+1. **The wallet announced payments it had REJECTED as payments it had RECEIVED.** The header passed
+   `unread_count` — every undismissed notice — to the panel, which paints its GREEN "Received N
+   payments" banner from it. Two *rejected* payments ⇒ "Received 2 payments". The count was correct
+   at the wallet, correct in the API, and correct in the panel's own later fetch; it was wrong only
+   in the hand-off between two components, for a few hundred milliseconds, and only when the notices
+   were of the other kind.
+2. **A timed-out dApp call never settled** (`8e50208`). Found by waiting ten real minutes and asking
+   why nothing had happened.
+3. **The dashboard showed the same payment unmarked** while the banner above it warned about that
+   payment, and "see Activity" was a dead end with no link into 649 rows.
+
+⇒ Worth adopting on your side: reviewers check whether each part is right; a person checks whether
+the parts AGREE. Neither subsumes the other.
+
+## 🚨 And the worst one the panel DID find, now fixed
+
+`internalizeAction`'s `basket insertion` arm was **ungated**. Measured pre-fix against the dev wallet
+with a real mined transaction belonging to a stranger: **HTTP 200** and balance
+**29,077,178 → 128,714,797** — about one BSV of money the wallet never received, stored spendable.
+⛔ The on-chain existence check does not help: the attack uses a REAL transaction, so it passes
+honestly. The missing question was "is this **ours**?". Fixed in `07c69de`.
+
+⚠️ Note for your own probes: output 0 of that test transaction is worth 0 satoshis and returns 400
+**while still writing the row**. Only the value-bearing output exposes the 200. A probe that reads
+status codes alone calls this healthy — which is exactly how it survived a full panel.
+
+## 🍎 Yours
+
+1. **Rebuild** (five shared C++ commits) and re-run your suite, including the new
+   `prompt_type_agreement_test`.
+2. ⚠️ **`preflight -Full` reported PASS while the SHELL did not compile.** T1c builds `hodos_tests`,
+   never `HodosBrowserShell`. Build the shell explicitly after any C++ change; a green preflight is
+   not evidence that the browser builds.
+3. ⛔ `cargo test --lib` matches **zero** paymail tests and still prints `ok` — `paymail` is a
+   binary-only module. Use `--bin hodos-wallet`.
+4. Owed on macOS, unchanged: the `P10d-A5` visual row and the `W7` expired-prompt check's HTTP-path
+   half. Nothing new is owed to you from this round.
+
+---
+
 # 📋 ROUND 2026-09-15f (**Windows**) — the Phase 10 adversarial panel, and ⚠️ **shared C++ you must rebuild**
 
 Windows is at the panel fixes on `origin/0.4.0`. A four-reviewer adversarial panel over 10a/10b/10c/10d
