@@ -283,13 +283,36 @@ impl<'a> OutputRepository<'a> {
         // after overlay/nosend transactions. They are NOT available for UTXO selection
         // (get_spendable_by_user still excludes nosend). If the nosend tx fails,
         // TaskCheckForProofs deletes the change output and restores inputs automatically.
+        // beta.3 Phase 10e, 👤 owner 2026-09-16 — an output filed in a NON-DEFAULT
+        // basket is not money. It is a token carrier: a 1Sat Ordinal, an OpNS name,
+        // an app's own marker. `get_spendable_by_user` has always excluded them from
+        // coin selection (`o.basket_id IS NULL OR b.name = 'default'`), so counting
+        // them here showed the user a balance containing satoshis the wallet would
+        // refuse to spend — and, worse, spending one would destroy the asset
+        // (BRC-147, and `R-DUST`'s whole reason for existing).
+        //
+        // 📏 Measured on the dev wallet the day this landed: 9 rows, 9 satoshis —
+        // a name token, a todo token and seven upvote tokens. Every satoshi removed
+        // is a carrier.
+        //
+        // ⛔ Deliberately NOT also filtering `derivation_prefix IS NULL`, even though
+        // `get_spendable_by_user` does. Measured: **0 rows, 0 satoshis** on this
+        // wallet, so adding it would change nothing here and could HIDE real money on
+        // a wallet that has such rows — an output with no derivation recipe is locked
+        // to the master key itself, which we hold. That mismatch between what the
+        // balance counts and what the selector will spend is recorded as an open
+        // question rather than guessed at; see `10e-panel-remainder/README.md`.
+        //
+        // ⚠️ `nosend` stays INCLUDED — see the note above; that is deliberate UX.
         let balance: i64 = self.conn.query_row(
             "SELECT COALESCE(SUM(o.satoshis), 0)
              FROM outputs o
              LEFT JOIN transactions t ON o.transaction_id = t.id
+             LEFT JOIN output_baskets b ON o.basket_id = b.basketId
              WHERE o.user_id = ?1 AND o.spendable = 1
                AND (t.status IS NULL OR t.status NOT IN ('unsigned', 'failed', 'nonfinal'))
-               AND COALESCE(o.derivation_prefix, '') != '1-wallet-backup'",
+               AND COALESCE(o.derivation_prefix, '') != '1-wallet-backup'
+               AND (o.basket_id IS NULL OR b.name = 'default')",
             rusqlite::params![user_id],
             |row| row.get(0),
         )?;
@@ -300,6 +323,12 @@ impl<'a> OutputRepository<'a> {
     /// Calculate total balance from spendable outputs (all users)
     ///
     /// This is useful for single-user wallets where we don't need to filter by user.
+    ///
+    /// ⚠️ Deliberately NOT given `calculate_balance`'s basket filter (2026-09-16).
+    /// This one is not shown to the user — its callers are `wallet_recover_onchain`
+    /// and `task_backup`'s significance threshold — and narrowing it would change
+    /// when backups fire, which nobody asked for. The difference is the token
+    /// carriers only (9 satoshis when measured). Recorded, not fixed.
     pub fn calculate_total_balance(&self) -> Result<i64> {
         // NOTE: nosend outputs included in balance (see calculate_balance comment)
         let balance: i64 = self.conn.query_row(
@@ -1546,6 +1575,41 @@ mod token_reserved_exposure_tests {
     }
 
     const SCRIPT: &str = "76a914abababababababababababababababababababab88ac";
+
+    /// 👤 Owner 2026-09-16 — a token carrier in a basket is NOT money.
+    ///
+    /// `get_spendable_by_user` has always refused non-default baskets, so counting
+    /// them in the balance showed satoshis the wallet would not spend — and spending
+    /// one would destroy the asset. The two views of one wallet disagreed.
+    #[test]
+    fn basketed_outputs_are_not_counted_as_balance() {
+        let conn = seed_db();
+        let repo = OutputRepository::new(&conn);
+
+        // ordinary money, default pool
+        repo.upsert_received_utxo_with_confirmed(1, "ord", 0, 50_000, SCRIPT, 0, true)
+            .unwrap();
+        let money_only = repo.calculate_balance(1).unwrap();
+        assert_eq!(money_only, 50_000);
+
+        // a 1-sat carrier filed into an app basket, exactly as internalizeAction files one
+        let basket_repo = crate::database::BasketRepository::new(&conn);
+        let basket_id = basket_repo.find_or_insert("xanaverse-upvotes", 1).unwrap();
+        repo.insert_output(1, "carrier_tx", 0, 1, SCRIPT, Some(basket_id),
+                           None, None, None, None, false)
+            .unwrap();
+
+        // the carrier is stored and spendable-flagged...
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM outputs WHERE spendable = 1", [], |r| r.get::<_, i64>(0)).unwrap(),
+            2, "fixture check: the carrier row exists and carries spendable = 1");
+        // ...and coin selection already refuses it
+        assert!(!repo.get_spendable_by_user(1).unwrap().iter().any(|o| o.txid.as_deref() == Some("carrier_tx")),
+                "control: the selector has always excluded it");
+        // ⇒ so the balance must refuse it too
+        assert_eq!(repo.calculate_balance(1).unwrap(), money_only,
+                   "a basketed carrier must not move the displayed balance");
+    }
 
     /// GREEN — a 1-satoshi payment arriving at a receive address becomes a fully
     /// spendable, default-pool row with no user action and no recovery scan.
