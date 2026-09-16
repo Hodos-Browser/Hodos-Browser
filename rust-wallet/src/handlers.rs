@@ -4126,10 +4126,80 @@ pub(crate) struct ReservationGuard {
 /// ⚠️ **Not usable from `do_onchain_backup`.** That path resolves the placeholder
 /// *after* it broadcasts, so by the time a failure is visible the money has already
 /// moved and there is nothing left to abort. See its call site for what it does instead.
-fn resolution_failed_response(placeholder: &str, txid: &str, err: &str) -> HttpResponse {
+/// Give back everything a transaction that will NEVER be broadcast is holding.
+///
+/// beta.3, from the payment sitting (M4). ⛔ Order is the Ghost Transaction Safety
+/// Rules': created outputs first, then inputs. The other way round leaves a window
+/// where both the restored input and the phantom change are spendable, which
+/// double-counts the balance.
+///
+/// ⭐ Prior art, checked before writing this (working rule 5):
+/// `reference/go-wallet-toolbox/pkg/storage/internal/actions/abort.go :: abortTx`
+/// does the same things in ONE unit of work — unreserve the inputs, restore the
+/// outputs it marked spent, **mark created outputs not spendable**, set the status —
+/// and gates it all on the transaction provably never having reached a broadcaster.
+/// ⭐ It MARKS rather than deletes, which is why this does too: the row stays as a
+/// record and simply cannot be selected.
+/// ⛔ We hold that gate by construction at every call site: the broadcast has not
+/// happened, which is the only reason we are here.
+///
+/// Returns (created outputs disabled, inputs restored).
+fn release_unbroadcast_transaction(
+    state: &AppState,
+    txid: &str,
+    reservation_placeholder: Option<&str>,
+) -> (usize, usize) {
+    let (disabled, restored);
+    {
+        let db = match state.database.lock() {
+            Ok(g) => g,
+            Err(e) => { log::error!("   ⚠️  release: DB lock failed: {}", e); return (0, 0); }
+        };
+        // One SQLite transaction, mirroring the reference's unit of work: a partial
+        // cleanup is worse than none, because it is the half-state nobody tests.
+        let txn = match db.connection().unchecked_transaction() {
+            Ok(t) => t,
+            Err(e) => { log::error!("   ⚠️  release: begin failed: {}", e); return (0, 0); }
+        };
+        let output_repo = crate::database::OutputRepository::new(&txn);
+        disabled = output_repo.disable_by_txid(txid).unwrap_or(0);
+        // The reservation may still carry the PLACEHOLDER (resolving it is exactly what
+        // failed) or the txid (resolution worked and something later did not). Try
+        // both; each is a no-op when it does not apply.
+        let mut r = 0usize;
+        if let Some(ph) = reservation_placeholder {
+            r += output_repo.restore_by_spending_description(ph).unwrap_or(0);
+        }
+        r += output_repo.restore_by_spending_description(txid).unwrap_or(0);
+        restored = r;
+        let tx_repo = crate::database::TransactionRepository::new(&txn);
+        let _ = tx_repo.update_broadcast_status(txid, "failed");
+        if let Err(e) = txn.commit() {
+            log::error!("   ⚠️  release: commit failed: {}", e);
+            return (0, 0);
+        }
+    }
+    state.balance_cache.invalidate();
+    (disabled, restored)
+}
+
+fn resolution_failed_response(state: &AppState, placeholder: &str, txid: &str, err: &str) -> HttpResponse {
+    // ⛔ Clean up HERE, synchronously. We know at this instant that this transaction
+    // will never exist — that is the whole reason we are refusing.
+    //
+    // 📏 Measured before this (payment sitting, M4): the refusal left a `nosend` row,
+    // a reserved input AND a **spendable phantom change output** for a transaction
+    // that would never be broadcast. Coin selection could pick that phantom for ~11
+    // minutes. The background tasks did recover it (TaskCheckForProofs ~11 min,
+    // TaskSweepReservations ~19 min) but those are the backstop for a CRASH, where
+    // nobody can know what happened. A deliberate refusal is not a crash.
+    // 👤 Owner: "if there's a refusal, can we just trigger the cleanup?" — yes.
+    let (disabled, restored) = release_unbroadcast_transaction(state, txid, Some(placeholder));
+    log::info!("   ♻️  Released on refusal: {} created output(s) disabled, {} input(s) restored",
+               disabled, restored);
     log::error!(
         "   ⛔ ABORTING BEFORE BROADCAST — could not resolve reservation {} → {}: {}. \
-         No money has moved. The reservation is left for the sweeper.",
+         No money has moved. Everything it held has been released now.",
         placeholder, txid, err
     );
     HttpResponse::InternalServerError().json(serde_json::json!({
@@ -6447,7 +6517,7 @@ pub(crate) async fn create_action_internal(
             let output_repo = crate::database::OutputRepository::new(db.connection());
             if let Err(e) = output_repo.update_spending_description_batch(placeholder, &final_txid) {
                 drop(db);
-                return resolution_failed_response(placeholder, &final_txid, &e.to_string());
+                return resolution_failed_response(&state, placeholder, &final_txid, &e.to_string());
             }
         }
 
@@ -6459,7 +6529,7 @@ pub(crate) async fn create_action_internal(
             let output_repo = crate::database::OutputRepository::new(db.connection());
             if let Err(e) = output_repo.update_spending_description_batch(placeholder, &final_txid) {
                 drop(db);
-                return resolution_failed_response(placeholder, &final_txid, &e.to_string());
+                return resolution_failed_response(&state, placeholder, &final_txid, &e.to_string());
             }
             drop(db);
         }
@@ -8821,7 +8891,7 @@ pub async fn sign_action(
                 Err(e) => {
                     // ⛔ Fatal — the broadcast below has not happened yet.
                     drop(db);
-                    return resolution_failed_response(placeholder, &txid, &e.to_string());
+                    return resolution_failed_response(&state, placeholder, &txid, &e.to_string());
                 }
             }
         } else {
@@ -12169,7 +12239,23 @@ pub async fn abort_action(
     // Update status to aborted
     match tx_repo.update_status(&action.txid, ActionStatus::Aborted) {
         Ok(_) => {
-            log::info!("✅ Action aborted successfully: {}", action.txid);
+            // beta.3, payment sitting — ⛔ flipping the status is not an abort.
+            //
+            // This used to be the WHOLE of abortAction: the inputs stayed reserved and
+            // the created outputs stayed `spendable = 1`, so a dApp that created an
+            // action and aborted it left a phantom coin referencing a transaction that
+            // will never exist — and unlike the refusal path there is no sweeper story,
+            // because nothing watches an aborted transaction.
+            //
+            // ⭐ `reference/go-wallet-toolbox/.../abort.go :: abortTx` does exactly what
+            // `release_unbroadcast_transaction` does, for exactly this reason.
+            //
+            // ⚠️ The reservation may still be under an unresolved placeholder we cannot
+            // name from here; the txid arm covers the resolved case, which is the one
+            // an aborted action is normally in.
+            let (disabled, restored) = release_unbroadcast_transaction(&state, &action.txid, None);
+            log::info!("✅ Action aborted: {} — {} created output(s) disabled, {} input(s) restored",
+                       action.txid, disabled, restored);
             HttpResponse::Ok().json(AbortActionResponse { aborted: true })
         }
         Err(e) => {
