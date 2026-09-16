@@ -88,6 +88,147 @@ pub struct PaymailOutput {
     pub satoshis: i64,
 }
 
+/// beta.3 Phase 10c (CU-2) — the maximum outputs a paymail host may split a
+/// payment across. BRC-29's P2P destination exists so a receiver can split a
+/// payment; it does not say how far. 100 is the fix shape's suggestion and is
+/// far above any real host's behaviour (HandCash returns 1–3).
+pub const MAX_P2P_OUTPUTS: usize = 100;
+
+/// Why a P2P destination response is not safe to sign.
+#[derive(Debug, PartialEq, Eq)]
+pub enum P2POutputsError {
+    Empty,
+    TooMany { count: usize },
+    NonPositive { index: usize, satoshis: i64 },
+    EmptyScript { index: usize },
+    SumMismatch { sum: i64, requested: i64 },
+}
+
+impl std::fmt::Display for P2POutputsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            P2POutputsError::Empty => write!(f, "the recipient's server returned no outputs"),
+            P2POutputsError::TooMany { count } => write!(
+                f, "the recipient's server returned {} outputs (limit {})", count, MAX_P2P_OUTPUTS),
+            P2POutputsError::NonPositive { index, satoshis } => write!(
+                f, "the recipient's server returned output {} with {} satoshis", index, satoshis),
+            P2POutputsError::EmptyScript { index } => write!(
+                f, "the recipient's server returned output {} with an empty script", index),
+            P2POutputsError::SumMismatch { sum, requested } => write!(
+                f, "the recipient's server asked for {} satoshis but you approved {} — payment cancelled, nothing was sent",
+                sum, requested),
+        }
+    }
+}
+
+/// beta.3 Phase 10c (CU-2, `P10c-A1`/`A2`/`A4`) — a paymail host may split the
+/// payment, but it may not change it.
+///
+/// ⛔ The bsvalias P2P destination spec (BRFC `2a40af698840`) does NOT state this
+/// rule — its own example answers a 1,000,100-satoshi request with outputs of
+/// 10,000 + 20,000 — and the reference client (`bitcoin-sv/go-paymail`) does not
+/// check it either. 👤 Owner decision 2026-09-15: it is **Hodos's** invariant, the
+/// same one Phase 10b enforces for dApp payments — a signature exists only for an
+/// amount the user saw. Without it, `x@evil.example` (or a compromised host for an
+/// honest recipient) turns a 1,000-satoshi send into a 5,000,000-satoshi one, with
+/// no second prompt: the send is an INTERNAL call and the permission gate priced
+/// the request body, not the built transaction.
+/// See `development-docs/PRIOR_ART.md` 2026-09-15 and the upstream issues in
+/// Marston `Standards/BRCs/drafts/peerpay-messagebox-size-and-encoding/`.
+pub fn validate_p2p_outputs(outputs: &[PaymailOutput], requested_satoshis: i64) -> Result<(), P2POutputsError> {
+    if outputs.is_empty() {
+        return Err(P2POutputsError::Empty);
+    }
+    if outputs.len() > MAX_P2P_OUTPUTS {
+        return Err(P2POutputsError::TooMany { count: outputs.len() });
+    }
+    let mut sum: i64 = 0;
+    for (i, o) in outputs.iter().enumerate() {
+        if o.satoshis <= 0 {
+            return Err(P2POutputsError::NonPositive { index: i, satoshis: o.satoshis });
+        }
+        if o.script_hex.trim().is_empty() {
+            return Err(P2POutputsError::EmptyScript { index: i });
+        }
+        // Saturating: a hostile host could otherwise overflow the sum to land on
+        // the requested amount.
+        sum = sum.saturating_add(o.satoshis);
+    }
+    if sum != requested_satoshis {
+        return Err(P2POutputsError::SumMismatch { sum, requested: requested_satoshis });
+    }
+    Ok(())
+}
+
+/// beta.3 Phase 10c (CU-2) — every capability URL used on the SEND path must be
+/// `https://`. A plain-http P2P destination lets anyone on the network swap the
+/// outputs, which is the same defect as a lying host with no host to blame.
+/// ⚠️ Applied to the send path only; the resolve/preview path is unchanged.
+pub fn require_https_capability(url: &str, what: &str) -> Result<(), PaymailError> {
+    if url.starts_with("https://") {
+        return Ok(());
+    }
+    Err(PaymailError::P2PDestination(format!(
+        "{} endpoint is not https ({}), refusing to use it", what,
+        url.split(':').next().unwrap_or("?"))))
+}
+
+#[cfg(test)]
+mod cu2_validation_tests {
+    use super::*;
+
+    fn out(sats: i64) -> PaymailOutput {
+        PaymailOutput { script_hex: "76a914".to_string() + &"11".repeat(20) + "88ac", satoshis: sats }
+    }
+
+    /// `P10c-A1` — the measured attack shape: a host answering a 500,000-satoshi
+    /// request with 5,000,000.
+    #[test]
+    fn a1_ten_times_the_request_is_refused() {
+        let e = validate_p2p_outputs(&[out(5_000_000)], 500_000).unwrap_err();
+        assert_eq!(e, P2POutputsError::SumMismatch { sum: 5_000_000, requested: 500_000 });
+        assert!(e.to_string().contains("nothing was sent"));
+    }
+
+    /// `P10c-A2` — a host MAY split the amount; it may not change it. One satoshi
+    /// either way is a mismatch.
+    #[test]
+    fn a2_exact_sum_split_across_three_outputs_is_accepted() {
+        assert!(validate_p2p_outputs(&[out(300), out(400), out(300)], 1000).is_ok());
+        assert!(validate_p2p_outputs(&[out(300), out(401), out(300)], 1000).is_err());
+        assert!(validate_p2p_outputs(&[out(300), out(399), out(300)], 1000).is_err());
+    }
+
+    /// `P10c-A4` — count bound, non-positive values, empty scripts, and an
+    /// overflow that would otherwise wrap onto the requested amount.
+    #[test]
+    fn a4_count_bound_and_bad_values_are_refused() {
+        let many: Vec<PaymailOutput> = (0..=MAX_P2P_OUTPUTS).map(|_| out(1)).collect();
+        assert_eq!(validate_p2p_outputs(&many, many.len() as i64).unwrap_err(),
+                   P2POutputsError::TooMany { count: MAX_P2P_OUTPUTS + 1 });
+        assert_eq!(validate_p2p_outputs(&[out(1000), out(0)], 1000).unwrap_err(),
+                   P2POutputsError::NonPositive { index: 1, satoshis: 0 });
+        assert_eq!(validate_p2p_outputs(&[out(1500), out(-500)], 1000).unwrap_err(),
+                   P2POutputsError::NonPositive { index: 1, satoshis: -500 });
+        assert_eq!(validate_p2p_outputs(&[], 1000).unwrap_err(), P2POutputsError::Empty);
+        let mut blank = out(1000); blank.script_hex = String::new();
+        assert_eq!(validate_p2p_outputs(&[blank], 1000).unwrap_err(), P2POutputsError::EmptyScript { index: 0 });
+        // i64 overflow must not wrap onto the requested amount
+        assert!(validate_p2p_outputs(&[out(i64::MAX), out(i64::MAX), out(1000)], 1000).is_err());
+    }
+
+    /// `P10c-A3` — the send path refuses a non-https capability URL.
+    #[test]
+    fn a3_http_capability_url_is_refused() {
+        assert!(require_https_capability("https://example.com/api/p2p", "P2P destination").is_ok());
+        assert!(require_https_capability("http://example.com/api/p2p", "P2P destination").is_err());
+        assert!(require_https_capability("http://127.0.0.1:8766/p2p", "P2P destination").is_err());
+        assert!(require_https_capability("ftp://example.com/p2p", "P2P destination").is_err());
+        // no scheme at all
+        assert!(require_https_capability("example.com/p2p", "P2P destination").is_err());
+    }
+}
+
 /// Public profile information
 #[derive(Debug, Clone)]
 pub struct PaymailProfile {
@@ -294,6 +435,8 @@ impl PaymailClient {
         })?;
 
         let url = Self::expand_url(&url_template, alias, domain);
+        // 10c (CU-2, `P10c-A3`): the send path never talks to a non-https capability.
+        require_https_capability(&url, "P2P destination")?;
         debug!("PaymailClient: P2P destination POST {}", url);
 
         let body = serde_json::json!({ "satoshis": satoshis });
@@ -334,10 +477,11 @@ impl PaymailClient {
             .unwrap_or("")
             .to_string();
 
-        if outputs.is_empty() {
-            return Err(PaymailError::P2PDestination(
-                "empty outputs array".to_string(),
-            ));
+        // 10c (CU-2): a host may split the payment; it may not change it. Checked
+        // HERE, before the caller can build anything from these outputs.
+        if let Err(e) = validate_p2p_outputs(&outputs, satoshis) {
+            warn!("PaymailClient: refusing P2P destination from {} — {}", domain, e);
+            return Err(PaymailError::P2PDestination(e.to_string()));
         }
 
         info!(
@@ -367,6 +511,8 @@ impl PaymailClient {
         })?;
 
         let url = Self::expand_url(&url_template, alias, domain);
+        // 10c (CU-2, `P10c-A3`): send path, https only.
+        require_https_capability(&url, "payment destination")?;
         debug!("PaymailClient: basic paymentDestination POST {}", url);
 
         // Basic paymentDestination requires senderName and dt
@@ -451,6 +597,8 @@ impl PaymailClient {
         };
 
         let url = Self::expand_url(&url_template, alias, domain);
+        // 10c (CU-2, `P10c-A3`): send path, https only.
+        require_https_capability(&url, "P2P receive-transaction")?;
         debug!("PaymailClient: submit_transaction POST {}", url);
 
         let body = serde_json::json!({

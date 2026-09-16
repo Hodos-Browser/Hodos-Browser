@@ -19526,6 +19526,26 @@ pub async fn paymail_send(
         }
     };
 
+    // beta.3 Phase 10c (CU-2, `P10c-A1`) — last check before anything is signed:
+    // whatever path produced these outputs, they must total EXACTLY the amount the
+    // user approved. `PaymailClient::get_p2p_destination` already refuses a host
+    // that changes the amount; this is the layer that owns `amount_satoshis`, and
+    // it also covers the basic-resolution path and any future producer.
+    let built_total: i64 = outputs.iter().map(|o| o.satoshis.unwrap_or(0)).sum();
+    if built_total != req.amount_satoshis {
+        log::warn!("   🚫 Paymail send refused BEFORE signing: outputs total {} sats but {} was approved",
+            built_total, req.amount_satoshis);
+        return HttpResponse::UnprocessableEntity().json(serde_json::json!({
+            "success": false,
+            "code": "ERR_PAYMAIL_OUTPUT_MISMATCH",
+            "error": format!(
+                "This payment was not sent: the recipient's server asked for {} satoshis but you approved {}. Nothing was signed or broadcast.",
+                built_total, req.amount_satoshis),
+            "outputTotalSatoshis": built_total,
+            "approvedSatoshis": req.amount_satoshis
+        }));
+    }
+
     // Build transaction via createAction (noSend=true to get Atomic BEEF)
     let create_req = CreateActionRequest {
         inputs: None,
