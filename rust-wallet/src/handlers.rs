@@ -18113,8 +18113,24 @@ pub struct PeerpaySendRequest {
 /// beta.3 Phase 10d (`P10d-A2`) — would a PeerPay payment token of `payload_len`
 /// plaintext bytes fit the relay's body cap once BRC-2 encrypted and wrapped?
 /// `Err((wire_bytes, cap))` means refuse before broadcasting. Pure.
+/// The MessageBox box every PeerPay notification is posted to. Named here because
+/// the size check has to model the exact request that will be sent.
+pub(crate) const PEERPAY_MESSAGE_BOX: &str = "payment_inbox";
+
+/// Will this PeerPay notification survive the relay, or must the send be refused
+/// before anything is broadcast?
+///
+/// ⛔ Phase 10e (panel `F2-10d`) — measures the WHOLE REQUEST, not just
+/// `message.body`. The relay enforces two limits at the same 1 MiB: its route rule
+/// on the body, and `bodyParser.json({ limit })` on the entire request, which runs
+/// FIRST. Checking only the body left a window where we said "fits", broadcast, and
+/// then took a 413 from the body parser — after the money had moved. The outer
+/// envelope is ~220 bytes, so the window was narrow and entirely real.
+///
+/// ⭐ Modelled exactly rather than given a guessed margin: `wire_request_len` is
+/// checked against a real serde render of the envelope `send_message` builds.
 pub(crate) fn peerpay_message_fits(payload_len: usize, cap: usize) -> Result<(), (usize, usize)> {
-    let wire = crate::messagebox::wire_body_len(payload_len);
+    let wire = crate::messagebox::wire_request_len(payload_len, PEERPAY_MESSAGE_BOX);
     if wire > cap { Err((wire, cap)) } else { Ok(()) }
 }
 
@@ -18137,14 +18153,43 @@ mod peerpay_message_fits_tests {
         assert!(peerpay_message_fits(75_000, crate::messagebox::MESSAGEBOX_MAX_BODY_BYTES).is_ok());
     }
 
-    /// The boundary is the server's measure (`Buffer.byteLength(body) > max`):
-    /// exactly at the cap fits, one byte over does not.
+    /// The boundary is the server's measure: exactly at the cap fits, one byte over
+    /// does not.
+    ///
+    /// ⚠️ **This assertion was CHANGED in Phase 10e and the change is the point.** It
+    /// used to pin the boundary to `wire_body_len` — the relay's ROUTE rule — and that
+    /// encoded the wrong rule: express's `bodyParser.json({ limit })` runs first, at
+    /// the same 1 MiB, against the WHOLE request. A payload sized to the old boundary
+    /// passed here and then took a 413 from the body parser, after broadcast. Pinning
+    /// the larger of the two limits is what the check has to do.
     #[test]
     fn a2_boundary_matches_the_server_rule() {
-        let wire_of = crate::messagebox::wire_body_len;
+        let wire_of = |n: usize| crate::messagebox::wire_request_len(n, PEERPAY_MESSAGE_BOX);
         let cap = wire_of(100_000);
         assert!(peerpay_message_fits(100_000, cap).is_ok());
         assert!(peerpay_message_fits(100_003, cap).is_err());
+    }
+
+    /// Panel `F2-10d` — the window that existed: a payload the OLD check called
+    /// "fits" which the relay's body parser would have rejected.
+    #[test]
+    fn f2_the_outer_envelope_is_counted() {
+        let cap = crate::messagebox::MESSAGEBOX_MAX_BODY_BYTES;
+        // Pick the largest payload the body-only rule would have allowed.
+        let mut n = 0usize;
+        let mut lo = 0usize;
+        let mut hi = 1_200_000usize;
+        while lo <= hi {
+            let mid = (lo + hi) / 2;
+            if crate::messagebox::wire_body_len(mid) <= cap { n = mid; lo = mid + 1; } else { hi = mid - 1; }
+        }
+        assert!(crate::messagebox::wire_body_len(n) <= cap,
+                "fixture: the old body-only rule accepts this payload");
+        assert!(peerpay_message_fits(n, cap).is_err(),
+                "the whole request exceeds the cap, so the send must be refused");
+        let (wire, _) = peerpay_message_fits(n, cap).unwrap_err();
+        assert!(wire > cap && wire - cap < 400,
+                "the overshoot is the outer envelope, ~220 bytes, not a guessed margin: {}", wire - cap);
     }
 
     /// `wire_body_len` against the real encoding: base64 of (32 IV + ct + 16 tag)

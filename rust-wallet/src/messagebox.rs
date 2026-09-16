@@ -98,6 +98,29 @@ mod permanence_tests {
     use super::MessageBoxError;
 
     /// `P10d-A4` — a refusal is permanent; a server error or transport failure is not.
+    /// Panel `F2-10d` — the modelled request size must equal what serde actually
+    /// emits, for the real envelope `send_message` builds.
+    #[test]
+    fn wire_request_len_equals_the_serialized_request() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+        for n in [0usize, 1, 2, 3, 100, 4_999] {
+            for boxname in ["payment_inbox", "x", "a_much_longer_box_name"] {
+                let fake_cipher = vec![0u8; n + 48];
+                let body_string = serde_json::to_string(
+                    &serde_json::json!({ "encryptedMessage": BASE64.encode(&fake_cipher) })).unwrap();
+                let request = serde_json::json!({ "message": {
+                    "recipient": "0".repeat(66),
+                    "messageBox": boxname,
+                    "messageId": "a".repeat(64),
+                    "body": body_string,
+                }});
+                let actual = serde_json::to_vec(&request).unwrap().len();
+                assert_eq!(super::wire_request_len(n, boxname), actual,
+                           "plaintext {} box {}", n, boxname);
+            }
+        }
+    }
+
     #[test]
     fn a4_rejection_is_permanent_api_error_is_not() {
         assert!(MessageBoxError::Rejected { status: 413, body: "too large".into() }.is_permanent());
@@ -116,6 +139,31 @@ pub fn wire_body_len(plaintext_len: usize) -> usize {
     let cipher_len = plaintext_len + BRC2_OVERHEAD;
     let b64_len = 4 * ((cipher_len + 2) / 3);
     WRAPPER + b64_len
+}
+
+/// Exact size of the WHOLE request body `send_message` posts, for a plaintext of
+/// `plaintext_len` bytes going to `message_box`.
+///
+/// ⛔ Phase 10e (panel `F2-10d`). `wire_body_len` above is exact for `message.body`,
+/// which is what the relay's route rule measures — but express parses the request
+/// first, and `app.ts` mounts `bodyParser.json({ limit: … })` at the SAME 1 MiB. Our
+/// body sits inside `{"message":{"recipient":…,"messageBox":…,"messageId":…,"body":…}}`,
+/// so there was a window where we said "fits", broadcast, and then took a 413 from
+/// the body parser — after the money had moved.
+///
+/// ⭐ Modelled rather than given a guessed margin, and checked against a real serde
+/// render in `wire_request_len_equals_the_serialized_request`. The outer object is
+/// fixed except for the box name: a 66-hex recipient, a 64-hex message id, and the
+/// body embedded as a JSON string — which costs 4 extra bytes, one per `"` in
+/// `{"encryptedMessage":"…"}` being escaped.
+pub fn wire_request_len(plaintext_len: usize, message_box: &str) -> usize {
+    const RECIPIENT_HEX: usize = 66;   // 33-byte compressed pubkey
+    const MESSAGE_ID_HEX: usize = 64;  // sha256 hex
+    const ESCAPED_QUOTES_IN_BODY: usize = 4;  // the 4 `"` of {"encryptedMessage":"…"}
+    // {"message":{"recipient":"…","messageBox":"…","messageId":"…","body":"…"}}
+    const FIXED: usize = r#"{"message":{"recipient":"","messageBox":"","messageId":"","body":""}}"#.len();
+    FIXED + RECIPIENT_HEX + message_box.len() + MESSAGE_ID_HEX
+        + wire_body_len(plaintext_len) + ESCAPED_QUOTES_IN_BODY
 }
 
 impl MessageBoxClient {
