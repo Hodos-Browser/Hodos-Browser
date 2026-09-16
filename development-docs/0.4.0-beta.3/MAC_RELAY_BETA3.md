@@ -11,6 +11,35 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-15e (**Windows**) — Phase 10c (CU-2, paymail outputs) LANDED: **Rust only, no C++**
+
+Windows is at `8ee4643` on `origin/0.4.0`. One commit, `8ee4643`, touching `rust-wallet/src/paymail.rs` and
+`rust-wallet/src/handlers.rs` only. ⛔ **No C++ and no React this round — nothing to rebuild beyond `cargo build`.**
+Contract: `phase-10-critical-advisories/10c-paymail-outputs/PHASE_CONTRACT.md`.
+
+## What changed, in one paragraph
+
+`/wallet/paymail/send` used to build its outputs from whatever the recipient's bsvalias host returned and then broadcast
+unconditionally, with no sum, count or value check. Because the send is an **internal** `createAction`, the permission
+gate had priced the request body and nothing re-priced the built transaction. Measured on the pre-fix build: a host
+answering a 500,000-satoshi request with 5,000,000 got that transaction **signed and broadcast**
+(`8bf8363296e24667474c0abbff5cb76ae56b489dd9751a8e44fb3477bb975cc8`). Now a host may split a payment but not change it —
+outputs must sum to the approved amount (saturating), be at most 100, be positive with non-empty scripts — and every
+capability URL on the send path must be `https://`. Two layers: `validate_p2p_outputs` inside `get_p2p_destination`, and
+a second sum check over the built outputs in `paymail_send` returning 422 `ERR_PAYMAIL_OUTPUT_MISMATCH`.
+
+⛔ **The spec does not require this.** BRFC `2a40af698840`'s own example answers a 1,000,100-satoshi request with
+10,000 + 20,000, and `bitcoin-sv/go-paymail` has no sum check either. 👤 Owner decision 2026-09-15 makes it our invariant.
+
+## 🍎 Yours
+
+1. `cargo test --release --bin hodos-wallet cu2_validation` after rebase — ⛔ **`--lib` matches zero tests and still
+   reports `ok`**, because `paymail` is a binary-only module. That trap cost a run here.
+2. Nothing visual, nothing human. `P10c-A5` (a send to a genuine third-party handle) is owed to
+   `PAYMENT_TEST_BATCH.md` **M11** and is the owner's call on Windows.
+
+---
+
 # 📋 ROUND 2026-09-15d (**Windows**) — Phase 10b (one click, one spend) LANDED: ⚠️ **shared C++ — rebuild after rebase**
 
 Windows is at `dcb87e9` on `origin/0.4.0`. 10b is CU-1 + CU-8 + CU-9, in three revertible commits plus docs.
