@@ -13,7 +13,12 @@ sitting, 2026-09-16). **Standard:** `../../HARNESS.md`.
 
 ## The work, in the order I'd do it
 
-### 1. 🔴 `internalizeAction`'s basket-insertion arm is ungated · `F1-10a` / `F2-10a`
+### 1. ✅ DONE 2026-09-16 — `internalizeAction`'s basket-insertion arm is ungated · `F1-10a` / `F2-10a`
+
+> ✅ `07c69de` (ownership check; RED measured at **+99,637,619 sats and HTTP 200**) and `14a553a`
+> (balance excludes non-default baskets; measured live −9 sats, all token carriers). `P10a-A6` re-closed.
+> 👤 Owner decided to leave derivation-less outputs counted — see the commit for why, and for the
+> dormant `recover_change_index_pure` that is the right answer if such a row ever appears.
 
 **This is the one that matters.** An already-approved dApp can post any mined transaction with a
 `basket insertion` spec and the wallet stores a **stranger's output** as its own.
@@ -39,9 +44,14 @@ Two independent halves; ⭐ **separate commits**, because the second changes a n
 ⚠️ Measure the displayed balance **before and after** (b) on the dev wallet and record both numbers.
 A balance that moves for a reason nobody wrote down is its own incident.
 
-`P10a-A6` stays **not GREEN** until (a) lands and its probe grows a `basket insertion` arm.
+~~`P10a-A6` stays **not GREEN** until (a) lands and its probe grows a `basket insertion` arm.~~ ✅ Both done.
 
-### 2. 🟠 One site can blank the consent surface for ten minutes · `F2-10b`
+### 2. ✅ DONE 2026-09-16 — one site can blank the consent surface for ten minutes · `F2-10b`
+
+> ✅ `d2c1e0a`. Measured two-sided with two real origins over CDP, no human click: pre-fix the second
+> origin's connect prompt REPLACED the payment prompt and answering it left the overlay **empty** with
+> **zero** queue-advance lines; post-fix it is *"queued behind the prompt on screen"* and advances when
+> the first is answered. All three connect openers now share one `enqueueConnectPrompt`.
 
 The three connect openers bypass `enqueuePrompt` and post their modal unconditionally, while the
 queue's "may I show the next one?" test (`anyLiveShownLocked`) is **global**. So a second origin — an
@@ -95,7 +105,10 @@ and that test's baseline do not land in the same commit as anything else.
 
 ## Owed evidence that is not code
 
-- `HUMAN_TEST_QUEUE.md` **W7** — the expired-prompt RED for the `F1-10b` fix.
+- ✅ `HUMAN_TEST_QUEUE.md` **W7** — PASSED 2026-09-16. ⚠️ It exercised the IPC path, which already popped
+  correctly; the `F1-10b` fix was for the **HTTP** path, so that half still wants a run.
+- `HUMAN_TEST_QUEUE.md` **W4** (display-scaling matrix, belongs at the RC) and **W5** (gold pill +
+  session counters, needs the funded sitting).
 - `PAYMENT_TEST_BATCH.md` **M11** — a real third-party paymail handle, now also carrying the real
   claim-block assertion (`F3-10d`, half-answered by the human sitting).
 - `REGRESSION_SET.md` — R-GOLD, R-COUNT, R-PERIM's T2 arm and R-CLOSE, owed at this boundary as at
