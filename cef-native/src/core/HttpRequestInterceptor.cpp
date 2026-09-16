@@ -1757,10 +1757,39 @@ public:
     }
 
     void handleAuthTimeout(const std::string& errorJson) {
+        // beta.3 Phase 10b panel `F1` — ⛔ release the pending entry, exactly as
+        // the IPC twin `postIpcAuthTimeout` does.
+        //
+        // Before this, the HTTP path's timeout flipped `httpCompleted_` and left
+        // the PendingRequestManager entry alive forever. 10b then made prompts
+        // QUEUE rather than replace each other, so that dead entry could be
+        // posted to the screen minutes later — and Approve on it runs
+        // `resumeHttpCallbackResponse`, which re-issues the wallet call with
+        // `X-User-Approved` and BROADCASTS, while the page was told "Approval
+        // timeout" long ago. Real money, into a response nobody reads.
+        //
+        // popRequest is the atomic arbiter: only one of (approve, deny, timeout)
+        // wins, so a user who clicked a moment earlier still wins here.
+        if (!timeoutRequestId_.empty()) {
+            PendingAuthRequest expired;
+            if (!PendingRequestManager::GetInstance().popRequest(timeoutRequestId_, expired)) {
+                return;  // already answered — the click won
+            }
+            if (httpCompleted_.load()) return;
+            LOG_DEBUG_HTTP("⏱️ Approval timeout - sending error (released " + timeoutRequestId_ + ")");
+            onAuthResponseReceived(errorJson);
+            // The expired prompt held the overlay — let the next one have it.
+            if (expired.shown) ShowNextQueuedPrompt();
+            return;
+        }
         if (httpCompleted_.load()) return;  // Already responded, skip
         LOG_DEBUG_HTTP("⏱️ Approval timeout - sending error");
         onAuthResponseReceived(errorJson);
     }
+
+    // Panel `F1`: the entry this handler's timeout must release. Empty for the
+    // ancillary BRC-100 auth-handshake modal, which owns no queued entry.
+    void setTimeoutRequestId(const std::string& id) { timeoutRequestId_ = id; }
 
     // Trigger domain approval notification overlay.
     // Phase 2.5 Commit 6 sub-step 6.c — delegates to free-function opener
@@ -1971,6 +2000,7 @@ private:
     std::string endpoint_;
     std::string body_;
     std::string requestDomain_;
+    std::string timeoutRequestId_;           // panel F1 — entry released on timeout
     CefRequest::HeaderMap originalHeaders_;  // BRC-31 authentication headers
 
     // Response management
@@ -3247,6 +3277,9 @@ static bool tryHandlePendingResponse(
     } else if (resume.handler) {
         auto* walletHandler = static_cast<AsyncWalletResourceHandler*>(resume.handler.get());
         if (walletHandler) {
+            // Panel `F1`: tell the timeout which entry it owns, so firing it
+            // releases that entry instead of leaving it queueable forever.
+            walletHandler->setTimeoutRequestId(newRequestId);
             walletHandler->postAuthTimeout(kPromptAuthTimeoutMs, timeoutMsg);
         }
     }

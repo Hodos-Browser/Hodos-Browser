@@ -64,6 +64,13 @@ struct PendingAuthRequest {
     std::string overlayExtraParams;   // the query extras to post it with, later
     bool shown = false;               // its modal is (or was last) on screen
     std::chrono::steady_clock::time_point shownAt{};
+    // beta.3 Phase 10b panel `F1` — when the entry was enrolled. A prompt that
+    // has waited longer than the answer is worth must never be posted: 10b made
+    // prompts WAIT instead of replacing each other, which opened a window in
+    // which a queued entry could reach the screen long after its own transport
+    // gave up on it. Answering one of those spends money into a response nobody
+    // is listening for.
+    std::chrono::steady_clock::time_point createdAt{std::chrono::steady_clock::now()};
     uint64_t seq = 0;                 // arrival order, for FIFO
 };
 
@@ -168,9 +175,16 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         if (anyLiveShownLocked()) return false;
         PendingAuthRequest* best = nullptr;
+        const auto now = std::chrono::steady_clock::now();
         for (auto& pair : requests_) {
             auto& r = pair.second;
             if (r.shown || r.overlayType.empty()) continue;
+            // Panel `F1`: freshness. An entry older than the prompt timeout has
+            // already told its caller "Approval timeout" — showing it now would
+            // invite a click that resolves nothing the page can still receive,
+            // and on the HTTP path re-issues the wallet call anyway.
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - r.createdAt).count()
+                    >= kShownPromptExpiryMs) continue;
             if (!best || r.seq < best->seq) best = &r;
         }
         if (!best) return false;
