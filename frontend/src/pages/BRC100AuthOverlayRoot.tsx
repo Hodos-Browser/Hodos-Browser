@@ -735,6 +735,20 @@ const BRC100AuthOverlayRoot: React.FC = () => {
       setNotificationDomain('');
     };
 
+    // beta.3 Phase 10e — C++ calls this when another request from THIS site queues
+    // behind the prompt currently on screen, so the "1 of N" line is live.
+    //
+    // ⛔ It sets ONE number and nothing else. The count used to be frozen into the
+    // modal's URL at creation, so the first prompt of a burst always read 0 (nothing
+    // else had arrived yet) and a two-request burst never showed the line at all.
+    // The obvious alternative — re-calling showNotification with a new param — would
+    // re-run applyParams and reset this modal's state, wiping a half-filled
+    // "Modify Limits" form and flashing the overlay blank.
+    (window as any).updateQueuedCount = (n: number) => {
+      const v = Number(n);
+      if (Number.isFinite(v) && v >= 0) setQueuedFromSite(v);
+    };
+
     // Phase 1.5 Step 5 — fetch the user's default for the identity-key bundle
     // checkbox. If they set it to OFF in Approved Sites, fresh-site prompts
     // should start the checkbox unticked. Default to true on any fetch failure
@@ -803,6 +817,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     return () => {
       delete (window as any).showNotification;
       delete (window as any).hideNotification;
+      delete (window as any).updateQueuedCount;
     };
   }, []);
 

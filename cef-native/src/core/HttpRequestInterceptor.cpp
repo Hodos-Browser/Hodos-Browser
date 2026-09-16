@@ -1265,6 +1265,27 @@ static PendingAuthRequest buildPendingAuthRequest(
 // requestId, and the approve/deny message must return it — so a click can only
 // ever resolve the request whose amount was on screen. CU-1, measured 2026-09-15:
 // one Approve on a modal showing 130,000 sats broadcast that AND an unseen 150,000.
+// beta.3 Phase 10e — tell the modal ON SCREEN that another request from its own
+// site just queued behind it, so the "1 of N" line is live instead of frozen at the
+// moment the modal was created.
+//
+// ⛔ Deliberately NOT a re-`showNotification()`. That re-runs `applyParams`, which
+// resets the modal's React state — it would wipe a half-filled "Modify Limits" form,
+// and the panel measured a window of up to 1200 ms where the overlay is visible and
+// blank while params are re-applied. This pushes ONE number and touches nothing else.
+static void PushQueuedCountToShownModal() {
+    CefPostTask(TID_UI, base::BindOnce([]() {
+        std::string domain;
+        int waiting = PendingRequestManager::GetInstance().waitingCountForShownDomain(domain);
+        if (waiting < 0) return;  // nothing on screen
+        CefRefPtr<CefBrowser> notif = SimpleHandler::GetNotificationBrowser();
+        if (!notif || !notif->GetMainFrame()) return;
+        notif->GetMainFrame()->ExecuteJavaScript(
+            "window.updateQueuedCount && window.updateQueuedCount(" + std::to_string(waiting) + ")",
+            "", 0);
+    }));
+}
+
 static std::string enqueuePrompt(PendingAuthRequest req, const std::string& overlayType,
                                  const std::string& extraParams) {
     req.overlayType = overlayType;
@@ -1280,6 +1301,7 @@ static std::string enqueuePrompt(PendingAuthRequest req, const std::string& over
     } else {
         LOG_INFO_HTTP("⏳ " + overlayType + " for " + domain + " queued behind the prompt on screen (requestId: "
                       + requestId + ")");
+        PushQueuedCountToShownModal();
     }
     return requestId;
 }
@@ -1313,6 +1335,7 @@ static std::string enqueueConnectPrompt(PendingAuthRequest req, const std::strin
     } else {
         LOG_INFO_HTTP("⏳ " + overlayType + " for " + domain
                       + " queued behind the prompt on screen (requestId: " + requestId + ")");
+        PushQueuedCountToShownModal();
     }
     return requestId;
 }

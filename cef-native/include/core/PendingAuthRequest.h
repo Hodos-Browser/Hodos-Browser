@@ -212,6 +212,27 @@ public:
         return true;
     }
 
+    // beta.3 Phase 10e — how many OTHER requests from the shown prompt's own site
+    // are waiting behind it, right now. Returns -1 when nothing is on screen.
+    //
+    // ⛔ Why this exists: `queuedFromSite` was computed once, at enqueue or take
+    // time, and frozen into the modal's URL. The FIRST prompt of a burst therefore
+    // always read 0 — nothing else had arrived when it was created — and a
+    // TWO-request burst could never show the line at all, since the second is taken
+    // when nothing remains behind it. 👤 The owner asked for that line specifically
+    // in the 10b design and it never appeared in the common case (measured during
+    // the 2026-09-16 human sitting).
+    int waitingCountForShownDomain(std::string& domainOut) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const PendingAuthRequest* shown = nullptr;
+        for (const auto& pair : requests_) {
+            if (pair.second.shown && !pair.second.overlayType.empty()) { shown = &pair.second; break; }
+        }
+        if (!shown) return -1;
+        domainOut = shown->domain;
+        return countWaitingForDomainLocked(shown->domain, shown->requestId);
+    }
+
     // Mark an entry as on screen (posts that bypass addPromptRequest).
     void markShown(const std::string& requestId) {
         std::lock_guard<std::mutex> lock(mutex_);
