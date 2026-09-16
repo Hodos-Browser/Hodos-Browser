@@ -636,7 +636,7 @@
   flex-shrink: 0;
   margin-left: auto;
   padding-left: 8px;
-  gap: 0;
+  gap: 6px;   /* was 0 + a margin on the txid pill; see .wd-activity-center */
 }
 
 .wd-recent-values {
@@ -958,6 +958,11 @@
   flex-shrink: 0;
   margin-left: auto;
   padding-left: 12px;
+  /* 👤 Owner 2026-09-16: spacing belongs to the container, not to one child.
+     It used to come from `.wd-txid-pill`'s margin-right, so the gaps depended on
+     the txid pill being first — reordering the row left the other buttons
+     touching. A row's spacing must survive its children being reordered. */
+  gap: 6px;
 }
 
 .wd-activity-amount {
@@ -1140,7 +1145,6 @@
   width: 46px;
   text-align: center;
   box-sizing: border-box;
-  margin-right: 6px;
   transition: all 0.15s ease;
 }
 

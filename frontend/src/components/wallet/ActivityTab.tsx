@@ -278,6 +278,31 @@ const ActivityTab: React.FC = () => {
                 <div className="wd-activity-center">
                   {item.txid && (
                     <>
+                      {item.outbox_undeliverable && item.outbox_claim_block && (
+                        <HodosButton
+                          variant="ghost"
+                          size="small"
+                          className="wd-retry-btn"
+                          onClick={(e) => { e.stopPropagation(); handleCopyClaimBlock(item); }}
+                          title="Copy the payment details so you can send them to the recipient yourself."
+                          style={{ color: '#fdd835', fontSize: '11px' }}
+                        >
+                          {copiedClaimTxid === item.txid ? 'Copied' : 'Copy details'}
+                        </HodosButton>
+                      )}
+                      {item.outbox_failed && (
+                        <HodosButton
+                          variant="ghost"
+                          size="small"
+                          className="wd-retry-btn"
+                          onClick={(e) => { e.stopPropagation(); handleRetryNotification(item.txid); }}
+                          disabled={retryingTxid === item.txid}
+                          title="Recipient wasn't notified. Retry sending the notification."
+                          style={{ color: '#fdd835', fontSize: '11px' }}
+                        >
+                          {retryingTxid === item.txid ? 'Retrying...' : 'Retry notification'}
+                        </HodosButton>
+                      )}
                       <HodosButton
                         variant="ghost"
                         size="small"
@@ -296,31 +321,6 @@ const ActivityTab: React.FC = () => {
                       >
                         <img src="/whatsonchain.png" alt="WoC" width="20" height="20" />
                       </HodosButton>
-                      {item.outbox_failed && (
-                        <HodosButton
-                          variant="ghost"
-                          size="small"
-                          className="wd-retry-btn"
-                          onClick={(e) => { e.stopPropagation(); handleRetryNotification(item.txid); }}
-                          disabled={retryingTxid === item.txid}
-                          title="Recipient wasn't notified. Retry sending the notification."
-                          style={{ color: '#fdd835', fontSize: '11px' }}
-                        >
-                          {retryingTxid === item.txid ? 'Retrying...' : 'Retry notification'}
-                        </HodosButton>
-                      )}
-                      {item.outbox_undeliverable && item.outbox_claim_block && (
-                        <HodosButton
-                          variant="ghost"
-                          size="small"
-                          className="wd-retry-btn"
-                          onClick={(e) => { e.stopPropagation(); handleCopyClaimBlock(item); }}
-                          title="Copy the payment details so you can send them to the recipient yourself."
-                          style={{ color: '#fdd835', fontSize: '11px' }}
-                        >
-                          {copiedClaimTxid === item.txid ? 'Copied' : 'Copy details'}
-                        </HodosButton>
-                      )}
                       {item.outbox_retrying && (
                         <span style={{ color: '#fdd835', fontSize: '11px', marginLeft: '4px' }} title="Notification delivery in progress">
                           Notifying...

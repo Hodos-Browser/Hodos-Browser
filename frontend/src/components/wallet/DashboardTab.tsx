@@ -38,6 +38,13 @@ interface ActivityItem {
   labels?: string[];
   price_usd_cents?: number | null;
   source: string;
+  // beta.3 10d, 👤 owner 2026-09-16: the dashboard's recent list dropped these
+  // fields on the floor, so the SAME payment showed a "recipient not notified"
+  // banner at the top of this screen and an unmarked row below it. Two views of
+  // one wallet disagreeing on one screen is the shape that produced the
+  // undismissable dot. Read-only here; Retry and Copy details stay in Activity.
+  outbox_undeliverable?: boolean;
+  outbox_cause?: 'message_too_large' | 'relay_refused';
 }
 
 interface DashboardTabProps {
@@ -431,8 +438,20 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
           {/* Recipient-not-notified banner (beta.3 10d — yellow; Retry / Copy details on the Activity row) */}
           {undeliverableCount > 0 && (
             <div className="wd-notification-bar wd-notification-warning">
+              {/* 👤 Owner 2026-09-16 (found during the W1 sitting): this said "see
+                  Activity" and gave no way to get there, while the green
+                  received-payment banner has a Details button. Activity holds
+                  hundreds of rows, so the instruction was a dead end. */}
               <span className="wd-notification-text">
-                {undeliverableCount} payment{undeliverableCount > 1 ? 's' : ''} sent but the recipient was not notified — see Activity
+                {undeliverableCount} payment{undeliverableCount > 1 ? 's' : ''} sent but the recipient was not notified —{' '}
+                <button
+                  className="wd-notification-link"
+                  onClick={onNavigateToActivity}
+                  style={{ background: 'none', border: 'none', padding: 0, font: 'inherit',
+                           color: 'inherit', textDecoration: 'underline', cursor: 'pointer' }}
+                >
+                  see Activity
+                </button>
               </span>
               <button className="wd-notification-dismiss" onClick={handleDismissNotification}>
                 Dismiss
@@ -690,6 +709,21 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
                         <span className="wd-recent-time">{formatTime(action.timestamp)}</span>
                         <span className={`wd-recent-status ${action.status}`}>{action.status}</span>
                       </div>
+                      {action.outbox_undeliverable && (
+                        <div
+                          className="wd-activity-undelivered"
+                          role="button"
+                          tabIndex={0}
+                          title="Open Activity to retry the notification or copy the payment details"
+                          onClick={(e) => { e.stopPropagation(); onNavigateToActivity(); }}
+                          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); onNavigateToActivity(); } }}
+                          style={{ cursor: 'pointer' }}
+                        >
+                          {action.outbox_cause === 'message_too_large'
+                            ? 'Recipient not notified: payment message too large to deliver'
+                            : 'Recipient not notified: the message relay refused it'}
+                        </div>
+                      )}
                     </div>
                     <div className="wd-recent-center">
                       {action.txid && (

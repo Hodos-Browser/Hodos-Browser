@@ -215,8 +215,19 @@ const MainBrowserView: React.FC = () => {
                         setHasOutboxWarnings(((data.undeliverable_count || 0) + (data.rejected_count || 0)) > 0);
                         if (data.unread_count > 0) {
                             setHasUnreadPayments(true);
-                            setUnreadPaymentCount(data.unread_count);
-                            setUnreadPaymentAmount(data.unread_amount || 0);
+                            // ⛔ These two are NOT the badge count. They are handed to the
+                            // wallet panel on open (`toggle_wallet_panel` -> `ppc`/`ppa`)
+                            // and the panel paints its GREEN "Received N payments" banner
+                            // from them before its own fetch lands.
+                            //
+                            // 👤 Found by the owner during the W2 sitting, 2026-09-16:
+                            // sending `unread_count` here meant a wallet holding two
+                            // REJECTED incoming payments announced "Received 2 payments"
+                            // for a moment — the opposite of the truth, about money, in
+                            // exactly the situation 10a exists for. `receive_count` is the
+                            // only count that banner may be built from.
+                            setUnreadPaymentCount(data.receive_count || 0);
+                            setUnreadPaymentAmount(data.receive_amount || 0);
                             setHasFailedPayments((data.failure_count || 0) > 0);
                         } else {
                             setHasUnreadPayments(false);
