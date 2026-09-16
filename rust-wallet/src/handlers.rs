@@ -12868,6 +12868,34 @@ pub async fn internalize_action(
             }
 
             let output = &parsed_tx.outputs[output_index_usize];
+
+            // beta.3 Phase 10e (CU-6 residual, panel `F1-10a`) — ⛔ a basket
+            // insertion may only file an output THIS WALLET OWNS.
+            //
+            // The chain check above ("is this transaction real?") passes honestly
+            // for this attack, because the attacker uses a REAL mined transaction
+            // belonging to someone else. The question that was never asked is
+            // "is this ours?" — which the `wallet payment` arm asks two ways
+            // (`is_output_ours` against our addresses, or BRC-42 derivation from a
+            // paymentRemittance) and this arm asked not at all. It checked only
+            // that the index was in range.
+            //
+            // Consequence, measured: an already-approved dApp could post any mined
+            // transaction with a `basket insertion` spec, and the wallet stored a
+            // stranger's output with `spendable = 1` and added its value to
+            // `total_received` — BEFORE the `ERR_NO_OUTPUTS_OWNED` gate, so that
+            // gate could never fire for a basket request. The user's displayed
+            // balance rose by satoshis the wallet never received, repeatably.
+            //
+            // `our_output_indices` is populated by the ownership pass above, which
+            // has already run, so both proofs of ownership are honoured here and
+            // no new derivation is invented.
+            if !our_output_indices.contains(output_index) {
+                log::warn!("   🚫 Basket insertion refused for output {} — it does not belong to this wallet (txid {})",
+                           output_index, txid);
+                continue;
+            }
+
             let satoshis = output.value;
             let script_hex = hex::encode(&output.script);
 
@@ -12923,9 +12951,11 @@ pub async fn internalize_action(
                         }
                     }
 
-                    // Track as received
-                    total_received += satoshis;
-                    our_output_indices.push(*output_index);
+                    // ⛔ NOT counted again. The ownership pass above already added
+                    // this output to `total_received` and to `our_output_indices` —
+                    // it had to, or we would not have reached this line. Adding it
+                    // here a second time double-counted every output that is both
+                    // ours and basket-filed, inflating the action's recorded amount.
                 }
                 Err(e) => {
                     log::error!("   ❌ Failed to store basket insertion output {}:{}: {}", txid, output_index, e);
