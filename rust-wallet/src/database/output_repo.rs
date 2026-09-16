@@ -972,6 +972,26 @@ impl<'a> OutputRepository<'a> {
     /// * `placeholder` - The placeholder pattern (e.g., "pending-1234567890")
     /// * `real_txid` - The actual signed transaction ID
     pub fn update_spending_description_batch(&self, placeholder: &str, real_txid: &str) -> Result<usize> {
+        // ⭐ RIG SEAM for `PAYMENT_TEST_BATCH.md` M4 (`P8b-A1`) — and it is safe by
+        // construction, not by promise.
+        //
+        // P8b's rule is "if the wallet cannot record which coins a transaction
+        // spends, it must not broadcast that transaction". Proving it needs this
+        // function to fail ON DEMAND in a RELEASE build, because the dev browser is
+        // a release build, so `#[cfg(test)]` cannot reach it.
+        //
+        // ⛔ Two locks, both required: the env var must be set AND `hodos::is_dev()`
+        // must be true. `main.rs :: enforce_dev_safeguard` runs first in `main()` and
+        // SCRUBS `HODOS_DEV` from the environment of any binary that is not running
+        // from a build directory — so a shipped wallet cannot enter this branch even
+        // if someone sets the variable. That reuses a safeguard that already exists
+        // and is already trusted, rather than inventing a second one.
+        if std::env::var("HODOS_DEV").as_deref() == Ok("1")
+            && std::env::var("HODOS_FAIL_SPEND_RESOLUTION").is_ok()
+        {
+            log::warn!("🧪 RIG: HODOS_FAIL_SPEND_RESOLUTION is set — failing spend resolution on purpose (M4)");
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
