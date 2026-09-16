@@ -137,17 +137,34 @@ public:
     // ⛔ Do not reintroduce the check-then-act pair. `wasFirstForDomain` is
     // written under the same lock that performs the insert, so exactly one
     // caller per domain can ever see `true`.
-    std::string addRequestIfFirstForDomain(PendingAuthRequest req, bool& wasFirstForDomain) {
+    std::string addRequestIfFirstForDomain(PendingAuthRequest req, bool& wasFirstForDomain,
+                                           bool& showNow) {
         std::lock_guard<std::mutex> lock(mutex_);
         wasFirstForDomain = true;
         for (const auto& pair : requests_) {
             if (pair.second.domain == req.domain) { wasFirstForDomain = false; break; }
         }
+        // beta.3 Phase 10e (panel `F2-10b`) — ⛔ being first for YOUR domain is not
+        // permission to take the screen.
+        //
+        // This used to set `shown = true` on the strength of `wasFirstForDomain`
+        // alone, while the queue's own gate (`anyLiveShownLocked`) is GLOBAL. So a
+        // connect prompt from a second origin — an iframe to a domain the page
+        // controls is enough — painted over a payment prompt that was already up,
+        // leaving TWO entries flagged shown. Answering the connect one then called
+        // `ShowNextQueuedPrompt`, which saw the painted-over entry still flagged and
+        // refused to advance: its modal was gone and never came back, and EVERY
+        // prompt from EVERY site waited invisibly until that entry's 10-minute
+        // expiry. Fails closed, so it is a consent OUTAGE rather than a spend
+        // bypass — one any site could trigger at will.
+        //
+        // Both conditions now, decided under the same lock as the insert so two
+        // concurrent first-for-domain prompts cannot both conclude they may show.
+        showNow = wasFirstForDomain && !anyLiveShownLocked();
         std::string id = generateId();
         req.requestId = id;
         req.seq = counter_;
-        // 10b: the first connect entry for a domain owns the modal on screen.
-        if (wasFirstForDomain) { req.shown = true; req.shownAt = std::chrono::steady_clock::now(); }
+        if (showNow) { req.shown = true; req.shownAt = std::chrono::steady_clock::now(); }
         requests_[id] = std::move(req);
         return id;
     }

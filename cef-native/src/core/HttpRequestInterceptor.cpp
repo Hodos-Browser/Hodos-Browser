@@ -1284,6 +1284,39 @@ static std::string enqueuePrompt(PendingAuthRequest req, const std::string& over
     return requestId;
 }
 
+// beta.3 Phase 10e (panel `F2-10b`) — the connect twin of `enqueuePrompt`.
+//
+// Connect prompts keep their PER-DOMAIN dedup (several in-flight calls from one
+// fresh origin share a single modal — P0.8-A4), but they no longer take the screen
+// just because they are first for their own domain. If another prompt is already
+// up, this one waits in the same queue as everything else and `ShowNextQueuedPrompt`
+// posts it later, which is what stops one site blanking the consent surface.
+//
+// ⛔ `overlayType` / `overlayExtraParams` are set BEFORE enrolment, deliberately.
+// `takeNextQueuedPrompt` only considers entries whose `overlayType` is non-empty, so
+// an entry enrolled first and described afterwards would be invisible to a drain
+// happening in between — trading one stall for a narrower one.
+static std::string enqueueConnectPrompt(PendingAuthRequest req, const std::string& overlayType,
+                                        const std::string& extraParams, bool& wasFirstForDomain) {
+    req.overlayType = overlayType;
+    req.overlayExtraParams = extraParams;
+    const std::string domain = req.domain;
+    bool showNow = false;
+    std::string requestId = PendingRequestManager::GetInstance()
+        .addRequestIfFirstForDomain(std::move(req), wasFirstForDomain, showNow);
+    if (!wasFirstForDomain) {
+        return requestId;  // caller logs its own dedup line
+    }
+    if (showNow) {
+        CefPostTask(TID_UI, new CreateNotificationOverlayTask(
+            overlayType, domain, extraParams, requestId));
+    } else {
+        LOG_INFO_HTTP("⏳ " + overlayType + " for " + domain
+                      + " queued behind the prompt on screen (requestId: " + requestId + ")");
+    }
+    return requestId;
+}
+
 // Post the oldest waiting prompt, if nothing live is on screen. Called when the
 // notification overlay closes (both platforms, simple_handler.cpp) and when a shown
 // prompt times out.
@@ -1312,16 +1345,13 @@ std::string openDomainApprovalModal(const ModalContext& ctx, const ResumeContext
     PendingAuthRequest req = buildPendingAuthRequest("domain_approval", ctx, resume);
     req.body = "";  // historical: body cleared for domain_approval entries
     bool wasFirstForDomain = false;
-    std::string requestId = PendingRequestManager::GetInstance()
-        .addRequestIfFirstForDomain(std::move(req), wasFirstForDomain);
-
+    std::string requestId = enqueueConnectPrompt(std::move(req), "domain_approval", "",
+                                                 wasFirstForDomain);
     if (!wasFirstForDomain) {
         LOG_DEBUG_HTTP("🔒 Modal already pending for domain " + ctx.domain
                        + ", request queued (requestId: " + requestId + ")");
         return requestId;
     }
-
-    CefPostTask(TID_UI, new CreateNotificationOverlayTask("domain_approval", ctx.domain, "", requestId));
     LOG_DEBUG_HTTP("🔒 Domain approval needed for: " + ctx.domain
                    + " requesting " + ctx.method + " " + ctx.endpoint);
     return requestId;
@@ -1336,16 +1366,14 @@ std::string openBRC100AuthApprovalModal(const ModalContext& ctx, const ResumeCon
     // the React modal page.
     // ⛔ Atomic check-and-add (P0.8-A4) — see openDomainApprovalModal.
     bool wasFirstForDomain = false;
-    std::string requestId = PendingRequestManager::GetInstance().addRequestIfFirstForDomain(
-        buildPendingAuthRequest("domain_approval", ctx, resume), wasFirstForDomain);
-
+    std::string requestId = enqueueConnectPrompt(
+        buildPendingAuthRequest("domain_approval", ctx, resume), "domain_approval", "",
+        wasFirstForDomain);
     if (!wasFirstForDomain) {
         LOG_DEBUG_HTTP("🔐 Modal already pending for domain " + ctx.domain
                        + ", request queued (requestId: " + requestId + ")");
         return requestId;
     }
-
-    CefPostTask(TID_UI, new CreateNotificationOverlayTask("domain_approval", ctx.domain, "", requestId));
     LOG_DEBUG_HTTP("🔐 BRC-100 auth approval needed for: " + ctx.domain
                    + " requesting " + ctx.method + " " + ctx.endpoint);
     return requestId;
@@ -1368,15 +1396,9 @@ std::string openManifestConnectBundleModal(const ModalContext& ctx, const Resume
     // any of them registered, and all three posted an overlay task: MEASURED
     // 2026-08-21 as three notification overlays in 56 ms for a single click on
     // bitgenius.net. `addRequestIfFirstForDomain` does both under one lock.
-    bool wasFirstForDomain = false;
-    std::string requestId = PendingRequestManager::GetInstance().addRequestIfFirstForDomain(
-        buildPendingAuthRequest("manifest_connect_bundle", ctx, resume), wasFirstForDomain);
-
-    if (!wasFirstForDomain) {
-        LOG_DEBUG_HTTP("📦 Modal already pending for domain " + ctx.domain
-                        + ", request queued (requestId: " + requestId + ")");
-        return requestId;
-    }
+    // ⛔ Enrolment moved BELOW the manifest serialisation (Phase 10e) — see
+    // `enqueueConnectPrompt`: an entry must carry its overlay params before it
+    // is enrolled, or a queue drain in between cannot post it.
 
     // Serialize manifest to JSON, URL-encode, pass as extraParams.
     // 64 KB cap from fetcher + ~33% base64-style inflation → ~85 KB URL-safe
@@ -1454,8 +1476,15 @@ std::string openManifestConnectBundleModal(const ModalContext& ctx, const Resume
 
     std::string extraParams = "&manifest=" + urlEncode(j.dump());
 
-    CefPostTask(TID_UI, new CreateNotificationOverlayTask(
-        "manifest_connect_bundle", ctx.domain, extraParams, requestId));
+    bool wasFirstForDomain = false;
+    std::string requestId = enqueueConnectPrompt(
+        buildPendingAuthRequest("manifest_connect_bundle", ctx, resume),
+        "manifest_connect_bundle", extraParams, wasFirstForDomain);
+    if (!wasFirstForDomain) {
+        LOG_DEBUG_HTTP("📦 Modal already pending for domain " + ctx.domain
+                        + ", request queued (requestId: " + requestId + ")");
+        return requestId;
+    }
     LOG_DEBUG_HTTP("📦 manifest_connect_bundle notification queued (requestId: " + requestId + ")");
     return requestId;
 }
