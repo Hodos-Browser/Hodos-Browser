@@ -123,6 +123,7 @@ not an agent's claim (L4).
 | W4 | **DPI matrix cells #4 / #6 / #9** | See `E3` — not run on either platform | `DevOps-CICD/DPI_RESOLUTION_TEST_MATRIX.md` | ⬜ owed |
 | W5 | **`R-GOLD` / `R-COUNT`** with a real payment — the gold pill on the originating tab; counters reset on tab close | See `E1`; the Windows half is `PAYMENT_TEST_BATCH.md` M1/M2 | `REGRESSION_SET.md` | ⬜ owed at every boundary |
 | W6 | ⭐ **10b — the burst prompt** (added when 10b's modal changes): the queued payment modal shows *its own* amount and a **"1 of N"** line; the next one appears after the click; readable at the small-screen size | — | `10b-one-click-one-spend/PHASE_CONTRACT.md` | ⬜ lands with 10b |
+| W7 | 🔴 **Panel `F1-10b` live RED — an expired prompt must not come back and spend.** Raise an over-cap payment from an external https page so a prompt queues **behind** another, leave it past the 10-minute prompt timeout, then answer it | The queued prompt is **never posted** once it is older than the timeout; if one is on screen when it expires, clicking Approve resolves **nothing** and **no txid appears** on WhatsOnChain. ⛔ Subject is the **transaction**, not the HTTP status: the page was already told "Approval timeout", so a broadcast here is money into a response nobody reads | `ADVERSARIAL_PANEL.md` `F1-10b`; fix `12c76bd` | ⬜ owed — needs a human because the wait is 10 real minutes and the click is the instrument. ⚠️ Costs cents if the fix regresses (pay the dev wallet's own address, per 10b's rig) |
 
 ---
 

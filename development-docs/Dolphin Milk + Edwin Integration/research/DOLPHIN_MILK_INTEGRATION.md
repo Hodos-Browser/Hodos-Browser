@@ -164,7 +164,7 @@ This is a product judgment, not a technical one — but the framing is:
 - [ ] Wallet API compatibility audit (Hodos's BRC-100 vs Dolphin Milk's expected `bsv-wallet-cli` surface)
 - [ ] Cross-platform binary build pipeline for `dolphin-milk` (Windows + macOS today; Linux later)
 - [ ] License confirmation (read `Dolphin_Milk/rust-bsv-worm/LICENSE`)
-- [ ] Outreach to @johncalhooon about an integration partnership / coordinated launch
+- [ ] Outreach to @johncalhooon about the proposed Hodos + Dolphin Milk integration / coordinated launch
 - [ ] Decision: embed upstream UI vs. build Hodos-native UI
 - [ ] Decision: on-chain proofs default-on vs default-off in Hodos's bundled config
 - [ ] Cost model: typical "20-minute chat session" cost in sats, surfaced honestly in the install flow

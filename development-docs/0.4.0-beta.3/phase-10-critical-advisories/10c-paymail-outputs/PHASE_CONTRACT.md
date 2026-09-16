@@ -105,7 +105,31 @@ One Rust commit; revert restores the pre-fix handler.
 
 | Item | Result | Date | By |
 |---|---|---|---|
-| preflight -Full | | | |
-| preflight -NegativeControl | | | |
-| regression set | | | |
-| adversarial review | | | |
+| preflight -Full | **PASS** (T0 gates at baseline, T1a–T1g) | 2026-09-15 | Windows |
+| preflight -NegativeControl | ⬜ owed at the phase boundary | | |
+| regression set | 🟡 **PARTIAL** — see `../../REGRESSION_SET.md` boundary record for Phase 10 | 2026-09-15 | Windows |
+| adversarial review | ✅ **DONE — and it found four defects here**, one of them a regression this phase shipped. `../ADVERSARIAL_PANEL.md` | 2026-09-15 | four-reviewer panel |
+
+## Adversarial panel, 2026-09-15 — what it changed here
+
+Full report and the four harness questions: `../ADVERSARIAL_PANEL.md`. Fixed in `0e8ea27`:
+
+- **`F1` — a regression this phase shipped.** `resolve()` proves a handle exists by asking for a
+  546-satoshi destination, and the new sum check ran on that probe ⇒ a host that does not echo the
+  probe amount was reported an **invalid recipient** and could not be paid at all. ⛔ **§2 bullet 4,
+  `D-5`, the doc comment and the commit message all claimed the resolve path was untouched. That was
+  a code reading and it was wrong.** Now the probe gets the shape checks only.
+- **`F2`** — `reqwest` follows redirects by default and permits https→http, so the https requirement
+  could be walked around with a `302`. Redirects are now off, tested against a real socket.
+- **`F3`** — a rule breach fell through to the same host's basic endpoint. Now terminal (422
+  `ERR_PAYMAIL_HOST_REFUSED`), which is what the owner's rule actually says.
+- **`F5`** — host-supplied script length feeds fee estimation, so a host could inflate the debit while
+  honouring the total. Bounded at `MAX_SCRIPT_HEX_LEN`.
+
+⚠️ **Corrected claim for the record:** the resolve path is unchanged *except* that a host whose
+capability URLs are plain http now resolves as invalid. That is deliberate and consistent — such a
+host is unpayable on the send path, so showing it as a valid recipient would only move the failure
+later.
+
+⚠️ `P10c-A4`'s RED is **structural**, not observed. It is acceptable only because `A1`'s live RED
+demonstrates the same absence on the same tree.

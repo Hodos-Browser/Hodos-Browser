@@ -71,7 +71,7 @@ per envelope ⇒ ten).
 | `P10a-A3` | Unit: a receive for an existing `txid:vout` ⇒ refused, row byte-identical | pre-fix: UPDATE branch rewrites derivation fields and `spendable` | row compared before/after by value | T1 | ✅ **GREEN, RED seen** — RED (fix stashed): `overwrite accepted: Ok(())`; GREEN: `Err("…refusing to overwrite")`, row byte-identical, identical re-delivery a no-op |
 | `P10a-A4` | Unit/T2: stale unconfirmed row whose txid is mined but whose stored value ≠ chain ⇒ **not** promoted, flagged | pre-fix: `mark_output_confirmed` called | the promotion path is driven with a stubbed chain answer whose output differs from the row | T1/T2 | ✅ **GREEN, RED seen** — T2 RED (pre-fix wallet): phantom `2cf90ef4…:1` value+1 ⇒ `Marked output … as confirmed`, `confirmed=1`; T2 GREEN (fixed wallet): `NOT promoted`, row deleted, red notification; T1 `chain_output_matches` ×4 |
 | `P10a-A5` | **Live, two wallets:** a genuine PeerPay (a few hundred sats) from wallet B ⇒ credited once in wallet A, correct amount, `peerpay_received` once; the message `amount` cross-check passes | Send the same envelope with the message `amount` edited ⇒ rejected (the cross-check has teeth) | wallet A's `outputs` row and the MessageBox message id; both wallets on dev ports | T2 | 🟡 **INCOMPLETE — poller half OWED** (`PAYMENT_TEST_BATCH.md` M9). Real send made 2026-09-15 (`3798109e…4ab55`, 613,685 sats) but the sender's MessageBox message is 1.76 MB and rejected with 413 (ticket filed); credited **once, correct amount, genuine 495 KB envelope** via `/internalizeAction` instead — the accept-side control holds. Amount cross-check teeth: T1 |
-| `P10a-A6` | `internalize_action`: subject mismatch ⇒ error; nothing credited ⇒ non-200 | pre-fix: 200 with `total_received == 0` | the HTTP status and body, not the log | T1/T2 | ✅ **GREEN, RED seen** — T2 probe, pre-fix: stranger's mined tx ⇒ 200 `unconfirmed` (+ a `transactions` row); mismatch ⇒ warn-only then the fabricated bytes sent to WoC (400 `ERR_BROADCAST_FAILED`). Fixed: 400 `ERR_NO_OUTPUTS_OWNED` / `ERR_SUBJECT_MISMATCH` (no broadcast) / `ERR_INVALID_BEEF`; nothing written |
+| `P10a-A6` | `internalize_action`: subject mismatch ⇒ error; nothing credited ⇒ non-200 | pre-fix: 200 with `total_received == 0` | the HTTP status and body, not the log | T1/T2 | 🔴 **NOT GREEN — downgraded 2026-09-15 by the adversarial panel (`F1-10a`).** What was measured stands: T2 probe, pre-fix, stranger's mined tx ⇒ 200 `unconfirmed` (+ a `transactions` row); mismatch ⇒ warn-only then the fabricated bytes sent to WoC (400 `ERR_BROADCAST_FAILED`); fixed ⇒ 400 `ERR_NO_OUTPUTS_OWNED` / `ERR_SUBJECT_MISMATCH` / `ERR_INVALID_BEEF`. ⛔ **But the probe drove four envelope shapes and never a `basket insertion` output spec** — the arm `D-7` listed as remaining CU-6 work. That arm writes an `outputs` row for ANY output index with **no ownership check**, `insert_output` sets `spendable = 1`, `calculate_balance` has no basket filter, and it adds to `total_received` **before** the `ERR_NO_OUTPUTS_OWNED` gate — so an approved dApp can inflate the displayed balance with a stranger's outputs, repeatable per `txid:vout`, and the new gate cannot fire. Not spendable (coin selection needs a derivation prefix), so it is a ledger-integrity defect, not theft — and it is the vehicle for `F2-10a`. Verified in the tree, not taken on report. ⇒ the row closes when the basket arm is gated and the probe grows that case. See `../ADVERSARIAL_PANEL.md` |
 
 **Two-sided rows:** A1 (reject fabricated) and A5 (accept genuine) are each other's control.
 
@@ -208,3 +208,28 @@ One Rust commit; revert restores the pre-fix parser and promotion. No schema cha
 | adversarial review | ⬜ one panel over 10a+10b+10c after all three land (`HARNESS.md` §6) | | |
 
 **Status 2026-09-15:** 10a landed on Windows as two Rust commits (`57812cf` extraction; fix commit follows). Rows A1–A4, A6 GREEN with RED seen; A5 poller half owed (`PAYMENT_TEST_BATCH.md` M9, sender ticket). 🍎 Mac: rebuild + `cargo test`; A5 as sender when the relay asks.
+
+---
+
+## Adversarial panel, 2026-09-15 — what it changed here
+
+Full report: `../ADVERSARIAL_PANEL.md`. Three corrections to this contract:
+
+1. **`P10a-A6` is no longer GREEN** (row updated above) — `F1-10a`/`F2-10a`.
+2. **`P10a-A2`'s cited accept-side control is not one.** The GREEN block says the pre-existing
+   `beef.rs :: test_beef_roundtrip` exercises the strict parser. It does not — that test uses
+   `to_bytes`/`from_bytes` (V2) and never calls `to_atomic_beef_hex` or `from_atomic_beef_bytes`.
+   The real accept-side evidence is `A5`'s 495 KB internalize, which stands. ⚠️ No **foreign**
+   (wallet-toolbox / PeerPay) Atomic envelope has yet been through the strict parse.
+3. **`P10a-A7` is cited in `a91a34a`'s message and has no row in §4.** Its subject — the one-notice
+   dedupe — is defective in both directions (`F3-10a`): keyed on sender only so a different later
+   attack is log-only, and permanent rather than per-session, so a dismissed sender can never notify
+   again. Any fresh key is a fresh sender, so the attention-DoS the design prevents costs one keygen.
+   Its RED, when written, must be *"eleven fabricated envelopes from eleven fresh sender keys ⇒ eleven
+   notifications"* plus *"dismiss, then a twelfth from a known sender ⇒ silence forever"*.
+
+Also owed, and not a documentation issue: `F4-10a` — stale promotion now **deletes** a genuine mined
+output whose stored `locking_script` is NULL or empty, because `""` can never equal the chain script.
+Such rows demonstrably exist (`handlers.rs` carries a repair routine whose whole job is to find them).
+The old failure mode was "promote wrongly"; the new one is "delete a real coin". One-line fix: skip
+the comparison when the stored script is empty rather than treating absence as mismatch.

@@ -6,13 +6,13 @@
 >
 > **Reorganized 2026-06-29:** the previously-flat folder is now split into
 > `design/`, `implementation/`, `research/` (+ `research/deep-dives/`), and
-> `partner-facing/`. No research was merged or deleted in the reorg — only moved.
+> `external-facing/`. No research was merged or deleted in the reorg — only moved.
 > This README is the map. Cross-references between docs are by **filename in prose**
 > (not clickable links), so they survive the move.
 
 ## Where to start
 
-- **Need to talk to Jake?** → `JAKE_CONVERSATION_PREP.md` — plain-English cheat-sheet for the partner conversation (no jargon). The build's one real blocker is a question for Jake; this explains it.
+- **Need to talk to Jake?** → `JAKE_CONVERSATION_PREP.md` — plain-English cheat-sheet for the conversation with Jake (no jargon). The build's one real blocker is a question for Jake; this explains it.
 - **Building?** → `implementation/IMPLEMENTATION_PLAN_v1.md` — the phased build + test plan. **Start here.**
 - **Need the architecture?** → `design/ARCHITECTURE_TECHNICAL.md` (the canonical three-party design).
 - **Weighing an open decision?** → `design/ARCHITECTURE_OPTIONS_BOTH_WAYS.md` (5 decisions both ways + the Jake agenda).
@@ -39,7 +39,7 @@ re-point it at the new subfolder during the next congruence pass.)
 ## Companion folder (marketing / pitch half)
 
 ```
-C:\Users\archb\Marston Enterprises\Hodos\Product\Native AI Assistant\
+C:\Users\archb\Marston Enterprises\Hodos\Product\Features\Native-AI-Assistant\
 ```
 
 See that folder's `README.md` for the full pitch/product/outreach index.
@@ -89,9 +89,9 @@ Companion studies that go deep on the pieces Hodos would actually have to build 
 | `DEEPDIVE_MAXTHON_FORENSIC.md` | Post-mortem of the BSV-native browser (VBox/VPoint/NBdomain): why the economic loop never closed; patterns to copy vs avoid |
 | `DEEPDIVE_CASUAL_USER_ONBOARDING_UX.md` | How AI browsers onboard + the per-query cost-control UX nobody has solved; design-against the Edwin install failures; proposed first-run flow options |
 
-## `partner-facing/` — external-send docs
+## `external-facing/` — external-send docs
 
-> Written to be shared with external partners. Do **not** add cross-references to
+> Docs written for Jake and John, to be shared with them. Do **not** add cross-references to
 > internal marketing/pitch material inside these.
 
 | Doc | What it is | Notes |

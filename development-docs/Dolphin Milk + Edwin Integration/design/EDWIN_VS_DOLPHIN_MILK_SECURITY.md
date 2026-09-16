@@ -4,7 +4,7 @@
 
 **Written for:** Matt, to build clear mental models before the Jake + John meetings and the AWS pitch.
 **Drafted:** 2026-05-29
-**Status:** Working explainer. Will become a section of the pitch deck and the technical partner briefing.
+**Status:** Working explainer. Will become a section of the pitch deck and the technical briefing for Jake and John.
 
 ---
 

@@ -78,7 +78,7 @@ The quality layer is exactly what makes memory *best* instead of *okay*, so we c
   Memory is core for us, so this one matters a lot."
 
 **One strategic note (worth sitting with, not deciding today):** our single biggest differentiator —
-memory — partly lives inside Jake's closed code. That's a reason to *deepen* the partnership so it's
+memory — partly lives inside Jake's closed code. That's a reason to *deepen* the working relationship with Jake so it's
 reliable on every platform, **and** to make sure we could stand on our own memory layer if we ever had
 to. Name it as a choice, not an accident.
 

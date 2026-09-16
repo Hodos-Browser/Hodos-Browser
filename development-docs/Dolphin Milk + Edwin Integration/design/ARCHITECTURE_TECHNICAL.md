@@ -296,7 +296,7 @@ No Mac-specific *new* work for the envelope system itself — it rides on the ex
 
 ## 9. Open design questions for Jake (the meeting agenda)
 
-These are the engineering decisions the partner conversation has to resolve.
+These are the engineering decisions the conversation with Jake has to resolve.
 
 1. **SecureVault library extraction.** Edwin currently bundles vault + multi-channel inbox + Tauri desktop. For Hodos to link the vault primitives, do we (a) extract a `edwin-vault` crate that both Edwin and Hodos depend on, or (b) reimplement the vault interface in Rust for Hodos using Edwin's schema as spec? Jake's pick.
 
@@ -314,7 +314,7 @@ These are the engineering decisions the partner conversation has to resolve.
 
 ---
 
-## 10. Open design questions for John (parallel partner conversation)
+## 10. Open design questions for John (parallel conversation with John Calhoun)
 
 1. **Wallet URL override + endpoint shim.** Confirmed Hodos-side via Canary A1. Three small patches on our side. Any Dolphin Milk-side changes needed? (Lean: no — Dolphin Milk's client is already flexible.)
 
@@ -341,7 +341,7 @@ These are the engineering decisions the partner conversation has to resolve.
 - `PITCH_EVENT.md` — AWS competition forcing function
 - `EDWIN_VS_DOLPHIN_MILK_SECURITY.md` — the security model comparison this doc builds on
 - `CANARY_A1_WALLET_COMPAT.md` — wallet API compatibility check
-- `JAKE_OUTREACH_DM.md` (marketing) — partner outreach message
+- `JAKE_OUTREACH_DM.md` (marketing) — outreach message to Jake
 - Hodos `CLAUDE.md` — invariants and surface area
 - `cef-native/src/core/PermissionEngine.cpp` — the engine being extended
 - `rust-wallet/src/handlers.rs` — wallet endpoint surface (89+ handlers)

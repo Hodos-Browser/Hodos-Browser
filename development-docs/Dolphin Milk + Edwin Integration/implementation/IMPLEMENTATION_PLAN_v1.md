@@ -2,7 +2,7 @@
 
 > 📁 Part of the **Dolphin Milk + Edwin Integration** doc set — see `../README.md` for the map.
 > **Created:** 2026-06-29. **Status:** the current build plan. Supersedes the install-sequencing in
-> `../partner-facing/INTEGRATION_PLAN_v1.md` §4/§6 and the research-phase entry in
+> `../external-facing/INTEGRATION_PLAN_v1.md` §4/§6 and the research-phase entry in
 > `../research/INTEGRATION_RESEARCH_KICKOFF.md`.
 > **Phase:** BUILD. We are past study. This plan sets a working spine and flags the sub-decisions that
 > are still genuinely open (presented as options, not forced).
@@ -137,7 +137,7 @@ Phase 8  Security hardening + macOS parity + signed installer + e2e
 
 **Build.**
 - **Identity via transport binding:** implement Edwin's `NodeIdentityCoreTransport` (4 methods: `signHttpRequest`, `signEnvelope`, `verifyEnvelope`, `getPublicKey`) against the Hodos Rust wallet's existing secp256k1 + DPAPI/Keychain + BRC-42 stack. Wire Edwin via `createNodeIdentityCoreBinding(transport)`. Precedent: Edwin's own `desktop-binding.ts` already backs IdentityCore with a Rust/Tauri backend. (`../research/EDWIN_NATIVE_PACKAGING_FINDINGS.md` §2.)
-- **One auth flow:** Edwin's gateway runs with `bsvAuth.enabled = true`; the wallet identity signs every gateway-bound request (HTTP + WS) via BRC-103. Token auth becomes vestigial. **Pairing replaces discovery-by-URL** — the wallet signs a pairing handshake; first-connect is one prompt ("Trust the Edwin gateway, identity `02a3…b1`?"). (`../partner-facing/INTEGRATION_PLAN_v1.md` §4.1.2 — promote to design constraint; do **not** carry the gateway-token model into the integrated path.)
+- **One auth flow:** Edwin's gateway runs with `bsvAuth.enabled = true`; the wallet identity signs every gateway-bound request (HTTP + WS) via BRC-103. Token auth becomes vestigial. **Pairing replaces discovery-by-URL** — the wallet signs a pairing handshake; first-connect is one prompt ("Trust the Edwin gateway, identity `02a3…b1`?"). (`../external-facing/INTEGRATION_PLAN_v1.md` §4.1.2 — promote to design constraint; do **not** carry the gateway-token model into the integrated path.)
 - Define the **IPC bridge** for Edwin's localhost web UI to reach Hodos C++ (needed later for the payment-consent modal in Phase 7): a Hodos-registered custom scheme (`hodos://`), a localhost webhook, or a WebSocket from the sidecar to the shell. Settle this here because Phases 6–7 depend on it.
 
 **Test locally.**
@@ -170,7 +170,7 @@ Phase 8  Security hardening + macOS parity + signed installer + e2e
 
 ## Phase 5 — Recall stack
 
-**Scope.** Index-once / retrieve-relevant-snippets recall, running **natively on Windows at chat speed**, with cheap cloud embeddings — fixing the WSL/9P measurement that made standalone Edwin recall *structurally non-functional* on Windows (1m43s vs 0.53s; a ~200× slowdown reading Windows-side content over 9P). (`../research/LESSONS_LEARNED` §6; `../partner-facing/EDWIN_SETUP_FEEDBACK_FOR_JAKE.md` §5.9–5.10.)
+**Scope.** Index-once / retrieve-relevant-snippets recall, running **natively on Windows at chat speed**, with cheap cloud embeddings — fixing the WSL/9P measurement that made standalone Edwin recall *structurally non-functional* on Windows (1m43s vs 0.53s; a ~200× slowdown reading Windows-side content over 9P). (`../research/LESSONS_LEARNED` §6; `../external-facing/EDWIN_SETUP_FEEDBACK_FOR_JAKE.md` §5.9–5.10.)
 
 **Build.**
 - **sqlite-vec** (already an Edwin dep, prebuilt for Win/Mac) as the vector store, indexing native paths (no 9P bridge).
@@ -194,7 +194,7 @@ Phase 8  Security hardening + macOS parity + signed installer + e2e
 - **Guided/conversational setup** — "tell me which folders to use," not "point recall at a collection path"; no JSON5/YAML editing; populate what the UI reads so tabs aren't empty/misleading on first launch.
 - **Honest status surfaces:** Sources/Skills/Workflows show real info on first open ("empty" means empty, not "misconfigured"). Surface the real loaded-skill count, not a management-endpoint 0.
 - **Visible cost + budget cap with alerts:** a spend meter and a hard cap; fiat-denominated display ("$0.001/query") over BSV settlement; never let a user discover a $0 balance via a cryptic `429`. (`../research/deep-dives/DEEPDIVE_CASUAL_USER_ONBOARDING_UX.md` — budget-caps + invisible execution; "AI wallet" language, not "blockchain.")
-- v1 default is **Mode 1 (fully x402)** — no API key needed; BYO-key (Modes 2/3) is a later power-user setting. (`../partner-facing/INTEGRATION_PLAN_v1.md` §3.)
+- v1 default is **Mode 1 (fully x402)** — no API key needed; BYO-key (Modes 2/3) is a later power-user setting. (`../external-facing/INTEGRATION_PLAN_v1.md` §3.)
 
 **Test locally.** Fresh-install walkthrough as a non-technical user: no terminal/YAML touched; routine question costs a fraction of a cent; the spend meter and cap are visible and enforce; every status tab shows accurate info on first open; hitting the cap prompts clearly rather than failing opaquely.
 
@@ -248,9 +248,9 @@ Phase 8  Security hardening + macOS parity + signed installer + e2e
 
 ---
 
-## 11. Blocked-on-partners register (the agenda)
+## 11. Blocked-on-Jake-and-John register (the agenda)
 
-Consolidated from `../design/ARCHITECTURE_OPTIONS_BOTH_WAYS.md` "What to Ask Jake," `../design/ARCHITECTURE_TECHNICAL.md` §9–10, and `../partner-facing/INTEGRATION_PLAN_v1.md` §8. **Bold = blocks a critical-path phase.**
+Consolidated from `../design/ARCHITECTURE_OPTIONS_BOTH_WAYS.md` "What to Ask Jake," `../design/ARCHITECTURE_TECHNICAL.md` §9–10, and `../external-facing/INTEGRATION_PLAN_v1.md` §8. **Bold = blocks a critical-path phase.**
 
 **Jake (Edwin):**
 1. **Transport-binding blessing** — is `createNodeIdentityCoreBinding` / `NodeIdentityCoreTransport` a stable, supported, public integration surface? **(Blocks Phase 3.)** Yes → Hodos wallet backs IdentityCore. No → wait on native companion (#2).

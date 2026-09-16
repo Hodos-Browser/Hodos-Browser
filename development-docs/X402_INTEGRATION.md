@@ -1,8 +1,8 @@
 # x402 Integration — what we have, what's missing, what it costs
 
-> **Created:** 2026-08-07 · **Updated:** 2026-08-26 (**BRC-166 read in full** from PR #231 — wire format, `payloadFormat.kind` mode discriminator, and "Overpayment MUST be accepted" now specified, closing §9 target B's open question, §9b; **BRC-120 name collision recorded**, §1). Previous: 2026-08-25 (status re-verified — still open/`blocked`; andyrowe's approval remains the only review; no new comments; 11 commits, head `d14bff7` — an upstream merge plus a prettier-formatting fix to the BSV constants test, §7). Previous: 2026-08-24 (heads `6cfa20a`/`36c1fda` — merge-only, no BSV files, §4a/§8 re-checks carry over; unit/lint workflows still never run, §7) · 2026-08-21 (first review on the PR — andyrowe **APPROVED**, non-maintainer, §7; head `53a8fdf` — merge-only, no BSV files; fork CI identified as a concrete component of `blocked`, §7) · 2026-08-19 (CAIP-2 `bsv` namespace **registered** §5; PR status re-verified at head `f8813af` §7; freshness rule re-checked — still 30s symmetric at `/verify`, §4a/§4c; test matrix §9; decision record §10; draft comment §11) · 2026-08-08 (governance §7; facilitator code read at `9808154` §4c; Cloudflare §6a)
+> **Created:** 2026-08-07 · **Updated:** 2026-09-14 (sweep at head `30a30e8` — still open/`blocked`, 1 review, BSV changes since 09-02 are wording-only; daily upstream merges are automated; merge authority, the Cardano three-PR precedent, two older BSV spec PRs #1844/#1004, and repo provenance recorded, §7). Previous: 2026-08-26 (**BRC-166 read in full** from PR #231 — wire format, `payloadFormat.kind` mode discriminator, and "Overpayment MUST be accepted" now specified, closing §9 target B's open question, §9b; **BRC-120 name collision recorded**, §1). Previous: 2026-08-25 (status re-verified — still open/`blocked`; andyrowe's approval remains the only review; no new comments; 11 commits, head `d14bff7` — an upstream merge plus a prettier-formatting fix to the BSV constants test, §7). Previous: 2026-08-24 (heads `6cfa20a`/`36c1fda` — merge-only, no BSV files, §4a/§8 re-checks carry over; unit/lint workflows still never run, §7) · 2026-08-21 (first review on the PR — andyrowe **APPROVED**, non-maintainer, §7; head `53a8fdf` — merge-only, no BSV files; fork CI identified as a concrete component of `blocked`, §7) · 2026-08-19 (CAIP-2 `bsv` namespace **registered** §5; PR status re-verified at head `f8813af` §7; freshness rule re-checked — still 30s symmetric at `/verify`, §4a/§4c; test matrix §9; decision record §10; draft comment §11) · 2026-08-08 (governance §7; facilitator code read at `9808154` §4c; Cloudflare §6a)
 > **Status:** Research complete. **Decision recorded (§10): items 1,2,3,5,6 → a `beta.4`/feature branch; hold 4 and 7. Not a beta.3 tail item.** No code written. **Item 7 of §3 remains blocked on spec — do not "fix" it.**
-> **Context:** [x402-foundation/x402 PR #2890](https://github.com/x402-foundation/x402/pull/2890) — `feat(bsv): add exact scheme support for BSV`, by sirdeggen (Deggen), **open**, 43 files / +4,368 −7 lines, 11 commits, head `d14bff7` (2026-08-25).
+> **Context:** [x402-foundation/x402 PR #2890](https://github.com/x402-foundation/x402/pull/2890) — `feat(bsv): add exact scheme support for BSV`, by sirdeggen (Deggen), **open**, 26 commits, head `30a30e8` (2026-09-12; re-verified 2026-09-14).
 > **TL;DR:** We already ship the hard part. x402 support is a **serialization adapter**, not new crypto.
 
 ---
@@ -352,12 +352,96 @@ approved it, never that a test ran.
 ⭐ **No change to the §10 decision.** Still do not implement. The gate is still a paying BRC-29
 `exact` server, not a merge.
 
+### Sweep 2026-09-14 — head `30a30e8`, plus who actually merges
+
+Verified via GitHub API unless marked *inference*.
+
+**The commit link is to the fork, shown through the upstream URL.** `github.com/x402-foundation/x402/commit/30a30e8…`
+resolves because GitHub shares objects between a repo and its forks. The commit lives on
+`bsv-blockchain/x402@feat/bsv-exact-scheme`. `compare main...30a30e8` on the foundation repo =
+**ahead 26, behind 0** — nothing from #2890 is on foundation `main`.
+
+| | State at 2026-09-14 |
+|---|---|
+| **#2890** | OPEN, `mergeable_state: blocked`, **26 commits**, head `30a30e8` (2026-09-12 09:07 UTC), `author_association: NONE` |
+| **Reviews** | Still 1 — andyrowe, 2026-08-19. 26 days without a second review; TSC engagement still zero |
+| **Comments** | 37 — none since 2026-08-18 |
+| **CI** | Now visible as named runs: `Lint`, `Run Unit Tests`, `Format`, `Package Lock`, `Check Go`, `Check Python` all **`action_required`** (queued awaiting maintainer approval, never executed). `check-verified-commits` ✅, `labeler` ✅, `Vercel` ❌ "Authorization required to deploy" |
+
+**What `30a30e8` is:** `Merge remote-tracking branch 'upstream/main'`. Its first-parent diff is six
+upstream files — Go and Python `bazaar` facilitator route-template decode fixes and their changelog
+entries. No BSV file.
+
+**BSV-file changes since the 09-02 sweep (read via path-filtered commit history, because
+`compare` caps at 300 files):**
+
+- `92fc793` (sirdeggen, 09-03) — `docs(bsv): note CAIP-2 bsv namespace is registered`. Wording only
+  in `scheme_exact_bsv.md`, the package README and a doc comment in `constants.ts`: "registration in
+  progress" → "registered", plus a link to `bsv/caip2.md`. No normative change.
+- `23fb0cb` (09-08) — `pnpm-lock.yaml` regenerated after an upstream merge (+2 −1).
+- Nothing under `go/` or `python/` for BSV.
+- `DEFAULT_PAYMENT_WINDOW_MS = 30_000` still in `constants.ts` at `30a30e8`; `facilitator/scheme.ts`
+  untouched since `d14bff7`. **§4a freshness rule unchanged; item 7 stays blocked.**
+
+**The daily merges are automated.** 17 of the 26 commits are authored and committed as `Claude
+<noreply@anthropic.com>` (GitHub maps that email to the `claude` account), almost all at 09:07–09:20
+UTC, one per day. sirdeggen's own two commits on 09-03 merge from a remote named `foundation/main`;
+the automated ones merge from `upstream/main`. *Inference:* a scheduled Claude Code job on a
+separate clone with push rights to the `bsv-blockchain` fork keeps the branch current; Deggen
+steps in by hand for content changes. This matters for CONTRIBUTING's warning about "unreviewed AI
+output" (§7): the PR history is now mostly bot merges, while its tests have never run.
+
+#### Who can merge
+
+- **Merges are done by `phdargen`.** Of the 150 most recent merged PRs (all after the 2026-07-14
+  operational launch), phdargen merged 142 and CarsonRoscoe 8. Neither profile names an employer;
+  do not guess one.
+- **Deggen cannot merge.** #2890 is his only PR in the repo; his association is `NONE`. He pushes to
+  the BSV Association fork and waits for a maintainer, like any outside contributor.
+- `CODEOWNERS` has network-maintainer teams for `evm`, `svm`, `stellar`, `aptos` and `avm`, under a
+  `core` team that owns `/specs/`. **There is no `bsv` team**, so a BSV spec defaults to `core`.
+- The only public org member is `lgalabru` (Ludo Galabru, Solana Foundation). Private membership is
+  not visible to us.
+- `TSC.md` unchanged: Coinbase (Erik Reppel), Cloudflare (Rohin Lohe), Stripe (Steve Kaliski).
+
+#### ⭐ The Cardano precedent confirms the three-PR reading
+
+Cardano went through the documented workflow and landed. Spec-only **#1093 merged 2026-04-23**;
+implementation **#2537** (fabianbormann, 99 files, +18,673, 108 commits) opened 2026-06-01, went
+through repeated inline review from phdargen and a Cardano-side reviewer in late June, and **merged
+2026-09-09 by phdargen**; docs (#3429) and SDK follow-ups (#3430) merged the same day. A large
+implementation PR is acceptable. What #2890 lacks is a merged spec PR ahead of it.
+
+#### ⚠️ Two older BSV spec PRs we had not recorded
+
+| PR | Author | Opened | Shape | State |
+|---|---|---|---|---|
+| **#1844** `spec: add exact scheme for BSV network` | sgbett (Simon Bettison) | 2026-03-27 | Spec only, 1 file, `specs/schemes/exact/scheme_exact_bsv.md` — **the same path as #2890** — with a different design: no facilitator, the resource server broadcasts to ARC | Open, idle since 2026-04-02 |
+| **#1004** `spec: Add draft TXID payment payload specification` | alftom | 2026-01-21 | Spec draft, 2 files | Open, idle since 2026-04-27 |
+
+Read so far: titles, descriptions, file lists only — neither spec body has been read. Consequence:
+a maintainer turning to BSV will find three open proposals, two of which write the same file with
+incompatible settlement models. *Inference:* that is another reason a maintainer would leave BSV
+alone until the BSV side presents one spec.
+
+#### Repository provenance — it is the Linux Foundation's x402 Foundation repo
+
+- Repo created **2025-02-21**; first commit `e01a090` by erik, **2025-02-16**. It is the original
+  Coinbase repo, moved: the `x402-foundation` org was created **2026-04-01**, and `coinbase/x402`
+  is now a **fork of** `x402-foundation/x402` created 2026-04-02, the day of the LF announcement.
+- Chain of links: the LF operational-launch press release points to `x402.org`; `docs.x402.org`
+  links to `github.com/x402-foundation/x402`; the repo's homepage is `x402.org`. The GitHub org
+  itself is not domain-verified, and the LF press release does not link the repo directly.
+- ~6,600 stars, ~2,000 forks, 1,218 commits on `main`.
+
+**No change to the §10 decision.**
+
 ---
 
 ## 8. Open questions
 
 1. Does PR #2890 merge, and in what shape? **Narrowed 2026-08-19.** The network-identifier question is no longer part of this — CAIP-2 `bsv` is registered (§5), so the only remaining *technical* maintainer call is the **recipient-wallet facilitator model** (PR reviewer note 2: the facilitator is the merchant's own BRC-100 wallet rather than a third-party service). Structural mismatch with the 3-PR workflow (§7) remains the leading explanation for the silence; the 2026-08-19 rebase shows the author is keeping it mergeable, so "abandoned" is not the explanation. **2026-08-21:** the review-side silence is no longer total — andyrowe approved (the PR's first review, §7) — but that is peer review, not the maintainer call this question turns on; don't over-read it.
-2. Does the freshness rule adopt server-issued `expiresAt` or the past-side-at-verify extension (§4a/§4c)? **This is the live one** — it determines whether item 7 in §3 is work at all. **Re-checked 2026-08-19: no change at head `f8813af`; re-checked 2026-08-21: `53a8fdf` is merge-only, no BSV files (§4a), so no change; re-checked 2026-08-24: `6cfa20a`/`36c1fda` likewise merge-only (§4a), so no change.**
+2. Does the freshness rule adopt server-issued `expiresAt` or the past-side-at-verify extension (§4a/§4c)? **This is the live one** — it determines whether item 7 in §3 is work at all. **Re-checked 2026-08-19: no change at head `f8813af`; re-checked 2026-08-21: `53a8fdf` is merge-only, no BSV files (§4a), so no change; re-checked 2026-08-24: `6cfa20a`/`36c1fda` likewise merge-only (§4a), so no change; re-checked 2026-09-14 at `30a30e8`: only wording changes to BSV files, `DEFAULT_PAYMENT_WINDOW_MS` still 30 000 (§7), so no change.**
 3. Do we implement the adapter speculatively, or wait for merge? **Decided 2026-08-19 — see §10.** Nothing upstream *gates* us: Hodos is a C++/Rust client that doesn't consume the TS SDK, so we could emit a conforming `PAYMENT-SIGNATURE` today. The demand gate has **partly** moved: bsv.cx now advertises `bsv:mainnet` in production (plain-P2PKH variant) — so there is a live server that exercises the network identifier and amount exactness, though not the BRC-29 `exact` payload (§9). A merge alone still won't unblock us; a paying BRC-29 `exact` server would, and until then Deggen's example server from the PR branch is the only one.
 4. Should we propose header-name alignment to BRC-121 itself, or let x402 supersede it? Probably the latter.
 5. ~~Governance~~ — **resolved, see §7.**

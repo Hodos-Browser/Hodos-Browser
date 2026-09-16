@@ -200,6 +200,7 @@ the mechanism, not for the production numbers, which is why Half 2 is owed at th
 | 2 → 3 | 2026-08-26 | 🟢 **GREEN both halves** (see run log) | ⬜ needs a real payment | ⬜ live app, human | 🟢 T1 — 73 engine tests · ⬜ T2 e2e | ⬜ needs a payment | 🟡 T1 only (6 tests); real N−1→N owed at RC |
 | 3 → 4 | 2026-09-01 | 🟢 **GREEN both halves** (run log) | ⬜ needs a real payment | 🟡 **PARTIAL** — the arms this phase touched are green; file-dialog arm + a clean prevent-close pair still owed | 🟢 T1 (preflight `T1a`) · ⬜ T2 e2e | ⬜ needs a payment | 🟡 T1 only; real N−1→N owed at RC |
 | 4 → 5 | 2026-09-02 | 🟢🔴 **GREEN both halves + the injected RED, both directions — first time this sprint** (run log) | ⬜ needs a real payment | ⬜ not touched by this phase | 🟢 T1 (preflight `T1a`) · ⬜ T2 e2e | ⬜ needs a payment | 🟡 T1 only; real N−1→N owed at RC | |
+| **10 → next** | **2026-09-15** | 🟢🔴 **GREEN both halves, exact subject** (run log) | ⬜ needs a real payment | ⬜ subject touched by 10b's `overlay_close` arms — owed, see run log | 🟢 T1 (75 engine tests) · ⬜ T2 e2e | 🟢 T1 (`a6_` pair) · ⬜ T2 needs a payment | 🟡 T1 only; real N−1→N owed at RC | **R-DUST 🟢 (16 tests) · R-PEERPAY-DELIVERY 🟢🔴 half 1 both tiers · R-ONE-CLICK-ONE-SPEND 🟢 T1** |
 | **8 → next** | **2026-09-08** | ⬜ **subject untouched** — see run log; no gating, header or origin-derivation change | ⬜ needs a real payment | ⬜ subject untouched (no C++, no overlay) | 🟢 T1 (preflight `T1a`) · ⬜ T2 e2e | ⬜ needs a payment | 🟡 T1 only; real N−1→N owed at RC | **R-DUST 🟢🔴 GREEN + RED** |
 
 ---
@@ -608,3 +609,110 @@ regression introduced here.
 ⛔ **Production was not touched.** The owner's installed browser, wallet (`31301`, `/health` ok) and
 adblock (`31302`) were running throughout; every check above ran against the build tree or the test
 harness. No dev stack was started, so no port or data directory was contended.
+
+---
+
+# Boundary run: Phase 10 → next, 2026-09-15 — 🟡 INCOMPLETE (honestly)
+
+Run after 10a/10b/10c/10d landed and after the four-reviewer adversarial panel
+(`phase-10-critical-advisories/ADVERSARIAL_PANEL.md`) produced fixes of its own. Recorded
+**INCOMPLETE**, not PASS: three checks need a real payment and one needs ten real minutes.
+
+### What Phase 10 put at risk
+
+| Check | Why this phase touched it |
+|---|---|
+| **R-INTEXT** | 10c's whole defect is that a paymail send is an **internal** `create_action`, so nothing re-priced the built transaction. The fix had to reject in the handler without routing an internal call through the external gate |
+| **R-ONE-CLICK-ONE-SPEND** | 10b is its source; the panel then changed the timeout path underneath it |
+| **R-PEERPAY-DELIVERY** | 10d is its source; the panel found a hole in the selection half (`F1-10d`) |
+| **R-COUNT** | CU-8 rewrote how the counters are read and written |
+| **R-CLOSE** | 10b added `ShowNextQueuedPrompt()` to both platforms' `overlay_close` arms |
+
+### R-INTEXT — 🟢 GREEN, both halves, and this is the exact SUBJECT the check asks for
+
+📏 One dev-browser session, asserted against the **Rust** side, not the UI:
+
+```
+86 x  R-INTEXT trust: path=…  requesting_domain=<none:internal>
+ 1 x  R-INTEXT trust: path=/getVersion  requesting_domain=example.com
+```
+
+and exactly **one** engine decision in the whole session:
+
+```
+🛡️ engine Prompt (domain-trust) minted approval id=8430eff5… for domain=example.com
+   endpoint=/getVersion type=DomainApproval reason=new_domain_no_manifest
+```
+
+⭐ The discriminating observation is **86 against 1**: the wallet UI's own traffic reached Rust with
+no requesting domain and produced no decision at all, while one call from `https://example.com`
+carried **exactly the page host** and was gated. Same target (`127.0.0.1`), opposite outcomes,
+discriminated only by the frame origin the renderer cannot forge.
+
+⛔ The prompt was **not approved** — approving would make `example.com` a standing approved domain and
+render every future run of this check vacuous (the P0.8 trap). Verified clean afterwards: **no
+`example.com` row in `domain_permissions`**.
+⚠️ The *injected* RED (force internal-as-external and back) was not re-run; it needs a code change.
+The two halves remain each other's control, as at every prior boundary.
+⚠️ `RUST_LOG=hodos_wallet=debug` puts the middleware line in the **log file**, not stderr —
+`duplicate_to_stderr(Duplicate::Info)`. Reading stderr alone shows zero and means nothing.
+
+### R-PEERPAY-DELIVERY half 1 — 🟢 GREEN, T1 **and** T2, with a working instrument control
+
+T1: `peerpay_selection_tests` (6, including the panel's new `f1_consolidation_pass_also_skips_large_parents`),
+`peerpay_message_fits_tests` (4), `permanence_tests` (1), `payment_claim_block_tests` (2) — all green.
+
+T2, dev wallet with `HODOS_MESSAGEBOX_MAX_BODY_BYTES=2000`, `POST /wallet/peerpay/send` 700 sats:
+
+| | Before | After |
+|---|---|---|
+| spendable sats | 29,087,233 | **29,087,233** |
+| `peerpay_outbox` rows | 0 | **0** |
+| `pending-%` reservations | 0 | **0** |
+| `transactions` rows | 529 | 530 — the refused attempt, `status = failed`, `failed_at` set |
+
+⇒ **422 `ERR_PEERPAY_MESSAGE_TOO_LARGE`** (`messageBytes: 6755`, `capBytes: 2000`), no funds moved, no
+outbox row, no reserved coin. The built txid `56bb940b…f4bf` returns **404** on WhatsOnChain while the
+day's accept-side control txid `48b77e68…052a` returns **200** — so the 404 is the transaction's
+absence, not a broken query. That control is the point: a 404 alone proves nothing about the instrument.
+
+⭐ Worth recording rather than glossing: a refused send **does** leave a `transactions` row, marked
+`failed`. That is correct and deliberate (the activity log must show every spend attempt) and the
+contract's "leaves the wallet clean" means no outbox row, no notice, no reserved coin — not no record.
+
+### R-ONE-CLICK-ONE-SPEND — 🟢 T1; T2 was run inside 10b and is cited, not re-run
+
+`a6_red_three_step_sequence_lets_the_whole_burst_go_silent` + `a6_one_lock_decision_never_exceeds_the_session_cap`
+green; `pay402_reuse_key_tests` (4) green. The T2 halves (one click ⇒ one txid; the queued request then
+showing its own amount) were measured live during 10b with their RED, and re-running them costs real
+cents — cited, per this document's own rule for expensive REDs.
+⚠️ **New debt from the panel:** `F4-10b` — the session cap resets when the requesting domain changes,
+so `a6_one_lock…` (single domain) cannot see a page alternating between two hostnames it controls.
+Pre-existing, fixed by CU-7's persisted ledger in beta.4; the multi-domain arm goes in with it.
+
+### R-DUST — 🟢 T1, 16 tests
+
+Including `a3_smallest_sufficient_never_takes_a_token_reserved_output`, which is the arm 10d added.
+The floor still holds on both new selectors.
+
+### R-PERIM — 🟢 T1 (75 engine tests), ⬜ T2 e2e owed — unchanged from every prior boundary
+
+### R-CLOSE — ⬜ OWED, and this boundary **added** to it
+
+10b posts `ShowNextQueuedPrompt()` from both platforms' `overlay_close` arms, so the close path is no
+longer only a dismissal — it advances the consent queue. None of the three close paths was exercised
+here (`SendInput` clicks are dropped in the agent session). ⚠️ The panel's `F2-10b` is exactly this
+seam: a connect prompt displacing a shown kind prompt parks the whole queue for ten minutes. Human
+row **W7** covers the money half; `F2-10b` needs an owner decision on scheduling.
+
+### R-GOLD / R-COUNT / R-UPDATE — ⬜ NOT RUN, same reasons as every prior boundary
+
+R-GOLD and R-COUNT need a real auto-approved payment (`PAYMENT_TEST_BATCH.md` M1/M2); R-UPDATE's real
+N−1 → N apply is owed at the RC. ⛔ Owed, not waived.
+
+### What this boundary establishes
+
+The two invariants Phase 10 could most plausibly have broken — internal-never-prompts and
+PeerPay-never-leaves-undeliverable — were measured directly, both with working controls, and both
+hold. Everything still open is either pre-existing debt identical to the previous four boundaries, or
+newly *recorded* debt from the adversarial panel, which is a better place for it than undiscovered.

@@ -11,6 +11,52 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-15f (**Windows**) — the Phase 10 adversarial panel, and ⚠️ **shared C++ you must rebuild**
+
+Windows is at the panel fixes on `origin/0.4.0`. A four-reviewer adversarial panel over 10a/10b/10c/10d
+(`phase-10-critical-advisories/ADVERSARIAL_PANEL.md`) found eight defects worth fixing and several worth
+recording. ⭐ **Read the panel report before your next Phase 10 work** — three of the four reviews found
+the same failure shape: *a test whose subject is not the production call site*.
+
+## ⚠️ C++ this round — rebuild after your next rebase (standing rule)
+
+| Commit | Files | Platform split |
+|---|---|---|
+| `12c76bd` | `cef-native/src/core/HttpRequestInterceptor.cpp`, `cef-native/include/core/PendingAuthRequest.h` | ⚠️ **shared, no `#ifdef`** — nothing to port, but rebuild. The prompt-queue entry gains `createdAt` and a freshness skip; the HTTP-path timeout now pops its entry like the IPC path always did |
+
+## 🔴 The one you should care about most
+
+`F1-10b`: **10b created a path where an expired prompt could come back and spend real money.** The HTTP
+transport's timeout answered the page *"Approval timeout"* but never popped the pending entry, and 10b's
+new queue had no freshness test — so that dead entry could reach the screen minutes later, and Approve on
+it re-issues the wallet call with `X-User-Approved` and **broadcasts**, into a response nobody is reading.
+Fixed; its live RED is owed as human row **W7** (it needs a 10-minute wait and a real click).
+
+## Also fixed (Rust + React, `cargo test` / rebuild)
+
+- `F1-10c` ⛔ **a regression 10c shipped**: the recipient-preview probe asks for 546 sats, and the new sum
+  check ran on it, so a host that does not echo the probe amount showed as an **invalid recipient** and
+  could not be paid at all. The BRFC's own worked example behaves that way. The contract claimed three
+  times that resolve was untouched — a code reading, and wrong.
+- `F2-10c`: `reqwest` follows redirects by default and permits https→http, so the https rule could be
+  walked around with a `302`. Redirects are off now.
+- `F3-10c`: a rule breach fell through to the same host's basic endpoint. Terminal now.
+- `F1-10d`: the lazy-consolidation pass in coin selection had **no large-parent check**, and production
+  enables consolidation for every send — so 10d's own defect could recur through a small backup-change
+  coin. Its tests missed it because they pass `consolidation = None` and production passes `Some`.
+
+## 🍎 Yours
+
+1. **Rebuild** (shared C++) and re-run your suite. ⛔ `cargo test --lib` matches **zero** paymail tests and
+   still reports `ok` — `paymail` is a binary-only module. Use `--bin hodos-wallet`.
+2. **Read the panel report's "CONFIRMED, not fixed" section** — `F1-10a` (`internalizeAction`'s
+   basket-insertion arm is ungated and inflates the displayed balance) and `F2-10b` (a site can blank the
+   consent surface for ten minutes) are owner decisions, not Windows decisions. If you have a view, put it
+   in your next round.
+3. Nothing visual is owed to you from this round.
+
+---
+
 # 📋 ROUND 2026-09-15e (**Windows**) — Phase 10c (CU-2, paymail outputs) LANDED: **Rust only, no C++**
 
 Windows is at `8ee4643` on `origin/0.4.0`. One commit, `8ee4643`, touching `rust-wallet/src/paymail.rs` and

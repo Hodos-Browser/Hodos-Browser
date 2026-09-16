@@ -156,7 +156,7 @@ The relevance to the Futran grant becomes narrower:
 
 So the AWS grant work would be smaller: *"deploy and operate a Hodos-branded signing node on AWS as one operator in the John/BINARY signing network"* — rather than *"build the whole signing system on AWS."* That's a cleaner, smaller, more honest scope for $25K Futran hours.
 
-**Pitch-side framing if asked:** *"Our partners are building a permissionless threshold-signing network as a public good. We use it; we may also operate a node on AWS as a contributor to the network."*
+**Pitch-side framing if asked:** *"John Calhoun and Binary Distributed Technologies are building a permissionless threshold-signing network as a public good. We use it; we may also operate a node on AWS as a contributor to the network."*
 
 ---
 
@@ -166,13 +166,13 @@ So the AWS grant work would be smaller: *"deploy and operate a Hodos-branded sig
 
 **Don't put it as a *promise* in the pitch deck.** It's not our work, and the timeline is John's not ours.
 
-**DO mention it as evidence the partner ecosystem is building real infrastructure.** That's a different claim and a true one. If asked about the security ceiling or partner-network maturity:
+**DO mention it as evidence the BSV ecosystem is building real infrastructure.** That's a different claim and a true one. If asked about the security ceiling or ecosystem maturity:
 
-> *"Our partners are already shipping the next layer beyond v1 — John Calhoun and Binary Distributed Technologies just announced a permissionless threshold-signing network for BRC-100 wallets, in Rust/WASM, based on the modern CGGMP construction. It means no single party holds the full signing key, and the math itself catches any party that tries to cheat. The same trick big banks use to protect billions, except permissionless. We don't have to build that — we'll integrate it once it ships. That's the value of building inside an ecosystem instead of alone."*
+> *"Others in the BSV ecosystem are already shipping the next layer beyond v1 — John Calhoun and Binary Distributed Technologies just announced a permissionless threshold-signing network for BRC-100 wallets, in Rust/WASM, based on the modern CGGMP construction. It means no single party holds the full signing key, and the math itself catches any party that tries to cheat. The same trick big banks use to protect billions, except permissionless. We don't have to build that — we'll integrate it once it ships. That's the value of building inside an ecosystem instead of alone."*
 
-This is honest, technically literate, name-drops two partners credibly without promising what isn't ours to promise.
+This is honest, technically literate, names John Calhoun and Binary credibly without promising what isn't ours to promise.
 
-**Tier classification:** previously "Tier-3 what-becomes-possible." Now legitimately **Tier-2 "designed by partners, not yet shipped, integration path clear."** Because it's BRC-100 compatible, the integration work on Hodos's side is just "talk to the signing network via overlay-discovered nodes for any envelope-gated action."
+**Tier classification:** previously "Tier-3 what-becomes-possible." Now legitimately **Tier-2 "designed by John Calhoun and Binary, not yet shipped, integration path clear."** Because it's BRC-100 compatible, the integration work on Hodos's side is just "talk to the signing network via overlay-discovered nodes for any envelope-gated action."
 
 **The Mines connection deepens here.** Mitch Burcham (BINARY founder, CSM) is a co-builder of the signing network with John. So the "Mines alumni in the BSV community" framing isn't just nominal — it's *infrastructure-deep.* Worth a sentence in the Beck-aimed framing.
 

@@ -1,6 +1,6 @@
 # Hodos + Edwin + Dolphin Milk — Integration Plan
 
-> ℹ️ **PARTNER-FACING / PARTLY SUPERSEDED (2026-06-29).** This is the external-send integration
+> ℹ️ **EXTERNAL-FACING / PARTLY SUPERSEDED (2026-06-29).** This is the external-send integration
 > overview written for Jake, John, and Calhoun. Its §1–§3 (three-party architecture, bundling intent,
 > API-key/cost-mode UX) and §7 (test plan) remain useful, but its **Windows install sequencing (§4.1,
 > WSL-based)** has been overtaken by the native-sidecar, no-WSL direction. For the current internal build
