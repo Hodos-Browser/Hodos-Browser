@@ -392,13 +392,57 @@ async fn cache_parent_transactions(state: &web::Data<AppState>, txids: &[String]
 /// mined" proves the stored value only if the value was read from THAT
 /// transaction. The stale-promotion path used to check the txid alone; this is
 /// the comparison it was missing. Pure — driven by `P10a-A4`'s unit tests.
-pub(crate) fn chain_output_matches(body: &serde_json::Value, vout: u32, satoshis: i64, script: &[u8]) -> bool {
-    let Some(vouts) = body.get("vout").and_then(|v| v.as_array()) else { return false; };
-    let Some(out) = vouts.iter().find(|o| o.get("n").and_then(|n| n.as_u64()) == Some(vout as u64)) else { return false; };
-    // WoC reports value in BSV as a float; round to the satoshi.
-    let chain_sats = out.get("value").and_then(|v| v.as_f64()).map(|bsv| (bsv * 100_000_000.0).round() as i64);
-    let chain_script = out.get("scriptPubKey").and_then(|s| s.get("hex")).and_then(|h| h.as_str());
-    chain_sats == Some(satoshis) && chain_script == Some(hex::encode(script).as_str())
+/// `Some(true)` the chain's output IS the stored row · `Some(false)` it genuinely
+/// differs · **`None` we could not compare** — and the caller must then do
+/// nothing rather than assume the worst.
+///
+/// ⛔ The third case was added 2026-09-16 after the Phase 10 adversarial panel
+/// (`F4-10a`). The first cut returned a bare `bool`, so "I cannot read this" and
+/// "this is a phantom" were the same answer, and the caller **deletes** on that
+/// answer and raises a "payment failed" notice. Two ways a GENUINE mined coin
+/// reached it:
+///   1. the stored `locking_script` is NULL or empty — `get_stale_unconfirmed`
+///      defaults it to `[]`, which can never equal a real script. Such rows
+///      demonstrably exist: `handlers.rs :: wallet_recover_onchain` carries a
+///      repair routine whose whole job is `WHERE locking_script IS NULL OR
+///      LENGTH(locking_script) = 0`;
+///   2. a malformed or partial provider body (no `vout` array, an unreadable
+///      `value`) — note `as i64` **saturates**, so a NaN would silently become 0
+///      and compare unequal.
+/// The old failure mode was "promote a phantom". The new one would have been
+/// "delete a real coin", which is strictly worse.
+///
+/// ⭐ When the script is missing but the value is readable we still compare the
+/// **value**, so the guard keeps its teeth — `P10a-A4`'s RED was a one-satoshi
+/// value difference, and that still fails.
+pub(crate) fn chain_output_matches(body: &serde_json::Value, vout: u32, satoshis: i64, script: &[u8]) -> Option<bool> {
+    // No vout array at all ⇒ not a body we can read. Cannot compare.
+    let vouts = body.get("vout").and_then(|v| v.as_array())?;
+    // The array is readable and has no such output ⇒ the mined tx genuinely does
+    // not carry it. That IS a mismatch, not an unknown.
+    let Some(out) = vouts.iter().find(|o| o.get("n").and_then(|n| n.as_u64()) == Some(vout as u64))
+        else { return Some(false); };
+
+    // WoC reports value in BSV as a float; round to the satoshi. Reject
+    // non-finite values rather than letting `as i64` saturate them into a
+    // plausible-looking number.
+    let chain_sats = match out.get("value").and_then(|v| v.as_f64()) {
+        Some(bsv) if bsv.is_finite() => (bsv * 100_000_000.0).round() as i64,
+        _ => return None,
+    };
+    if chain_sats != satoshis {
+        return Some(false);
+    }
+
+    if script.is_empty() {
+        // Nothing to compare the script against. The value matched, which is the
+        // half with teeth; treat it as a match rather than deleting a real coin.
+        return Some(true);
+    }
+    match out.get("scriptPubKey").and_then(|s| s.get("hex")).and_then(|h| h.as_str()) {
+        Some(chain_script) => Some(chain_script == hex::encode(script).as_str()),
+        None => None,  // the body carries no script — cannot compare
+    }
 }
 
 #[cfg(test)]
@@ -415,27 +459,61 @@ mod stale_promotion_tests {
     fn script() -> Vec<u8> { hex::decode("76a914b3c3d3e3f30000000000000000000000000000000088ac").unwrap() }
 
     /// `P10a-A4` — the row the dev-wallet RED promoted: value off by one sat.
+    /// ⭐ Still a definite mismatch, which is the half of the guard with teeth.
     #[test]
     fn a4_value_mismatch_is_not_a_match() {
-        assert!(!chain_output_matches(&body(), 1, 99_637_620, &script()));
+        assert_eq!(chain_output_matches(&body(), 1, 99_637_620, &script()), Some(false));
     }
 
     #[test]
     fn a4_script_mismatch_is_not_a_match() {
         let mut other = script(); other[5] ^= 0x01;
-        assert!(!chain_output_matches(&body(), 1, 99_637_619, &other));
+        assert_eq!(chain_output_matches(&body(), 1, 99_637_619, &other), Some(false));
     }
 
+    /// A readable body that does not carry output `n` is a genuine mismatch; a
+    /// body we cannot read at all is NOT — it is "unknown".
     #[test]
     fn a4_missing_vout_is_not_a_match() {
-        assert!(!chain_output_matches(&body(), 7, 99_637_619, &script()));
-        assert!(!chain_output_matches(&json!({}), 1, 99_637_619, &script()));
+        assert_eq!(chain_output_matches(&body(), 7, 99_637_619, &script()), Some(false));
+        assert_eq!(chain_output_matches(&json!({}), 1, 99_637_619, &script()), None);
     }
 
     /// The control: the genuine row matches, including float→satoshi rounding.
     #[test]
     fn genuine_row_matches() {
-        assert!(chain_output_matches(&body(), 1, 99_637_619, &script()));
+        assert_eq!(chain_output_matches(&body(), 1, 99_637_619, &script()), Some(true));
+    }
+
+    /// Panel `F4-10a` — ⛔ the deletion this guard would otherwise have caused.
+    /// A GENUINE mined output whose stored `locking_script` is NULL or empty:
+    /// `get_stale_unconfirmed` hands it over as `[]`, which can never equal a real
+    /// script, so the old bare-bool version answered "mismatch" and the caller
+    /// DELETED the row and raised "payment failed" for a real coin. Rows like this
+    /// exist — `wallet_recover_onchain` carries a repair routine that hunts them.
+    #[test]
+    fn f4_empty_stored_script_falls_back_to_the_value_and_does_not_delete() {
+        // right value, no stored script ⇒ a match, not a deletion
+        assert_eq!(chain_output_matches(&body(), 1, 99_637_619, &[]), Some(true));
+        // ⭐ and the guard still has teeth without the script: wrong value still fails
+        assert_eq!(chain_output_matches(&body(), 1, 99_637_620, &[]), Some(false));
+    }
+
+    /// Panel `F4-10a`, second edge — a malformed or partial provider body must be
+    /// "cannot compare", never "phantom". ⚠️ `as i64` SATURATES, so without the
+    /// finite check a NaN silently becomes 0 and compares unequal.
+    #[test]
+    fn f4_unreadable_body_is_unknown_not_mismatch() {
+        let no_value = json!({ "vout": [ { "n": 1, "scriptPubKey": { "hex": "76a914aa88ac" } } ] });
+        assert_eq!(chain_output_matches(&no_value, 1, 99_637_619, &script()), None);
+
+        let bad_value = json!({ "vout": [ { "n": 1, "value": "not a number",
+                                            "scriptPubKey": { "hex": "76a914aa88ac" } } ] });
+        assert_eq!(chain_output_matches(&bad_value, 1, 99_637_619, &script()), None);
+
+        // value matches but the body carries no script to compare against
+        let no_script = json!({ "vout": [ { "n": 1, "value": 0.99637619 } ] });
+        assert_eq!(chain_output_matches(&no_script, 1, 99_637_619, &script()), None);
     }
 }
 
@@ -532,9 +610,18 @@ async fn check_stale_unconfirmed(state: &web::Data<AppState>) -> Result<(), Stri
             // (value + script). A mined txid whose output differs from what we
             // stored is a phantom, and is handled exactly like a dropped tx.
             let chain_body = confirmed_bodies.get(txid);
-            let mismatch = chain_body
-                .map(|body| !chain_output_matches(body, *vout, *satoshis, script))
-                .unwrap_or(false);
+            let verdict = chain_body.map(|body| chain_output_matches(body, *vout, *satoshis, script));
+            // `Some(None)` = the txid is mined but we could not compare the output.
+            // ⛔ Leave the row exactly as it is: promoting it would be the phantom
+            // bug, and deleting it would destroy a real coin (`F4-10a`). It stays a
+            // stale candidate and is re-examined on the next sweep, by which time
+            // the provider body or the stored script may be readable.
+            if let Some(None) = verdict {
+                warn!("   ⚠️  Stale output {}:{} — txid is mined but the output could not be compared (stored script empty or provider body incomplete) — left untouched, not promoted and NOT deleted",
+                      &txid[..std::cmp::min(16, txid.len())], vout);
+                continue;
+            }
+            let mismatch = matches!(verdict, Some(Some(false)));
             if mismatch {
                 warn!("   🚫 Stale output {}:{} — txid is mined but the chain's output differs from the stored row ({} sats) — NOT promoted",
                       &txid[..std::cmp::min(16, txid.len())], vout, satoshis);
