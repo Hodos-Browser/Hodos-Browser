@@ -3271,8 +3271,11 @@ static bool tryHandlePendingResponse(
     // here would let the kind gate's replay path Proceed without re-checking
     // that grant (a privacy-perimeter bypass). Only kind-dispatch prompts carry
     // the replay token.
-    const bool isDomainTrustPrompt =
-        env.promptType == "domain_approval" || env.promptType == "manifest_connect_bundle";
+    // Phase 10e (panel `F3-10b`) — one list, in `core/PromptTypes.h`. This used to
+    // carry its own copy that omitted `brc100_auth`, which `isConnectPromptType`
+    // included. A connect-type entry holding a single-use approval token would be
+    // replayed by `popConnectForDomain`'s fan-out — CU-1, reopened.
+    const bool isDomainTrustPrompt = hodos::IsDomainTrustPromptType(env.promptType);
     if (!isDomainTrustPrompt) {
         resume.headersOnApprove["X-User-Approved"] = env.approvalId;
     }

@@ -7,6 +7,7 @@
 #include <map>
 #include <mutex>
 #include <chrono>
+#include "PromptTypes.h"   // sibling; quoted include resolves next to this header
 
 // Phase 2.5 Commit 6 (sub-step 6.a) — discriminator for how a resolved
 // pending request resumes work. The HTTP path keeps its existing behavior
@@ -318,8 +319,10 @@ public:
     // and re-evaluated fresh). A kind prompt (payment, rate limit, scoped grant,
     // certificate, key reveal) carries its own single-use approval and must be
     // answered by its own click.
+    // Phase 10e: the list itself now lives in `core/PromptTypes.h`, so this and
+    // `isDomainTrustPrompt` cannot drift apart again (panel `F3-10b`).
     static bool isConnectPromptType(const std::string& type) {
-        return type == "domain_approval" || type == "brc100_auth" || type == "manifest_connect_bundle";
+        return hodos::IsConnectPromptType(type);
     }
 
     // Pop only the connect-type requests for a domain; kind prompts stay queued.
