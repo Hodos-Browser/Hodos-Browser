@@ -98,13 +98,18 @@ Measured: **27 nonstandard txs = 420,865 bytes = 39.0% of the block for 2.1% of 
 
 At the live rate (100 sat/KB, BSV $12.93):
 
-| Protocol | Per transfer | Cost |
-|---|---|---|
-| **BOLT** | ~19 KB | **~1,970 sat ≈ $0.025** |
-| BSV21 | ~450–500 B | ~50 sat ≈ $0.0006 |
-| Plain P2PKH | ~250 B | ~25 sat ≈ $0.0003 |
+⛔ **CORRECTED 2026-09-16 — the original fiat column was 100× too high on every row** (caught by Matt: "2.5 cents seems kind of high"). 1,970 sat ÷ 100,000,000 × $12.93 = **$0.000255**, not $0.025. The satoshi figures and the byte measurements were right; only the dollar conversion was wrong. Corrected table:
 
-**Verdict:** viable for high-value or low-frequency transfers; **prohibitive for the machine-to-machine micropayment story BOLT itself pitches.** That was Kurt's actual economic point and it stands: *"transfer weight IS the product."*
+| Protocol | Per transfer | Cost @ BSV $12.93 | Cost @ BSV $15.745 (2026-09-16) |
+|---|---|---|---|
+| **BOLT** | ~19 KB | **~1,970 sat ≈ $0.00026** (0.026 ¢) | ≈ **$0.00031** (0.031 ¢) |
+| BSV21 | ~450–500 B | ~50 sat ≈ $0.0000065 | ≈ $0.0000079 |
+| Plain P2PKH | ~250 B | ~25 sat ≈ $0.0000032 | ≈ $0.0000039 |
+
+**Verdict, restated on the corrected numbers:**
+- **The multiple stands: BOLT is 40–65× a BSV-21 transfer**, and Kurt's point was about weight, not fiat — *"transfer weight IS the product."* At scale, bytes are the constraint on a chain selling throughput.
+- ⚠️ **But "prohibitive for micropayments" was overstated.** Three hundredths of a cent is not prohibitive in absolute terms; on a 1¢ payment it is roughly a 3% fee, which is card-network territory rather than impossible. On a $1 payment it disappears.
+- **For infrequent transfers — names, titles, high-value instruments — the cost is a rounding error.** That is the case where BOLT's weight simply doesn't matter.
 
 ---
 

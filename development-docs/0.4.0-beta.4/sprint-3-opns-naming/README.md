@@ -76,6 +76,50 @@ stays up, good; that is not a promise. State this on the artifact itself, not on
 | Measuring §10.1 economics, if 3.4 reaches it | Paymail, domain-name bridging, goodwill/premint schemes (`Future-Features/`, archiving) |
 | Feeding spec defects back to BRC-174 | Silent divergence from the merged text |
 
+## ⭐ Verification policy and the ancestry cache — decide in the microscope pass (added 2026-09-16)
+
+**Where this came from:** the public back-to-genesis argument on 2026-09-16 (shruggr, Siggi, Calhoun).
+Full context, positions and the decision not to involve BOLT:
+`Marston Enterprises/Standards/Ecosystem/PROVENANCE_BACK_TO_GENESIS.md`.
+
+**The thing to design here is not the spec, it's the wallet's behaviour.**
+
+**1. What triggers a full ancestry verification?** Resolving a name to display it and paying to a name
+are not the same risk. Being wrong about the first shows the wrong avatar; being wrong about the second
+sends money to a stranger. So verification should scale with value at risk, the way the auto-approve
+engine already scales prompting:
+
+| Action | Proposed bar *(to decide, not settled)* |
+|---|---|
+| Display a name while browsing | Overlay's answer is enough; no walk |
+| Show a name as the counterparty **before** a payment | Walk, or a cached result for that name |
+| Receive a name transfer into the wallet | Full walk, always |
+| Register a name | N/A — our own mint |
+
+⚠️ **The owner raised the case that decides this:** a user browsing Web3 / Metanet apps or playing games
+could resolve many names quickly. Per-name cost measured at **4–21 transactions, 0.06–0.38 MB**
+(`Marston Enterprises/Standards/BRCs/drafts/consensus-unique-name-tokens/MEASUREMENT_2026-09-04_ancestry-walk.md`).
+A thousand names verified naively is hundreds of megabytes, which a browser wallet should not carry.
+
+**2. Cache segments, not names.** ⭐ The same measurement found **walk length tracks prefix popularity,
+not name length** — names sharing a prefix share the claims along that prefix. So the ancestry is a tree
+with shared branches, and the cache should be keyed on **prefix segments**, not on whole names
+*(inferred from the measurement; not separately measured)*.
+
+Consequences worth testing:
+- **Shallow prefixes are shared by the most names**, so a small cache of them should serve a large share
+  of lookups — the same shape as any popularity-weighted cache.
+- **Claims are immutable once mined**, so a cached segment never needs revalidating. It is a permanent
+  fact, unlike a UTXO's spend status.
+- **The per-name tail is small**; the shared prefix chain is the expensive part, and it is exactly the
+  part that amortises.
+
+**The measurement that settles it, and it is cheap:** resolve a sample of real names, record the
+segments each walk touches, then plot cache size against hit rate. If a few megabytes of popular
+prefixes covers most lookups, the policy above is comfortable and the wallet can verify aggressively. If
+it doesn't, verification has to be rarer and the trigger table gets stricter. **Do this before 3.2
+ships**, since it decides whether resolution can verify inline or must defer.
+
 ## Owed to the microscope pass
 
 | Question | Why it matters |
@@ -84,6 +128,7 @@ stays up, good; that is not a promise. State this on the artifact itself, not on
 | What happens when shruggr's overlay is unavailable — degrade, fail, or fall back to ours? | This is the dependency-risk question, and it should be answered **before 3.2 ships**, not after. |
 | Which parts of BRC-174 are unimplementable as written | **Expect some.** §4 and §10.1 are the likeliest. |
 | Does name registration reuse sprint 2.3's token-spend permission class, or need its own? | A name is a 1-sat output, so the default answer is "reuse" — verify rather than assume. |
+| **What triggers a full ancestry walk, and what does the cache keep?** | See the section above. It decides whether 3.2 can verify inline or must defer, and the measurement that answers it is cheap. |
 
 ## Verified context carried in
 
