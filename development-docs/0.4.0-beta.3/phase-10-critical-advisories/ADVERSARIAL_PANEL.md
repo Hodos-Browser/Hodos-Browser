@@ -198,3 +198,66 @@ Worth recording, because these are the properties most likely to be assumed:
 - **No paymail producer of outputs skips validation**, and the service fee is correctly excluded from
   the approved total.
 - **No integer overflow in 10a's amount comparisons.**
+
+---
+
+# Addendum — what the human sitting found, 2026-09-16
+
+⭐ The panel was four reviewers reading code. This is one person clicking for an hour. **It found a
+defect none of the four reviewers did, and it is arguably the worst-reading of the lot.**
+
+## 🚨 The wallet announced payments it had REJECTED as payments it had RECEIVED
+
+`MainBrowserView` polls `/wallet/peerpay/status` and passed **`unread_count`** — every undismissed
+notice, receipts and refusals alike — to the wallet panel as `ppc`. The panel paints its **green**
+"Received N payments" banner straight from that number, before its own fetch lands. So a wallet
+holding two **rejected** incoming payments opened with *"Received 2 payments"* in green, then
+corrected itself a moment later.
+
+Wrong information, about money, in the *exact* situation 10a exists for: the wallet has just refused
+fabricated incoming payments, and the first thing it tells you is that you received some.
+
+⛔ **Why no reviewer caught it.** Every one of them was reading Rust and C++ correctness. The count
+was correct at the wallet, correct in the API response, and correct in the panel's own later fetch.
+It was wrong only in the hand-off between two frontend components, for a few hundred milliseconds,
+and only when the notices were of the *other* kind. Fixed in `ddf8c04`.
+
+🧑 **How it was actually found:** the owner said *"it's still kind of buggy — I first open it and
+there's also a green payment received and then it refreshes on its own and that goes away."* Twice.
+The first time I logged it as probably a test artefact. It was not.
+
+## Also found by hand, all fixed in `ddf8c04`
+
+| Finding | Why no code review would have raised it |
+|---|---|
+| The dashboard's recent-activity list dropped the outbox fields, so the same payment showed a warning banner at the top of the screen and an **unmarked row below it** | Each component is internally correct; only seeing both at once shows the disagreement |
+| *"see Activity"* was a **dead end** — no link, and Activity is 649 rows at ten per page | Reads as complete prose until you try to follow it |
+| Row spacing came entirely from one child's `margin-right`, so reordering the buttons made them touch | Invisible until the order changes |
+
+## Confirmed by hand, and better evidence than the tests had
+
+- **Retry really works, and spends nothing.** It re-contacted the live MessageBox, drew a genuine
+  `413 ERR_MESSAGE_BODY_TOO_LARGE`, marked the row undeliverable and stopped. No broadcast.
+- **`F3-10d` is half-answered.** Copy details produced a real claim block whose `senderIdentityKey`
+  is genuinely this wallet's and whose derivation values were read back out of the stored payload
+  rather than coming out empty. No test had ever seen a real emitted block. Still owed: a block from
+  a genuine PeerPay payload.
+- **CU-1 proven by a real human click.** Two over-cap payments, one Approve ⇒ **one** transaction for
+  **the amount that modal displayed**; the queued one then showed its own amount and produced nothing
+  when denied.
+
+## New finding from the sitting — the *"1 of N"* line is effectively dead
+
+`queuedFromSite` is computed **once**, at enqueue or take time, and frozen into the modal. So the
+**first** prompt of a burst always shows 0, because nothing else had arrived when it was created, and
+a **two**-request burst can never show the line at all. It can only appear from the second prompt of a
+three-or-more burst. 👤 The owner asked for that line specifically in the 10b design decision, and it
+does not appear in the common case. Informational only — CU-1 itself is unaffected. ⇒ 10e.
+
+## The owner's own conclusion, which is the right frame for all of it
+
+> *"this is more than the casual user should have to be able to do. So we really just need to make the
+> message box work."*
+
+The yellow-dot work is a safety net, not a solution. The durable fixes are the size guard, the
+upstream issues, and the receiver-side claim box in beta.5.
