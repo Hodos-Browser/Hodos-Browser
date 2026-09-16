@@ -169,7 +169,7 @@ impl PeerPayRepository {
         sender_identity_key: &str,
     ) -> Result<bool> {
         let message_id = format!("reject:{}", sender_identity_key);
-        let rows = conn.execute(
+        let inserted = conn.execute(
             "INSERT OR IGNORE INTO peerpay_received (
                 message_id, sender_identity_key, amount_satoshis,
                 derivation_prefix, derivation_suffix, txid,
@@ -177,7 +177,29 @@ impl PeerPayRepository {
             ) VALUES (?1, ?2, 0, '', '', NULL, 'peerpay', 'rejected', NULL)",
             params![message_id, sender_identity_key],
         )?;
-        Ok(rows > 0)
+        if inserted > 0 {
+            return Ok(true);
+        }
+        // beta.3 Phase 10e (panel `F3-10a`) — the row already exists. If the user
+        // DISMISSED it, this is a LATER attack from that same sender and they should
+        // hear about it again.
+        //
+        // ⛔ Before this, `INSERT OR IGNORE` alone meant a dismissed sender could
+        // never raise a visible notice again for the life of the wallet — a
+        // different attack shape from the same key was log-only, forever. Meanwhile
+        // a fresh key costs an attacker nothing, so the quiet-by-default design was
+        // being paid for by the honest case and not by the hostile one.
+        //
+        // Semantics now: at most ONE visible notice per sender at a time. Repeated
+        // rejections while it is still on screen change nothing. Dismiss silences
+        // it. The next rejection after that raises it once more.
+        let raised = conn.execute(
+            "UPDATE peerpay_received
+                SET dismissed = 0, accepted_at = datetime('now')
+              WHERE message_id = ?1 AND dismissed = 1",
+            params![message_id],
+        )?;
+        Ok(raised > 0)
     }
 
     /// Dismiss all notifications matching a txid prefix (e.g., `utxo:{txid}:%`).
@@ -505,6 +527,69 @@ impl PeerPayRepository {
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
         )?;
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod rejected_notice_tests {
+    use super::*;
+    use crate::database::migrations;
+
+    fn db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::create_schema_v1(&conn).unwrap();
+        conn
+    }
+    fn visible(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM peerpay_received WHERE notification_type='rejected' AND dismissed=0",
+                       [], |r| r.get(0)).unwrap()
+    }
+    const A: &str = "02aaaa1111111111111111111111111111111111111111111111111111111111aa";
+    const B: &str = "03bbbb2222222222222222222222222222222222222222222222222222222222bb";
+
+    /// 👤 Owner decision surface: how loud is this? One visible notice per sender at
+    /// a time — a burst from one attacker does not nag.
+    #[test]
+    fn one_visible_notice_per_sender_at_a_time() {
+        let c = db();
+        assert!(PeerPayRepository::insert_rejected_notification(&c, A).unwrap(), "first is raised");
+        assert!(!PeerPayRepository::insert_rejected_notification(&c, A).unwrap(), "second changes nothing");
+        assert!(!PeerPayRepository::insert_rejected_notification(&c, A).unwrap());
+        assert_eq!(visible(&c), 1);
+        assert!(PeerPayRepository::insert_rejected_notification(&c, B).unwrap(), "a different sender is its own notice");
+        assert_eq!(visible(&c), 2);
+    }
+
+    /// Panel `F3-10a` — ⛔ the defect. A sender the user dismissed used to be
+    /// silenced FOREVER, for every later attack, for the life of the wallet.
+    #[test]
+    fn f3_a_dismissed_sender_can_raise_a_later_attack() {
+        let c = db();
+        PeerPayRepository::insert_rejected_notification(&c, A).unwrap();
+        PeerPayRepository::dismiss_all(&c).unwrap();
+        assert_eq!(visible(&c), 0, "the user dismissed it");
+
+        assert!(PeerPayRepository::insert_rejected_notification(&c, A).unwrap(),
+                "a LATER rejection from the same sender must be heard again");
+        assert_eq!(visible(&c), 1);
+        // ...and it still does not nag while it is on screen
+        assert!(!PeerPayRepository::insert_rejected_notification(&c, A).unwrap());
+        assert_eq!(visible(&c), 1);
+    }
+
+    /// Control: re-raising must not multiply rows, or the banner's count lies.
+    #[test]
+    fn re_raising_reuses_the_same_row() {
+        let c = db();
+        for _ in 0..3 {
+            PeerPayRepository::insert_rejected_notification(&c, A).unwrap();
+            PeerPayRepository::dismiss_all(&c).unwrap();
+        }
+        PeerPayRepository::insert_rejected_notification(&c, A).unwrap();
+        let total: i64 = c.query_row("SELECT COUNT(*) FROM peerpay_received WHERE notification_type='rejected'",
+                                     [], |r| r.get(0)).unwrap();
+        assert_eq!(total, 1, "one sender must never occupy more than one row");
+        assert_eq!(visible(&c), 1);
     }
 }
 

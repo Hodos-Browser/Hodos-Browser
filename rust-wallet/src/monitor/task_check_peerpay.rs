@@ -172,28 +172,30 @@ pub(crate) fn resolve_brc29_credit(
 /// list — never a modal, because the inbox is writable by anyone who knows the
 /// identity key and a modal per fake would be an attention-DoS handed to them.
 ///
-/// The per-session dedupe is in-process; the DB row is `INSERT OR IGNORE` on
-/// `reject:{sender}`, so a dismissed sender only re-notifies after a restart.
+/// beta.3 Phase 10e (panel `F3-10a`) — the dedupe is now the DB ROW ITSELF, with no
+/// in-process state at all.
+///
+/// ⛔ What was here: an in-process `OnceLock<Mutex<HashSet<String>>>` of senders,
+/// plus `INSERT OR IGNORE`. Two problems, in opposite directions. The set grew
+/// without bound and was never cleared, and a fresh key costs an attacker nothing —
+/// so the memory was paid by us and the quiet was paid by the honest case. And
+/// because the row survives dismissal, a sender the user had dismissed could NEVER
+/// raise a visible notice again for the life of the wallet, not even for a different
+/// attack later. The doc comment claimed "only re-notifies after a restart", which
+/// was wrong: after a restart the set is empty, the INSERT is ignored, and the
+/// notice is silently dropped.
+///
+/// Now: at most ONE visible notice per sender at a time. Repeated rejections while
+/// it is on screen change nothing. Dismiss silences it. The next rejection after
+/// that raises it once more. Still never a modal.
 fn record_rejected_message(conn: &rusqlite::Connection, sender: &str, message_id: &str, why: &str) {
-    use std::collections::HashSet;
-    use std::sync::{Mutex, OnceLock};
-    static NOTIFIED_SENDERS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-
     let sender_prefix = &sender[..16.min(sender.len())];
     warn!("🚫 PeerPay REJECTED — sender {}… message {}…: {}",
         sender_prefix, &message_id[..16.min(message_id.len())], why);
 
-    let first_this_session = NOTIFIED_SENDERS
-        .get_or_init(|| Mutex::new(HashSet::new()))
-        .lock()
-        .map(|mut set| set.insert(sender.to_string()))
-        .unwrap_or(false);
-    if !first_this_session {
-        return;
-    }
     match PeerPayRepository::insert_rejected_notification(conn, sender) {
         Ok(true) => info!("   🔔 Rejected-payment notification recorded for sender {}…", sender_prefix),
-        Ok(false) => debug!("   Rejected-payment notification for sender {}… already present", sender_prefix),
+        Ok(false) => debug!("   Rejected-payment notice for sender {}… is already on screen", sender_prefix),
         Err(e) => warn!("   Failed to record rejected-payment notification: {}", e),
     }
 }
