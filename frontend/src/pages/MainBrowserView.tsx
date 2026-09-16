@@ -241,6 +241,12 @@ const MainBrowserView: React.FC = () => {
                 setHasFailedPayments(false);
                 setUnreadPaymentCount(0);
                 setUnreadPaymentAmount(0);
+                // beta.3 Phase 10d panel `F6` — the badge is driven by
+                // (hasUnreadPayments || hasOutboxWarnings). Clearing only the
+                // first left the dot on screen until the next 10-second poll,
+                // which is the same "I dismissed it and it is still there"
+                // experience 10d exists to remove, just shorter.
+                setHasOutboxWarnings(false);
             }
         };
         window.addEventListener('message', handlePaymentDismissed);
