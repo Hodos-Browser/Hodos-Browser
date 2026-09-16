@@ -41,6 +41,39 @@ with no scheduled thaw is how a known-vulnerable OpenSSL ships without anyone de
    escalation the Brewfile already names — a `brew extract` into a Hodos tap — is Mac's call: relayed
    in `0.4.0-beta.3/MAC_RELAY_BETA3.md` (round 2026-09-14b) for the Mac side to recommend for or against.
 
+### 8. ⭐ The engine is a dependency too — check it against Chrome's security releases (added 2026-09-16)
+
+**The gap this closes.** Steps 1–7 cover the dependencies *we* pin. Nobody was checking the biggest one:
+**the Chromium version inside our CEF build.** It was found by accident on 2026-09-15, through a browser
+competitor's security blog post in the Morning Report, by which point we were **three security refreshes
+behind on our own branch** and missing an actively exploited V8 bug (CVE-2026-85046, CVSS 8.8). Details
+and the routes out: `CEF_VERSION_UPDATE_TRACKER.md`, *OWED AT THE NEXT BUILD*.
+
+**The check — monthly, and at every build:**
+
+1. **Read our shipped engine** from `cef-binaries/include/cef_version.h` (or the tracker header). That
+   gives the Chromium version, e.g. `150.0.7871.187`.
+2. **List newer builds on our branch** from the CEF index `https://cef-builds.spotifycdn.com/index.json`
+   — filter `windows64` and `macosarm64` by our branch number, e.g. `150.0.7871.*`.
+3. **Read the fix lists** for every Chromium version between ours and the newest on the branch, at
+   `https://chromereleases.googleblog.com/` (desktop Stable, Extended Stable, and the ChromeOS Long Term
+   Support posts, which are what keeps an older branch alive). Note every High and Critical.
+4. **Check for actively exploited bugs.** Chrome's wording is "Google is aware that an exploit for
+   CVE-… exists in the wild". Cross-check CISA's catalogue:
+   `https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json`.
+5. **Where a CVE names a fixed version above our branch's newest build, our branch does not have it.**
+   Record it rather than assuming a backport.
+6. **Write the result here** as a dated row, even when nothing is owed. "Checked, nothing new" is a
+   result; silence is not.
+
+⛔ **A check is not a bump** (step 6 of the policy). The engine rebuild stays an owner-approved change.
+
+👤 **Owner decision, 2026-09-16:** the current gap is **accepted and deferred to the next full build**.
+Reason: very few users, and the risk to them is accepted. Anyone who finds this before that build should
+not treat it as a new discovery.
+
+**Next check due:** 2026-10-16, or the next engine bump, whichever comes first.
+
 ## The dependency inventory (Hodos-owned)
 | Layer | Dependency | Where pinned |
 |-------|-----------|--------------|

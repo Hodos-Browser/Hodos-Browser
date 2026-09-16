@@ -33,6 +33,58 @@ Track features, fixes, and investigations to research when updating the CEF buil
 
 ---
 
+## 🚨 OWED AT THE NEXT BUILD — engine is behind on security fixes (recorded 2026-09-16)
+
+👤 **Owner decision, 2026-09-16: do not rebuild now. Fold this into the next full build.** Reason: we
+have very few users and the risk to them is accepted. **This block is the handover so the next build
+does not rediscover it.**
+
+**Where we are:** we ship `150.0.43-7871.3576+g9ccef04+chromium-150.0.7871.187`, built 2026-07-29.
+
+| Public CEF build on our branch `7871` | Chromium | Published |
+|---|---|---|
+| `150.0.18+gdb11278` | `150.0.7871.213` | 2026-08-14 |
+| `150.0.19+gcf60f42` | `150.0.7871.252` | 2026-08-27 |
+| `150.0.20+ga832838` | `150.0.7871.253` | 2026-09-11 |
+
+**Three refreshes behind.** The ChromeOS LTC notes for `.252` (2026-08-24) and `.253` (2026-09-11) list
+roughly 20 High and one Critical fix between them that we do not have *(read, Chrome Releases)*.
+
+### ⛔ CVE-2026-85046 is NOT on our branch at all
+
+- **What:** type confusion in V8. NVD: "allowed a remote attacker to execute arbitrary code inside the
+  sandbox via a crafted HTML page", **CVSS 8.8 High**. Renderer-level; a sandbox escape would need a
+  second bug *(inferred)*.
+- **Exploited:** "Google is aware that an exploit for CVE-2026-85046 exists in the wild" (Chrome
+  Releases, 2026-09-03). **CISA KEV** added 2026-09-04, federal due date 2026-09-18. The researcher's
+  write-up and the V8 fix commit `e0562d87ad9c17042b581582c99237d798572e67` are public.
+- **Fixed in Chromium `152.0.7977.82`.** The oldest CEF build carrying it is **`152.0.6+g708dc14`
+  (Chromium `152.0.7977.83`, 2026-09-07)** *(measured, CEF index 2026-09-16)*.
+- ⛔ **`150.0.7871.253` does not list this fix**, and Google's desktop extended-stable line has moved to
+  152, so branch 150 now receives only selected ChromeOS LTS fixes. **Assume our branch stays unpatched
+  for this CVE unless a later `7871` build's notes say otherwise.**
+
+### The three routes, for whoever runs the next build
+
+| Route | What it costs | What it keeps |
+|---|---|---|
+| **A. Rebase onto the newest `7871` (`.253`), stay on branch** | Cheapest: same branch, same API surface, one rebuild | Keeps the LTS window to 2027-04-13. **Does not fix CVE-2026-85046** |
+| **B. A + backport the V8 commit** | A, plus applying `e0562d87` to the 150 tree by hand. V8 moved between 150 and 152, so it may not apply cleanly — engine surgery, and a bad adjustment is worse than the bug | Branch and LTS window kept, CVE closed |
+| **C. Bump to CEF 152 (branch `7977`)** | Full milestone bump: re-check our fork patches (farbling especially), rebuild both arms, new assets, new pin tag, new farbling release token (it binds to the fork SHA), full regression | Every fix to date. ⛔ **Gives up the `7871` LTS window** that §"Version-lock" chose deliberately |
+
+**Not verified:** whether our Chromium checkout already carries `e0562d87` (the tree is on the build
+machine, not the owner's laptop), and whether the patch applies cleanly to 150. Check both before
+choosing between B and C.
+
+**Interim mitigation, if the wait gets long:** JIT is where V8 type-confusion bugs are exploited.
+Running V8 without the optimizer removes most of that at a real speed cost — measure before adopting.
+
+**Related:** `DEPENDENCY_VERIFICATION.md` (the standing engine-CVE check added the same day) ·
+`0.4.0-beta.3/CRITICAL_UPDATES.md` CU-1 (one approval releasing every pending payment is the path that
+turns a compromised renderer into money).
+
+---
+
 ## ⭐ Version-lock — CEF 150 / branch `7871` (recorded 2026-08-03, pre-build)
 
 The `PLAN_version_bump.md` §3 pre-flight, answered. **Re-verify the point-release on build day** — a
