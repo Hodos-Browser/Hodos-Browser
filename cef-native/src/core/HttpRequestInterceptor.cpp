@@ -2427,8 +2427,22 @@ void postIpcAuthTimeout(const std::string& requestId,
         // popRequest is atomic — only one of (approve, deny, timeout) wins.
         PendingAuthRequest req;
         if (!PendingRequestManager::GetInstance().popRequest(requestId, req)) return;
-        sendWalletResponseIpc(frame, requestId, false, errorJson);
-        LOG_DEBUG_HTTP("⏰ IPC auth timeout fired for " + requestId);
+        // beta.3 2026-09-16 — ⛔ answer the id the PAGE is waiting on, not ours.
+        //
+        // Found by the owner during the W7 human sitting: the timeout fired on
+        // schedule and popped the request, but the page's promise never settled,
+        // so the dApp's call hung forever. The rejection was being addressed to
+        // the C++ prompt id while the wallet-call shim is keyed on the id the
+        // page supplied. `resumeIpcResponse` already resolves this exact way
+        // ("use page-supplied IPC requestId — the one the CWI shim is waiting
+        // on", Phase 2.6-C.5); the SUCCESS path got that fix and the TIMEOUT path
+        // never did. No money was ever at risk — but a call that can never settle
+        // is the failure mode the modal-resume requestId invariant exists to stop.
+        const std::string ipcId = !req.originalIpcRequestId.empty()
+            ? req.originalIpcRequestId : requestId;
+        sendWalletResponseIpc(frame, ipcId, false, errorJson);
+        LOG_DEBUG_HTTP("⏰ IPC auth timeout fired for " + requestId
+                       + " (answered page id " + ipcId + ")");
         // 10b: the prompt on screen expired — let the next waiting one take the overlay.
         if (req.shown) ShowNextQueuedPrompt();
     }, requestId, frame, errorJson), delayMs);
