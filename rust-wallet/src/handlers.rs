@@ -7485,6 +7485,43 @@ mod peerpay_selection_tests {
         assert_eq!(picked(&sel), vec!["report"]);
     }
 
+    /// Panel `F1` — ⛔ the test above passes `consolidation = None`. **Production
+    /// passes `Some(&CONSOLIDATION_FOR_SENDS)` for every send, PeerPay included**
+    /// (`create_action_internal`), and the consolidation pass had no large-parent
+    /// rule of its own. So a clean primary selection was followed by a ≤5000-sat
+    /// coin carrying the 433 KB backup parent, and the message was undeliverable
+    /// again — with A1 green throughout, because its subject was not the
+    /// production call.
+    ///
+    /// The fixture adds exactly the coin `P10d-A3` makes likely: backup change,
+    /// small (the live run left 8,057 sats), large parent.
+    #[test]
+    fn f1_consolidation_pass_also_skips_large_parents() {
+        let coins = vec![
+            coin("report", 23_721_396),
+            coin("paid_content", 2_273_287),
+            coin("backup_change_small", 900),   // ≤ dust_threshold_sats ⇒ a consolidation candidate
+        ];
+        let sizes = HashMap::from([
+            ("report".to_string(), 555usize),
+            ("paid_content".to_string(), 259),
+            ("backup_change_small".to_string(), 436_221),
+        ]);
+        // The production shape: consolidation ON, bundle-carrying send.
+        let sel = select_utxos_with_preference(
+            None, &coins, 600_000, Some(&CONSOLIDATION_FOR_SENDS), Some(&sizes));
+        assert!(!picked(&sel).contains(&"backup_change_small"),
+                "the consolidation pass must not append a large-parent coin: {:?}", picked(&sel));
+
+        // Control, so this is not vacuous: with no parent-size map (an ordinary
+        // send) the same small coin IS swept up, which is the feature working.
+        let sel_plain = select_utxos_with_preference(
+            None, &coins, 600_000, Some(&CONSOLIDATION_FOR_SENDS), None);
+        assert!(picked(&sel_plain).contains(&"backup_change_small"),
+                "consolidation must still sweep small coins when parents are irrelevant: {:?}",
+                picked(&sel_plain));
+    }
+
     /// Control: an ordinary send is unchanged — still largest first, backup change included.
     #[test]
     fn a1_ordinary_send_order_is_unchanged() {
@@ -7600,6 +7637,16 @@ fn select_utxos_greedy(
         for utxo in &sorted_utxos {
             if extra_added >= config.max_extra_inputs { break; }
             if utxo.satoshis > config.dust_threshold_sats { continue; }
+            // beta.3 Phase 10d panel `F1` — ⛔ the consolidation pass must honour
+            // the same large-parent rule as the primary pass. It did not, and
+            // production passes `Some(&CONSOLIDATION_FOR_SENDS)` for EVERY send
+            // including PeerPay, so a single ≤5000-sat coin whose parent is the
+            // 433 KB backup was appended after a clean primary selection and made
+            // the message undeliverable again. `P10d-A3`'s own fix made such a
+            // coin more likely, not less: backup funding takes the smallest
+            // sufficient coin, so its change is biased small (8,057 sats on the
+            // live run; the whole 547–5000 window is reachable).
+            if has_large_parent(utxo, parent_sizes) { continue; }
             // Skip if already selected in the primary pass
             if selected.iter().any(|s| s.txid == utxo.txid && s.vout == utxo.vout) { continue; }
             selected.push(utxo.clone());
@@ -19496,6 +19543,20 @@ pub async fn paymail_send(
                 .collect();
             (outs, Some(dest.reference), true)
         }
+        Err(p2p_err) if p2p_err.is_host_violation() => {
+            // beta.3 Phase 10c panel `F3` — the host broke a rule, it was not
+            // unreachable. ⛔ Do NOT try the same host's basic endpoint: that
+            // handed a host which had just tried to overbill a second attempt at
+            // the same payment, and the user was told nothing about the first.
+            // 👤 Owner rule: "that payment must be rejected and user must be
+            // notified".
+            log::warn!("   🚫 Paymail send refused — recipient's server broke a rule: {}", p2p_err);
+            return HttpResponse::UnprocessableEntity().json(serde_json::json!({
+                "success": false,
+                "code": "ERR_PAYMAIL_HOST_REFUSED",
+                "error": format!("This payment was not sent. {}", p2p_err)
+            }));
+        }
         Err(p2p_err) => {
             log::info!("   P2P unavailable ({}), trying basic path...", p2p_err);
             match client
@@ -19531,7 +19592,13 @@ pub async fn paymail_send(
     // user approved. `PaymailClient::get_p2p_destination` already refuses a host
     // that changes the amount; this is the layer that owns `amount_satoshis`, and
     // it also covers the basic-resolution path and any future producer.
-    let built_total: i64 = outputs.iter().map(|o| o.satoshis.unwrap_or(0)).sum();
+    // Saturating, not `sum()`: a plain `Add` panics in a debug build and wraps in
+    // release, and an i64::MAX-shaped answer must land on "mismatch", never on a
+    // wrapped value that happens to equal the approved amount (panel `F7`).
+    let built_total: i64 = outputs
+        .iter()
+        .map(|o| o.satoshis.unwrap_or(0))
+        .fold(0i64, |acc, v| acc.saturating_add(v));
     if built_total != req.amount_satoshis {
         log::warn!("   🚫 Paymail send refused BEFORE signing: outputs total {} sats but {} was approved",
             built_total, req.amount_satoshis);

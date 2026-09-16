@@ -51,6 +51,33 @@ pub enum PaymailError {
 
     #[error("No payment capability found for {0}")]
     NoPaymentCapability(String),
+
+    /// beta.3 Phase 10c panel `F3` — the host answered, and its answer is not
+    /// one we may sign. ⛔ Distinct from every variant above, which mean "this
+    /// path did not work": those may fall back to the basic path, this one may
+    /// NOT. Falling back handed a host that had just tried to overbill a second
+    /// chance at the same payment, against the owner's stated rule that a
+    /// mismatch "must be rejected and user must be notified".
+    #[error("{0}")]
+    HostViolation(String),
+}
+
+impl PaymailError {
+    /// True when the host broke a rule we enforce, rather than being unreachable.
+    /// The send path must stop rather than try another endpoint on the same host.
+    pub fn is_host_violation(&self) -> bool {
+        matches!(self, PaymailError::HostViolation(_))
+    }
+}
+
+/// The one HTTP client every paymail call uses. Named and module-level so the
+/// redirect policy below is testable rather than asserted (panel `F2`).
+pub(crate) fn build_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(crate::services::CallClass::ThirdPartyNoFallback.timeout())
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
 }
 
 /// Cached capability URLs for a paymail domain
@@ -101,8 +128,22 @@ pub enum P2POutputsError {
     TooMany { count: usize },
     NonPositive { index: usize, satoshis: i64 },
     EmptyScript { index: usize },
+    ScriptTooLong { index: usize, hex_len: usize },
     SumMismatch { sum: i64, requested: i64 },
 }
+
+/// beta.3 Phase 10c panel `F5` — the longest locking script a paymail host may
+/// return, in hex characters (2,000 hex = 1,000 bytes). A P2PKH script is 25
+/// bytes and the most baroque real receiver script is far under this.
+///
+/// ⛔ Why this is a money rule and not tidiness: the script is host-supplied and
+/// its length is fed straight into fee estimation
+/// (`handlers.rs :: create_action_internal` sums `script_hex.len() / 2` into the
+/// estimated size, then prices it at the live ARC sat/KB rate). Without a bound,
+/// a host that honours the satoshi total to the last unit can still inflate what
+/// leaves the wallet, by making the transaction enormous. "May not change the
+/// payment" has to mean the debit, not just the outputs.
+pub const MAX_SCRIPT_HEX_LEN: usize = 2_000;
 
 impl std::fmt::Display for P2POutputsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -114,6 +155,9 @@ impl std::fmt::Display for P2POutputsError {
                 f, "the recipient's server returned output {} with {} satoshis", index, satoshis),
             P2POutputsError::EmptyScript { index } => write!(
                 f, "the recipient's server returned output {} with an empty script", index),
+            P2POutputsError::ScriptTooLong { index, hex_len } => write!(
+                f, "the recipient's server returned output {} with a {}-character script (limit {})",
+                index, hex_len, MAX_SCRIPT_HEX_LEN),
             P2POutputsError::SumMismatch { sum, requested } => write!(
                 f, "the recipient's server asked for {} satoshis but you approved {} — payment cancelled, nothing was sent",
                 sum, requested),
@@ -136,6 +180,27 @@ impl std::fmt::Display for P2POutputsError {
 /// See `development-docs/PRIOR_ART.md` 2026-09-15 and the upstream issues in
 /// Marston `Standards/BRCs/drafts/peerpay-messagebox-size-and-encoding/`.
 pub fn validate_p2p_outputs(outputs: &[PaymailOutput], requested_satoshis: i64) -> Result<(), P2POutputsError> {
+    let sum = validate_p2p_outputs_shape(outputs)?;
+    if sum != requested_satoshis {
+        return Err(P2POutputsError::SumMismatch { sum, requested: requested_satoshis });
+    }
+    Ok(())
+}
+
+/// The half of the check that does NOT depend on the amount: non-empty, bounded
+/// count, every output positive with a plausible script. Returns the saturating
+/// total so the caller can compare it if it has an amount to compare against.
+///
+/// ⛔ Separated 2026-09-15 by the Phase 10c adversarial panel (`F1`). `resolve()`
+/// probes a handle by asking the host for a **546-satoshi** destination purely to
+/// learn "can this alias receive?" — it commits to nothing and signs nothing. The
+/// first cut of this phase ran the full check there, so a host that does not echo
+/// a probe amount was reported as an **invalid recipient** and could not be paid
+/// at all. That is not a hypothetical shape: BRFC `2a40af698840`'s own worked
+/// example answers a 1,000,100-satoshi request with 10,000 + 20,000 (`D-4`), and
+/// the contract claimed three times that the preview path was untouched.
+/// ⇒ the probe gets the shape checks; only a real send gets the total check.
+pub fn validate_p2p_outputs_shape(outputs: &[PaymailOutput]) -> Result<i64, P2POutputsError> {
     if outputs.is_empty() {
         return Err(P2POutputsError::Empty);
     }
@@ -147,17 +212,18 @@ pub fn validate_p2p_outputs(outputs: &[PaymailOutput], requested_satoshis: i64) 
         if o.satoshis <= 0 {
             return Err(P2POutputsError::NonPositive { index: i, satoshis: o.satoshis });
         }
-        if o.script_hex.trim().is_empty() {
+        let script = o.script_hex.trim();
+        if script.is_empty() {
             return Err(P2POutputsError::EmptyScript { index: i });
+        }
+        if script.len() > MAX_SCRIPT_HEX_LEN {
+            return Err(P2POutputsError::ScriptTooLong { index: i, hex_len: script.len() });
         }
         // Saturating: a hostile host could otherwise overflow the sum to land on
         // the requested amount.
         sum = sum.saturating_add(o.satoshis);
     }
-    if sum != requested_satoshis {
-        return Err(P2POutputsError::SumMismatch { sum, requested: requested_satoshis });
-    }
-    Ok(())
+    Ok(sum)
 }
 
 /// beta.3 Phase 10c (CU-2) — every capability URL used on the SEND path must be
@@ -168,7 +234,9 @@ pub fn require_https_capability(url: &str, what: &str) -> Result<(), PaymailErro
     if url.starts_with("https://") {
         return Ok(());
     }
-    Err(PaymailError::P2PDestination(format!(
+    // Panel F3: terminal. An http endpoint is not a path that "did not work",
+    // it is one we refuse — the send must not retry the same host elsewhere.
+    Err(PaymailError::HostViolation(format!(
         "{} endpoint is not https ({}), refusing to use it", what,
         url.split(':').next().unwrap_or("?"))))
 }
@@ -217,6 +285,100 @@ mod cu2_validation_tests {
         assert!(validate_p2p_outputs(&[out(i64::MAX), out(i64::MAX), out(1000)], 1000).is_err());
     }
 
+    /// Panel `F1` — the resolve/preview PROBE must not enforce the total.
+    /// ⛔ This is the regression the panel caught: the first cut ran the full
+    /// check on `resolve()`'s 546-satoshi probe, so a host that answers a probe
+    /// with anything other than 546 satoshis — which BRFC 2a40af698840's own
+    /// worked example does — was reported as an INVALID RECIPIENT and could not
+    /// be paid at all. Shape rules still apply on the probe.
+    #[test]
+    fn f1_probe_checks_shape_but_not_the_total() {
+        // the exact shape that broke: probe asks 546, host answers otherwise
+        let answer = [out(10_000), out(20_000)];
+        assert!(validate_p2p_outputs_shape(&answer).is_ok(),
+                "the probe must accept a host that does not echo the probe amount");
+        assert_eq!(validate_p2p_outputs(&answer, 546).unwrap_err(),
+                   P2POutputsError::SumMismatch { sum: 30_000, requested: 546 },
+                   "a real SEND of 546 must still refuse the same answer");
+        // the probe is not a hole: shape rules are still enforced there
+        assert!(validate_p2p_outputs_shape(&[]).is_err());
+        assert!(validate_p2p_outputs_shape(&[out(0)]).is_err());
+        let many: Vec<PaymailOutput> = (0..=MAX_P2P_OUTPUTS).map(|_| out(1)).collect();
+        assert!(validate_p2p_outputs_shape(&many).is_err());
+    }
+
+    /// Panel `F5` — a host may not inflate the transaction (and so the miner fee
+    /// the user pays) with an enormous locking script while honouring the total.
+    #[test]
+    fn f5_script_length_is_bounded() {
+        let mut huge = out(1000);
+        huge.script_hex = "ab".repeat(MAX_SCRIPT_HEX_LEN); // 2x the limit in chars
+        assert_eq!(validate_p2p_outputs(&[huge], 1000).unwrap_err(),
+                   P2POutputsError::ScriptTooLong { index: 0, hex_len: MAX_SCRIPT_HEX_LEN * 2 });
+        // an ordinary P2PKH script is nowhere near the bound
+        assert!(validate_p2p_outputs(&[out(1000)], 1000).is_ok());
+        let mut at_limit = out(1000);
+        at_limit.script_hex = "a".repeat(MAX_SCRIPT_HEX_LEN);
+        assert!(validate_p2p_outputs(&[at_limit], 1000).is_ok(), "the bound itself is allowed");
+    }
+
+    /// Panel `F3` — a broken rule is terminal, so the send path can tell it apart
+    /// from "this endpoint did not work" and refuse instead of asking the same
+    /// host again on another endpoint.
+    #[test]
+    fn f3_rule_breaches_are_marked_terminal() {
+        let https_err = require_https_capability("http://h/p2p", "P2P destination").unwrap_err();
+        assert!(https_err.is_host_violation(), "an http endpoint must be terminal");
+        // the variants that mean "unreachable" must NOT be terminal, or a host
+        // that is merely down would stop falling back to the basic path
+        assert!(!PaymailError::P2PDestination("connection refused".into()).is_host_violation());
+        assert!(!PaymailError::AddressResolution("HTTP 404".into()).is_host_violation());
+        assert!(!PaymailError::NoPaymentCapability("a@b".into()).is_host_violation());
+    }
+
+    /// Panel `F2` — ⛔ the https check validates the URL we were GIVEN. If the
+    /// client follows redirects, a host can advertise `https://…` and answer
+    /// `302 Location: http://…`, and the destination request travels in cleartext
+    /// for an on-path attacker to rewrite — the exact swap this phase exists to
+    /// stop. reqwest 0.11's default is `Policy::limited(10)` and it permits an
+    /// https→http hop unless `https_only` is set, which nothing in this wallet
+    /// sets. This drives a real socket rather than asserting the builder.
+    #[tokio::test]
+    async fn f2_the_client_does_not_follow_a_redirect() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hops_srv = hops.clone();
+        std::thread::spawn(move || {
+            // Serve two requests at most: the first 302s to a plain-http URL on
+            // the same listener. A client that follows it arrives a second time.
+            for _ in 0..2 {
+                let Ok((mut sock, _)) = listener.accept() else { return };
+                hops_srv.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf);
+                let body = format!(
+                    "HTTP/1.1 302 Found
+Location: http://127.0.0.1:{}/followed
+Content-Length: 0
+Connection: close
+
+",
+                    port);
+                let _ = sock.write_all(body.as_bytes());
+            }
+        });
+
+        let client = build_http_client();
+        let resp = client.get(format!("http://127.0.0.1:{}/start", port)).send().await.unwrap();
+
+        assert_eq!(resp.status().as_u16(), 302,
+                   "the client must hand back the redirect, not follow it");
+        assert_eq!(hops.load(std::sync::atomic::Ordering::SeqCst), 1,
+                   "the server must have been hit exactly once — a second hit means the hop was followed");
+    }
+
     /// `P10c-A3` — the send path refuses a non-https capability URL.
     #[test]
     fn a3_http_capability_url_is_refused() {
@@ -256,10 +418,22 @@ impl PaymailClient {
     /// `CallClass::ThirdPartyNoFallback` — paymail hosts are third parties
     /// with no Hodos-side fallback.
     pub fn new() -> Self {
-        let http_client = reqwest::Client::builder()
-            .timeout(crate::services::CallClass::ThirdPartyNoFallback.timeout())
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        // beta.3 Phase 10c panel `F2` — ⛔ redirects OFF.
+        //
+        // `require_https_capability` checks the URL we were given. reqwest 0.11's
+        // default policy follows up to 10 redirects and permits an https → http
+        // hop unless `https_only` is set (which nothing in this wallet sets), so
+        // a host could advertise `https://host/p2p/...` and answer `302 Location:
+        // http://host/p2p/...`. The check would pass and the destination request
+        // would still travel in cleartext — precisely the swap-the-outputs attack
+        // the check exists to stop. `.well-known` discovery is worse: it is
+        // hard-coded https, and a redirect to http would put the whole capability
+        // set on the wire for an on-path attacker to rewrite.
+        //
+        // `Policy::none()` rather than `https_only(true)`: a paymail host has no
+        // legitimate reason to redirect a machine API, and refusing the hop keeps
+        // every URL we validate the URL we actually talk to.
+        let http_client = build_http_client();
 
         Self {
             http_client,
@@ -422,11 +596,36 @@ impl PaymailClient {
     ///
     /// POST to the P2P destination endpoint with the payment amount.
     /// Returns output scripts and a reference string for receiver notification.
+    /// Ask a host where to pay, for a payment we intend to sign.
+    /// Enforces the full rule, including the total.
     pub async fn get_p2p_destination(
         &self,
         alias: &str,
         domain: &str,
         satoshis: i64,
+    ) -> Result<P2PDestination, PaymailError> {
+        self.p2p_destination_inner(alias, domain, satoshis, true).await
+    }
+
+    /// Ask a host the same question purely to learn whether an alias can receive
+    /// (`resolve()`'s existence probe). ⛔ Does **not** enforce the total — see
+    /// `validate_p2p_outputs_shape` for why enforcing it here broke real hosts.
+    /// Nothing is signed, built or committed on this path.
+    async fn p2p_destination_probe(
+        &self,
+        alias: &str,
+        domain: &str,
+        satoshis: i64,
+    ) -> Result<P2PDestination, PaymailError> {
+        self.p2p_destination_inner(alias, domain, satoshis, false).await
+    }
+
+    async fn p2p_destination_inner(
+        &self,
+        alias: &str,
+        domain: &str,
+        satoshis: i64,
+        enforce_total: bool,
     ) -> Result<P2PDestination, PaymailError> {
         let caps = self.discover_capabilities(domain).await?;
 
@@ -479,9 +678,17 @@ impl PaymailClient {
 
         // 10c (CU-2): a host may split the payment; it may not change it. Checked
         // HERE, before the caller can build anything from these outputs.
-        if let Err(e) = validate_p2p_outputs(&outputs, satoshis) {
+        // `enforce_total` is false only for `resolve()`'s existence probe (panel F1).
+        let verdict = if enforce_total {
+            validate_p2p_outputs(&outputs, satoshis)
+        } else {
+            validate_p2p_outputs_shape(&outputs).map(|_| ())
+        };
+        if let Err(e) = verdict {
             warn!("PaymailClient: refusing P2P destination from {} — {}", domain, e);
-            return Err(PaymailError::P2PDestination(e.to_string()));
+            // Panel F3: a broken rule is terminal. The send path must not answer
+            // it by asking the same host again on another endpoint.
+            return Err(PaymailError::HostViolation(e.to_string()));
         }
 
         info!(
@@ -743,7 +950,9 @@ impl PaymailClient {
         // reject BRC-standard requests. Fall back to basic only if the
         // domain has no P2P capability.
         let exists = if has_p2p {
-            self.get_p2p_destination(&alias, &domain, 546)
+            // Panel F1: the PROBE variant — shape checked, total not. This asks
+            // "can this alias receive?", it does not approve a payment.
+            self.p2p_destination_probe(&alias, &domain, 546)
                 .await
                 .map(|_| ())
                 .map_err(|e| e.to_string())
