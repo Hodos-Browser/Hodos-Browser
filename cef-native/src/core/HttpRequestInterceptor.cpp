@@ -4609,6 +4609,103 @@ private:
     IMPLEMENT_REFCOUNTING(Brc121ReloadTask);
     DISALLOW_COPY_AND_ASSIGN(Brc121ReloadTask);
 };
+
+// ---------------------------------------------------------------------------
+// Phase 11 item 11 row A1 — the in-flight payment banner.
+//
+// 🚨 The defect this closes, measured 2026-09-16 and reproduced 2026-09-17:
+// while a SILENT auto-approved BRC-121 payment was in flight, 15 consecutive
+// screenshots of the tab were BYTE-IDENTICAL to the page that was on screen
+// before the payment started. The browser spent money and changed nothing the
+// user could see, so the user clicked again — and each click cancelled the
+// in-flight paid request and caused a fresh 402 to be paid.
+//
+// ⛔ Why this is injected into the page rather than navigating: the
+// reload → handler-install → paid-request chain IS the money path. A mid-flight
+// navigation is how a paid-for article never arrives. 👤 Owner decision
+// 2026-09-17: in-viewport banner, no navigation.
+//
+// ⛔ Why not the tab throbber: it was already running for all 48 s of the
+// original incident, so anything reading loading state passes with this feature
+// absent.
+//
+// ⚠️ Known limitation, recorded not hidden: the banner lives in the page's DOM,
+// so a hostile page could restyle or remove it. The unsuppressable half of the
+// safeguard is the GOLD PILL, which fires on success from the header browser
+// and is out of the page's reach. This banner is the "we are working" signal,
+// not the "money moved" signal.
+//
+// No teardown is needed on success: the paid document replaces this one and the
+// banner goes with it. Failure and cancel paths call the Hide task explicitly.
+class Brc121PaymentBannerTask : public CefTask {
+public:
+    Brc121PaymentBannerTask(CefRefPtr<CefBrowser> browser, std::string host, int64_t satoshis)
+        : browser_(std::move(browser)), host_(std::move(host)), satoshis_(satoshis) {}
+
+    void Execute() override {
+        if (!browser_) return;
+        auto frame = browser_->GetMainFrame();
+        if (!frame) return;
+
+        // Host comes from the request URL and sats from the 402 header — both
+        // are remote-influenced, so both go through the existing escaper.
+        const std::string host = escapeForJsSingleQuote(host_);
+        const std::string sats = std::to_string(satoshis_);
+
+        std::string js =
+            "(function(){try{"
+            "var ID='__hodos_pay_banner__';"
+            "var d=document;var el=d.getElementById(ID);"
+            "if(!el){"
+            "el=d.createElement('div');el.id=ID;"
+            "el.setAttribute('data-hodos-payment-banner','1');"
+            "el.style.cssText='position:fixed!important;top:0!important;left:0!important;"
+            "right:0!important;z-index:2147483647!important;background:#1c1c1c!important;"
+            "color:#d4a017!important;font:13px/1.4 system-ui,-apple-system,Segoe UI,sans-serif!important;"
+            "padding:9px 16px!important;border-bottom:2px solid #a67c00!important;"
+            "box-shadow:0 2px 8px rgba(0,0,0,.35)!important;display:flex!important;"
+            "align-items:center!important;gap:9px!important;pointer-events:none!important;';"
+            "(d.body||d.documentElement).appendChild(el);"
+            "}"
+            "el.textContent='\\u25CF  Paying " + host + " \\u00B7 " + sats + " sats\\u2026';"
+            "}catch(e){}})();";
+
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        LOG_INFO_HTTP("💰 BRC-121: in-flight payment banner shown for " + host_
+                      + " (" + sats + " sats)");
+    }
+
+private:
+    CefRefPtr<CefBrowser> browser_;
+    std::string host_;
+    int64_t satoshis_;
+    IMPLEMENT_REFCOUNTING(Brc121PaymentBannerTask);
+    DISALLOW_COPY_AND_ASSIGN(Brc121PaymentBannerTask);
+};
+
+// Companion to Brc121PaymentBannerTask. Only needed when the document SURVIVES
+// the payment attempt (upstream failed, or the handler was cancelled) — on
+// success the new document takes the banner with it.
+class Brc121PaymentBannerHideTask : public CefTask {
+public:
+    explicit Brc121PaymentBannerHideTask(CefRefPtr<CefBrowser> browser)
+        : browser_(std::move(browser)) {}
+
+    void Execute() override {
+        if (!browser_) return;
+        auto frame = browser_->GetMainFrame();
+        if (!frame) return;
+        frame->ExecuteJavaScript(
+            "(function(){try{var e=document.getElementById('__hodos_pay_banner__');"
+            "if(e&&e.parentNode)e.parentNode.removeChild(e);}catch(e){}})();",
+            frame->GetURL(), 0);
+    }
+
+private:
+    CefRefPtr<CefBrowser> browser_;
+    IMPLEMENT_REFCOUNTING(Brc121PaymentBannerHideTask);
+    DISALLOW_COPY_AND_ASSIGN(Brc121PaymentBannerHideTask);
+};
 }  // namespace
 
 // ============================================================================
@@ -4738,6 +4835,14 @@ public:
 
     void Cancel() override {
         CEF_REQUIRE_IO_THREAD();
+        // A1 — this is the path the owner's re-clicks took on 2026-09-16: a new
+        // navigation cancels the in-flight paid request and THIS document stays
+        // on screen. Clear the banner so it cannot outlive the attempt it
+        // describes. (Row A3 stops the re-click minting a second payment; this
+        // only stops a stale banner.)
+        if (browser_) {
+            CefPostTask(TID_UI, new Brc121PaymentBannerHideTask(browser_));
+        }
         if (urlRequest_) {
             urlRequest_->Cancel();
             urlRequest_ = nullptr;
@@ -4883,6 +4988,13 @@ public:
             // /payment-failed page with a Retry button.
             RegisterBrc121FailedUrl(ctx_.url, ctx_.domain,
                                     ctx_.satoshis, status);
+            // A1 — the document survives a failed retry, so the banner would
+            // otherwise sit there claiming a payment is still in flight. On the
+            // success branch above no hide is needed: the paid document replaces
+            // this one and takes the banner with it.
+            if (browser_) {
+                CefPostTask(TID_UI, new Brc121PaymentBannerHideTask(browser_));
+            }
         }
 
         // Tell CEF we're ready: it will now call GetResponseHeaders (which
@@ -4910,6 +5022,38 @@ private:
     };
 
     void startUpstreamRequest() {
+        // A1 — tell the user money is moving, BEFORE anything that can block.
+        // Deliberately above the rig seam and above the retry re-entry: the
+        // banner must appear while we wait, not after. The JS is idempotent, so
+        // the re-entries (delay seam, MAX_UPSTREAM_RETRIES) just refresh it.
+        if (browser_) {
+            CefPostTask(TID_UI, new Brc121PaymentBannerTask(browser_, ctx_.domain, ctx_.satoshis));
+        }
+
+        // ⚠️ Rig-only seam (Phase 11 item 11, row A1/A2). Holds the paid retry for N ms
+        // so the "slow origin" condition is reproducible on demand — the 2026-09-16
+        // defect needed the site's own origin to take 34.5 s (`cfOrigin;dur=34481`),
+        // which is not something a test can arrange.
+        //
+        // ⭐ Safe by construction, same argument as M4's Rust seam: gated on
+        // hodos::IsDevEnv(), and AppPaths::EnforceDevSafeguard (called first in main)
+        // SCRUBS a stray HODOS_DEV=1 from any non-dev-build binary before IsDevEnv()
+        // ever caches. So a shipped build cannot enter this branch even if a developer
+        // left the flag set in their environment. Unset in production regardless.
+        static const int kUpstreamDelayMs = [] {
+            if (!hodos::IsDevEnv()) return 0;
+            const char* v = std::getenv("HODOS_402_UPSTREAM_DELAY_MS");
+            if (!v) return 0;
+            try { return std::stoi(v); } catch (...) { return 0; }
+        }();
+        if (kUpstreamDelayMs > 0 && !upstreamDelayApplied_) {
+            upstreamDelayApplied_ = true;
+            LOG_WARNING_HTTP("⚠️ HODOS_402_UPSTREAM_DELAY_MS=" + std::to_string(kUpstreamDelayMs)
+                             + " — holding paid retry for " + ctx_.url);
+            CefPostDelayedTask(TID_IO, new StartTask(this), kUpstreamDelayMs);
+            return;
+        }
+
         LOG_INFO_HTTP("🌐 Async402ResourceHandler: issuing paid request to " + ctx_.url
                       + " (txid=" + ctx_.txid.substr(0, std::min<size_t>(16, ctx_.txid.size())) + "...)");
 
@@ -5008,6 +5152,7 @@ private:
     size_t responseOffset_;
     bool completed_;
     int retryAttempts_;  // Phase 1 polish — see MAX_UPSTREAM_RETRIES
+    bool upstreamDelayApplied_ = false;  // rig seam, see startUpstreamRequest
     CefRefPtr<CefCallback> openCallback_;   // Fired in onUpstreamComplete to release Open()
     CefRefPtr<CefCallback> readCallback_;
     CefRefPtr<CefURLRequest> urlRequest_;

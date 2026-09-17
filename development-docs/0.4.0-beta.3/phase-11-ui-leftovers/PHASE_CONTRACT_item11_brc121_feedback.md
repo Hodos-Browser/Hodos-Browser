@@ -84,7 +84,7 @@ reproduces the whole thing. Only `A5` spends, and it is cents.
 
 | ID | 🟢 GREEN — must be true | 🔴 RED — must be *seen* to fail | 🎯 SUBJECT | Tier | Result |
 |---|---|---|---|---|---|
-| `P11-11-A1` | With the paid retry stubbed to hang 20 s, the banner is in the viewport within ~1 s naming host + sats | Revert the banner ⇒ the tab renders the **previous document**, unchanged and clickable, for the full 20 s | ⭐ **The tab's rendered document** (CDP `DOM.getDocument` / screenshot of `tab_8`), **never** a log line and never the tab throbber — the throbber was already running during the 48 s and proved nothing | T2 | ⬜ |
+| `P11-11-A1` | With the paid retry stubbed to hang 20 s, the banner is in the viewport within ~1 s naming host + sats | Revert the banner ⇒ the tab renders the **previous document**, unchanged and clickable, for the full 20 s | ⭐ **The tab's rendered document** (screenshot of the content tab), **never** a log line and never the tab throbber — the throbber was already running during the 48 s and proved nothing | T2 | ✅ **2026-09-17** |
 | `P11-11-A2` | Past the 10 s threshold the banner states the site is slow and offers Stop; the request stays alive and still completes | Set the threshold above the stub delay ⇒ the escalated copy never appears | The banner's rendered text **and** that the upstream request is still in flight afterwards (it must not be cancelled by its own warning) | T2 | ⬜ |
 | `P11-11-A3` | With a payment in flight, a second navigation to the same URL mints **no** second payment — the existing one is reused | Revert to the pre-fix path ⇒ **two** `createAction`s / two `nosend` rows for one article, reproducing 2026-09-16 | ⭐ **Count of `nosend` rows + `createAction` calls for that URL**, not an HTTP status. ⚠️ The 2026-09-16 run is the naturally-occurring RED; reproduce it deliberately | T2 | ⬜ |
 | `P11-11-A4` | After an abandoned retry: zero `nosend` rows, zero spendable phantom outputs for that txid, reservation released | Remove the `release_unbroadcast_transaction` call ⇒ the row, the phantom output and the held reservation all persist (📏 measured 2026-09-16: 2 rows, 1 spendable output each, 1,419,268 sats reserved) | The wallet DB `transactions` + `outputs` rows and the reservation, **not** the log's "funds preserved" line — that line was already true while the leak existed | T2 | ⬜ |
@@ -93,6 +93,38 @@ reproduces the whole thing. Only `A5` spends, and it is cents.
 
 **Two-sided pairing:** `A3` ⇄ `A5` (must reuse, and must still deliver), `A2` (must warn, and must not
 cancel itself).
+
+### `P11-11-A1` — run record, 2026-09-17 (Windows)
+
+**Same article, same seam, same baseline screenshot hash. One variable: the binary.**
+
+| | 🔴 RED (pre-fix) | 🟢 GREEN (post-fix) |
+|---|---|---|
+| Article | `/articles/tetheral-reserve-bank` | **the same URL** (its one `paid_content` row deleted so it re-paid) |
+| Baseline sha256[:16] | `712b0e48db0e6845` (357,778 B) | `712b0e48db0e6845` (357,778 B) — ⭐ identical, so the setup is provably the same |
+| During the hold | **15/15 samples byte-identical to baseline** | changed at **t+2.1 s**, `c75880e8971b1abb`, and stayed changed |
+| Banner | absent | `● Paying now.bsvblockchain.tech · 200 sats…` |
+| Payment real? | 402 → 200 sats, held 20.010 s, `cfOrigin;dur=10896` | 402 → 200 sats, banner at 14:58:22.175, held 20.003 s, txid `9fe12b7367f5c51a…` |
+
+⛔ **Two instrument defects found and fixed before the result was believed:**
+1. **`Runtime.evaluate` QUEUES behind the pending navigation.** The first two attempts returned exactly
+   one sample, at t+37.6 s and t+32.0 s — the renderer would not answer during the very window under
+   test. ⇒ switched to `Page.captureScreenshot`, which the browser process serves.
+2. 🚨 **A run was VACUOUS and looked perfect.** `PaidContentCache` served a previously-paid article
+   from disk: no 402, no payment, no hold, article on screen at t+1.2 s. A table of 25 healthy-looking
+   rows that tested **nothing**. ⇒ every run now uses a URL with no `paid_content` row, verified.
+
+⭐ **Instrument control** (without it, "15 identical frames" could just mean a frozen capture): the
+screenshot taken after completion is `5dccbfca96271e94` / 467,590 B — **different**. The instrument
+can see change; the identical frames are real.
+
+⚠️ Cost: 4 real payments across the runs (150–200 sats each), dev wallet.
+
+**`R-GOLD` spot-check on the green run:** `OnWalletCallSuccess fired (… cefBrowserId=2 → tabId=1,
+endpoint=pay402)` — ids differ and it resolved to the paying tab. Full `A6` row still owed.
+
+**Preflight `-Full`: PASS**, every gate at baseline (G11 59, G12 4 — unchanged). ⛔ `HodosBrowserShell`
+also built explicitly; `-Full` does not build it.
 
 ## 5. Blast radius
 
