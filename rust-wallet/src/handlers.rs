@@ -4460,6 +4460,23 @@ pub struct CreateActionOptions {
     /// a dApp sets it — it only reorders the preference.
     #[serde(rename = "preferSmallParents", default)]
     pub prefer_small_parents: Option<bool>,
+
+    /// Hodos extension (beta.3 Phase 11 item 11, `P11-11-A7`). The BEEF budget of
+    /// the channel this transaction must travel over, in bytes.
+    ///
+    /// 🚨 Why this is per-request and not a constant: `prefer_small_parents` alone
+    /// silently used the **MessageBox** line (≈105 KB) for **every** caller,
+    /// including BRC-121 — whose real ceiling is an HTTP header block roughly ten
+    /// times tighter. 📏 Measured 2026-09-17: a 92,837-byte BEEF whose parent sat
+    /// *under* the MessageBox line was rejected by Cloudflare with 431. The
+    /// preference was on, correct, and calibrated to the wrong channel.
+    ///
+    /// ⇒ The caller knows its own transport; the selector should not guess. When
+    /// set, it both tightens the large-parent line (`large_parent_bytes_for_budget`)
+    /// and gives the caller a number to size-check the built BEEF against.
+    /// Unset ⇒ the MessageBox line, i.e. exactly the previous behaviour.
+    #[serde(rename = "maxBeefBytes", default)]
+    pub max_beef_bytes: Option<usize>,
 }
 
 // Response structure for /createAction - full BRC-100 spec
@@ -5342,12 +5359,19 @@ pub(crate) async fn create_action_internal(
                     } else {
                         None
                     };
+                // `P11-11-A7`: the large-parent line follows the CALLER'S channel,
+                // not MessageBox's. Unset ⇒ the MessageBox line, i.e. unchanged.
+                let large_at = req.options.as_ref()
+                    .and_then(|o| o.max_beef_bytes)
+                    .map(large_parent_bytes_for_budget)
+                    .unwrap_or_else(large_parent_bytes);
                 selected_utxos = select_utxos_with_preference(
                     confirmed_utxos.as_deref(),
                     &all_utxos,
                     wallet_amount_needed,
                     Some(&CONSOLIDATION_FOR_SENDS),
                     parent_sizes.as_ref(),
+                    large_at,
                 );
             }
 
@@ -7445,10 +7469,11 @@ pub(crate) fn select_utxos_with_preference(
     amount_needed: i64,
     consolidation: Option<&ConsolidationConfig>,
     parent_sizes: Option<&std::collections::HashMap<String, usize>>,
+    large_at: usize,
 ) -> Vec<UTXO> {
     // Try confirmed-only first if available
     if let Some(confirmed) = confirmed_utxos {
-        let selection = select_utxos_greedy(confirmed, amount_needed, consolidation, parent_sizes);
+        let selection = select_utxos_greedy(confirmed, amount_needed, consolidation, parent_sizes, large_at);
         if !selection.is_empty() {
             log::info!("   ✅ Selected {} UTXOs from CONFIRMED transactions only", selection.len());
             return selection;
@@ -7457,7 +7482,7 @@ pub(crate) fn select_utxos_with_preference(
     }
 
     // Fallback to all UTXOs
-    select_utxos_greedy(all_utxos, amount_needed, consolidation, parent_sizes)
+    select_utxos_greedy(all_utxos, amount_needed, consolidation, parent_sizes, large_at)
 }
 
 /// beta.3 Phase 10d (`P10d-A1`) — a parent transaction at or above this many bytes
@@ -7474,13 +7499,52 @@ pub(crate) fn large_parent_bytes() -> usize {
     crate::messagebox::messagebox_max_body_bytes() / 10
 }
 
-/// True when the coin's parent transaction is known to be large. Unknown parents
-/// (not in the local cache) count as small — the preference is an ordering, not a
-/// guarantee, and the pre-broadcast size check (`P10d-A2`) is the hard stop.
-fn has_large_parent(utxo: &UTXO, parent_sizes: Option<&std::collections::HashMap<String, usize>>) -> bool {
+/// beta.3 Phase 11 item 11 (`P11-11-A7`) — the BRC-121 402 channel's BEEF budget.
+///
+/// 🚨 Why this exists: `large_parent_bytes()` above is derived from the **MessageBox**
+/// relay cap (≈105 KB at 1 MiB). `pay_402` asked for `prefer_small_parents` from the
+/// day 10d landed — the call site even says *"the BEEF travels base64 in an HTTP
+/// header — avoid large parents"* — but it inherited MessageBox's number, which is an
+/// order of magnitude too loose for this channel. 📏 Measured 2026-09-17: a 92,837-byte
+/// BEEF whose parent sat **under** the 105 KB line sailed through selection and was
+/// rejected by Cloudflare with 431 / *"Exceeded maximum HTTP header buffer size of
+/// 100KB"*. The payment was minted and could not be delivered.
+///
+/// ⛔ The ceiling is NOT 100 KB of BEEF. Two compounding costs:
+///   • the header carries **base64(BEEF)**, ×4/3 — 92,837 B became 123,784 B;
+///   • Cloudflare's 100 KB is the **whole request header block**, and we also send the
+///     page's own User-Agent / Cookie / Accept-Language / Referer plus four more
+///     `x-bsv-*`. Cookies on a logged-in site run to several KB and vary per site.
+///
+/// ⇒ 64 KB, chosen deliberately below the ≈68–73 KB the arithmetic allows, because the
+/// non-BEEF headers are not ours to predict. 100 KB − 64 KB×4/3 ≈ 15 KB of headroom for
+/// everything else. ⚠️ 100 KB is Cloudflare's number, not a standard; another CDN may be
+/// tighter, which is a further argument for headroom rather than precision.
+pub(crate) const BRC121_MAX_BEEF_BYTES: usize = 64 * 1024;
+
+/// The large-parent line for a given channel's BEEF budget.
+///
+/// ⭐ The rule both channels share: **half the budget**. A single parent at or above
+/// half of what the whole BEEF may weigh is the one coin most likely to sink the send,
+/// so it sorts last. (MessageBox's existing `large_parent_bytes()` is the same shape —
+/// ≈105 KB against the ≈220 KB of BEEF a 1 MiB relay message allows — and is left
+/// exactly as it was, so that path's behaviour does not move.)
+pub(crate) fn large_parent_bytes_for_budget(max_beef_bytes: usize) -> usize {
+    max_beef_bytes / 2
+}
+
+/// True when the coin's parent transaction is known to be large, measured against the
+/// caller's channel line (`large_at`). Unknown parents (not in the local cache) count as
+/// small — the preference is an ordering, not a guarantee, and a pre-send size check is
+/// the hard stop (`P10d-A2` for MessageBox, `P11-11-A7` for the BRC-121 header).
+fn has_large_parent(
+    utxo: &UTXO,
+    parent_sizes: Option<&std::collections::HashMap<String, usize>>,
+    large_at: usize,
+) -> bool {
     parent_sizes
         .and_then(|m| m.get(&utxo.txid))
-        .map(|&n| n >= large_parent_bytes())
+        .map(|&n| n >= large_at)
         .unwrap_or(false)
 }
 
@@ -7546,12 +7610,73 @@ mod peerpay_selection_tests {
 
     fn picked(v: &[UTXO]) -> Vec<&str> { v.iter().map(|u| u.txid.as_str()).collect() }
 
+    /// `P11-11-A7` — **the defect, as a two-sided test.**
+    ///
+    /// 🚨 Measured 2026-09-17: `pay_402` had `prefer_small_parents` on since 10d and
+    /// still produced a 92,837-byte BEEF that Cloudflare rejected with 431
+    /// (*"Exceeded maximum HTTP header buffer size of 100KB"*). The preference was
+    /// working; it was calibrated to the **MessageBox** channel.
+    ///
+    /// The `awkward` coin below is the whole bug in one number: a 90,000-byte parent
+    /// sits **under** the MessageBox line (104,857) and **over** the BRC-121 line
+    /// (32,768). Same coin, same preference, opposite verdicts — discriminated only
+    /// by which channel's budget the caller declares.
+    ///
+    /// ⛔ This is its own negative control: the MessageBox arm IS the pre-fix
+    /// behaviour, and it must keep selecting the awkward coin. If someone "fixes"
+    /// `large_parent_bytes()` globally, that arm goes red and tells them they just
+    /// moved the PeerPay path too.
+    #[test]
+    fn a7_the_brc121_budget_rejects_a_parent_the_messagebox_budget_accepts() {
+        let coins = vec![coin("awkward", 5_000_000), coin("clean", 4_000_000)];
+        let sizes = HashMap::from([
+            ("awkward".to_string(), 90_000usize),  // between the two lines
+            ("clean".to_string(), 300usize),
+        ]);
+
+        // Sanity: the two lines really do straddle 90,000. If this ever stops being
+        // true the test below proves nothing, so assert it rather than assume it.
+        assert!(large_parent_bytes() > 90_000,
+            "MessageBox line {} should be ABOVE the awkward parent", large_parent_bytes());
+        assert!(large_parent_bytes_for_budget(BRC121_MAX_BEEF_BYTES) <= 90_000,
+            "BRC-121 line {} should be AT OR BELOW the awkward parent",
+            large_parent_bytes_for_budget(BRC121_MAX_BEEF_BYTES));
+
+        // 🔴 RED arm — the shipped behaviour that produced the 431. Largest-first, and
+        // the awkward coin is "small" by MessageBox's line, so it is taken first.
+        let messagebox = select_utxos_with_preference(
+            None, &coins, 3_000_000, None, Some(&sizes), large_parent_bytes());
+        assert_eq!(picked(&messagebox), vec!["awkward"],
+            "the MessageBox line must still accept this parent — that IS the pre-fix behaviour");
+
+        // 🟢 GREEN arm — the same coins, the same preference, the BRC-121 budget.
+        let brc121 = select_utxos_with_preference(
+            None, &coins, 3_000_000, None, Some(&sizes),
+            large_parent_bytes_for_budget(BRC121_MAX_BEEF_BYTES));
+        assert_eq!(picked(&brc121), vec!["clean"],
+            "with the 402 header budget the awkward coin must sort last");
+    }
+
+    /// `P11-11-A7` — the budget must be tight enough that a conforming BEEF still
+    /// fits the header *after* base64, with room for the page's own headers.
+    /// ⛔ 100 KB is NOT the BEEF ceiling: base64 is x4/3, and Cloudflare's cap covers
+    /// the WHOLE header block (User-Agent, Cookie, Referer, four more x-bsv-*).
+    #[test]
+    fn a7_the_budget_leaves_headroom_after_base64() {
+        let b64 = (BRC121_MAX_BEEF_BYTES + 2) / 3 * 4;
+        assert!(b64 < 100 * 1024,
+            "base64 of the budget ({} B) must fit Cloudflare's 100 KB block", b64);
+        let headroom = 100 * 1024 - b64;
+        assert!(headroom >= 12 * 1024,
+            "only {} B left for the page's own headers — cookies alone can exceed that", headroom);
+    }
+
     /// `P10d-A1` — a bundle-carrying send does not take the large-parent coin when
     /// clean coins cover the amount.
     #[test]
     fn a1_bundle_send_skips_the_large_parent_coin() {
         let (coins, sizes) = wallet();
-        let sel = select_utxos_with_preference(None, &coins, 600_000, None, Some(&sizes));
+        let sel = select_utxos_with_preference(None, &coins, 600_000, None, Some(&sizes), large_parent_bytes());
         assert_eq!(picked(&sel), vec!["report"]);
     }
 
@@ -7579,14 +7704,14 @@ mod peerpay_selection_tests {
         ]);
         // The production shape: consolidation ON, bundle-carrying send.
         let sel = select_utxos_with_preference(
-            None, &coins, 600_000, Some(&CONSOLIDATION_FOR_SENDS), Some(&sizes));
+            None, &coins, 600_000, Some(&CONSOLIDATION_FOR_SENDS), Some(&sizes), large_parent_bytes());
         assert!(!picked(&sel).contains(&"backup_change_small"),
                 "the consolidation pass must not append a large-parent coin: {:?}", picked(&sel));
 
         // Control, so this is not vacuous: with no parent-size map (an ordinary
         // send) the same small coin IS swept up, which is the feature working.
         let sel_plain = select_utxos_with_preference(
-            None, &coins, 600_000, Some(&CONSOLIDATION_FOR_SENDS), None);
+            None, &coins, 600_000, Some(&CONSOLIDATION_FOR_SENDS), None, large_parent_bytes());
         assert!(picked(&sel_plain).contains(&"backup_change_small"),
                 "consolidation must still sweep small coins when parents are irrelevant: {:?}",
                 picked(&sel_plain));
@@ -7596,7 +7721,7 @@ mod peerpay_selection_tests {
     #[test]
     fn a1_ordinary_send_order_is_unchanged() {
         let (coins, _) = wallet();
-        let sel = select_utxos_with_preference(None, &coins, 600_000, None, None);
+        let sel = select_utxos_with_preference(None, &coins, 600_000, None, None, large_parent_bytes());
         assert_eq!(picked(&sel), vec!["backup_change"]);
     }
 
@@ -7605,7 +7730,7 @@ mod peerpay_selection_tests {
     #[test]
     fn a1_large_parent_coin_is_used_last_not_never() {
         let (coins, sizes) = wallet();
-        let sel = select_utxos_with_preference(None, &coins, 30_000_000, None, Some(&sizes));
+        let sel = select_utxos_with_preference(None, &coins, 30_000_000, None, Some(&sizes), large_parent_bytes());
         assert_eq!(picked(&sel), vec!["report", "paid_content", "backup_change"]);
     }
 
@@ -7653,6 +7778,7 @@ fn select_utxos_greedy(
     amount_needed: i64,
     consolidation: Option<&ConsolidationConfig>,
     parent_sizes: Option<&std::collections::HashMap<String, usize>>,
+    large_at: usize,
 ) -> Vec<UTXO> {
     let mut selected = Vec::new();
     let mut total: i64 = 0;
@@ -7672,8 +7798,8 @@ fn select_utxos_greedy(
     // parent sort AFTER every clean coin; within each group largest-first as before.
     // With `parent_sizes == None` the order is byte-identical to the old one.
     sorted_utxos.sort_by(|a, b| {
-        has_large_parent(a, parent_sizes)
-            .cmp(&has_large_parent(b, parent_sizes))
+        has_large_parent(a, parent_sizes, large_at)
+            .cmp(&has_large_parent(b, parent_sizes, large_at))
             .then_with(|| b.satoshis.cmp(&a.satoshis))
     });
 
@@ -7686,10 +7812,10 @@ fn select_utxos_greedy(
         }
     }
     if parent_sizes.is_some() {
-        let large = selected.iter().filter(|u| has_large_parent(u, parent_sizes)).count();
+        let large = selected.iter().filter(|u| has_large_parent(u, parent_sizes, large_at)).count();
         if large > 0 {
             log::warn!("   ⚠️  Bundle-carrying send had to use {} input(s) with a large parent (≥ {} bytes) — no clean coins covered the amount",
-                large, large_parent_bytes());
+                large, large_at);
         }
     }
 
@@ -7716,7 +7842,7 @@ fn select_utxos_greedy(
             // coin more likely, not less: backup funding takes the smallest
             // sufficient coin, so its change is biased small (8,057 sats on the
             // live run; the whole 547–5000 window is reachable).
-            if has_large_parent(utxo, parent_sizes) { continue; }
+            if has_large_parent(utxo, parent_sizes, large_at) { continue; }
             // Skip if already selected in the primary pass
             if selected.iter().any(|s| s.txid == utxo.txid && s.vout == utxo.vout) { continue; }
             selected.push(utxo.clone());
@@ -7734,7 +7860,7 @@ fn select_utxos_greedy(
 
 // Backwards-compatible wrapper for existing callers
 fn select_utxos(available: &[UTXO], amount_needed: i64) -> Vec<UTXO> {
-    select_utxos_greedy(available, amount_needed, None, None)
+    select_utxos_greedy(available, amount_needed, None, None, large_parent_bytes())
 }
 
 // Options for /signAction (per SDK spec: SignActionOptions)
@@ -9108,6 +9234,7 @@ pub async fn process_action(
             send_max: None,
             send_with: None,
             prefer_small_parents: None,
+            max_beef_bytes: None,
         }),
         input_beef: None,
         lock_time: None,
@@ -10597,6 +10724,7 @@ pub async fn send_transaction(
             send_max: if send_max { Some(true) } else { None },
             send_with: None,
             prefer_small_parents: None,
+            max_beef_bytes: None,
         }),
         input_beef: None,
         lock_time: None,
@@ -18522,6 +18650,7 @@ pub async fn peerpay_send(
             send_with: None,
             // 10d `P10d-A1`: the BEEF travels over MessageBox (1 MiB cap) — avoid large parents.
             prefer_small_parents: Some(true),
+            max_beef_bytes: None,
         }),
         input_beef: None,
         lock_time: None,
@@ -19290,6 +19419,10 @@ pub async fn pay_402(
             send_with: None,
             // 10d `P10d-A1`: the BEEF travels base64 in an HTTP header — avoid large parents.
             prefer_small_parents: Some(true),
+            // `P11-11-A7`: this BEEF travels base64 in an HTTP header block that
+            // Cloudflare caps at 100 KB. Measured 2026-09-17: a 92,837-byte BEEF
+            // passed the MessageBox line and was rejected 431. Own channel, own line.
+            max_beef_bytes: Some(BRC121_MAX_BEEF_BYTES),
         }),
         input_beef: None,
         lock_time: None,
@@ -19373,6 +19506,40 @@ pub async fn pay_402(
         return HttpResponse::InternalServerError().json(serde_json::json!({
             "success": false,
             "error": "Empty BEEF returned from createAction"
+        }));
+    }
+
+    // `P11-11-A7` — the HARD STOP. `prefer_small_parents` is an ordering, not a
+    // guarantee: when no small-parent coin can cover the amount it picks a large one
+    // anyway, and unknown parents count as small. Without this check we mint a payment
+    // that the channel cannot carry, and the user gets a 431 from the CDN plus a
+    // `nosend` row and a spendable phantom output for a transaction that will never
+    // exist. This is the same shape as `P10d-A2`'s refuse-before-broadcast on the
+    // PeerPay path, which this path never had.
+    //
+    // ⛔ Refuse BEFORE the caller can act on it, and release what the mint reserved —
+    // reusing `release_unbroadcast_transaction` rather than writing a second cleanup.
+    if atomic_beef_bytes.len() > BRC121_MAX_BEEF_BYTES {
+        let b64_len = (atomic_beef_bytes.len() + 2) / 3 * 4;
+        log::warn!(
+            "   ⛔ pay_402 refusing: BEEF {} bytes (base64 {} bytes) exceeds the {} byte \
+             BRC-121 header budget — releasing txid={} and NOT returning a payment",
+            atomic_beef_bytes.len(), b64_len, BRC121_MAX_BEEF_BYTES, txid
+        );
+        let (disabled, restored) = release_unbroadcast_transaction(state.get_ref(), &txid, None);
+        log::warn!("   🧹 released: {} output(s) disabled, {} input(s) restored", disabled, restored);
+        state.balance_cache.invalidate();
+        return HttpResponse::UnprocessableEntity().json(serde_json::json!({
+            "success": false,
+            "error": "ERR_BRC121_BEEF_TOO_LARGE",
+            "message": format!(
+                "This payment cannot be delivered: it would need a {} KB request header, \
+                 and servers commonly cap the whole header block at 100 KB. The coins \
+                 available to fund it carry too much transaction history.",
+                (b64_len + 1023) / 1024
+            ),
+            "beefBytes": atomic_beef_bytes.len(),
+            "maxBeefBytes": BRC121_MAX_BEEF_BYTES,
         }));
     }
 
@@ -19791,6 +19958,7 @@ pub async fn paymail_send(
             send_max: None,
             send_with: None,
             prefer_small_parents: None,
+            max_beef_bytes: None,
         }),
         input_beef: None,
         lock_time: None,
@@ -20965,7 +21133,7 @@ mod token_reserved_selection_tests {
     /// the pass that would reach a 1-satoshi carrier FIRST.
     #[test]
     fn consolidation_pass_does_not_sweep_up_the_carrier() {
-        let selected = select_utxos_greedy(&wallet(), 10_000, Some(&CONSOLIDATION_FOR_SENDS), None);
+        let selected = select_utxos_greedy(&wallet(), 10_000, Some(&CONSOLIDATION_FOR_SENDS), None, large_parent_bytes());
 
         assert!(!picked(&selected).contains(&"ordinal"),
             "consolidation pass must not add the carrier: {:?}", picked(&selected));
@@ -20983,13 +21151,13 @@ mod token_reserved_selection_tests {
 
         // One satoshi more than the ordinary coins can cover: only the carrier could
         // close the gap, and it must not be allowed to.
-        let selected = select_utxos_greedy(&all, ordinary_total + 1, None, None);
+        let selected = select_utxos_greedy(&all, ordinary_total + 1, None, None, large_parent_bytes());
         assert!(selected.is_empty(),
             "insufficient funds is the correct answer; spending the carrier is not: {:?}",
             picked(&selected));
 
         // Control: one satoshi less and the selection succeeds without the carrier.
-        let ok = select_utxos_greedy(&all, ordinary_total, None, None);
+        let ok = select_utxos_greedy(&all, ordinary_total, None, None, large_parent_bytes());
         assert!(!ok.is_empty(), "the same call succeeds when the target is reachable");
         assert!(!picked(&ok).contains(&"ordinal"));
     }
@@ -21002,12 +21170,12 @@ mod token_reserved_selection_tests {
         let mut all = wallet();
         all[1] = utxo("ordinal", 2); // one satoshi above the floor — no longer reserved
 
-        let consolidated = select_utxos_greedy(&all, 10_000, Some(&CONSOLIDATION_FOR_SENDS), None);
+        let consolidated = select_utxos_greedy(&all, 10_000, Some(&CONSOLIDATION_FOR_SENDS), None, large_parent_bytes());
         assert!(picked(&consolidated).contains(&"ordinal"),
             "at 2 sats the same output IS consolidated — if not, the A5 tests are vacuous");
 
         let ordinary_total: i64 = all.iter().map(|u| u.satoshis).sum();
-        let drained = select_utxos_greedy(&all, ordinary_total, None, None);
+        let drained = select_utxos_greedy(&all, ordinary_total, None, None, large_parent_bytes());
         assert!(picked(&drained).contains(&"ordinal"),
             "at 2 sats a full drain DOES reach it");
     }
@@ -21046,6 +21214,6 @@ mod token_reserved_selection_tests {
     fn two_sat_outputs_remain_ordinary_value() {
         let all = vec![utxo("two", 2), utxo("one", 1)];
         assert_eq!(picked(&select_all_spendable(&all)), vec!["two"]);
-        assert_eq!(picked(&select_utxos_greedy(&all, 2, None, None)), vec!["two"]);
+        assert_eq!(picked(&select_utxos_greedy(&all, 2, None, None, large_parent_bytes())), vec!["two"]);
     }
 }
