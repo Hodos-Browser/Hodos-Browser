@@ -5372,6 +5372,7 @@ pub(crate) async fn create_action_internal(
                     Some(&CONSOLIDATION_FOR_SENDS),
                     parent_sizes.as_ref(),
                     large_at,
+                    req.options.as_ref().and_then(|o| o.max_beef_bytes),
                 );
             }
 
@@ -7470,7 +7471,35 @@ pub(crate) fn select_utxos_with_preference(
     consolidation: Option<&ConsolidationConfig>,
     parent_sizes: Option<&std::collections::HashMap<String, usize>>,
     large_at: usize,
+    beef_budget: Option<usize>,
 ) -> Vec<UTXO> {
+    // `P11-11-A8` — 👤 "There has to be a way to choose tokens that will meet the
+    // size limit." There is, and the per-coin rule above is not it: `large_at` is a
+    // line each coin is judged against ALONE. With a 64 KB budget that line is 32 KB,
+    // so three coins with 30 KB parents are each "small" and together carry 90 KB of
+    // ancestry — over budget, selected happily, refused at the hard stop.
+    //
+    // ⇒ When the caller declares a budget, try a CUMULATIVE pass first: walk the same
+    // preference order but skip any coin whose parent would push the running ancestry
+    // total over the budget. Only if that cannot fund the amount do we fall through to
+    // the ordinary pass, where the hard stop reports honestly that nothing fits.
+    //
+    // ⛔ The fall-through matters: silently returning "insufficient funds" here would
+    // be a lie — the coins exist, they just cannot be carried by this channel, and the
+    // user needs to be told THAT.
+    if let Some(budget) = beef_budget {
+        for pool in [confirmed_utxos, Some(all_utxos)].into_iter().flatten() {
+            let sel = select_utxos_within_ancestry_budget(
+                pool, amount_needed, consolidation, parent_sizes, large_at, budget);
+            if !sel.is_empty() {
+                log::info!("   ✅ Selected {} UTXO(s) within the {} byte ancestry budget", sel.len(), budget);
+                return sel;
+            }
+        }
+        log::warn!("   ⚠️  No combination of coins fits the {} byte ancestry budget — \
+                    falling through so the caller's size check can report it", budget);
+    }
+
     // Try confirmed-only first if available
     if let Some(confirmed) = confirmed_utxos {
         let selection = select_utxos_greedy(confirmed, amount_needed, consolidation, parent_sizes, large_at);
@@ -7483,6 +7512,79 @@ pub(crate) fn select_utxos_with_preference(
 
     // Fallback to all UTXOs
     select_utxos_greedy(all_utxos, amount_needed, consolidation, parent_sizes, large_at)
+}
+
+/// `P11-11-A8` — greedy selection that keeps the TOTAL parent ancestry under a budget.
+///
+/// Same preference order as `select_utxos_greedy` (small parents first, then largest
+/// value first), but carries a running total and refuses to add a coin that would
+/// exceed `budget`. Returns empty when the amount cannot be met within the budget —
+/// the caller then decides what to tell the user.
+///
+/// ⚠️ `ANCESTRY_OVERHEAD_BYTES` is the spending transaction itself plus BEEF framing,
+/// which ride in the same envelope as the parents. Parents dominate by orders of
+/// magnitude, so a fixed, generous reserve is honest here where a computed one would
+/// only look precise.
+///
+/// ⚠️ Parents not in the local cache have unknown size. They count as ZERO here, which
+/// is the optimistic reading — consistent with `has_large_parent` treating unknown as
+/// small, and the reason a hard size check after building is still required.
+fn select_utxos_within_ancestry_budget(
+    available: &[UTXO],
+    amount_needed: i64,
+    consolidation: Option<&ConsolidationConfig>,
+    parent_sizes: Option<&std::collections::HashMap<String, usize>>,
+    large_at: usize,
+    budget: usize,
+) -> Vec<UTXO> {
+    const ANCESTRY_OVERHEAD_BYTES: usize = 2048;
+    let parent_budget = budget.saturating_sub(ANCESTRY_OVERHEAD_BYTES);
+
+    let mut sorted: Vec<UTXO> = available.iter()
+        .filter(|u| !is_token_reserved_value(u.satoshis))
+        .cloned()
+        .collect();
+    sorted.sort_by(|a, b| {
+        has_large_parent(a, parent_sizes, large_at)
+            .cmp(&has_large_parent(b, parent_sizes, large_at))
+            .then_with(|| b.satoshis.cmp(&a.satoshis))
+    });
+
+    let size_of = |u: &UTXO| -> usize {
+        parent_sizes.and_then(|m| m.get(&u.txid)).copied().unwrap_or(0)
+    };
+
+    let mut selected: Vec<UTXO> = Vec::new();
+    let mut total: i64 = 0;
+    let mut ancestry: usize = 0;
+    for utxo in &sorted {
+        let sz = size_of(utxo);
+        if ancestry + sz > parent_budget { continue; }   // would not fit — skip it
+        ancestry += sz;
+        total += utxo.satoshis;
+        selected.push(utxo.clone());
+        if total >= amount_needed { break; }
+    }
+    if total < amount_needed { return Vec::new(); }
+
+    // Lazy consolidation, same rule: only while it still fits.
+    if let Some(config) = consolidation {
+        let mut extra = 0;
+        for utxo in &sorted {
+            if extra >= config.max_extra_inputs { break; }
+            if utxo.satoshis > config.dust_threshold_sats { continue; }
+            if selected.iter().any(|s| s.txid == utxo.txid && s.vout == utxo.vout) { continue; }
+            let sz = size_of(utxo);
+            if ancestry + sz > parent_budget { continue; }
+            ancestry += sz;
+            selected.push(utxo.clone());
+            extra += 1;
+        }
+    }
+
+    log::info!("   📏 Ancestry budget: {} of {} bytes used by {} input(s)",
+        ancestry, parent_budget, selected.len());
+    selected
 }
 
 /// beta.3 Phase 10d (`P10d-A1`) — a parent transaction at or above this many bytes
@@ -7644,17 +7746,83 @@ mod peerpay_selection_tests {
 
         // 🔴 RED arm — the shipped behaviour that produced the 431. Largest-first, and
         // the awkward coin is "small" by MessageBox's line, so it is taken first.
-        let messagebox = select_utxos_with_preference(
-            None, &coins, 3_000_000, None, Some(&sizes), large_parent_bytes());
+        let messagebox = select_utxos_with_preference(None, &coins, 3_000_000, None, Some(&sizes), large_parent_bytes(), None);
         assert_eq!(picked(&messagebox), vec!["awkward"],
             "the MessageBox line must still accept this parent — that IS the pre-fix behaviour");
 
         // 🟢 GREEN arm — the same coins, the same preference, the BRC-121 budget.
         let brc121 = select_utxos_with_preference(
             None, &coins, 3_000_000, None, Some(&sizes),
-            large_parent_bytes_for_budget(BRC121_MAX_BEEF_BYTES));
+            large_parent_bytes_for_budget(BRC121_MAX_BEEF_BYTES), None);
         assert_eq!(picked(&brc121), vec!["clean"],
             "with the 402 header budget the awkward coin must sort last");
+    }
+
+    /// `P11-11-A8` — 👤 *"There has to be a way to choose tokens that will meet the
+    /// size limit."* There is, and the per-coin line alone is NOT it.
+    ///
+    /// ⛔ The hole this closes: `large_at` judges each coin **alone**. With a 64 KB
+    /// budget the line is 32 KB, so three coins with 30 KB parents are each "small"
+    /// and the old selector took all three — 90 KB of ancestry, over budget, and only
+    /// caught later by the hard stop. The user would be refused a payment that a
+    /// different combination could have carried.
+    #[test]
+    fn a8_selection_keeps_the_TOTAL_ancestry_under_budget() {
+        // Each parent is UNDER the 32 KB per-coin line, so the old rule saw nothing wrong.
+        // ⚠️ The values matter as much as the parent sizes: largest-first must be
+        // FORCED onto the heavy-ancestry coins, and no single coin may cover the
+        // amount. An earlier version of this fixture let the selector stop after two
+        // coins, stayed under budget, and proved nothing.
+        let coins = vec![
+            coin("heavy_a", 3_000_000), coin("heavy_b", 3_000_000), coin("heavy_c", 3_000_000),
+            coin("light_a", 2_900_000), coin("light_b", 2_900_000), coin("light_c", 2_900_000),
+        ];
+        let sizes = HashMap::from([
+            ("heavy_a".to_string(), 30_000usize),
+            ("heavy_b".to_string(), 30_000usize),
+            ("heavy_c".to_string(), 30_000usize),
+            ("light_a".to_string(),    200usize),
+            ("light_b".to_string(),    200usize),
+            ("light_c".to_string(),    200usize),
+        ]);
+        let large_at = large_parent_bytes_for_budget(BRC121_MAX_BEEF_BYTES);
+        for k in ["heavy_a", "heavy_b", "heavy_c"] {
+            assert!(sizes[k] < large_at,
+                "{} must pass the per-coin line, or this tests the old rule instead of the new one", k);
+        }
+
+        // 🔴 Without a budget (the pre-A8 behaviour): largest-first takes `tiny`, then
+        // tops up with mid coins — and nothing counts the total.
+        let unbudgeted = select_utxos_with_preference(
+            None, &coins, 8_000_000, None, Some(&sizes), large_at, None);
+        let anc: usize = unbudgeted.iter().map(|u| sizes[u.txid.as_str()]).sum();
+        assert!(anc > BRC121_MAX_BEEF_BYTES - 2048,
+            "pre-A8 selection should blow the ancestry budget ({} bytes) — that is the defect", anc);
+
+        // 🟢 With the budget declared: it still funds the amount, and the total fits.
+        let budgeted = select_utxos_with_preference(
+            None, &coins, 8_000_000, None, Some(&sizes), large_at, Some(BRC121_MAX_BEEF_BYTES));
+        assert!(!budgeted.is_empty(), "a fitting combination exists and must be found");
+        let total: i64 = budgeted.iter().map(|u| u.satoshis).sum();
+        assert!(total >= 8_000_000, "must still cover the amount, got {}", total);
+        let anc2: usize = budgeted.iter().map(|u| sizes[u.txid.as_str()]).sum();
+        assert!(anc2 <= BRC121_MAX_BEEF_BYTES - 2048,
+            "ancestry {} must fit the budget", anc2);
+    }
+
+    /// `P11-11-A8` — when NO combination fits, selection must NOT quietly report
+    /// "insufficient funds". The coins exist; they cannot be carried by this channel,
+    /// and that is a different sentence for the user. ⇒ it falls through to the
+    /// ordinary selector so the caller's size check produces the honest error.
+    #[test]
+    fn a8_impossible_budget_falls_through_rather_than_lying() {
+        let coins = vec![coin("heavy", 9_000_000)];
+        let sizes = HashMap::from([("heavy".to_string(), 500_000usize)]);
+        let large_at = large_parent_bytes_for_budget(BRC121_MAX_BEEF_BYTES);
+        let sel = select_utxos_with_preference(
+            None, &coins, 1_000_000, None, Some(&sizes), large_at, Some(BRC121_MAX_BEEF_BYTES));
+        assert_eq!(picked(&sel), vec!["heavy"],
+            "must still select, so the size check can say WHY it cannot be sent");
     }
 
     /// `P11-11-A7` — the budget must be tight enough that a conforming BEEF still
@@ -7676,7 +7844,7 @@ mod peerpay_selection_tests {
     #[test]
     fn a1_bundle_send_skips_the_large_parent_coin() {
         let (coins, sizes) = wallet();
-        let sel = select_utxos_with_preference(None, &coins, 600_000, None, Some(&sizes), large_parent_bytes());
+        let sel = select_utxos_with_preference(None, &coins, 600_000, None, Some(&sizes), large_parent_bytes(), None);
         assert_eq!(picked(&sel), vec!["report"]);
     }
 
@@ -7703,15 +7871,13 @@ mod peerpay_selection_tests {
             ("backup_change_small".to_string(), 436_221),
         ]);
         // The production shape: consolidation ON, bundle-carrying send.
-        let sel = select_utxos_with_preference(
-            None, &coins, 600_000, Some(&CONSOLIDATION_FOR_SENDS), Some(&sizes), large_parent_bytes());
+        let sel = select_utxos_with_preference(None, &coins, 600_000, Some(&CONSOLIDATION_FOR_SENDS), Some(&sizes), large_parent_bytes(), None);
         assert!(!picked(&sel).contains(&"backup_change_small"),
                 "the consolidation pass must not append a large-parent coin: {:?}", picked(&sel));
 
         // Control, so this is not vacuous: with no parent-size map (an ordinary
         // send) the same small coin IS swept up, which is the feature working.
-        let sel_plain = select_utxos_with_preference(
-            None, &coins, 600_000, Some(&CONSOLIDATION_FOR_SENDS), None, large_parent_bytes());
+        let sel_plain = select_utxos_with_preference(None, &coins, 600_000, Some(&CONSOLIDATION_FOR_SENDS), None, large_parent_bytes(), None);
         assert!(picked(&sel_plain).contains(&"backup_change_small"),
                 "consolidation must still sweep small coins when parents are irrelevant: {:?}",
                 picked(&sel_plain));
@@ -7721,7 +7887,7 @@ mod peerpay_selection_tests {
     #[test]
     fn a1_ordinary_send_order_is_unchanged() {
         let (coins, _) = wallet();
-        let sel = select_utxos_with_preference(None, &coins, 600_000, None, None, large_parent_bytes());
+        let sel = select_utxos_with_preference(None, &coins, 600_000, None, None, large_parent_bytes(), None);
         assert_eq!(picked(&sel), vec!["backup_change"]);
     }
 
@@ -7730,7 +7896,7 @@ mod peerpay_selection_tests {
     #[test]
     fn a1_large_parent_coin_is_used_last_not_never() {
         let (coins, sizes) = wallet();
-        let sel = select_utxos_with_preference(None, &coins, 30_000_000, None, Some(&sizes), large_parent_bytes());
+        let sel = select_utxos_with_preference(None, &coins, 30_000_000, None, Some(&sizes), large_parent_bytes(), None);
         assert_eq!(picked(&sel), vec!["report", "paid_content", "backup_change"]);
     }
 
@@ -19532,12 +19698,23 @@ pub async fn pay_402(
         return HttpResponse::UnprocessableEntity().json(serde_json::json!({
             "success": false,
             "error": "ERR_BRC121_BEEF_TOO_LARGE",
-            "message": format!(
-                "This payment cannot be delivered: it would need a {} KB request header, \
-                 and servers commonly cap the whole header block at 100 KB. The coins \
-                 available to fund it carry too much transaction history.",
-                (b64_len + 1023) / 1024
-            ),
+            // 👤 Owner 2026-09-17: "we have to give the user good feedback" — not
+            // "some strange error that they're not going to understand". Say what is
+            // wrong, why, and what happens next, in that order.
+            // ⛔ It deliberately does NOT claim we have consolidated anything: nothing
+            // does that yet (see TICKET_wallet_cannot_shed_large_parents). Promising a
+            // cleanup that is not running would be worse than the raw error.
+            "message":
+                "Your coins carry too much transaction history for this kind of payment. \
+                 Paywalled pages need the payment to fit inside a web request header, and \
+                 every coin brings its previous transactions along with it. None of the \
+                 coins available can fund this payment and still fit.",
+            "whatNow":
+                "Consolidating your wallet fixes this: send your balance to yourself once, \
+                 wait for it to confirm in a block (usually about 10 minutes), and the \
+                 history is replaced by a single proof. Payments will work normally after that. \
+                 Your funds are safe and nothing was spent.",
+            "userActionable": true,
             "beefBytes": atomic_beef_bytes.len(),
             "maxBeefBytes": BRC121_MAX_BEEF_BYTES,
         }));
