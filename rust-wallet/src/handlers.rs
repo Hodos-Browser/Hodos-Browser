@@ -19231,6 +19231,20 @@ pub struct Pay402ReuseEntry {
 /// Reuse TTL — conservative within the BRC-121 30s freshness window.
 const PAY402_REUSE_TTL_MS: u128 = 25_000;
 
+/// `P11-11-A3` — the reuse check's SQL, hoisted to a constant **so a test can run the
+/// exact production string against the real schema**.
+///
+/// 🚨 It read `SELECT new_status` until 2026-09-17. No such column exists — the dual
+/// `status`/`broadcast_status` pair was collapsed into one `status` column and this
+/// query was never updated. The call site swallowed the error with `.unwrap_or(false)`,
+/// so the check answered "not reusable" on **every** call and the reuse cache never
+/// worked once since the rename. 📏 Measured 2026-09-16: one article, three payments,
+/// two of them for the same URL and amount 6.6 s apart.
+///
+/// ⛔ Keep this as a constant. A query built inline is a query no test can see.
+pub(crate) const PAY402_REUSE_STATUS_SQL: &str =
+    "SELECT status FROM transactions WHERE txid = ?1 LIMIT 1";
+
 /// POST /wallet/pay402 — Build a BRC-121 payment for the requesting page.
 /// beta.3 Phase 10b (CU-9, `P10b-A7`) — the reuse-don't-recreate cache key.
 ///
@@ -19247,6 +19261,79 @@ pub(crate) fn pay402_reuse_key(requesting_domain: &str, server_pubkey_hex: &str,
 /// `X-Requesting-Domain`, or "" for an internal caller.
 fn requesting_domain(http_req: &HttpRequest) -> &str {
     http_req.headers().get("X-Requesting-Domain").and_then(|v| v.to_str().ok()).unwrap_or("")
+}
+
+#[cfg(test)]
+mod pay402_reuse_sql_tests {
+    use super::PAY402_REUSE_STATUS_SQL;
+    use rusqlite::Connection;
+
+    /// `P11-11-A3` — **the test that would have caught it, and the reason it is written
+    /// this way.**
+    ///
+    /// The bug was a column name (`new_status`) that no longer existed, hidden by
+    /// `.unwrap_or(false)` at the call site. No unit test could see it, because the SQL
+    /// was a string literal buried inside a 200-line handler and the error was converted
+    /// into a plausible answer.
+    ///
+    /// ⛔ So this test does **not** re-type the query — it prepares the **exact production
+    /// constant** against the **real schema**. Re-typing it would test my copy of the
+    /// string, which is the mistake the panel found three times in Phase 10: a test whose
+    /// subject is not the production call site.
+    #[test]
+    fn a3_the_reuse_status_query_runs_against_the_real_schema() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::database::migrations::create_schema_v1(&conn).unwrap();
+
+        // prepare() is what fails on an unknown column, and it is what the handler does
+        // implicitly via query_row.
+        conn.prepare(PAY402_REUSE_STATUS_SQL).unwrap_or_else(|e| {
+            panic!("the production reuse query does not run against the real schema: {e}\n\
+                    SQL was: {PAY402_REUSE_STATUS_SQL}")
+        });
+    }
+
+    /// The other half: a row in `nosend` must actually be readable as `nosend` through
+    /// that query. A query that parses but reads the wrong column would still pass the
+    /// test above.
+    #[test]
+    fn a3_a_nosend_row_reads_back_as_nosend() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::database::migrations::create_schema_v1(&conn).unwrap();
+        // The subject here is which COLUMN the query reads, not referential integrity —
+        // seeding a whole user row would add fixture surface that proves nothing extra.
+        conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+        conn.execute(
+            "INSERT INTO transactions (user_id, txid, reference_number, status, is_outgoing, \
+             satoshis, created_at, updated_at) \
+             VALUES (1, 'deadbeef', 'ref-1', 'nosend', 1, 1000, 0, 0)", [],
+        ).unwrap();
+
+        let status: String = conn
+            .query_row(PAY402_REUSE_STATUS_SQL, rusqlite::params![&"deadbeef"], |r| r.get(0))
+            .expect("the production query must find the row it is meant to check");
+        assert_eq!(status, "nosend", "the query must read the STATUS column, not another one");
+    }
+
+    /// ⛔ And the arm that turned a schema bug into a payment: a missing row is the ONLY
+    /// benign failure. Anything else must not be read as a verdict.
+    #[test]
+    fn a3_a_missing_row_is_distinguishable_from_a_broken_query() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::database::migrations::create_schema_v1(&conn).unwrap();
+
+        let missing = conn.query_row(
+            PAY402_REUSE_STATUS_SQL, rusqlite::params![&"nope"], |r| r.get::<_, String>(0));
+        assert!(matches!(missing, Err(rusqlite::Error::QueryReturnedNoRows)),
+            "a missing row must surface as QueryReturnedNoRows, got {missing:?}");
+
+        // The shape the old code could not tell apart from the above.
+        let broken = conn.query_row(
+            "SELECT new_status FROM transactions WHERE txid = ?1 LIMIT 1",
+            rusqlite::params![&"nope"], |r| r.get::<_, String>(0));
+        assert!(!matches!(broken, Err(rusqlite::Error::QueryReturnedNoRows)),
+            "a bad column must NOT look like a missing row — that conflation is the bug");
+    }
 }
 
 #[cfg(test)]
@@ -19429,13 +19516,31 @@ pub async fn pay_402(
                 let still_nosend = {
                     let db = state.database.lock().unwrap();
                     let conn = db.connection();
-                    conn.query_row(
-                        "SELECT new_status FROM transactions WHERE txid = ?1 LIMIT 1",
+                    match conn.query_row(
+                        PAY402_REUSE_STATUS_SQL,
                         rusqlite::params![&entry.txid],
                         |r| r.get::<_, String>(0),
-                    )
-                    .map(|s| s == "nosend")
-                    .unwrap_or(false)
+                    ) {
+                        Ok(s) => s == "nosend",
+                        // A legitimate miss: the row is gone, so there is nothing to
+                        // reuse. Fall through and mint — this is the only benign arm.
+                        Err(rusqlite::Error::QueryReturnedNoRows) => false,
+                        // 🚨 ANY other error is a BUG, not a verdict. This arm used to be
+                        // `.unwrap_or(false)`, which swallowed `no such column:
+                        // new_status` — the column was renamed to `status` and this query
+                        // was never updated, so the check returned "not reusable" EVERY
+                        // time and the reuse cache never once worked. Measured 2026-09-16:
+                        // one article, three payments, two of them for the same URL 6.6 s
+                        // apart. ⛔ Never silently convert a failed check into a decision.
+                        Err(e) => {
+                            log::error!(
+                                "🚨 pay_402 reuse check FAILED (not a verdict) for txid {}: {} \
+                                 — minting a new payment. This is a bug, not a fallback.",
+                                &entry.txid[..16.min(entry.txid.len())], e
+                            );
+                            false
+                        }
+                    }
                 };
                 if still_nosend {
                     let age_ms = now_ms_check.saturating_sub(entry.created_at_ms);

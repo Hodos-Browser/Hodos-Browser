@@ -86,7 +86,7 @@ reproduces the whole thing. Only `A5` spends, and it is cents.
 |---|---|---|---|---|---|
 | `P11-11-A1` | With the paid retry stubbed to hang 20 s, the banner is in the viewport within ~1 s naming host + sats | Revert the banner ⇒ the tab renders the **previous document**, unchanged and clickable, for the full 20 s | ⭐ **The tab's rendered document** (screenshot of the content tab), **never** a log line and never the tab throbber — the throbber was already running during the 48 s and proved nothing | T2 | ✅ **2026-09-17** |
 | `P11-11-A2` | Past the 10 s threshold the banner states the site is slow and offers Stop; the request stays alive and still completes | Set the threshold above the stub delay ⇒ the escalated copy never appears | The banner's rendered text **and** that the upstream request is still in flight afterwards (it must not be cancelled by its own warning) | T2 | ✅ **2026-09-17** |
-| `P11-11-A3` | With a payment in flight, a second navigation to the same URL mints **no** second payment — the existing one is reused | Revert to the pre-fix path ⇒ **two** `createAction`s / two `nosend` rows for one article, reproducing 2026-09-16 | ⭐ **Count of `nosend` rows + `createAction` calls for that URL**, not an HTTP status. ⚠️ The 2026-09-16 run is the naturally-occurring RED; reproduce it deliberately | T2 | ⬜ |
+| `P11-11-A3` | With a payment in flight, a second navigation to the same URL mints **no** second payment — the existing one is reused | Revert to the pre-fix path ⇒ **two** `createAction`s / two `nosend` rows for one article, reproducing 2026-09-16 | ⭐ **Count of `nosend` rows + `createAction` calls for that URL**, not an HTTP status. ⚠️ The 2026-09-16 run is the naturally-occurring RED; reproduce it deliberately | T2 | ✅ **2026-09-17** (one residual, see below) |
 | `P11-11-A4` | After an abandoned retry: zero `nosend` rows, zero spendable phantom outputs for that txid, reservation released | Remove the `release_unbroadcast_transaction` call ⇒ the row, the phantom output and the held reservation all persist (📏 measured 2026-09-16: 2 rows, 1 spendable output each, 1,419,268 sats reserved) | The wallet DB `transactions` + `outputs` rows and the reservation, **not** the log's "funds preserved" line — that line was already true while the leak existed | T2 | ⬜ |
 | `P11-11-A5` | 👤 A real 402 paywall, human watching: banner appears, article arrives, gold pill on the paying tab, **one** payment | Two-sided with `A3`: click again mid-flight ⇒ still exactly one broadcast txid | ⭐ **The owner's eyes + one txid on WhatsOnChain.** The 2026-09-16 sitting is why this row exists — 4 reviewers found none of the 3 defects a person clicking found | T3 | ⬜ |
 | `P11-11-A6` | `R-GOLD` still green both paths after the edit | Stub `firePaymentSuccessIpc`'s tab resolution to the raw `cefBrowserId` ⇒ pill lands on the wrong tab | `cefBrowserId → tabId` in the log **and** which tab shows the pill (they differ — that is the hazard) | T2 | ⬜ |
@@ -161,9 +161,9 @@ owner should know about rather than discover:
 ⇒ The banner says **"Leave this page to stop waiting"**, which is true today: a navigation cancels
 the handler, `Cancel()` clears the banner, and `A3` will stop that navigation re-minting a payment.
 
-👤 **Open for the owner:** if a real Stop control is wanted, the clean form is a **native overlay
-strip** rather than page JS — no new page surface, and unsuppressable by a hostile site, which the
-current banner is not. That is a bigger change and is not in this contract.
+👤 **DECIDED 2026-09-17 — do not re-ask.** *"I think the leave this page is a better stop control
+anyway."* ⇒ "Leave this page to stop waiting" **is** the Stop control. No button, no native overlay
+strip, no page-JS binding. A2 is complete as shipped and the row's wording is satisfied.
 
 ## 5. Blast radius
 
@@ -202,3 +202,51 @@ single-call-site changes and revert independently.
 - [ ] `../REGRESSION_SET.md` at this boundary, incl. the T2 halves
 - [ ] 🍎 Mac relay row naming the shared C++ + React files
 - [ ] `../HUMAN_TEST_QUEUE.md` row for `A5` landed **in the same commit** that marks it owed
+
+
+### `P11-11-A3` — run record, 2026-09-17 (Windows)
+
+🚨 **ROOT CAUSE, and it is not what the plan assumed.** The plan said to build reuse keyed on CU-9's
+`pay402_reuse_key`. **That cache already existed and had never once worked.** Its liveness check read
+
+```sql
+SELECT new_status FROM transactions WHERE txid = ?1 LIMIT 1
+```
+
+and **there is no `new_status` column** — the dual `status`/`broadcast_status` pair was collapsed into
+a single `status` long ago and this query was never updated. Proven against the live schema:
+`no such column: new_status`. The call site ended `.unwrap_or(false)`, so the error became the answer
+*"not reusable"* on **every** call, and every retry minted a fresh transaction.
+
+⇒ ⭐ **That is the 2026-09-16 triple-mint.** Attempts 1 and 2 were the same URL, same 150 sats, 6.6 s
+apart — squarely inside the 25 s TTL — and still produced two different txids.
+
+**Fixed:** the column, and the arm that hid it. `QueryReturnedNoRows` is now the **only** benign
+failure; any other error is logged as a bug and never read as a verdict.
+
+**🟢 GREEN — two navigations to the same URL, 8 s hold:**
+
+| Time | Event |
+|---|---|
+| 17:14:43.231 | mint `feb48755…`, 849 BEEF bytes |
+| 17:14:46.965 | **`pay_402 REUSE: returning existing nosend tx feb48755… (age 3996ms)`** ← the re-click |
+| 17:15:02.076 | upstream 200, 14,712 bytes — article delivered |
+| 17:15:02.639 | `broadcast-nosend OK` for `feb48755…` — **one** payment |
+
+**🔴 RED observed** at the unit level: restoring `new_status` fails
+`a3_the_reuse_status_query_runs_against_the_real_schema` with the exact production error.
+
+**⚠️ RESIDUAL, measured not assumed.** The second navigation still installs its own
+`Async402ResourceHandler`, which issues a late upstream request after the first succeeded. Its payment
+is by then broadcast, so the server answers 402 and **one extra mint** follows (`2eb513d8…`).
+⭐ It is **never broadcast** — no money is lost and the user paid 150 sats once — but it leaves exactly
+one orphan `nosend` row. **That row is `A4`'s job**, and this run is a live fixture for it.
+⬜ Suppressing the duplicate *handler* (rather than the duplicate mint) is a further step, recorded
+here and not done.
+
+**⚠️ Rig finding worth keeping — the freshness window is real.** A first run used a **25 s** hold. The
+reused payment was then issued ~33 s after minting, and the server rejected it **402: stale**, against
+BRC-121's 30 s `x-bsv-time` window. Our `PAY402_REUSE_TTL_MS` is 25 s, leaving ~5 s for the hold, the
+RTT and clock skew. ⇒ the 25 s reuse TTL and the 30 s protocol window are **too close together**, which
+is exactly the risk recorded in the x402 research. Not a defect introduced here; a real interaction the
+rig surfaced, and an argument for a shorter reuse TTL or a fresh mint past a safety margin.
