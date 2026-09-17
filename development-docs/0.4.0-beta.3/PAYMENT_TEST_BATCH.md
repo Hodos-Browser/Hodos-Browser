@@ -13,6 +13,22 @@ the correct time, it still needs done or…?"* **Owner:** Matthew. **Platform:**
 > schedule. `P8b-A1` was about to become the fifth. A row that is owed everywhere and scheduled
 > nowhere is a row that never runs.
 
+## ⛔ RULE (owner, 2026-09-17): "it needs a funded wallet" is NOT a reason to defer a test
+
+> 👤 *"I have a million funded wallets. This is not a reason to defer a test. We have lots of funded
+> wallets. We need to do these tests."*
+
+**Funding is available on demand.** It is not scarce, it is not a scheduling constraint, and it may
+never again appear in a deferral reason, a phase contract, a residual, or a status line. If a row
+needs BSV, ask for a funded wallet and run it.
+
+⇒ What this register actually batches is **rig setup** — dev stack up, a fault-injection build,
+a second wallet, a live counterparty. Those are real costs. Funding is not one of them. ⛔ Any row
+still reading *"deferred: needs a real payment"* is mis-labelled; re-state the real blocker or run it.
+
+⚠️ This is what five consecutive deferrals of `R-GOLD` were actually resting on, and the sitting that
+finally ran it took one afternoon and found three defects no code review had.
+
 ⛔ **A row here is OWED, not waived.** Nothing may be reported as passed, skipped, or "covered by
 unit tests". Per `HARNESS.md` §8 a skipped check is **SKIPPED** and its run is **INCOMPLETE**.
 

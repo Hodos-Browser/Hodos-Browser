@@ -17,11 +17,41 @@
 | 8 | ❔ `longlived_surfaces_snapshot_state_at_startup` | old bundle | |
 | 9 | ❔ `disable_features_autofill_is_a_noop` | old bundle | |
 | 10 | Phase 1's overlay dead strip · the DPI matrix overlay section | old bundle | `DPI_RESOLUTION_TEST_MATRIX.md` cells #4/#6/#9 |
+| **11** | 🔴 **A BRC-121 payment shows the user NOTHING while it spends** | `../TICKET_brc121_paid_retry_aborts_and_mints_a_payment_each_time.md` | ⛔ **RUNS FIRST — money path, and the only item here that costs real BSV when it goes wrong.** Four fixes in causal order, plan + negative controls in the ticket. 👤 Owner 2026-09-17: *"it's not okay."* See below |
+
+## Item 11 — why it is here and why it goes first
+
+Folded in 👤 by owner decision 2026-09-17, out of the payment sitting. It is a UI defect, which is why
+it lands in this phase — but it is a UI defect **on the shipped money path**, so it is not queued
+behind the omnibox cluster.
+
+**Measured, 2026-09-16** (`debug_output-40428.log` 21703–21893): one paywalled article took ≈41 s and
+minted **three** payments. Of that, **34.5 s was the site's own origin** (`cfOrigin;dur=34481` — not
+ours, not fixable by us). The rest was ours: we showed the user nothing, so they clicked again, and
+**each click cancelled the paid request in flight** and caused a fresh 402 to be paid. Proof it was
+clicks and not our reload: the third attempt requests a **different article**.
+
+⭐ **The root defect is one sentence.** `PaymentPendingPage` is only ever rendered *behind the
+domain-approval modal*, so on the **silent auto-approved path — the normal path — nothing ever
+reaches the screen.** We built the "we are paying" screen only for the case where the user was
+already being told.
+
+⇒ Fix order is causal, not severity-ordered: **feedback → honest timeout → don't re-mint on
+navigation → release the abandoned transaction.** Fixing the feedback removes the clicks, which
+removes the aborts and the extra mints.
+
+⛔ Negative controls are in the ticket and each names its **subject**: the tab's rendered document
+(not a log line), the count of `nosend` rows (not an HTTP status), the phantom outputs and the
+reservation. ⚠️ No money is required for the GREEN halves — a stubbed slow retry reproduces it.
+
+🍎 macOS: the pending screen is React and relays; the navigation/cancel arm is shared C++
+(`HttpRequestInterceptor.cpp`) ⇒ relay note naming the files, per the root `CLAUDE.md` build rule.
 
 ## Harness notes
 
 - Items 1–5 are **five separate defects sharing a surface** (the ticket says so); one contract, one row each, no
   single "omnibox fixes" branch.
+- **Item 11 runs before items 1–10** and gets its own contract; it shares no surface with the omnibox cluster.
 - Item 1 is the one with a T3 human row: a person launching the installed build and typing without clicking.
   Its instrumented half: a startup probe that reads which HWND has focus and whether the header's `<input>` is
   `document.activeElement` at first paint, RED = the current binary.
