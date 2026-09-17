@@ -4639,6 +4639,13 @@ private:
 // banner goes with it. Failure and cancel paths call the Hide task explicitly.
 class Brc121PaymentBannerTask : public CefTask {
 public:
+    /// A2 — how long before the banner stops saying "paying" and starts saying the
+    /// SITE is slow. 📏 Chosen against the real incident: the owner's first re-click
+    /// came at 6.5 s and the second at 5.7 s after that, so a threshold above ~12 s
+    /// would have escalated only after the damage was done. 10 s is inside the window
+    /// where a person is still deciding whether the browser is broken.
+    static constexpr int kSlowSiteSeconds = 10;
+
     Brc121PaymentBannerTask(CefRefPtr<CefBrowser> browser, std::string host, int64_t satoshis)
         : browser_(std::move(browser)), host_(std::move(host)), satoshis_(satoshis) {}
 
@@ -4652,6 +4659,14 @@ public:
         const std::string host = escapeForJsSingleQuote(host_);
         const std::string sats = std::to_string(satoshis_);
 
+        // A2 — the banner keeps its own clock. One interval, installed once, so the
+        // re-entries (delay seam, MAX_UPSTREAM_RETRIES) refresh the text without
+        // stacking timers or resetting the elapsed count.
+        //
+        // ⛔ The escalation must NOT touch the request. The 34.5 s that started all of
+        // this was the site's own origin and it DID eventually answer; a warning that
+        // cancelled the payment it is warning about would turn a slow success into a
+        // guaranteed failure. This is purely text.
         std::string js =
             "(function(){try{"
             "var ID='__hodos_pay_banner__';"
@@ -4666,8 +4681,21 @@ public:
             "box-shadow:0 2px 8px rgba(0,0,0,.35)!important;display:flex!important;"
             "align-items:center!important;gap:9px!important;pointer-events:none!important;';"
             "(d.body||d.documentElement).appendChild(el);"
+            "el.__t0=Date.now();"
             "}"
-            "el.textContent='\\u25CF  Paying " + host + " \\u00B7 " + sats + " sats\\u2026';"
+            "el.__host='" + host + "';el.__sats='" + sats + "';"
+            "var paint=function(){"
+            "  var s=Math.floor((Date.now()-(el.__t0||Date.now()))/1000);"
+            "  if(s<" + std::to_string(kSlowSiteSeconds) + "){"
+            "    el.textContent='\\u25CF  Paying '+el.__host+' \\u00B7 '+el.__sats+' sats\\u2026';"
+            "  }else{"
+            "    el.textContent='\\u25CF  Paid '+el.__host+' \\u00B7 '+el.__sats+' sats. "
+            "Waiting for the site to send the page \\u2014 it has been '+s+'s, which is slow for them, "
+            "not a problem with your payment. Leave this page to stop waiting.';"
+            "  }"
+            "};"
+            "paint();"
+            "if(!el.__iv){el.__iv=setInterval(paint,1000);}"
             "}catch(e){}})();";
 
         frame->ExecuteJavaScript(js, frame->GetURL(), 0);
@@ -4697,7 +4725,8 @@ public:
         if (!frame) return;
         frame->ExecuteJavaScript(
             "(function(){try{var e=document.getElementById('__hodos_pay_banner__');"
-            "if(e&&e.parentNode)e.parentNode.removeChild(e);}catch(e){}})();",
+            "if(e){if(e.__iv)clearInterval(e.__iv);"           // A2: stop the clock first
+            "if(e.parentNode)e.parentNode.removeChild(e);}}catch(e){}})();",
             frame->GetURL(), 0);
     }
 

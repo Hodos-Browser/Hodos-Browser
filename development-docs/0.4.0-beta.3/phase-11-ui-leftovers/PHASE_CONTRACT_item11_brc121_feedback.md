@@ -85,7 +85,7 @@ reproduces the whole thing. Only `A5` spends, and it is cents.
 | ID | 🟢 GREEN — must be true | 🔴 RED — must be *seen* to fail | 🎯 SUBJECT | Tier | Result |
 |---|---|---|---|---|---|
 | `P11-11-A1` | With the paid retry stubbed to hang 20 s, the banner is in the viewport within ~1 s naming host + sats | Revert the banner ⇒ the tab renders the **previous document**, unchanged and clickable, for the full 20 s | ⭐ **The tab's rendered document** (screenshot of the content tab), **never** a log line and never the tab throbber — the throbber was already running during the 48 s and proved nothing | T2 | ✅ **2026-09-17** |
-| `P11-11-A2` | Past the 10 s threshold the banner states the site is slow and offers Stop; the request stays alive and still completes | Set the threshold above the stub delay ⇒ the escalated copy never appears | The banner's rendered text **and** that the upstream request is still in flight afterwards (it must not be cancelled by its own warning) | T2 | ⬜ |
+| `P11-11-A2` | Past the 10 s threshold the banner states the site is slow and offers Stop; the request stays alive and still completes | Set the threshold above the stub delay ⇒ the escalated copy never appears | The banner's rendered text **and** that the upstream request is still in flight afterwards (it must not be cancelled by its own warning) | T2 | ✅ **2026-09-17** |
 | `P11-11-A3` | With a payment in flight, a second navigation to the same URL mints **no** second payment — the existing one is reused | Revert to the pre-fix path ⇒ **two** `createAction`s / two `nosend` rows for one article, reproducing 2026-09-16 | ⭐ **Count of `nosend` rows + `createAction` calls for that URL**, not an HTTP status. ⚠️ The 2026-09-16 run is the naturally-occurring RED; reproduce it deliberately | T2 | ⬜ |
 | `P11-11-A4` | After an abandoned retry: zero `nosend` rows, zero spendable phantom outputs for that txid, reservation released | Remove the `release_unbroadcast_transaction` call ⇒ the row, the phantom output and the held reservation all persist (📏 measured 2026-09-16: 2 rows, 1 spendable output each, 1,419,268 sats reserved) | The wallet DB `transactions` + `outputs` rows and the reservation, **not** the log's "funds preserved" line — that line was already true while the leak existed | T2 | ⬜ |
 | `P11-11-A5` | 👤 A real 402 paywall, human watching: banner appears, article arrives, gold pill on the paying tab, **one** payment | Two-sided with `A3`: click again mid-flight ⇒ still exactly one broadcast txid | ⭐ **The owner's eyes + one txid on WhatsOnChain.** The 2026-09-16 sitting is why this row exists — 4 reviewers found none of the 3 defects a person clicking found | T3 | ⬜ |
@@ -125,6 +125,45 @@ endpoint=pay402)` — ids differ and it resolved to the paying tab. Full `A6` ro
 
 **Preflight `-Full`: PASS**, every gate at baseline (G11 59, G12 4 — unchanged). ⛔ `HodosBrowserShell`
 also built explicitly; `-Full` does not build it.
+
+### `P11-11-A2` — run record, 2026-09-17 (Windows)
+
+Rig: 25 s hold, real paywall, screenshots read as images.
+
+| | Text on screen |
+|---|---|
+| **t+5 s** | `● Paying now.bsvblockchain.tech · 75 sats…` |
+| **t+15 s** 🟢 | `● Paid now.bsvblockchain.tech · 75 sats. Waiting for the site to send the page — it has been 14s, which is slow for them, not a problem with your payment. Leave this page to stop waiting.` |
+| **t+15.5 s** 🔴 | `● Paying now.bsvblockchain.tech · 100 sats…` — threshold recompiled to 300 s, **escalation never appears** |
+
+⭐ **The half that matters most is the second subject, and it passed:** the warning did **not** cancel
+the request it warns about. `upstream complete — status=200 bodyBytes=8819`, `cfOrigin;dur=10421`,
+then `broadcast-nosend OK for txid=73eab7534e1514…`. A warning that killed a slow-but-succeeding
+payment would turn the original defect into a guaranteed failure.
+
+⚠️ The escalated copy deliberately says **"Paid … waiting for the site"** and names the elapsed
+seconds. The 34.5 s that started this was the site's origin (`cfOrigin;dur=34481`), so the wording
+puts the delay where it belongs and reassures about the money.
+
+### ⚠️ A2 scope narrowed, deliberately — no clickable Stop
+
+The contract said "offers Stop". **There is no Stop button**, and the reason is a privacy trade the
+owner should know about rather than discover:
+
+- The banner is **injected into the page's DOM**. A clickable Stop needs page JS to call back into
+  C++, which means a new binding on **every** external page.
+- `simple_render_process_handler.cpp` deliberately gives external pages **only** the `brc100`
+  sub-object, commented *"to minimize fingerprint surface"*. A Hodos-only global function is a
+  fingerprinting signal on a browser whose headline feature is fingerprint defence.
+- Esc→`StopLoad` does not exist in this shell (checked: no `VK_ESCAPE` / `StopLoad` handler
+  anywhere), so there was no existing affordance to point at either.
+
+⇒ The banner says **"Leave this page to stop waiting"**, which is true today: a navigation cancels
+the handler, `Cancel()` clears the banner, and `A3` will stop that navigation re-minting a payment.
+
+👤 **Open for the owner:** if a real Stop control is wanted, the clean form is a **native overlay
+strip** rather than page JS — no new page surface, and unsuppressable by a hostile site, which the
+current banner is not. That is a bigger change and is not in this contract.
 
 ## 5. Blast radius
 
