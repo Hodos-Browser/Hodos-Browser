@@ -138,6 +138,28 @@ that makes cleanup provably safe. ⇒ it should call the same release.
   — the paid-retry half of `R-GOLD`, which had never been observed. The identifiers differ again
   (19 → 8), and it resolved to the article's own tab.
 
+## Minor, same subsystem — `PaidContentCache` logs the origin, stores the URL
+
+Found in passing 2026-09-17 while clearing the cache for A1's rig. The PUT log line prints the
+**origin** while the row is keyed on the **full URL**:
+
+```
+PaidContentCache PUT: https://now.bsvblockchain.tech (14712 bytes)   <- logs origin
+PaidContentCache HIT: https://now.bsvblockchain.tech/articles/agentpay-hackathon
+```
+
+Verified against the DB — the table holds four rows, one per full article URL, so **storage is
+correct and this is cosmetic**. ⚠️ Worth fixing anyway: it cost real minutes, because "PUT origin /
+HIT full URL" reads exactly like a cache-key collision across every article on a site, on the money
+path. A log line that implies a money-path bug that isn't there is a log line that will waste
+somebody's afternoon again.
+
+👤 Owner 2026-09-17 asked whether this belongs in the x402 ecosystem doc. ⛔ **No** — that doc is
+research, which by the standing rule is never scheduled and never justifies a code change, so a
+defect filed there would never be fixed. It is also not protocol-shaped: it is one log string in our
+own cache. It lives here because `PaidContentCache` is on the BRC-121 paid-retry path this ticket
+covers, and Phase 11 item 11 is already working in that code.
+
 ## Plan — what to build, in order
 
 ⛔ **Fix order follows causation, not severity.** Feedback first: it is the root, and it removes the
