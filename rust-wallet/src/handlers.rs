@@ -19919,6 +19919,85 @@ fn sendwith_status_is_broadcastable(status: Option<&str>) -> bool {
     status == Some("nosend")
 }
 
+/// `P11-11-A4` — the opposite of `broadcast_nosend`, and the missing half of the
+/// BRC-121 pair.
+///
+/// The paid-retry path already calls `/wallet/broadcast-nosend` when the server
+/// accepts the payment. When the server **definitively refuses** it, C++ logs
+/// *"NOT broadcasting (funds preserved)"* and then does nothing — so the minted
+/// transaction keeps its `nosend` row, its **spendable phantom change output** and its
+/// reserved input, for a transaction that will never exist.
+///
+/// 📏 Measured 2026-09-16: two abandoned attempts left two `nosend` rows with one
+/// spendable output each and **1,419,268 sats reserved**. The background tasks do
+/// recover it (`TaskCheckForProofs` ~11 min, `TaskSweepReservations` ~19 min) but those
+/// are the backstop for a **crash**, where nobody can know what happened. A server
+/// saying "no" is not a crash — we know at that instant that this transaction is dead.
+///
+/// ⭐ Same argument, same helper and same wording as the refusal path
+/// (`resolution_failed_response`) and `abort_action`. ⛔ Do not write a third cleanup.
+pub async fn release_nosend(
+    state: web::Data<AppState>,
+    body: web::Bytes,
+) -> HttpResponse {
+    let req: BroadcastNosendRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "success": false,
+                "error": format!("Invalid request: {}", e),
+            }));
+        }
+    };
+
+    log::info!("♻️  /wallet/release-nosend called: txid={}", &req.txid);
+
+    // ⛔ Only a `nosend` transaction may be released. Anything else — broadcast,
+    // completed, already failed — must be left alone: disabling the outputs of a
+    // transaction that IS on chain would destroy real coins. Refuse loudly instead.
+    let status: Option<String> = {
+        let db = state.database.lock().unwrap();
+        db.connection().query_row(
+            "SELECT status FROM transactions WHERE txid = ?1 LIMIT 1",
+            rusqlite::params![&req.txid],
+            |r| r.get::<_, String>(0),
+        ).ok()
+    };
+    match status.as_deref() {
+        Some("nosend") => {}
+        Some(other) => {
+            log::warn!("   ⛔ release-nosend refused: txid={} is '{}', not 'nosend'", &req.txid, other);
+            return HttpResponse::Conflict().json(serde_json::json!({
+                "success": false,
+                "error": "ERR_NOT_NOSEND",
+                "status": other,
+            }));
+        }
+        None => {
+            // Already gone (a sweeper got there first). Releasing nothing is success.
+            log::info!("   ℹ️  release-nosend: txid={} not found — nothing to release", &req.txid);
+            return HttpResponse::Ok().json(serde_json::json!({
+                "success": true, "disabled": 0, "restored": 0, "alreadyGone": true,
+            }));
+        }
+    }
+
+    let (disabled, restored) = release_unbroadcast_transaction(state.get_ref(), &req.txid, None);
+    let _ = {
+        let db = state.database.lock().unwrap();
+        let conn = db.connection();
+        conn.execute("UPDATE transactions SET status = 'failed' WHERE txid = ?1",
+                     rusqlite::params![&req.txid])
+    };
+    state.balance_cache.invalidate();
+    log::info!("   ♻️  Released abandoned paid retry {}: {} output(s) disabled, {} input(s) restored",
+               &req.txid, disabled, restored);
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true, "disabled": disabled, "restored": restored,
+    }))
+}
+
 pub async fn broadcast_nosend(
     state: web::Data<AppState>,
     body: web::Bytes,

@@ -1351,6 +1351,10 @@ async fn main() -> std::io::Result<()> {
             // BRC-121 Simple HTTP 402 Payment
             .route("/wallet/pay402", web::post().to(handlers::pay_402))
             .route("/wallet/broadcast-nosend", web::post().to(handlers::broadcast_nosend))
+            // P11-11-A4 — the other half of the pair: the BRC-121 retry calls this when
+            // the server definitively refuses, so the dead payment does not keep a
+            // spendable phantom output and a reserved input until a sweeper notices.
+            .route("/wallet/release-nosend", web::post().to(handlers::release_nosend))
 
             // Paymail (bsvalias) endpoints
             .route("/wallet/paymail/send", web::post().to(handlers::paymail_send))

@@ -87,7 +87,7 @@ reproduces the whole thing. Only `A5` spends, and it is cents.
 | `P11-11-A1` | With the paid retry stubbed to hang 20 s, the banner is in the viewport within ~1 s naming host + sats | Revert the banner ⇒ the tab renders the **previous document**, unchanged and clickable, for the full 20 s | ⭐ **The tab's rendered document** (screenshot of the content tab), **never** a log line and never the tab throbber — the throbber was already running during the 48 s and proved nothing | T2 | ✅ **2026-09-17** |
 | `P11-11-A2` | Past the 10 s threshold the banner states the site is slow and offers Stop; the request stays alive and still completes | Set the threshold above the stub delay ⇒ the escalated copy never appears | The banner's rendered text **and** that the upstream request is still in flight afterwards (it must not be cancelled by its own warning) | T2 | ✅ **2026-09-17** |
 | `P11-11-A3` | With a payment in flight, a second navigation to the same URL mints **no** second payment — the existing one is reused | Revert to the pre-fix path ⇒ **two** `createAction`s / two `nosend` rows for one article, reproducing 2026-09-16 | ⭐ **Count of `nosend` rows + `createAction` calls for that URL**, not an HTTP status. ⚠️ The 2026-09-16 run is the naturally-occurring RED; reproduce it deliberately | T2 | ✅ **2026-09-17** (one residual, see below) |
-| `P11-11-A4` | After an abandoned retry: zero `nosend` rows, zero spendable phantom outputs for that txid, reservation released | Remove the `release_unbroadcast_transaction` call ⇒ the row, the phantom output and the held reservation all persist (📏 measured 2026-09-16: 2 rows, 1 spendable output each, 1,419,268 sats reserved) | The wallet DB `transactions` + `outputs` rows and the reservation, **not** the log's "funds preserved" line — that line was already true while the leak existed | T2 | ⬜ |
+| `P11-11-A4` | After an abandoned retry: zero `nosend` rows, zero spendable phantom outputs for that txid, reservation released | Remove the `release_unbroadcast_transaction` call ⇒ the row, the phantom output and the held reservation all persist (📏 measured 2026-09-16: 2 rows, 1 spendable output each, 1,419,268 sats reserved) | The wallet DB `transactions` + `outputs` rows and the reservation, **not** the log's "funds preserved" line — that line was already true while the leak existed | T2 | ✅ **2026-09-17** |
 | `P11-11-A5` | 👤 A real 402 paywall, human watching: banner appears, article arrives, gold pill on the paying tab, **one** payment | Two-sided with `A3`: click again mid-flight ⇒ still exactly one broadcast txid | ⭐ **The owner's eyes + one txid on WhatsOnChain.** The 2026-09-16 sitting is why this row exists — 4 reviewers found none of the 3 defects a person clicking found | T3 | ⬜ |
 | `P11-11-A6` | `R-GOLD` still green both paths after the edit | Stub `firePaymentSuccessIpc`'s tab resolution to the raw `cefBrowserId` ⇒ pill lands on the wrong tab | `cefBrowserId → tabId` in the log **and** which tab shows the pill (they differ — that is the hazard) | T2 | ⬜ |
 
@@ -250,3 +250,53 @@ BRC-121's 30 s `x-bsv-time` window. Our `PAY402_REUSE_TTL_MS` is 25 s, leaving ~
 RTT and clock skew. ⇒ the 25 s reuse TTL and the 30 s protocol window are **too close together**, which
 is exactly the risk recorded in the x402 research. Not a defect introduced here; a real interaction the
 rig surfaced, and an argument for a shorter reuse TTL or a fresh mint past a safety margin.
+
+
+### `P11-11-A4` — run record, 2026-09-17 (Windows)
+
+**Shipped:** `POST /wallet/release-nosend` — the missing half of the pair the BRC-121 path already had.
+It reuses `release_unbroadcast_transaction` (⛔ no third cleanup) and refuses anything that is not
+`nosend`: disabling the outputs of a transaction that IS on chain would destroy real coins, so a
+`completed`/`sending` txid gets a 409 instead. A row that is already gone is success (`alreadyGone`).
+
+⭐ **The rig had to make the server genuinely refuse**, and the honest way turned out to be the
+protocol itself: hold the paid retry **40 s** so the payment exceeds BRC-121's **30 s** `x-bsv-time`
+window, and the real server answers **402**. ⚠️ 25 s was *not* enough — the server accepted it — which
+is itself a useful datum about where the real margin sits.
+
+| | 🟢 GREEN (release wired) | 🔴 RED (call commented out, rebuilt) |
+|---|---|---|
+| txid | `9b9d4504…` | `e4ed2cb5…` |
+| transaction status | **`failed`** | **`nosend`** |
+| its change output | **`spendable = 0`** | **`spendable = 1`** — the phantom coin |
+| release log | `1 output(s) disabled, 1 input(s) restored`, 49 ms after the refusal | none — 0 release calls |
+| after three attempts | released each time | **3 `nosend` rows accumulated**, one spendable output each |
+
+⭐ **The RED reproduces 2026-09-16 exactly**: the leak compounds per attempt.
+
+### ⭐ The distinction A3 forced, and it is the interesting part of A4
+
+Release fires **only when `status > 0`** — the server answered and refused. On `status == 0` (no HTTP
+response: our own request cancelled, which is what a user navigating away produces, and the whole of
+the 2026-09-16 incident) we deliberately **keep** the transaction, because that is precisely the one
+`A3`'s reuse cache hands back on the re-click. Releasing it would defeat the fix that stops the
+re-click minting a second payment.
+
+⇒ three cases, three owners: **`A3`** = the user comes back · **`A4`** = the server said no ·
+**the sweepers** = nobody ever comes back.
+
+### 🚨 Found while measuring — a reservation stuck for 27 hours
+
+`b00be69c…:2`, **1,419,268 sats, `confirmed = 1`, `spendable = 0`**, held under
+`pending-1789591461036-0` for **26.9 hours**. That is the *same figure* the 2026-09-16 ticket
+recorded, so it has been stuck since the incident.
+
+`TaskSweepReservations` runs every 300 s against a 15-minute age threshold and has not released it —
+by design: it releases **only** outpoints positively observed in the on-chain unspent set, and every
+uncertainty leaves the reservation standing. Fail-safe, and correct as a rule. But the consequence is
+that a reservation whose outpoint cannot be observed is held **forever**, and the money is invisible
+in the balance the whole time.
+
+⛔ Not fixed here and not in this contract's scope. Ticketed separately —
+`../TICKET_reservation_can_be_held_indefinitely.md`. ⭐ A4 prevents *new* ones of this shape on the
+server-refusal path; it does nothing for the ones already stuck.

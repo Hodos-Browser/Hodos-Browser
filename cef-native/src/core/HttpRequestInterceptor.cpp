@@ -5024,6 +5024,34 @@ public:
             if (browser_) {
                 CefPostTask(TID_UI, new Brc121PaymentBannerHideTask(browser_));
             }
+
+            // A4 — release the dead payment, but ONLY on a definitive server refusal.
+            //
+            // ⭐ The distinction matters, and it only became visible once A3 landed:
+            //
+            //   status  > 0  the server ANSWERED and refused (402 stale, 4xx, 5xx after
+            //                retries). This payment can never be accepted by anyone, so
+            //                holding its reserved input and spendable phantom change
+            //                buys nothing. Release now.
+            //
+            //   status == 0  no HTTP response — our own request was CANCELLED, which is
+            //                what a user navigating away produces (the whole of the
+            //                2026-09-16 incident). ⛔ Do NOT release: this is exactly the
+            //                transaction `A3`'s reuse cache hands back when they click
+            //                again, and releasing it would defeat the fix that stops the
+            //                re-click minting a second payment. If they never come back,
+            //                TaskCheckForProofs / TaskSweepReservations reclaim it — the
+            //                sweepers keep the "nobody can know" case, which is what they
+            //                are for.
+            //
+            // ⇒ A3 covers "the user comes back", A4 covers "the server said no", and the
+            //   sweepers cover "nobody ever comes back". Three cases, three owners.
+            if (status > 0) {
+                releaseNosendAsync();
+            } else {
+                LOG_INFO_HTTP("💰 BRC-121: retry cancelled (no HTTP response) — keeping txid="
+                              + ctx_.txid + " reusable for a re-click (A3)");
+            }
         }
 
         // Tell CEF we're ready: it will now call GetResponseHeaders (which
@@ -5169,6 +5197,40 @@ private:
         std::string txid_;
         IMPLEMENT_REFCOUNTING(BroadcastTask);
         DISALLOW_COPY_AND_ASSIGN(BroadcastTask);
+    };
+
+    // A4 — the other half of the pair. We know at this instant that this transaction
+    // will never exist, so release what it holds instead of leaving a spendable
+    // phantom output and a reserved input for a sweeper to find minutes later.
+    void releaseNosendAsync() {
+        std::string txid = ctx_.txid;
+        CefPostTask(TID_FILE_USER_BLOCKING, new ReleaseTask(txid));
+    }
+
+    class ReleaseTask : public CefTask {
+    public:
+        explicit ReleaseTask(std::string txid) : txid_(std::move(txid)) {}
+        void Execute() override {
+            nlohmann::json body;
+            body["txid"] = txid_;
+            HttpResponse r = SyncHttpClient::Post(
+                hodos::WalletUrl("/wallet/release-nosend"),
+                body.dump(), "application/json", 30000);
+            if (!r.success) {
+                // ⚠️ Not fatal and deliberately not retried here: the sweepers
+                // (TaskCheckForProofs / TaskSweepReservations) remain the backstop.
+                // This call exists to make the common case immediate, not to replace them.
+                LOG_WARNING_HTTP("💰 BRC-121: release-nosend failed (status="
+                                 + std::to_string(r.statusCode) + ") for txid=" + txid_
+                                 + " — the Monitor sweepers will reconcile");
+            } else {
+                LOG_INFO_HTTP("♻️ BRC-121: released abandoned payment txid=" + txid_);
+            }
+        }
+    private:
+        std::string txid_;
+        IMPLEMENT_REFCOUNTING(ReleaseTask);
+        DISALLOW_COPY_AND_ASSIGN(ReleaseTask);
     };
 
     PaidRetryContext ctx_;
