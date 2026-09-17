@@ -80,3 +80,48 @@ missing, showed the boundary at 20.
   sprint starts.
 - `rust-wallet/src/utxo_fetcher.rs` — `WOC_BULK_CONFIRMED`, the per-chunk loop, and the
   single-address fallback that already exists.
+
+---
+
+## 👤 Owner input, 2026-09-16
+
+> *"I just don't trust that bulk lookup, even though it should be a lot faster … sometimes the bulk
+> lookups can't be trusted either — timeout, and then we handle that wrong sometimes."*
+
+⚠️ So the 20-cap is **one instance of a broader distrust**, not the whole complaint. Two separate
+failure modes on the same path:
+
+| | |
+|---|---|
+| **Truncation** | measured above — silent, and the response looks complete |
+| **Timeout / partial** | owner reports it is sometimes mishandled. ⛔ **Not yet measured.** Do not fix from this sentence alone — reproduce it first, or the fix guards a shape nobody has seen |
+
+⭐ The dangerous property both share: a bulk answer that is **short** is indistinguishable from a bulk
+answer that is **complete**. Nothing in the response says "there are more". Any fix should attack that
+directly rather than each symptom.
+
+### 👤 Owner's proposal: a second independent explorer, cross-referenced
+
+**Assessment: good, but only applied narrowly — and it is not what we have today.**
+
+What exists is a **fallback chain** (`services/mod.rs`: WhatsOnChain → GorillaPool Ordinals for
+`fetch_utxos`, longer chains elsewhere). A fallback answers *"the first one failed, ask the next"*. It
+never notices a first answer that is **wrong but well-formed**, which is exactly this bug. A
+cross-reference answers a different question: *"do two independent sources agree?"*
+
+⇒ Worth doing **where silence is dangerous and the answer is small**:
+
+- the UTXO set for an address (completeness — this ticket)
+- the spendable balance shown to the user
+
+⛔ Worth avoiding as a blanket rule: cross-checking every call doubles latency and rate-limit
+pressure for no gain on calls where a failure is already loud (a missing raw transaction errors; a
+truncated UTXO list does not).
+
+⛔ **Disagreement needs a defined resolution before this is built**, or it becomes a coin flip: which
+source wins, and does the wallet fail closed (assume the larger set, spend nothing it cannot verify)
+or fail open? Fail-closed is the only safe default on a money path.
+
+⚠️ I could not identify the explorer the owner named ("banana blocks" as transcribed) — confirm the
+service before anyone codes against it. Candidates already in the tree, for reference: `bitails`,
+`junglebus`, `gorillapool_ordinals` (all already wired as providers in `services/providers/`).
