@@ -202,6 +202,7 @@ the mechanism, not for the production numbers, which is why Half 2 is owed at th
 | 4 → 5 | 2026-09-02 | 🟢🔴 **GREEN both halves + the injected RED, both directions — first time this sprint** (run log) | ⬜ needs a real payment | ⬜ not touched by this phase | 🟢 T1 (preflight `T1a`) · ⬜ T2 e2e | ⬜ needs a payment | 🟡 T1 only; real N−1→N owed at RC | |
 | **10 → next** | **2026-09-15** | 🟢🔴 **GREEN both halves, exact subject** (run log) | ⬜ needs a real payment | ⬜ subject touched by 10b's `overlay_close` arms — owed, see run log | 🟢 T1 (75 engine tests) · ⬜ T2 e2e | 🟢 T1 (`a6_` pair) · ⬜ T2 needs a payment | 🟡 T1 only; real N−1→N owed at RC | **R-DUST 🟢 (16 tests) · R-PEERPAY-DELIVERY 🟢🔴 half 1 both tiers · R-ONE-CLICK-ONE-SPEND 🟢 T1** |
 | **8 → next** | **2026-09-08** | ⬜ **subject untouched** — see run log; no gating, header or origin-derivation change | ⬜ needs a real payment | ⬜ subject untouched (no C++, no overlay) | 🟢 T1 (preflight `T1a`) · ⬜ T2 e2e | ⬜ needs a payment | 🟡 T1 only; real N−1→N owed at RC | **R-DUST 🟢🔴 GREEN + RED** |
+| **11 (omnibox cluster) → next** | **2026-09-18** | ⬜ **subject untouched** — no gating, no header stamping, no origin derivation; the two C++ files carry one new IPC forward that moves a URL between our own browsers | ⬜ needs a real payment | 🟡 **PARTIAL, and this cluster touched it** — see run log | 🟢 T1 (preflight `T1a`, all gates at baseline) · ⬜ T2 e2e | ⬜ needs a payment | 🟡 T1 only; real N−1→N owed at RC | **P11 items 2/3/4 🟢🔴 GREEN + RED, both observed** |
 
 ---
 
@@ -716,3 +717,51 @@ The two invariants Phase 10 could most plausibly have broken — internal-never-
 PeerPay-never-leaves-undeliverable — were measured directly, both with working controls, and both
 hold. Everything still open is either pre-existing debt identical to the previous four boundaries, or
 newly *recorded* debt from the adversarial panel, which is a better place for it than undiscovered.
+
+
+---
+
+## Run log — 11 (omnibox cluster) → next boundary (2026-09-18)
+
+Phase 11 items 2, 3 and 4 changed the omnibox overlay's **lifetime** and the address bar's key
+handling. Nothing on the money path, nothing on the trust boundary — which is what makes R-CLOSE the
+one row that actually matters here.
+
+### R-CLOSE — 🟡 PARTIAL, and this cluster is the reason it is listed
+
+The omnibox is a dropdown overlay, so its close guards are R-CLOSE's **third** path: the
+`WH_MOUSE_LL` click-outside hook, plus the unconditional-looking window-message hides.
+
+**What was measured, and it is the useful half:** overlay **visibility itself**, at the Win32 layer
+(`IsWindowVisible` on the real `CEFOmniboxOverlayWindow` HWND), across every dismissal path the
+header owns — Enter, Escape, empty input, blur, and the overlay's own click. 🟢 All hide and **stay**
+hidden; 🔴 with the fix reverted, two of them re-show themselves ~110 ms later. That is a stronger
+statement about this overlay's lifetime than any prior boundary has made.
+
+**What is owed:** ⛔ the `WH_MOUSE_LL` click-outside arm **cannot be driven from the agent session at
+all** (`SendInput` clicks are dropped), and the three window-message hides (move, resize, app focus
+loss) were not exercised. ⚠️ Item 4 also introduced a **stale-true** window on `omniboxOpenRef` for
+exactly those three paths — documented in the phase README, cost bounded at one dead Tab press.
+Human row **W9** covers the mouse and keyboard halves.
+
+⭐ **The wallet arms of R-CLOSE were not touched** — `g_file_dialog_active` and
+`g_wallet_overlay_prevent_close` are untouched by all three commits, and `HideOmniboxOverlay()` was
+deliberately left with its existing signature (phase README, item 2).
+
+### R-INTEXT / R-PERIM / R-DUST / R-ONE-CLICK-ONE-SPEND / R-PEERPAY-DELIVERY — 🟢 T1
+
+`scripts/preflight.ps1 -Full` → **PASS**, all eight T0 gates at baseline (`G11` 59, `G12` 4, rest 0)
+and all seven T1 suites green including `T1c hodos_tests` and `T1d` the frontend build. ⬜ Their T2
+halves are unchanged pre-existing debt, identical to every prior boundary.
+
+### R-GOLD / R-COUNT / R-UPDATE — ⬜ NOT RUN, same reasons as every prior boundary
+
+⛔ Owed, not waived.
+
+### What this boundary establishes
+
+The change that could most plausibly have broken something here was item 4's **blur → hide**: a
+suggestion click blurs the header for ~18 ms (item 3's measurement), so the dropdown could have
+vanished under the mouse before `onClick` ran and broken clicking outright. That was written as an
+explicit regression row (`item4check.py` R6) rather than assumed, and measured green — the click still
+navigates and item 3's number is unchanged. `R7` does the same for Enter.

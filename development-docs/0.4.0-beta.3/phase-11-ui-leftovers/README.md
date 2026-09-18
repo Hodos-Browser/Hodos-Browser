@@ -234,12 +234,11 @@ answer.
 
 ### ⬜ Still open in this cluster
 
-- **Item 1's native half** — whether a real first click is lost. Needs a human; not claimed.
-- **Item 2** (omnibox stuck open) — needs a *reproduction* before anything else.
-- **Item 3** (late URL in the address bar) — the gap must be **timed** before the obvious fix; Phase 2's
-  lesson (the control read 2.04 s) applies directly.
-- **Item 4** (Tab/Enter autocomplete) — working rule 5: read Chrome/Firefox/Vivaldi and record in
-  `PRIOR_ART.md` **before** code. A change here alters muscle memory on every navigation.
+- **Item 1's native half** — whether a real first click is lost. Needs a human; not claimed. `W8`.
+- ~~**Item 2**, **Item 3**, **Item 4**~~ — ✅ **all three closed 2026-09-18**, one commit each, sections
+  below. ⚠️ Their greens are all **CDP-driven**: they prove the React → IPC → HWND chain and say
+  nothing about native mouse/keyboard delivery. `W9` is the human row that covers that, and the
+  `WH_MOUSE_LL` click-outside path in particular **cannot be driven from the agent session at all**.
 
 
 ---
