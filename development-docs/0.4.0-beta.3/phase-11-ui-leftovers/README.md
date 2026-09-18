@@ -12,11 +12,11 @@
 | 3 | ✅ **DONE 2026-09-18** — **URL populates the address bar late after clicking a suggestion** | ticket #3 | 📏 **Not "late" — never.** Measured pre-fix: page navigated at 122 ms, clicked URL absent from the address bar after **35 s**. Fixed: **75 ms**, ahead of the navigation. See § Item 3 below |
 | 4 | ✅ **DONE 2026-09-18** — **Tab / Enter autocomplete behaviour** | ticket #4 | 📏 **There was no inline autocomplete at all** — the Tab branch was unreachable dead code. 👤 Owner chose scope **A (conformance only)**. `PRIOR_ART.md` row logged. See § Item 4 below |
 | 5 | ✅ **CLOSED 2026-09-18 — not reproduced** — **Tear-off window overlay sweep** | 👤 owner 2026-09-15: typing in a torn-off tab's address bar makes that window disappear | 📏 16/16 rows green (2 windows × 8 overlays); 🔴 7/16 red with `OwnOverlayToRequestingWindow` disabled, **all seven on the torn-off window**. ⇒ the observation predates the Phase 3.5 fix. See § Item 5 below
-| 6 | `modal_buttons_unclickable_small_screen` | old bundle | may already be covered by 7a's viewport work — verify, do not re-do |
-| 7 | ❔ `chrome_ui_scales_but_its_window_does_not` | old bundle | may collapse into 3.5 — verify |
+| 6 | ✅ **VERIFIED ALREADY FIXED 2026-09-18** — `modal_buttons_unclickable_small_screen` | old bundle | ⛔ Not by 7a's viewport work — by **Phase 1 (WS1)**, which measured this exact symptom at 125% and converted all 47 mouse call sites. Gate `G8` holds it at 0; `overlay_mouse_test.cpp` covers 100/125/150/175%. ⬜ On-screen confirmation folds into item 10 |
+| 7 | 🟡 **ANSWERED, NOT FIXED — 👤 needs an owner decision** — `chrome_ui_scales_but_its_window_does_not` | old bundle | ⛔ **Not** superseded by Phase 1 — genuinely distinct. All three causes re-verified, and the clipping mechanism is now **measured** rather than read. See § Item 7 below |
 | 8 | ✅ **FIXED 2026-09-18 — and the predicted 4th instance was real** — `longlived_surfaces_snapshot_state_at_startup` | old bundle | 📏 Profile edits now reach every surface in ~10-20 ms. 🚨 The audit found instance #4: **changing your search engine did nothing until you restarted** — its broadcast was guarded on a static that is never assigned. See § Item 8 below
 | 9 | 🚨 **FIXED 2026-09-18 — and it was NOT low severity** — `disable_features_autofill_is_a_noop` | old bundle | 📏 The switch was provably dead **and** autofill was live: a probe typed into a form landed in the profile's `Web Data` `autofill` table, next to **6 rows of the owner's real typing** incl. two email addresses. Now a preference, not a flag. See § Item 9 below |
-| 10 | Phase 1's overlay dead strip · the DPI matrix overlay section | old bundle | `DPI_RESOLUTION_TEST_MATRIX.md` cells #4/#6/#9 |
+| 10 | ⬜ **OWED TO A HUMAN** — Phase 1's overlay dead strip · the DPI matrix overlay section | old bundle | The dead strip itself is fixed (see item 6). What is owed is the **matrix run**: `DPI_RESOLUTION_TEST_MATRIX.md` cells #4/#6/#9, which also settle items 6 and 7. `HUMAN_TEST_QUEUE` **W4** + **W10** |
 | **11** | 🔴 **A BRC-121 payment shows the user NOTHING while it spends** | `../TICKET_brc121_paid_retry_aborts_and_mints_a_payment_each_time.md` | ⛔ **RUNS FIRST — money path, and the only item here that costs real BSV when it goes wrong.** Four fixes in causal order, plan + negative controls in the ticket. 👤 Owner 2026-09-17: *"it's not okay."* See below |
 
 ## Item 11 — why it is here and why it goes first
@@ -854,3 +854,101 @@ and it now has two named broadcasters to copy.
 
 Shared C++ (`simple_handler.cpp` + its header) — relay note in `../MAC_RELAY_P11_ROUND.md`. No
 platform split; both broadcasters are plain CEF.
+
+---
+
+## Item 6 — modal buttons unclickable on a small screen · ✅ ALREADY FIXED, verified 2026-09-18
+
+The README guessed this *"may already be covered by 7a's viewport work"*. ⛔ It is not — it was fixed
+by **Phase 1 (WS1)**, and the evidence is unusually direct: `cef-native/include/core/OverlayMouse.h`
+records the same defect, measured at the same scale, with the same two symptoms the owner described:
+
+> 📏 MEASURED 2026-08-25 at 125%: *"the user aims at one control and a DIFFERENT control receives
+> the event (aimed BUTTON:Advanced, got the balance panel) — on a consent modal that is 'aims at
+> Deny, activates Allow'"* and *"everything below 1/scale of the overlay's height lands outside the
+> view entirely — the bottom 20% is dead at 125%, 33% at 150%."*
+
+⭐ That second line **is** the owner's report: buttons that render but do nothing on the small
+(scaled) screen and work on the large one.
+
+Verified rather than re-done, as the row asked:
+
+| check | result |
+|---|---|
+| the modal in question — the **notification overlay** — converts its coordinates | ✅ `ClientToViewPoint` at all 5 of its mouse sites |
+| every other site | ✅ 47 sites converted; gate **`G8`** fails on a new raw assignment, baseline 0, target 0 |
+| arithmetic covered by tests | ✅ `cef-native/tests/overlay_mouse_test.cpp` — 100%, 125%, 150%, 175%, the bottom-of-view case, rounding, negatives |
+| a negative control exists without a rebuild | ⭐ yes — `HODOS_OVERLAY_RAW_MOUSE=1` restores the pre-fix behaviour **on the same binary** |
+
+⚠️ **What is still owed, and it is not an agent row.** The conversion is proven; *a person clicking
+the modal at 125% and 150%* is not. ⛔ CDP delivers events straight to the renderer and never enters
+the WndProc where the conversion lives, so this environment cannot exercise the fixed code path at
+all. It folds into item 10's matrix run, where the same sitting settles items 6, 7 and 10 together.
+
+---
+
+## Item 7 — chrome scales but its window does not · 🟡 ANSWERED, and 👤 the decision is the owner's
+
+The ticket's own open question was *"is it superseded by Phase 1's DPI work, or genuinely
+distinct?"* ✅ **Distinct.** Phase 1 converted mouse *coordinates*; it touched neither the header's
+height nor zoom. Nothing since has touched either.
+
+### All three causes re-verified against current code
+
+| # | claim | status |
+|---|---|---|
+| 1 | the zoom guard covers the keyboard and not the wheel | ✅ `OnPreKeyEvent` blocks `0xBB / 0xBD / '0' / numpad ±` for non-tab roles — and **`MK_CONTROL` appears zero times** in `cef_browser_shell.cpp`, so Ctrl+wheel is never inspected |
+| 2 | Chrome zoom is per-ORIGIN, so all our chrome shares one setting | ✅ unchanged — the header and every overlay are served from `127.0.0.1:5137` |
+| 3 | the header's window height is a constant | ✅ `HEADER_CSS_HEIGHT = 96`, and `GetHeaderHeightPx()` scales it by `GetDpiForWindow()` — **monitor DPI and nothing else** |
+
+### 📏 The clipping is now measured, not inferred
+
+At 100% the header's content and its window are both 96 px — no clipping, which is why this is
+invisible on a normal desktop. Scaling the **content** while the window keeps its monitor-DPI size:
+
+| content scale | content needs | window gives | clipped |
+|---|---|---|---|
+| 100% | 96 px | 96 px | no |
+| 125% | **150 px** | 96 px | 🔴 **54 px hidden** |
+| 150% | **215 px** | 96 px | 🔴 **119 px hidden** |
+
+⚠️ **Bounding this honestly:** CSS `zoom` was used as the stand-in, because the two real routes —
+Ctrl+wheel page zoom and the Windows text-size setting — cannot be driven from here. All three scale
+the *content* and none of them resize the *window*, which is the mechanism under test; but the exact
+pixel counts are not the real ones. (The ticket's own reading was 120 px at 125%, against 150 here —
+the difference is the stand-in, not a contradiction.) ⇒ the numbers that matter come from the matrix
+run, and the **existence** of the overflow is what is established here.
+
+### 👤 The decision, and why it is not mine
+
+The ticket is explicit that the obvious fix is a workaround: blocking zoom removes one of the two
+routes and leaves the **accessibility** route — Windows Settings → Accessibility → Text size — broken,
+and that one is set once by a user with poor eyesight and has no per-app opt-out. ⭐ That is the
+serious route, and it is not a user doing something unusual.
+
+Three options, and the second is the one the ticket argues for:
+
+| | scope | cost |
+|---|---|---|
+| **A** | Block Ctrl+wheel zoom on chrome browsers only | small and safe, but **fixes only half** — the accessibility route still clips |
+| **B** | A, **plus** derive the header height from the effective content scale instead of the constant | the correct fix, and it touches the header-layout path the DPI matrix records as having regressed **three times** (`7277980`, the header-UX pass, `ff3e2ee`) |
+| **C** | Defer to beta.4 | leaves a supported OS accessibility setting permanently breaking our header |
+
+⛔ **Not started, deliberately.** Any change here is gated on DPI matrix cells #4/#6/#9 **plus** a
+text-scale pass the matrix does not currently have at all — so the verification has to exist before
+the change, not after. ⭐ The cheapest first step is the same human sitting item 10 needs.
+
+---
+
+## Item 10 — the DPI matrix · ⬜ OWED TO A HUMAN
+
+Two halves, and only one is still open.
+
+✅ **Phase 1's overlay dead strip is fixed** — that is item 6 above: the bottom 20% of every overlay
+was dead at 125% because of unconverted mouse coordinates, and all 47 sites now convert.
+
+⬜ **The matrix run itself has never happened.** `DPI_RESOLUTION_TEST_MATRIX.md` cells **#4**
+(125% / 1366×768), **#6** (150% / 1366×768) and **#9** (mixed-DPI) are owed on both platforms and have
+been at every boundary. ⭐ **One sitting settles three items:** #6's modal clicks, #7's header
+clipping, and #10 itself. `HUMAN_TEST_QUEUE` **W4** (pre-existing) and **W10** (added, with the
+text-scale dimension the matrix lacks).
