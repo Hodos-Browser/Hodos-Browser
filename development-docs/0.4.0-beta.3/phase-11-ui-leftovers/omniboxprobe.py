@@ -122,6 +122,16 @@ class Session:
             raise RuntimeError("JS threw in %s: %s" % (self.url, json.dumps(r["exceptionDetails"])[:400]))
         return r.get("result", {}).get("value")
 
+    def ev_async(self, js):
+        """Evaluate a Promise and wait for it. ⛔ Without awaitPromise the call
+        returns the Promise OBJECT, which json.loads() then chokes on — or worse,
+        silently reads as an empty result."""
+        r = self.call("Runtime.evaluate", {"expression": js, "returnByValue": True,
+                                           "awaitPromise": True})
+        if "exceptionDetails" in r:
+            raise RuntimeError("JS threw in %s: %s" % (self.url, json.dumps(r["exceptionDetails"])[:400]))
+        return r.get("result", {}).get("value")
+
     def close(self):
         try:
             self.ws.close()

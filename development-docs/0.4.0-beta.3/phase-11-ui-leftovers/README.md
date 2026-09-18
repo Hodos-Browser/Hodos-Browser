@@ -11,7 +11,7 @@
 | 2 | ✅ **DONE 2026-09-18** — **Omnibox sometimes stays open after selecting a URL** | ticket #2 | 📏 **Reproduced deterministically.** Not the hide path — an uncancelled 150 ms **show** debounce in the header fires after the hide. See § Item 2 below |
 | 3 | ✅ **DONE 2026-09-18** — **URL populates the address bar late after clicking a suggestion** | ticket #3 | 📏 **Not "late" — never.** Measured pre-fix: page navigated at 122 ms, clicked URL absent from the address bar after **35 s**. Fixed: **75 ms**, ahead of the navigation. See § Item 3 below |
 | 4 | ✅ **DONE 2026-09-18** — **Tab / Enter autocomplete behaviour** | ticket #4 | 📏 **There was no inline autocomplete at all** — the Tab branch was unreachable dead code. 👤 Owner chose scope **A (conformance only)**. `PRIOR_ART.md` row logged. See § Item 4 below |
-| 5 | **Tear-off window overlay sweep** | 👤 owner 2026-09-15: typing in a torn-off tab's address bar makes that window disappear | Phase 3.5 measured and fixed this for Ctrl+N windows (K9: z-order occlusion; overlays now owned by the requesting window, owner-confirmed `Z5`). It was **never measured on a torn-off window** (`tab_tearoff` → `CreateFullWindow`, same creator). Re-run the Phase 3.5 `winprobe.ps1` z-order read on a torn-off window, **every overlay** (the 3.5 doc predicted "generalises beyond the omnibox" and said "not yet tested on a second overlay"), with `OwnOverlayToRequestingWindow` reverted as the negative control. If it is green, the owner's observation predates the fix and the row closes; if red, tear-off differs and gets fixed here |
+| 5 | ✅ **CLOSED 2026-09-18 — not reproduced** — **Tear-off window overlay sweep** | 👤 owner 2026-09-15: typing in a torn-off tab's address bar makes that window disappear | 📏 16/16 rows green (2 windows × 8 overlays); 🔴 7/16 red with `OwnOverlayToRequestingWindow` disabled, **all seven on the torn-off window**. ⇒ the observation predates the Phase 3.5 fix. See § Item 5 below
 | 6 | `modal_buttons_unclickable_small_screen` | old bundle | may already be covered by 7a's viewport work — verify, do not re-do |
 | 7 | ❔ `chrome_ui_scales_but_its_window_does_not` | old bundle | may collapse into 3.5 — verify |
 | 8 | ❔ `longlived_surfaces_snapshot_state_at_startup` | old bundle | |
@@ -574,3 +574,82 @@ deliberately left alone.
 ### 🍎 macOS
 
 React only — no rebuild. The overlay `omnibox_select` IPC it leans on is already cross-platform.
+
+---
+
+## Item 5 — tear-off window overlay sweep · ✅ CLOSED 2026-09-18, NOT REPRODUCED
+
+👤 Owner, 2026-09-15: *"typing in a torn-off tab's address bar makes that window disappear."*
+
+Phase 3.5 measured and fixed exactly this shape for **Ctrl+N** windows (`K9`: the overlay pulled the
+**primary** window forward, so the requesting window went *behind* it and read as "vanished"; fix =
+`OwnOverlayToRequestingWindow`, owner-confirmed `Z5`). It was never measured on a **torn-off** window,
+and the 3.5 write-up said in as many words that its fix was *"not yet tested on a second overlay"*.
+This is that test.
+
+### The rig — `tearoffprobe.py`
+
+⭐ **Tear-off has an IPC** (`tab_tearoff` → `simple_handler.cpp`), so the second window can be created
+without the drag gesture `SendInput` cannot deliver here. ⚠️ That bounds the claim: this proves the
+**window-ownership** half, not the drag.
+
+**Layer:** Win32. `EnumWindows` z-order (topmost first) plus `IsWindowVisible` and `IsIconic` on every
+Hodos shell and overlay HWND in the dev process — *"went behind"* and *"was minimised"* look identical
+on screen and have different causes, so both discriminators are printed.
+
+### ⛔ Two instrument defects found while using it — both produced confident false REDs
+
+1. **The assertion named the wrong subject.** The first version asserted that the torn-off window B
+   must stay in front *whichever* header was driven. So typing in window **A** — where A coming
+   forward is **correct** — scored as a reproduction. The assertion has to be *"the window the user
+   typed in stays in front"*, not *"window B always stays in front"*. Same family as the item-3 probe
+   that asserted "the value changed" instead of "the value is the one we expect".
+2. **Ownership was attributed from geometry while the windows OVERLAPPED.** Window A sat at
+   `0,0 1920w` and the torn-off B at `800,380 1820w`. Every overlay anchored to a window's *right*
+   edge — menu `1605`, profile `1485`, download `1435`, cookie `1365` — has an origin past B's left
+   edge, so all four were attributed to B while the user had typed in A. **Four confident REDs, all
+   of them the instrument.** Fixed by `split_windows()`, which moves the two shells side by side so
+   their rects are disjoint and attribution is exact.
+
+⚠️ Both were caught by reading the numbers rather than the verdict. Neither would have been caught
+by the verdict line, which is the point.
+
+### Result
+
+| | driven from window A | driven from the **torn-off** window B |
+|---|---|---|
+| omnibox · menu · cookie · download · profile · siteinfo · tablist · bookmarks | 🟢 8/8 | 🟢 8/8 |
+
+Every overlay opened over the window that asked for it, and that window stayed visible, un-minimised
+and in front while its own overlay was up. **16/16.**
+
+### 🔴 Negative control — run, and it is the sharpest one in this phase
+
+`OwnOverlayToRequestingWindow` was made a no-op (`return;` at the top), the **shell rebuilt**, the
+browser relaunched, and the same sweep re-run:
+
+| | driven from window A | driven from the **torn-off** window B |
+|---|---|---|
+| omnibox | 🟢 | 🟢 (see note) |
+| menu · cookie · download · profile · siteinfo · tablist · bookmarks | 🟢 7/7 | 🔴 **7/7 — the window went BEHIND the other one** |
+
+⭐ **The asymmetry is the whole finding.** With the fix off, the *original* window is never affected
+and the *torn-off* window is affected by almost everything — which is precisely the owner's report,
+and precisely what the fix exists to remove.
+
+⚠️ **The omnibox does not go red even in the control**, and the reason is worth recording as a
+🧠 **hypothesis, not a finding**: unlike the other overlays, the omnibox HWND did not exist at
+startup, and `CreateOmniboxOverlay(hInstance, showImmediately, targetWin)` computes its owner from
+`targetWin` at **creation** time — so in a run where the torn-off window is driven first, its owner is
+already correct without the re-owning call. ⬜ Not verified; it does not change the verdict, but it
+does mean **the omnibox alone would have been a weak choice of subject** for this sweep.
+
+### Verdict
+
+✅ **The row closes.** The owner's observation predates the Phase 3.5 fix, and that fix does
+generalise beyond the omnibox exactly as its author predicted — now measured on 8 overlays and on the
+window type it was never tested against.
+
+⬜ **What is still owed to a human:** a real drag. `tab_tearoff` was driven over IPC, which creates
+the window but does not reproduce the mouse capture and activation changes a drag also causes. Folded
+into `HUMAN_TEST_QUEUE` **W9**.
