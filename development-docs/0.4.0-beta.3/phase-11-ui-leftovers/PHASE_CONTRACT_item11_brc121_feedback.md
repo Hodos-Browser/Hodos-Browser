@@ -89,7 +89,7 @@ reproduces the whole thing. Only `A5` spends, and it is cents.
 | `P11-11-A3` | With a payment in flight, a second navigation to the same URL mints **no** second payment — the existing one is reused | Revert to the pre-fix path ⇒ **two** `createAction`s / two `nosend` rows for one article, reproducing 2026-09-16 | ⭐ **Count of `nosend` rows + `createAction` calls for that URL**, not an HTTP status. ⚠️ The 2026-09-16 run is the naturally-occurring RED; reproduce it deliberately | T2 | ✅ **2026-09-17** (one residual, see below) |
 | `P11-11-A4` | After an abandoned retry: zero `nosend` rows, zero spendable phantom outputs for that txid, reservation released | Remove the `release_unbroadcast_transaction` call ⇒ the row, the phantom output and the held reservation all persist (📏 measured 2026-09-16: 2 rows, 1 spendable output each, 1,419,268 sats reserved) | The wallet DB `transactions` + `outputs` rows and the reservation, **not** the log's "funds preserved" line — that line was already true while the leak existed | T2 | ✅ **2026-09-17** |
 | `P11-11-A5` | 👤 A real 402 paywall, human watching: banner appears, article arrives, gold pill on the paying tab, **one** payment | Two-sided with `A3`: click again mid-flight ⇒ still exactly one broadcast txid | ⭐ **The owner's eyes + one txid on WhatsOnChain.** The 2026-09-16 sitting is why this row exists — 4 reviewers found none of the 3 defects a person clicking found | T3 | 🟡 **2026-09-17 — pill + reuse PASS, and it found a defect I introduced today** |
-| `P11-11-A6` | `R-GOLD` still green both paths after the edit | Stub `firePaymentSuccessIpc`'s tab resolution to the raw `cefBrowserId` ⇒ pill lands on the wrong tab | `cefBrowserId → tabId` in the log **and** which tab shows the pill (they differ — that is the hazard) | T2 | ⬜ |
+| `P11-11-A6` | `R-GOLD` still green both paths after the edit | Stub `firePaymentSuccessIpc`'s tab resolution to the raw `cefBrowserId` ⇒ pill lands on the wrong tab | `cefBrowserId → tabId` in the log **and** which tab shows the pill (they differ — that is the hazard) | T2 | ✅ **2026-09-18** |
 
 **Two-sided pairing:** `A3` ⇄ `A5` (must reuse, and must still deliver), `A2` (must warn, and must not
 cancel itself).
@@ -413,7 +413,69 @@ natural RED for the same assertion.
 
 588 unit tests pass · preflight `-Full` PASS · shell built explicitly.
 
-⬜ Still open on this row: the **duplicate-handler** residual (a second navigation installs its own
-handler and re-issues the *same* payment, which a server may fairly reject as a replay — the likely
-cause of the first 402 in both runs). Recorded under `A3`; suppressing the duplicate handler rather
-than the duplicate mint is the remaining step.
+### ⛔ CORRECTION — "the duplicate handler causes the first 402" is REFUTED
+
+I wrote that twice, as a likely cause. **My own green re-run disproves it:**
+
+```
+19:13:53.932  issue #1
+19:13:56.053  status=0     ← #1 cancelled by the re-click
+19:13:56.155  issue #2
+19:14:25.617  status=402   ← 29.5 s later
+```
+
+**Only one request was in flight when that 402 arrived.** No duplicate handler was running. ⇒ the
+cause of that first 402 is **unestablished**, and this ticket already carries one refuted hypothesis
+(the "our reload cancels the in-flight request" story the owner's account overturned). ⛔ **Do not fix
+from this paragraph.**
+
+Three candidates, with **opposite** fixes — which is exactly why guessing is expensive here:
+
+| # | Hypothesis | If true, the fix is… |
+|---|---|---|
+| 1 | **Replay.** We cancelled #1 locally at 2.1 s but its bytes had already left; the server may have consumed that payment. #2 reuses it ⇒ replay. ⚠️ If so, **`A3`'s reuse is subtly wrong** — a payment that reached the server is not reusable, only one that never left | in the reuse *decision*, not the handler |
+| 2 | **Freshness.** Their origin takes 10–30 s; the 30 s `x-bsv-time` window can expire during the request | the reuse TTL / mint fresh past a margin |
+| 3 | Something in their implementation we have not seen | unknown |
+
+⇒ **Instrument, do not fix.** One cheap pass settles all three: log whether a cancelled attempt's
+request actually left the machine, and capture the 402's body + headers for a reason code.
+⬜ Owed as its own small item, deliberately not bundled into a phase closing out.
+
+
+### `P11-11-A6` — run record, 2026-09-18 (Windows)
+
+⛔ **Subject is the rendered DOM, not the log.** The badge is found in the **header browser's** document
+by its unique animation name (`paymentBadgeFade`, `TabComponent.tsx` — the element carries no id or
+data attribute), then walked up to its owning tab. A log line saying `cefBrowserId=N → tabId=M` proves
+the translation was *computed*, not that the badge *rendered* on that tab.
+
+⭐ **Three DISTINGUISHABLE tabs, deliberately.** `Tab::id` is a `TabManager`-local counter and
+`CefBrowser::GetIdentifier()` is global (it counts overlays and devtools), so with one tab they can
+coincide and a broken build passes. This is also `M1`'s lesson restated: its first attempt was VOID
+because `example.com` and `example.org` were indistinguishable on screen.
+
+📏 The run made the hazard concrete:
+
+```
+cefBrowserId = 2  →  tabId = 1
+   Tab 1  now.bsvblockchain.tech   ← the payer
+   Tab 2  whatsonchain.com         ← a bystander, and the id the raw value points at
+   Tab 3  en.wikipedia.org
+```
+
+| | Badge rendered on |
+|---|---|
+| 🟢 **GREEN** | `'BSV Hackathon Requires AI Agents to Discover Eac…'` — **the paying tab** |
+| 🔴 **RED** (`int tabId = browserId;`, rebuilt) | **`'WhatsOnChain.com - BSV Explorer - Mainnet'`** — a bystander that paid nothing |
+
+⛔ The RED failure is **worse than no indicator**: it asserts a payment on a tab that never paid and
+stays silent on the one that did. That is the whole reason the translation exists and why `R-GOLD` is
+a standing invariant.
+
+**Scope, stated precisely rather than over-claimed.** This run exercised the **BRC-121 paid-retry**
+path end to end. `OnWalletCallSuccess` is the **single emit site** for the pill and the translation is
+one line inside it, so the RED/GREEN above covers the translation for every caller. What differs per
+path is only *which call site invokes it* — and nothing in item 11 touched the `createAction` call
+site. The `createAction` half's live evidence remains `PAYMENT_TEST_BATCH.md` **M1** (2026-09-16,
+owner watching, `cefBrowserId=12 → tabId=2`). ⬜ Re-running the `createAction` half against today's
+binary is **not** claimed here.
