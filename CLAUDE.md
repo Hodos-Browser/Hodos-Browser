@@ -78,6 +78,30 @@ Six standing rules. They are short on purpose. Adopted 2026-08-30; provenance an
 6. ⛔ **The instrument is not edited by the change it measures.**
    `scripts/preflight.ps1` gate patterns, gate baselines, and `REGRESSION_SET.md` are **not** touched in the same change that implements the code they measure. Loosening a pattern or raising a baseline is its own commit, with the reason written in `HARNESS.md` §4, and it re-runs `-NegativeControl`. This project has already shipped a preflight that reported PASS while running zero checks.
 
+7. 🚨 **A POISONING defect outranks the sprint. Verify it cheaply, then stop and say so.**
+   Adopted 2026-09-17. 👤 *"If we have something that's totally breaking a wallet, we can't continue — not everything in testing is going to be off, everything is broken and we can't trust anything after that."*
+
+   **What makes a defect *poisoning* rather than merely bad:** it corrupts state that **later work reads**, so every measurement taken after it is suspect. A bug that produces a wrong answer is ordinary. A bug that makes *the next ten answers unverifiable* is not.
+
+   ⭐ **Four trip-wires. Any one of them, treat as poisoning until disproved:**
+
+   | # | Trip-wire |
+   |---|---|
+   | 1 | **A money-path row in a state no code expects** — `outputs` / `transactions` with a contradictory combination (`spendable=0` + `spent_by=NULL`, a `nosend` row with a spendable output, a balance that disagrees with the chain) |
+   | 2 | **A check that returns a VERDICT where it should return an ERROR** — `.unwrap_or(false)`, a swallowed exception, a default that is indistinguishable from a real answer. The `new_status` reuse query answered *"not reusable"* for months because of exactly this |
+   | 3 | **Durable state that outlives the process** — a DB row, cache entry or file that the next session, the next test and the next developer will read as fact |
+   | 4 | **An instrument that cannot fail** — a gate, probe or assertion that would pass with the feature absent. Rule 6 is the special case; this is the general one |
+
+   ⛔ **Do the cheap ground-truth check BEFORE escalating. Escalate on evidence, not suspicion.**
+   For wallet state the authority is **the chain, and it is one HTTP call away**: a wallet row is a *claim about* the chain, never the chain itself. 🚨 On 2026-09-17 a "1.4M sats stuck, balance understated" alarm cost a full investigation and turned out to be a **spent** coin and our own test residue — one `curl` would have settled it before the owner was ever told. ⇒ **Ask the chain, then escalate.**
+
+   **If it survives that check:**
+   - ⛔ **Stop the sprint task.** Do not "finish this row first" — later rows read the poisoned state.
+   - 👤 **Tell the owner plainly**, with the trip-wire, the evidence, and what is now untrustworthy.
+   - ⛔ **Re-run anything already measured against the affected state.** A green from before the discovery proves nothing; say so rather than quietly keeping it.
+
+   ⚠️ **A deliberate fault-injection test must DECLARE its residue.** A negative control that breaks bookkeeping on purpose leaves rows that look exactly like trip-wire 1. Say what it leaves behind, in the row that owns it, or the next person to find it will — correctly — treat it as a live defect. `PAYMENT_TEST_BATCH.md` M4 is the worked example.
+
 ## Scoping a sprint or release — `development-docs/SCOPING_PROCESS.md`
 
 **Before a sprint exists, `SCOPING_PROCESS.md` is the procedure.** Four stages — **Scope → Telescope → Microscope → Telescope (close)** — with defined outputs, exit conditions, a loop limit, and explicit human decision points. The `sprint-scoper` agent (`.claude/agents/sprint-scoper.md`) owns it.
