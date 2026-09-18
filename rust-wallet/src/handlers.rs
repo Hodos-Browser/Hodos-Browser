@@ -19982,6 +19982,28 @@ pub async fn release_nosend(
         }
     }
 
+    // `P11-11-A5` — evict the reuse entry FIRST, and do it here rather than trusting the
+    // caller's ordering.
+    //
+    // 🚨 Measured 2026-09-17: `pay_402` handed this very txid back out of `pay402_reuse`
+    // **4 ms before** the release landed, so the retry was issued with a transaction that
+    // was about to be marked `failed` — a guaranteed 402 and a wasted mint. The shell now
+    // withholds the refused response until this call returns, which closes the window;
+    // this eviction is the second lock on the same door, because an ordering guarantee
+    // that lives in another process is not a guarantee.
+    //
+    // ⛔ Evict BEFORE the status flip: between the two, a concurrent `pay_402` must find
+    // either a live entry backed by a live `nosend` row, or no entry at all — never an
+    // entry pointing at a transaction we have just killed.
+    {
+        let mut reuse = state.pay402_reuse.lock().unwrap();
+        let before = reuse.len();
+        reuse.retain(|_, e| e.txid != req.txid);
+        if before != reuse.len() {
+            log::info!("   🧹 evicted {} pay402_reuse entr(ies) for {}", before - reuse.len(), &req.txid);
+        }
+    }
+
     let (disabled, restored) = release_unbroadcast_transaction(state.get_ref(), &req.txid, None);
     let _ = {
         let db = state.database.lock().unwrap();

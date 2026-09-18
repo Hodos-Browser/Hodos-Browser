@@ -5047,21 +5047,42 @@ public:
             // ⇒ A3 covers "the user comes back", A4 covers "the server said no", and the
             //   sweepers cover "nobody ever comes back". Three cases, three owners.
             if (status > 0) {
-                releaseNosendAsync();
-            } else {
-                LOG_INFO_HTTP("💰 BRC-121: retry cancelled (no HTTP response) — keeping txid="
-                              + ctx_.txid + " reusable for a re-click (A3)");
+                // 🚨 A5 FIX — the release must COMPLETE before this refused response
+                // reaches the page.
+                //
+                // 📏 Measured 2026-09-17 with the owner clicking, and it is a race I
+                // created by landing A3 and A4 in the same session:
+                //     18:24:49.696  wallet  REUSE returns 39357fc3…
+                //     18:24:49.700  shell   RELEASED 39357fc3…      (4 ms later)
+                //     18:24:49.705  shell   issues the request with a DEAD payment
+                //     18:24:59.918  server  402 — guaranteed
+                // Delivering the 402 lets the page re-request, which reaches `pay_402`,
+                // which reuses the very transaction we are in the middle of killing.
+                //
+                // ⇒ Do not fire the CEF callbacks here. The release task fires them when
+                //   it is done, which closes the window entirely.
+                releaseNosendThenContinue();
+                return;
             }
+            LOG_INFO_HTTP("💰 BRC-121: retry cancelled (no HTTP response) — keeping txid="
+                          + ctx_.txid + " reusable for a re-click (A3)");
         }
 
-        // Tell CEF we're ready: it will now call GetResponseHeaders (which
-        // sees real status + headers) and ReadResponse (which streams body).
+        releaseCefCallbacks();
+    }
+
+    // Tell CEF we're ready: it will now call GetResponseHeaders (which sees the real
+    // status + headers) and ReadResponse (which streams the body). ⚠️ IO thread only,
+    // and safe to call twice — the release path and the ordinary path share it.
+    void releaseCefCallbacks() {
+        CEF_REQUIRE_IO_THREAD();
         if (openCallback_) {
             openCallback_->Continue();
             openCallback_ = nullptr;
         }
         if (readCallback_) {
             readCallback_->Continue();
+            readCallback_ = nullptr;
         }
     }
 
@@ -5202,14 +5223,32 @@ private:
     // A4 — the other half of the pair. We know at this instant that this transaction
     // will never exist, so release what it holds instead of leaving a spendable
     // phantom output and a reserved input for a sweeper to find minutes later.
-    void releaseNosendAsync() {
-        std::string txid = ctx_.txid;
-        CefPostTask(TID_FILE_USER_BLOCKING, new ReleaseTask(txid));
+    //
+    // ⚠️ A5 — it now also OWNS the CEF callbacks. The refused response must not reach
+    // the page until the release has landed, or `pay_402` hands the dying transaction
+    // straight back to the retry. The task fires `releaseCefCallbacks()` on TID_IO when
+    // it finishes, on every path including failure — ⛔ a path that forgets to fire them
+    // hangs the tab forever.
+    void releaseNosendThenContinue() {
+        CefPostTask(TID_FILE_USER_BLOCKING, new ReleaseTask(this, ctx_.txid));
     }
+
+    // Hops back to TID_IO so the handler's callbacks are touched on the right thread.
+    class ContinueTask : public CefTask {
+    public:
+        explicit ContinueTask(CefRefPtr<Async402ResourceHandler> parent)
+            : parent_(std::move(parent)) {}
+        void Execute() override { parent_->releaseCefCallbacks(); }
+    private:
+        CefRefPtr<Async402ResourceHandler> parent_;
+        IMPLEMENT_REFCOUNTING(ContinueTask);
+        DISALLOW_COPY_AND_ASSIGN(ContinueTask);
+    };
 
     class ReleaseTask : public CefTask {
     public:
-        explicit ReleaseTask(std::string txid) : txid_(std::move(txid)) {}
+        ReleaseTask(CefRefPtr<Async402ResourceHandler> parent, std::string txid)
+            : parent_(std::move(parent)), txid_(std::move(txid)) {}
         void Execute() override {
             nlohmann::json body;
             body["txid"] = txid_;
@@ -5226,8 +5265,13 @@ private:
             } else {
                 LOG_INFO_HTTP("♻️ BRC-121: released abandoned payment txid=" + txid_);
             }
+            // ⛔ UNCONDITIONAL. Whether the release succeeded or not, the page is still
+            // waiting on this response. Releasing the callbacks only on success would
+            // turn a wallet hiccup into a tab that never finishes loading.
+            if (parent_) CefPostTask(TID_IO, new ContinueTask(parent_));
         }
     private:
+        CefRefPtr<Async402ResourceHandler> parent_;
         std::string txid_;
         IMPLEMENT_REFCOUNTING(ReleaseTask);
         DISALLOW_COPY_AND_ASSIGN(ReleaseTask);

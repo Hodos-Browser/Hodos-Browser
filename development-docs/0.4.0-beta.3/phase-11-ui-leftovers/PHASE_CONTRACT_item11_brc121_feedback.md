@@ -383,3 +383,37 @@ not "louder where it is" but "unsuppressable, where the eye already is". And the
 the weight — Activity is the durable record; the pill is the alert.
 
 ⬜ Not scheduled. 👤 Owner: *"I don't want to focus on that too much right now."*
+
+
+### `P11-11-A5` follow-up — the A3/A4 race is FIXED, 2026-09-17
+
+**Two locks on the same door**, because an ordering guarantee that lives in another process is not a
+guarantee:
+
+1. **Ordering (shell).** The refused response is now withheld until the release lands.
+   `releaseNosendThenContinue()` owns the CEF callbacks and fires them from the release task's
+   completion — ⛔ **unconditionally**, success or failure, or a wallet hiccup becomes a tab that never
+   finishes loading.
+2. **Eviction (wallet).** `release_nosend` drops the `pay402_reuse` entry **before** flipping the
+   status, so a concurrent `pay_402` finds either a live entry backed by a live `nosend` row, or
+   nothing — never an entry pointing at a transaction we have just killed.
+
+**Same scenario, same site, one variable — the binary:**
+
+| | 🔴 RED (A5, owner clicking) | 🟢 GREEN (re-run) |
+|---|---|---|
+| reuse vs release | `REUSE` **:49.696** → `RELEASED` **:49.700** — handed back **4 ms before** the kill | `EVICTED` **:25.619** → `RELEASED` **:25.627** → next mint **:25.720** |
+| what the next attempt carried | a **dead** payment ⇒ guaranteed 402 | a genuinely new payment |
+| upstream attempts for one article | **4** | **3** |
+| broadcasts | 1 | 1 |
+
+**Asserted invariant, not eyeballed:** *a `REUSE` must never return a txid that was already
+`RELEASED`.* Parsed from the interleaved wallet + shell logs — **0 violations**. The A5 log is the
+natural RED for the same assertion.
+
+588 unit tests pass · preflight `-Full` PASS · shell built explicitly.
+
+⬜ Still open on this row: the **duplicate-handler** residual (a second navigation installs its own
+handler and re-issues the *same* payment, which a server may fairly reject as a replay — the likely
+cause of the first 402 in both runs). Recorded under `A3`; suppressing the duplicate handler rather
+than the duplicate mint is the remaining step.
