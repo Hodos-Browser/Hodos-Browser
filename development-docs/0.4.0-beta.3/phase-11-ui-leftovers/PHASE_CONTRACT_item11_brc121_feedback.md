@@ -88,7 +88,7 @@ reproduces the whole thing. Only `A5` spends, and it is cents.
 | `P11-11-A2` | Past the 10 s threshold the banner states the site is slow and offers Stop; the request stays alive and still completes | Set the threshold above the stub delay ⇒ the escalated copy never appears | The banner's rendered text **and** that the upstream request is still in flight afterwards (it must not be cancelled by its own warning) | T2 | ✅ **2026-09-17** |
 | `P11-11-A3` | With a payment in flight, a second navigation to the same URL mints **no** second payment — the existing one is reused | Revert to the pre-fix path ⇒ **two** `createAction`s / two `nosend` rows for one article, reproducing 2026-09-16 | ⭐ **Count of `nosend` rows + `createAction` calls for that URL**, not an HTTP status. ⚠️ The 2026-09-16 run is the naturally-occurring RED; reproduce it deliberately | T2 | ✅ **2026-09-17** (one residual, see below) |
 | `P11-11-A4` | After an abandoned retry: zero `nosend` rows, zero spendable phantom outputs for that txid, reservation released | Remove the `release_unbroadcast_transaction` call ⇒ the row, the phantom output and the held reservation all persist (📏 measured 2026-09-16: 2 rows, 1 spendable output each, 1,419,268 sats reserved) | The wallet DB `transactions` + `outputs` rows and the reservation, **not** the log's "funds preserved" line — that line was already true while the leak existed | T2 | ✅ **2026-09-17** |
-| `P11-11-A5` | 👤 A real 402 paywall, human watching: banner appears, article arrives, gold pill on the paying tab, **one** payment | Two-sided with `A3`: click again mid-flight ⇒ still exactly one broadcast txid | ⭐ **The owner's eyes + one txid on WhatsOnChain.** The 2026-09-16 sitting is why this row exists — 4 reviewers found none of the 3 defects a person clicking found | T3 | ⬜ |
+| `P11-11-A5` | 👤 A real 402 paywall, human watching: banner appears, article arrives, gold pill on the paying tab, **one** payment | Two-sided with `A3`: click again mid-flight ⇒ still exactly one broadcast txid | ⭐ **The owner's eyes + one txid on WhatsOnChain.** The 2026-09-16 sitting is why this row exists — 4 reviewers found none of the 3 defects a person clicking found | T3 | 🟡 **2026-09-17 — pill + reuse PASS, and it found a defect I introduced today** |
 | `P11-11-A6` | `R-GOLD` still green both paths after the edit | Stub `firePaymentSuccessIpc`'s tab resolution to the raw `cefBrowserId` ⇒ pill lands on the wrong tab | `cefBrowserId → tabId` in the log **and** which tab shows the pill (they differ — that is the hazard) | T2 | ⬜ |
 
 **Two-sided pairing:** `A3` ⇄ `A5` (must reuse, and must still deliver), `A2` (must warn, and must not
@@ -309,3 +309,77 @@ production only if all three `create_action` guards fail at once.
 
 ⭐ **The lesson worth more than the ticket: ask the chain before calling a wallet state a leak.** One
 `curl` would have prevented the whole scare, and I asserted a loss without it.
+
+
+### `P11-11-A5` — run record, 2026-09-17 (Windows, 👤 owner clicking, no fault seam)
+
+👤 *"The banner did show. I clicked it again. I saw the banner refresh… The page finally did load. It
+felt like a long time. It felt like over a minute… I did see the gold pill only once, once the page
+did load."*
+
+📏 **40.4 s** first 402 → article. Not impatience: the owner was nearly right.
+
+**🟢 What passed**
+
+- **A1/A2 confirmed by a human**: banner appeared, refreshed on the re-click, and changed wording —
+  the escalation, seen in the wild.
+- **⭐ A3 confirmed with real money**: the re-click at `18:24:31.893` produced
+  `pay_402 REUSE … (age 2532ms)` — **no second mint.** On 2026-09-16 that same click minted a second
+  payment. The fix works on the path it was written for.
+- **A5's pill assertion**: exactly one pill, `cefBrowserId=15 → tabId=4` — ids differ and it resolved
+  to the paying tab.
+- One article, **75 sats, paid once**. No money lost.
+
+**🔴 THE FIND — a race between `A3` and `A4`, both landed today, by me**
+
+```
+18:24:49.696  wallet  REUSE returns 39357fc3…      ← hands the payment back
+18:24:49.700  shell   RELEASED 39357fc3…           ← 4 ms later, marks it failed
+18:24:49.705  shell   issues the paid request with 39357fc3…   ← already dead
+18:24:59.918  server  402                           ← guaranteed
+18:24:59.982  wallet  fresh mint 02f8d9f2…          ← the wasted extra mint
+```
+
+`A4` releases a transaction that `A3` handed out 4 ms earlier. The next attempt is then **certain** to
+fail, costing a full round trip (~10 s of the owner's 40) and one unnecessary `createAction`.
+
+⛔ **Neither automated row could have caught it.** `A4`'s test used a single navigation, so no reuse
+was in play; `A3`'s test had no definitive server refusal inside the window. **It requires a re-click
+AND a refusal — which is what a person does and a script did not.** Second time this sprint the human
+row has found what the automated ones could not.
+
+⚠️ No money is lost (the extra mint is never broadcast), but it is a real defect on the money path and
+it is **mine, from today**.
+
+**Suggested fix (not implemented):** `release_nosend` should evict the `pay402_reuse` entry in the same
+lock as the status change, and the release should complete **before** the refused response reaches the
+page — today `releaseNosendAsync()` posts to `TID_FILE_USER_BLOCKING` and the response continues
+immediately, which is the race. ⇒ ordering, plus belt-and-braces eviction.
+
+**🟠 Also visible:** three attempts for one article. The first 402 at `18:24:49` is likely the
+duplicate-handler residual already recorded under `A3` — the second navigation installs its own handler
+and issues the **same** payment a second time, which a server may fairly reject as a replay.
+
+**📏 Where the 40 s went:** their origin `17.7 s + 10.2 s + 9.7 s` = **37.6 s across three attempts** —
+~93 % theirs. But two of the three attempts should not have happened.
+
+### 👤 The gold pill — owner asked how to make it less subtle (2026-09-17)
+
+Current: **10 px**, bottom edge of the tab, centred, `rgba(166,124,0,.95)`, 6 s `paymentBadgeFade`
+(~4 s at full opacity), amount only. 👤 *"a little subtle"* — said twice now, 2026-09-16 and today.
+
+Why it reads as subtle: smallest type in the UI · in the **tab strip** while the user is looking at the
+**page** · arrives at the exact moment the article appears and takes the attention · a flash, not a record.
+
+| Option | Cost | Trade |
+|---|---|---|
+| Bigger type / contrast / dwell / a pulse | minutes | Still in a tab; smallest gain |
+| ⭐ **A transient chip in the TOOLBAR, by the address bar** | small | Still browser chrome ⇒ **unsuppressable**, but in the region the eye actually uses. **Recommended** |
+| Reuse the A1 banner as a success confirmation | small | Most visible — but the banner is **page DOM**, so a hostile site could suppress the one indicator that says money moved |
+
+⛔ **The tension to hold on to:** the pill's real virtue is that it lives in the **header browser, out of
+the page's reach**. Anything moved into the viewport to make it louder trades that away. ⇒ the answer is
+not "louder where it is" but "unsuppressable, where the eye already is". And the flash need not carry all
+the weight — Activity is the durable record; the pill is the alert.
+
+⬜ Not scheduled. 👤 Owner: *"I don't want to focus on that too much right now."*
