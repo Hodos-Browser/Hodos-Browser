@@ -15,7 +15,7 @@
 | 6 | `modal_buttons_unclickable_small_screen` | old bundle | may already be covered by 7a's viewport work — verify, do not re-do |
 | 7 | ❔ `chrome_ui_scales_but_its_window_does_not` | old bundle | may collapse into 3.5 — verify |
 | 8 | ❔ `longlived_surfaces_snapshot_state_at_startup` | old bundle | |
-| 9 | ❔ `disable_features_autofill_is_a_noop` | old bundle | |
+| 9 | 🚨 **FIXED 2026-09-18 — and it was NOT low severity** — `disable_features_autofill_is_a_noop` | old bundle | 📏 The switch was provably dead **and** autofill was live: a probe typed into a form landed in the profile's `Web Data` `autofill` table, next to **6 rows of the owner's real typing** incl. two email addresses. Now a preference, not a flag. See § Item 9 below |
 | 10 | Phase 1's overlay dead strip · the DPI matrix overlay section | old bundle | `DPI_RESOLUTION_TEST_MATRIX.md` cells #4/#6/#9 |
 | **11** | 🔴 **A BRC-121 payment shows the user NOTHING while it spends** | `../TICKET_brc121_paid_retry_aborts_and_mints_a_payment_each_time.md` | ⛔ **RUNS FIRST — money path, and the only item here that costs real BSV when it goes wrong.** Four fixes in causal order, plan + negative controls in the ticket. 👤 Owner 2026-09-17: *"it's not okay."* See below |
 
@@ -653,3 +653,98 @@ window type it was never tested against.
 ⬜ **What is still owed to a human:** a real drag. `tab_tearoff` was driven over IPC, which creates
 the window but does not reproduce the mouse capture and activation changes a drag also causes. Folded
 into `HUMAN_TEST_QUEUE` **W9**.
+
+---
+
+## Item 9 — `--disable-features=Autofill` was a no-op · 🚨 FIXED 2026-09-18
+
+The ticket called this *"low severity, but it means a stated privacy control is not in effect"*, and
+left the important half explicitly open: ⚠️ *"Unmeasured: whether any of this is user-visible in
+Hodos today."* ⭐ **It was measured, and it is user-visible.** The severity label was too low.
+
+### Half 1 — the switch is dead, verified against the Chromium source on this machine
+
+⛔ The ticket's *conclusion* was right and its *reasoning* was wrong, so both are corrected here
+(HARNESS §8: correct stale rationale in place). It said *"Chromium derives a feature's name from its
+variable, so a feature called `Autofill` would require `BASE_FEATURE(kAutofill, ...)`"*. It does not:
+
+```
+base/feature_list.h:73
+#define BASE_FEATURE(feature, name, default_state)
+```
+
+The wire name is the **second** argument, independent of the variable. So the right query is *"does
+any BASE_FEATURE declare the NAME `Autofill`?"* — and across `components/` and `chrome/` in the
+Chromium tree this machine builds from, **none does**. A name no feature declares cannot match
+anything in `FeatureList::InitFromCommandLine`. ✅ Dead, for the reason now written in the code.
+
+⭐ And there is **no** feature that gates autofill wholesale — everything in `autofill_features.cc`
+gates an individual behaviour. That is why no amount of fixing the token would have worked.
+
+### Half 2 — 🚨 what the dead switch was hiding
+
+The comment above it read *"Disable Chromium's built-in autofill, autocorrect, and spell checking."*
+📏 **Measured**: a value typed into a form on `example.com` and submitted, then the browser stopped
+and `<profile>/Default/Web Data` read directly:
+
+```
+('hodos_probe_field', 'HODOSAUTOFILLPROBE1', 1)     <- the probe
+('emailField',        '<owner work email>',   7)     <- and six rows that were
+('login',             '<owner hotmail>',      1)        already there, from real
+('sign-in-email-field','<owner hotmail>',     2)        use, on a privacy browser
+('username',          '<owner hotmail>',      1)
+('text',              'BSVArchie',            1)
+('main-search-input', 'butter',               1)
+```
+
+⚠️ **Two email addresses and a username, recorded on a browser whose own comment said the feature
+was off.** That is the finding, and it is why "low severity" was wrong: the defect is not that a flag
+does nothing, it is that a **claimed privacy control was never in effect**.
+
+### The fix — it is a preference, not a flag
+
+`autofill.profile_enabled` is the real gate. Chromium's
+`components/autofill/core/browser/foundations/autofill_client.cc` is explicit:
+
+```cpp
+bool IsAutocompleteEnabled(const PrefService* prefs) {
+  return IsAutofillProfileEnabled(prefs);
+}
+```
+
+⭐ So one preference governs **both** address autofill and the single-field "remember what you typed"
+history that produced those rows. `DisableChromiumAutofill()` sets it, plus
+`autofill.credit_card_enabled`, on the global request context in `OnContextInitialized`, via CEF's
+`CefPreferenceManager::SetPreference`. ⛔ Failures are logged, not swallowed — a preference that
+silently refused would leave us exactly where we started.
+
+The dead `Autofill` token is removed from `--disable-features`; `AutofillServerCommunication` and
+`GlicActorUi` stay (the second is a **hard crash fix** for CEF 150 — the existing comment says so and
+it must not be dropped while tidying).
+
+⚠️ **Deliberately NOT touched: `credentials_enable_service`,** the password manager. The comment this
+fix makes honest claims only that *autofill* is off; silently removing password saving is a product
+decision, not a correctness one. 👤 Owner's call, if wanted.
+
+### Evidence — same subject, same action, before and after
+
+| | action | `autofill` table |
+|---|---|---|
+| 🔴 **RED** (pre-fix) | type `HODOSAUTOFILLPROBE1` into a form on example.com, submit | row **added**, 6 → 7 |
+| 🟢 **GREEN** (post-fix) | type `HODOSAUTOFILLPROBE2` into the same form, submit | **no row added**, stayed at 6 |
+
+Both halves read the same table in the same profile, with the browser stopped so the file is
+unlocked. ✅ Log confirms the mechanism fired:
+`Chromium autofill disabled: autofill.profile_enabled=false` / `...credit_card_enabled=false`.
+
+### 👤 Two things for the owner
+
+1. ⚠️ **The six rows are still there** — they are the owner's real data in the dev profile and were
+   deliberately **not** deleted. Say the word and they go.
+2. 🚨 **The installed production build has the same defect and the same table.** It was not read or
+   touched. The fix ships with the next build; clearing the existing rows there is the owner's call.
+
+### 🍎 macOS
+
+Shared C++ (`simple_app.cpp`), no platform split added — relay note in `../MAC_RELAY_P11_ROUND.md`.
+The preference API is cross-platform CEF, so macOS gets it on rebuild.

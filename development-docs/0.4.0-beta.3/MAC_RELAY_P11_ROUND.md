@@ -13,8 +13,15 @@ touching `cef-native/**` names its files here and the other platform rebuilds af
 | `cef-native/src/handlers/simple_handler.cpp` | ❌ none — pure CEF, no `#ifdef` added | 3 | New `omnibox_navigated` IPC arm, next to the existing `omnibox_hide` arm. Forwards the clicked URL to the **owning window's** `header_browser`. ⛔ Deliberately **not** `SimpleHandler::GetHeaderBrowser()`, which resolves the **primary** window's header — in a second window the URL would land in the wrong address bar |
 | `cef-native/src/handlers/simple_render_process_handler.cpp` | ❌ none | 3 | Relays `omnibox_navigated` to the header document as `window.postMessage({type:'omnibox_navigated', url})`, same shape as the existing `omnibox_autocomplete_update` relay |
 
+| `cef-native/src/handlers/simple_app.cpp` | ❌ none — CEF preference API, cross-platform | 9 | 🚨 `--disable-features=Autofill` named a feature that **does not exist** (verified against the Chromium source: `BASE_FEATURE(feature, name, …)` takes the name as its 2nd arg, and none declares `"Autofill"`), while autofill was live and recording form input to `<profile>/Default/Web Data`. Token removed; `DisableChromiumAutofill()` now sets `autofill.profile_enabled` and `autofill.credit_card_enabled` to false in `OnContextInitialized`. ⛔ `GlicActorUi` kept — it is the CEF 150 crash fix |
+
 Both files are shared and carry **no** `#ifdef _WIN32` / `#elif defined(__APPLE__)` in the new code,
 so the macOS build needs nothing but a rebuild.
+
+🍎 **macOS should re-run item 9's evidence on its own profile**: the `autofill` table lives at
+`~/Library/Application Support/HodosBrowserDev/Default/Default/Web Data`. Type a probe value into any
+form, submit, quit the browser, and confirm no row is added. ⚠️ And check whether the **installed**
+macOS build has already accumulated rows, as the Windows one has.
 
 ## 🍎 What macOS should check when it gets here
 

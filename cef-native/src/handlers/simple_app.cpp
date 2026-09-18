@@ -143,7 +143,20 @@ void SimpleApp::OnBeforeCommandLineProcessing(const CefString& process_type,
     }
 #endif
 
-    // Disable Chromium's built-in autofill, autocorrect, and spell checking.
+    // Disable Chromium's autofill crowdsourcing traffic, its AI Actor UI, and spell
+    // checking.
+    //
+    // \u26d4 "Autofill" USED TO BE IN THIS LIST AND DID NOTHING. \U0001f4cf Verified 2026-09-18
+    // against the Chromium source on this machine: `BASE_FEATURE(feature, name,
+    // default_state)` takes the wire name as its SECOND argument, and **no**
+    // BASE_FEATURE anywhere in `components/` or `chrome/` declares the name
+    // "Autofill". A name no feature declares cannot match anything in
+    // FeatureList::InitFromCommandLine, so the token was silently ignored for as
+    // long as it has been here \u2014 while the comment above it claimed autofill was
+    // off. \U0001f6a8 It was not: a probe value typed into a form on example.com landed in
+    // the profile's `Web Data` `autofill` table, alongside six pre-existing rows of
+    // real typing. Autofill is not a feature flag at all; it is a PREFERENCE, and
+    // it is now set as one in OnContextInitialized below.
     //
     // GlicActorUi is NOT a preference — it is a hard crash fix for CEF 150 and must not
     // be dropped without re-testing. Chromium 150 ships its AI "Actor" UI
@@ -159,7 +172,7 @@ void SimpleApp::OnBeforeCommandLineProcessing(const CefString& process_type,
     //
     // ⚠️ Single-value switch: AppendSwitchWithValue REPLACES any --disable-features passed
     // on the command line. Anything that must be disabled has to be added to THIS list.
-    command_line->AppendSwitchWithValue("disable-features", "Autofill,AutofillServerCommunication,GlicActorUi");
+    command_line->AppendSwitchWithValue("disable-features", "AutofillServerCommunication,GlicActorUi");
     command_line->AppendSwitch("disable-spell-checking");
 
     // Additional GPU flags (keep commented for now):
@@ -190,6 +203,47 @@ void SimpleApp::SetMacOSWindow(void* main_window, void* header_view, void* webvi
 }
 #endif
 
+// Turn Chromium's own autofill off. \U0001f4cf Measured 2026-09-18: it was ON, and it had
+// been recording form input to `<profile>/Default/Web Data` -> table `autofill`.
+//
+// \u26d4 It is a PREFERENCE, not a feature flag. `--disable-features=Autofill` named a
+// feature that does not exist (see OnBeforeCommandLineProcessing above), and there
+// is no single feature that gates autofill wholesale \u2014 the ones in
+// `autofill_features.cc` gate individual behaviours. The gate is
+// `autofill.profile_enabled`: Chromium's `IsAutocompleteEnabled(prefs)` is literally
+// `return IsAutofillProfileEnabled(prefs);`
+// (`components/autofill/core/browser/foundations/autofill_client.cc`), so the same
+// pref controls both address autofill and the single-field "remember what you typed"
+// history that produced those rows.
+//
+// \u26a0\ufe0f Deliberately NOT touched: `credentials_enable_service` (the password manager).
+// The comment this fix makes honest claims only that *autofill* is off, and silently
+// removing password saving is a product decision, not a correctness one.
+static void DisableChromiumAutofill(CefRefPtr<CefRequestContext> ctx) {
+    if (!ctx) return;
+    // \u26d4 Report failures rather than swallowing them. A preference that silently
+    // refused to be set would leave us exactly where we started \u2014 a privacy control
+    // that is claimed and not in effect \u2014 which is the whole defect being fixed here.
+    const char* kPrefs[] = {
+        "autofill.profile_enabled",      // addresses AND single-field autocomplete
+        "autofill.credit_card_enabled",  // payment-instrument autofill
+    };
+    for (const char* name : kPrefs) {
+        if (!ctx->CanSetPreference(name)) {
+            LOG_WARNING_APP(std::string("Autofill pref not settable: ") + name);
+            continue;
+        }
+        CefString error;
+        CefRefPtr<CefValue> off = CefValue::Create();
+        off->SetBool(false);
+        if (!ctx->SetPreference(name, off, error)) {
+            LOG_WARNING_APP(std::string("Failed to disable ") + name + ": " + error.ToString());
+        } else {
+            LOG_INFO_APP(std::string("Chromium autofill disabled: ") + name + "=false");
+        }
+    }
+}
+
 void SimpleApp::OnContextInitialized() {
     CEF_REQUIRE_UI_THREAD();
 
@@ -198,6 +252,7 @@ void SimpleApp::OnContextInitialized() {
     CefRefPtr<CefRequestContext> ctx = CefRequestContext::GetGlobalContext();
     if (ctx) {
         ctx->ClearCertificateExceptions(nullptr);
+        DisableChromiumAutofill(ctx);
     }
 
 #ifdef _WIN32
