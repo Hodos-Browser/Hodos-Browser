@@ -203,6 +203,7 @@ the mechanism, not for the production numbers, which is why Half 2 is owed at th
 | **10 → next** | **2026-09-15** | 🟢🔴 **GREEN both halves, exact subject** (run log) | ⬜ needs a real payment | ⬜ subject touched by 10b's `overlay_close` arms — owed, see run log | 🟢 T1 (75 engine tests) · ⬜ T2 e2e | 🟢 T1 (`a6_` pair) · ⬜ T2 needs a payment | 🟡 T1 only; real N−1→N owed at RC | **R-DUST 🟢 (16 tests) · R-PEERPAY-DELIVERY 🟢🔴 half 1 both tiers · R-ONE-CLICK-ONE-SPEND 🟢 T1** |
 | **8 → next** | **2026-09-08** | ⬜ **subject untouched** — see run log; no gating, header or origin-derivation change | ⬜ needs a real payment | ⬜ subject untouched (no C++, no overlay) | 🟢 T1 (preflight `T1a`) · ⬜ T2 e2e | ⬜ needs a payment | 🟡 T1 only; real N−1→N owed at RC | **R-DUST 🟢🔴 GREEN + RED** |
 | **11 (omnibox cluster) → next** | **2026-09-18** | ⬜ **subject untouched** — no gating, no header stamping, no origin derivation; the two C++ files carry one new IPC forward that moves a URL between our own browsers | ⬜ needs a real payment | 🟡 **PARTIAL, and this cluster touched it** — see run log | 🟢 T1 (preflight `T1a`, all gates at baseline) · ⬜ T2 e2e | ⬜ needs a payment | 🟡 T1 only; real N−1→N owed at RC | **P11 items 2/3/4 🟢🔴 GREEN + RED, both observed** |
+| **11 (items 5–10) → next** | **2026-09-18** | ⬜ **subject untouched** — no gating, no header stamping, no origin derivation | ⬜ needs a real payment | 🟢 **the strongest R-CLOSE evidence this sprint has** — 8 overlays × 2 windows, and a control that turns 7 of 8 red on the torn-off window; see run log | 🟢 T1 (preflight `T1a`, all gates at baseline) · ⬜ T2 e2e | ⬜ needs a payment | 🟡 T1 only; real N−1→N owed at RC | **P11-5 🟢🔴 · P11-8 🟢🔴 (both instances) · P11-9 🟢🔴 · P11-6 verified · P11-7/10 ⬜ human** |
 
 ---
 
@@ -765,3 +766,53 @@ suggestion click blurs the header for ~18 ms (item 3's measurement), so the drop
 vanished under the mouse before `onClick` ran and broken clicking outright. That was written as an
 explicit regression row (`item4check.py` R6) rather than assumed, and measured green — the click still
 navigates and item 3's number is unchanged. `R7` does the same for Enter.
+
+
+---
+
+## Run log — 11 (items 5–10) → next boundary (2026-09-18)
+
+Items 5–10 changed **overlay window ownership evidence** (none — measurement only), **Chromium
+preferences** (item 9), and **cross-surface state invalidation** (item 8). Nothing on the money path
+and nothing on the trust boundary.
+
+### R-CLOSE — 🟢 GREEN, and this is the best evidence this invariant has had
+
+Item 5 swept **8 overlays × 2 windows** — including a **torn-off** window, which no prior boundary
+has tested — reading `IsWindowVisible`, `IsIconic` and `EnumWindows` z-order on the real HWNDs.
+16/16: every overlay opened over the window that asked for it and that window stayed visible and in
+front. 🔴 With `OwnOverlayToRequestingWindow` disabled and the shell rebuilt, **7 of 8 send the
+torn-off window behind the other one and none affect the original** — the asymmetry the fix exists
+to remove.
+
+⚠️ Still owed, unchanged: the `WH_MOUSE_LL` click-outside arm cannot be driven from the agent
+session, and the wallet arms (`g_file_dialog_active`, `g_wallet_overlay_prevent_close`) were not
+exercised — they are also untouched by every commit in this batch.
+
+### R-INTEXT / R-PERIM / R-DUST / R-ONE-CLICK-ONE-SPEND / R-PEERPAY-DELIVERY — 🟢 T1
+
+`scripts/preflight.ps1 -Full` → **PASS** twice in this session, all eight T0 gates at baseline
+(`G11` 59, `G12` 4, rest 0) and all seven T1 suites green. ⬜ T2 halves unchanged pre-existing debt.
+
+⭐ **`G8` is load-bearing for item 6** and is green at 0/0: it is the gate that keeps the overlay
+mouse-coordinate conversion in place, which is the fix item 6 turned out to already have.
+
+### 🚨 New privacy finding recorded rather than buried — item 9
+
+Chromium autofill was **live** and had recorded 6 rows of the owner's real form input to
+`<profile>/Default/Web Data`, while the code claimed it was disabled. Fixed, with RED/GREEN on the
+same table. ⚠️ The **installed** build carries the same defect until the next release; not read, not
+touched.
+
+### R-GOLD / R-COUNT / R-UPDATE — ⬜ NOT RUN, same reasons as every prior boundary
+
+⛔ Owed, not waived.
+
+### What this boundary establishes
+
+Three fixes landed with a control each, and **three separate instrument defects were caught and
+recorded** — a probe asserting the wrong subject, a probe attributing ownership from overlapping
+geometry, and a probe whose editor browser navigated mid-run so the edit was never sent. ⭐ All three
+produced confident REDs; none would have been caught by reading the verdict line. That is the same
+family as the four farbling harnesses this harness exists for, and it is the reason every row in this
+batch carries its control.
