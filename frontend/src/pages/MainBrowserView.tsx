@@ -104,6 +104,44 @@ const MainBrowserView: React.FC = () => {
         (window as any).removeSplash?.();
     }, []);
 
+    // beta.3 Phase 11 item 7, route 1 (`P11-I7a`) — the browser chrome must not zoom.
+    //
+    // 👤 Owner's rule, 2026-09-18: *"when the user zooms in, they just want to zoom into
+    // the page… the user goes into settings to make it bigger because they can't see and
+    // they need everything to be bigger."* Two intents, two behaviours. This is the first:
+    // Ctrl+wheel is a page gesture and must not touch the toolbar.
+    //
+    // ⭐ Chrome and Brave get this for free because their toolbar is native C++
+    // (`class ToolbarView : public views::AccessiblePaneView`), so page zoom structurally
+    // cannot reach it. Ours IS a web page, so we are in Electron's position, not Chrome's
+    // — and this is Electron's answer too.
+    //
+    // WHY preventDefault IS ENOUGH (verified in the Chromium source, not assumed):
+    //   content/browser/renderer_host/render_widget_host_impl.cc :: OnWheelEventAck
+    //     if (ack_result != blink::mojom::InputEventResultState::kConsumed &&
+    //         delegate_ && delegate_->HandleWheelEvent(wheel_event.event)) {
+    // Zoom is only ever reached for a wheel event the page did NOT consume. Consuming it
+    // here means `WebContentsImpl::HandleWheelEvent` — which is what turns Ctrl+wheel into
+    // `delegate_->ContentsZoomChange()` — is never called.
+    //
+    // ⛔ `{ passive: false }` IS LOAD-BEARING. React registers its own `onWheel` as PASSIVE,
+    // and a passive listener's preventDefault() is silently discarded — Chrome logs
+    // "Unable to preventDefault inside passive event listener invocation" and zooms anyway.
+    // A JSX `onWheel` here would look right and do nothing.
+    //
+    // ⚠️ The ~15 overlays need no equivalent: their WndProcs forward wheel events with
+    // `mouse_event.modifiers = 0` (cef_browser_shell.cpp), and `kPageZoom` requires
+    // `kControlKey`, so Ctrl never reaches them. They only ever APPEARED to zoom because
+    // zoom is stored per-ORIGIN and every overlay shares 127.0.0.1:5137 with this header —
+    // so stopping the header from zooming stops them too.
+    useEffect(() => {
+        const blockChromeZoom = (e: WheelEvent) => {
+            if (e.ctrlKey) e.preventDefault();
+        };
+        window.addEventListener('wheel', blockChromeZoom, { passive: false });
+        return () => window.removeEventListener('wheel', blockChromeZoom);
+    }, []);
+
     // Keep wallet-exists cache in sync so the overlay opens instantly with correct state.
     // Also fetch and cache the identity key so the wallet panel has it immediately.
     // Runs once on mount — if wallet.db was deleted, clears the stale cache before

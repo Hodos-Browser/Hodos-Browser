@@ -13,7 +13,7 @@
 | 4 | ✅ **DONE 2026-09-18** — **Tab / Enter autocomplete behaviour** | ticket #4 | 📏 **There was no inline autocomplete at all** — the Tab branch was unreachable dead code. 👤 Owner chose scope **A (conformance only)**. `PRIOR_ART.md` row logged. See § Item 4 below |
 | 5 | ✅ **CLOSED 2026-09-18 — not reproduced** — **Tear-off window overlay sweep** | 👤 owner 2026-09-15: typing in a torn-off tab's address bar makes that window disappear | 📏 16/16 rows green (2 windows × 8 overlays); 🔴 7/16 red with `OwnOverlayToRequestingWindow` disabled, **all seven on the torn-off window**. ⇒ the observation predates the Phase 3.5 fix. See § Item 5 below
 | 6 | ✅ **VERIFIED ALREADY FIXED 2026-09-18** — `modal_buttons_unclickable_small_screen` | old bundle | ⛔ Not by 7a's viewport work — by **Phase 1 (WS1)**, which measured this exact symptom at 125% and converted all 47 mouse call sites. Gate `G8` holds it at 0; `overlay_mouse_test.cpp` covers 100/125/150/175%. ⬜ On-screen confirmation folds into item 10 |
-| 7 | 🟡 **ANSWERED, NOT FIXED — 👤 needs an owner decision** — `chrome_ui_scales_but_its_window_does_not` | old bundle | ⛔ **Not** superseded by Phase 1 — genuinely distinct. All three causes re-verified, and the clipping mechanism is now **measured** rather than read. See § Item 7 below |
+| 7 | 🟢 **ROUTE 1 DONE 2026-09-18** · 🟡 route 2 open — `chrome_ui_scales_but_its_window_does_not` | old bundle | 👤 Owner's rule: zoom = the page only; Settings text size = everything. ⛔ **No rebuild needed for either** — route 1 is 4 lines of JS. See § Item 7 below |
 | 8 | ✅ **FIXED 2026-09-18 — and the predicted 4th instance was real** — `longlived_surfaces_snapshot_state_at_startup` | old bundle | 📏 Profile edits now reach every surface in ~10-20 ms. 🚨 The audit found instance #4: **changing your search engine did nothing until you restarted** — its broadcast was guarded on a static that is never assigned. See § Item 8 below
 | 9 | 🚨 **FIXED 2026-09-18 — and it was NOT low severity** — `disable_features_autofill_is_a_noop` | old bundle | 📏 The switch was provably dead **and** autofill was live: a probe typed into a form landed in the profile's `Web Data` `autofill` table, next to **6 rows of the owner's real typing** incl. two email addresses. Now a preference, not a flag. See § Item 9 below |
 | 10 | ⬜ **OWED TO A HUMAN** — Phase 1's overlay dead strip · the DPI matrix overlay section | old bundle | The dead strip itself is fixed (see item 6). What is owed is the **matrix run**: `DPI_RESOLUTION_TEST_MATRIX.md` cells #4/#6/#9, which also settle items 6 and 7. `HUMAN_TEST_QUEUE` **W4** + **W10** |
@@ -952,3 +952,114 @@ was dead at 125% because of unconverted mouse coordinates, and all 47 sites now 
 been at every boundary. ⭐ **One sitting settles three items:** #6's modal clicks, #7's header
 clipping, and #10 itself. `HUMAN_TEST_QUEUE` **W4** (pre-existing) and **W10** (added, with the
 text-scale dimension the matrix lacks).
+
+---
+
+## Item 7 route 1 — the chrome no longer zooms · 🟢 DONE 2026-09-18
+
+👤 Owner's rule, and it is the whole design: *"When the user zooms in, they just want to zoom into
+the page to see what they want to see. The user goes into settings to make it bigger because they
+can't see and they need everything to be bigger."* Two intents, two behaviours — not a conflict.
+
+### ⛔ Two things I got wrong first, both corrected by the owner pushing back
+
+1. **I said this needed a CEF fork patch and a Chromium rebuild. It needs neither.** I found
+   `ZoomController::ZOOM_MODE_DISABLED` (which CEF does not wrap) and stopped there, instead of
+   asking how the input actually flows. 👤 The owner's *"why would Chromium need us to change it? it
+   should already be there… can't we just control what that one mouse function controls?"* was right
+   on both counts.
+2. **I framed the two routes as conflicting.** They are two different user intents with two
+   different correct answers, which is how the owner put it and is also what the reference browsers do.
+
+### The mechanism, read from the Chromium source rather than assumed
+
+```cpp
+// content/browser/renderer_host/render_widget_host_impl.cc :: OnWheelEventAck
+if (ack_result != blink::mojom::InputEventResultState::kConsumed &&
+    delegate_ && delegate_->HandleWheelEvent(wheel_event.event)) {
+```
+
+`WebContentsImpl::HandleWheelEvent` is what turns Ctrl+wheel into `delegate_->ContentsZoomChange()`,
+and it is **only reached for a wheel event the page did not consume**. So the page consuming it is
+sufficient — four lines in `MainBrowserView.tsx`:
+
+```ts
+const blockChromeZoom = (e: WheelEvent) => { if (e.ctrlKey) e.preventDefault(); };
+window.addEventListener('wheel', blockChromeZoom, { passive: false });
+```
+
+⛔ **`{ passive: false }` is load-bearing.** React registers its own `onWheel` as **passive**, and a
+passive listener's `preventDefault()` is silently discarded — Chrome logs *"Unable to preventDefault
+inside passive event listener invocation"* and zooms anyway. A JSX `onWheel` would look right and do
+nothing.
+
+### ⛔ The ticket's cause #2 is half wrong — corrected here
+
+The ticket says zoom is per-origin *"so zooming the header zooms every overlay too"*, and treats the
+~15 overlays as part of the problem. 📏 **The overlays cannot zoom at all.** All three overlay wheel
+handlers in `cef_browser_shell.cpp` forward with:
+
+```cpp
+mouse_event.modifiers = 0;
+```
+
+and `kPageZoom` requires `kControlKey` (`web_mouse_wheel_event.cc ::
+GetPlatformSpecificDefaultEventAction`), so Ctrl never reaches them. They only ever *appeared* to
+zoom because the zoom level is stored per-**origin** and every overlay shares `127.0.0.1:5137` with
+the header — they re-render at whatever the header's origin is set to. ⭐ **Fix the header and the
+overlays follow. One place, not fifteen.**
+
+### 📏 Prior art — we are in Electron's position, not Chrome's
+
+Chrome and Brave never had this problem: their toolbar is `class ToolbarView : public
+views::AccessiblePaneView`, native C++, so page zoom structurally cannot reach it. Ours **is** a web
+page. The apps with our shape are Electron apps, and this is exactly their answer —
+`preventDefault()` on a non-passive wheel listener, optionally with `setVisualZoomLevelLimits(1, 1)`.
+Row logged in `../../PRIOR_ART.md`.
+
+### Evidence — and ⛔ an honest split between what is proved and what is not
+
+`zoomprobe.py`. It carries a **free positive control**: the same CDP wheel is sent to a **tab**, which
+*should* zoom, and to the **header**, which should not.
+
+| | GREEN | RED (guard disabled, shell not rebuilt — React only) |
+|---|---|---|
+| header cancels **ctrl**+wheel | 🟢 `True` | 🔴 `False` |
+| header cancels a **plain** wheel | 🟢 `False` — not over-broad | `False` |
+| **tab** cancels ctrl+wheel | 🟢 `False` — no leak into pages | `False` |
+
+⛔ **What is NOT established here.** The CDP wheel never reached Chromium's zoom path *at all* — the
+**tab** did not zoom either, and the tab is supposed to. A synthetic wheel is not a native one. So
+*"the toolbar no longer grows"* is **not** proved by this run, and the probe says
+`[PARTIAL] … HUMAN_TEST_QUEUE W10` rather than reporting a green it did not earn. What **is** proved
+is the half that lives in our code: the guard is installed, reached, cancels Ctrl+wheel, and cancels
+nothing else.
+
+### ⛔ An instrument lesson, because it nearly produced a false reading
+
+The RED run's served-module check said the control marker was **absent** while the behaviour was
+clearly red. Both halves of that were my instrument:
+
+- the marker was a **comment**, and vite strips comments — the known trap;
+- the behavioural token `false && e.ctrlKey` was **constant-folded by esbuild** to `if (false)`, so
+  the `e.ctrlKey` operand was eliminated as dead code and could never be found.
+
+⇒ the token must be one that **survives the transform**. The pair now used is
+`if (e.ctrlKey)` for green and `if (false)` for red, both read from the served module.
+
+### ⬜ Route 2, still open — and smaller than it sounded
+
+📏 **Half of it is already the behaviour the owner wants.** `ScreenWin::GetScaleFactorForHWND` is
+documented *"including accessibility adjustments"*, so Chromium already grows the header's **content**
+with the Windows text-size setting — correct. What is missing is one factor in one function:
+`GetHeaderHeightPx()` calls raw `GetDpiForWindow()`, the *unmodified* DPI, so the **window** is sized
+by `dpi` while its content is sized by `dpi × textScale`. The difference is what hides behind the
+webview.
+
+✅ Confirmed not a monitor-DPI problem: measured with the browser on a **125% monitor**
+(`GetDpiForWindow` = 120), header content 96 CSS px and view 96 CSS px — **not clipped**. Monitor DPI
+is handled correctly; only the accessibility factor is missing.
+
+The factor is readable without Chromium — `HKCU\Software\Microsoft\Accessibility\TextScaleFactor`
+(100 on this machine, i.e. off). ⚠️ Its verification is the DPI matrix plus a text-scale pass, which
+is `W10` and does not exist yet, so it stays open deliberately.

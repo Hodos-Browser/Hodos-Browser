@@ -1306,3 +1306,21 @@ Guessing was useless; two cheap mechanical steps settled each in minutes.
       copy-lists (CMake does a wholesale copy and can never drop a file); and there is **no fuzz to
       report** — CEF's `git apply -p0` is exact-context and fail-loud, so the only sub-failure signal is
       a hunk **offset**.
+
+---
+
+## ⛔ Engine changes CONSIDERED and deliberately NOT made — keep this list
+
+A short register of "we looked at patching the engine and decided we didn't need to". It exists so
+nobody re-derives the same idea at the next Chromium bump and reaches for a patch we already ruled
+out. ⭐ Every row must say what we did **instead**, or it is not a decision, only a note.
+
+| Date | What was considered | Verdict | What we did instead |
+|---|---|---|---|
+| 2026-09-18 | **Expose `zoom::ZoomController::ZOOM_MODE_DISABLED` through CEF**, so the header and overlay browsers refuse all zoom. Chromium has the mode; CEF's public API wraps only `CanZoom` / `Zoom` / `Get`/`SetZoomLevel`, and `libcef/browser/browser_host_base.cc` already holds the `ZoomController` lookup — so the patch would have been ~15 lines in a file already wired for it | ⛔ **Not needed.** It would have cost a fork commit plus a full Chromium+CEF rebuild for a result we get in four lines of JavaScript | The header consumes the gesture: `preventDefault()` on a **non-passive** `wheel` listener when `e.ctrlKey`. Verified sufficient from the Chromium source — `render_widget_host_impl.cc :: OnWheelEventAck` only reaches the zoom delegate `if (ack_result != kConsumed …)`. beta.3 Phase 11 item 7 route 1 |
+
+⚠️ **What the JS approach does *not* buy**, stated so the trade-off is on the record: it blocks the
+**routes** a user has (keyboard, already guarded in `OnPreKeyEvent`; wheel, now), not the
+**capability**. `ZOOM_MODE_DISABLED` would make the browser refuse zoom from any source at all. If a
+third route ever appears — an extension, a devtools call, a programmatic `SetZoomLevel` — the chrome
+could still zoom, and *then* this row should be revisited.
