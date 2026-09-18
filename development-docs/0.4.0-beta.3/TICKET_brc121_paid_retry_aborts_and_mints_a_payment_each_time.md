@@ -120,8 +120,15 @@ logged `NOT broadcasting (funds preserved)` and neither reached the network — 
 - a transaction row stuck at `status = nosend`, and
 - a **spendable output** for a transaction that will never exist.
 
-📏 After the session: `de1b4287…` and `f56ef113…` both `nosend` with 1 spendable output each, and
-1,419,268 sats still reserved.
+📏 After the session: `de1b4287…` and `f56ef113…` both `nosend` with 1 spendable output each.
+
+⛔ **CORRECTION 2026-09-17 — the "1,419,268 sats still reserved" that used to be on this line was
+NOT from these aborts.** Chased to ground: that reservation belongs to the **`M4` RED** fault-injection
+run the same afternoon, whose seam deliberately disabled the code that resolves the placeholder. Its
+outpoint is **spent on chain** (by `80d5821f…`, block 967057), so no money is reserved and none is
+missing. Two different causes on one afternoon, conflated here and then repeated in a second ticket.
+Full working: `TICKET_reservation_can_be_held_indefinitely.md`. ⭐ The lesson: **ask the chain before
+calling a wallet state a leak.**
 
 ⭐ **This is the same shape as the phantom coin fixed earlier today** in
 `handlers.rs :: release_unbroadcast_transaction`, but a different call site: that fix covers the

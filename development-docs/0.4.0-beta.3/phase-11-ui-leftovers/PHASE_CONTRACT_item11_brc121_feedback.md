@@ -285,18 +285,27 @@ re-click minting a second payment.
 ⇒ three cases, three owners: **`A3`** = the user comes back · **`A4`** = the server said no ·
 **the sweepers** = nobody ever comes back.
 
-### 🚨 Found while measuring — a reservation stuck for 27 hours
+### ⛔ Found while measuring — and my first reading of it was WRONG
 
-`b00be69c…:2`, **1,419,268 sats, `confirmed = 1`, `spendable = 0`**, held under
-`pending-1789591461036-0` for **26.9 hours**. That is the *same figure* the 2026-09-16 ticket
-recorded, so it has been stuck since the incident.
+A reservation `b00be69c…:2` (1,419,268 sats, `confirmed = 1`, `spendable = 0`) has been held under a
+`pending-` placeholder for 26.9 hours. **I wrote it up as a live leak understating the balance. It is
+not.** 👤 The owner escalated on that basis — correctly, given what I had written — and the
+investigation settled it in three queries:
 
-`TaskSweepReservations` runs every 300 s against a 15-minute age threshold and has not released it —
-by design: it releases **only** outpoints positively observed in the on-chain unspent set, and every
-uncertainty leaves the reservation standing. Fail-safe, and correct as a rule. But the consequence is
-that a reservation whose outpoint cannot be observed is held **forever**, and the money is invisible
-in the balance the whole time.
+| | |
+|---|---|
+| Is the outpoint unspent? | ❌ **Spent.** The address has **zero** unspent outputs |
+| What spent it? | `80d5821f…`, block 967057, 172 confirmations — its `vin[0]` **is** this outpoint |
+| What is that transaction? | ⭐ **The `M4` RED** — our own fault-injection run, whose seam deliberately disabled the code that resolves the placeholder |
 
-⛔ Not fixed here and not in this contract's scope. Ticketed separately —
-`../TICKET_reservation_can_be_held_indefinitely.md`. ⭐ A4 prevents *new* ones of this shape on the
-server-refusal path; it does nothing for the ones already stuck.
+⇒ **No money lost, none missing from the balance**, and `TaskSweepReservations` declining for 27 hours
+is the **correct** answer: releasing a spent coin back to `spendable = 1` is the `P0.7` double-spend
+path. ⛔ Do not relax the sweeper.
+
+The narrow real gap — a row at `spendable = 0, spent_by = NULL` that nothing ever reconciles, because
+the sweeper can express *"observed unspent ⇒ release"* but not *"observed **spent** ⇒ close it out"* —
+is ticketed at `../TICKET_reservation_can_be_held_indefinitely.md`, **severity LOW**, reachable in
+production only if all three `create_action` guards fail at once.
+
+⭐ **The lesson worth more than the ticket: ask the chain before calling a wallet state a leak.** One
+`curl` would have prevented the whole scare, and I asserted a loss without it.
