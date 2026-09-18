@@ -405,6 +405,53 @@ const MainBrowserView: React.FC = () => {
     // Derive security state from active tab
     const activeTab = useMemo(() => tabs.find(t => t.id === activeTabId), [tabs, activeTabId]);
 
+    // ── Phase 11 item 1 — focus the address bar when a window opens on the new-tab page.
+    //
+    // 👤 Reported by a TEST USER: "trouble getting the cursor to show up in the address bar
+    // after initial launch… had to click elsewhere first". 📏 Measured 2026-09-18 before
+    // this existed: at startup `document.activeElement` was **BODY**, and a real click or a
+    // programmatic `.focus()` both worked. ⇒ the defect was (a) FOCUS NEVER LANDS — nothing
+    // tried. The two existing focus calls are reactive only (the `focus_address_bar` IPC and
+    // the Ctrl+L shortcut), so on launch the address bar is simply never asked for.
+    //
+    // ⭐ THE RULE, and it is deliberately about CONTENT, not about how the window was made:
+    // focus when the window opens on an empty new-tab page; never when it opens on a real
+    // page. Keying off creation type would get tear-off wrong — a torn-off window and a
+    // Ctrl+N window both come from `CreateFullWindow`, but one arrives showing a page the
+    // user just dragged out (do not steal focus) and the other arrives empty (do). Content
+    // is the axis that answers every case without a list of exceptions:
+    //     fresh launch → NTP        ✅      restored session → a page   ❌
+    //     Ctrl+N       → NTP        ✅      tear-off        → that page ❌
+    //
+    // ⚠️ Once per window, and only while the address bar is still untouched — re-focusing
+    // later would fight the user. `hasAutoFocusedRef` is never reset.
+    // ⚠️ The 60 ms delay is the documented CEF pattern (root `CLAUDE.md`, "CEF Input
+    // Patterns": delayed focus via `useEffect` + `setTimeout`). A bare focus on mount races
+    // the header browser's own first focus and is silently dropped.
+    const hasAutoFocusedRef = React.useRef(false);
+    useEffect(() => {
+        if (hasAutoFocusedRef.current) return;
+        if (!activeTab) return;                       // tabs not resolved yet
+        const isNewTabPage = activeTab.url === 'http://127.0.0.1:5137/newtab';
+        if (!isNewTabPage) {
+            // Opened on content — that is a legitimate outcome, not a retry. Stand down for
+            // the life of this window so a later navigation to the NTP does not grab focus.
+            hasAutoFocusedRef.current = true;
+            return;
+        }
+        hasAutoFocusedRef.current = true;
+        const t = setTimeout(() => {
+            const el = addressInputRef.current;
+            if (!el) return;
+            // ⛔ Do not steal focus if anything else already has it — the user may have
+            // clicked into the page or another control during the delay.
+            if (document.activeElement && document.activeElement !== document.body) return;
+            el.focus();
+            el.select();
+        }, 60);
+        return () => clearTimeout(t);
+    }, [activeTab]);
+
     const securityState = useMemo((): 'secure' | 'insecure' | 'error' | 'none' => {
         if (activeTab?.hasCertError) return 'error';
         try {

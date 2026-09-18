@@ -7,7 +7,7 @@
 
 | # | Item | Source | Shape |
 |---|---|---|---|
-| 1 | **Cursor is not in the address bar at launch** — a test user had to click elsewhere first | `../TICKET_omnibox_addressbar_interaction_defects.md` #1 | ⭐ First-run blast radius, external reporter. Establish *which* defect first (focus never lands / first click lost / caret invisible) with an instrumented probe on the header browser at startup; then the fix. 👤 Owner's target: on launch, focus is in the address bar with the caret visible, ready to type. T2 probe + T3 human check |
+| 1 | ✅ **DONE 2026-09-18** — **Cursor is not in the address bar at launch** — a test user had to click elsewhere first | `../TICKET_omnibox_addressbar_interaction_defects.md` #1 | ⭐ First-run blast radius, external reporter. Establish *which* defect first (focus never lands / first click lost / caret invisible) with an instrumented probe on the header browser at startup; then the fix. 👤 Owner's target: on launch, focus is in the address bar with the caret visible, ready to type. T2 probe + T3 human check |
 | 2 | **Omnibox sometimes stays open after selecting a URL** | ticket #2 | reproduce before anything; the hide path (`omnibox_hide`) is the suspect, not Phase 3.5's create/show arm |
 | 3 | **URL populates the address bar late after clicking a suggestion** | ticket #3 | measure the gap first (Phase 2's lesson: the control read 2.04 s); then send the URL with the click and set it optimistically. 👤 Owner: the page navigating while the bar still shows the old URL reads as "the click did nothing" |
 | 4 | **Tab / Enter autocomplete behaviour** | ticket #4 | prior-art read (Chrome, Firefox, Brave omnibox key handling) before code |
@@ -59,3 +59,83 @@ reservation. ⚠️ No money is required for the GREEN halves — a stubbed slow
 - Hard-reload before every React measurement (Vite HMR fakes negative controls — memory).
 - 🍎 macOS: items 1–4 are React + header focus (CEF focus handling differs; relay for their eyes); item 5 has
   its own macOS half already in `HUMAN_TEST_QUEUE.md` B4.
+
+---
+
+## Item 1 — cursor does not appear in the address bar at launch · ✅ DONE 2026-09-18
+
+👤 Reported by a **test user**: *"had to click elsewhere first and then they could click in the
+address bar and it would then allow them to type."* ⭐ The only one of the four with an external
+reporter and a first-run blast radius.
+
+### Which of the three defects it is — measured, not argued
+
+The ticket insists on establishing *which* before designing, because three different bugs produce that
+one sentence. 📏 Measured on a fresh launch **before** any change:
+
+| Question | Answer |
+|---|---|
+| `document.activeElement` at startup | **`BODY`** |
+| Does a real input event focus it? | ✅ yes |
+| Does programmatic `.focus()` work? | ✅ yes |
+
+⇒ **(a) focus never lands** — nothing *tries*. Confirmed in code: there is no `autoFocus` and no
+mount-time focus anywhere in `MainBrowserView.tsx`; the only two focus calls are **reactive** (the
+`focus_address_bar` IPC and the Ctrl+L shortcut).
+
+⛔ **Boundary of what this proves.** The click was a CDP input event delivered to the header browser.
+A user's click travels OS → HWND → CEF's input pipeline — a different path, and the one CEF is
+documented to be fragile about. So the **renderer** side is cleared; the **native** side is not.
+⬜ Whether a real first click is lost remains **unproven in both directions** and needs a human
+(SendInput clicks are dropped in this agent environment). That is the test user's *"click elsewhere
+first"* half, and it is **not** claimed fixed.
+
+### The rule shipped — deliberately about CONTENT, not about how the window was made
+
+👤 Owner asked for "safest, fresh launch only" and asked why tear-off was risky. It is not; the right
+axis dissolves the question:
+
+> **Focus the address bar when the window opens on an empty new-tab page. Never when it opens on a
+> real page.**
+
+| Case | Opens on | Focus |
+|---|---|---|
+| Fresh launch → NTP | nothing | ✅ |
+| Fresh launch → restored session | a page | ❌ |
+| Ctrl+N new window | NTP | ✅ |
+| **Tear-off** | the dragged tab's page | ❌ |
+
+⛔ Keying off *creation type* would get tear-off wrong — tear-off and Ctrl+N both come from
+`CreateFullWindow`, but one arrives showing content and the other empty. Content is the axis that
+answers every case without a list of exceptions.
+
+**Guards:** once per window (`hasAutoFocusedRef`, never reset) · stands down **permanently** if the
+window opened on content, so a later navigation to the NTP cannot grab focus · does not steal focus if
+anything else already holds it when the timer fires · 60 ms delay, the documented CEF pattern (root
+`CLAUDE.md` "CEF Input Patterns") — a bare focus on mount races the header browser's own first focus
+and is silently dropped.
+
+### Evidence
+
+| Run | activeElement | is the address bar |
+|---|---|---|
+| 🟢 fresh launch on the NTP | `INPUT` | ✅ **with caret** |
+| 🟢 window opened on content (header re-mounted while the tab showed Wikipedia) | `BODY` | ❌ correctly stood down |
+| 🔴 feature disabled, fresh launch on the NTP | `BODY` | ❌ |
+
+⛔ **The Vite trap nearly ate the negative control.** My verification curl ran 4 s after the edit and
+reported the control **absent** — and I printed "RED as expected" anyway. Re-checked: Vite simply had
+not picked the edit up at that instant. The RED was then re-run with the control **verified present in
+the served module before the browser launched**. ⇒ verify the served code *after* the dev server has
+settled, and ⛔ never narrate a result your own instrument check just contradicted.
+
+`npm run build` clean (⛔ not `npx tsc --noEmit`, which passes on code the build rejects).
+
+### ⬜ Still open in this cluster
+
+- **Item 1's native half** — whether a real first click is lost. Needs a human; not claimed.
+- **Item 2** (omnibox stuck open) — needs a *reproduction* before anything else.
+- **Item 3** (late URL in the address bar) — the gap must be **timed** before the obvious fix; Phase 2's
+  lesson (the control read 2.04 s) applies directly.
+- **Item 4** (Tab/Enter autocomplete) — working rule 5: read Chrome/Firefox/Vivaldi and record in
+  `PRIOR_ART.md` **before** code. A change here alters muscle memory on every navigation.
