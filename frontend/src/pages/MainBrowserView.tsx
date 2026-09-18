@@ -62,6 +62,27 @@ const MainBrowserView: React.FC = () => {
     // Debounce omnibox IPC so typing stays snappy
     const omniboxDebounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
+    // beta.3 Phase 11 item 2 (`P11-I2`) — cancel a scheduled `omnibox_show`.
+    // ⛔ MUST be called by every path that dismisses the dropdown. 📏 Measured
+    // 2026-09-18 on the HWND layer (IsWindowVisible on CEFOmniboxOverlayWindow):
+    // onChange schedules this timer 150 ms out and NOTHING used to cancel it, so
+    // committing within 150 ms of the last keystroke produced
+    //     0ms:VISIBLE  54ms:hidden  233ms:VISIBLE
+    // — the hide landed, then the stale timer re-showed the overlay and nothing
+    // hid it again. That is the owner's "I have to click off to get it to go
+    // away", and it is intermittent for exactly one reason: it depends only on
+    // how fast you hit Enter (or click) after the last letter.
+    const cancelPendingOmniboxShow = React.useCallback(() => {
+        if (omniboxDebounceRef.current) {
+            clearTimeout(omniboxDebounceRef.current);
+            omniboxDebounceRef.current = null;
+        }
+    }, []);
+
+    // A pending timer must not outlive the header either: it would fire an
+    // `omnibox_show` for a document that is gone.
+    React.useEffect(() => cancelPendingOmniboxShow, [cancelPendingOmniboxShow]);
+
     // Search engine setting — fetched from C++ settings on mount
     const [searchEngine, setSearchEngine] = useState('duckduckgo');
 
@@ -519,6 +540,10 @@ const MainBrowserView: React.FC = () => {
             if (event.data?.type !== 'omnibox_navigated') return;
             const url: string = event.data.url || '';
             if (!url) return;
+            // P11-I2 — the click path. The overlay hid itself, but the header's own
+            // debounce is still armed and would re-show the dropdown ~150 ms later.
+            // This is the only place the header learns a suggestion was clicked.
+            cancelPendingOmniboxShow();
             const display = toDisplayUrl(url);
             // Snapshot the old tab URL so tab sync suppresses the stale push that
             // arrives before the navigation lands (same guard the Enter path uses).
@@ -535,7 +560,7 @@ const MainBrowserView: React.FC = () => {
 
         window.addEventListener('message', handleOmniboxNavigated);
         return () => window.removeEventListener('message', handleOmniboxNavigated);
-    }, [tabs, activeTabId]);
+    }, [tabs, activeTabId, cancelPendingOmniboxShow]);
 
     // Keyboard shortcuts
     useKeyboardShortcuts({
@@ -793,9 +818,11 @@ const MainBrowserView: React.FC = () => {
                                 // Set ref so onBlur knows not to revert the address
                                 justNavigatedRef.current = true;
                                 e.currentTarget.blur();
+                                cancelPendingOmniboxShow();   // P11-I2
                                 window.cefMessage?.send('omnibox_hide', []);
                             } else if (e.key === 'Escape') {
                                 // Escape dismisses overlay, keeps current input
+                                cancelPendingOmniboxShow();   // P11-I2
                                 window.cefMessage?.send('omnibox_hide', []);
                                 setIsEditingAddress(false);
                                 setAutocompleteText('');
@@ -822,6 +849,8 @@ const MainBrowserView: React.FC = () => {
                             window.cefMessage?.send('omnibox_create', []);
                         }}
                         onBlur={() => {
+                            // P11-I2 — leaving the bar must not leave a show queued.
+                            cancelPendingOmniboxShow();
                             setIsEditingAddress(false);
                             setAutocompleteText('');
                             // Don't revert address if we just navigated (Enter was pressed)

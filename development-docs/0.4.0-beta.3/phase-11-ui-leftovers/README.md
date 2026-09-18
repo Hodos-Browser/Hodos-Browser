@@ -8,7 +8,7 @@
 | # | Item | Source | Shape |
 |---|---|---|---|
 | 1 | 🟡 **DIAGNOSED, NOT FIXED (2026-09-18 — shipped attempt REVERTED)** — **Cursor is not in the address bar at launch** — a test user had to click elsewhere first | `../TICKET_omnibox_addressbar_interaction_defects.md` #1 | ⭐ First-run blast radius, external reporter. Establish *which* defect first (focus never lands / first click lost / caret invisible) with an instrumented probe on the header browser at startup; then the fix. 👤 Owner's target: on launch, focus is in the address bar with the caret visible, ready to type. T2 probe + T3 human check |
-| 2 | **Omnibox sometimes stays open after selecting a URL** | ticket #2 | reproduce before anything; the hide path (`omnibox_hide`) is the suspect, not Phase 3.5's create/show arm |
+| 2 | ✅ **DONE 2026-09-18** — **Omnibox sometimes stays open after selecting a URL** | ticket #2 | 📏 **Reproduced deterministically.** Not the hide path — an uncancelled 150 ms **show** debounce in the header fires after the hide. See § Item 2 below |
 | 3 | ✅ **DONE 2026-09-18** — **URL populates the address bar late after clicking a suggestion** | ticket #3 | 📏 **Not "late" — never.** Measured pre-fix: page navigated at 122 ms, clicked URL absent from the address bar after **35 s**. Fixed: **75 ms**, ahead of the navigation. See § Item 3 below |
 | 4 | **Tab / Enter autocomplete behaviour** | ticket #4 | prior-art read (Chrome, Firefox, Brave omnibox key handling) before code |
 | 5 | **Tear-off window overlay sweep** | 👤 owner 2026-09-15: typing in a torn-off tab's address bar makes that window disappear | Phase 3.5 measured and fixed this for Ctrl+N windows (K9: z-order occlusion; overlays now owned by the requesting window, owner-confirmed `Z5`). It was **never measured on a torn-off window** (`tab_tearoff` → `CreateFullWindow`, same creator). Re-run the Phase 3.5 `winprobe.ps1` z-order read on a torn-off window, **every overlay** (the 3.5 doc predicted "generalises beyond the omnibox" and said "not yet tested on a second overlay"), with `OwnOverlayToRequestingWindow` reverted as the negative control. If it is green, the owner's observation predates the fix and the row closes; if red, tear-off differs and gets fixed here |
@@ -377,3 +377,79 @@ Shared C++ (`simple_handler.cpp`, `simple_render_process_handler.cpp`), no platf
 relay note in `../MAC_RELAY_P11_ROUND.md`. The *cause* cited above is Windows-specific in one detail
 (`MA_NOACTIVATE`); whether macOS shows the same focus flicker is ⬜ unmeasured, but the fix is
 correct on both and macOS gets it from the shared files.
+
+---
+
+## Item 2 — the omnibox stays open after selecting a URL · ✅ DONE 2026-09-18
+
+👤 *"it gets stuck open after selection and navigation… it's not often and I haven't noticed a
+pattern… I have to click off to get it to go away."*
+
+### 📏 Reproduced first, deterministically — and the ticket's suspect was the wrong half
+
+⛔ The ticket and the session prompt both pointed at the **hide** path: *"a hide that depends on an
+IPC from the overlay's own browser can be lost or arrive after a re-show."* Tested because it was
+cheap. **No hide is ever lost.** The defect is on the **show** side, and it is not intermittent at
+all once you know the variable.
+
+`MainBrowserView.tsx`'s `onChange` schedules a **150 ms debounce** that sends `omnibox_update_query`
++ `omnibox_show`. Nothing cancelled it — not Enter, not Escape, not blur, not unmount, and the header
+never learned that the overlay had hidden itself after a suggestion click. So if the user commits
+within 150 ms of their last keystroke, the timer fires *after* the hide and re-shows the overlay,
+and nothing hides it again.
+
+Instrument: `omniboxprobe.py item2 <gap_ms>` / `item2click <prefix> <gap_ms>` — **HWND layer**,
+`IsWindowVisible()` on the real `CEFOmniboxOverlayWindow`, sampled every 20 ms on its own thread
+while the action is driven over CDP. The single variable is the gap between the last keystroke and
+the commit.
+
+| Path | gap | transitions (ms from the last keystroke) | stuck open |
+|---|---|---|---|
+| Enter | 40 | `0:VIS 54:hid 233:VIS` | 🔴 **yes** |
+| Enter | 60 | `0:VIS 87:hid 168:VIS` | 🔴 **yes** |
+| Enter | **200** | `0:VIS 225:hid` | 🟢 no |
+| Enter | 800 | `0:VIS 826:hid` | 🟢 no |
+| Click a suggestion | 40 | `0:VIS 81:hid 173:VIS` | 🔴 **yes** |
+| Click a suggestion | 800 | `0:VIS 844:hid` | 🟢 no |
+
+⭐ The boundary is exactly 150 ms, on both paths. That **is** the "no pattern": it depends on nothing
+but how fast you hit Enter after the last letter, which is why it looked random.
+
+### The fix
+
+One helper, `cancelPendingOmniboxShow()`, called by every path that dismisses the dropdown: Enter,
+Escape, blur, unmount, and the `omnibox_navigated` message from item 3 — which is the **only** way
+the header can learn a suggestion was clicked, and the reason item 3 was committed first.
+
+⭐ **The two-sided check is built into the same run:** every row prints
+`after typing … visible=True` before the commit. A fix that cancelled too eagerly would stop the
+dropdown appearing at all and would fail that line, in the same run, without a second test.
+
+### 🔴 Negative control — run and observed, both paths
+
+The two lines inside `cancelPendingOmniboxShow` were replaced with a comment (the eight call sites
+left in place, so the control disables the *mechanism*, not the wiring), the served module verified
+to no longer contain `omniboxDebounceRef.current = null` after the dev server had settled, and both
+browsers hard-reloaded:
+
+| | control | result |
+|---|---|---|
+| Enter, 40 ms | cancellation off | 🔴 `0:VIS 86:hid 194:VIS` — stuck open |
+| Click, 40 ms | cancellation off | 🔴 `0:VIS 83:hid 180:VIS` — stuck open |
+| Enter, 40 ms | restored | 🟢 `0:VIS 84:hid` |
+| Click, 40 ms | restored | 🟢 `0:VIS 89:hid` |
+
+### ⭐ `HideOmniboxOverlay()` takes no `BrowserWindow*` — settled deliberately, **keep it**
+
+The prompt asked for this to be decided rather than inherited. Decision: **no change.** There is
+exactly one omnibox HWND per process (`g_omnibox_overlay_hwnd` is a single global), so a hide has
+nothing to choose. `Show*Overlay(targetWin)` takes a window because it must choose a **position** and
+an **owner**; adding the same parameter to the hide would advertise per-window overlays that do not
+exist. ⚠️ Related correction to the ticket: its five `cef_browser_shell.cpp` hide sites are described
+as *"unconditional"* — they are **not**. All five are guarded by `IsWindowVisible`. (Their line
+numbers have also moved: 873/882, 1163, 1474, 1522, 2537.)
+
+### 🍎 macOS
+
+React-only — no rebuild needed. ⬜ The HWND half of the evidence has no macOS analogue yet
+(`omniboxprobe.py` reads `user32!IsWindowVisible`); noted in `../MAC_RELAY_P11_ROUND.md`.
