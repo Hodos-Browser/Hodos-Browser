@@ -1,4 +1,4 @@
-# Sprint 1 — UTXO safety guard
+# Track 1 — UTXO safety guard
 
 **Opened:** 2026-08-29 (created at the beta.4 telescope pass — no prior research existed).
 **Status:** 🔭 SCOPE ONLY. No phase contracts, no design. The microscope pass writes those.
@@ -16,7 +16,7 @@
 Users can receive a 1-sat output at a Hodos address **today**, and three code paths treat it as
 ordinary spendable value. One of them needs **no user action**.
 
-⛔ **This sprint is needed even if we never ship ordinals.** It is not a prerequisite of the ordinals
+⛔ **This track is needed even if we never ship ordinals.** It is not a prerequisite of the ordinals
 feature; it is a live defect that the ordinals feature would multiply.
 
 ## The verified findings — read by direct code inspection, 2026-08-29
@@ -45,7 +45,7 @@ An output **correctly filed into a non-default basket is already excluded** from
 **The exclusion logic exists and works.**
 
 > ⛔ **The gap is classification on ingest, not exclusion.** Nothing ever files a token output into a
-> basket. This sprint closes that gap. It does **not** build a second exclusion system.
+> basket. This track closes that gap. It does **not** build a second exclusion system.
 
 ### Related and already correct
 
@@ -61,7 +61,7 @@ BRC-165 normalization rewrites the storage basket to `1sat`, and the DB never st
 |---|---|
 | The seam returns | `Spendable` / `Token` / `Unknown` |
 | ⛔ `Unknown` is | **not spendable** — fail closed |
-| Implemented in this sprint | The **1-sat / inscription** classifier only |
+| Implemented in this track | The **1-sat / inscription** classifier only |
 | Added later, without reopening call sites | BSV-20/21 and future protocols, as classifiers |
 
 **Why general rather than a value check at five sites:** the exclusion logic is already generic
@@ -72,9 +72,9 @@ copies, and every later protocol would reopen all five paths.
 open and competing, same author, one day apart. A fungible classifier written today may encode the
 side that loses. See `../WATCH_fungibles.md`.
 
-## Sub-sprints
+## Candidate phases
 
-| # | Sub-sprint | Produces |
+| # | Candidate phase | Produces |
 |---|---|---|
 | **1.1** | Enumerate the surface | ⛔ **The definitive list** of places the token/value distinction is needed, proven by call-site sweep. Minimum from the kickoff: **balance, coin selection, dust consolidator, recovery sweep, reconcile** — the deliverable is the *complete* list, not a restatement of those five. |
 | **1.2** | Classification on ingest | Every output entering the wallet is classified once, at ingest, and the classification persists. |
@@ -88,8 +88,8 @@ side that loses. See `../WATCH_fungibles.md`.
 |---|---|
 | Classification on ingest and its persistence | Inscription rendering, or any UI beyond what proves the classification |
 | Fail-closed refusal at every enumerated site | BSV-20/21 classifiers — contested, see `../WATCH_fungibles.md` |
-| Recovery / sweep / reconcile parity | Ordinal transfer, listing, purchase — sprint 2 |
-| `R-NOSPEND` + `R-CLASSIFY` as standing invariants | Token-spend permission classes — sprint 2.3 |
+| Recovery / sweep / reconcile parity | Ordinal transfer, listing, purchase — track 2 |
+| `R-NOSPEND` + `R-CLASSIFY` as standing invariants | Token-spend permission classes — track 2.3 |
 | Deciding whether the beta.3 floor is kept as defence in depth | BRC-147/150/165 semantics beyond what the classifier needs |
 
 ## Exit condition
@@ -99,7 +99,7 @@ side that loses. See `../WATCH_fungibles.md`.
 - [ ] `R-CLASSIFY` green, with the ingest-route list it was run against **named** — including the
       routes it does *not* cover.
 - [ ] beta.3's regression set run in full at the boundary.
-- [ ] Pre-sprint `R-NOSPEND` baseline recorded as **RED** (see below).
+- [ ] Pre-track `R-NOSPEND` baseline recorded as **RED** (see below).
 
 ⭐ **Run `R-NOSPEND` before writing any code and record it as RED.** It is available today, it costs
 almost nothing, and a guard whose regression row was never seen failing beforehand has no baseline —
@@ -107,7 +107,7 @@ almost nothing, and a guard whose regression row was never seen failing beforeha
 
 ## Owed to the microscope pass — do not answer here
 
-> ⭐ **RQ-1 is the top design question of this sprint, and it is a RESEARCH task.** ⛔ Do not answer it
+> ⭐ **RQ-1 is the top design question of this track, and it is a RESEARCH task.** ⛔ Do not answer it
 > from first principles. Per `CLAUDE.md` working rule 5: read the **BRC documentation** (46, 99, 147,
 > 150, 165), then the BSV Association's **`wallet-toolbox` in TypeScript *and* Go**, then the other
 > **BSV SDKs**. Report where implementations agree — that is the convention — and ⭐ **where they
@@ -141,7 +141,7 @@ Asserted, not merely read: `output_repo.rs :: token_reserved_exposure_tests` (be
 the **real ingest function** against a seeded DB and shows the row comes back spendable with
 `basket_id IS NULL` — and that the same row filed into a `1sat` basket is correctly excluded.
 
-⇒ **The exclusion logic works. Nothing files a token into a basket. That gap is this sprint.**
+⇒ **The exclusion logic works. Nothing files a token into a basket. That gap is this track.**
 
 The beta.3 floor (`R-DUST`) now blocks 1-satoshi outputs from every spend path, so the immediate
 hazard is contained. ⛔ **It is a value floor, not a classifier** — it cannot tell a token from a
@@ -177,14 +177,14 @@ What is actually on chain, for the three real cases:
 That is *why* address indexers return it under the owner's address — and why it reaches us at all.
 
 ⭐ **The fix needs no new fetch and no schema change**, which is why it belongs at the front of this
-sprint rather than in its own: `cache_parent_transactions` already stores the raw parent tx,
+track rather than in its own: `cache_parent_transactions` already stores the raw parent tx,
 `reconcile.rs :: parse_tx_outputs` already returns per-output `(value, script)`, and
 `outputs.script_length` already exists and is never written. ⚠️ But **do not write the naive version** —
 copying a 2.6 MB script into the `locking_script` BLOB lands it in the DB *and* in every on-chain
 backup. The ticket sets out three bounded options and takes no decision.
 
 ⛔ **Sequencing:** do this **before** 1.1's route list is turned into a classifier, not after.
-Otherwise sprint 1 has to build its own negative control proving the classifier can see an envelope
+Otherwise track 1 has to build its own negative control proving the classifier can see an envelope
 at all — harder than the fix.
 
 ## ⚠️ Also carried from beta.3 Phase 8 — two path claims that did not survive
@@ -206,7 +206,7 @@ for a synced output, because it inspects the fabricated script. Do not count it 
 ## Links
 
 - `../README.md` — release scope and the three kickoff decisions
-- `../SPRINT_PLAN.md` — sprint-level breakdown and cross-sprint edges
+- `../RELEASE_PLAN.md` — track-level breakdown and cross-track edges
 - `../REGRESSION_ADDITIONS.md` — `R-NOSPEND`, `R-CLASSIFY`, `R-RESTORE`
 - `../../0.4.0-beta.3/TICKET_token_outputs_destroyed_by_dust_paths.md` — ⛔ read-only
-- `../sprint-2-1sat-ordinals/README.md` — the rule this enforces was written there first
+- `../track-2-1sat-ordinals/README.md` — the rule this enforces was written there first

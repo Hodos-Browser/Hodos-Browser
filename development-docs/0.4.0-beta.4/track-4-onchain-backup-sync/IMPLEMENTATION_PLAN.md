@@ -5,7 +5,7 @@ gaps fixed, none rejected). **Revised:** 2026-08-24 — adversarial review appli
 `ADVERSARIAL_REVIEW.md`: 36 confirmed findings, 3 refuted; every confirmed finding has a defending
 edit below, each marked *(adversarial review 2026-08-24)*; new decisions D13–D15, new tests
 H17–H19). D4/D5 signed off by owner 2026-08-24 — migrations REJECTED absent a forcing
-cryptographic break; a follow-up adversarial review is scheduled at sprint kickoff.
+cryptographic break; a follow-up adversarial review is scheduled at track kickoff.
 **Status:** ACTIVE. README.md reconciled 2026-08-23: the §4.1 verdicts are now annotated into the
 README itself.
 
@@ -47,7 +47,7 @@ lower-numbered priority class wins (G1–G5 and G11–G12 correctness, G6–G8 c
 | **G11** | **No format change ever breaks an existing user's recovery.** Every payload version ever broadcast to mainnet stays decryptable and recoverable forever: recovery tries the current decode first, then every legacy decode (today: the shipped headerless gzip→AES-GCM envelope under `SHA-256(master_privkey ‖ "hodos-wallet-backup-v1")`), in declared order, before reporting failure. Any KDF/envelope/header change ships only together with its fallback path and an H15 fixture proving a pre-change token still recovers. *(Owner directive 2026-08-24: "We must have this legacy fallback so that we do not break users wallets.")* | H15 |
 | **G12** | **No external lookup without a written, tested contract.** Every external endpoint the wallet consumes (WoC unspent/history/tx/proof, ARC, GorillaPool, any future secondary indexer) has a checked-in contract: exact URL + params, exact semantics of what is and is not returned (unspent vs history vs bulk; pagination and its caps; index-lag and unconfirmed-visibility behavior; error shapes), a recorded fixture, and a conformance test. No call site outside the contract allowlist (CI-enforced); changing a lookup means changing the contract test *first*. A secondary provider enters only via shadow mode (D12). *(Root: backup has completely broken wallets because call semantics were assumed, not known — the 2026-04-11 incident class; owner directive 2026-08-24.)* | H16 |
 
-Non-goals this sprint: solving seed-handover between vendors (separate Portability/Handover BRC —
+Non-goals this track: solving seed-handover between vendors (separate Portability/Handover BRC —
 README Open Q7; we only keep the cheap gates: liveness-check-before-first-spend after recovery,
 recovered-vs-not report, foreign-`device_id` warning), and activating foreign BRC-38 imports
 (parse/validate/preserve only — B2 §5).
@@ -109,7 +109,7 @@ appended to, never regenerated.
 > cryptographic break.** Standing principle attached to this and every recommendation below:
 > **decide by what is best, not what is most expedient** (owner) — accepted here because the
 > review showed best and expedient coincide: migration adds compat risk and zero security.
-> Provisional only in that the sprint-kickoff re-review may re-open it with new technical
+> Provisional only in that the track-kickoff re-review may re-open it with new technical
 > evidence. *(Full argument: ADVERSARIAL_REVIEW.md §4.)*
 > The review (R3, skeptic concurring after independent re-verification) recommends hardening this
 > decision from "KDF migration out of scope / on the blocker list" to **"KDF migration REJECTED
@@ -134,15 +134,15 @@ Decision: **do not silently fix.** v1 keeps the shipped string, documented in th
 non-BRC-43-conformant derivation with the exact literal given; a conformant derivation
 (`2-wallet backup-1`) is specified for new implementations of the standard, with the note that the
 two produce different addresses. Address migration: **REJECTED absent a forcing cryptographic
-break** (owner decision 2026-08-24; previously “named blocker for a later sprint”).
+break** (owner decision 2026-08-24; previously “named blocker for a later track”).
 
 > **OWNER DECISION 2026-08-24 — ACCEPTED (Matt): address migration REJECTED absent a forcing
 > cryptographic break** (same best-not-expedient principle as D4; the review showed migration
 > would *create* the R3-1 money-loss surface to buy a cosmetic conformance fix). Both carve-outs
 > stand: the conformant `2-wallet backup-1` derivation stays documented for NEW implementations,
-> and the fail-closed dual-address rule below binds any future forced migration. Sprint-kickoff
+> and the fail-closed dual-address rule below binds any future forced migration. Track-kickoff
 > re-review may re-open with new technical evidence. *(Full argument: ADVERSARIAL_REVIEW.md §4.)*
-> The review recommends converting "address migration is a named blocker for a later sprint" into
+> The review recommends converting "address migration is a named blocker for a later track" into
 > **"address migration REJECTED absent a forcing cryptographic break."** The clinching finding is
 > **R3-1 (CRITICAL, conditional):** any migration creates a dual-address recovery surface whose
 > downgrade failure mode — indexer lag or litter at the v2 address reads as "no v2 backup", the
@@ -351,7 +351,7 @@ specified, not inherited from shipped monitor behavior:
   `failed`" wording.
 - **Confirmation-depth strip** (R4-5): raw_tx bytes leave the payload only at a **declared
   confirmation depth** (constant in the BRC; default ≥ 6 confs — provisionally accepted by owner
-  2026-08-24, to be confirmed with reorg-depth data at sprint kickoff, best over expedient), not at proof-existence = 1 conf
+  2026-08-24, to be confirmed with reorg-depth data at track kickoff, best over expedient), not at proof-existence = 1 conf
   (backup.rs:449-457). A proven→unproven transition (reorg) is defined and re-inflates the
   payload. The mock gains an un-mine operation; H17 covers it.
 - **Delete-emission allowlist** (R4-7): the Phase 5 producer emits a delete record **only** for
@@ -702,7 +702,7 @@ A3 §5's sixteen "must not repeat" constraints, each with a design decision and/
 | 11 | Atomic import | Shipped single-transaction import retained (A1 §1b); **kill-mid-import added to the H5 matrix and recovery made resumable — the constraint was previously untested on the one case it exists for** *(adversarial review 2026-08-24, R5-9)* | H1, H5, H6 |
 | 12 | Concurrency discipline, no `let _ =` | Phase 2 hygiene | H5 |
 | 13 | Round-trip test before shipping | Phase 1 first | H1 |
-| 14 | Namespaced credential storage | **Partially closed** by `deff765` (A3 E12): env-level namespacing (dev/prod service name), **macOS only**. The other half — per-wallet-identity namespacing, on every platform — is unverified and **open**, with no test; recorded as an open item, no new code this sprint. *(adversarial review 2026-08-24, R5-5: the observability half is now testable — key-identity mismatch is a G5 health input asserted in H9, so the E12 class can no longer pass silently even while the storage fix stays open.)* | H9 (key-identity assertion); storage half still open |
+| 14 | Namespaced credential storage | **Partially closed** by `deff765` (A3 E12): env-level namespacing (dev/prod service name), **macOS only**. The other half — per-wallet-identity namespacing, on every platform — is unverified and **open**, with no test; recorded as an open item, no new code this track. *(adversarial review 2026-08-24, R5-5: the observability half is now testable — key-identity mismatch is a G5 health input asserted in H9, so the E12 class can no longer pass silently even while the storage fix stays open.)* | H9 (key-identity assertion); storage half still open |
 | 15 | No signing-key inference from index conventions | Phase 4 explicit derivation metadata on the backup address | H9 soak includes a full sync; H1 |
 | 16 | Backup health observability | Phase 2 health surface | H9 (injected failures must surface) |
 
@@ -838,7 +838,7 @@ Quoted both sides; not averaged.
 4. **Stuck-unconfirmed lifecycle policy** (§3.3): the *structure* is now specified (D14:
    `abandoned-unbroadcast`, inputs stay encumbered, limbo bound) *(adversarial review
    2026-08-24)*. Owner 2026-08-24: **structure ACCEPTED; the constants (age-out horizon, limbo
-   bound N) remain owner-pending** — to be set at sprint kickoff from measurement/analysis, by
+   bound N) remain owner-pending** — to be set at track kickoff from measurement/analysis, by
    what is best rather than what is expedient; until then the payload keeps carrying the raw
    bytes.
 5. **BRC-38 amendment acceptance** is not in our control; D1's envelope posture is

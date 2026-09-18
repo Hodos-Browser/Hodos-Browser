@@ -190,30 +190,30 @@ What Hodos has today that helps: BEEF-aware `createAction` builder, BRC-29/Payma
 **View-only (display ordinals owned by user) — Size: S**
 - New components: `OrdinalsIndexerClient` (REST wrapper for GorillaPool); UTXO classifier flagging ordinal vs fungible; `Ordinal` row type + repo; UI panel calling indexer's `/utxos/address/<addr>/inscriptions`, rendering thumbnails from `/files/inscriptions/<origin>`.
 - No new crypto, no new transaction builders.
-- ~1 sprint.
+- ~1 track.
 
 **Transfer (send ordinal to another address) — Size: S–M**
 - Reuses existing `createAction` builder with one new constraint: lock the 1-sat ordinal UTXO into a specific output, fund fees from non-ordinal UTXOs, never accidentally spend an ordinal UTXO for fees.
 - New: separate "ordinal address" derivation path (`m/44'/236'/1'/0/0` per Yours convention).
-- ~1 sprint.
+- ~1 track.
 
 **Buy from a marketplace (interact with 1sat.market) — Size: M–L**
 - New: **Ordinal Lock** script template (lock + unlock paths). Covenant script with `OP_PUSH_TX`-style introspection for the price-output check. Reference: `js-1sat-ord` `purchaseOrdListing`.
 - New: ability to spend a UTXO whose locking script is *not* P2PKH — Hodos's signer must accept arbitrary lock scripts.
 - New: `purchaseOrdinal({ outpoint, marketplaceRate?, marketplaceAddress? })` JS API method exposed via V8 injection. For compatibility, alias as `window.yours` / `window.panda`.
 - Optional: PSBT support — required if you want legacy PSBT-listed marketplaces, not needed for `1sat.market`.
-- ~2 sprints.
+- ~2 tracks.
 
 **List for sale — Size: M**
 - Inverse of buy: Ordinal Lock listing tx + cancel listing tx. Both are templates added to the script library plus new builder paths in `handlers.rs`.
-- ~1.5 sprints.
+- ~1.5 tracks.
 
 **Inscribe (mint) — Size: S–M**
 - 1-sat output with `<P2PKH> + <inscription envelope>`. Script-template work + a JS `inscribe()` method.
 - BSV21 deploy/transfer is a JSON-content variant of the same.
-- ~1 sprint.
+- ~1 track.
 
-**Total to ordinal-feature-parity with Yours Wallet: ~5–7 sprints.** Hardest piece is the Ordinal Lock covenant script and its unlock construction; everything else reuses Hodos primitives.
+**Total to ordinal-feature-parity with Yours Wallet: ~5–7 tracks.** Hardest piece is the Ordinal Lock covenant script and its unlock construction; everything else reuses Hodos primitives.
 
 **Where you might get blocked / unclear:**
 - `1sat.market`'s exact backend contract (closed source)

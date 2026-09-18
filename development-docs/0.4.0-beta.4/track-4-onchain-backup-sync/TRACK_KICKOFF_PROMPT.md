@@ -1,11 +1,11 @@
-# Kickoff prompt — backup/recovery research sprint + patent research
+# Kickoff prompt — backup/recovery research track + patent research
 
 **Written 2026-08-22.** Paste the prompt below into a fresh session started in
 `C:\Users\archb\Marston Enterprises` (so project memory auto-loads).
 
 ---
 
-I want to run a deep research sprint on our on-chain wallet backup system, using multi-agent
+I want to run a deep research track on our on-chain wallet backup system, using multi-agent
 workflows. This is the part of Hodos that has given us more trouble than any other part of
 development, it handles people's real money, and I want a rigorous plan before we write more code.
 Use the Workflow tool to orchestrate this — fan out agents in parallel where the work is
@@ -13,7 +13,7 @@ independent. Two workflows, run in sequence.
 
 ## Context to load first
 
-- `C:\Users\archb\Hodos-Browser\development-docs\0.4.0-beta.4\sprint-4-onchain-backup-sync\README.md` — the current
+- `C:\Users\archb\Hodos-Browser\development-docs\0.4.0-beta.4\track-4-onchain-backup-sync\README.md` — the current
   work plan (items 0–7, including item 0 = BRC-38 compat gate and item 0b = delta-format prior
   art, both defined but NOT yet run). Its core rule stands: **the BRC draft follows the code, not
   the other way around.**
@@ -25,7 +25,7 @@ independent. Two workflows, run in sequence.
 - Memory file `project_onchain_backup_delta_design` — full state including the 2026-08-22
   analysis of deggen's go-private-backup-cache and the decisions made with me.
 
-## Workflow 1 — research sprint → implementation plan
+## Workflow 1 — research track → implementation plan
 
 **Phase A — our own code, honestly.** Agents dig into `C:\Users\archb\Hodos-Browser`:
 - `rust-wallet/src/backup.rs` (~2,284 lines), the recovery/restore path, and the database
@@ -55,7 +55,7 @@ already defined there: core / assets-and-attestations / wallet-local).
   — read for format and semantics only, never vendor code.
 
 **Phase D — synthesis.** Produce, in
-`C:\Users\archb\Hodos-Browser\development-docs\0.4.0-beta.4\sprint-4-onchain-backup-sync\`, an
+`C:\Users\archb\Hodos-Browser\development-docs\0.4.0-beta.4\track-4-onchain-backup-sync\`, an
 `IMPLEMENTATION_PLAN.md` that the existing README's items 0–7 get reconciled against (update the
 README where the plan supersedes it; don't leave the two contradicting). The plan must contain:
 

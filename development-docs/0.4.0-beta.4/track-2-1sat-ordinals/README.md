@@ -1,21 +1,21 @@
-# 1Sat Ordinals + BSV21 — Sprint
+# 1Sat Ordinals + BSV21 — Track
 
 **Status:** Not started. Scoped and researched; ready to plan when picked up.
 
-> **Was `Sigma-BRC121-Sprint/phase-3-ordinals/`.** Split into its own sprint 2026-08-15 — it never
+> **Was `Sigma-BRC121-Track/phase-3-ordinals/`.** Split into its own track 2026-08-15 — it never
 > depended on the BRC-100 shim work beyond call routing, and it is large enough to stand alone. The
-> parent sprint is archived at `archived-docs/Sigma-BRC121-Sprint/`.
+> parent track is archived at `archived-docs/Sigma-BRC121-Track/`.
 
-## ⛔ Read before starting this sprint
+## ⛔ Read before starting this track
 
-1. **`development-docs/BSV-Tokens/` — all seven documents.** Pre-existing research this sprint builds
+1. **`development-docs/BSV-Tokens/` — all seven documents.** Pre-existing research this track builds
    on. **Per-file trust ratings are at the bottom of this document** ("Existing research to
    evaluate") — two are marked do-not-trust and one must be redone from scratch. Read the ratings
    before you read the docs.
 2. **The BRC-147 / BRC-150 decision immediately below** — it supersedes any design in BSV-Tokens that
    predates 2026-08-05.
 3. **`development-docs/Future-Features/Decentralized-Naming/`** — OpNS names *are* 1-sat ordinals, so
-   naming shares this sprint's substrate. See "Naming & OpNS" below.
+   naming shares this track's substrate. See "Naming & OpNS" below.
 
 Our own BRC draft on name resolution lives outside this repo, at
 `Marston Enterprises/Standards/BRCs/drafts/consensus-unique-name-tokens.md`.
@@ -56,7 +56,7 @@ BRC-147/150 cover **1Sat ordinals (NFT-style)**. **BSV21 fungible tokens are a s
 
 ---
 
-Sigma auth (Phase 2) alone unlocks app discovery in Cluster B (users can sign in to 1sat.market with their Hodos identity). Ordinal *transfer* requires substantial new work and is a separate sprint:
+Sigma auth (Phase 2) alone unlocks app discovery in Cluster B (users can sign in to 1sat.market with their Hodos identity). Ordinal *transfer* requires substantial new work and is a separate track:
 
 - New UTXO classification (1-sat outputs with inscribed data)
 - BSV20/21 token indexer integration
@@ -68,7 +68,7 @@ Sigma auth (Phase 2) alone unlocks app discovery in Cluster B (users can sign in
 
 **Small, scoped check — because OpNS names *are* 1-sat ordinals**, Phase 3's ordinal machinery (UTXO classification, indexer/overlay client, transfer builder) is the natural substrate for naming too. This is a *check + possible prototype*, not a commitment to build a full naming feature in this phase.
 
-**Canonical analysis lives outside this sprint:** `development-docs/Future-Features/Decentralized-Naming/OPNS_REVIEW.md` (deep teardown + reference links) and that folder's `README.md` (current direction). Current lean = **OpNS**, posture **"engage, prototype, watch."** Read those first.
+**Canonical analysis lives outside this track:** `development-docs/Future-Features/Decentralized-Naming/OPNS_REVIEW.md` (deep teardown + reference links) and that folder's `README.md` (current direction). Current lean = **OpNS**, posture **"engage, prototype, watch."** Read those first.
 
 ### First, understand how the pieces fit together
 
@@ -117,5 +117,5 @@ Flagged so the design-decision phase actually researches them (do **not** hardco
 - `BSV21_PLAN_A_BACKEND.md` / `BSV21_PLAN_B_FRONTEND.md` — design decisions, **do not trust without re-review**
 - `BSV21_UX_DESIGN_OUTLINE.md` — **do not trust**, redo from scratch when Phase 3 activates
 
-When this sprint activates, extract the trusted raw research into `research-extracted/` here, and
+When this track activates, extract the trusted raw research into `research-extracted/` here, and
 consider moving the whole `BSV-Tokens/` folder in at that time.

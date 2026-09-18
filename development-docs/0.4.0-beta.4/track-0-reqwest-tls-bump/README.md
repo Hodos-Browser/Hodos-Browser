@@ -1,11 +1,11 @@
-# Sprint 0 — `reqwest` 0.11 → 0.12+ (the wallet's TLS certificate validator)
+# Track 0 — `reqwest` 0.11 → 0.12+ (the wallet's TLS certificate validator)
 
 **Opened:** 2026-09-15, by owner decision at the beta.3 Phase 9 dependency review
 (`../../DevOps-CICD/DEPENDENCY_VERIFICATION.md`, "Freshness review — 2026-09-14").
 **Status:** 🔭 SCOPE + RESEARCH NOTES ONLY. No phase contract, no design. It needs a real scoping pass
 (`../../SCOPING_PROCESS.md`) before code — this file is the outline that pass starts from.
 **Standard:** `../../0.4.0-beta.3/HARNESS.md` + `../HARNESS_DELTA.md`.
-**Placement:** 👤 **first in beta.4, ahead of the four settled sprints** (owner, 2026-09-15). The Guard → 1Sat →
+**Placement:** 👤 **first in beta.4, ahead of the four settled tracks** (owner, 2026-09-15). The Guard → 1Sat →
 OpNS → Backup order is untouched; this sits in front of it because it is a dependency change on the money
 path, not an asset-layer feature, and beta.3's release verification should not absorb it.
 
@@ -36,7 +36,7 @@ and it carries three advisories:
 Two of the three are "accepts what it should reject". Nobody has to have exploited them for that to be the
 wrong lock on the door of a money-handling program. The fix exists **only** in the `0.103` line of the
 validator, which ships with **`rustls 0.23`**, which ships with **`reqwest 0.12+`**. There is no way to take
-the fix without moving the HTTP client a major version — hence a sprint, not a `cargo update`.
+the fix without moving the HTTP client a major version — hence a track, not a `cargo update`.
 
 The same move also clears **RUSTSEC-2026-0258** (`h2 0.3.27`, HTTP/2 unbounded empty DATA frames, DoS) —
 `h2 0.4` comes with `reqwest 0.12`.
@@ -47,7 +47,7 @@ The same move also clears **RUSTSEC-2026-0258** (`h2 0.3.27`, HTTP/2 unbounded e
 - `adblock-engine` also uses `reqwest 0.11` (default features ⇒ schannel on Windows, not rustls). It has the
   `h2` advisory but not the webpki ones. Bump it in the same sitting **only if** the wallet bump proves
   uneventful; otherwise it is its own small item.
-- Bumping anything else in `Cargo.toml` "while we are in there". One dependency, one sprint.
+- Bumping anything else in `Cargo.toml` "while we are in there". One dependency, one track.
 
 ## Where the client is used — the surface the scoping pass must enumerate (starting list, from grep)
 
@@ -84,7 +84,7 @@ The same move also clears **RUSTSEC-2026-0258** (`h2 0.3.27`, HTTP/2 unbounded e
 5. **Chromium's stance** is irrelevant here — the wallet is a separate Rust process with its own TLS; libcef's
    BoringSSL is not on this path (`DEPENDENCY_VERIFICATION.md`, symbol coexistence).
 
-## Outline of the sprint (for the scoping pass to confirm or cut)
+## Outline of the track (for the scoping pass to confirm or cut)
 
 | # | Step | Produces |
 |---|---|---|

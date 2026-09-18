@@ -18,7 +18,7 @@
 > **Still open here:** ⛔ **pin** and ⛔ **mute site** (per-domain) only.
 
 **Found:** 2026-09-01, Phase 4 kickoff inventory
-**Status:** ⬜ UNASSIGNED · **Sprint:** unassigned (beta.4 candidate) · **Filed by:** Phase 4 kickoff
+**Status:** ⬜ UNASSIGNED · **Track:** unassigned (beta.4 candidate) · **Filed by:** Phase 4 kickoff
 
 > ⚠️ **Method note.** All claims here were **code reading** of the tree at filing time — `Tab.h`,
 > `TabManager.h`, `simple_handler.cpp`. Nothing was run. ⛔ The item flagged "not verified" —

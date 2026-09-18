@@ -448,7 +448,7 @@ human, DPI matrix, 20 min". A row whose mechanism is "by hand, TBD" is a row tha
 the boundary. Making this a scoping-gate field means the cost is visible while the phase can still be
 resized, which is the whole point of scoping.
 
-**2. Sum the T3 minutes for the sprint and put the number in `SPRINT_PLAN.md`.** beta.3's evidence is
+**2. Sum the T3 minutes for the sprint and put the number in `RELEASE_PLAN.md`.** beta.3's evidence is
 that unbudgeted human testing does not happen. If the sum exceeds roughly an hour per boundary, the
 standing set is too large — cut it, automate it, or move it to R-RELEASE (#8). Do not write down an
 hour you have not scheduled.

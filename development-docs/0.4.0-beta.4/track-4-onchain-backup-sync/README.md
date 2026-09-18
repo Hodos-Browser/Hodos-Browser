@@ -1,7 +1,7 @@
 # On-chain Backup and Sync — delta chain + multi-device
 
 **Opened:** 2026-08-19.
-**Status:** 🔵 OUTLINE. Not scheduled into any sprint. This is the *shape* of the work; most rows
+**Status:** 🔵 OUTLINE. Not scheduled into any track. This is the *shape* of the work; most rows
 below need research and measurement before they become tickets. **We update the BRC as we
 implement, test and learn — the draft follows the code, not the other way around.**
 
@@ -52,7 +52,7 @@ tables.]**
 wallet-toolbox but has drifted: we back up 18 tables (`../../ONCHAIN_BACKUP_SYSTEM.md` § Included
 Tables), BRC-38 defines exactly 13 and **MUSTs that list with no extension slot**. If the gap is
 small, the rest of this plan proceeds as written. If it's large, **that is a big problem with a lot
-of work**, and the sprint has to start by identifying it clearly and planning from that — not
+of work**, and the track has to start by identifying it clearly and planning from that — not
 discovering it halfway through item 3. Matt, 2026-08-19.
 
 **Deliverable: a table, one row per table we back up**, with columns:
@@ -110,10 +110,10 @@ Known before we start (from reading, not running):
 - **(b) Envelope** — our token carries a BRC-38 document *plus* a sibling extensions object. Works
   without asking anyone; weaker interop story.
 - **(c) Native payload for now**, `kind` flag says so, migrate later. Only if (a)/(b) turn out to
-  need schema changes we can't afford this sprint.
+  need schema changes we can't afford this track.
 
 Also out of item 0: the list of **field-level adapters** needed (our column ↔ 38 column), and
-whether *import* from a foreign BRC-38 document is in scope for this sprint or the next.
+whether *import* from a foreign BRC-38 document is in scope for this track or the next.
 
 ## Work item 0b — delta-format prior art. **Added 2026-08-22; gates item 3's delta format.**
 
@@ -302,7 +302,7 @@ on-chain equivalent (plan §4.1).]*
    exists in code (the draft described chunking that does not ship); Phase 4 adds a hard
    pre-broadcast size cap that fails closed, chunking honestly deferred (plan §6.1 item 6).]*
 7. **Handover / deconfliction — the "user puts a seed into a second wallet" problem.** Not this
-   sprint's scope to *solve*, but this sprint's scope to *not make worse*. Two wallets (ours and a
+   track's scope to *solve*, but this track's scope to *not make worse*. Two wallets (ours and a
    vendor's, or two of ours) with one seed, not syncing, both spending = double-spends and a user
    who doesn't know what a UTXO is blaming the wallet. We should not try to dictate policy —
    everyone will say "user's responsibility," and they're right — but **build to the lowest common

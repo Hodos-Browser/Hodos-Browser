@@ -29,7 +29,7 @@ anywhere in the repo**; the file format is a custom `.hodos-wallet` JSON envelop
 | 6 | On-chain backup/restore (`/wallet/backup/onchain`, `/wallet/recover/onchain`, `/wallet/restore`, `/wallet/recover`) | routes `main.rs:1260-1267`; import at `handlers.rs:15072` | **LIVE end to end** — this is what ships today (`ONCHAIN_BACKUP_SYSTEM.md`); listed here because it shares the file-export machinery (§4) |
 | 7 | External-wallet import: "Recover from Centbee" (BIP39 sweep, `/wallet/recover-external`) | handler `wallet_recover_external` `handlers.rs:16027`; UI live in `WalletPanelPage.tsx` | **LIVE** — the only shipping cross-wallet import; it sweeps funds, it does not import state |
 | 8 | Mnemonic reveal (Settings) and mnemonic-based recovery | `SettingsTab.tsx`, `WalletPanelPage.tsx:466,497` | **LIVE** — seed-level export/import only, not state |
-| 9 | BRC-38 / BRC-39 / `.brc39` / `exportBRC*` / `importBRC*` code | — | **DOES NOT EXIST** in this repo. Grep for `brc38|brc39|brc-38|brc-39` (case-insensitive) hits only two planning docs: `development-docs/0.4.0-beta.4/sprint-4-onchain-backup-sync/README.md` and `SPRINT_KICKOFF_PROMPT.md` |
+| 9 | BRC-38 / BRC-39 / `.brc39` / `exportBRC*` / `importBRC*` code | — | **DOES NOT EXIST** in this repo. Grep for `brc38|brc39|brc-38|brc-39` (case-insensitive) hits only two planning docs: `development-docs/0.4.0-beta.4/track-4-onchain-backup-sync/README.md` and `TRACK_KICKOFF_PROMPT.md` |
 
 VERIFIED (all rows): by reading the cited files/lines and grepping the repo, this session.
 
@@ -200,7 +200,7 @@ it exists.
 - `cef-native/src/core/HttpRequestInterceptor.cpp`: 1820-1880 (chunking)
 - `development-docs/0.4.0/archive/WALLET_UI_BRIDGE_MIGRATION.md`: status line + lines 58-158
 - `development-docs/MACOS_CATCHUP_PLAYBOOK.md`: line 278
-- `development-docs/0.4.0-beta.4/sprint-4-onchain-backup-sync/README.md`: lines 1-100 + work item 7 section
+- `development-docs/0.4.0-beta.4/track-4-onchain-backup-sync/README.md`: lines 1-100 + work item 7 section
 - Git: `git show` full diffs/messages of `f219da7`, `026f5b4`, `4baa272`, `9209705`; stats of
   `e4e7533`; dates of `b1fe160`, `a95e01e`, `afeef52`, `0dca522`; `git log -S` on the disable
   strings; `git log --since=2026-04-02 -- backup.rs`; commit list 2026-06-24..27

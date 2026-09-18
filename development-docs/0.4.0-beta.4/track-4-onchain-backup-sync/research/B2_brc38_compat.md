@@ -28,7 +28,7 @@ Not backed up at all (in DB, absent from BackupPayload): messages, relay_message
 
 ## 1. THE TABLE — one row per backed-up table
 
-Tier definitions from `0.4.0-beta.4/sprint-4-onchain-backup-sync/README.md` item 0: **1 Core** = derivation data, unspent outputs + spending instructions, baskets. **2 Assets & attestations** = certificates + keyrings, credentials, token outputs, labels, tags. **3 Wallet-local** = permissions, prefs, device labels, sync state.
+Tier definitions from `0.4.0-beta.4/track-4-onchain-backup-sync/README.md` item 0: **1 Core** = derivation data, unspent outputs + spending instructions, baskets. **2 Assets & attestations** = certificates + keyrings, credentials, token outputs, labels, tags. **3 Wallet-local** = permissions, prefs, device labels, sync state.
 
 Column lists: ours from migrations.rs DDL (line refs in §2); BRC-38 from 0038.md §7.x (re-read directly). "Extra" = our column with no BRC-38 field. "Missing" = BRC-38 field we don't have.
 
@@ -165,7 +165,7 @@ One caution the diffs force: the amendment must also bless the **stripped profil
 ## Disagreements with existing docs (rule 3: quote, cite, state)
 
 1. **ONCHAIN_BACKUP_SYSTEM.md § Included Tables** says: "wallet | Excludes mnemonic (re-entered on recovery). **Includes PIN salt, DPAPI blob**, current_index, backed_up flag". The code disagrees: `backup.rs:375-377` — comment "`// Wallet (no mnemonic, no pin_salt)`", SELECT is `id, current_index, backed_up, created_at, updated_at` only. **PIN salt and DPAPI blob are NOT backed up.** The code is right to exclude them (device-bound secrets); the doc is stale.
-2. **0.4.0-beta.4/sprint-4-onchain-backup-sync/README.md item 0** says "we back up 18 tables". Actual count from `BackupPayload` (backup.rs 32–59): **19 SQL tables** serialized (21 members counting the two arrays cleared to empty). Off-by-one from the doc's combined rows; harmless but the item-0 table above is the corrected inventory.
+2. **0.4.0-beta.4/track-4-onchain-backup-sync/README.md item 0** says "we back up 18 tables". Actual count from `BackupPayload` (backup.rs 32–59): **19 SQL tables** serialized (21 members counting the two arrays cleared to empty). Off-by-one from the doc's combined rows; harmless but the item-0 table above is the corrected inventory.
 3. **Invoice string, now settled from code** (B1 left this to us): `connection.rs:390/550/716` — `let backup_invoice = "1-wallet-backup-1";` and `handlers.rs:14037` stores `derivation_prefix = "1-wallet-backup"`. So the current-system doc matches the code, and B1's spec finding applies to the **code**, not just the doc: the literal string is security level 1 (BRC draft says level 2) and contains a hyphen inside the protocol ID, which BRC-43 forbids (letters/numbers/spaces only). Conformant BRC-43 tooling would produce `2-wallet backup-1`. Changing it changes the derived backup address — a migration event (old chain at old address must be found or re-anchored). This belongs on the BRC draft's blocker list, not silently fixed.
 4. **ONCHAIN_BACKUP_SYSTEM.md** does not mention that the `domain_permissions` backup silently drops `max_tx_per_session`, `identity_key_disclosure_allowed`, `bundled_scope_grant` (backup.rs 806–807 SELECTs only 7 columns; the table has 12 — migrations.rs 468–482 + v17 + v22). Tier 3, but restore-after-recovery loses three permission dimensions users set. Decide: fix or document.
 
@@ -179,7 +179,7 @@ One caution the diffs force: the amendment must also bless the **stripped profil
 - `rust-wallet/src/database/migration.rs` — read in full (206 lines; it is the one-time JSON→SQLite import, **not** schema migrations — references legacy tables like `transaction_labels` that no longer exist in V1 DDL).
 - `outpoints/0038.md` @ c1d12f2 — §4 (lines 65–113), §5.4 (160–166), §7.1–7.14 (220–515, re-read directly), §8 (517–533). Commit hash verified by `git log -1`.
 - `development-docs/ONCHAIN_BACKUP_SYSTEM.md` — lines 1–120 (architecture, included/excluded tables, optimizations).
-- `development-docs/0.4.0-beta.4/sprint-4-onchain-backup-sync/README.md` — lines 1–120 (item 0 brief, tier definitions, decision gate).
+- `development-docs/0.4.0-beta.4/track-4-onchain-backup-sync/README.md` — lines 1–120 (item 0 brief, tier definitions, decision gate).
 - B1 digest `research/B1_brc_specs.md` — read in full; every B1 claim I depend on at field level was re-verified against 0038.md directly.
 
 ## NOT checked

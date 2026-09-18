@@ -2,7 +2,7 @@
 
 **Found:** 2026-09-16, reading `Standards/BRCs/reference/key-derivation/0140.md` in the Marston tree
 while building the BSVA team profiles.
-**Status:** ⬜ UNASSIGNED · **Sprint:** unassigned · **Filed by:** owner (Matt), 2026-09-16
+**Status:** ⬜ UNASSIGNED · **Track:** unassigned · **Filed by:** owner (Matt), 2026-09-16
 
 > ⚠️ **Method note.** This is a **research-and-decide** ticket, not a defect — the template is
 > defect-shaped and the sections are bent to fit. What the wallet does today is **code reading**
@@ -79,7 +79,7 @@ maintainer, is worth something on its own when we are already submitting BRCs in
 ## What already protects us, and how that shapes the decision
 
 The wallet already has BIP39 + BIP32 + BRC-42 derivation and gap-limit recovery working, and beta.4
-sprint 4 (`../sprint-4-onchain-backup-sync/`) is already the place where backup and recovery get
+track 4 (`../track-4-onchain-backup-sync/`) is already the place where backup and recovery get
 worked. **So this is an addition to a working path, never a replacement.** Whatever we do, `reveal_mnemonic`
 and mnemonic recovery stay — a user who already wrote down twelve words must not be stranded.
 
@@ -87,13 +87,13 @@ and mnemonic recovery stay — a user who already wrote down twelve words must n
 
 | Option | What it means |
 |---|---|
-| **A — beta.4** | Fold into sprint 4, which already owns backup and recovery |
+| **A — beta.4** | Fold into track 4, which already owns backup and recovery |
 | **B — beta.5 or later** | Research now, decide later, build when the recovery story gets a dedicated pass |
 | **C — scrap** | BIP39 is enough; record the reasoning so this is not reopened annually |
 
-**My read, for the owner to overrule:** ⭐ **B.** Sprint 4's open questions are already about delta
+**My read, for the owner to overrule:** ⭐ **B.** Track 4's open questions are already about delta
 chains and multi-device sync measured against real token rows; adding a key-splitting scheme to it
-widens a sprint that is last in the order and most at risk of being cut. And the interesting version
+widens a track that is last in the order and most at risk of being cut. And the interesting version
 of this is a *user-facing recovery option* with UI, wording and a support story attached, which is a
 product pass rather than a wallet-internals pass. **Research it in beta.4, build it no earlier than
 beta.5.**
@@ -126,7 +126,7 @@ as the same wallet recovered from its phrase"* is the row for `../REGRESSION_ADD
 ## Links
 
 - `Marston Enterprises/Standards/BRCs/reference/key-derivation/0140.md` — the spec, in our tree
-- `../sprint-4-onchain-backup-sync/` — the sprint that owns backup and recovery
+- `../track-4-onchain-backup-sync/` — the track that owns backup and recovery
 - `rust-wallet/src/json_storage.rs`, `recovery.rs`, `backup.rs` — what exists today
 - `Marston Enterprises/Hodos/Marketing/Profiles/bsv/deggen.md` — the author, and why his opinion of our
   backup BRC matters

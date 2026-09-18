@@ -54,7 +54,7 @@ spent status** or it cannot serve D6; the mock implements the real spent endpoin
 404 semantics.
 
 **R1-02 — One unservable mid-chain link orphans the nearest snapshot behind it.**
-Chain S0+d1..d20+S1+d21..; the indexer cannot serve d23's tx (pruned/404). The D6 walk is
+Chain T0+d1..d20+T1+d21..; the indexer cannot serve d23's tx (pruned/404). The D6 walk is
 parent-only: T(k−2)'s txid lives inside T(k−1), so a hole is unjumpable; "stop at the last
 contiguous token and flag" leaves deltas-without-base or a weeks-old snapshot as the restore
 (violates G1/G4). H6's FAIL clause ("silent partial restore reported as success") is evaded

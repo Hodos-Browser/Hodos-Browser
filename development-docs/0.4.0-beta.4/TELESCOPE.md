@@ -1,49 +1,49 @@
-# beta.4 telescope output — how the sprints interact, and how to run the microscope pass
+# beta.4 telescope output — how the tracks interact, and how to run the microscope pass
 
 **Written:** 2026-08-29, telescope pass. **Read by:** the microscope sessions, before they start.
-**Companions:** `README.md` (scope, settled decisions), `SPRINT_PLAN.md` (sprint breakdown).
+**Companions:** `README.md` (scope, settled decisions), `RELEASE_PLAN.md` (track breakdown).
 
-> **What a telescope output is for.** Not a plan — the plan is `SPRINT_PLAN.md`. This file carries
-> the two things only a long-distance look can produce: **the places where sprints touch each other**,
+> **What a telescope output is for.** Not a plan — the plan is `RELEASE_PLAN.md`. This file carries
+> the two things only a long-distance look can produce: **the places where tracks touch each other**,
 > and **how to divide the microscope work across contexts so those places are not lost.**
 
-⛔ **Hard rule for every microscope session:** the sprints are separated so their contexts can be.
-A session that reads all four sprint folders has recreated the problem this pass exists to solve.
+⛔ **Hard rule for every microscope session:** the tracks are separated so their contexts can be.
+A session that reads all four track folders has recreated the problem this pass exists to solve.
 
 ---
 
-## 1. The four cross-sprint edges
+## 1. The four cross-track edges
 
-Everything inside one sprint is that sprint's problem. These four are nobody's, which is why they get
+Everything inside one track is that track's problem. These four are nobody's, which is why they get
 named here or not at all.
 
-### ⭐ E1 — S1 → S2: the classifier must match BRC-165 normalization
+### ⭐ E1 — T1 → T2: the classifier must match BRC-165 normalization
 
-Sprint 1 writes a classifier before sprint 2 reads the spec that says what a classified ordinal
-*is*. If sprint 1 invents its own basket naming, sprint 2 rewrites it — and the rewrite lands after
+Track 1 writes a classifier before track 2 reads the spec that says what a classified ordinal
+*is*. If track 1 invents its own basket naming, track 2 rewrites it — and the rewrite lands after
 the guard is already the thing everything trusts.
 
 | | |
 |---|---|
-| **Cheapest mitigation** | Sprint 1's microscope reads **BRC-147 + BRC-165 normalization rules** before choosing what "classified" persists as. Nothing else from sprint 2. |
-| **Owner** | Sprint 1 microscope |
-| **Failure if missed** | A migration in sprint 2, on the one data structure the release's safety depends on |
+| **Cheapest mitigation** | Track 1's microscope reads **BRC-147 + BRC-165 normalization rules** before choosing what "classified" persists as. Nothing else from track 2. |
+| **Owner** | Track 1 microscope |
+| **Failure if missed** | A migration in track 2, on the one data structure the release's safety depends on |
 
-### ⭐ E2 — S2 → S4: sprint 4's central question is answered with sprint 2's data
+### ⭐ E2 — T2 → T4: track 4's central question is answered with track 2's data
 
-Sprint 4 asks *what actually needs backing up vs what can be re-fetched*. Its stated hypothesis — the
+Track 4 asks *what actually needs backing up vs what can be re-fetched*. Its stated hypothesis — the
 size problem is **`beefB64` ancestry depth**, not inscription media — is a hypothesis, and the data
-that settles it is created during sprint 2.
+that settles it is created during track 2.
 
 | | |
 |---|---|
-| **Cheapest mitigation** | Sprint 2 carries **measurement rows** (`HARNESS_DELTA.md` §1.3): real provenance-row sizes **and ancestry depth**, recorded as they land |
-| **Owner** | Sprint 2 microscope writes the rows; sprint 4 consumes them |
-| **Failure if missed** | Sprint 4 measures retrospectively or assumes. ⛔ `HARNESS.md` §8: *do not record a cause you have not reproduced* |
+| **Cheapest mitigation** | Track 2 carries **measurement rows** (`HARNESS_DELTA.md` §1.3): real provenance-row sizes **and ancestry depth**, recorded as they land |
+| **Owner** | Track 2 microscope writes the rows; track 4 consumes them |
+| **Failure if missed** | Track 4 measures retrospectively or assumes. ⛔ `HARNESS.md` §8: *do not record a cause you have not reproduced* |
 
-### ⭐ E3 — S1 → S4: fail-closed must survive recovery
+### ⭐ E3 — T1 → T4: fail-closed must survive recovery
 
-The sharpest edge in the release. Sprint 1 says an unclassified output is not spendable. Sprint 4
+The sharpest edge in the release. Track 1 says an unclassified output is not spendable. Track 4
 owns restore-from-seed, which is where classification is least likely to be available and where a
 user is least able to notice a loss.
 
@@ -51,23 +51,23 @@ Two failures, and **a fix for one is the other**:
 
 | Failure | Shape |
 |---|---|
-| Silently spendable | Restore defaults unknown outputs to spendable → sprint 1's rule evaporates at the one moment it matters most |
+| Silently spendable | Restore defaults unknown outputs to spendable → track 1's rule evaporates at the one moment it matters most |
 | Silently lost | Restore drops what it cannot classify → the output is safe from spending and gone from the user |
 
 | | |
 |---|---|
-| **Cheapest mitigation** | `R-RESTORE` in `REGRESSION_ADDITIONS.md` — **two GREENs that are each other's control.** Written now, run in sprint 4 |
-| **Owner** | Neither sprint alone ⇒ **an owner decision point**, §4 below |
+| **Cheapest mitigation** | `R-RESTORE` in `REGRESSION_ADDITIONS.md` — **two GREENs that are each other's control.** Written now, run in track 4 |
+| **Owner** | Neither track alone ⇒ **an owner decision point**, §4 below |
 
-### E4 — S2 → S3: does a name reuse the token-spend permission class?
+### E4 — T2 → T3: does a name reuse the token-spend permission class?
 
-An OpNS name is a 1-sat output, so the default answer is "reuse sprint 2.3's class". Default answers
+An OpNS name is a 1-sat output, so the default answer is "reuse track 2.3's class". Default answers
 about permissions are how permission surfaces quietly widen.
 
 | | |
 |---|---|
-| **Cheapest mitigation** | Sprint 3's microscope **verifies** rather than assumes, and says which |
-| **Owner** | Sprint 3 microscope |
+| **Cheapest mitigation** | Track 3's microscope **verifies** rather than assumes, and says which |
+| **Owner** | Track 3 microscope |
 
 ---
 
@@ -100,37 +100,37 @@ about permissions are how permission surfaces quietly widen.
 > ⛔ **Owner correction, 2026-08-30: both are RESEARCH TASKS, not decisions M0 makes.** M0 researches
 > and presents; the owner decides. **RQ-1 is the top design question of the release** and is
 > answered by reading BRC docs + `wallet-toolbox` (TypeScript and Go) + the other BSV SDKs — not from
-> first principles. **RQ-2 requires a good / bad / ugly outcome matrix** and is decided in the sprint
+> first principles. **RQ-2 requires a good / bad / ugly outcome matrix** and is decided in the track
 > planning session, not in M0. Full instructions: `RESUME_beta4.md` §3.
 
 | | |
 |---|---|
 | **Job** | ⛔ **Research** RQ-1 (what "classified" persists as) and RQ-2 (restore behaviour), and present both for owner decision. **M0 does not decide either.** |
 | **Reads** | `README.md`, `RESUME_beta4.md` §3, this file, `REGRESSION_ADDITIONS.md` · **BRC 46/99/147/150/165** · ⭐ **the BSV Association's `wallet-toolbox`, TypeScript *and* Go, plus the other BSV SDKs** · then `output_repo.rs`, `basket_repo.rs`, `domain_permission_repo.rs` |
-| **Does NOT read** | Any sprint folder in full. `IMPLEMENTATION_PLAN.md`. `RESEARCH_FINDINGS.md` |
+| **Does NOT read** | Any track folder in full. `IMPLEMENTATION_PLAN.md`. `RESEARCH_FINDINGS.md` |
 | **Output** | Two research docs: **(RQ-1)** what the ecosystem does, where implementations disagree, what we should do and why · **(RQ-2)** ⭐ a **good / bad / ugly outcome matrix** per candidate restore behaviour, in plain language |
 | **Exit** | Both research outputs exist and the owner has seen the RQ-2 matrix. **Nothing else.** |
 
 ⭐ **Why M0 exists at all.** E1 and E3 are the only decisions that are *cheaper to make once* than to
-make twice. Everything else genuinely belongs inside a sprint. Resist the urge to grow M0 — a context
+make twice. Everything else genuinely belongs inside a track. Resist the urge to grow M0 — a context
 that owns "the cross-cutting concerns" becomes the context that owns everything.
 
-### M1–M4 — one per sprint, fresh, and deliberately blinkered
+### M1–M4 — one per track, fresh, and deliberately blinkered
 
 | Context | Reads | ⛔ Does **not** read |
 |---|---|---|
-| **M1 Guard** | `sprint-1-utxo-safety-guard/README.md`, M0's output, `HARNESS_DELTA.md`, `REGRESSION_ADDITIONS.md`, the `rust-wallet` paths named in the sprint README | Sprints 2/3/4 folders. `WATCH_fungibles.md` beyond its one-line verdict |
-| **M2 1Sat** | `sprint-2-1sat-ordinals/` (both files), M0's output, BRC-147/150/159/160/165, `WATCH_fungibles.md` | Sprints 3/4 folders. The old naming research |
-| **M3 OpNS** | `sprint-3-opns-naming/README.md`, `tokens/0174.md`, `Future-Features/Decentralized-Naming/` **once**, sprint 2's *outcomes* (not its folder) | Sprints 1/4 folders. The naming research a second time |
-| **M4 Backup** | `sprint-4-onchain-backup-sync/` (the plan is authoritative), M0's E3 answer, sprint 2's **measurement rows** | Sprints 1/2/3 folders |
+| **M1 Guard** | `track-1-utxo-safety-guard/README.md`, M0's output, `HARNESS_DELTA.md`, `REGRESSION_ADDITIONS.md`, the `rust-wallet` paths named in the track README | Tracks 2/3/4 folders. `WATCH_fungibles.md` beyond its one-line verdict |
+| **M2 1Sat** | `track-2-1sat-ordinals/` (both files), M0's output, BRC-147/150/159/160/165, `WATCH_fungibles.md` | Tracks 3/4 folders. The old naming research |
+| **M3 OpNS** | `track-3-opns-naming/README.md`, `tokens/0174.md`, `Future-Features/Decentralized-Naming/` **once**, track 2's *outcomes* (not its folder) | Tracks 1/4 folders. The naming research a second time |
+| **M4 Backup** | `track-4-onchain-backup-sync/` (the plan is authoritative), M0's E3 answer, track 2's **measurement rows** | Tracks 1/2/3 folders |
 
 **Each M-context produces:** phase contracts from `PHASE_CONTRACT_TEMPLATE.md`, and a short
 **findings note** listing anything that contradicts this telescope output. The findings notes are the
 input to the closing telescope pass.
 
 ⛔ **M4's plan is not open for redesign.** `IMPLEMENTATION_PLAN.md` carries 8 phases, D1–D15, two
-adversarial reviews and owner sign-offs. M4 **reconciles** it against what sprints 1–3 built. If a
-sprint outcome breaks a D-decision, that is a **finding to surface**, not a licence to re-plan.
+adversarial reviews and owner sign-offs. M4 **reconciles** it against what tracks 1–3 built. If a
+track outcome breaks a D-decision, that is a **finding to surface**, not a licence to re-plan.
 
 ### Where the microscopes genuinely cross over — use a sub-loop, not a shared context
 
@@ -139,11 +139,11 @@ Only two places, and both are **narrow queries**, not merged contexts:
 | Crossover | Handle it as |
 |---|---|
 | M2 needs to know what M1's classifier produces | A **question to M1's output doc**, not a read of M1's context. If the doc cannot answer it, the doc is incomplete — fix the doc. |
-| M4 needs sprint 2's measured sizes | A **data handoff** — the measurement rows. Numbers, not narrative. |
+| M4 needs track 2's measured sizes | A **data handoff** — the measurement rows. Numbers, not narrative. |
 
 ⭐ **The rule:** if one microscope needs another's *reasoning*, that reasoning belongs in a document
 neither of them owns. If it needs another's *result*, hand over the result. Merging contexts to share
-understanding is how a four-sprint release becomes one un-reviewable plan.
+understanding is how a four-track release becomes one un-reviewable plan.
 
 ---
 
@@ -154,14 +154,14 @@ Following `HARNESS.md` §6 — fan-out is for **breadth**, not ceremony. The def
 | Where | Workflow? | Why |
 |---|---|---|
 | M0 — the edge context | ❌ | Two decisions and a spec read. One agent, one document. |
-| **S1.1 — enumerate the surface** | ✅ **call-site sweep** | The deliverable *is* completeness across a codebase. Exactly the shape `HARNESS.md` §6 already blesses for the routing predicate. **Fan out by path family** (monitor, recovery, reconcile, handlers, repos) — one agent per family, blind to the others, then reconcile the lists. Disagreement between agents is signal. |
-| S1.2–1.4 — the implementation | ❌ | Bounded, and the evidence is a test with a real output in a scratch profile. |
-| **S2.3 — token-spend permission class** | ✅ **adversarial panel** | A permission boundary. `HARNESS.md` §6 already routes security boundaries to distinct lenses, and BRC-147's MUST NOT makes this the same class as the privacy-perimeter gates. |
-| S2.1/2.2/2.4 | ❌ | Spec implementation against merged, coherent BRCs. |
-| **S2.6 — BSV-20/21 review** | ✅ **research fan-out** | It is a research phase by definition, and its gate question is answerable from the ecosystem, not our code. Cheap, parallel, and the output is findings. |
-| S3.1–3.3 | ❌ | Bounded. First-implementation friction, not breadth. |
-| **S3.4 — the overlay PoC** | ⚠️ **only if it targets §10.1 economics** | If it produces numbers, an independent verification lens is worth it. If it is a demo, one agent. |
-| S4 | ❌ | The plan already absorbed **two** adversarial reviews. A third is ceremony. |
+| **T1.1 — enumerate the surface** | ✅ **call-site sweep** | The deliverable *is* completeness across a codebase. Exactly the shape `HARNESS.md` §6 already blesses for the routing predicate. **Fan out by path family** (monitor, recovery, reconcile, handlers, repos) — one agent per family, blind to the others, then reconcile the lists. Disagreement between agents is signal. |
+| T1.2–1.4 — the implementation | ❌ | Bounded, and the evidence is a test with a real output in a scratch profile. |
+| **T2.3 — token-spend permission class** | ✅ **adversarial panel** | A permission boundary. `HARNESS.md` §6 already routes security boundaries to distinct lenses, and BRC-147's MUST NOT makes this the same class as the privacy-perimeter gates. |
+| T2.1/2.2/2.4 | ❌ | Spec implementation against merged, coherent BRCs. |
+| **T2.6 — BSV-20/21 review** | ✅ **research fan-out** | It is a research phase by definition, and its gate question is answerable from the ecosystem, not our code. Cheap, parallel, and the output is findings. |
+| T3.1–3.3 | ❌ | Bounded. First-implementation friction, not breadth. |
+| **T3.4 — the overlay PoC** | ⚠️ **only if it targets §10.1 economics** | If it produces numbers, an independent verification lens is worth it. If it is a demo, one agent. |
+| T4 | ❌ | The plan already absorbed **two** adversarial reviews. A third is ceremony. |
 | **Every phase boundary** | ✅ **regression sweep** | Independent, parallel, cheap — unchanged from beta.3. |
 
 ⛔ **Note what is not on this list.** No workflow for architecture exploration, option comparison, or
@@ -177,10 +177,10 @@ Each of these **stops the pass** until answered. Each is stated as one question 
 
 | # | Decision | Blocks | When |
 |---|---|---|---|
-| **D-1** | **RQ-2** — what restore does with an output it cannot identify. ⛔ **Decided in the sprint planning session, from a good/bad/ugly matrix M0 researches.** Not a two-option pick | S1's rule shape, S4's recovery UX | Sprint planning, after M0's research |
+| **D-1** | **RQ-2** — what restore does with an output it cannot identify. ⛔ **Decided in the track planning session, from a good/bad/ugly matrix M0 researches.** Not a two-option pick | T1's rule shape, T4's recovery UX | Track planning, after M0's research |
 | **D-2** | The **exposure question** — does an ordinary incoming 1-sat payment become a tracked default-basket row without a recovery scan? | Sizing, not design. Answer by **experiment** | M1, early |
-| **D-3** | **Is the OpNS overlay PoC in the release**, or a parallel public artifact? | S3's size | Before M3 |
-| **D-4** | **S2.6's gate question** — do wallets need BSV20/21 code at all? | Whether 2.6 stays a review | M2, at 2.6 |
+| **D-3** | **Is the OpNS overlay PoC in the release**, or a parallel public artifact? | T3's size | Before M3 |
+| **D-4** | **T2.6's gate question** — do wallets need BSV20/21 code at all? | Whether 2.6 stays a review | M2, at 2.6 |
 
 ⚠️ **D-2 is answered by running something, not by reading more code.** It has already been read twice.
 
@@ -192,10 +192,10 @@ The scoping process must scope itself. For beta.4 specifically:
 
 | | |
 |---|---|
-| **Microscope loop limit** | ⛔ **Two passes per sprint.** If a second microscope pass on the same sprint has not produced signable phase contracts, that is not a planning problem — **stop and build the smallest testable piece.** |
-| **M-context exit** | Phase contracts exist for the sprint's sub-sprints, every evidence row has a non-empty RED and SUBJECT, and the findings note is written. |
-| **Closing telescope exit** | All four findings notes read; `SPRINT_PLAN.md` and this file amended where they broke; and an explicit statement of **what did not change** — silence is not confirmation. |
-| **Loop back into a microscope** | ⛔ Only when a finding **invalidates a cross-sprint edge**. Not for detail, not for polish, not for a better idea. |
+| **Microscope loop limit** | ⛔ **Two passes per track.** If a second microscope pass on the same track has not produced signable phase contracts, that is not a planning problem — **stop and build the smallest testable piece.** |
+| **M-context exit** | Phase contracts exist for the track's phases — each candidate either confirmed into a phase or dropped with a reason — every evidence row has a non-empty RED and SUBJECT, and the findings note is written. |
+| **Closing telescope exit** | All four findings notes read; `RELEASE_PLAN.md` and this file amended where they broke; and an explicit statement of **what did not change** — silence is not confirmation. |
+| **Loop back into a microscope** | ⛔ Only when a finding **invalidates a cross-track edge**. Not for detail, not for polish, not for a better idea. |
 
 ---
 
@@ -205,10 +205,10 @@ Written down so the closing pass has something to check rather than a mood to ma
 
 | # | Belief | How it fails |
 |---|---|---|
-| 1 | The classification seam is cheap because exclusion already works | 1.1's sweep finds selection paths that bypass `output_repo` entirely. **Then sprint 1 is bigger than scoped** — the most likely way this plan breaks |
-| 2 | Ordinals are a prerequisite for names | BRC-174 turns out not to need ordinal handling at all, and sprint 3 could have run earlier |
-| 3 | The backup size problem is ancestry depth, not media | **Explicitly a hypothesis.** E2's measurement settles it. If media dominates, sprint 4's phase 3 changes shape |
-| 4 | Four sprints fit in one release | The first honest phase-contract set says otherwise. **Cut from the back** — sprint 4's plan already stands alone and can slip to beta.5 without waste |
+| 1 | The classification seam is cheap because exclusion already works | 1.1's sweep finds selection paths that bypass `output_repo` entirely. **Then track 1 is bigger than scoped** — the most likely way this plan breaks |
+| 2 | Ordinals are a prerequisite for names | BRC-174 turns out not to need ordinal handling at all, and track 3 could have run earlier |
+| 3 | The backup size problem is ancestry depth, not media | **Explicitly a hypothesis.** E2's measurement settles it. If media dominates, track 4's phase 3 changes shape |
+| 4 | Four tracks fit in one release | The first honest phase-contract set says otherwise. **Cut from the back** — track 4's plan already stands alone and can slip to beta.5 without waste |
 | 5 | Fungibles can be deferred without cost | A partner or user need forces BSV-21 mid-release. Trigger 5 in `WATCH_fungibles.md` |
 
 ⭐ **Belief 1 is the one to test first**, and 1.1 tests it on day one. If it is wrong, the release

@@ -40,7 +40,7 @@ the model question above is settled; noted so it is not discovered late.
 
 **BRC-147, 150, 159, 160, 165 are all merged and mutually coherent.** There is no competing proposal
 for the collectable model and no live dispute about how a 1-sat output carries an inscription. That
-is why sprint 2 builds on collectables with confidence and stops at the fungible boundary.
+is why track 2 builds on collectables with confidence and stops at the fungible boundary.
 
 ⚠️ **Do not generalise "1Sat is stable" from the collectable half to the fungible half.** They are in
 different states, and the ecosystem writing about "1Sat tokens" often does not distinguish them.
@@ -49,16 +49,16 @@ different states, and the ecosystem writing about "1Sat tokens" often does not d
 
 ⛔ In beta.4, **none** of the following are built:
 
-- a fungible classifier in sprint 1's classification seam;
+- a fungible classifier in track 1's classification seam;
 - `bsv21` or `1sat-ft` basket semantics;
 - BSV-21 balance, transfer, or display;
 - either encoding (BRC-161 or BRC-162).
 
-✅ What **is** done: sprint 2 phase **2.6** reviews the question *do wallets need BSV20/21 code at
+✅ What **is** done: track 2 phase **2.6** reviews the question *do wallets need BSV20/21 code at
 all, or is it only the apps that talk to wallets?* — as a **review phase producing findings**, not a
 build phase. Its output includes the state of this dispute at review time.
 
-⭐ Sprint 1's classification seam is deliberately **general** (`Spendable` / `Token` / `Unknown`,
+⭐ Track 1's classification seam is deliberately **general** (`Spendable` / `Token` / `Unknown`,
 fail closed on `Unknown`) so that a fungible classifier can be added later **without reopening the
 call sites**. That is the whole reason the seam is general rather than a 1-sat value check. Deferring
 fungibles costs us a classifier, not an architecture.
@@ -78,15 +78,15 @@ Re-check when **any one** of these becomes true. Not on a calendar; on an event.
 **On any trigger, the re-check answers three questions, in order:**
 
 1. Is there now **one** model, or still two?
-2. Does the winning model change what sprint 1's classification seam must produce? (If yes, that is a
-   sprint-1 amendment, not a new sprint.)
-3. Is there **anything to test against**? ⚠️ The testing problem from sprint 2.6 does not go away
+2. Does the winning model change what track 1's classification seam must produce? (If yes, that is a
+   track-1 amendment, not a new track.)
+3. Is there **anything to test against**? ⚠️ The testing problem from track 2.6 does not go away
    when the spec settles: most 1Sat/BSV21 apps ship their own wallets, so we may have no
    counterparty. **A capability we cannot test is not a capability we can claim.**
 
 ⛔ **A merged BRC is not, by itself, a trigger to build.** BRC-174 — ours — merged with zero review
 comments, and merging is publication, not endorsement. Condition 1 above opens a *review*, not a
-sprint.
+track.
 
 ## Log
 
@@ -94,4 +94,4 @@ sprint.
 |---|---|---|
 | 2026-08-27 | BRC-175 opened (`1sat-ft`), competing with BRC-163 | — |
 | 2026-08-28 | BRC-163 merged (`bsv21`) | Dispute now merged-vs-open, one day apart |
-| 2026-08-29 | Fungibles deferred for beta.4; this watch opened | Sprint 1 seam kept general so the deferral is reversible |
+| 2026-08-29 | Fungibles deferred for beta.4; this watch opened | Track 1 seam kept general so the deferral is reversible |

@@ -1,7 +1,7 @@
 # 🎫 Session restore keeps only the last window's tabs — every other window's tabs are lost on quit
 
 **Found:** 2026-08-31, running beta.3 Phase 3.5's `P3.5-A4` row (the do-not-convert control)
-**Status:** ⬜ UNASSIGNED · **Sprint:** unassigned (beta.4 candidate) · **Filed by:** Phase 3.5
+**Status:** ⬜ UNASSIGNED · **Track:** unassigned (beta.4 candidate) · **Filed by:** Phase 3.5
 
 > ⚠️ **Method note.** The **failure is MEASURED** — two windows with distinct external tabs, quit,
 > and `session.json` came back holding one. The **cause is a CODE READING** of `ShellWindowProc`'s

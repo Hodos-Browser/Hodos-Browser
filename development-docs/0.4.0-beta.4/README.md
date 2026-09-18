@@ -1,29 +1,66 @@
-# beta.4 sprint — scope and running order
+# beta.4 release — scope and running order
 
 **Opened:** 2026-08-29, from `SESSION_PROMPT_beta4_kickoff.md` (the telescope pass).
-**Status:** 🔭 TELESCOPED. Sprint-level scope is set; **no phase-level design exists yet** and none
+**Status:** 🔭 TELESCOPED. Track-level scope is set; **no phase-level design exists yet** and none
 should be written here. The microscope pass produces that — see `TELESCOPE.md`.
 
 > **Naming.** This folder produces **`v0.4.0-beta.4`**. It sits beside `0.4.0-beta.3/`, which is
 > still live and owned by another session. ⛔ **Do not edit anything under `0.4.0-beta.3/`.**
+
+## The naming convention — settled 2026-09-18, applies from beta.4 forward
+
+👤 Owner decision. Four rungs, all named from the field, and **"sprint" is retired as a scope word**
+— in Scrum, SAFe and Shape Up it names a *timebox*, never a chunk of work, which is what made
+"the beta.4 sprint" and "sprint 2" collide.
+
+| Rung | Name | What it is | Artifact | Example here |
+|---|---|---|---|---|
+| 1 | **Release** | the version we ship, 1–3 months | `README.md`, `RELEASE_PLAN.md` | `v0.4.0-beta.4` |
+| 2 | **Track** | one of the 4–5 big parallel efforts — a feature, or a bug bundle | folder + scope doc | Track 2 — 1Sat Ordinals |
+| 3 | **Phase** | a slice of a track finished and **verified on its own** | **phase contract** + evidence table | *(none yet — microscope produces them)* |
+| 3.5 | **Sub-phase** | ⭐ **optional, used only when needed.** A phase that grew too big to verify in one contract splits into sub-phases, each with its own | its own phase contract | — |
+| 4 | **Item** | one numbered defect or row inside a phase | a row in the evidence table | `A1` |
+
+⭐ **Sub-phase is a pressure valve, not a required rung.** Most phases go straight to items. Reach
+for it when a phase has too many large items to carry one honest evidence table — and when you do,
+say so in the phase contract rather than letting it happen silently.
+
+⛔ **Never write a bare rung number.** Every reference starts at the release: *"beta.4, Track 2
+(1Sat Ordinals), Phase 3"* in prose, **`B4-T2-P3`** as a short id — `B4-T2-P3.1` for a sub-phase. A
+sentence that opens with "track 2" does not say which release, and beta.3 is live beside this one.
+
+## Statuses, which are not rungs
+
+**Candidate phase** — a proposal, during a pass, for something that *may* become a phase. It means
+exactly what the words mean: we are looking into making it one. It becomes a **Phase** when the
+microscope pass confirms it, and the heading over it changes from *Candidate phases* to *Phases*.
+⛔ It is not a name for a rung, and nothing is a candidate once it has a contract.
+
+⭐ **"Phase" means rung 3 and nothing else.** The planning stages are **passes** — the *telescope
+pass* sets the tracks, the *microscope pass* turns one track into phases. ⛔ Do not write "scoping
+phase"; write "telescope pass" or "scoping".
+
+⚠️ **beta.3 is not renamed and will not be.** It ships in days and its vocabulary is internally
+consistent; it simply calls rung 3 a phase and has no name for rung 2. Read `0.4.0-beta.3/` as
+written. This convention starts here.
 
 ---
 
 ## What beta.4 is
 
 beta.3 is browser-shell work — overlays, DPI, window identity, logging, the trust boundary.
-**beta.4 is the wallet's asset layer.** Four sprints, in a fixed order, that take the wallet from
+**beta.4 is the wallet's asset layer.** Four tracks, in a fixed order, that take the wallet from
 "cannot tell a token from a coin" to "holds, spends and recovers tokens deliberately".
 
-| # | Sprint | Folder | One-line goal |
+| # | Track | Folder | One-line goal |
 |---|---|---|---|
-| **0** | **`reqwest` 0.11 → 0.12+** — the wallet's TLS certificate validator | `sprint-0-reqwest-tls-bump/` | Every outbound HTTPS call validates the server with a library that has no open advisories, without changing what the wallet sends or signs. 👤 **Added 2026-09-15 by owner decision** from the beta.3 Phase 9 dependency review; sits *ahead of* the settled 1–4 order because it is a money-path dependency change, not an asset-layer feature |
-| **0.5** | **UTXO reservation ownership** — `../TICKET_reservation_ownership_converge_on_spent_by.md` | *(folder at its microscope pass)* | Reservations are owned by a transaction row (`spent_by`), not a placeholder string, converging on wallet-toolbox. 👤 Placed here 2026-09-15: the ticket forbids doing it in beta.3 (it reorders `create_action_internal`), and sprint 1's classification seam touches the same `output_repo` exclusion logic, so it should land **before** the guard, not under it. Owner to confirm at the beta.4 kickoff |
-| 1 | **UTXO safety guard** | `sprint-1-utxo-safety-guard/` | No path — automatic or manual — can spend an output the wallet has not classified as spendable |
-| 2 | **1Sat Ordinals** | `sprint-2-1sat-ordinals/` | Hold, display, receive and deliberately transfer 1Sat ordinals to BRC-147 + BRC-150 |
-| 3 | **OpNS unique names** | `sprint-3-opns-naming/` | Resolve and register OpNS names against BRC-174, with a live overlay proof-of-concept |
-| 4 | **On-chain backup & sync** | `sprint-4-onchain-backup-sync/` | Delta-chain backup measured against real token workloads, multi-device sync |
-| — | Tickets | `tickets/` | Reviewed and assigned into sprints by the owner, not worked ad hoc |
+| **0** | **`reqwest` 0.11 → 0.12+** — the wallet's TLS certificate validator | `track-0-reqwest-tls-bump/` | Every outbound HTTPS call validates the server with a library that has no open advisories, without changing what the wallet sends or signs. 👤 **Added 2026-09-15 by owner decision** from the beta.3 Phase 9 dependency review; sits *ahead of* the settled 1–4 order because it is a money-path dependency change, not an asset-layer feature |
+| **0.5** | **UTXO reservation ownership** — `../TICKET_reservation_ownership_converge_on_spent_by.md` | *(folder at its microscope pass)* | Reservations are owned by a transaction row (`spent_by`), not a placeholder string, converging on wallet-toolbox. 👤 Placed here 2026-09-15: the ticket forbids doing it in beta.3 (it reorders `create_action_internal`), and track 1's classification seam touches the same `output_repo` exclusion logic, so it should land **before** the guard, not under it. Owner to confirm at the beta.4 kickoff |
+| 1 | **UTXO safety guard** | `track-1-utxo-safety-guard/` | No path — automatic or manual — can spend an output the wallet has not classified as spendable |
+| 2 | **1Sat Ordinals** | `track-2-1sat-ordinals/` | Hold, display, receive and deliberately transfer 1Sat ordinals to BRC-147 + BRC-150 |
+| 3 | **OpNS unique names** | `track-3-opns-naming/` | Resolve and register OpNS names against BRC-174, with a live overlay proof-of-concept |
+| 4 | **On-chain backup & sync** | `track-4-onchain-backup-sync/` | Delta-chain backup measured against real token workloads, multi-device sync |
+| — | Tickets | `tickets/` | Reviewed and assigned into tracks by the owner, not worked ad hoc |
 
 ## Why this order — settled, do not relitigate
 
@@ -32,12 +69,12 @@ beta.3 is browser-shell work — overlays, DPI, window identity, logging, the tr
 1. **Guard is first because the hazard is already live.** Users can receive a 1-sat output at a Hodos
    address today, and three code paths treat it as spendable value — one of them
    (`monitor/task_consolidate_dust.rs`) runs automatically every 24 hours with no user action. Every
-   later sprint *creates* the assets those paths destroy. Shipping sprint 2 before sprint 1 means
-   shipping a feature and its own destroyer in the same release. **This sprint is needed even if we
+   later track *creates* the assets those paths destroy. Shipping track 2 before track 1 means
+   shipping a feature and its own destroyer in the same release. **This track is needed even if we
    never ship ordinals.**
 2. **1Sat before OpNS** because an OpNS name is carried by a 1-sat output. Names inherit ordinal
    handling; building names first means building ordinal handling badly, twice.
-3. **OpNS before Backup** because names are the second real token workload, and the backup sprint's
+3. **OpNS before Backup** because names are the second real token workload, and the backup track's
    central open question is measured against real rows.
 4. **Backup last** because BRC-150 provenance rows (`beefB64`) *are* the token-heavy workload that
    deltas exist to solve. Sequencing it last means measuring a workload that exists rather than
@@ -47,9 +84,9 @@ beta.3 is browser-shell work — overlays, DPI, window identity, logging, the tr
 
 | # | Question | Decision |
 |---|---|---|
-| 1 | Minimal defensive floor in beta.3? | ✅ **Yes — ship now.** `satoshis > 1` floor in the dust consolidator, recovery sweep and the coin-selection dust pass, landing in beta.3 under its existing ticket. Do **not** wait on the exposure question; it changes urgency, not correctness. The full classification guard stays sprint 1. |
+| 1 | Minimal defensive floor in beta.3? | ✅ **Yes — ship now.** `satoshis > 1` floor in the dust consolidator, recovery sweep and the coin-selection dust pass, landing in beta.3 under its existing ticket. Do **not** wait on the exposure question; it changes urgency, not correctness. The full classification guard stays track 1. |
 | 2 | Harness: inherit or fork? | ✅ **Reference beta.3, extend by delta.** `../0.4.0-beta.3/HARNESS.md` and `REGRESSION_SET.md` are the standard. beta.4's additions live in `HARNESS_DELTA.md` and `REGRESSION_ADDITIONS.md` only. Fold both into a version-neutral `development-docs/HARNESS.md` **after** beta.3 closes. |
-| 3 | Guard reach in sprint 1? | ✅ **General seam, one classifier.** Build the classification point with a general shape (`Spendable` / `Token` / `Unknown`, fail closed on `Unknown`); implement only the 1-sat/inscription classifier. BSV-20/21 slots in later as a classifier, not as a rewrite of the call sites. |
+| 3 | Guard reach in track 1? | ✅ **General seam, one classifier.** Build the classification point with a general shape (`Spendable` / `Token` / `Unknown`, fail closed on `Unknown`); implement only the 1-sat/inscription classifier. BSV-20/21 slots in later as a classifier, not as a rewrite of the call sites. |
 
 ## The harness — inherited, not copied
 
@@ -78,16 +115,16 @@ And its beta.4 restatement, because this release handles assets that cannot be r
 
 ## Folder mechanics — done 2026-08-29
 
-Both prior standalone sprint folders were **moved into this folder**, not copied — originals no
+Both prior standalone track folders were **moved into this folder**, not copied — originals no
 longer exist, and BSV-21 is out of the ordinals folder name per §2 of the kickoff:
 
 | Was | Now |
 |---|---|
-| `development-docs/1SatOrdinals-BSV21/` | `0.4.0-beta.4/sprint-2-1sat-ordinals/` |
-| `development-docs/Onchain-Backup-and-Sync/` | `0.4.0-beta.4/sprint-4-onchain-backup-sync/` |
+| `development-docs/1SatOrdinals-BSV21/` | `0.4.0-beta.4/track-2-1sat-ordinals/` |
+| `development-docs/Onchain-Backup-and-Sync/` | `0.4.0-beta.4/track-4-onchain-backup-sync/` |
 
 Cross-references rewritten in `development-docs/README.md`, the moved
-`SPRINT_KICKOFF_PROMPT.md`, and four `research/*.md` files. Verified: **zero stale references remain
+`TRACK_KICKOFF_PROMPT.md`, and four `research/*.md` files. Verified: **zero stale references remain
 outside `0.4.0-beta.3/`.**
 
 ⚠️ **Six files under `0.4.0-beta.3/` still carry the old paths** — five `SESSION_PROMPT_beta3_*.md`
@@ -96,26 +133,26 @@ another session owns that folder. Five of the six are historical session prompts
 The ticket is live and its "Links" section points at the old ordinals path — **that one is owed**, and
 belongs to whoever next touches beta.3.
 
-## What each sprint folder contains right now
+## What each track folder contains right now
 
 | Folder | State |
 |---|---|
-| `sprint-1-utxo-safety-guard/` | ⬜ **New. Scope only** (`README.md`). No prior research existed; sprint 1 was created at this kickoff. |
-| `sprint-2-1sat-ordinals/` | 🟡 Carried in: `README.md` (scope + the 2026-08-05 BRC-147/150 decision) and `RESEARCH_FINDINGS.md` (protocol mechanics, provider APIs, indexer infrastructure). Both predate the guard work — read against `TELESCOPE.md` before trusting scope claims. |
-| `sprint-3-opns-naming/` | ⬜ **New. Scope only.** ⛔ A new naming sprint doc is **required** — see below. |
-| `sprint-4-onchain-backup-sync/` | 🟢 Carried in and **authoritative**: `IMPLEMENTATION_PLAN.md` (8 phases, D1–D15 decisions, two adversarial reviews, owner sign-offs), `README.md`, `ADVERSARIAL_REVIEW.md`, `research/`. ⛔ **Not to be redesigned.** |
+| `track-1-utxo-safety-guard/` | ⬜ **New. Scope only** (`README.md`). No prior research existed; track 1 was created at this kickoff. |
+| `track-2-1sat-ordinals/` | 🟡 Carried in: `README.md` (scope + the 2026-08-05 BRC-147/150 decision) and `RESEARCH_FINDINGS.md` (protocol mechanics, provider APIs, indexer infrastructure). Both predate the guard work — read against `TELESCOPE.md` before trusting scope claims. |
+| `track-3-opns-naming/` | ⬜ **New. Scope only.** ⛔ A new naming track doc is **required** — see below. |
+| `track-4-onchain-backup-sync/` | 🟢 Carried in and **authoritative**: `IMPLEMENTATION_PLAN.md` (8 phases, D1–D15 decisions, two adversarial reviews, owner sign-offs), `README.md`, `ADVERSARIAL_REVIEW.md`, `research/`. ⛔ **Not to be redesigned.** |
 
 ⛔ **`Future-Features/Decentralized-Naming/`** (README, `OPNS_REVIEW.md`, `OPNS_RESOLVER_SCOPE.md`,
 Xanaverse review) **predates BRC-174 and will be archived.** It stays where it is, is read **once**
-during the sprint-3 outline pass, and is **not referenced after that**. Sprint 3 gets a new doc built
+during the track-3 outline pass, and is **not referenced after that**. Track 3 gets a new doc built
 on the merged BRC, not on the old research.
 
 ## Ecosystem position — as of 2026-08-29
 
 | | |
 |---|---|
-| **BRC-174** (ours, OpNS) | **MERGED** 2026-08-28 as `tokens/0174.md`, zero review comments. The development base for sprint 3. ⚠️ Merging is publication, **not endorsement** — §4 and §10.1 are unimplemented by anyone. |
-| **Collectables** — BRC-147, 150, 159, 160, 165 | All merged and mutually coherent. **Safe to build on.** This is sprint 2's foundation. |
+| **BRC-174** (ours, OpNS) | **MERGED** 2026-08-28 as `tokens/0174.md`, zero review comments. The development base for track 3. ⚠️ Merging is publication, **not endorsement** — §4 and §10.1 are unimplemented by anyone. |
+| **Collectables** — BRC-147, 150, 159, 160, 165 | All merged and mutually coherent. **Safe to build on.** This is track 2's foundation. |
 | **Fungibles** — BRC-163 vs BRC-175 | 🔴 **Contested. Do not build on.** See `WATCH_fungibles.md` for the state and the explicit re-check gate. |
 | **BSV-21 encodings** | Two exist: BRC-161 (JSON) and BRC-162 (binary/CBOR). Relevant only if the fungibles gate ever opens. |
 
@@ -123,7 +160,7 @@ on the merged BRC, not on the old research.
 
 Read by direct inspection of `rust-wallet` on 2026-08-29. Full detail in
 `0.4.0-beta.3/TICKET_token_outputs_destroyed_by_dust_paths.md` (read-only) and in
-`sprint-1-utxo-safety-guard/README.md`.
+`track-1-utxo-safety-guard/README.md`.
 
 **Nothing files a 1-sat output into a protective basket, and three paths treat it as spendable:**
 
@@ -154,30 +191,30 @@ one. This changes **urgency, not the fix** — which is why the beta.3 floor shi
 - ⛔ **Spend is a `createAction` label** (`p 1sat input id <key>`), not a basket. **BRC-147 says pay
   and auto-pay grants MUST NOT authorize ordinal spends.** So the auto-approve engine needs a
   separate token-spend permission class, and the approval modals must show which baskets and
-  sub-categories a grant covers. This lands in sprint 2, and it touches the privacy-perimeter
+  sub-categories a grant covers. This lands in track 2, and it touches the privacy-perimeter
   surface — treat it with the seriousness of `R-PERIM`.
 
 ## What "done" looks like for beta.4
 
 To be filled in at the end of the microscope pass, not now. Two structural rules that hold regardless:
 
-1. **Every sprint doc sets specific goals with well-defined outcomes** for functions and tests,
+1. **Every track doc sets specific goals with well-defined outcomes** for functions and tests,
    against the testing methods identified by research (c) — see `research/`.
-2. **A sprint that ships a token capability without the guard in front of it is not done**, however
+2. **A track that ships a token capability without the guard in front of it is not done**, however
    green its own evidence table is.
 
-## Decisions owed before sprint 1 implementation starts
+## Decisions owed before track 1 implementation starts
 
 1. **Exposure question** (above) — answer by experiment, not by reading. Sizes the guard's urgency
    and tells us whether existing users are already affected.
 2. **Where the classification seam sits** — ingest-only, or ingest plus a verification pass on
    reconcile. Microscope decision; do not settle it here.
 3. **The BSV-20/21 review phase's own gate question** (owner's): *do wallets need BSV20/21 code at
-   all, or is it only the apps that talk to wallets?* Carried into sprint 2 as a **review** phase,
+   all, or is it only the apps that talk to wallets?* Carried into track 2 as a **review** phase,
    not a build phase. Record the testing problem with it: most 1Sat/BSV21 apps ship their own
    wallets, so we may have nothing to test against.
 4. **Whether the OpNS overlay PoC is in scope for the release** or is a parallel public artifact.
-   Sprint 3 treats it as a live PoC, not a production feature — confirm that reading.
+   Track 3 treats it as a live PoC, not a production feature — confirm that reading.
 
 ## Reading order for a fresh session
 
@@ -186,12 +223,12 @@ on record, what is still owed, and a paste-able restart prompt.
 
 ```
 0. RESUME_beta4.md         ← if you are picking this up cold
-1. TELESCOPE.md            ← how the four sprints interact, and how to run the microscope pass
-2. SPRINT_PLAN.md          ← the sprint-level breakdown
+1. TELESCOPE.md            ← how the four tracks interact, and how to run the microscope pass
+2. RELEASE_PLAN.md          ← the track-level breakdown
 3. ../0.4.0-beta.3/HARNESS.md + REGRESSION_SET.md   ← the standard
 4. HARNESS_DELTA.md + REGRESSION_ADDITIONS.md       ← what beta.4 adds to it
-5. the one sprint folder you are working in — and no others
+5. the one track folder you are working in — and no others
 ```
 
-⛔ **Do not read all four sprint folders in one context.** That is the specific mistake
+⛔ **Do not read all four track folders in one context.** That is the specific mistake
 `TELESCOPE.md` §"Context strategy" exists to prevent.

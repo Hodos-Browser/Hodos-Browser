@@ -3,7 +3,7 @@
 **Found:** 2026-09-17, planning the Q4 marketing push. Download counts are the only user signal we
 have, and `Hodos/marketing/Metrics/DOWNLOAD_METRICS.md` says itself that they do not answer the
 question.
-**Status:** ⬜ UNASSIGNED · **Sprint:** unassigned · **Filed by:** owner (Matt), 2026-09-17
+**Status:** ⬜ UNASSIGNED · **Track:** unassigned · **Filed by:** owner (Matt), 2026-09-17
 
 > ⚠️ **Method note.** The measurement below is **read from our own metrics doc**, not re-pulled today.
 > The design in *Proposed fix* is **a design, nothing built and nothing tested** — no endpoint exists,

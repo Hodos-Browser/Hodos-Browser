@@ -1,7 +1,7 @@
 # 🎫 Split view — our tab model allows exactly one visible tab per window
 
 **Found:** 2026-09-01, 👤 owner raised it while reviewing the Phase 4 tab menu
-**Status:** ⬜ UNASSIGNED · **Sprint:** unassigned (beta.4 candidate) · **Filed by:** Phase 4
+**Status:** ⬜ UNASSIGNED · **Track:** unassigned (beta.4 candidate) · **Filed by:** Phase 4
 
 > ⚠️ **Method note.** This is **code reading** plus one live observation of Chrome's feature. Nothing
 > was prototyped. The cost estimate below is therefore a **shape**, not a number — treat "which

@@ -37,7 +37,7 @@ Consequences for evidence tables in this release:
 
 ### 1.2 Destructive tests need a real subject and a scratch profile
 
-The paths under test in sprint 1 **destroy assets** when they work as currently written. That is the
+The paths under test in track 1 **destroy assets** when they work as currently written. That is the
 point of testing them.
 
 - ⛔ Never against the production profile. `REGRESSION_SET.md`'s existing rule ("where a RED is
@@ -45,14 +45,14 @@ point of testing them.
 - The negative control for the guard is *deliberately destroying a test asset*. Budget for staging
   real 1-sat outputs, and record their outpoints in the contract.
 
-### 1.3 Measurement rows — a new obligation on sprint 2
+### 1.3 Measurement rows — a new obligation on track 2
 
-Sprint 4's central question is answered with **sprint 2's data**. So sprint 2's contracts carry rows
+Track 4's central question is answered with **track 2's data**. So track 2's contracts carry rows
 whose result is a **number**, not a pass:
 
 | Obligation | Why |
 |---|---|
-| Record real BRC-150 provenance row sizes (`beefB64`) as they land | Sprint 4 measures against them. Retrospective measurement is guesswork with better manners. |
+| Record real BRC-150 provenance row sizes (`beefB64`) as they land | Track 4 measures against them. Retrospective measurement is guesswork with better manners. |
 | Record ancestry depth, not just byte size | The stated hypothesis is that depth, not media, is the size problem. A hypothesis needs the variable it names. |
 
 ⚠️ `HARNESS.md` §8 already says *do not record a cause you have not reproduced*. A measurement row
@@ -77,7 +77,7 @@ exists is a gate whose baseline is a guess.
 
 | Candidate | What it would catch | Decide at |
 |---|---|---|
-| A gate on **UTXO-selecting code paths that do not consult the classification** | The sprint-1 failure recurring silently in a path added later | Sprint 1 microscope |
+| A gate on **UTXO-selecting code paths that do not consult the classification** | The track-1 failure recurring silently in a path added later | Track 1 microscope |
 
 ⛔ If it is added: **baseline it with `preflight.ps1` itself**, never a hand grep — `HARNESS.md` §9
 records two gates whose hand counts were wrong (`G2` 6→5, `G5` 11→15), and that is the stated reason
@@ -104,7 +104,7 @@ Adopting an item is a decision recorded here with a reason, the same as lowering
 
 | Item | Why it matters to this release |
 |---|---|
-| ⭐ **`cargo-mutants --in-diff`** on `hodos_permission_engine` | Sprint 2.3 adds a token-spend permission class to that crate. Mutation testing there is the mechanised form of the hand negative control, on the code where a false green costs the most |
+| ⭐ **`cargo-mutants --in-diff`** on `hodos_permission_engine` | Track 2.3 adds a token-spend permission class to that crate. Mutation testing there is the mechanised form of the hand negative control, on the code where a false green costs the most |
 | ⭐ **Split the standing set into R-EVERY (automatable) / R-RELEASE (human, timeboxed, scheduled)** | `R-GOLD`, `R-CLOSE` and `R-COUNT` have been *"owed, not waived"* at every beta.3 boundary because four of six rows need a human and **nobody budgeted the minutes**. beta.4 adds four more rows, three of which need a real wallet and real outputs. ⛔ **Without the split, beta.4 inherits the same debt and doubles it** |
 
 ⚠️ The second one is a change to beta.3's file, which this session cannot make. It is recorded here
@@ -117,4 +117,4 @@ as the recommendation for the merged `HARNESS.md` after beta.3 closes — and as
 
 | Date | Change |
 |---|---|
-| 2026-08-29 | Opened. Fail-closed rule, destructive-test rule, measurement obligation on sprint 2. No new tiers, no new gates. |
+| 2026-08-29 | Opened. Fail-closed rule, destructive-test rule, measurement obligation on track 2. No new tiers, no new gates. |

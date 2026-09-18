@@ -1,7 +1,7 @@
 # ⚠️ The frontend e2e specs test the wrong subject, and nothing runs them
 
 **Found:** 2026-08-29, by the research (c) testing-practice pass during beta.4 scoping.
-**Status:** ⬜ UNASSIGNED · **Sprint:** unassigned · **Filed by:** beta.4 telescope session
+**Status:** ⬜ UNASSIGNED · **Track:** unassigned · **Filed by:** beta.4 telescope session
 
 > ⚠️ **Method note.** This is a **second-hand report**, not a first-hand reading. It comes from
 > research task (c) (`../research/RESEARCH_c_testing_practice.md`), which read the repo directly.

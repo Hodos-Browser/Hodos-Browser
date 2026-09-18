@@ -1,6 +1,6 @@
 # D2 — Adversarial completeness critique of IMPLEMENTATION_PLAN.md
 
-**Task:** D2. **Date:** 2026-08-23. **Target:** `development-docs/0.4.0-beta.4/sprint-4-onchain-backup-sync/IMPLEMENTATION_PLAN.md` (read in full, 554 lines).
+**Task:** D2. **Date:** 2026-08-23. **Target:** `development-docs/0.4.0-beta.4/track-4-onchain-backup-sync/IMPLEMENTATION_PLAN.md` (read in full, 554 lines).
 **Verdict: FIX-THEN-SHIP.** The plan satisfies the contract's structure completely — every clause has a
 home, every A3 constraint is placed, every required harness scenario exists with pass/fail — but it
 contains two HIGH gaps (one internal contradiction that makes G2/H9 fail by design; one cost-floor
@@ -236,7 +236,7 @@ found; no license-tainted adoption found.
 - Research reports, in full: A1 (259 ln), A3 (230 ln), B2 (192 ln); targeted full-section reads of
   C1 (SyncChunk semantics, what-aligns/what-doesn't, flags 1–7), C2 (§1 divergences, §5 conformance,
   addendum 1–6), C3 (§1 opaque-blob, §2 chaining/retention, comparison table rows, flags).
-- `0.4.0-beta.4/sprint-4-onchain-backup-sync/README.md` — items table (137–160), decided block + Open Q1–7 + tests
+- `0.4.0-beta.4/track-4-onchain-backup-sync/README.md` — items table (137–160), decided block + Open Q1–7 + tests
   T1–T7 (225–287).
 - `DELTA_ANALYSIS.md` — §3 snapshot rule (lines 93–111 region).
 - Code (Hodos @ working tree ≈ `6b4a4be`): `handlers.rs:13595-13610` (no-service-fee comment +

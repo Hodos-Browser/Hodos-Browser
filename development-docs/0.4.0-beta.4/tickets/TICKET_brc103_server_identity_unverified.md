@@ -3,7 +3,7 @@
 **Found:** 2026-09-16, reading `rust-wallet/src/authfetch.rs` while assessing the upstream
 `@bsv/sdk` 2.7.1 authentication fix. **Nobody reported this to us** — it is not an upstream advisory,
 not a CVE, and not a GHSA.
-**Status:** ⬜ UNASSIGNED · **Sprint:** proposed beta.4 · **Filed by:** Claude, confirmed with the owner
+**Status:** ⬜ UNASSIGNED · **Track:** proposed beta.4 · **Filed by:** Claude, confirmed with the owner
 
 > ⚠️ **Method note.** Everything below is **code reading**, on both sides: our `authfetch.rs` and the
 > reference `Peer.ts` in `reference/ts-stack`. ⛔ **Nothing was executed and nothing was measured.** No
@@ -92,7 +92,7 @@ a TLS connection that says nothing about BSV identity.
 
 ⛔ **Not a beta.3 interrupt.** Phase 10 is mid-flight on the critical advisories, there is no
 compatibility break forcing a date, and no path to spending money has been found through this. Owner
-decision 2026-09-16: **talk first, do not add to the current sprint.**
+decision 2026-09-16: **talk first, do not add to the current track.**
 
 ## What already protects us, and how that shapes the fix
 

@@ -1,7 +1,7 @@
 # <emoji> <One-line statement of the defect, in the present tense>
 
 **Found:** <date>, <how — reading which file, running what, or reported by whom>
-**Status:** ⬜ UNASSIGNED · **Sprint:** unassigned · **Filed by:** <who>
+**Status:** ⬜ UNASSIGNED · **Track:** unassigned · **Filed by:** <who>
 
 > ⚠️ **Method note.** State plainly which claims below are **code reading** and which are
 > **measurement**, and name the one thing you did **not** verify. Delete this line only when you have
@@ -57,4 +57,4 @@ in the diff.>
 
 ## Links
 
-<Related tickets, sprint docs, BRCs, prior sessions. Use paths that resolve today — check them.>
+<Related tickets, track docs, BRCs, prior sessions. Use paths that resolve today — check them.>

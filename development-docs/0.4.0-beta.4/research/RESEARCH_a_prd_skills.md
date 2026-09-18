@@ -213,7 +213,7 @@ measurable outcome"* — that is `PHASE_CONTRACT_TEMPLATE` §2 in one sentence, 
 
 **8. "Falsifiable check: static vs dynamic" (`project-artifact/swe.md`).** Adopt the phrasing for GREEN/RED
 cells — *static:* "this diff is empty" (our T0 gates); *dynamic:* "run X with the flag on, observe Y stays
-flat". Also consider **X.Y phase numbering** for `SPRINT_PLAN.md`: `X` increments on a blocking dependency,
+flat". Also consider **X.Y phase numbering** for `RELEASE_PLAN.md`: `X` increments on a blocking dependency,
 `Y` for parallel work, so the ID carries the ordering and no dependency diagram is needed.
 
 **9. Completion as a transcript, not a claim (`bsv-skills/PRD-TEMPLATE.md`).** The sign-off block should be

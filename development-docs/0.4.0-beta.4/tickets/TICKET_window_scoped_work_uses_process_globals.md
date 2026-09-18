@@ -1,7 +1,7 @@
 # 🪟 Window-scoped work is performed against process-globals, so one window acts on another
 
 **Found:** 2026-08-26 → 2026-08-30, during the beta.3 Phase 3 (WS2) kickoff — two symptoms reported by the owner at the machine, mechanism established by code reading, scale established by counting.
-**Status:** ⬜ UNASSIGNED · **Sprint:** unassigned · **Filed by:** Phase 3 kickoff session
+**Status:** ⬜ UNASSIGNED · **Track:** unassigned · **Filed by:** Phase 3 kickoff session
 
 > ⚠️ **Method note.** The **two symptoms** are 👤 owner-observed measurements. The **mechanism** is a
 > 📖 code reading — no debugger was attached. The **counts** are 📏 measured by `grep`, but they are

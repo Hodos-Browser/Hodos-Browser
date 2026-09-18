@@ -10,8 +10,8 @@
 
 ## 1. Where things stand, in one paragraph
 
-The **telescope pass is done**. The release is scoped into four sprints in a settled order, the
-cross-sprint edges are named, the harness question is decided, the folders are moved, and the
+The **telescope pass is done**. The release is scoped into four tracks in a settled order, the
+cross-track edges are named, the harness question is decided, the folders are moved, and the
 reusable scoping process exists. **Nothing has been designed at phase level and no code has been
 written.** The next stage is the **microscope pass**, and it should not start until beta.3 ships.
 
@@ -20,12 +20,12 @@ written.** The next stage is the **microscope pass**, and it should not start un
 ⛔ **Do not re-scope.** The order and the three kickoff decisions are settled (§4 below).
 
 ```
-1. Read  0.4.0-beta.4/README.md         ← scope, the four sprints, decisions on record
-2. Read  0.4.0-beta.4/TELESCOPE.md      ← the cross-sprint edges + how to split the microscope work
+1. Read  0.4.0-beta.4/README.md         ← scope, the four tracks, decisions on record
+2. Read  0.4.0-beta.4/TELESCOPE.md      ← the cross-track edges + how to split the microscope work
 3. Then run the FIRST MICROSCOPE STEP — described in plain terms in §3 below
 ```
 
-Everything else is read **when you get to that sprint**, not before.
+Everything else is read **when you get to that track**, not before.
 
 ## 3. The first microscope step, in plain English
 
@@ -34,8 +34,8 @@ Everything else is read **when you get to that sprint**, not before.
 > **Before splitting the work up between four separate sessions, run one session on the two questions
 > those four sessions would otherwise each answer differently.**
 
-The four sprints get one fresh session each, deliberately kept apart so no session has to hold the
-whole release in its head. But two questions sit *between* sprints, and if each session answers them
+The four tracks get one fresh session each, deliberately kept apart so no session has to hold the
+whole release in its head. But two questions sit *between* tracks, and if each session answers them
 on its own you get four incompatible answers.
 
 ⛔ **Owner correction, 2026-08-30: both of these are RESEARCH TASKS, not decisions to be made on the
@@ -45,9 +45,9 @@ was answerable in the telescope session and neither should be answered from firs
 ### ⭐ RQ-1 — What does "this output is a token" get saved as? *(the top design question)*
 
 **The question.** When the wallet decides an output is a token rather than spendable money, **where
-does that fact get stored, and in what form?** Sprint 1 has to build this. Sprint 2 then implements
-the ordinals spec, which has its own rules for how tokens are filed. If sprint 1 guesses and the spec
-disagrees, sprint 2 rewrites the one thing the release's safety rests on.
+does that fact get stored, and in what form?** Track 1 has to build this. Track 2 then implements
+the ordinals spec, which has its own rules for how tokens are filed. If track 1 guesses and the spec
+disagrees, track 2 rewrites the one thing the release's safety rests on.
 
 ⛔ **Do not design this from first principles. Go and find out how it is already done, and why.**
 
@@ -73,7 +73,7 @@ output it cannot classify, what should happen?
 
 ⛔ **Owner correction, 2026-08-30: this needs a full conversation and a good / bad / ugly outcome
 matrix, not a two-option recommendation.** My earlier framing (two options, pick A) was too thin for
-the decision it is carrying. **It belongs in the sprint planning session, with the research done
+the decision it is carrying. **It belongs in the track planning session, with the research done
 first.**
 
 **What M0 must produce for it:**
@@ -95,7 +95,7 @@ finds out much later, if ever. That is why `R-RESTORE` in `REGRESSION_ADDITIONS.
 
 | | Decision | When |
 |---|---|---|
-| **Sprint order** | Guard → 1Sat → OpNS → Backup, then tickets. Each is a prerequisite for the next | 2026-08-29 |
+| **Track order** | Guard → 1Sat → OpNS → Backup, then tickets. Each is a prerequisite for the next | 2026-08-29 |
 | **beta.3 floor** | The `satoshis > 1` stopgap ships in **beta.3**, not beta.4 | 2026-08-29 |
 | **Harness** | beta.4 **references** beta.3's `HARNESS.md` / `REGRESSION_SET.md`; additions live in `HARNESS_DELTA.md` / `REGRESSION_ADDITIONS.md`. Merge into one version-neutral copy **after beta.3 closes** | 2026-08-29 |
 | **Guard reach** | General classification seam (`Spendable`/`Token`/`Unknown`, fail closed), **one** classifier implemented | 2026-08-29 |
@@ -107,13 +107,13 @@ finds out much later, if ever. That is why `R-RESTORE` in `REGRESSION_ADDITIONS.
 
 | # | Owed | Who / when |
 |---|---|---|
-| 1 | ⭐ **RQ-1** — research what "classified" persists as, against BRC docs + `wallet-toolbox` (TS and Go) + the other BSV SDKs. ⛔ **Research task, not a decision** | M0, before any sprint work |
-| 1b | ⭐ **RQ-2** — research restore behaviour and produce the **good / bad / ugly outcome matrix**. ⛔ **Owner decides in the sprint planning session, after the research** | M0 researches; owner decides |
-| 2 | **The exposure question** — does an ordinary incoming 1-sat payment become a tracked default-basket row without a recovery scan? ⚠️ **Answer by running something.** It has been read twice already | Sprint 1, early |
+| 1 | ⭐ **RQ-1** — research what "classified" persists as, against BRC docs + `wallet-toolbox` (TS and Go) + the other BSV SDKs. ⛔ **Research task, not a decision** | M0, before any track work |
+| 1b | ⭐ **RQ-2** — research restore behaviour and produce the **good / bad / ugly outcome matrix**. ⛔ **Owner decides in the track planning session, after the research** | M0 researches; owner decides |
+| 2 | **The exposure question** — does an ordinary incoming 1-sat payment become a tracked default-basket row without a recovery scan? ⚠️ **Answer by running something.** It has been read twice already | Track 1, early |
 | 3 | Six files under `0.4.0-beta.3/` still carry pre-move folder paths — five session prompts (archaeology) and the dust ticket's Links section (**live, genuinely owed**) | Whoever next touches beta.3 |
 | 4 | `../SCOPING_PROCESS.md` §7a, §7b, §7b-ii — ~19 proposed adoptions, **one decision each**, none in force | Owner, when there is time. Not urgent |
 | 5 | `tickets/TICKET_e2e_specs_wrong_subject_and_never_run.md` — second-hand, unverified. Its first step is verification | Unassigned |
-| 6 | Is the OpNS overlay PoC in the release, or a parallel public artifact? | Owner, before sprint 3 |
+| 6 | Is the OpNS overlay PoC in the release, or a parallel public artifact? | Owner, before track 3 |
 
 ⛔ **Nothing on this list blocks beta.3.** Items 1 and 2 block the beta.4 microscope pass; the rest
 can wait.
@@ -129,21 +129,21 @@ development-docs/
 │   └── TICKET_token_outputs_destroyed_by_dust_paths.md   ← the beta.3 floor ships from here
 └── 0.4.0-beta.4/
     ├── RESUME_beta4.md         ← you are here
-    ├── README.md               ← scope, four sprints, decisions, verified code findings
-    ├── SPRINT_PLAN.md          ← sprint + sub-sprint breakdown, no phase detail
-    ├── TELESCOPE.md            ← cross-sprint edges, microscope context plan, what we believe & how it fails
+    ├── README.md               ← scope, four tracks, decisions, verified code findings
+    ├── RELEASE_PLAN.md          ← track + candidate phase breakdown, no phase detail
+    ├── TELESCOPE.md            ← cross-track edges, microscope context plan, what we believe & how it fails
     ├── HARNESS_DELTA.md        ← what beta.4 adds to the harness
     ├── REGRESSION_ADDITIONS.md ← R-NOSPEND, R-CLASSIFY, R-RESTORE, R-TOKENPERM
     ├── WATCH_fungibles.md      ← BRC-163 vs 175, with re-check triggers
     ├── tickets/                ← review queue + template
     ├── research/               ← the three research files (a) PRD skills (b) Karpathy (c) testing
-    ├── sprint-1-utxo-safety-guard/    ← scope only, new
-    ├── sprint-2-1sat-ordinals/        ← carried in (was 1SatOrdinals-BSV21/)
-    ├── sprint-3-opns-naming/          ← scope only, new. A naming doc is still owed (sub-sprint 3.1)
-    └── sprint-4-onchain-backup-sync/  ← carried in, IMPLEMENTATION_PLAN.md is authoritative
+    ├── track-1-utxo-safety-guard/    ← scope only, new
+    ├── track-2-1sat-ordinals/        ← carried in (was 1SatOrdinals-BSV21/)
+    ├── track-3-opns-naming/          ← scope only, new. A naming doc is still owed (candidate phase 3.1)
+    └── track-4-onchain-backup-sync/  ← carried in, IMPLEMENTATION_PLAN.md is authoritative
 ```
 
-Also: `.claude/agents/sprint-scoper.md` — the agent that owns the scoping process.
+Also: `.claude/agents/track-scoper.md` — the agent that owns the scoping process.
 Also: root `CLAUDE.md` — now carries the five working rules and points at `SCOPING_PROCESS.md`.
 
 ## 7. Paste this to restart
@@ -161,7 +161,7 @@ RESUME §3. M0 owns two RESEARCH questions and nothing else:
 
   RQ-2  What restore does with an output it cannot identify. Research how other wallets handle it,
         then produce a good / bad / ugly outcome matrix per candidate behaviour, in plain language.
-        Do NOT recommend a two-option answer. I decide this in the sprint planning session.
+        Do NOT recommend a two-option answer. I decide this in the track planning session.
 
 Constraints: do not re-scope — the order and the decisions in RESUME §4 are settled. Do not design
 either question from first principles; go and read how it is already done (CLAUDE.md working rule 5).
@@ -175,11 +175,11 @@ Stop when both research outputs exist and I have seen the RQ-2 matrix.
 Repeated from `TELESCOPE.md` §6 because it is the thing most likely to be forgotten across a gap.
 
 ⭐ **The belief to test first:** the classification seam is cheap, *because the exclusion logic
-already works*. Sprint 1.1's call-site sweep tests this on day one. **If it is wrong — if there are
-UTXO-selecting paths that bypass `output_repo` entirely — sprint 1 is bigger than scoped and the
+already works*. Track 1.1's call-site sweep tests this on day one. **If it is wrong — if there are
+UTXO-selecting paths that bypass `output_repo` entirely — track 1 is bigger than scoped and the
 release plan changes.** Better to find that in the first hours than the third week.
 
 The other four beliefs, briefly: ordinals are a prerequisite for names; the backup size problem is
-ancestry depth rather than media (**explicitly a hypothesis, settled by measurement**); four sprints
-fit in one release (**if not, cut from the back** — sprint 4's plan stands alone and can slip to
+ancestry depth rather than media (**explicitly a hypothesis, settled by measurement**); four tracks
+fit in one release (**if not, cut from the back** — track 4's plan stands alone and can slip to
 beta.5 without waste); and fungibles can be deferred without cost.

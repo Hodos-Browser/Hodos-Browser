@@ -1,7 +1,7 @@
 # 🎫 Menu → Exit closes the primary window, not the window it was clicked in
 
 **Found:** 2026-08-31, running beta.3 Phase 3.5's evidence rows (incidental)
-**Status:** ⬜ UNASSIGNED · **Sprint:** unassigned (beta.4 candidate) · **Filed by:** Phase 3.5
+**Status:** ⬜ UNASSIGNED · **Track:** unassigned (beta.4 candidate) · **Filed by:** Phase 3.5
 
 > ⚠️ **Method note.** **MEASURED**: the `exit` IPC sent from window B's header closed window **A** and
 > left B running. The two-line **cause is a code reading**, though a direct one — the handler contains

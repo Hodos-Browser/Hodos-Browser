@@ -9,7 +9,7 @@
 
 ## 0. What this session is, and what it is NOT
 
-This is the **telescope** pass: the long-distance look at how four sprints fit together. It produces
+This is the **telescope** pass: the long-distance look at how four tracks fit together. It produces
 a compressed output file that a later **microscope** session reads.
 
 **It is not** detailed design. Do not specify APIs, schemas, or phase-level implementation.
@@ -27,7 +27,7 @@ OPEN questions in §8. Then stop.
 
 ## 1. Two tracks in this work
 
-Track A is the **beta.4 release plan** (four sprints).
+Track A is the **beta.4 release plan** (four tracks).
 Track B is a **reusable scoping process** the owner is designing, which uses beta.4 as its feedback
 loop. Track B is the bigger long-term item. Keep them separate in the outputs.
 
@@ -37,7 +37,7 @@ loop. Track B is the bigger long-term item. Keep them separate in the outputs.
 
 Order is **settled**: **Guard → 1Sat → OpNS → Backup**, then a misc/tickets bucket.
 
-### Sprint 1 — UTXO safety guard (new, up front)
+### Track 1 — UTXO safety guard (new, up front)
 
 Distinguish token outputs from spendable value **everywhere it matters**. First job is to enumerate
 where the distinction is needed, at minimum: balance, coin selection, the dust consolidator, the
@@ -46,7 +46,7 @@ recovery sweep, reconcile. Fail closed — if an output cannot be classified, do
 This is needed **even if we never ship ordinals**, because users can receive one to a Hodos address
 today. See §5 for the verified code paths.
 
-### Sprint 2 — 1Sat Ordinals
+### Track 2 — 1Sat Ordinals
 
 Implement to **BRC-147 + BRC-150** (owner-approved 2026-08-05).
 
@@ -58,7 +58,7 @@ against. Record that in the phase doc.
 Fungibles are deferred **with a watch note**, not dropped. Re-check if the BRC-163 vs BRC-175 dispute
 resolves (§6).
 
-### Sprint 3 — OpNS unique-name system
+### Track 3 — OpNS unique-name system
 
 Built on **BRC-174** — our merged BRC is the development base, not the old research.
 
@@ -69,23 +69,23 @@ demo with a strategic/tactical post on what users should demand of devs.
 
 `Future-Features/Decentralized-Naming/` (README, OPNS_REVIEW, OPNS_RESOLVER_SCOPE, Xanaverse review)
 stays where it is and is **read once in the outline pass, then NOT referenced** — it predates BRC-174
-and will be archived. A new naming sprint doc is required.
+and will be archived. A new naming track doc is required.
 
-### Sprint 4 — On-chain Backup & Sync
+### Track 4 — On-chain Backup & Sync
 
 Last. Reason: deltas exist to solve token-heavy wallets, and BRC-150 provenance rows (`beefB64`) are
 that workload — measure against real ordinal rows rather than designing for a workload that does not
 exist yet. Existing `Onchain-Backup-and-Sync/IMPLEMENTATION_PLAN.md` (8 phases, two adversarial
 reviews, owner sign-offs recorded) stands and is not to be redesigned here.
 
-**Open owner question to resolve during this sprint's scoping:** what actually needs backing up vs
+**Open owner question to resolve during this track's scoping:** what actually needs backing up vs
 what can be re-fetched and rebuilt on recovery. Inscription content is already on chain at the
 outpoint, so store outpoints and re-query. The size problem is likely `beefB64` ancestry depth, not
 images. Confirm with measurement, do not assume.
 
 ### Misc / tickets
 
-The owner wants a **tickets folder** he reviews and assigns into sprints — not beta.3's flat
+The owner wants a **tickets folder** he reviews and assigns into tracks — not beta.3's flat
 `TICKET_*.md` at folder root. He has items on paper already; do not chase them now.
 
 ### Folder mechanics (decided)
@@ -98,13 +98,13 @@ name.
 
 ## 3. Track B — the scoping process to design
 
-The owner wants a **reusable process for every sprint/sub-sprint**, with its own goals and defined
+The owner wants a **reusable process for every track/candidate phase**, with its own goals and defined
 outcomes:
 
-1. **Scope** — outline the sprint/sub-sprints (what this session is doing).
-2. **Telescope** — long-distance look at how all sub-sprints work together. **Output must include
+1. **Scope** — outline the track/candidate phases (what this session is doing).
+2. **Telescope** — long-distance look at how all candidate phases work together. **Output must include
    recommendations on how contexts and workflows should be used in the microscoping stage.**
-3. **Microscope** — dig into each sprint and each phase. Runs in a **fresh context** that reads the
+3. **Microscope** — dig into each track and each phase. Runs in a **fresh context** that reads the
    telescope output. Each microscope may need its own context; where they genuinely cross over, use a
    designed workflow with sub-loops.
 4. **Telescope again** — zoom out, assess microscope findings against the broad plan, change it if it
@@ -135,7 +135,7 @@ and how it will be tested before building.
 ## 4. What beta.4 docs must achieve
 
 Copy beta.3's structure, then **expand it** (the owner intends to, but not yet — do not over-build
-now). Every sprint doc sets **specific goals with well-defined outcomes** for all aspects, functions
+now). Every track doc sets **specific goals with well-defined outcomes** for all aspects, functions
 and tests, built against the best testing methods identified by research (c).
 
 ---
@@ -189,8 +189,8 @@ classification on ingest, not exclusion logic.** That shapes the guard.
 
 ## 7. Deliverables for this session
 
-1. `0.4.0-beta.4/README.md` — release scope, the four sprints, the settled order and the reasoning.
-2. `0.4.0-beta.4/SPRINT_PLAN.md` — sprint-level breakdown, no phase detail.
+1. `0.4.0-beta.4/README.md` — release scope, the four tracks, the settled order and the reasoning.
+2. `0.4.0-beta.4/RELEASE_PLAN.md` — track-level breakdown, no phase detail.
 3. Folder moves per §2, cross-references fixed, originals deleted.
 4. `WATCH_fungibles.md` — the 163/175 state and an explicit re-check gate.
 5. `tickets/` folder with a ticket template.
@@ -203,8 +203,8 @@ classification on ingest, not exclusion logic.** That shapes the guard.
 
 1. **Does the minimal defensive floor go in beta.3?** Recommendation from the prior session: yes. The
    dust consolidator destroys assets automatically on a 24h timer, and a floor (`satoshis > 1` plus a
-   basket check) is a small fix. The full classification guard stays beta.4 sprint 1.
+   basket check) is a small fix. The full classification guard stays beta.4 release 1.
 2. Does beta.4 **inherit** beta.3's `HARNESS.md` / `REGRESSION_SET.md`, or get its own copies to
    extend? (The owner said he wants to expand the harness, "not right now.")
-3. How far does the guard reach in sprint 1 — 1-sat outputs only, or a general "classified token"
+3. How far does the guard reach in track 1 — 1-sat outputs only, or a general "classified token"
    concept that BSV-20/21 and future protocols slot into later?

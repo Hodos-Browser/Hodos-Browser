@@ -15,8 +15,8 @@ replace anything.
 
 ## R-NOSPEND — no automatic path spends an unclassified output ⭐
 
-**The load-bearing one for this release.** It is the invariant the whole guard sprint exists to
-create, and it must outlive that sprint.
+**The load-bearing one for this release.** It is the invariant the whole guard track exists to
+create, and it must outlive that track.
 
 This row was proposed by `0.4.0-beta.3/TICKET_token_outputs_destroyed_by_dust_paths.md` as an
 invariant that *"should outlive this ticket and hold through the beta.4 guard work"*. This is where
@@ -55,7 +55,7 @@ the gap identified 2026-08-29 as the real defect.
 | **SUBJECT** | Name every ingest route the run covers, and every route it does **not**. ⚠️ `grep` finds **zero** `basket` references in `recovery.rs`, `reconcile.rs`, `utxo_fetcher.rs` — those three are the routes most likely to bypass, and a run that skips them has proven nothing about the dangerous half |
 | **Tier** | T1 + T2 |
 
-⛔ **The complete route list is sprint 1.1's deliverable.** Until it exists, this row cannot be
+⛔ **The complete route list is track 1.1's deliverable.** Until it exists, this row cannot be
 honestly signed off — it can only be run against a route list someone believes is complete. Say which.
 
 > 🚨 **This row can go vacuous before it is ever run. Added 2026-09-08, measured.**
@@ -76,8 +76,8 @@ restore-from-seed, which builds no sweep at all).
 
 ## R-RESTORE — fail-closed survives recovery
 
-The sharpest cross-sprint edge in the release: sprint 1's fail-closed rule meets sprint 4's recovery
-path. **Neither sprint owns it alone.**
+The sharpest cross-track edge in the release: track 1's fail-closed rule meets track 4's recovery
+path. **Neither track owns it alone.**
 
 | | |
 |---|---|
@@ -87,7 +87,7 @@ path. **Neither sprint owns it alone.**
 | **SUBJECT** | The **restored** wallet's DB state, not the pre-backup state. Recovery is the path where a user is least able to notice a loss |
 | **Tier** | T2 |
 
-⏳ **Not runnable until sprint 4.** Recorded now so it is not invented late, and so sprint 1 knows the
+⏳ **Not runnable until track 4.** Recorded now so it is not invented late, and so track 1 knows the
 shape its rule must survive.
 
 ## R-TOKENPERM — pay grants do not authorize token spends
@@ -103,8 +103,44 @@ requirement, and it sits on the same surface as the four privacy-perimeter gates
 | **SUBJECT** | The **Rust decision** (`PermissionDecision` kind + reason), not the modal's appearance. A modal that renders is not proof the engine decided to prompt — `R-PERIM`'s rule, applied here |
 | **Tier** | T1 (engine) + T2 (end-to-end) |
 
-⏳ **Not runnable until sprint 2.3.** Its shape is fixed now because sprint 2 must build to it rather
+⏳ **Not runnable until track 2.3.** Its shape is fixed now because track 2 must build to it rather
 than discover it.
+
+## R-BEEFOUT — a BEEF we hand to a counterparty stands on its own
+
+**We have shipped this defect once already and closed it with a comment instead of a check.** Before
+2026-05-28 the overlay cleanup path called `build_beef_for_txid`, which is tuned for ARC and stops
+walking at a BUMP; the overlay rejected the result as *"missing previous transaction"*
+(`anvil.sendbsv` HTTP 400) — recorded at `../0.4.0-beta.3/`, `handlers/certificate_handlers.rs:5517`.
+Upstream `go-wallet-toolbox` hit the identical trap on 2026-09-18, reverted it, and closed it with
+`pkg/wallet/wallet_sign_action_beef_completeness_test.go`. Two implementations, the same mistake,
+one of them ours. It belongs in the standing set.
+
+⛔ **Carve-out, or this row is wrong.** This is **not** a rule that every outbound payload carries
+ancestry. The ARC broadcast path legitimately ships Extended Format (BRC-30, `Beef::to_ef_hex`),
+which embeds each input's source output inline so *"ARC can validate without parsing BEEF ancestry"*
+(`beef.rs:700`). The invariant covers a BEEF handed to a receiver that must **SPV-validate** it: an
+overlay topic manager, a paywalled origin, a MessageBox recipient.
+
+| | |
+|---|---|
+| **GREEN** | A BEEF built for a counterparty carries every input's ancestry down to a proven transaction, with **zero txid-only stubs the receiver cannot resolve**. `validate_beef_ancestry` (`beef.rs:1973`) passes on the exact bytes sent |
+| **RED** | ⛔ Point the ARC-tuned builder at a counterparty path and observe the **receiver** reject it. 📏 The naturally-occurring RED is already on file — the May 2026 overlay rejection above. Reproduce it deliberately rather than citing it |
+| **SUBJECT** | ⭐ The **receiver's verdict on the exact bytes sent** — the overlay's error, the origin's refusal. Our own `validate_beef_ancestry` returning OK is the T1 half and is **not** sufficient: it is our opinion of our own output. ⚠️ Name a receiver that *reports* an error — the May incident records that bsvb hosts **silently** failed validation and returned an ambiguous STEAK shape that could not be interpreted without the anvil message |
+| **Tier** | T1 (`validate_beef_ancestry` over the built BEEF) + T2 (a real receiver rejects the stubbed one) |
+
+> 🚨 **A silent truncation path exists today. Measured 2026-09-18, reading `beef_helpers.rs`.**
+> `MAX_BEEF_ANCESTORS = 50` (`:155`) caps the walk. On reaching it the loop **`break`s with a
+> `log::warn!` only** — the queue is abandoned, `missing_ancestors` stays empty, and the function
+> returns **`Ok(())`** carrying an incomplete BEEF (`:188`, `:452-463`). Unfetchable ancestors return
+> `Err`; hitting the cap does not. ⇒ **A deep-ancestry wallet can hand out a truncated BEEF with no
+> error at all** — exactly the shape this row forbids, arrived at by a different route than trimming.
+> ⛔ **Every run of this row must state whether the cap was reached.** A green obtained under the cap
+> on a shallow wallet proves nothing about a deep one.
+
+⭐ **Runnable today, and worth running before track 1.** Unlike `R-RESTORE` and `R-TOKENPERM` this
+needs no beta.4 code: both builders, the counterparty path and the failing case already exist. Like
+`R-NOSPEND`, the cheap negative control is available now.
 
 ---
 
@@ -113,15 +149,15 @@ than discover it.
 Fill at every beta.4 phase boundary. ⛔ A blank cell is **not** a pass — `HARNESS.md` §8: a skipped
 check is SKIPPED and the run is INCOMPLETE.
 
-| Phase boundary | Date | R-NOSPEND | R-CLASSIFY | R-RESTORE | R-TOKENPERM | beta.3 set in full |
-|---|---|---|---|---|---|---|
-| *(pre-sprint-1 baseline)* | | ⬜ expected **RED** — the guard does not exist yet | ⬜ n/a | ⏳ not until S4 | ⏳ not until S2.3 | ⬜ |
-| S1 → S2 | | | | ⏳ | ⏳ | |
-| S2 → S3 | | | | ⏳ | | |
-| S3 → S4 | | | | ⏳ | | |
-| S4 → RC | | | | | | |
+| Phase boundary | Date | R-NOSPEND | R-CLASSIFY | R-RESTORE | R-TOKENPERM | R-BEEFOUT | beta.3 set in full |
+|---|---|---|---|---|---|---|---|
+| *(pre-track-1 baseline)* | | ⬜ expected **RED** — the guard does not exist yet | ⬜ n/a | ⏳ not until T4 | ⏳ not until T2.3 | ⬜ runnable now — state the cap | ⬜ |
+| T1 → T2 | | | | ⏳ | ⏳ | | |
+| T2 → T3 | | | | ⏳ | | | |
+| T3 → T4 | | | | ⏳ | | | |
+| T4 → RC | | | | | | | |
 
-⭐ **Run `R-NOSPEND` once before sprint 1 starts and record it as RED.** A guard whose regression row
+⭐ **Run `R-NOSPEND` once before track 1 starts and record it as RED.** A guard whose regression row
 was never seen failing beforehand has no baseline, and "it passes now" would be unfalsifiable. This
 is the cheapest negative control in the release and it is available today.
 
@@ -131,6 +167,6 @@ is the cheapest negative control in the release and it is available today.
 
 | Considered | Verdict |
 |---|---|
-| A row asserting "ordinals display correctly" | Not an invariant — a feature. Belongs in sprint 2's evidence table, not the standing set. The standing set is for what must not break *later*. |
+| A row asserting "ordinals display correctly" | Not an invariant — a feature. Belongs in track 2's evidence table, not the standing set. The standing set is for what must not break *later*. |
 | A row on fungible/BSV-21 handling | ⛔ Nothing to guard. Fungibles are deferred — see `WATCH_fungibles.md`. Adding a row for absent behaviour is how a set rots. |
 | A 1-satoshi value floor as a standing invariant | Rejected. That is beta.3's stopgap. Writing the stopgap into the standing set would freeze the wrong rule: **value is not the discriminator, classification is.** |
