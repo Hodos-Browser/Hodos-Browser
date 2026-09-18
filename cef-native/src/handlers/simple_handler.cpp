@@ -469,7 +469,6 @@ CefRefPtr<CefLoadHandler> SimpleHandler::GetLoadHandler() {
 }
 
 CefRefPtr<CefBrowser> SimpleHandler::webview_browser_ = nullptr;
-CefRefPtr<CefBrowser> SimpleHandler::header_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::wallet_panel_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::overlay_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::settings_browser_ = nullptr;
@@ -833,6 +832,84 @@ static void SendProfilesToBrowser(CefRefPtr<CefBrowser> browser) {
     response->GetArgumentList()->SetString(0, doc.dump());
     browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, response);
     LOG_DEBUG_BROWSER("👤 Sent " + std::to_string(profiles.size()) + " profiles");
+}
+
+// beta.3 Phase 11 item 8 (`P11-I8`) — push the profile list to every long-lived
+// surface that displays it, instead of waiting for one to ask.
+//
+// 👤 Owner, 2026-08-25: *"I changed the avatar on another profile. It did take, but
+// it didn't refresh in all of the places. I closed it and reopened it and the new
+// avatar was there."*
+//
+// ⛔ THE SHAPE, which is the real content of the ticket: the header browser is
+// created once at startup and every overlay is keep-alive, but `useProfiles` fetches
+// with `useEffect(…, [])` — mount-only. So the toolbar's profile button holds a
+// snapshot from browser start, and **nothing existed to tell it otherwise**: a grep
+// for `profile_updated` / `profiles_changed` / `profile_list_update` across the whole
+// tree returned zero hits. The panel you edit in looks right only because it holds
+// the value it just wrote.
+//
+// ⭐ Deliberately mirrors `NotifyTabListChanged()` above rather than inventing a
+// mechanism: walk every window, push to the surfaces that render this state. And it
+// needs **no React change** — `useProfiles` already applies any `profiles_result` it
+// receives; it simply never received one it had not asked for.
+//
+// ⚠️ Why the profile indicator is not cosmetic: it is how the user knows which
+// profile they are in, and profiles are a separation boundary. A stale indicator
+// misidentifies the context the user believes they are acting in.
+void SimpleHandler::BroadcastProfilesChanged() {
+    CEF_REQUIRE_UI_THREAD();
+    for (BrowserWindow* bw : WindowManager::GetInstance().GetAllWindows()) {
+        if (!bw) continue;
+        // The header carries the toolbar profile button; the profile panel and the
+        // settings page are the two surfaces that list profiles.
+        SendProfilesToBrowser(bw->header_browser);
+        SendProfilesToBrowser(bw->profile_panel_browser);
+        SendProfilesToBrowser(bw->settings_browser);
+    }
+    // Tabs can be showing /profile-picker or /settings-page, which use the same hook.
+    for (Tab* tab : TabManager::GetInstance().GetAllTabs()) {
+        if (tab && tab->browser) SendProfilesToBrowser(tab->browser);
+    }
+}
+
+// beta.3 Phase 11 item 8 (`P11-I8`), the FOURTH instance of the same pattern — the
+// one the ticket predicted would exist ("fixing only the avatar leaves the pattern
+// in place and guarantees a fourth instance").
+//
+// 🚨 `settings_set` ALREADY had a broadcast, and it had never once fired. It was
+// guarded on `header_browser_`, a static that was defined `= nullptr` and **assigned
+// nowhere in the tree** — so `if (header_browser_ && …)` was permanently false while
+// the comment beside it promised "so the header picks up changes (e.g. search engine
+// change made in settings tab)". Same shape as the `--disable-features=Autofill`
+// token in item 9: a stated behaviour with nothing behind it.
+//
+// 📏 Measured before the fix, at the layer the user lives in — not the stored
+// setting but what the address bar DOES: change the search engine in settings, type a
+// query, and the header still searched with the OLD engine. It only took effect after
+// a browser restart.
+//
+// ⭐ Same shape as BroadcastProfilesChanged above. The React side needs no change:
+// `window.onSettingsResponse` already applies any `settings_response` it receives.
+void SimpleHandler::BroadcastSettingsChanged() {
+    CEF_REQUIRE_UI_THREAD();
+    std::string json = SettingsManager::GetInstance().ToJson();
+    auto push = [&json](CefRefPtr<CefBrowser> b) {
+        if (!b || !b->GetMainFrame()) return;
+        CefRefPtr<CefProcessMessage> m = CefProcessMessage::Create("settings_response");
+        m->GetArgumentList()->SetString(0, json);
+        b->GetMainFrame()->SendProcessMessage(PID_RENDERER, m);
+    };
+    // ⛔ EVERY window's header, not one global one. That is the bug being fixed:
+    // a process-wide handle cannot address the header of the window the user is in.
+    for (BrowserWindow* bw : WindowManager::GetInstance().GetAllWindows()) {
+        if (!bw) continue;
+        push(bw->header_browser);
+        push(bw->settings_browser);
+    }
+    for (Tab* tab : TabManager::GetInstance().GetAllTabs()) {
+        if (tab && tab->browser) push(tab->browser);
+    }
 }
 
 // b1b.1 — effective state for a request: the persisted store decision, but an
@@ -4050,15 +4127,8 @@ bool SimpleHandler::OnProcessMessageReceived(
             LOG_WARNING_BROWSER("⚠️ Unknown settings key: " + key);
         }
 
-        // Broadcast settings_updated to the header browser so it picks up changes
-        // (e.g. search engine change made in settings tab)
-        if (header_browser_ && header_browser_->GetIdentifier() != browser->GetIdentifier()) {
-            std::string updatedJson = SettingsManager::GetInstance().ToJson();
-            CefRefPtr<CefProcessMessage> updateMsg = CefProcessMessage::Create("settings_response");
-            updateMsg->GetArgumentList()->SetString(0, updatedJson);
-            header_browser_->GetMainFrame()->SendProcessMessage(PID_RENDERER, updateMsg);
-            LOG_DEBUG_BROWSER("⚙️ Broadcast settings_updated to header browser");
-        }
+        // P11-I8 — tell every long-lived surface, not one static that was never set.
+        BroadcastSettingsChanged();
 
         return true;
     }
@@ -4207,9 +4277,7 @@ bool SimpleHandler::OnProcessMessageReceived(
         bool success = ProfileManager::GetInstance().CreateProfile(name, color, avatarImage);
         LOG_INFO_BROWSER("👤 Profile created: " + name + " = " + (success ? "success" : "failed"));
         
-        // Send updated profile list
-        CefRefPtr<CefProcessMessage> trigger = CefProcessMessage::Create("profiles_get_all");
-        OnProcessMessageReceived(browser, browser->GetMainFrame(), PID_RENDERER, trigger);
+        BroadcastProfilesChanged();   // P11-I8 — every surface, not just this one
         return true;
     }
 
@@ -4228,6 +4296,7 @@ bool SimpleHandler::OnProcessMessageReceived(
             }
 #endif
         }
+        BroadcastProfilesChanged();   // P11-I8
         return true;
     }
 
@@ -4312,6 +4381,7 @@ bool SimpleHandler::OnProcessMessageReceived(
             std::string id = args->GetString(0).ToString();
             std::string color = args->GetString(1).ToString();
             ProfileManager::GetInstance().SetProfileColor(id, color);
+            BroadcastProfilesChanged();   // P11-I8
             LOG_INFO_BROWSER("Profile color set: " + id + " -> " + color);
 #ifdef _WIN32
             // Refresh taskbar badge if this is the current profile
@@ -4331,6 +4401,7 @@ bool SimpleHandler::OnProcessMessageReceived(
             std::string id = args->GetString(0).ToString();
             std::string avatarImage = args->GetString(1).ToString();
             ProfileManager::GetInstance().SetProfileAvatar(id, avatarImage);
+            BroadcastProfilesChanged();   // P11-I8
             LOG_INFO_BROWSER("Profile avatar set: " + id);
 #ifdef _WIN32
             if (id == ProfileManager::GetInstance().GetCurrentProfileId()) {
@@ -4349,6 +4420,7 @@ bool SimpleHandler::OnProcessMessageReceived(
             std::string id = args->GetString(0).ToString();
             ProfileManager::GetInstance().SetDefaultProfile(id);
             LOG_INFO_BROWSER("Default profile set: " + id);
+            BroadcastProfilesChanged();   // P11-I8
         }
         return true;
     }

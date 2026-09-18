@@ -48,7 +48,7 @@ Central browser-process handler. One instance per CEF browser (tabs, header, ove
 | `CefJSDialogHandler` | `OnBeforeUnloadDialog` — suppresses beforeunload traps |
 
 **Static browser references** (declared in `simple_handler.h`, defined at the top of `simple_handler.cpp`) — 15 total:
-`webview_browser_`, `header_browser_`, `wallet_panel_browser_`, `overlay_browser_`, `settings_browser_`, `wallet_browser_`, `backup_browser_`, `brc100_auth_browser_`, `notification_browser_`, `settings_menu_browser_`, `omnibox_browser_`, `cookie_panel_browser_`, `download_panel_browser_`, `profile_panel_browser_`, `menu_browser_`
+`webview_browser_`, ~~`header_browser_`~~ (deleted, P11-8), `wallet_panel_browser_`, `overlay_browser_`, `settings_browser_`, `wallet_browser_`, `backup_browser_`, `brc100_auth_browser_`, `notification_browser_`, `settings_menu_browser_`, `omnibox_browser_`, `cookie_panel_browser_`, `download_panel_browser_`, `profile_panel_browser_`, `menu_browser_`
 
 > ⚠️ Three of those are **vestigial**: `download_panel_browser_`, `profile_panel_browser_`, and `menu_browser_` are declared and initialized to `nullptr` but never assigned or read. Their accessors were migrated to per-window storage (below) and the statics were left behind.
 

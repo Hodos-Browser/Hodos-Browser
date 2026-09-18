@@ -14,7 +14,7 @@
 | 5 | ✅ **CLOSED 2026-09-18 — not reproduced** — **Tear-off window overlay sweep** | 👤 owner 2026-09-15: typing in a torn-off tab's address bar makes that window disappear | 📏 16/16 rows green (2 windows × 8 overlays); 🔴 7/16 red with `OwnOverlayToRequestingWindow` disabled, **all seven on the torn-off window**. ⇒ the observation predates the Phase 3.5 fix. See § Item 5 below
 | 6 | `modal_buttons_unclickable_small_screen` | old bundle | may already be covered by 7a's viewport work — verify, do not re-do |
 | 7 | ❔ `chrome_ui_scales_but_its_window_does_not` | old bundle | may collapse into 3.5 — verify |
-| 8 | ❔ `longlived_surfaces_snapshot_state_at_startup` | old bundle | |
+| 8 | ✅ **FIXED 2026-09-18 — and the predicted 4th instance was real** — `longlived_surfaces_snapshot_state_at_startup` | old bundle | 📏 Profile edits now reach every surface in ~10-20 ms. 🚨 The audit found instance #4: **changing your search engine did nothing until you restarted** — its broadcast was guarded on a static that is never assigned. See § Item 8 below
 | 9 | 🚨 **FIXED 2026-09-18 — and it was NOT low severity** — `disable_features_autofill_is_a_noop` | old bundle | 📏 The switch was provably dead **and** autofill was live: a probe typed into a form landed in the profile's `Web Data` `autofill` table, next to **6 rows of the owner's real typing** incl. two email addresses. Now a preference, not a flag. See § Item 9 below |
 | 10 | Phase 1's overlay dead strip · the DPI matrix overlay section | old bundle | `DPI_RESOLUTION_TEST_MATRIX.md` cells #4/#6/#9 |
 | **11** | 🔴 **A BRC-121 payment shows the user NOTHING while it spends** | `../TICKET_brc121_paid_retry_aborts_and_mints_a_payment_each_time.md` | ⛔ **RUNS FIRST — money path, and the only item here that costs real BSV when it goes wrong.** Four fixes in causal order, plan + negative controls in the ticket. 👤 Owner 2026-09-17: *"it's not okay."* See below |
@@ -748,3 +748,109 @@ unlocked. ✅ Log confirms the mechanism fired:
 
 Shared C++ (`simple_app.cpp`), no platform split added — relay note in `../MAC_RELAY_P11_ROUND.md`.
 The preference API is cross-platform CEF, so macOS gets it on rebuild.
+
+---
+
+## Item 8 — long-lived surfaces snapshot state at startup · ✅ FIXED 2026-09-18
+
+👤 Owner, 2026-08-25: *"I changed the avatar on another profile. It did take, but it didn't
+refresh in all of the places. I closed it and reopened it and the new avatar was there."*
+
+The ticket's real content is the **pattern**, not the avatar:
+
+> A surface is long-lived — the header browser is created once at startup, every overlay is
+> keep-alive — but its state was written as if the component mounts fresh whenever the user looks
+> at it.
+
+Three instances were already recorded (connect-modal spending limits, quiet-mode checkboxes, the
+avatar). ⭐ And the ticket's warning was explicit: *"Fixing only the avatar leaves the pattern in
+place and guarantees a fourth instance."* **There was one.**
+
+### Instance 3 — the profile indicator
+
+📏 Root cause confirmed still current: `useProfiles` fetches with `useEffect(…, [])`, mount-only,
+and a grep for `profile_updated` / `profiles_changed` / `profile_list_update` across the whole tree
+returned **zero hits**. Nothing existed to tell any other surface a profile had changed. The panel
+you edit in looks right only because it holds the value it just wrote.
+
+⭐ **The fix needed no React change at all.** `useProfiles` already applies any `profiles_result` it
+receives — it simply never received one it had not asked for. `SimpleHandler::BroadcastProfilesChanged()`
+walks every window and pushes to the header, the profile panel, the settings overlay and every tab,
+from all five profile mutators. Deliberately mirrors `NotifyTabListChanged()` rather than inventing a
+mechanism, which is what the ticket asked for.
+
+| | subject | result |
+|---|---|---|
+| 🟢 GREEN | the **header's** toolbar profile button — `aria-label` + the avatar's computed `background-color`, edit sent from the **profile panel's** browser | picked up in **8–22 ms**, no reload, no reopen |
+| 🔴 RED | same, with `BroadcastProfilesChanged` made a no-op and the shell rebuilt | header still showed the **old** colour 12 s later — the owner's report exactly |
+
+⛔ The subject is the header on purpose. Reading the panel the edit was made in would pass either
+way, which is precisely what made this look like a one-off three times running.
+
+### 🚨 Instance 4, found by the audit — the search engine
+
+The header reads `browser.searchEngine` in a mount-only effect and uses it for every non-URL the user
+types. `settings_set` **did** have a broadcast… guarded like this:
+
+```cpp
+if (header_browser_ && header_browser_->GetIdentifier() != browser->GetIdentifier()) {
+```
+
+🚨 `header_browser_` was defined `= nullptr` and **assigned nowhere in the tree.** The guard was
+permanently false, so the broadcast beside the comment *"so the header picks up changes (e.g. search
+engine change made in settings tab)"* had **never fired**. Same shape as item 9's dead switch: a
+stated behaviour with nothing behind it.
+
+⭐ **The codebase already knew half of this.** `cef-native/include/handlers/CLAUDE.md` records the
+null-check as *"a dead branch"*. What nobody had joined up is the **consequence**: change your search
+engine and the address bar keeps sending your typing to the old one until you restart.
+
+⚠️ That is a privacy-relevant setting silently not taking effect, on a privacy browser — the same
+family as item 9, found in the same afternoon.
+
+Fixed by `BroadcastSettingsChanged()`, the sibling of the profiles one, and the orphaned
+`header_browser_` static is deleted along with its declaration.
+
+| | subject | result |
+|---|---|---|
+| 🟢 GREEN | **where the address bar actually navigates** for a non-URL query — not the stored setting | changed engine → next search went to the new engine, no restart |
+| 🔴 RED | same, with `BroadcastSettingsChanged` made a no-op and the shell rebuilt | still searched with the **old** engine |
+
+### ⛔ The first RED for instance 4 was my instrument, and it took a failed fix to notice
+
+Recorded because it is the third time in this phase and the lesson is the same one.
+
+The first version of `settingsrefreshprobe.py` picked **the tab** as the browser to send the settings
+change from — and `search_and_read()` then navigates that same tab to the search results, destroying
+the document the editor session was attached to. So the `settings_set` after it went nowhere, and the
+probe reported RED. It reported RED **before** the fix and **again after it**, and only investigating
+*"why didn't my fix work"* surfaced the fact that neither run had ever sent the edit.
+
+⇒ Both were rerun with a keep-alive overlay (`/menu`) as the editor, which never navigates, and the
+probe now **refuses to run** if the editor has no `cefMessage` bridge — because a RED from a send that
+never happened proves nothing. The 🔴/🟢 pair above is from the hardened probe only; the earlier
+pair is discarded.
+
+### ⬜ The rest of the audit — what was checked and what was left alone
+
+Every hook with a mount-only fetching effect, against the question *"is this rendered by a long-lived
+surface, and can it change from elsewhere?"*
+
+| hook | long-lived surface? | can change elsewhere? | verdict |
+|---|---|---|---|
+| `useProfiles` | header, profile panel, settings | yes | 🔴 → ✅ fixed |
+| header's `browser.searchEngine` effect | header | yes, from settings | 🔴 → ✅ fixed |
+| `useTabManager` | header | yes | ✅ already pushed (`NotifyTabListChanged`) + 30 s poll |
+| `useDownloads` | header, downloads panel | yes | ✅ already pushed (`download_state_update`) |
+| `useBackgroundBalancePoller` | header | yes | ✅ polls |
+| `useSettings` | settings overlay / settings page | yes | ✅ now covered by `BroadcastSettingsChanged` |
+| `useOmniboxSuggestions`, `useImport`, `usePrivacyShield` | request/response per use, not a startup snapshot | — | ⬜ no signal needed |
+
+⚠️ **This is an audit of hooks, not of every `useState` initialiser.** A fifth instance is still
+possible in a component that snapshots something without a hook. The pattern is what to watch for,
+and it now has two named broadcasters to copy.
+
+### 🍎 macOS
+
+Shared C++ (`simple_handler.cpp` + its header) — relay note in `../MAC_RELAY_P11_ROUND.md`. No
+platform split; both broadcasters are plain CEF.

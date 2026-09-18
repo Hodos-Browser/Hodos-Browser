@@ -15,6 +15,8 @@ touching `cef-native/**` names its files here and the other platform rebuilds af
 
 | `cef-native/src/handlers/simple_app.cpp` | ❌ none — CEF preference API, cross-platform | 9 | 🚨 `--disable-features=Autofill` named a feature that **does not exist** (verified against the Chromium source: `BASE_FEATURE(feature, name, …)` takes the name as its 2nd arg, and none declares `"Autofill"`), while autofill was live and recording form input to `<profile>/Default/Web Data`. Token removed; `DisableChromiumAutofill()` now sets `autofill.profile_enabled` and `autofill.credit_card_enabled` to false in `OnContextInitialized`. ⛔ `GlicActorUi` kept — it is the CEF 150 crash fix |
 
+| `cef-native/src/handlers/simple_handler.cpp` + `include/handlers/simple_handler.h` | ❌ none | 8 | Two new broadcasters, `BroadcastProfilesChanged()` and `BroadcastSettingsChanged()`, called from the profile and settings mutators. 🚨 The settings one replaces a guard on `header_browser_`, a static that was **never assigned** — so changing the search engine did nothing until a restart. That static and its declaration are deleted |
+
 Both files are shared and carry **no** `#ifdef _WIN32` / `#elif defined(__APPLE__)` in the new code,
 so the macOS build needs nothing but a rebuild.
 

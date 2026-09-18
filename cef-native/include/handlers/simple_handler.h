@@ -71,7 +71,7 @@ public:
     CefRefPtr<CefFindHandler> GetFindHandler() override;
     CefRefPtr<CefJSDialogHandler> GetJSDialogHandler() override;
     static CefRefPtr<CefBrowser> webview_browser_;
-    static CefRefPtr<CefBrowser> header_browser_;
+
     static CefRefPtr<CefBrowser> wallet_panel_browser_;
     static CefRefPtr<CefBrowser> GetOverlayBrowser();
     static CefRefPtr<CefBrowser> GetHeaderBrowser();
@@ -114,6 +114,14 @@ public:
     static bool needs_overlay_reload_;
     static void TriggerDeferredPanel(const std::string& panel);
     static void NotifyTabListChanged();  // Notify ALL windows' frontends of tab list changes
+    // P11-I8 - push the profile list to every long-lived surface that shows it.
+    // Long-lived surfaces fetch on mount only; without this nothing tells them a
+    // profile changed. Mirrors NotifyTabListChanged above.
+    static void BroadcastProfilesChanged();
+
+    // P11-I8 - same, for settings. Replaces a `header_browser_` static that was
+    // never assigned, so the broadcast it guarded had never fired.
+    static void BroadcastSettingsChanged();
     static void NotifyWindowTabListChanged(int window_id);  // Notify ONE window's frontend only
 
     // Force-close any browsers still in the handler map. Safety net for leaked
