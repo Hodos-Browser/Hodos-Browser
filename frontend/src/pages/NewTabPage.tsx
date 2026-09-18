@@ -124,13 +124,27 @@ const NewTabPage: React.FC = () => {
         };
     }, []);
 
-    // Auto-focus search bar on mount
-    useEffect(() => {
-        const timer = setTimeout(() => {
-            searchInputRef.current?.focus();
-        }, 100);
-        return () => clearTimeout(timer);
-    }, []);
+    // Phase 11 item 1 — ⛔ this page deliberately does NOT auto-focus its search box.
+    //
+    // 👤 Owner, 2026-09-18, looking at a fresh launch: *"I see the cursor in the search bar
+    // in the middle of the new tab and not in the address bar… when I clicked in the address
+    // bar, the cursor showed up in there. But the cursor in the search bar in the web page
+    // view still stayed in there and was still blinking."*
+    //
+    // 🚨 TWO CARETS. This page and the header are **separate CEF browser processes with
+    // separate documents**, so each renders its own caret independently — only one actually
+    // receives keystrokes. Typing went to the address bar and worked, but the page showed a
+    // second blinking caret that owns nothing.
+    //
+    // ⇒ The address bar wins on the new-tab page, which is both the owner's stated target
+    // ("on launch, focus is in the address bar with the caret visible, ready to type") and
+    // what Chrome does. The header's focus lives in `MainBrowserView.tsx` — search for
+    // `hasAutoFocusedRef`.
+    //
+    // ⚠️ The box still works; it just needs a click first. ⬜ The better end state is for it
+    // to FORWARD focus to the address bar (the `focus_address_bar` IPC already exists, used
+    // by Ctrl+L), because the address bar has history suggestions and inline autocomplete
+    // and this box has neither. Recorded in the phase README, not done here.
 
     // Fetch search engine setting
     useEffect(() => {

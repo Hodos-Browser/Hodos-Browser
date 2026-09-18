@@ -131,6 +131,64 @@ settled, and ⛔ never narrate a result your own instrument check just contradic
 
 `npm run build` clean (⛔ not `npx tsc --noEmit`, which passes on code the build rejects).
 
+
+### ⛔ Follow-up, same day — my fix produced TWO carets, and my measurement had been scoped too narrowly
+
+👤 Owner on a fresh launch: *"I see the cursor in the search bar in the middle of the new tab and not
+in the address bar… when I clicked in the address bar, the cursor showed up in there. But the cursor
+in the search bar in the web page view still stayed in there and was still blinking."*
+
+**Both halves of that are findings.**
+
+**1. The premise of item 1 was narrower than I wrote.** `NewTabPage.tsx` has auto-focused its own
+search box since long before today (a 100 ms timer on mount). So on launch there *was* a caret — in
+the new-tab page's search box, not in the header. My probe read the **header browser only**,
+concluded "focus never lands", and that was true *of the header* while being misleading about what
+the user sees.
+
+⛔ This is a cousin of the farbling defect the root `CLAUDE.md` records — *"a third drove the wrong
+browser … which faked an intermittent per-session bug in code that was fine."* I drove the **right**
+browser for the question I asked; the question was scoped too narrowly to describe the product.
+⇒ **On a multi-browser surface, measure every browser that can hold the thing you are asking about.**
+
+**2. My fix then made it two carets.** The header and the new-tab page are **separate CEF browser
+processes with separate documents**, so each renders its own caret independently; only one receives
+keystrokes. Typing went to the address bar and worked — it just looked wrong.
+
+**Fixed:** `NewTabPage.tsx` no longer auto-focuses. The address bar wins on the new-tab page, which is
+the owner's stated target and what Chrome does.
+
+| Run | HEADER `activeElement` | NEW TAB `activeElement` | carets |
+|---|---|---|---|
+| 🔴 before | `INPUT` (address bar) | `INPUT` (search box) | **2** |
+| 🟢 after | `INPUT` (address bar) | `BODY` | **1** |
+
+⭐ The green is asserted **across both browsers in one run**, which is the correction the mistake
+above demands.
+
+### ⚠️ Two claims from the original ticket now look weaker
+
+- 👤 The owner clicked the address bar and typing worked **immediately** — evidence *against* the test
+  user's *"had to click elsewhere first"*, at least on this machine. ⇒ either it is
+  environment-specific, or the report really meant *"the cursor was not where I expected"*. ⛔ Worth
+  **asking the reporter** before chasing a native-focus bug that may not exist.
+- ⇒ item 1's native half stays **unproven in both directions**, and is now also **less likely**.
+
+### ⬜ Recorded, not done — make the new-tab box forward focus (option "C")
+
+The two fields are functionally the same: the new-tab box uses the **same** `isUrl` / `normalizeUrl` /
+`toSearchUrl` utilities and the same search-engine setting as the address bar.
+
+**The one real difference:** the address bar has the omnibox dropdown — history suggestions and inline
+autocomplete. `NewTabPage.tsx` contains **zero** omnibox references. So the same keystrokes in the
+middle box give a worse result.
+
+⛔ **I first called this "real work across two browsers" and that was wrong.** The route already
+exists: `focus_address_bar` is wired end to end (C++ `simple_handler.cpp` → render handler →
+`MainBrowserView.tsx`) and is what Ctrl+L uses. The missing piece is only that the new-tab page does
+not *send* it. 👤 Owner's instinct — *"don't we already have C?"* — was closer to right than my
+answer.
+
 ### ⬜ Still open in this cluster
 
 - **Item 1's native half** — whether a real first click is lost. Needs a human; not claimed.
