@@ -10,7 +10,7 @@
 | 1 | 🟡 **DIAGNOSED, NOT FIXED (2026-09-18 — shipped attempt REVERTED)** — **Cursor is not in the address bar at launch** — a test user had to click elsewhere first | `../TICKET_omnibox_addressbar_interaction_defects.md` #1 | ⭐ First-run blast radius, external reporter. Establish *which* defect first (focus never lands / first click lost / caret invisible) with an instrumented probe on the header browser at startup; then the fix. 👤 Owner's target: on launch, focus is in the address bar with the caret visible, ready to type. T2 probe + T3 human check |
 | 2 | ✅ **DONE 2026-09-18** — **Omnibox sometimes stays open after selecting a URL** | ticket #2 | 📏 **Reproduced deterministically.** Not the hide path — an uncancelled 150 ms **show** debounce in the header fires after the hide. See § Item 2 below |
 | 3 | ✅ **DONE 2026-09-18** — **URL populates the address bar late after clicking a suggestion** | ticket #3 | 📏 **Not "late" — never.** Measured pre-fix: page navigated at 122 ms, clicked URL absent from the address bar after **35 s**. Fixed: **75 ms**, ahead of the navigation. See § Item 3 below |
-| 4 | **Tab / Enter autocomplete behaviour** | ticket #4 | prior-art read (Chrome, Firefox, Brave omnibox key handling) before code |
+| 4 | ✅ **DONE 2026-09-18** — **Tab / Enter autocomplete behaviour** | ticket #4 | 📏 **There was no inline autocomplete at all** — the Tab branch was unreachable dead code. 👤 Owner chose scope **A (conformance only)**. `PRIOR_ART.md` row logged. See § Item 4 below |
 | 5 | **Tear-off window overlay sweep** | 👤 owner 2026-09-15: typing in a torn-off tab's address bar makes that window disappear | Phase 3.5 measured and fixed this for Ctrl+N windows (K9: z-order occlusion; overlays now owned by the requesting window, owner-confirmed `Z5`). It was **never measured on a torn-off window** (`tab_tearoff` → `CreateFullWindow`, same creator). Re-run the Phase 3.5 `winprobe.ps1` z-order read on a torn-off window, **every overlay** (the 3.5 doc predicted "generalises beyond the omnibox" and said "not yet tested on a second overlay"), with `OwnOverlayToRequestingWindow` reverted as the negative control. If it is green, the owner's observation predates the fix and the row closes; if red, tear-off differs and gets fixed here |
 | 6 | `modal_buttons_unclickable_small_screen` | old bundle | may already be covered by 7a's viewport work — verify, do not re-do |
 | 7 | ❔ `chrome_ui_scales_but_its_window_does_not` | old bundle | may collapse into 3.5 — verify |
@@ -453,3 +453,125 @@ numbers have also moved: 873/882, 1163, 1474, 1522, 2537.)
 
 React-only — no rebuild needed. ⬜ The HWND half of the evidence has no macOS analogue yet
 (`omniboxprobe.py` reads `user32!IsWindowVisible`); noted in `../MAC_RELAY_P11_ROUND.md`.
+
+---
+
+## Item 4 — Tab / Enter autocomplete conformance · ✅ DONE 2026-09-18
+
+👤 *"I want to make sure our tab and enter behavior in the addressbar is standard for
+auto-complete suggested etc. so we have the same feel as what people are accustomed to."*
+
+Not a defect report — the only conformance question of the four. Working rule 5 job before it was a
+coding job: prior art read and logged in `../../PRIOR_ART.md` (2026-09-18 row) **before** any change,
+then 👤 the owner chose the scope.
+
+### 📏 The finding the ticket did not have: there is no inline autocomplete
+
+The ticket says *"Tab, ArrowRight and End all accept the inline autocomplete"*. **False in the current
+tree, and it had been for a long time.** `autocompleteText` is initialised `''` and every one of its
+**8** assignments is `''`, so `(e.key === 'Tab' || 'ArrowRight' || 'End') && autocompleteText` can
+never be true. `suppressAutocompleteRef` was written twice and read nowhere.
+
+Measured, not argued (DOM layer: the header `<input>`'s value + `document.activeElement`; HWND layer:
+`IsWindowVisible` on the omnibox overlay):
+
+| key | what it actually did |
+|---|---|
+| **Tab** | blurred the bar, focus jumped to the next toolbar **button**, and 🔴 **the dropdown stayed on screen indefinitely** (`onBlur` sent no hide) |
+| **ArrowRight / End** | nothing at all |
+| **↓ / ↑** | highlighted and filled the bar — correct |
+| **Enter** | navigated — correct |
+| **Escape** | one press hid the dropdown, jumped straight to the **page URL** and left the bar |
+
+### What the reference browsers do — and they agree
+
+| | Hodos (before) | Chrome | Firefox | Vivaldi |
+|---|---|---|---|---|
+| inline autocomplete | **none** | yes, on by default | yes (`browser.urlbar.autoFill`) | yes ("Address Auto-Complete") |
+| accepts it | n/a | **→ / End** | **→** | → |
+| **Tab** | blur to toolbar, dropdown stays | **moves through the suggestion list** | **moves through results** | cycles the drop-down |
+| Enter on a highlighted item | navigates ✅ | ✅ | ✅ | ✅ |
+| **Escape** | one press does everything | 4-rung ladder | ~2 rungs | Chromium |
+
+⭐ **All three disagree with the dead code.** Tab is not the accept key — → is. A Firefox urlbar
+owner, Bugzilla 1596264: *"in Firefox (and Chrome too) TAB moves through results, that's why we
+complete with the right arrow."* That bug has sat **NEW since 2019** specifically to protect this
+muscle memory. Chromium's Escape ladder (commit `60dbc25`): revert temporary text → close the popup
+→ restore the page URL → blur.
+
+⭐ **Where they genuinely disagree is narrower than the ticket implied:** not *what* Tab does, but
+whether Tab-cycling is **liked** — Vivaldi users call it counter-intuitive, Mozilla defends it.
+
+### 👤 Owner decision — scope A, conformance only
+
+Offered A (conformance only), B (A **plus** actually building inline autocomplete), C (fix only the
+stuck dropdown, change no key semantics). 👤 **A.** So inline autocomplete is deliberately **not**
+built — it is a feature, not conformance, and the owner asked for the literal question answered.
+
+Shipped:
+
+1. **Tab traverses the suggestion list** (Shift+Tab goes back up), exactly like ↓/↑ — and only while
+   the dropdown is up, so Tab keeps its normal focus-moving job otherwise.
+2. **Blur dismisses the dropdown**, which kills the measured "Tab left it on screen forever".
+3. **Escape becomes a two-rung ladder**: 1st press closes the dropdown, restores **the user's own
+   typed text** and **keeps focus**; 2nd press restores the page URL and leaves.
+   ⚠️ Chromium's rungs 1 and 2 are collapsed into one here on purpose — our bar has no separate
+   "default match" to revert to, so "revert temporary text" and "close the popup" are one action.
+4. **The dead `autocompleteText` state and `suppressAutocompleteRef` are deleted**, along with the
+   unreachable branch and the Backspace/Delete block that existed only to feed it.
+
+### Evidence — `item4check.py`, 15 rows, and the RED half
+
+| | GREEN (feature on) | RED (`MainBrowserView.tsx` at HEAD~1) |
+|---|---|---|
+| R1a Tab keeps focus in the bar | 🟢 | 🔴 focus lands on a toolbar BUTTON |
+| R1b Tab fills the bar with a suggestion | 🟢 | ⚠️ passes vacuously — see below |
+| R1c a second Tab moves to the NEXT suggestion | 🟢 `example.com` → `example.org` | 🔴 unchanged |
+| R1d dropdown stays up while traversing | 🟢 | ⚠️ passes — because leaving it up **was the bug** |
+| R2a Shift+Tab steps back | 🟢 | ⚠️ vacuous |
+| R2b focus still in the bar | 🟢 | 🔴 |
+| R3 Tab leaves the bar when there is **no** dropdown | 🟢 | 🟢 (must not change, and did not) |
+| R4a Escape×1 closes the dropdown | 🟢 | 🔴 |
+| R4b Escape×1 restores the **typed** text | 🟢 `'exam'` | 🔴 jumped to the page URL |
+| R4c Escape×1 keeps focus | 🟢 | 🔴 |
+| R4d Escape×1 did **not** jump to the page URL | 🟢 | 🔴 |
+| R5a/R5b Escape×2 restores the page URL and leaves | 🟢 | ⚠️ passes — the old single press did both rungs at once |
+| R5c dropdown still down after Escape×2 | 🟢 | 🔴 |
+| R6 **regression**: clicking a suggestion still navigates, item 3 still green | 🟢 54 ms | 🟢 58 ms |
+| R7 **regression**: Enter still navigates | 🟢 | 🟢 |
+
+**8 of 15 rows go red with the change reverted.** ⚠️ **Five do not, and four of those are not
+independently falsifiable** — recorded rather than quietly counted as greens:
+
+- **R1b** only asserts the value is no longer `'exam'`; in the old build Tab blurs and the bar shows
+  the page URL, which satisfies it. It is meaningful only beside R1a/R1c.
+- **R1d** and **R2a** pass in the control *because of the defect* — the old build never hid the
+  dropdown and never moved the selection, so "still up" and "unchanged" both read as pass.
+- **R5a/R5b** pass because the old one-press Escape performed both rungs; only **R4\*** and **R5c**
+  distinguish a ladder from a single action.
+- **R3, R6, R7** are *invariance* rows: they are supposed to pass in both columns, and do.
+
+⛔ **The R6 row exists because the fix could have broken clicking.** Blur now sends `omnibox_hide`,
+and 📏 a suggestion click *does* blur the header for ~18 ms (item 3's measurement), so the dropdown
+could have vanished under the mouse before `onClick` ran. Measured: it does not — the click still
+navigates and item 3's number is unchanged at 54 ms.
+
+### ⚠️ Stated residual, not hidden
+
+`omniboxOpenRef` is the header's belief about whether the dropdown is up. C++ also hides the overlay
+on window **move**, **resize** and **app focus loss** (`cef_browser_shell.cpp`), and none of those
+paths tell the header anything — so after one of them the flag reads stale-true until the next blur,
+hide or keystroke, and the cost is **one Tab press that traverses nothing**. Closing it properly means
+a notification out of `HideOmniboxOverlay()`, which is item 2's settled no-parameter decision and was
+deliberately left alone.
+
+### ⭐ Two things deliberately NOT changed
+
+- **Enter**, which the prior art and our own measurement both say is already correct.
+- **Re-focusing the address bar when the window regains OS focus** — already checked with the owner
+  during item 1 and confirmed standard: Chrome, Brave and Firefox all restore focus to whatever held
+  it. No change.
+
+### 🍎 macOS
+
+React only — no rebuild. The overlay `omnibox_select` IPC it leans on is already cross-platform.

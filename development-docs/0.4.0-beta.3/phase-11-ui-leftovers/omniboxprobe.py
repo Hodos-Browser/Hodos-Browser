@@ -148,10 +148,10 @@ def type_char(sess, ch):
     sess.call("Input.dispatchKeyEvent", dict(type="keyUp", **common))
 
 
-def press(sess, name):
+def press(sess, name, shift=False):
     vk = VK[name]
     common = {"key": name, "code": name, "windowsVirtualKeyCode": vk,
-              "nativeVirtualKeyCode": vk}
+              "nativeVirtualKeyCode": vk, "modifiers": 8 if shift else 0}
     sess.call("Input.dispatchKeyEvent", dict(type="rawKeyDown", **common))
     sess.call("Input.dispatchKeyEvent", dict(type="keyUp", **common))
 

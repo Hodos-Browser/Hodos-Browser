@@ -50,17 +50,25 @@ const MainBrowserView: React.FC = () => {
     // Address bar state
     const [address, setAddress] = useState('');
     const [isEditingAddress, setIsEditingAddress] = useState(false);
-    const [autocompleteText, setAutocompleteText] = useState<string>('');
     const [userTypedText, setUserTypedText] = useState('');
     const addressInputRef = React.useRef<HTMLInputElement>(null);
     const justNavigatedRef = React.useRef(false);
     // Tracks navigation-in-progress to prevent tab sync from reverting address bar
     const pendingNavigationRef = React.useRef(false);
     const preNavTabUrlRef = React.useRef<string>('');
-    // Suppress autocomplete after Backspace/Delete so it doesn't re-fill
-    const suppressAutocompleteRef = React.useRef(false);
     // Debounce omnibox IPC so typing stays snappy
     const omniboxDebounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+    // beta.3 Phase 11 item 4 (`P11-I4`) — does the header believe the dropdown is on
+    // screen? Tab must only traverse suggestions while there ARE suggestions;
+    // otherwise it has to fall through to normal focus movement.
+    // ⚠️ Known residual, stated rather than hidden: C++ also hides the overlay on
+    // window move, resize and app focus loss (`cef_browser_shell.cpp`), and none of
+    // those paths tell the header anything. After one of them this flag reads
+    // stale-true until the next blur, hide or keystroke — cost is a single Tab press
+    // that traverses nothing. Closing it properly means a notification out of
+    // HideOmniboxOverlay(), which is item 2's settled no-parameter decision and not
+    // this commit's business.
+    const omniboxOpenRef = React.useRef(false);
 
     // beta.3 Phase 11 item 2 (`P11-I2`) — cancel a scheduled `omnibox_show`.
     // ⛔ MUST be called by every path that dismisses the dropdown. 📏 Measured
@@ -501,23 +509,15 @@ const MainBrowserView: React.FC = () => {
         }
     }, [activeTabId, tabs, resetBlockedCount, resetAdblockCount]);
 
-    // Listen for autocomplete suggestions from omnibox overlay
-    // Only used for arrow-key selection in the dropdown — no inline autofill
+    // Listen for the highlighted suggestion from the omnibox overlay.
+    // Arrow-key / Tab selection only — there is no inline autofill in the bar.
     React.useEffect(() => {
         const handleAutocomplete = (event: MessageEvent) => {
             if (event.data?.type === 'omnibox_autocomplete') {
                 const suggestion = event.data.suggestion;
-                if (suggestion && isEditingAddress) {
-                    // Arrow-key selected item — show it in the address bar
-                    setAutocompleteText('');
-                    setAddress(suggestion);
-                } else if (!suggestion && isEditingAddress) {
-                    // Arrow back to -1 — revert to typed text
-                    setAutocompleteText('');
-                    setAddress(userTypedText);
-                } else {
-                    setAutocompleteText('');
-                }
+                if (!isEditingAddress) return;
+                // Selected an item — show it. Back to -1 — restore what was typed.
+                setAddress(suggestion || userTypedText);
             }
         };
 
@@ -553,7 +553,7 @@ const MainBrowserView: React.FC = () => {
             setAddress(display);
             setUserTypedText(display);
             setIsEditingAddress(false);
-            setAutocompleteText('');
+            omniboxOpenRef.current = false;
             justNavigatedRef.current = true;
             addressInputRef.current?.blur();
         };
@@ -776,7 +776,6 @@ const MainBrowserView: React.FC = () => {
                             setAddress(newValue);
                             setUserTypedText(newValue);
                             setIsEditingAddress(true);
-                            setAutocompleteText(''); // Clear autocomplete on input change
 
                             // Debounce omnibox IPC so typing stays responsive
                             if (omniboxDebounceRef.current) clearTimeout(omniboxDebounceRef.current);
@@ -784,21 +783,15 @@ const MainBrowserView: React.FC = () => {
                                 omniboxDebounceRef.current = setTimeout(() => {
                                     window.cefMessage?.send('omnibox_update_query', [newValue]);
                                     window.cefMessage?.send('omnibox_show', [newValue]);
+                                    omniboxOpenRef.current = true;   // P11-I4
                                 }, 150);
                             } else {
+                                cancelPendingOmniboxShow();
                                 window.cefMessage?.send('omnibox_hide', []);
+                                omniboxOpenRef.current = false;      // P11-I4
                             }
                         }}
                         onKeyDown={(e) => {
-                            if (e.key === 'Backspace' || e.key === 'Delete') {
-                                // Suppress autocomplete re-fill after deletion
-                                suppressAutocompleteRef.current = true;
-                                setAutocompleteText('');
-                            } else if (e.key !== 'Shift' && e.key !== 'Control' && e.key !== 'Alt' && e.key !== 'Meta'
-                                && e.key !== 'ArrowDown' && e.key !== 'ArrowUp') {
-                                // Any non-modifier, non-arrow key clears the suppression
-                                suppressAutocompleteRef.current = false;
-                            }
                             if (e.key === 'ArrowDown') {
                                 e.preventDefault();
                                 window.cefMessage?.send('omnibox_select', 'down');
@@ -813,32 +806,44 @@ const MainBrowserView: React.FC = () => {
                                 pendingNavigationRef.current = true;
                                 handleNavigate(navigatedAddress);
                                 setIsEditingAddress(false);
-                                setAutocompleteText('');
                                 setUserTypedText(navigatedAddress);
                                 // Set ref so onBlur knows not to revert the address
                                 justNavigatedRef.current = true;
                                 e.currentTarget.blur();
                                 cancelPendingOmniboxShow();   // P11-I2
                                 window.cefMessage?.send('omnibox_hide', []);
-                            } else if (e.key === 'Escape') {
-                                // Escape dismisses overlay, keeps current input
-                                cancelPendingOmniboxShow();   // P11-I2
-                                window.cefMessage?.send('omnibox_hide', []);
-                                setIsEditingAddress(false);
-                                setAutocompleteText('');
-                                setAddress(userTypedText);
-                                e.currentTarget.blur();
-                            } else if ((e.key === 'Tab' || e.key === 'ArrowRight' || e.key === 'End') && autocompleteText) {
-                                // Tab, Right arrow, or End accepts the autocomplete suggestion
+                                omniboxOpenRef.current = false;
+                            } else if (e.key === 'Tab' && omniboxOpenRef.current) {
+                                // beta.3 Phase 11 item 4 (`P11-I4`) — Tab moves THROUGH the
+                                // suggestion list. ⭐ Chrome, Firefox and Vivaldi all agree on
+                                // this, and all three disagree with the code that used to be
+                                // here, which tried to make Tab ACCEPT an inline completion —
+                                // and never ran at all, because the state it tested was only
+                                // ever assigned ''. A Firefox urlbar owner, bug 1596264: "in
+                                // Firefox (and Chrome too) TAB moves through results, that's
+                                // why we complete with the right arrow." That bug is still
+                                // open precisely to protect this muscle memory.
+                                // ⛔ Only while the dropdown is up — otherwise Tab must keep
+                                // its normal job of moving focus out of the address bar.
                                 e.preventDefault();
-                                setUserTypedText(address);
-                                setAutocompleteText('');
-                                // Move cursor to end
-                                setTimeout(() => {
-                                    if (addressInputRef.current) {
-                                        addressInputRef.current.setSelectionRange(address.length, address.length);
-                                    }
-                                }, 0);
+                                window.cefMessage?.send('omnibox_select', e.shiftKey ? 'up' : 'down');
+                            } else if (e.key === 'Escape') {
+                                // `P11-I4` — Chromium's escape ladder (commit 60dbc25), first
+                                // two rungs. One press used to do all of it at once: hide the
+                                // dropdown, throw away what the user typed AND leave the bar.
+                                cancelPendingOmniboxShow();
+                                if (omniboxOpenRef.current) {
+                                    // Rung 1: close the dropdown, give the user their own text
+                                    // back, and STAY in the bar so they can keep editing.
+                                    window.cefMessage?.send('omnibox_hide', []);
+                                    omniboxOpenRef.current = false;
+                                    setAddress(userTypedText);
+                                } else {
+                                    // Rung 2: nothing left to dismiss — restore the page's URL
+                                    // (the tab-sync effect does that once editing ends) and go.
+                                    setIsEditingAddress(false);
+                                    e.currentTarget.blur();
+                                }
                             }
                         }}
                         onFocus={(e) => {
@@ -851,8 +856,14 @@ const MainBrowserView: React.FC = () => {
                         onBlur={() => {
                             // P11-I2 — leaving the bar must not leave a show queued.
                             cancelPendingOmniboxShow();
+                            // P11-I4 — nor a dropdown on screen. 📏 Measured 2026-09-18:
+                            // Tabbing out left the suggestion list up indefinitely, because
+                            // nothing on the blur path ever sent a hide.
+                            if (omniboxOpenRef.current) {
+                                window.cefMessage?.send('omnibox_hide', []);
+                                omniboxOpenRef.current = false;
+                            }
                             setIsEditingAddress(false);
-                            setAutocompleteText('');
                             // Don't revert address if we just navigated (Enter was pressed)
                             if (justNavigatedRef.current) {
                                 justNavigatedRef.current = false;
