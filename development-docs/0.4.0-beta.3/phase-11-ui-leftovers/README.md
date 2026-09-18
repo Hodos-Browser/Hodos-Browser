@@ -1063,3 +1063,67 @@ is handled correctly; only the accessibility factor is missing.
 The factor is readable without Chromium — `HKCU\Software\Microsoft\Accessibility\TextScaleFactor`
 (100 on this machine, i.e. off). ⚠️ Its verification is the DPI matrix plus a text-scale pass, which
 is `W10` and does not exist yet, so it stays open deliberately.
+
+---
+
+## Item 7 route 1 — FOLLOW-UP, same day: the guard was in the wrong place
+
+👤 The owner tested it with a real wheel within minutes of the commit, and the result was **half
+green and half a new finding** — which is exactly what a human row is for.
+
+> 👤 *"They don't scroll when I'm actually over the header portion, but when I'm on the web view
+> that's supposed to scroll, the web view scrolls and everything else scrolls with it."*
+> … then, after retesting: *"I tested on a regular site, which is what I should have done in the
+> first place and not on the wallet. And then the zoom does just do the web view and not the header.
+> So it works correctly unless it's a localhost."*
+
+### 🟢 What the owner's test proved that no probe here could
+
+**Ctrl+wheel over the header does nothing.** That is the end-to-end claim the CDP probe explicitly
+could **not** establish — a synthetic wheel never reaches Chromium's zoom path (verified twice: the
+*tab* did not zoom either, by wheel or by Ctrl+Plus). `W10(c)` is satisfied by this.
+
+### 🔴 And what it found — the guard was scoped too narrowly
+
+Zoom is stored per-**ORIGIN**, and `127.0.0.1:5137` serves far more than the chrome:
+
+| served from our origin | |
+|---|---|
+| the header | `/` |
+| ~14 overlays | `/omnibox`, `/menu`, `/wallet`, `/site-info`, … |
+| ⭐ **internal pages a user opens as TABS** | `/newtab`, `/settings-page`, `/browser-data`, `/wallet-panel`, `/cert-error`, `/payment-pending` |
+
+So Ctrl+scrolling the **new tab page** — an ordinary thing to do — zoomed the origin, and the header
+and every overlay re-rendered at that zoom. ⛔ Guarding only the header could never have fixed it,
+because the user is not over the header when it happens.
+
+### The fix: move the guard up, delete the copy
+
+It moved from `MainBrowserView.tsx` to **`App.tsx`**, the shared root for all 24 routes. Same four
+lines, one place instead of one-per-surface, and the header's copy is deleted.
+
+⭐ **The scope comes out exactly right for free.** The guard runs on the pages *we serve*, which is
+precisely the set that shares the chrome's origin. Real web content is a different origin in a
+different document and is untouched — no URL matching, no allow-list, nothing to drift.
+
+⚠️ **The trade-off, stated rather than buried:** our internal pages are no longer zoomable — settings,
+history, wallet, new tab. That is the owner's own rule applied consistently (our UI is chrome; the
+lever for making chrome bigger is Settings → Text size). ✅ And it strands nobody: internal pages
+already scale with the OS text-size factor, and as tabs they fill the webview, so nothing clips.
+
+### Evidence — the assertion is a SPLIT, because either half alone is satisfiable by a bug
+
+`zoomprobe.py` gained an **origin sweep**: every open browser, asserting *cancelled == (we serve it)*.
+A guard that blocks nothing would still pass "web content zooms"; one that blocks everything would
+still pass "our UI does not". Only the split catches both.
+
+| | GREEN | RED (guard disabled, React only) |
+|---|---|---|
+| pages we serve cancel ctrl+wheel | 🟢 12/12 | 🔴 0/12 |
+| web content cancels it | 🟢 0/2 — `bsvarcade.com`, `zanaadu.com` | 0/2 |
+| header cancels a **plain** wheel | 🟢 `False` — not over-broad | `False` |
+
+⛔ Served-module tokens: `if (e.ctrlKey) e.preventDefault` for green, `Date.now() < 0` for red.
+The red token is deliberately one **esbuild cannot constant-fold** — the previous attempt used
+`false && e.ctrlKey`, which esbuild folded to `if (false)`, deleting the operand being grepped for
+and making the instrument check contradict a correct result.

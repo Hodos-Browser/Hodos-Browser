@@ -27,6 +27,46 @@ const CertErrorPage = React.lazy(() => import('./pages/CertErrorPage'));
 const WalletPanelPage = React.lazy(() => import('./pages/WalletPanelPage'));
 
 const App = () => {
+  // beta.3 Phase 11 item 7, route 1 (`P11-I7a`) — Hodos's own UI never zooms.
+  //
+  // 👤 Owner's rule: page zoom is "show me THIS PAGE bigger"; Settings → Text size is
+  // "I can't see, make everything bigger". Everything we serve is UI, so it belongs on
+  // the second lever, not the first.
+  //
+  // ⭐ WHY IT LIVES IN App.tsx AND NOT IN THE HEADER. Chromium stores page zoom
+  // per-ORIGIN, and every route below — header, ~14 overlays, AND the internal pages a
+  // user opens as tabs (/newtab, /settings-page, /browser-data, /wallet-panel) — is
+  // served from 127.0.0.1:5137. So Ctrl+scrolling the NEW TAB PAGE zoomed the whole
+  // browser chrome with it. 📏 Owner-confirmed 2026-09-18: correct on a real site,
+  // wrong on localhost. Guarding only the header could never have fixed that, because
+  // the user is not over the header when it happens.
+  //
+  // ⭐ And putting it here gets the scope exactly right for free: this runs on the pages
+  // WE serve, which is exactly the set that shares the chrome's origin. Real web content
+  // is in a different origin and a different document — untouched, no URL check needed.
+  //
+  // ⛔ `{ passive: false }` IS LOAD-BEARING. React registers its own onWheel as PASSIVE
+  // and a passive listener's preventDefault() is silently discarded — Chrome logs
+  // "Unable to preventDefault inside passive event listener invocation" and zooms anyway.
+  // A JSX onWheel here would look right and do nothing.
+  //
+  // WHY preventDefault IS ENOUGH (Chromium source, verified not assumed):
+  //   render_widget_host_impl.cc :: OnWheelEventAck
+  //     if (ack_result != blink::mojom::InputEventResultState::kConsumed &&
+  //         delegate_ && delegate_->HandleWheelEvent(wheel_event.event)) {
+  // `HandleWheelEvent` is what turns Ctrl+wheel into ContentsZoomChange(), and it is
+  // only reached for a wheel the page did not consume.
+  //
+  // ⚠️ Keyboard zoom (Ctrl +/-/0) is blocked separately and earlier, in C++:
+  // simple_handler.cpp :: OnPreKeyEvent, for every non-`tab_` role.
+  useEffect(() => {
+    const blockChromeZoom = (e: WheelEvent) => {
+      if (e.ctrlKey) e.preventDefault();
+    };
+    window.addEventListener('wheel', blockChromeZoom, { passive: false });
+    return () => window.removeEventListener('wheel', blockChromeZoom);
+  }, []);
+
   console.log("🔍🔍🔍 APP COMPONENT RENDERING 🔍🔍🔍");
   console.log("🔍 Current pathname:", window.location.pathname);
   console.log("🔍 Full URL:", window.location.href);

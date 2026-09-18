@@ -85,6 +85,52 @@ def guard_fires(sess):
         "})()")
 
 
+def origin_sweep():
+    """⭐ The row the owner's own testing forced into existence.
+
+    📏 Owner, 2026-09-18: zoom behaves correctly on a real site and wrongly on
+    localhost. Chromium stores page zoom per-ORIGIN, and the header, all ~14
+    overlays AND the internal pages a user opens as TABS (/newtab, /settings-page,
+    /browser-data, /wallet-panel) are all served from 127.0.0.1:5137 -- so
+    Ctrl+scrolling the NEW TAB PAGE zoomed the entire browser chrome with it.
+    Guarding only the header could never have caught that: the user is not over
+    the header when it happens.
+
+    The assertion is a SPLIT, not a single value, because either half alone is
+    satisfiable by a bug: a guard that blocks nothing passes "web content still
+    zooms", and a guard that blocks everything passes "our UI does not".
+    """
+    print("ORIGIN SWEEP - ctrl+wheel must be cancelled on every page WE serve,")
+    print("               and on NO web content:")
+    ok, ours_n, web_n = True, 0, 0
+    for t in P.targets():
+        if not t["url"].startswith("http"):
+            continue
+        ours = "127.0.0.1:5137" in t["url"]
+        try:
+            s = P.Session(t)
+            c = s.ev("(function(){var e=new WheelEvent('wheel',{deltaY:-120,"
+                     "ctrlKey:true,cancelable:true,bubbles:true});"
+                     "window.dispatchEvent(e);return e.defaultPrevented})()")
+            s.close()
+        except Exception:
+            print("   %-46s (unreachable)" % t["url"][:46])
+            continue
+        good = (c == ours)
+        ok = ok and good
+        ours_n += 1 if ours else 0
+        web_n += 0 if ours else 1
+        print("   %-46s ours=%-5s cancelled=%-5s %s"
+              % (t["url"][:46], ours, c, "ok" if good else "<<< WRONG"))
+    if web_n == 0:
+        print("   ⛔ NO web content was open -- the sweep cannot show the guard is")
+        print("      scoped rather than global. Open a real site and re-run.")
+        return False
+    print("   -> %s  (%d of ours, %d web)"
+          % ("OK" if ok else "RED", ours_n, web_n))
+    return ok
+
+
 def main():
     hdr = P.Session(P.pick_exact(P.HEADER_URL))
     tab = None
@@ -105,6 +151,8 @@ def main():
         _, _, hdr_moved = measure(hdr, "header, ctrl+wheel")
         print("")
 
+        sweep_ok = origin_sweep()
+        print("")
         import json as _j
         g = _j.loads(guard_fires(hdr))
         t = _j.loads(guard_fires(tab))
@@ -113,7 +161,7 @@ def main():
               % (g["ctrl"], g["plain"]))
         print("  tab   : ctrl+wheel cancelled = %-5s | plain wheel cancelled = %-5s"
               % (t["ctrl"], t["plain"]))
-        guard_ok = g["ctrl"] and not g["plain"] and not t["ctrl"]
+        guard_ok = g["ctrl"] and not g["plain"] and not t["ctrl"] and sweep_ok
         print("  -> %s" % ("OK: the header cancels ctrl+wheel ONLY, and the tab cancels nothing"
                            if guard_ok else
                            "RED: guard missing, too broad, or leaking into tabs"))
