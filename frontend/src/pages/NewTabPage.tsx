@@ -124,27 +124,31 @@ const NewTabPage: React.FC = () => {
         };
     }, []);
 
-    // Phase 11 item 1 — ⛔ this page deliberately does NOT auto-focus its search box.
+    // ⚠️ Phase 11 item 1 (2026-09-18) — this auto-focus was REMOVED for a day and then
+    // RESTORED, because removing it made things worse. Read before touching it.
     //
-    // 👤 Owner, 2026-09-18, looking at a fresh launch: *"I see the cursor in the search bar
-    // in the middle of the new tab and not in the address bar… when I clicked in the address
-    // bar, the cursor showed up in there. But the cursor in the search bar in the web page
-    // view still stayed in there and was still blinking."*
+    // The address bar and this box live in **separate CEF browser processes**. Two layers
+    // of focus decide where a keystroke goes:
+    //   DOM focus    — which element gets keys once they arrive at a browser
+    //   NATIVE focus — whether keys arrive at that browser at all
     //
-    // 🚨 TWO CARETS. This page and the header are **separate CEF browser processes with
-    // separate documents**, so each renders its own caret independently — only one actually
-    // receives keystrokes. Typing went to the address bar and worked, but the page showed a
-    // second blinking caret that owns nothing.
+    // 📏 Measured: at startup `TabManager::RegisterTabBrowser` gives NATIVE focus to the
+    // TAB. So this box holding DOM focus is what makes "launch and type" work at all today.
+    // Removing it, and separately focusing the address bar in `MainBrowserView.tsx`, left
+    // the header with DOM focus it could not use — 👤 the owner typed and **nothing
+    // happened**. Giving the header native focus here did not fix it either (tried, logged
+    // as firing, behaviour unchanged) — so the cause is further down and is not understood.
     //
-    // ⇒ The address bar wins on the new-tab page, which is both the owner's stated target
-    // ("on launch, focus is in the address bar with the caret visible, ready to type") and
-    // what Chrome does. The header's focus lives in `MainBrowserView.tsx` — search for
-    // `hasAutoFocusedRef`.
+    // ⛔ Do not remove this again without first establishing where native focus actually
+    // lands at startup. See `phase-11-ui-leftovers/README.md` item 1.
     //
-    // ⚠️ The box still works; it just needs a click first. ⬜ The better end state is for it
-    // to FORWARD focus to the address bar (the `focus_address_bar` IPC already exists, used
-    // by Ctrl+L), because the address bar has history suggestions and inline autocomplete
-    // and this box has neither. Recorded in the phase README, not done here.
+    // Auto-focus search bar on mount
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            searchInputRef.current?.focus();
+        }, 100);
+        return () => clearTimeout(timer);
+    }, []);
 
     // Fetch search engine setting
     useEffect(() => {

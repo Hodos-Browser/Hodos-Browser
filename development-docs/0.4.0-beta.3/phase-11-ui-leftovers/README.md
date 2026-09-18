@@ -7,7 +7,7 @@
 
 | # | Item | Source | Shape |
 |---|---|---|---|
-| 1 | ✅ **DONE 2026-09-18** — **Cursor is not in the address bar at launch** — a test user had to click elsewhere first | `../TICKET_omnibox_addressbar_interaction_defects.md` #1 | ⭐ First-run blast radius, external reporter. Establish *which* defect first (focus never lands / first click lost / caret invisible) with an instrumented probe on the header browser at startup; then the fix. 👤 Owner's target: on launch, focus is in the address bar with the caret visible, ready to type. T2 probe + T3 human check |
+| 1 | 🟡 **DIAGNOSED, NOT FIXED (2026-09-18 — shipped attempt REVERTED)** — **Cursor is not in the address bar at launch** — a test user had to click elsewhere first | `../TICKET_omnibox_addressbar_interaction_defects.md` #1 | ⭐ First-run blast radius, external reporter. Establish *which* defect first (focus never lands / first click lost / caret invisible) with an instrumented probe on the header browser at startup; then the fix. 👤 Owner's target: on launch, focus is in the address bar with the caret visible, ready to type. T2 probe + T3 human check |
 | 2 | **Omnibox sometimes stays open after selecting a URL** | ticket #2 | reproduce before anything; the hide path (`omnibox_hide`) is the suspect, not Phase 3.5's create/show arm |
 | 3 | **URL populates the address bar late after clicking a suggestion** | ticket #3 | measure the gap first (Phase 2's lesson: the control read 2.04 s); then send the URL with the click and set it optimistically. 👤 Owner: the page navigating while the bar still shows the old URL reads as "the click did nothing" |
 | 4 | **Tab / Enter autocomplete behaviour** | ticket #4 | prior-art read (Chrome, Firefox, Brave omnibox key handling) before code |
@@ -62,7 +62,7 @@ reservation. ⚠️ No money is required for the GREEN halves — a stubbed slow
 
 ---
 
-## Item 1 — cursor does not appear in the address bar at launch · ✅ DONE 2026-09-18
+## Item 1 — cursor does not appear in the address bar at launch · 🟡 DIAGNOSED, NOT FIXED
 
 👤 Reported by a **test user**: *"had to click elsewhere first and then they could click in the
 address bar and it would then allow them to type."* ⭐ The only one of the four with an external
@@ -240,3 +240,59 @@ answer.
   lesson (the control read 2.04 s) applies directly.
 - **Item 4** (Tab/Enter autocomplete) — working rule 5: read Chrome/Firefox/Vivaldi and record in
   `PRIOR_ART.md` **before** code. A change here alters muscle memory on every navigation.
+
+
+---
+
+## Item 1 — OUTCOME 2026-09-18: attempt REVERTED, defect diagnosed but not fixed
+
+🟡 **Everything below the diagnosis was reverted. The tree is back to pre-2026-09-18 behaviour:
+one caret, in the new-tab search box, and "launch and type" works.**
+
+### What the three attempts established
+
+👤 Owner, testing each build by launching and typing without clicking:
+
+| Attempt | Change | Result |
+|---|---|---|
+| 1 | Focus the address bar from React (`MainBrowserView.tsx`) | Address bar got DOM focus **and** the new-tab box kept its own ⇒ **two carets** |
+| 2 | Also stop the new-tab box auto-focusing (`NewTabPage.tsx`) | One caret — but typing did **nothing at all**. ⛔ **Worse than the original**, which at least accepted keystrokes |
+| 3 | Also give the header **native** focus at tab registration (`TabManager.cpp`) | The new code **fired** (log line confirmed) and behaviour was **unchanged** |
+
+### ⭐ The real finding — two layers of focus, and only one was ever in question
+
+| Layer | What it decides | Who sets it at startup |
+|---|---|---|
+| **DOM focus** | which element receives keys **once they arrive at a browser** | the page's own React |
+| **NATIVE focus** | whether keys **arrive at that browser at all** | `TabManager::RegisterTabBrowser` → **the TAB** |
+
+⇒ The new-tab search box holding DOM focus is the **only** reason "launch and type" works today.
+Removing it left the header holding DOM focus it could not use, so keystrokes reached **nobody**.
+
+⛔ **And the part that is NOT understood:** `header->GetHost()->SetFocus(true)` at registration ran —
+confirmed by its own log line — and changed nothing. CEF's documented advice for windowed browsers is
+exactly that call (root `CLAUDE.md`, "CEF Input Patterns"), so the cause sits **below** it. No
+hypothesis is recorded here on purpose; this ticket already burned a day on plausible-sounding ones.
+
+### ⛔ Before anyone writes more code here
+
+1. **Establish where native keyboard focus actually lands at startup** — which HWND, and which CEF
+   browser believes it has focus — *before* changing anything. That measurement does not exist yet.
+2. ⚠️ **The agent environment cannot settle it.** CDP key dispatch targets a browser directly and
+   bypasses native focus entirely; `PostMessage(WM_CHAR)` to a top-level window does not route to the
+   focused child; `SendInput` clicks are dropped here. Every green in this session that *looked* like
+   progress was measuring a layer the user does not experience. ⇒ this needs a human at the keyboard,
+   and `HUMAN_TEST_QUEUE.md` **W8** is that row.
+3. ⭐ **Three times in one session a measurement was scoped to the wrong layer** — one browser instead
+   of two, `activeElement` instead of a visible caret, DOM focus instead of native focus — and each
+   time it produced a confident green that did not survive the owner typing. **On a multi-process UI,
+   name the layer your instrument reads before you report what it means.**
+
+### What survives
+
+- The diagnosis above, and the two in-code warnings (`NewTabPage.tsx`, `MainBrowserView.tsx`) telling
+  the next person why the obvious change is wrong on its own.
+- `W8` in the human queue.
+- 👤 The owner's report that clicking the address bar works immediately, which makes the test user's
+  *"had to click elsewhere first"* look like **"the caret was not where I expected"** rather than a
+  second, separate defect. ⭐ Worth **asking the reporter** before treating it as one.
