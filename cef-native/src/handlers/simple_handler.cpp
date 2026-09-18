@@ -3112,6 +3112,31 @@ bool SimpleHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // beta.3 Phase 11 item 3 (`P11-I3`) — the omnibox overlay tells the header which
+    // URL it just launched, so the address bar can show it immediately instead of
+    // waiting for a tab-list push it will never accept (the header input keeps focus
+    // after a suggestion click, so its `isEditingAddress` guard blocks every sync).
+    // ⛔ Routed to the OWNING window's header, NOT SimpleHandler::GetHeaderBrowser():
+    // that one resolves the PRIMARY window's header, so in a second window the URL
+    // would land in the wrong address bar. ShowOmniboxOverlay() retargets this
+    // handler's window_id to the requesting window, which is what makes this correct.
+    if (message_name == "omnibox_navigated") {
+        CefRefPtr<CefListValue> nav_args = message->GetArgumentList();
+        std::string nav_url = nav_args->GetSize() > 0 ? nav_args->GetString(0).ToString() : "";
+        BrowserWindow* omni_win = GetOwnerWindow();
+        CefRefPtr<CefBrowser> omni_header = omni_win ? omni_win->header_browser : nullptr;
+        if (omni_header && omni_header->GetMainFrame()) {
+            CefRefPtr<CefProcessMessage> nav_fwd = CefProcessMessage::Create("omnibox_navigated");
+            nav_fwd->GetArgumentList()->SetString(0, nav_url);
+            omni_header->GetMainFrame()->SendProcessMessage(PID_RENDERER, nav_fwd);
+            LOG_DEBUG_BROWSER("Omnibox selection forwarded to header of window " +
+                              std::to_string(omni_win->window_id));
+        } else {
+            LOG_DEBUG_BROWSER("⚠️ No header browser for omnibox_navigated forward");
+        }
+        return true;
+    }
+
     if (message_name == "omnibox_hide") {
 #ifdef _WIN32
         extern void HideOmniboxOverlay();

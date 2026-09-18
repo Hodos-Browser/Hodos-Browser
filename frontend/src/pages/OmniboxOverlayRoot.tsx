@@ -199,6 +199,15 @@ interface SuggestionItemProps {
 const SuggestionItem: React.FC<SuggestionItemProps> = ({ suggestion, query, isFirst, isSelected, index, faviconSrc }) => {
   const handleClick = () => {
     if (window.cefMessage) {
+      // beta.3 Phase 11 item 3 (`P11-I3`) — hand the URL to the HEADER before
+      // navigating. 📏 Measured 2026-09-18: without this the page navigated in
+      // 94 ms and the address bar still read the typed fragment 35 s later, because
+      // clicking here deliberately does NOT blur the header input (the omnibox
+      // WndProc returns MA_NOACTIVATE so the dropdown never steals the caret), so
+      // `isEditingAddress` stayed true and the tab-sync effect returned early
+      // forever. ⛔ The header cannot learn the URL any other way: `navigate` is
+      // consumed by C++ and the tab list carries the URL only after OnTitleChange.
+      window.cefMessage.send('omnibox_navigated', suggestion.url);
       window.cefMessage.send('navigate', suggestion.url);
       window.cefMessage.send('omnibox_hide');
     }

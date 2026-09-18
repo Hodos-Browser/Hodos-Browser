@@ -504,6 +504,39 @@ const MainBrowserView: React.FC = () => {
         return () => window.removeEventListener('message', handleAutocomplete);
     }, [userTypedText, isEditingAddress]);
 
+    // beta.3 Phase 11 item 3 (`P11-I3`) — the omnibox overlay has committed to a URL.
+    // 📏 Measured 2026-09-18, before this existed: the page navigated in 94 ms and the
+    // address bar still showed the typed fragment 35 s later — and would have shown it
+    // forever. Clicking a suggestion does not blur this input (the overlay's WndProc
+    // returns MA_NOACTIVATE so the dropdown never steals the caret), so
+    // `isEditingAddress` stayed true and the tab-sync effect below returned early on
+    // every push, including the 30 s poll. Blurring by hand fixed it in 22 ms, which is
+    // the "I have to click off" the owner reported.
+    // ⚠️ This mirrors the Enter branch in onKeyDown deliberately — same five pieces of
+    // state, same order. If that branch changes, change this one too.
+    React.useEffect(() => {
+        const handleOmniboxNavigated = (event: MessageEvent) => {
+            if (event.data?.type !== 'omnibox_navigated') return;
+            const url: string = event.data.url || '';
+            if (!url) return;
+            const display = toDisplayUrl(url);
+            // Snapshot the old tab URL so tab sync suppresses the stale push that
+            // arrives before the navigation lands (same guard the Enter path uses).
+            const activeTab = tabs.find(t => t.id === activeTabId);
+            preNavTabUrlRef.current = activeTab?.url || '';
+            pendingNavigationRef.current = true;
+            setAddress(display);
+            setUserTypedText(display);
+            setIsEditingAddress(false);
+            setAutocompleteText('');
+            justNavigatedRef.current = true;
+            addressInputRef.current?.blur();
+        };
+
+        window.addEventListener('message', handleOmniboxNavigated);
+        return () => window.removeEventListener('message', handleOmniboxNavigated);
+    }, [tabs, activeTabId]);
+
     // Keyboard shortcuts
     useKeyboardShortcuts({
         onNewTab: createTab,

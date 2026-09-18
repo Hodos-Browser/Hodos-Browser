@@ -9,7 +9,7 @@
 |---|---|---|---|
 | 1 | 🟡 **DIAGNOSED, NOT FIXED (2026-09-18 — shipped attempt REVERTED)** — **Cursor is not in the address bar at launch** — a test user had to click elsewhere first | `../TICKET_omnibox_addressbar_interaction_defects.md` #1 | ⭐ First-run blast radius, external reporter. Establish *which* defect first (focus never lands / first click lost / caret invisible) with an instrumented probe on the header browser at startup; then the fix. 👤 Owner's target: on launch, focus is in the address bar with the caret visible, ready to type. T2 probe + T3 human check |
 | 2 | **Omnibox sometimes stays open after selecting a URL** | ticket #2 | reproduce before anything; the hide path (`omnibox_hide`) is the suspect, not Phase 3.5's create/show arm |
-| 3 | **URL populates the address bar late after clicking a suggestion** | ticket #3 | measure the gap first (Phase 2's lesson: the control read 2.04 s); then send the URL with the click and set it optimistically. 👤 Owner: the page navigating while the bar still shows the old URL reads as "the click did nothing" |
+| 3 | ✅ **DONE 2026-09-18** — **URL populates the address bar late after clicking a suggestion** | ticket #3 | 📏 **Not "late" — never.** Measured pre-fix: page navigated at 122 ms, clicked URL absent from the address bar after **35 s**. Fixed: **75 ms**, ahead of the navigation. See § Item 3 below |
 | 4 | **Tab / Enter autocomplete behaviour** | ticket #4 | prior-art read (Chrome, Firefox, Brave omnibox key handling) before code |
 | 5 | **Tear-off window overlay sweep** | 👤 owner 2026-09-15: typing in a torn-off tab's address bar makes that window disappear | Phase 3.5 measured and fixed this for Ctrl+N windows (K9: z-order occlusion; overlays now owned by the requesting window, owner-confirmed `Z5`). It was **never measured on a torn-off window** (`tab_tearoff` → `CreateFullWindow`, same creator). Re-run the Phase 3.5 `winprobe.ps1` z-order read on a torn-off window, **every overlay** (the 3.5 doc predicted "generalises beyond the omnibox" and said "not yet tested on a second overlay"), with `OwnOverlayToRequestingWindow` reverted as the negative control. If it is green, the owner's observation predates the fix and the row closes; if red, tear-off differs and gets fixed here |
 | 6 | `modal_buttons_unclickable_small_screen` | old bundle | may already be covered by 7a's viewport work — verify, do not re-do |
@@ -296,3 +296,84 @@ hypothesis is recorded here on purpose; this ticket already burned a day on plau
 - 👤 The owner's report that clicking the address bar works immediately, which makes the test user's
   *"had to click elsewhere first"* look like **"the caret was not where I expected"** rather than a
   second, separate defect. ⭐ Worth **asking the reporter** before treating it as one.
+
+---
+
+## Item 3 — the URL never reaches the address bar after a suggestion click · ✅ DONE 2026-09-18
+
+👤 *"clicking on a url in the omnibox works functionally (navigates to the page) but it takes a long
+time for the url to load in the address box after the user clicks it."*
+
+### 📏 Measured first, as the ticket demanded — and "a long time" is not the finding
+
+Instrument: `omniboxprobe.py item3` — **DOM layer**, the header browser's `<input>.value`, with the
+tab parked on the new-tab page so the clicked URL cannot already be there. Subject printed each run
+(dev pid, header target, omnibox target; dev CDP port 9322 only).
+
+| | pre-fix | post-fix |
+|---|---|---|
+| `tB` page navigated | 122 ms | 99 ms |
+| `tA` **clicked URL** in the address bar | 🔴 **NOT WITHIN 35 s** | 🟢 **75 ms** |
+| address bar final value | `''` (the parked NTP's) | `https://example.com/` |
+
+⭐ The bar now leads the navigation (75 ms < 99 ms), which is what Chrome does.
+⭐ Contrast row, measured on the same build: the **Enter** path was never broken — 235 ms.
+
+### The cause, and ⛔ a correction to my own first statement of it
+
+📖 The click sends only `navigate` + `omnibox_hide`; neither carries the URL to the header, and the
+header's own update path is the *tab list*, which C++ pushes on `OnTitleChange` — `OnAddressChange`
+pushes nothing, and `useTabManager`'s safety poll is **30 s**.
+
+But that is not what made it *never*. The header's "sync address bar with the active tab's URL"
+effect is guarded by `if (!isEditingAddress)`, and:
+
+> ⛔ **I first wrote that clicking a suggestion "never blurs the header input" (because the omnibox
+> WndProc returns `MA_NOACTIVATE` so the dropdown cannot steal the caret). That is wrong, and the
+> negative control is what caught it.** 📏 Measured focus events on the header `<input>`:
+>
+> ```
+>    49 ms  blur   value='exam'
+>    67 ms  focus  value='exam'
+> ```
+>
+> It blurs for **~18 ms and re-focuses**. So the sync effect does not run zero times — it runs
+> **exactly once, with the pre-navigation URL**, and is blocked from then on. That is why the bar
+> showed the *previous page's* URL in one control run and the *typed fragment* in another: which one
+> you get depends only on whether that 18 ms window lands before or after the tab URL updates. Both
+> are the same defect and both are wrong.
+
+### The fix
+
+`OmniboxOverlayRoot.tsx` sends a new `omnibox_navigated` IPC carrying the URL **before** `navigate`.
+C++ forwards it to the **owning window's** header; the header mirrors its own Enter branch — sets the
+address, leaves edit mode, snapshots the pre-nav URL so tab sync suppresses the stale push.
+
+⛔ **Reuse considered and rejected:** the existing `omnibox_autocomplete` channel already runs
+overlay → C++ → header and would have shown the URL with no new message. It was rejected because it
+is a *preview* of an arrow-key selection and deliberately **leaves the header in edit mode** — reusing
+it would have fixed the visible symptom and left the address bar frozen for every redirect after it.
+
+⛔ **Routed to `GetOwnerWindow()->header_browser`, not `SimpleHandler::GetHeaderBrowser()`** — the
+latter resolves the **primary** window's header (it is one of the `G11` sites), so in a second window
+the URL would have landed in the wrong address bar. `ShowOmniboxOverlay()` already retargets this
+handler's `window_id` to the requesting window, which is what makes the owner lookup correct.
+
+### 🔴 Negative control — run, and it failed for the right reason
+
+The `omnibox_navigated` send was deleted from `OmniboxOverlayRoot.tsx`, the served module verified to
+**lack** the token *after the dev server had settled* (⛔ the Vite trap that nearly ate item 1's
+control), both browsers hard-reloaded, and the log confirmed C++ received no `omnibox_navigated` on
+the control run. Result: page navigated at 122 ms, clicked URL **never** appeared in 35 s.
+
+⚠️ **The control also condemned the first version of the probe.** Its `tA` asserted only that the
+address bar value *changed* — and with the feature off it changes at ~99 ms, to the wrong URL. That
+probe scored the broken build green. `tA` now requires the **clicked host** to appear. Recorded here
+because it is exactly the family this harness exists for.
+
+### 🍎 macOS
+
+Shared C++ (`simple_handler.cpp`, `simple_render_process_handler.cpp`), no platform split added —
+relay note in `../MAC_RELAY_P11_ROUND.md`. The *cause* cited above is Windows-specific in one detail
+(`MA_NOACTIVATE`); whether macOS shows the same focus flicker is ⬜ unmeasured, but the fix is
+correct on both and macOS gets it from the shared files.

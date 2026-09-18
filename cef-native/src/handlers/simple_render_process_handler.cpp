@@ -1894,6 +1894,23 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
         return true;
     }
 
+    // ========== OMNIBOX NAVIGATED (suggestion clicked) ==========
+    // beta.3 Phase 11 item 3 (`P11-I3`). Distinct from omnibox_autocomplete below on
+    // purpose: that one is a PREVIEW of an arrow-key selection and deliberately leaves
+    // the header in edit mode, while this one means "we have committed to this URL" and
+    // the header must leave edit mode or its tab-sync effect stays blocked for good.
+    if (message_name == "omnibox_navigated") {
+        CefRefPtr<CefListValue> args = message->GetArgumentList();
+        std::string url = args->GetString(0);
+
+        std::string js = "window.postMessage({ type: 'omnibox_navigated', url: '" +
+                         escapeJsonForJs(url) + "' }, '*');";
+        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+
+        LOG_DEBUG_RENDER("omnibox_navigated posted to header window");
+        return true;
+    }
+
     // ========== OMNIBOX AUTOCOMPLETE UPDATE ==========
     if (message_name == "omnibox_autocomplete_update") {
         CefRefPtr<CefListValue> args = message->GetArgumentList();
