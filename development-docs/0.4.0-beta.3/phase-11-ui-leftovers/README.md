@@ -174,7 +174,50 @@ above demands.
   **asking the reporter** before chasing a native-focus bug that may not exist.
 - ⇒ item 1's native half stays **unproven in both directions**, and is now also **less likely**.
 
-### ⬜ Recorded, not done — make the new-tab box forward focus (option "C")
+
+### ⚠️ What the green actually proves — and the one row still owed to a human
+
+👤 Owner, next launch: *"I didn't see a cursor in either the address bar or the search box… I clicked
+in the address bar, started typing, it worked fine for me, but I should have just started typing and
+seen if it went into the address bar."*
+
+⛔ **My green measured `document.activeElement` — that focus was ASSIGNED. A caret only RENDERS when
+the window also has OS focus.** The rig launches the browser with `Start-Process`, which does not
+necessarily bring it to the foreground, so `activeElement` can be the address bar with nothing
+blinking on screen. ⇒ the measurement is sound for what it asked and **narrower than it reads**: it
+does not establish that a real user sees a caret on a real launch. Same class of error as measuring
+one browser, in a different dimension.
+
+⬜ **The row that settles it, and it needs a human** (`HUMAN_TEST_QUEUE.md`):
+
+> Launch the installed build yourself, click **nothing**, and **just start typing**. If the characters
+> land in the address bar, item 1 is done for real.
+
+That is also the test the original reporter's complaint was really about, and ⭐ it is the owner's own
+formulation.
+
+### 📖 Standard behaviour, checked because the owner asked
+
+👤 *"now that I click off of it, the cursor's not in there… the browser itself is in focus and it
+doesn't put the cursor back in the address bar. Is that what Brave and Chrome have?"*
+
+✅ **Yes — that is correct and standard.** Chrome, Brave and Firefox all restore focus to whatever held
+it when a window regains OS focus, and to the page when nothing did. ⛔ Re-focusing the address bar on
+every window activation would hijack typing on every alt-tab. **No change needed; behaviour matches
+the reference browsers.**
+
+### ⛔ DECLINED 2026-09-18 — do NOT make the new-tab box forward focus (option "C")
+
+👤 Owner: *"I don't see the point of C... The user starts typing, it looks for their history. If
+they type something that's wrong or that they just type something without a dot domain, it just does
+the search. That's fine. I don't understand C. I think A is fine."*
+
+⭐ **The reasoning is right and settles it.** The address bar already does the whole job — history
+lookup, search fallback, URL detection. C only changed *where the user types*, and there is no problem
+with where the user types. ⛔ Do not re-propose it; the note below is kept only so the option is
+understood rather than rediscovered.
+
+**Why it was ever raised:**
 
 The two fields are functionally the same: the new-tab box uses the **same** `isUrl` / `normalizeUrl` /
 `toSearchUrl` utilities and the same search-engine setting as the address bar.
