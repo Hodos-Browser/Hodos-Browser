@@ -112,7 +112,29 @@ for entry in "${TARGETS[@]}"; do
         # A textual prefix test on that would also accept a path that starts
         # inside the repo and then `..`s its way OUT of it — which is precisely
         # the "kill something outside the repo" case this script exists to refuse.
-        real_dir="$(cd "$(dirname "$path")" 2>/dev/null && pwd -P)" || real_dir=""
+        #
+        # 🚨 AND RESOLVE A RELATIVE comm AGAINST *THAT PROCESS'S* CWD, NOT OURS.
+        # 📏 MEASURED 2026-09-19, and this script silently failed its whole purpose:
+        # a browser launched as `./build/bin/HodosBrowser.app/...` reports a RELATIVE
+        # kernel comm. `cd $(dirname …)` then resolves it against **stop-dev.sh's own
+        # cwd** — which is wherever the user invoked the script, not where the browser
+        # was started. Launched from `cef-native/`, stopped from the repo root, the `cd`
+        # FAILS, real_path falls back to the relative string, the `$REPO_ROOT/*` test
+        # cannot match a path beginning `./`, and the dev browser is **SPARED and listed
+        # as if it were the installed app**. Two consecutive stop-dev runs left it alive,
+        # respawning helpers and holding 9322.
+        # ⇒ This is the argv[0] family one level up: the script was written to avoid
+        #   `pgrep -f`'s relative-path blindness and reintroduced it in the canonicaliser.
+        real_dir=""
+        case "$path" in
+            /*) real_dir="$(cd "$(dirname "$path")" 2>/dev/null && pwd -P)" || real_dir="" ;;
+            *)  # Relative: ask the KERNEL for that pid's cwd and resolve against it.
+                proc_cwd="$(lsof -p "$pid" -a -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
+                if [ -n "$proc_cwd" ]; then
+                    real_dir="$(cd "$proc_cwd" && cd "$(dirname "$path")" 2>/dev/null && pwd -P)" || real_dir=""
+                fi
+                ;;
+        esac
         if [ -n "$real_dir" ]; then
             real_path="$real_dir/$base"
         else
@@ -122,6 +144,16 @@ for entry in "${TARGETS[@]}"; do
         # genuinely under this repo.
         if [[ "$real_path" == *"$fragment"* && "$real_path" == "$REPO_ROOT"/* ]]; then
             dev_pids+=("$pid")
+        elif [[ "$real_path" == *"$fragment"* ]]; then
+            # ⛔ Fail LOUD, never silently spare. The fragment says this IS a dev build
+            # but we could not prove it lives under this repo — so we refuse to kill it
+            # (that refusal is the whole safety property) and say so, rather than letting
+            # it sit in the "spared, those are the installed build's" list where a human
+            # reads it as correct.
+            echo "  ⚠️  UNRESOLVED dev-looking process pid $pid: $path"
+            echo "      Could not canonicalise it; NOT stopped. Check it by hand:"
+            echo "      ps -p $pid -o comm=   # then kill -9 $pid if it is yours"
+            spared_paths+=("$real_path (UNRESOLVED — see warning above)")
         else
             spared_paths+=("$real_path")
         fi

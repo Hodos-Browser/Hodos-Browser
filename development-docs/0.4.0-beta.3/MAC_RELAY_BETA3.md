@@ -363,8 +363,32 @@ never by target URL). I will take that with `W7` rather than claim it now.
 - Prod isolation held throughout: the owner's installed browser (pid 56785, CDP 9222, wallet 31301) was
   **verified serving HTTP 200 after every dev stop**. All dev shutdowns via `./scripts/stop-dev.sh`;
   never `pkill`/`killall` by name. The owner's vite on :5137 was left alone.
-- ⛔ **zsh trap that cost a step:** `path=$(...)` **destroys `PATH`** — `path` is tied to `PATH` as a
-  special array. My wallet-kill step lost every external command mid-script. Use any other variable name.
+- 🚨 **`scripts/stop-dev.sh` SPARED a live dev browser — the safety script failed its own purpose.
+  FOUND AND FIXED this round, with both halves measured.**
+  A browser launched as `./build/bin/HodosBrowser.app/...` reports a **relative** kernel `comm`. The
+  script canonicalised it with `cd "$(dirname "$path")"` — which resolves against **stop-dev.sh's own
+  cwd**, not the browser's. Started from `cef-native/`, stopped from the repo root: the `cd` fails,
+  `real_path` falls back to the relative string, the `$REPO_ROOT/*` test cannot match a path beginning
+  `./`, and the process is **spared and listed under "those are the installed build's"** — where a human
+  reads it as correct.
+  ⛔ **Measured RED:** pid 43592 survived **two consecutive** `stop-dev.sh` runs, kept respawning
+  helpers, and held 9322 the whole time.
+  ✅ **Measured GREEN after the fix:** identical launch shape (relative path from `cef-native`, stopped
+  from the repo root) ⇒ **3 stopped, 0 dev processes remaining, 9322 free**, and the installed build's
+  10 processes + wallet HTTP 200 untouched.
+  **The fix:** a relative `comm` is now resolved against **that pid's own cwd**, taken from the kernel
+  via `lsof -p <pid> -a -d cwd -Fn`. And if a path still cannot be canonicalised while matching the dev
+  fragment, the script now **warns loudly and names the pid** instead of silently sparing it.
+  ⭐ This is the `argv[0]` family **one level up**: the script was written specifically to avoid
+  `pgrep -f`'s relative-path blindness, and reintroduced the identical blindness inside its own
+  canonicaliser. 🍎 macOS-only file, but the lesson is not.
+  ⚠️ My own discipline slip caused the exposure: the documented rule is *always launch the dev bundle
+  with an ABSOLUTE path*, and one of my four launches used `./`. The rule is right — and a rule whose
+  violation is this quiet deserves the script-side fix too.
+- ⛔ **zsh trap that cost a step, twice:** `path=$(...)` **destroys `PATH`** — `path` is tied to `PATH`
+  as a special array. My wallet-kill step lost every external command mid-script (`command not found:
+  ps`, `pgrep`, `wc`) while the shell kept running, so its later steps silently did nothing and printed
+  a clean-looking `0`. I then hit it a **second** time while writing up the first. Use any other name.
 - ⛔ A `for p in $(pgrep …); do case $(ps -p $p -o comm=) in *pattern*) …` filter that matches **nothing**
   fails *silently* and the kill is a no-op. Mine did, once — it failed **safe**, but only by luck. Assert
   the pid is non-empty before acting on it.
