@@ -1,14 +1,17 @@
-# Session prompt — beta.3 Phase 11, the human sitting (`W9` + `W10`)
+# Session prompt — beta.3 Phase 11, the `W10` sitting (DPI + text scale)
 
-**Base:** `2a89264` on `0.4.0`, **pushed**. **Platform:** Windows. **Standard:** `../HARNESS.md`.
+**Base:** `5a4819c` on `0.4.0`, **pushed**. ✅ **`W9` is DONE** — all six checks passed with the owner
+at the keyboard on 2026-09-19, closing the native half of items 2, 3, 4 and 5. Its section is kept
+below as context, not as work. **Platform:** Windows. **Standard:** `../HARNESS.md`.
 **Owner:** Matthew. **Written:** 2026-09-19, at the end of the session that closed item 1.
 
 ---
 
 ## Your task
 
-Run **`W9`** and **`W10`** from `HUMAN_TEST_QUEUE.md` with the owner at the keyboard, then fix what
-they find. These are the last two open rows in Phase 11 (9 of 11 items are already closed).
+Run **`W10`** from `HUMAN_TEST_QUEUE.md` with the owner at the keyboard, then fix what it finds, then
+do **item 7 route 2**. **10 of 11 items in Phase 11 are already closed**; `W10` and route 2 are all
+that is left.
 
 ⛔ **The owner performs these. You cannot.** `SendInput` clicks are dropped in this environment, CDP
 key and wheel events never reach the paths under test, and `Start-Process` does not foreground the
@@ -37,7 +40,13 @@ item 10 (the matrix itself).
    in `cef-native/` (⛔ stop the dev browser first or the linker dies `LNK1104`), then launch with
    `HODOS_DEV=1` and `--profile=Default --remote-debugging-port=9322`.
 
-## `W9` — the omnibox with a real mouse and keyboard
+## ✅ `W9` — DONE 2026-09-19, kept for context only
+
+All six passed first time. ⭐ Two of them had never been exercised by anything: the `WH_MOUSE_LL`
+click-outside hook (`SendInput` clicks are dropped in the agent environment) and the real tear-off
+drag. Both matched Chrome. Do **not** re-run these unless something regresses.
+
+### The six, for reference
 
 Everything in items 2, 3, 4 and 5 was verified over **CDP**, which proves React → IPC → HWND and says
 nothing about native delivery. Give these one at a time:
