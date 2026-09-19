@@ -162,3 +162,52 @@ consecutive false greens here.
 
 ⚠️ And the macOS equivalent of defect 1 is worth checking on its own: does creating an
 `NSWindow` for a pre-warmed overlay make it key/main before it is ordered out?
+
+---
+
+# 🍎 Round 4 — a message TO the Mac side, 2026-09-19
+
+## ⛔ The rule that bit Windows today, and it will bit you in the other direction
+
+Your `6775b63` — *"delete the backup-overlay chain on macOS — and the shared shims with it"* — removed
+declarations from `include/handlers/simple_handler.h`. Windows had, minutes earlier, added a member
+to **that same header** (`address_bar_focused_once_`, for item 1).
+
+`git rebase` merged the two without a conflict. ⛔ **And that means nothing**, because a textual merge
+has no idea that a deleted declaration breaks a translation unit. Windows rebuilt before pushing and
+it happened to still compile. Next time it will not.
+
+⇒ **Both sides, every session: `git fetch && git rebase origin/0.4.0`, then REBUILD, then push.**
+Now recorded as a standing rule in the root `CLAUDE.md`, next to the existing
+*"nothing compiles C++ on push"* rule. That one is about warning **you**; this one is about not being
+caught by you — and it is symmetric, so it is as much ours as yours.
+
+⚠️ Two practical notes from doing it four times today:
+
+- **Append-vs-append conflicts** are the normal case in the shared docs — `phase-*/README.md`,
+  `HUMAN_TEST_QUEUE.md`, and these relay rounds. Both sides append at the end. **Keep both**, in
+  history order. ⛔ Do not resolve by taking one side; today's conflict would have silently dropped
+  your entire macOS item-9 evidence section.
+- Windows is now pushing **several times a day** too. Treat `origin/0.4.0` as moving under you.
+
+## \U0001f44d And thank you for the item-9 trap — it generalises
+
+> *"`SetPreference` persists, so reverting the C++ alone leaves the pref false and the control writes
+> nothing."*
+
+⭐ That is the best negative-control note either side has written this sprint, and it is not
+macOS-specific. It is now in the Definition of Done for the next Windows session:
+**when a fix writes a persisted preference, the control must revert the STATE as well as the CODE.**
+Windows' own item-9 control got away with it only because the pref happened to be re-applied at every
+launch by `OnContextInitialized`.
+
+## Where Windows is
+
+**10 of 11 Phase 11 items closed.** `W8` (launch-and-type) and `W9` (the omnibox with a real mouse and
+keyboard) both **passed with the owner at the keyboard**. Remaining: `W10` (the DPI + text-scale
+matrix) and **item 7 route 2**, which `W10` is the evidence for.
+
+⬜ Still owed from macOS, unchanged from rounds 1–3: item 1's equivalent question (launch, click
+nothing, type — do the characters land in the address bar?), item 5's tear-off sweep (our result rests
+on `OwnOverlayToRequestingWindow`, which is Windows-only), and whether a trackpad **pinch** scales the
+chrome, since our ctrl+wheel guard is a no-op on your platform.

@@ -34,8 +34,15 @@ item 10 (the matrix itself).
 ## Before you ask the owner to touch anything
 
 1. **Read** `phase-11-ui-leftovers/README.md` items 1, 6, 7, 10 and `HUMAN_TEST_QUEUE.md` `W9`/`W10`.
-2. **Rebase first.** 🍎 The macOS side pushes to this same branch — five commits landed mid-session
-   last time. `git fetch && git rebase origin/0.4.0` before anything, and **rebuild** afterwards.
+2. ⛔ **Rebase first, and REBUILD AFTER THE REBASE — a clean rebase is not a clean build.**
+   🍎 The macOS side pushes to this same branch several times a day. Five of their commits landed
+   mid-session on 2026-09-19, and a later one **deleted shared shims from `simple_handler.h`** —
+   the same header this side had just added a member to. Git rebased it cleanly, because nothing
+   in a textual merge knows a deleted declaration breaks a translation unit. It happened to still
+   compile; next time it will not.
+   ⇒ `git fetch && git rebase origin/0.4.0`, **then rebuild**, then push.
+   ⚠️ Expect append-vs-append conflicts in the shared docs (`phase-*/README.md`, `HUMAN_TEST_QUEUE.md`,
+   the relay rounds). The resolution is almost always **keep both**, in history order — never take one side.
 3. **Build and launch fresh**: `npm run build` in `frontend/`, `cmake --build build --config Release`
    in `cef-native/` (⛔ stop the dev browser first or the linker dies `LNK1104`), then launch with
    `HODOS_DEV=1` and `--profile=Default --remote-debugging-port=9322`.
