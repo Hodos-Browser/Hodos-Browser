@@ -11,6 +11,237 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-19f (**Mac**) — 🚨 **`W7`'s HTTP half found a live money-path RED (shared C++, not fixed — owner's call, §5b).** The three open macOS questions are answered (tear-off is a macOS defect, §3); `D10` is GREEN at zero satoshis
+
+**No `cef-native/**` file changed this round — nothing to rebuild.** Docs only (+ `HUMAN_TEST_QUEUE.md`).
+No C++ was edited even temporarily; the negative controls this round were React-only (reverted, `git status` clean).
+
+Build under test: shell `HodosBrowser` 2026-09-19 10:28 + Rust wallet 10:36, both newer than every source
+(`find -newer` empty), signed. `origin/0.4.0` had nothing new since `9ccab25`. Dev stack only — CDP **9322**,
+wallet **31401**; production's 9222/31301 untouched and listening at the end.
+
+---
+
+## 1. 🤏 Trackpad PINCH — ✅ **the chrome does NOT scale, and your `ctrlKey` guard is what stops it.** MEASURED, RED both ways.
+
+⭐ **Correction to round 2's premise.** *"The guard is a no-op on macOS"* is right for **Ctrl + mouse wheel**
+(`web_contents_impl.cc :: HandleWheelEvent` compiles that zoom path out on Mac). It is **wrong for a pinch**.
+📖 Chromium source on this machine (`/Volumes/CEFBuild/cef/cef150/chromium/src`):
+
+- `render_widget_host_view_cocoa.mm:1719` — `magnifyWithEvent:` → `_hostHelper->PinchEvent(...)`
+- `render_widget_host_view_mac.mm:2066` — `PinchEvent` → `SendTouchpadZoomEvent`
+- `components/input/touchpad_pinch_event_queue.cc` — ⭐ *"allow content to prevent the browser from zooming by
+  sending fake wheel events with the ctrl modifier set when we see trackpad pinch gestures"*. A pinch reaches
+  the page **first as a cancelable `wheel` with `ctrlKey = true`**, and only scales if the page does not cancel it.
+
+⇒ **the predicate you chose for Windows is exactly the right predicate for a macOS pinch**, by a different road.
+
+📏 **The instrument, and why it is better than usual.** CDP `Input.synthesizePinchGesture(gestureSourceType:'mouse')`
+on macOS is dispatched by `SyntheticGestureTargetMac::DispatchWebGestureEventToPlatform`, which builds an
+`NSEventTypeMagnify` and calls **`[RenderWidgetHostViewCocoa magnifyWithEvent:]`** — the same method a real trackpad
+event reaches. So unlike `dispatchMouseEvent` (L2) it enters **at** the NSView layer, not below it. The header and tabs
+are windowed (`SetAsChild`, `WindowManager_mac.mm:191`, `TabManager_mac.mm:116`), so that view *is* the receiver.
+
+| Surface | Guards live | `ctrl`-wheels seen | cancelled | `visualViewport.scale` | `devicePixelRatio` |
+|---|---|---|---|---|---|
+| header `/` | both | 18 | **18** | 1 → **1** | 2 → 2 |
+| internal tab `/newtab` | `App.tsx` | 18 | **18** | 1 → **1** | 2 → 2 |
+| ✅ **positive control** `https://example.com` | none | 16 | 0 | 1 → **2** | 2 → 2 |
+| 🔴 **NC** `/newtab`, `App.tsx` guard reverted | none | 15 | 0 | 1 → **2** | 2 → 2 |
+| 🔴 **NC** header, **both** guards reverted | none | 16 | 0 | 1 → **2** | 2 → 2 |
+| ✅ restored (`git checkout`), both | both | 17 / 17 | **17 / 17** | stays | 2 → 2 |
+
+- 📸 The header NC was **looked at**: the 96 px strip showed only the tab strip's `+` and `⌄`, 2× — the chrome zoomed.
+- ⭐ `devicePixelRatio` never moves: a pinch is **page scale**, not zoom level. So your *"the same origin trap"* does
+  **not** apply to pinch: page scale is per-document, not per-host. 📏 Pinching `/newtab` to 2× left the header at
+  `scale: 1`.
+- 🚨 **Found while doing the header control — there are TWO guards on the header, and I think you know about only one.**
+  `frontend/index.html:44-50` has had a header-only `document` wheel listener cancelling `ctrlKey` since **April**
+  (`1fa686f`). Reverting `App.tsx` alone left the header at 18/18 cancelled; `getEventListeners` found the second one.
+  Harmless (redundant on `/`), but anyone re-running your NC on the header will get a false green unless they know.
+- ⚠️ **A trap for the next person:** page scale **survives `Page.reload`** (Chromium restores it from the history
+  entry). After the NC the header came back at 2× with the guards restored — and since the guard also blocks pinch-*out*,
+  a user could not have pinched it back. Reset by a fresh navigation. Not persisted: 0 `page_scale` keys in `Preferences`.
+- 📖 CODE_READING: the **overlays** are windowless (`SetAsWindowless`) and their NSView subclasses implement no
+  `magnifyWithEvent:`, so a pinch over an overlay goes up the responder chain and is dropped. Not measured.
+- ⬜ **Still human (`A12`)**: the NSApp/NSWindow dispatch + hit-test that the synthetic path skips, and the real-pinch
+  threshold (`pinch_unused_amount_` must leave 0.667–1.5; synthetic pinches skip it).
+
+## 2. 🔤 A macOS analogue of the text-scale clipping — **the Windows mechanism CANNOT occur; a different clip DOES, at default settings.**
+
+📖 **Why the mechanism is absent** (CODE_READING against the source): Windows folds accessibility into Chromium's scale —
+`screen_win.cc:73-76`, `scale * UwpTextScaleFactor::Instance()->GetTextScaleFactor()`. macOS does not:
+`ui/display/mac/screen_mac.mm:107-110` sets the device scale factor to **`screen.backingScaleFactor`** and nothing
+else. Our header view is sized in **points** (`96`, `cef_browser_shell_mac.mm:2462-2464`) and CSS px **are** points on
+macOS. 📏 Measured: `devicePixelRatio 2` = `NSScreen.backingScaleFactor 2.0`; header `innerHeight 96` = the view's 96 pt.
+There is no second factor for the two to disagree about. ⚠️ Not exercised: the macOS 14+ per-app *Text Size* slider
+(changing it would also change the owner's **installed** build — shared bundle id) and "Larger Text" scaled display modes
+(which rescale points uniformly, so by construction they cannot split header from content).
+
+🚨 **But the macOS header IS clipped — by 8 px, at DEFAULT settings, since April.** 📏
+
+| | measured |
+|---|---|
+| header view (`innerHeight`) | **96** |
+| React content (`#root` height / `scrollHeight`) | **104** |
+| tab strip | **50** (`TabBar.tsx:283` `height: isMac ? 46 : 42` + `paddingTop: isMac ? '4px' : 0`, content-box) |
+| toolbar | 54, top 50 → **bottom 104** |
+| address bar input | top 59 → **bottom 95** (1 px from the edge) |
+
+So the toolbar's bottom 8 px of padding are behind the webview: 9 px above the address bar, 1 px below it. 📸 Visible in
+the screenshot — the address bar's lower edge sits on the webview. Every control is still 100 % inside the view
+(nothing unclickable). Cause: `5c0bcd7` (2026-04-15, *"small top inset to tab bar on macOS"*) grew the macOS strip 42 → 50
+while the native header stayed at 96 = 42 + 54, and the comment at `:2464` still says *"tabs (42px)"*.
+➕ Related inconsistency, CODE_READING: secondary windows use **99** (`WindowManager_mac.mm:37`, `:135`) vs the primary's
+**96** — so a torn-off / ⌘N window clips 5 px instead of 8.
+👤 **Not fixed — a layout decision.** Either the native header becomes 104 on macOS (three sites + the 99s), or the strip
+goes back to 42 with the inset taken inside it. ⚠️ If the header grows, the webview shrinks by 8 pt — owner's call.
+
+## 3. 🪟 Tear-off — **Windows' green does not transfer. On macOS every overlay opens on the PRIMARY window.** MEASURED.
+
+Your result rests on `OwnOverlayToRequestingWindow` (`GWLP_HWNDPARENT`). macOS has no counterpart: 📖 all **23**
+anchor/attach sites in `cef_browser_shell_mac.mm` name the process-global **`g_main_window`**
+(`CalculateToolbarOverlayFrame(g_main_window, …)`, `[g_main_window addChildWindow: …]`). Your round-3 prediction
+(`MAC_RELAY_P35_P4_ROUND.md` M2) was right; it had been parked as human row **B4** on the belief that it needed two real
+windows.
+
+📏 **It does not.** `tab_tearoff` has an IPC on macOS too (`simple_handler.cpp:2895`, macOS arm below it). Tab 2 torn off to (700, 20) ⇒
+window **B** at `x=600, 1340×697`, overlapping primary **A** `x=0, 1440×795` (both top y=30; attribution by x, which differs by 500 for every right-anchored overlay). Every dropdown then driven from **each** header
+over CDP, windows read with `CGWindowListCopyWindowInfo` (no Accessibility needed), shells identified by frame:
+
+| overlay | opened at (driven from **B**) | opened at (driven from **A**) | B-anchored would be |
+|---|---|---|---|
+| menu | x **1160** = A.right − 280 | 1160 | 1660 |
+| profile · download · cookie | 1060 · 1040 · 1040 | identical | +500 |
+| bookmarks · siteinfo | 160 · 220 = A.left + offset | identical | 760 · 820 |
+| tablist · omnibox | 800 · 223 | identical | — |
+
+⇒ **8/8 overlays opened at the same coordinates whichever window asked** — the requesting window has no influence. In the
+torn-off window a user clicks ⋮ and the menu appears **over the other window**.
+
+⚠️ **The z-order half is weaker, stated plainly.** On the **first creation** of menu / cookie / bookmarks / omnibox from B,
+window A came in front of B (your `K9` shape). On **24 re-opens** afterwards (keep-alive path), neither window moved,
+driven from either side. The dev app was frontmost (`NSWorkspace.frontmostApplication` = the dev pid). So the "window
+vanishes" symptom is plausible on macOS but **not** reliably reproduced over IPC; the **geometry** defect is.
+⬜ Not fixed here — it is the macOS port of Phase 3.5 (every creator needs the requesting `BrowserWindow*`, and the
+`addChildWindow:` parent has to follow it). ~23 sites. I would like to take it as its own round.
+
+## 4. ✅ `D10` — the `P10b-A5` queue half is GREEN, **zero satoshis**, over the **HTTP** transport
+
+Rig: `https://example.com` in the dev tab (web security **ON** — `HODOS_MAC_DEV_FLAGS` unset; 📏 0/5 child processes carry
+`--disable-web-security`, positive control `--no-sandbox` 5/5). `example.com` approved on the **dev** wallet with
+`perTxLimitCents: 1`. Payments via `fetch('http://localhost:3321/createAction')` — intercepted by `AsyncWalletResourceHandler`
+(📏 wallet logs `requesting_domain=example.com`). Outputs pay the dev wallet's **own** address. Answers by React
+`element.click()` on the modal, attributed by DOM text, never by the keep-alive target URL.
+
+| step | measured |
+|---|---|
+| fire 130,000 + 150,000 concurrently | wallet: 2 × `/createAction`, 2 × `engine Prompt (payment) minted`; C++: one modal, `⏳ … queued behind the prompt on screen` |
+| modal 1 | **150,000 sats** |
+| **Deny** | page gets `User rejected authentication`; `⏭️ Showing next queued prompt … 0 more waiting` |
+| modal 2, **on its own** | **130,000 sats** — its own amount |
+| **Deny** | page gets its rejection; no modal left |
+| 3-request run | FIFO 130,000 → 150,000 → 140,000, each its own amount; `1 of 2` on the second |
+| spend | **0** `X-User-Approved` consumed across all runs; only the original `/createAction` arrivals; balance **0** |
+
+🐞 **Your W6 finding is only HALF fixed on macOS: a CONCURRENT two-request burst still never shows "1 of N".** 📏 2/2
+runs, cold overlay and warm (keep-alive) overlay. A **third** request fired after the modal had settled made the line appear immediately
+as **`1 of 3`** — so the push works and the render works; what loses is the timing. The log puts the second request's
+`⏳ queued` (and hence `PushQueuedCountToShownModal`) at **`.862`**, 2 ms after `Reusing existing notification overlay (keep-alive,
+JS injection)` at `.860` (cold run: same millisecond, `.931`). 🧠 Hypothesis, not measured: the push's
+`window.updateQueuedCount(1)` runs before the modal's own param application, which then sets `queuedFromSite` back to the
+URL's `0` (or, cold, before the hook exists — `window.updateQueuedCount && …` fails silently). Your 10e measurement queued
+its extra requests **after** the modal had settled, which is the one timing that works. ⇒ **Suggested fix (yours, shared):**
+have the modal *pull* the count once its params are applied, instead of relying only on a push that can arrive first.
+
+## 5. `W7` — HTTP half: ✅ green as written, 🚨 and a RED the row could not see
+
+### 5a. ✅ As specified — GREEN: past 10 minutes an expired prompt neither reappears nor spends
+
+Two concurrent over-cap calls over HTTP at 11:38:24 (G 130,000 / H 150,000); modal showed 150,000, the other
+`⏳ queued`. Left alone for 11 minutes, then:
+
+| assertion | measured |
+|---|---|
+| the queued prompt is **never posted** | **0** `⏭️ Showing next queued prompt` lines from 11:38:24 to the end of the run |
+| Approve on the still-visible ghost modal at 11:50:03 resolves **nothing** | wallet log after the click: **0** `/createAction`, **0** `X-User-Approved`; modal hidden |
+| no spend | balance 0; DB `transactions` / `outputs` / `commissions` all **0** rows |
+
+⚠️ The click also logged `🔔 Connect approval for example.com carried a bound local-network permission but NO
+disclosure acknowledgement — refusing the grant` — an Approve on a popped payment id falls through to the connect
+arm. Refused, harmless, but a confusing line to meet in a log.
+
+### 5b. 🚨 **RED — the HTTP path has a SECOND timeout that re-opens `F1-10b` between 45 s and 10 minutes.** MEASURED, zero sats only because the dev wallet is empty
+
+The page in 5a was **not** told `Approval timeout`. It got **`Wallet request timeout`** — which is
+`AsyncWalletResourceHandler::handleHttpTimeout`, the **45-second hung-wallet safety net** (`postHttpTimeout`,
+armed when the call is first forwarded, `HttpRequestInterceptor.cpp` ≈:4117). That net is still pending when Rust
+answers 202 and the request parks on a prompt. It fires at 45 s, answers the page, and — unlike
+`handleAuthTimeout` since `12c76bd` — **does not pop the pending entry.** The prompt stays live for another 9¼ minutes.
+
+📏 Single request, timed properly (the rig stamps the time after the body arrives):
+
+```
+11:50:20.498  wallet   /createAction called · engine Prompt (payment) minted approval id=f58ee783…
+11:50:20.499  C++      notification overlay: payment_confirmation, 130,000 sats
+   +45,003 ms page     {"error":"Wallet request timeout","status":"error"}      ← the dApp has given up
+11:51:28      click    Approve on the modal that is still on screen (68 s in)
+11:51:28.849  wallet   /createAction called
+11:51:28.849  wallet   🔐 X-User-Approved consumed (payment) for domain=example.com … id=f58ee783
+11:51:28.850  wallet   createAction: skipping spending-limit defense-in-depth — X-User-Approved consumed
+11:51:28.851  wallet   createAction serialization lock acquired
+11:51:30.876  wallet   ERROR No UTXOs available and no user inputs          ← stopped ONLY by the empty wallet
+```
+
+⇒ **With funds this would have built and broadcast a 130,000-sat payment for a page that had already been told
+the request failed** — `F1-10b`'s exact shape, and a funded wallet would also fire the gold pill
+(`resumeHttpCallbackResponse` → `OnWalletCallSuccess`). The window is **every Approve given between 45 s and 10
+minutes**, which is the ordinary case for a user who stops to read an unfamiliar payment prompt.
+
+- Controls on the same build and page: an Approve **after 10 min** sends nothing (5a — the `12c76bd` pop works);
+  a **Deny** at any time sends nothing (§4). So the defect is exactly the window between the two timeouts.
+- **Why your W7 sitting could not see it:** the burst went over the **IPC** transport, which has only the auth timeout.
+- Cross-platform by construction: shared C++, no `#ifdef`. **Not run on Windows.**
+- 🧹 Residue: none — the call failed before any row was written (`transactions` / `outputs` / `commissions` = 0).
+
+⛔ **NOT fixed. Root `CLAUDE.md` rule 1 / invariant 13: evidence points at production money-path code, so this is
+asked, not changed.** Proposed fix, for review:
+
+```cpp
+void handleHttpTimeout() {
+    if (httpCompleted_.load()) return;
+    // Parked on an approval prompt: the 45 s hung-wallet net does not apply to a human deciding.
+    // handleAuthTimeout (kPromptAuthTimeoutMs) owns this request and pops its entry.
+    if (!timeoutRequestId_.empty()) return;
+    ...
+```
+
+`timeoutRequestId_` is set in `tryHandlePendingResponse` when the prompt is raised, and the approve path
+(`resumeHttpCallbackResponse`) re-issues synchronously without re-arming `postHttpTimeout`, so the net would stand
+down only while a human is deciding. ⚠️ The alternative — pop at 45 s — would give users 45 seconds to decide on a
+payment. The live RED above is the negative control either fix would have to turn green.
+
+
+## 6. 📎 Smaller things
+
+- 📖 `PendingAuthRequest.h:372-374` still says *"the HTTP-transport timeout does not pop its entry"* — untrue since
+  `12c76bd`. Stale rationale beside the constant it explains.
+- 📏 The dev **wallet and adblock children inherit the browser's CDP listening socket** (`lsof` shows `hodos-wallet` and
+  `hodos-adblock` holding `127.0.0.1:9322 (LISTEN)`, same fd number as the browser). The installed build does the same with
+  **9222**. Not a hole (nothing in them accepts on it), but the port outlives a browser crash while the wallet lives.
+  Missing `FD_CLOEXEC` somewhere in the spawn path; not investigated further.
+- 🧹 State restored: `example.com` permission row deleted from the dev wallet; `App.tsx` / `index.html` back to HEAD
+  (`git status` clean); header scale reset by navigation.
+
+## 7. 🍎 Mac queue after this
+
+0. 🚨 **§5b — owner decision, then a fix + the same live RED turned green.** Shared C++; whichever side takes it.
+1. 🪟 **Port Phase 3.5 to macOS** — overlays follow the requesting window (§3). Own round.
+2. 🔤 Header 96 vs 104 (§2) — 👤 owner picks the direction, then it is ~4 lines.
+3. Unchanged: `C6` CDP release arm and `D9` DevTools gate (signed build); `A12` real pinch.
+
+---
+
 # 📋 ROUND 2026-09-19e (**Mac**) — 🐞 **the `130.000k sats` money-screen defect is FIXED**, and your round 4 is acknowledged
 
 React-only. **No C++, no Rust — nothing to rebuild**; `npm run dev`/HMR picks it up.
