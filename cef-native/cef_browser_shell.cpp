@@ -1555,6 +1555,50 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             return 0;
         }
 
+        // \U0001f6a8 beta.3 Phase 11 item 7 route 2 (`P11-I7b`) — re-lay-out when the user moves
+        // the Accessibility → Text size slider, without restarting.
+        //
+        // ⛔ Windows does NOT send WM_DPICHANGED for a text-scale change — the monitor DPI has
+        // not changed, only the accessibility factor — so the existing DPI path never fires and
+        // the header would stay the wrong height until the next restart or resize.
+        // WM_SETTINGCHANGE is the notification we do get. Chromium solves the same problem by
+        // observing `UwpTextScaleFactor` (`screen_win.cc :: OnUwpTextScaleFactorChanged`).
+        //
+        // ⚠️ WM_SETTINGCHANGE is BROADCAST for many unrelated settings, so this compares the
+        // factor against the one the layout was last built with and does nothing when it has
+        // not moved — otherwise every theme or locale change would re-lay-out the whole window.
+        case WM_SETTINGCHANGE: {
+            // ⛔ STATELESS ON PURPOSE. The first version remembered the previous factor in a
+            // function-local `static`, which initialises on FIRST CALL — and the first call is
+            // the change itself, so it recorded the NEW value as its baseline and compared it
+            // against itself. 📏 Measured: 0 firings across a real 125% → 150% change, window
+            // left at the height computed for 125%. The first change was missed by construction.
+            //
+            // ⭐ So compare what the header SHOULD be against what it IS. There is nothing to
+            // remember, nothing to initialise, and it self-corrects if a change is ever missed.
+            BrowserWindow* scaleBw =
+                reinterpret_cast<BrowserWindow*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+            HWND scaleHeader = scaleBw ? scaleBw->header_hwnd : g_header_hwnd;
+            if (scaleHeader && IsWindow(scaleHeader)) {
+                RECT hr{};
+                GetWindowRect(scaleHeader, &hr);
+                const int have = hr.bottom - hr.top;
+                const int want = GetHeaderHeightPx(hwnd);
+                if (have != want) {
+                    RECT rc{};
+                    GetClientRect(hwnd, &rc);
+                    LOG_INFO("Header height " + std::to_string(have) + " -> " +
+                             std::to_string(want) + " px (text scale " +
+                             std::to_string(GetTextScalePercent()) + "%) - re-laying out");
+                    // Reuse the existing relayout path rather than duplicating it: WM_SIZE is
+                    // what recomputes header/webview geometry from GetHeaderHeightPx().
+                    SendMessage(hwnd, WM_SIZE, SIZE_RESTORED,
+                                MAKELPARAM(rc.right - rc.left, rc.bottom - rc.top));
+                }
+            }
+            break;
+        }
+
         case WM_ACTIVATE: {
             // Track which window is active for per-window operations (Ctrl+T, etc.)
             if (LOWORD(wParam) != WA_INACTIVE) {

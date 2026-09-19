@@ -12,11 +12,11 @@
 | 3 | ✅ **DONE 2026-09-18** — **URL populates the address bar late after clicking a suggestion** | ticket #3 | 📏 **Not "late" — never.** Measured pre-fix: page navigated at 122 ms, clicked URL absent from the address bar after **35 s**. Fixed: **75 ms**, ahead of the navigation. See § Item 3 below |
 | 4 | ✅ **DONE 2026-09-18** — **Tab / Enter autocomplete behaviour** | ticket #4 | 📏 **There was no inline autocomplete at all** — the Tab branch was unreachable dead code. 👤 Owner chose scope **A (conformance only)**. `PRIOR_ART.md` row logged. See § Item 4 below |
 | 5 | ✅ **CLOSED 2026-09-18 — not reproduced** — **Tear-off window overlay sweep** | 👤 owner 2026-09-15: typing in a torn-off tab's address bar makes that window disappear | 📏 16/16 rows green (2 windows × 8 overlays); 🔴 7/16 red with `OwnOverlayToRequestingWindow` disabled, **all seven on the torn-off window**. ⇒ the observation predates the Phase 3.5 fix. See § Item 5 below
-| 6 | ✅ **VERIFIED ALREADY FIXED 2026-09-18** — `modal_buttons_unclickable_small_screen` | old bundle | ⛔ Not by 7a's viewport work — by **Phase 1 (WS1)**, which measured this exact symptom at 125% and converted all 47 mouse call sites. Gate `G8` holds it at 0; `overlay_mouse_test.cpp` covers 100/125/150/175%. ⬜ On-screen confirmation folds into item 10 |
-| 7 | 🟢 **ROUTE 1 DONE 2026-09-18** · 🟡 route 2 open — `chrome_ui_scales_but_its_window_does_not` | old bundle | 👤 Owner's rule: zoom = the page only; Settings text size = everything. ⛔ **No rebuild needed for either** — route 1 is 4 lines of JS. See § Item 7 below |
+| 6 | ✅ **CONFIRMED ON A SCREEN 2026-09-19** — `modal_buttons_unclickable_small_screen` | old bundle | Fixed by **Phase 1 (WS1)**, not 7a. 👤 Owner clicked a real loopback prompt on a real 125% monitor: hover tracked accurately, decline registered (`permission_response 'block'`). First confirmation on a screen — it had only ever been proven by unit tests and gate `G8` |
+| 7 | ✅ **BOTH ROUTES DONE** — route 1 2026-09-18, **route 2 2026-09-19** — `chrome_ui_scales_but_its_window_does_not` | old bundle | 👤 Owner's rule: zoom = the page only; Settings text size = everything. 📏 Route 2 reproduced at **18 px hidden** and fixed. See § Item 7 route 2 below |
 | 8 | ✅ **FIXED 2026-09-18 — and the predicted 4th instance was real** — `longlived_surfaces_snapshot_state_at_startup` | old bundle | 📏 Profile edits now reach every surface in ~10-20 ms. 🚨 The audit found instance #4: **changing your search engine did nothing until you restarted** — its broadcast was guarded on a static that is never assigned. See § Item 8 below
 | 9 | 🚨 **FIXED 2026-09-18 — and it was NOT low severity** — `disable_features_autofill_is_a_noop` | old bundle | 📏 The switch was provably dead **and** autofill was live: a probe typed into a form landed in the profile's `Web Data` `autofill` table, next to **6 rows of the owner's real typing** incl. two email addresses. Now a preference, not a flag. See § Item 9 below |
-| 10 | ⬜ **OWED TO A HUMAN** — Phase 1's overlay dead strip · the DPI matrix overlay section | old bundle | The dead strip itself is fixed (see item 6). What is owed is the **matrix run**: `DPI_RESOLUTION_TEST_MATRIX.md` cells #4/#6/#9, which also settle items 6 and 7. `HUMAN_TEST_QUEUE` **W4** + **W10** |
+| 10 | ✅ **DONE 2026-09-19** — Phase 1's overlay dead strip · the DPI matrix overlay section | old bundle | 👤 `W10` run with the owner at the keyboard on a real 125% monitor plus a text-scale pass the matrix never had. Settled items 6, 7 and 10 together |
 | **11** | 🔴 **A BRC-121 payment shows the user NOTHING while it spends** | `../TICKET_brc121_paid_retry_aborts_and_mints_a_payment_each_time.md` | ⛔ **RUNS FIRST — money path, and the only item here that costs real BSV when it goes wrong.** Four fixes in causal order, plan + negative controls in the ticket. 👤 Owner 2026-09-17: *"it's not okay."* See below |
 
 ## Item 11 — why it is here and why it goes first
@@ -1302,3 +1302,88 @@ through rather than swallowing it to dismiss.
 
 ⚠️ What this does **not** cover: `W10`. Items 6, 7 and 10 still need the DPI matrix, and item 7
 route 2 is expected to fail there by construction.
+
+---
+
+## Item 7 route 2 — the header follows the Windows text scale · ✅ DONE 2026-09-19
+
+👤 Owner's rule, from the route 1 session: *"The user goes into settings to make it bigger because
+they can't see and they need everything to be bigger."* This is that half.
+
+### 🔴 Reproduced first, with the owner at the machine
+
+The prompt said this row was **expected to fail** and that a green would mean the test had missed
+something. It failed.
+
+👤 *"I can't see the whole header section… the bottom of it goes into the web view section
+underneath. The horizontal looks OK."*
+
+📏 Measured in that state — Windows text size **125%**, on a real **125%** monitor:
+
+| | |
+|---|---|
+| `TextScaleFactor` | 125 |
+| monitor DPI | 120 |
+| `devicePixelRatio` | **1.5625** — 1.25 × 1.25, the two factors compounding |
+| header content needs | 95 CSS px |
+| header window gave | **77 CSS px** |
+| **hidden behind the webview** | **18 CSS px** |
+| Menu button within viewport | ✅ true — horizontal fine, exactly as reported |
+
+⭐ `1.5625` is the whole diagnosis in one number: Chromium multiplied monitor DPI **by** the text
+scale for the *content*, while `GetHeaderHeightPx()` used `GetDpiForWindow()` — monitor DPI **only** —
+for the *window*.
+
+### The fix
+
+`LayoutHelpers.h` gains `GetTextScalePercent()`, reading
+`HKCU\Software\Microsoft\Accessibility\TextScaleFactor` — the value the Settings slider writes and
+the same one the UWP `UISettings.TextScaleFactor` API reports. Both header-height helpers now apply
+it alongside the monitor DPI, matching what Chromium already does to the content
+(`screen_win.cc :: GetScaleFactorForDPI` returns `scale * UwpTextScaleFactor::…GetTextScaleFactor()`).
+
+⚠️ Read from the registry rather than from Chromium because this header links against libcef, not
+`ui/display`. ⚠️ Not cached — the user can move the slider while we run. ⚠️ Clamped to 100–300 so a
+junk value cannot produce a zero-height header.
+
+### 🔴 And the live-update half failed — my bug, found only because the owner moved the slider
+
+The first `WM_SETTINGCHANGE` handler remembered the previous factor in a function-local `static`:
+
+```cpp
+static UINT s_lastTextScale = GetTextScalePercent();   // ⛔ initialises on FIRST CALL
+```
+
+⛔ The first call **is the change**, so it recorded the new value as its own baseline and compared
+150 against 150. 📏 Measured: **0 firings** across a real 125% → 150% change, window left at the
+height computed for 125%. It would have shipped looking correct and failing on every first change.
+
+⭐ Rewritten to be **stateless**: compare the height the header *should* be against the height it
+*has*. Nothing to remember, nothing to initialise wrongly, and it self-corrects if a change is ever
+missed. ⚠️ That also dodged a second trap — Windows writes an approximate integer, and the log shows
+**124%** for a 125% slider position. Comparing *factors* would have been fragile; comparing *heights*
+is not.
+
+⛔ Windows sends **no** `WM_DPICHANGED` for a text-scale change — the monitor DPI has not moved — so
+the existing DPI path never fires. `WM_SETTINGCHANGE` is the only notification we get, and it is
+broadcast for many unrelated settings, which is why the handler must be cheap and idempotent.
+
+### Evidence
+
+| | content / window | hidden |
+|---|---|---|
+| 🔴 125% text on a 125% monitor, before | 95 / **77** | **18 px** |
+| 🟢 same, after | 96 / 96 | 0 |
+| 🟢 150% text, relaunch path | 96 / 96 | 0 |
+| 🟢 back to 100%, the normal case | 96 / 96 | 0 |
+
+👤 **Live**, without relaunching, owner moving the slider 100 → 125 → 100: *"It dynamically
+adjusted correctly… adjusted correctly… adjusted correctly again."* Log, 5 re-layouts:
+
+```
+Header height 120 -> 149 px (text scale 124%) - re-laying out
+Header height 149 -> 120 px (text scale 100%) - re-laying out
+```
+
+⚠️ The back-to-100% run is the one that matters most: this is the header-layout path the DPI matrix
+records as having regressed **three times**, so the normal case had to be re-checked, not assumed.

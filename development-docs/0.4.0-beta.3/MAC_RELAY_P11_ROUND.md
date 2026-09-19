@@ -211,3 +211,51 @@ matrix) and **item 7 route 2**, which `W10` is the evidence for.
 nothing, type — do the characters land in the address bar?), item 5's tear-off sweep (our result rests
 on `OwnOverlayToRequestingWindow`, which is Windows-only), and whether a trackpad **pinch** scales the
 chrome, since our ctrl+wheel guard is a no-op on your platform.
+
+---
+
+# 🍎 Round 5 — item 7 route 2 + W10, 2026-09-19
+
+## Rebuild required — but **Windows-only code**
+
+| File | What changed |
+|---|---|
+| `include/core/LayoutHelpers.h` | new `GetTextScalePercent()` reading `HKCU\Software\Microsoft\Accessibility\TextScaleFactor`; both `GetHeaderHeightPx*()` now apply it alongside the monitor DPI |
+| `cef_browser_shell.cpp` | `ShellWindowProc` gains `WM_SETTINGCHANGE`, which re-lays-out when the header's actual height differs from what it should be |
+
+⛔ Both are inside `#ifdef _WIN32` regions or Win32-only files. **Nothing for macOS to port literally.**
+
+## ⬜ What macOS owes: the same question, its own mechanism
+
+📏 Windows defect: Chromium sizes a window's **content** by `monitor DPI × accessibility text scale`
+(`screen_win.cc :: GetScaleFactorForDPI` returns `scale * UwpTextScaleFactor::…GetTextScaleFactor()`),
+while our header **window** was sized from `GetDpiForWindow()` — monitor DPI only. At Windows text
+size 125% on a 125% monitor, `devicePixelRatio` was **1.5625** and **18 CSS px** of header hid behind
+the webview. 👤 Owner-observed, then measured, then fixed.
+
+⬜ **Does the macOS header have the equivalent?** The analogous setting is
+System Settings → Accessibility → Display → **larger text**, and whether AppKit folds it into the
+backing scale the way Windows folds text scale into the device scale factor is **unknown**. The
+macOS header height is a fixed `96` too (`headerHeight = 96`, noted in `LayoutHelpers.h`'s own
+comment), so if AppKit does compound it, the same clipping exists there.
+
+## ⭐ Two transferable traps from this round
+
+1. **A `static` initialised inside the event handler misses the first event.** Our first
+   `WM_SETTINGCHANGE` handler cached the previous factor in a function-local `static`, which
+   initialises on *first call* — and the first call **is** the change. 📏 0 firings across a real
+   125% → 150% change. Rewritten to compare *what the header should be* against *what it is*: no
+   stored state, self-correcting. ⚠️ That also dodged a second trap — Windows writes an approximate
+   integer, and the log reads **124%** for a 125% slider, so comparing factors would have been
+   fragile.
+2. ⛔ **The DPI matrix's own `--force-device-scale-factor` shortcut makes the mouse row VACUOUS.**
+   `ClientToViewPoint` reads `GetDpiForWindow`, which that flag does not change — CEF would render
+   scaled while the conversion stayed a no-op, and the test would pass without exercising anything.
+   Item 6 was therefore run on a **real** 125% monitor. If macOS has an equivalent shortcut, check
+   what its own conversion actually reads before trusting it.
+
+## Where Windows is
+
+**Phase 11 is COMPLETE — 11 of 11.** `W8`, `W9` and `W10` all passed with the owner at the keyboard.
+Next is 👤 the owner's requested beta.3 item: `TaskSweepReservations`' second verdict
+(`TICKET_reservation_can_be_held_indefinitely.md`).
