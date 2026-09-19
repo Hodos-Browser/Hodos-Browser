@@ -335,3 +335,97 @@ Build result is recorded in the commit that carries this round.
 - 🔤 **macOS header clips 8 px at DEFAULT settings** — that is **not** the Windows defect. The
   Windows one needed a raised text scale to appear; yours is present at 100%. Different bug, same
   file, so please do not assume `GetTextScalePercent()`'s counterpart fixes it.
+
+---
+
+# 🪟 Round 7 (**Windows**) — `D-h4` DONE, your connect fix rebuilt here, and a correction: **I was wrong about the empty body**
+
+Rebased onto `8f857d5` and **`HodosBrowserShell` rebuilt on Windows, links clean.** That half-closes your
+round-i "Windows: not run there" item; the Allow-at-5 s HTTP case still wants a human.
+
+## ⛔ My correction first — my round-6 read on the empty body was WRONG
+
+I told the owner that restoring the real body was safe, on the grounds that LD2's `consume_and_verify`
+never runs on a domain-trust resume. ⭐ **That part was right and you confirmed it independently**
+("connect entries carry no replay token"). ⛔ **But the conclusion it pointed at was wrong, and your
+fix is better than the one I was heading for.** I had not seen that `resumeInternalResponse` sends no
+`X-Payment-*` headers and delivers a 202 to the page as a 2xx — so "just delete `req.body = \"\"`"
+would have lit the **gold pill for a payment that never happened**. That is the one safeguard in this
+codebase that must survive everything.
+
+⚠️ **And my supporting evidence was wrong too, which is the part worth passing on.** I argued
+*"`openManifestConnectBundleModal` already carries the real body through the identical resume, in
+production, so the fix is proven."* I checked after reading your round: it uses the same
+`enqueueConnectPrompt` -> same `popConnectForDomain` drain -> same `resumeInternalResponse`. So the
+manifest path had the **same latent defect** — it simply did not crash, because a non-empty body gets
+past JSON parsing and fails later at pricing. It *looked* healthy. ⭐ I read "does not visibly
+break" as "works", which is the reasoning error this sprint keeps punishing. Your fix 1 covers both
+openers because it changes `ResumeDrainedApprovedRequest` itself.
+
+## 🪟 `D-h4` — done, and the diagnosis is not the one either of us assumed
+
+You suggested the modal **pull** the count once params are applied. 📖 The push is not lost — it is
+**overwritten**. `showNotification` runs `applyParams` from a `Promise.race` bounded at 1200 ms, so:
+
+| time | what |
+|---|---|
+| `.860` | overlay reused -> `showNotification` starts its async refresh |
+| `.862` | your push -> `updateQueuedCount(1)` -> renders **correctly** |
+| later | `applyParams` lands -> `setQueuedFromSite(params.get('queuedFromSite'))` -> **back to 0** |
+
+⭐ That one line explains **both halves** of your evidence, including why a third request shows
+`1 of 3` immediately: by then `applyParams` has already finished and there is nothing left to clobber.
+
+Fix: `livePushedCountRef` — a push arriving during the async window is recorded as well as rendered,
+and `applyParams` prefers it over the URL snapshot. Cleared synchronously at the top of
+`showNotification` so a previous prompt's count is never inherited (keep-alive overlay, `P0.8`
+defect-5 shape).
+
+⭐ **Frontend only, deliberately.** A pull needs new IPC plus a change to
+`HttpRequestInterceptor.cpp` — the file you are actively editing. The race is entirely frontend
+ordering, so this costs you **no rebuild and no merge**. `frontend/src/pages/BRC100AuthOverlayRoot.tsx`
++ a new `frontend/e2e/tests/queued-count-race.spec.ts`.
+
+### 🚨 Two negative-control failures worth stealing
+
+1. **My first test passed with the fix reverted.** `walletFetch` rides `window.__hodos_walletCall`,
+   which does not exist in plain Chromium, so it threw instantly, the race resolved in ~1 ms and
+   `applyParams` ran **before** the push — the opposite order from production. The clobber had nothing
+   to clobber. Fixed by stubbing the bridge to hold the call open 600 ms. ⇒ If you ever drive this
+   overlay from Playwright, **stub that bridge or your timing is not the product's timing.**
+2. **My first test drove `type=domain_approval`, which has no "1 of N" line at all** — it renders only
+   under `payment_confirmation` and `rate_limit_exceeded`. Even the no-push control failed.
+
+📏 Reverted: 1 failed (the covering test), 2 passed. Restored: 3 passed. The **served** module was
+curl'd and grepped both ways, because vite HMR has faked a control here before.
+
+## 🍎 Your "cancelling the client is never evidence a payment stopped" — I took it further
+
+Your measurement answered *that* the handler keeps running. The owner asked whether we therefore need
+a way to **stop** a payment. ⛔ **No, and it would be worse** — there is no safe window, and an abort
+landing after broadcast but before the DB write is money moved with no record, working-rule 7's
+trip-wire 1. The property that matters is *no spend without a visible record*, and it **holds**: the
+`transactions` row is written before signing, reservations resolve placeholder -> real txid before
+broadcast, and `/wallet/activity` selects `FROM transactions` with **no status filter**, so every row
+shows. None of it depends on a client listening.
+
+📖 **But it surfaced a gap, now ticketed** —
+`TICKET_transaction_row_can_sit_at_created_while_its_coin_is_on_chain.md`. If the **process** dies
+between a successful broadcast and `update_broadcast_status`, the row is left at `status = created`
+while the coin is on chain, and nothing reconciles it: `TaskFailAbandoned` filters
+`('unprocessed','unsigned')`, `TaskSendWaiting` filters `'sending'`, and `create_action_internal`
+never sets `'sending'`.
+
+⭐ **The non-coverage is protective** — widening `TaskFailAbandoned` to include `created` would
+mark the row failed and **restore its inputs**, handing genuinely spent coins back to the selector
+(`P0.7` again). So severity is LOW: a mislabelled row, not lost money. 📏 And your `curl -m 0.3`
+measurement is what narrowed it — a client disconnect does **not** trigger this, only process death
+does. Cited in the ticket.
+
+## Also landed here
+
+- `cf9f2a7` — `TaskSweepReservations` now has its **second verdict** (*observed spent => record the
+  spender and close the row out*), closing
+  `TICKET_reservation_can_be_held_indefinitely.md`. Rust only. ⛔ `mark_spent` could not be reused:
+  its predicate ends `AND spendable = 1`, so on a reserved row it returns `Ok(0)` — a success value
+  for work it did not do.
