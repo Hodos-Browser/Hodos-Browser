@@ -48,3 +48,84 @@ item 2 needs a macOS analogue before item 2's row can be called green there.
 
 ⚠️ Items 2 and 4 are **React-only** (`MainBrowserView.tsx`, `OmniboxOverlayRoot.tsx`) and relay with
 the frontend — no rebuild needed for those, but they ride in the same branch.
+
+---
+
+# 🍎 Round 2 — items 5 → 10, added 2026-09-18 end of session
+
+## Rebuild required (shared C++, no platform split added in any of it)
+
+| File | Item | What changed |
+|---|---|---|
+| `src/handlers/simple_app.cpp` | **9** | `--disable-features=Autofill` removed (it named a feature that **does not exist**), and `DisableChromiumAutofill()` added to `OnContextInitialized` — sets `autofill.profile_enabled` and `autofill.credit_card_enabled` to false via `CefPreferenceManager::SetPreference`. ⛔ `GlicActorUi` kept — it is the CEF 150 hard-crash fix |
+| `src/handlers/simple_handler.cpp` + `include/handlers/simple_handler.h` | **8** | `BroadcastProfilesChanged()` and `BroadcastSettingsChanged()`; the `header_browser_` static is **deleted** (it was defined `= nullptr` and assigned nowhere, so the settings broadcast it guarded had never fired) |
+| `src/handlers/simple_handler.cpp` + `src/handlers/simple_render_process_handler.cpp` | **3** | `omnibox_navigated` IPC (round 1 above) |
+
+Nothing else in `cef-native/` was touched. Items 2, 4, 5, 6, 7 changed no C++ at all.
+
+## 🚨 Run this on macOS first — item 9, and it is a privacy row
+
+📏 On Windows, autofill was **live** and had been recording form input to
+`<profile>/Default/Web Data` → table `autofill`, including two real email addresses, while the code's
+own comment claimed it was disabled.
+
+⬜ **Check the same table on macOS**, at
+`~/Library/Application Support/HodosBrowserDev/Default/Default/Web Data`:
+
+```sql
+SELECT name, value, count FROM autofill;
+```
+
+Then type a probe value into any form on any site, submit it, **quit the browser** (the DB is locked
+while it runs) and re-read. Pre-fix a row is added; post-fix none is. ⚠️ And check the **installed**
+macOS build too — it will have been accumulating rows the same way.
+
+## ⛔ Item 7 route 1 — the guard is a NO-OP on macOS, and the macOS question is different
+
+`frontend/src/App.tsx` now cancels `wheel` events with `ctrlKey` so the browser chrome cannot be
+page-zoomed. React-only, relays with the frontend, no rebuild.
+
+⛔ **It does nothing on macOS, and that is expected.** Chromium compiles the whole ctrl+wheel→zoom
+path out there:
+
+```cpp
+// content/browser/web_contents/web_contents_impl.cc :: HandleWheelEvent
+#if !BUILDFLAG(IS_MAC)
+  // On platforms other than Mac, control+mousewheel may change zoom. On Mac,
+  // this isn't done for two reasons:
+  //   -the OS already has a gesture to do this through pinch-zoom
+  //   -if a user starts an inertial scroll … and presses control …
+```
+
+⬜ **So the macOS question is a different one and is unmeasured:** does a **trackpad pinch** zoom the
+browser chrome? Pinch is *page scale* (visual viewport), not page zoom, and whether it reaches a CEF
+chrome browser at all is unknown. 👤 The owner's rule applies either way — *"when the user zooms in
+they just want to zoom into the page; when they go into Settings to make it bigger, that should be
+everything"* — so if pinch does scale the chrome on macOS, it needs its own guard and the `ctrlKey`
+test will not be the right predicate.
+
+⚠️ **The same origin trap applies on macOS and is platform-independent**: the header, all overlays
+**and** the internal pages a user opens as tabs (`/newtab`, `/settings-page`, `/browser-data`,
+`/wallet-panel`) are all served from `127.0.0.1:5137`, so anything that zooms one of them zooms the
+chrome. That is why the guard lives in `App.tsx` and not in the header.
+
+## ⬜ Item 7 route 2 — not started, and macOS has no equivalent yet
+
+The header window is sized from monitor DPI only (`GetHeaderHeightPx()` → `GetDpiForWindow`), while
+Chromium sizes its **content** by `monitor DPI × the Windows text-scale factor`
+(`ScreenWin::GetScaleFactorForHWND`, *"including accessibility adjustments"*). The gap is what clips.
+The Windows fix is to read `HKCU\Software\Microsoft\Accessibility\TextScaleFactor`.
+
+⬜ **macOS equivalent unknown.** The analogous setting is Accessibility → Display → larger text, and
+whether AppKit folds it into the backing scale the way Windows does has not been checked. Do not
+assume the Windows fix ports.
+
+## ⬜ Instruments are Windows-only
+
+`omniboxprobe.py`, `tearoffprobe.py`, `zoomprobe.py` and `item4check.py` all read `user32` HWND state.
+`profilerefreshprobe.py` and `settingsrefreshprobe.py` are pure CDP and **should run on macOS as-is**
+— they are the two worth trying there first, since item 8 is shared C++.
+
+⭐ Item 5's whole result rests on `OwnOverlayToRequestingWindow`, which is Windows-only
+(`GWLP_HWNDPARENT`). macOS overlays are borderless `NSWindow`s, so **the tear-off question is
+genuinely open there** and the Windows green says nothing about it.
