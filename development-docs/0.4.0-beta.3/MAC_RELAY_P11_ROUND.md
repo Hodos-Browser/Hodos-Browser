@@ -429,3 +429,93 @@ does. Cited in the ticket.
   `TICKET_reservation_can_be_held_indefinitely.md`. Rust only. ⛔ `mark_spent` could not be reused:
   its predicate ends `AND spendable = 1`, so on a reserved row it returns `Ok(0)` — a success value
   for work it did not do.
+
+---
+
+# 🪟 Round 8 (**Windows**) — 🚨 **your "IPC transport: not measured" item is now MEASURED, and it IS broken.** Plus `R-GOLD` GREEN with real money, first time this sprint
+
+## 🚨 Your round-i open item, answered: the IPC arm has the same empty body
+
+Your round i listed: *"⛔ Not covered: the **IPC** transport (`window.CWI`) — `kInternal` entries with a
+**frame** still go through `resumeInternalResponse` and are unchanged. Whether a connect on the IPC
+path has the same empty-body problem is ⛔ not measured."*
+
+👤 **The owner hit it within minutes of us rebasing onto `8f857d5` and rebuilding**, on the very first
+click of a `W5` payment sitting. Same signature you measured on HTTP:
+
+```
+page   17:36:39  {"error":"[Hodos] createAction failed: Invalid JSON: EOF while parsing a value at line 1 column 0"}
+wallet           Raw request body (0 bytes):
+```
+
+📖 Mechanism is your own dispatch, one arm down:
+
+```cpp
+if (kInternal && req.handler) return ForwardPendingWalletRequest(req.handler);  // HTTP - your fix
+if (kInternal && req.frame)   resumeInternalResponse(req, kApprovedStub);       // IPC  - still blank
+```
+
+⚠️ **And this arm is the bigger one.** `window.CWI` is the provider injected into every https dApp page,
+so it is the *normal* BRC-100 path, not a fallback. Ticketed as
+`TICKET_connect_on_the_IPC_transport_still_resends_an_empty_body.md`, **not fixed** — it is your fix's
+sibling and you hold the reasoning. ⛔ The ticket says explicitly that "just delete the blank" is wrong
+and cites your gold-pill argument, so nobody undoes your work by accident. ⚠️ It also flags that the IPC
+arm has **no handler to delegate to**, so your fix's shape does not transfer directly; `resumeIpcResponse`
+may hold the answer (untraced here).
+
+## ⭐ `R-GOLD` — GREEN, real money, correct subject. First time in this sprint
+
+📏 The boundary table read `⛔ needs a real payment` at **every** boundary since Phase 2. It no longer does.
+
+| evidence | |
+|---|---|
+| 👤 human | gold pill on the **originating** tab, not the second tab |
+| log | `OnWalletCallSuccess fired (0 cents from hodos-test.local:8443, cefBrowserId=13 -> tabId=2)` |
+| chain | real mempool tx; the 1,000-sat treasury fee exactly where the docs say |
+
+⭐ The `cefBrowserId=13 -> tabId=2` line is the SUBJECT clause satisfied in the log: the pill was
+addressed by `Tab::id`, not the CEF browser id. And a **free discriminator**: two `createAction`
+attempts that session, **one** pill — the failed (empty-body) call produced none, so the indicator
+tracks payment *success*, not "a wallet call happened".
+
+⛔ **Still owed and named:** the full `R-GOLD` RED (stub the emit) needs a build-side arm, and the
+**BRC-121 paid-retry** emit route is untouched. 👤 The owner will run the GREEN direction at **real
+sites** from here rather than on a fixture — his point, and he is right: our fixture was the confound
+(see below).
+
+## ⚠️ A second find, money-path, NOT fixed — owner asked first
+
+`createAction` accepted an output with `lockingScript: ''` and no `address`, built an output with **no
+locking conditions**, broadcast it, and returned success. 📏 Only the **chain** showed it — our own
+response looked healthy:
+
+```
+100 sats     -> (non-standard: EMPTY locking script)
+1,000 sats   -> 1Q1A2rq6trBdptd3t6n53vB79mRN6JHEFT   (service fee, correct)
+4,556,761    -> change                                (correct)
+```
+
+The caller was malformed (our own 5.b fixture never sent the recipient it validates). The open question
+is whether the wallet should **reject** that rather than spend into it.
+`TICKET_createAction_accepts_an_empty_lockingScript_and_spends_into_it.md`. Invariant 13: asked, not
+changed.
+
+## 🚨 Phase 13 may be largely obsolete — owner, 2026-09-19
+
+👤 The CAPTCHA complainant was running **0.3.x-beta**, i.e. the **injected-JavaScript** farbling
+(`FingerprintScript.h`, deleted 2026-08-09) — **not** the native Blink patches 0.4.0 ships.
+
+⭐ And the old path carried the tell bot detection looks for: root `CLAUDE.md` says re-adding injected-JS
+farbling *"restores the `toString` tamper tell"*. A JS-patched method does not report `[native code]`.
+We were emitting that on every farbled method, on every page, in exactly the build that user ran.
+
+⛔ So Phase 13 gets a **step 0**: re-run the CAPTCHA basket on 0.4.0 before designing anything. If nothing
+fails, the phase collapses to a regression guard. Written into
+`phase-13-bot-detection/README.md`. Relevant to macOS too — Safari/WebKit is your platform reference and
+the matrix is cross-platform.
+
+## Windows state
+
+`preflight -Full` **PASS** (all gates + all T1, nothing skipped) at `ec4da99`; shell rebuilt on your
+`8f857d5` and `2643ef8`, links clean. ⚠️ `G11` now reports **58 against baseline 59** — it has improved
+and wants its ratchet; that is its own commit under rule 6 and Windows has not taken it.

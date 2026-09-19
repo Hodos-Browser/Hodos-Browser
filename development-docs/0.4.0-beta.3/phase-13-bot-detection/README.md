@@ -65,3 +65,50 @@ uniformity for the same reason. Log the rows in `PRIOR_ART.md`.
 vendor page that was red before and green after, and Chrome as the control · `P13-R1` the farbling acceptance
 battery still passes after any fix (a bot-compat fix must not silently weaken farbling — the constant-seed bug
 was exactly a "fix" nobody measured). 🍎 macOS runs the same matrix (vendors score platform signals).
+
+---
+
+## 🚨 STEP 0, ADDED 2026-09-19 BY THE OWNER — **the complaint predates the farbling rewrite. Re-test before assuming a defect exists.**
+
+👤 *"The user who made the complaint was still running a version before we moved the farbling into
+the actual Chromium... still running an old 0.3.x-beta. Not with the farbling in the actual Chromium
+build like we now have it in 0.4.0."*
+
+⛔ **This may invalidate the premise of this whole phase, and it must be checked FIRST.**
+
+| | |
+|---|---|
+| What they ran | `0.3.x-beta` — farbling by **injected JavaScript** (`FingerprintScript.h`) |
+| What we ship now | `0.4.0` — farbling as **Blink patches** in the fork (C1/C3/C4/C5/C6), applied at API-call time |
+| When it changed | `FingerprintScript.h` **deleted 2026-08-09** |
+
+⭐ **And the old implementation had a tell that bot detection specifically looks for.** The root
+`CLAUDE.md` gives it as a reason never to go back:
+
+> *"Do not re-add an injected-JS farbling path: it cannot cover workers, it restores the `toString`
+> tamper tell, and it would double-perturb values Blink already farbles."*
+
+A patched-in-JS method does not report `[native code]` from `toString()`. That is one of the cheapest,
+most widely deployed bot signals there is — and we were emitting it on every farbled method, on every
+page, in exactly the build this user was running. The native Blink patches report `[native code]`
+again, because the method genuinely *is* native.
+
+⚠️ **So the most likely reading is that the reported failure was caused by the thing 0.4.0 already
+removed.** Not proven — the site is unknown and the user does not remember it — but it reorders the
+work.
+
+### What this changes
+
+1. ⛔ **Do not design a fix first.** Step 0 is: run the CAPTCHA basket on **0.4.0** and see whether
+   anything fails at all. If nothing does, this phase collapses to a regression guard plus a note.
+2. ⭐ **A cheap discriminator exists and should be the first measurement:** compare
+   `Function.prototype.toString` output for the farbled methods on 0.3.x vs 0.4.0. If 0.3.x shows
+   JS source where 0.4.0 shows `[native code]`, the mechanism is demonstrated rather than assumed.
+   `BOT-1` in `farbling_acceptance_battery.py` already asserts the `[native code]` half on 0.4.0.
+3. 👤 **Owner's own framing:** *"if it works for us, then good. But it's still probably
+   fingerprinting."* 📏 So a green re-test closes the *reported* defect, not the *category* — keep the
+   matrix, drop the assumption that something is currently broken.
+
+⭐ **The general lesson, which is the same one this sprint keeps paying for:** a bug report names a
+build. Check that the build is the one you are about to fix before you fix it. This is the
+`feedback_test_subject_must_be_the_production_call` shape, applied to a *report* rather than a test.
