@@ -1797,8 +1797,22 @@ public:
     }
 
     // Timeout handling - called by WalletTimeoutTask
-    void handleHttpTimeout() {
+    void handleHttpTimeout(uint32_t armedForSend) {
         if (httpCompleted_.load()) return;  // Already responded, skip
+        // beta.3 2026-09-19h — a net armed for an EARLIER send of this handler. A
+        // connect drained on the HTTP transport re-sends on the SAME handler
+        // (ResumeDrainedApprovedRequest), so the first send's net is still pending.
+        // 📏 Measured: connect approved at 44.6 s ⇒ that net fired at 45.0 s into the
+        // re-send, told the page "Wallet request timeout" and Cancel()ed only the
+        // client — while the wallet approved and ran the createAction (the wallet
+        // does not stop when the client hangs up). Only the current send's net,
+        // armed by that send, may answer.
+        if (armedForSend != httpSend_.load()) {
+            LOG_INFO_HTTP("⏱️ Stale wallet HTTP timeout ignored — armed for send "
+                          + std::to_string(armedForSend) + ", current send "
+                          + std::to_string(httpSend_.load()));
+            return;
+        }
         // beta.3 W7 (HTTP half) — ⛔ this is a HUNG-WALLET net, not an approval
         // timeout. It is armed when the call is first forwarded and is still
         // pending when Rust answers 202 and the request parks on a prompt. Firing
@@ -2081,15 +2095,18 @@ private:
     std::atomic<bool> httpCompleted_{false};
     // W7 — true while this request is parked on an approval prompt; false again
     // whenever startAsyncHTTPRequest (re-)sends it, so a re-sent call keeps its
-    // hung-wallet net. ⚠️ Corrected 2026-09-19g: prompts raised from a Rust 202
-    // resume as kInternal (a synchronous re-issue with its own 30 s timeout), NOT
-    // through startAsyncHTTPRequest — only kHttpCallback entries (the BRC-100
-    // auth-handshake modal, raised before any forward) re-send on this handler.
+    // hung-wallet net. Two things re-send on this handler: a CONNECT drained on
+    // the HTTP transport (ResumeDrainedApprovedRequest, 2026-09-19h) and the
+    // BRC-100 auth-handshake modal. Kind prompts (payment, scoped, cert…) resume
+    // as kInternal — a synchronous re-issue with its own 30 s timeout.
     // ⛔ Deliberately NOT cleared on the approve/deny resume paths: those answer the
     // page via onAuthResponseReceived, which sets httpCompleted_, and handleHttpTimeout
     // checks httpCompleted_ FIRST. Clearing it there changes nothing — and clearing it
     // any earlier (e.g. when the prompt is answered but before the page is) reopens W7.
     std::atomic<bool> awaitingApproval_{false};
+    // 2026-09-19h — numbered on every (re-)send; each 45 s net carries the number
+    // of the send that armed it (see handleHttpTimeout).
+    std::atomic<uint32_t> httpSend_{0};
 
     // Auto-approve engine: pre-calculated spending for this request.
     // Phase 2.6-E — populated in Open() for payment endpoints from
@@ -2717,12 +2734,12 @@ public:
     enum Type { HTTP_TIMEOUT, AUTH_TIMEOUT };
 
     WalletTimeoutTask(CefRefPtr<AsyncWalletResourceHandler> handler, Type type,
-                      const std::string& errorJson)
-        : handler_(handler), type_(type), errorJson_(errorJson) {}
+                      const std::string& errorJson, uint32_t send = 0)
+        : handler_(handler), type_(type), errorJson_(errorJson), send_(send) {}
 
     void Execute() override {
         if (type_ == HTTP_TIMEOUT) {
-            handler_->handleHttpTimeout();
+            handler_->handleHttpTimeout(send_);
         } else {
             handler_->handleAuthTimeout(errorJson_);
         }
@@ -2732,6 +2749,7 @@ private:
     CefRefPtr<AsyncWalletResourceHandler> handler_;
     Type type_;
     std::string errorJson_;
+    uint32_t send_;  // HTTP_TIMEOUT only: which send of the handler armed this net
 
     IMPLEMENT_REFCOUNTING(WalletTimeoutTask);
     DISALLOW_COPY_AND_ASSIGN(WalletTimeoutTask);
@@ -2777,7 +2795,8 @@ void AsyncWalletResourceHandler::postHttpTimeout() {
         endpoint_.find("/proveCertificate")   != std::string::npos) {
         timeoutMs = 300000;
     }
-    CefPostDelayedTask(TID_UI, new WalletTimeoutTask(this, WalletTimeoutTask::HTTP_TIMEOUT, ""), timeoutMs);
+    CefPostDelayedTask(TID_UI, new WalletTimeoutTask(this, WalletTimeoutTask::HTTP_TIMEOUT, "",
+                                                     httpSend_.load()), timeoutMs);
 }
 
 // Function to store pending auth request data (called from overlay_show_brc100_auth IPC — no handler)
@@ -3093,7 +3112,19 @@ bool ResumeDrainedApprovedRequest(const PendingAuthRequest& req) {
         resumeIpcResponse(req, kApprovedStub);
         return true;
     }
-    if (req.resumeKind == ResumeKind::kInternal && (req.handler || req.frame)) {
+    // beta.3 2026-09-19h — a CONNECT drained on the HTTP transport goes back
+    // through the handler's own pipeline, as it did before 2.6-C.3 made 202
+    // entries kInternal. 📏 resumeInternalResponse re-sent `req.body`, which
+    // openDomainApprovalModal blanks, so the site's call arrived with a 0-byte
+    // body ("Invalid JSON"). It also sends no X-Payment-* headers and delivers a
+    // follow-up 202 to the page raw (as a 2xx, i.e. a false gold pill). The handler
+    // re-sends body_ with the payment headers, and a follow-up 202 opens its
+    // prompt via OnRequestComplete. Only connect entries reach here
+    // (popConnectForDomain), and those carry no replay token.
+    if (req.resumeKind == ResumeKind::kInternal && req.handler) {
+        return ForwardPendingWalletRequest(req.handler);
+    }
+    if (req.resumeKind == ResumeKind::kInternal && req.frame) {
         resumeInternalResponse(req, kApprovedStub);
         return true;
     }
@@ -4010,6 +4041,7 @@ void AsyncWalletResourceHandler::startAsyncHTTPRequest() {
     // W7 — back in flight (first forward, or re-forward after a connect
     // approval): the hung-wallet net applies again.
     awaitingApproval_.store(false);
+    httpSend_.fetch_add(1);  // postHttpTimeout below arms this send's net
 
     // Phase 2.6-C.4 — DELETED: the Phase 1.5 Step 1 drain-forward safety net
     // that fired triggerIdentityKeyRevealModal here when an identity-key
