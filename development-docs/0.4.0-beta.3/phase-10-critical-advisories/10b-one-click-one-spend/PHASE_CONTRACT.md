@@ -219,5 +219,10 @@ without moving money. The Windows run spent real money only because it clicked A
 📏 **130,000 sats renders as `130.000k sats`** — on the payment approval modal, the one screen where the
 user decides whether to spend. Every amount from **1,000 to 99,999,999 sats** is affected (`1,500` →
 `1.500k sats`), and `.toFixed(3)` implies three digits of precision that do not exist.
-⛔ Not fixed: shared React and a presentation decision. 👤 Owner's call — `130,000 sats` looks like the
-intent. Cross-platform; Windows renders the same string.
+✅ **FIXED 2026-09-19 (owner said fix it).** The middle branch is deleted; everything below 1 BSV is now
+`sats.toLocaleString() + ' sats'`. Measured across every boundary on the real modal: 700 → `700 sats`,
+1,000 → `1,000 sats`, 1,500 → `1,500 sats`, **130,000 → `130,000 sats`**, 99,999,999 →
+`99,999,999 sats`, 100,000,000 → `1.00000000 BSV` (the ≥ 1 BSV branch deliberately kept — a unit change
+genuinely helps at that size). `tsc --noEmit` clean; screenshot re-read at 1366×768.
+⭐ `toLocaleString()` also makes the grouping follow the user's locale rather than a hardcoded `.`, so it
+can never collide with the decimal separator again. Cross-platform: Windows gets the fix on rebase.

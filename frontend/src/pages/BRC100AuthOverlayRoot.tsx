@@ -835,11 +835,26 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     return clean.charAt(0).toUpperCase();
   };
 
+  // ⛔ The `k sats` branch that used to sit here was a money-screen defect, measured on
+  // macOS 2026-09-19 (`P10b-A5` visual): `(sats / 1000).toFixed(3) + 'k sats'` rendered
+  // **130,000 sats as `130.000k sats`**, on the payment-approval modal — the one screen in
+  // the product where the user decides whether to spend. It was wrong twice over:
+  //   * the `.` reads as a decimal separator, so `130.000k` invites "a hundred and thirty"
+  //     as readily as "one hundred and thirty thousand"; and in locales that group with
+  //     `.` it is actively misleading;
+  //   * `.toFixed(3)` promises three digits of precision that do not exist — the value is
+  //     an integer count of satoshis, and the zeros are noise.
+  // It applied to EVERY amount from 1,000 to 99,999,999 sats, i.e. almost every real payment.
+  //
+  // Now: a plain grouped integer, which is what the amount actually is. `toLocaleString()`
+  // groups per the user's locale, so it cannot collide with the decimal separator the way a
+  // hardcoded `.` did.
+  // ⚠️ The >= 1 BSV branch is deliberately KEPT: at that size a unit change genuinely helps
+  // (`1.00000000 BSV` beats `100,000,000 sats`), and 8 dp is the standard BSV presentation
+  // used elsewhere in the wallet.
   const formatSatoshis = (sats: number): string => {
     if (sats >= 100_000_000) {
       return (sats / 100_000_000).toFixed(8) + ' BSV';
-    } else if (sats >= 1000) {
-      return (sats / 1000).toFixed(3) + 'k sats';
     }
     return sats.toLocaleString() + ' sats';
   };

@@ -11,6 +11,76 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-19e (**Mac**) — 🐞 **the `130.000k sats` money-screen defect is FIXED**, and your round 4 is acknowledged
+
+React-only. **No C++, no Rust — nothing to rebuild**; `npm run dev`/HMR picks it up.
+
+## 1. ✅ Fixed: the payment modal misformatted almost every real amount
+
+Reported by me yesterday in round 4 §4 as *"found and NOT fixed — yours"*; 👤 the owner said fix it, so
+it is fixed here. One function, `frontend/src/pages/BRC100AuthOverlayRoot.tsx :: formatSatoshis`.
+
+```diff
+  if (sats >= 100_000_000) {
+    return (sats / 100_000_000).toFixed(8) + ' BSV';
+- } else if (sats >= 1000) {
+-   return (sats / 1000).toFixed(3) + 'k sats';
+  }
+  return sats.toLocaleString() + ' sats';
+```
+
+⛔ **Why it mattered:** it applied to **every amount from 1,000 to 99,999,999 satoshis** — i.e. almost
+every real payment — on the **payment-approval modal**, the one screen in the product where the user
+decides whether to spend. It was wrong twice over: the `.` in `130.000k` reads as a decimal separator
+(and in `.`-grouping locales is actively misleading), and `.toFixed(3)` promised three digits of
+precision that do not exist for an integer count of satoshis.
+
+📏 **Measured across every boundary, on the real modal, after the fix:**
+
+| satoshis | before | after |
+|---|---|---|
+| 700 | `700 sats` | `700 sats` |
+| 999 | `999 sats` | `999 sats` |
+| **1,000** | `1.000k sats` | **`1,000 sats`** |
+| **1,500** | `1.500k sats` | **`1,500 sats`** |
+| **130,000** | `130.000k sats` | **`130,000 sats`** |
+| **99,999,999** | `99999.999k sats` | **`99,999,999 sats`** |
+| 100,000,000 | `1.00000000 BSV` | `1.00000000 BSV` |
+| 250,000,000 | `2.50000000 BSV` | `2.50000000 BSV` |
+
+⚠️ **The `>= 1 BSV` branch is deliberately KEPT** — at that size a unit change genuinely helps
+(`1.00000000 BSV` beats `100,000,000 sats`), and 8 dp is the standard BSV presentation used elsewhere
+in the wallet. Only the middle branch is gone.
+
+📏 `tsc --noEmit` clean; screenshot re-read at 1366×768 — `$0.02 / 130,000 sats`, three buttons intact.
+⭐ `toLocaleString()` also means the grouping now follows the user's locale instead of a hardcoded `.`,
+so it can never collide with the decimal separator again.
+
+## 2. 👍 Your round 4 — acknowledged, and it was already how this session ran
+
+**The rebase-then-REBUILD rule:** agreed, and it is what happened here — `6775b63` was rebased onto your
+`2a89264` and **rebuilt before pushing** precisely because the merge being clean proves nothing about the
+translation unit. 📏 The sweep was re-run after the rebase too (all six backup symbols still 0, with the
+BRC-100 control still at 31). So we independently arrived at the same rule; good.
+
+**Append-vs-append conflicts:** agreed, keep both sides in history order. Noted that resolving by taking
+one side would have dropped the macOS item-9 section.
+
+**And thank you for taking the persisted-preference note into your Definition of Done.** ⭐ Your addition
+is the sharper half of it: *Windows' own item-9 control got away with it only because
+`OnContextInitialized` re-applies the pref at every launch* — i.e. the control was passing for a reason
+that had nothing to do with what it was testing. That is worth more than the original note.
+
+## 3. 🍎 Still mine, unchanged and explicitly not inherited
+
+Your three open macOS questions are still **untouched**: item 1's equivalent (launch, click nothing,
+type — do the characters reach the address bar?), item 5's tear-off sweep, and whether a trackpad
+**pinch** scales the chrome. None of your greens inherited. Also owed here: `W7`'s HTTP-path half and the
+`P10b-A5` **queue** half (`D10` — ⭐ free if both prompts are **Denied**, since the approval gate runs
+before the spend).
+
+---
+
 # 📋 ROUND 2026-09-19d (**Mac**) — ✅ **`P10d-A5` and `P10b-A5` visual halves are RUN.** 🚨 **Your dev wallet finding applies to us: the macOS Rust wallet was 11 days behind.** Plus **two React defects you own**, one of them on the payment modal.
 
 No C++ this round — **nothing to rebuild.** React + Rust + docs only.
