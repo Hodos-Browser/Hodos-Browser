@@ -11,6 +11,93 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-19j (**Mac**) — ✅ **`D-h3` done: a queued prompt is never posted with seconds to live, and an expired modal closes itself.** 🚨 Shared C++ + React — rebuild after rebase.
+
+> 🪟 **If you are looking into the connect EMPTY BODY right now: it is already fixed — `8f857d5`, round i below.**
+> ⛔ Please don't fix it by deleting `req.body = ""` — round i §1 explains why that alone lights a false gold pill.
+> The two cases worth re-running on Windows are round i §3 rows 1 and 3 (Allow at 5 s; connect then a 1 BSV prompt).
+
+## ⚠️ C++ this round — rebuild after your next rebase
+
+| File | Platform split? | What changed |
+|---|---|---|
+| `cef-native/include/core/PendingAuthRequest.h` | ❌ none | `takeNextQueuedPrompt` skips an entry with less than `kMinPostLifetimeMs` (5 s) left to live |
+| `cef-native/src/core/HttpRequestInterceptor.cpp` | ❌ none | `ShowNextQueuedPromptIfAny()` (bool) behind the unchanged `ShowNextQueuedPrompt()`; new `OnShownPromptExpired(id)` called from **both** prompt timeouts (`handleAuthTimeout` HTTP, `postIpcAuthTimeout` IPC); includes `JsStringEscape.h` |
+| `frontend/src/pages/BRC100AuthOverlayRoot.tsx` | React | `window.expirePrompt(requestId)` — closes via `overlay_close` **only if that request is on screen AND no newer prompt has been injected** (`latestInjectedIdRef`, set synchronously in `showNotification`, next to your D-h4 `livePushedCountRef` reset). Rebased onto your `ec4da99` — no textual conflict; the semantic interaction is §1(c) |
+
+`ShowNextQueuedPrompt()`'s signature is unchanged on purpose — both platform arms of `simple_handler.cpp` declare it
+`extern`.
+
+## 1. What changed, and why this shape
+
+**(a) The margin.** 📖 `createdAt` is stamped when the entry is **built** and its timeout is armed a moment **later**,
+so the sibling of a prompt that just expired can be a few ms younger than the limit. 📏 Round g measured it: posted at
++600.008 s, its own timeout ~6 ms later, a dead modal on screen. Now an entry needs 5 s of life left to be posted.
+
+**(b) The ghost.** When a SHOWN prompt times out and nothing replaces it, C++ injects
+`window.expirePrompt('<id>')` into the notification browser. The modal closes **only if `requestIdRef` still equals that
+id** — the overlay is shared by every prompt type, so a late call must never close a newer modal. It closes through
+`overlay_close`, i.e. the path Deny already uses, which is the platform-correct hide on both sides and keeps the
+parked-permission-prompt re-show latch intact. No answer is sent: the request was popped by its timeout.
+
+⛔ Rejected alternative: hiding the window straight from `HttpRequestInterceptor`. The hide is platform-split and
+coupled to `g_pendingModalDomain` and the permission latch, and C++ at that point does not know whether a *different*
+modal has since taken the overlay.
+
+**(c) Found while reading your D-h4 diff — a race in my own (b).** `showNotification` applies params up to 1200 ms
+after injection, and `requestIdRef` changes only then. So if prompt A expires just as a NEW prompt C is injected,
+`expirePrompt(A)` still sees A in the ref, closes the overlay C is about to occupy, and C sits invisible while holding
+the queue for 10 minutes. ⛔ Not fixed by moving `requestIdRef` earlier — until `applyParams` lands the screen still
+shows A, and a click would then answer C, a request the user has not seen (CU-1's shape). Fixed with a separate
+`latestInjectedIdRef`, set synchronously on injection; `expirePrompt` needs both refs to agree.
+
+📏 Guard cases, driven on the real component (`/brc100-auth` in an internal-origin tab, `cefMessage.send` captured):
+
+| call | sent | modal |
+|---|---|---|
+| (a) `expirePrompt('req-bogus')` | nothing | stays |
+| (b) `showNotification(newer)` then immediately `expirePrompt(displayed)` | `wallet_call` only (the defaults refresh) | stays |
+| 🔴 (b) with the `latestInjectedIdRef` line removed (HMR), same calls | `wallet_call`, **`overlay_close`** | closed — the race, shown |
+| (b) guard restored | `wallet_call` only | stays |
+| (c) `expirePrompt(the displayed id)` | `overlay_close` | closed |
+
+## 2. 📏 Measured — HTTP transport, web security on, dev wallet empty, zero satoshis
+
+| Case | 🔴 Before (round g, `4b5e750` build, 12:09) | ✅ After (this build, run kept awake, 14:09 → 14:20) |
+|---|---|---|
+| two over-cap prompts, left 10 min — the queued sibling | **posted** at +600.008 s (`⏭️ Showing next queued prompt …`), dead ~6 ms later | **not posted** — 0 `⏭️` lines |
+| the expired modal | stayed on screen; Approve on it resolved nothing | `⏱️ Expired prompt req-…-5 — asking the modal to close` at 14:19:54.782 → `Notification overlay hidden (keep-alive)` at **.786**; no payment text left on the page |
+| what the page receives | `Approval timeout` ×2 | `Approval timeout` ×2 (599,996 ms) |
+| spend | 0 | **0** `X-User-Approved` |
+| **control — the margin must not block a normal drain**: two prompts, Deny the first | — | second posted by itself (`⏭️ … req-…-2`), both rejections reach the page |
+
+⚠️ The id guard's *refusal* case was exercised only by accident — in the contaminated run below, `expirePrompt(-3)`
+arrived at a page holding `-1` and did nothing, which is the intended behaviour. Not a designed control.
+
+### ⛔ A contaminated first run, stated rather than dropped
+
+The first 10-minute run went wrong for a reason that was not the code: **the Mac slept** (the `sleep 615` returned 25
+minutes later). On wake, vite's dev client reconnected and **reloaded every `127.0.0.1:5137` page**
+(`Header browser loaded` at 13:52:07) — which re-mounted the keep-alive notification page from its ORIGINAL URL, i.e. a
+prompt from half an hour earlier. `expirePrompt` then correctly refused to close it (the ids differed), and the run
+looked like a failure of the fix. Dev-server artefact only — the installed app serves static files. ⇒ **Any long wait on
+macOS runs under `caffeinate -dimsu`.** The table above is the re-run.
+
+## 3. ⬜ Not covered
+
+- The **IPC** timeout (`postIpcAuthTimeout`) got the same one-line change and is ⬜ **not measured** — the rig here is HTTP.
+- Windows: not run. Shared code — one rebuild, and ideally one 10-minute run of two queued prompts.
+
+## 4. 🍎 Keychain, for the record (macOS only, no action for Windows)
+
+The owner asked why the dev wallet's Keychain prompt keeps returning although they always click **Always Allow**.
+📏 The dev wallet is **ad-hoc** signed (`Signature=adhoc`, `Identifier=hodos_wallet-2793ec2e69c76d70` — a per-build
+hash). 🧠 Inference, not tested: the Keychain ACL records that exact code identity, so every `cargo build` is a "new
+application" and *Always Allow* lasts until the next rebuild. Offered to the owner as a later dev-tooling task: sign the
+dev wallet with a stable local certificate.
+
+---
+
 # 📋 ROUND 2026-09-19i (**Mac**) — ✅ **round h §4 FIXED (owner-approved): a connect approved on the HTTP transport now re-sends the site's REAL call** — and fixing it made my round-g "double net" REAL, so that is fixed and measured too. 🚨 **Shared C++ — rebuild after your next rebase.**
 
 ## ⚠️ C++ this round
