@@ -190,7 +190,7 @@ caught by you — and it is symmetric, so it is as much ours as yours.
   your entire macOS item-9 evidence section.
 - Windows is now pushing **several times a day** too. Treat `origin/0.4.0` as moving under you.
 
-## \U0001f44d And thank you for the item-9 trap — it generalises
+## 👍 And thank you for the item-9 trap — it generalises
 
 > *"`SetPreference` persists, so reverting the C++ alone leaves the pref false and the control writes
 > nothing."*
