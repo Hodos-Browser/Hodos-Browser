@@ -1274,3 +1274,31 @@ box after clicking away. ⛔ I had claimed the address bar reverts to the page U
 corrected here by direct observation rather than by my recollection.** 👤 Decision: ours clears the
 address bar on blur and keeps the new-tab box, and that is **fine as-is** — *"if the user clicks out
 and clicks back in, they just start typing again."* No change.
+
+---
+
+## ✅ `W9` — the native half of items 2, 3, 4 and 5, confirmed 2026-09-19
+
+👤 Owner at the keyboard, six checks, **all pass first time**. This closes the gap every one of
+those items was written with: their evidence was CDP-driven, which proves React → IPC → HWND and says
+nothing about native mouse and keyboard delivery.
+
+| | check | result |
+|---|---|---|
+| a | Enter within a beat of the last letter | 🟢 dropdown gone and stayed gone — the 150 ms debounce race |
+| b | click a suggestion, fast | 🟢 stayed gone, and 👤 *"the url showed up right away"* |
+| c | Tab ×2 then Shift+Tab | 🟢 highlight walks, caret stays in the bar, dropdown stays up — 👤 and it feels right |
+| d | Escape ×2 | 🟢 rung 1 gives back the typed text and keeps focus; rung 2 restores the page URL and leaves |
+| e | click out on the page | 🟢 dismissed **and the click went through** |
+| f | **real-drag** tear-off, then type + open the menu | 🟢 the new window stayed in front |
+
+⭐ **Two of these had never been exercised by anything, ever.**
+**(e)** is the `WH_MOUSE_LL` click-outside hook — `SendInput` clicks are dropped in the agent
+environment, so no probe has ever touched that path. It matches Chrome, including letting the click
+through rather than swallowing it to dismiss.
+**(f)** is the drag itself. Item 5's 16/16 sweep created its second window through the `tab_tearoff`
+**IPC**, which conjures the window without the mouse capture and activation changes a drag causes.
+👤 The owner's 2026-09-15 report is now confirmed to predate the Phase 3.5 fix.
+
+⚠️ What this does **not** cover: `W10`. Items 6, 7 and 10 still need the DPI matrix, and item 7
+route 2 is expected to fail there by construction.
