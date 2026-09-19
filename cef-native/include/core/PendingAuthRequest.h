@@ -201,8 +201,15 @@ public:
             // already told its caller "Approval timeout" — showing it now would
             // invite a click that resolves nothing the page can still receive,
             // and on the HTTP path re-issues the wallet call anyway.
+            //
+            // 2026-09-19 (D-h3): and not one that is about to die either. `createdAt` is
+            // stamped when the entry is BUILT, and its timeout is armed a moment later,
+            // so the sibling of a prompt that just expired can be a few ms younger than
+            // the limit — 📏 measured: posted at +600.008 s, its own timeout fired ~6 ms
+            // later, leaving a dead modal on screen. Nobody can read and answer a
+            // payment prompt in a few seconds, so require kMinPostLifetimeMs of life.
             if (std::chrono::duration_cast<std::chrono::milliseconds>(now - r.createdAt).count()
-                    >= kShownPromptExpiryMs) continue;
+                    >= kShownPromptExpiryMs - kMinPostLifetimeMs) continue;
             if (!best || r.seq < best->seq) best = &r;
         }
         if (!best) return false;
@@ -375,6 +382,7 @@ private:
     // timeouts now pop their entry — HTTP since 12c76bd — so this is the backstop
     // for a path that forgets to, not the mechanism.)
     static constexpr int kShownPromptExpiryMs = 600000;  // == kPromptAuthTimeoutMs
+    static constexpr int kMinPostLifetimeMs = 5000;      // D-h3: never post a prompt with less left
 
     bool anyLiveShownLocked() const {
         const auto now = std::chrono::steady_clock::now();

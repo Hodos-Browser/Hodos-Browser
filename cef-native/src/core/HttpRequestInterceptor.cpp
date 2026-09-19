@@ -4,6 +4,7 @@
 #include "../../include/core/SensitiveCertFields.h"
 #include "../../include/core/SyncHttpClient.h"
 #include "../../include/core/PortConfig.h"
+#include "../../include/core/JsStringEscape.h"  // escapeJsonForJs (D-h3 expirePrompt)
 #include "include/wrapper/cef_helpers.h"
 #include "include/cef_urlrequest.h"
 #include "include/cef_request.h"
@@ -1343,15 +1344,37 @@ static std::string enqueueConnectPrompt(PendingAuthRequest req, const std::strin
 // Post the oldest waiting prompt, if nothing live is on screen. Called when the
 // notification overlay closes (both platforms, simple_handler.cpp) and when a shown
 // prompt times out.
-void ShowNextQueuedPrompt() {
+static bool ShowNextQueuedPromptIfAny();
+void ShowNextQueuedPrompt() { ShowNextQueuedPromptIfAny(); }
+
+// 2026-09-19 (D-h3) — a SHOWN prompt just timed out. If another waits, it takes the
+// overlay (its content replaces this one). If none does, ask the modal to close
+// itself — but only if it is still showing THIS request: the notification overlay
+// is shared by every prompt type, and its own `overlay_close` path is the one that
+// hides it correctly on each platform (and re-shows a pre-empted permission prompt).
+// 📏 Before this, the expired modal stayed on screen as a ghost whose buttons
+// resolved nothing (seen on both platforms, Windows W7 and macOS round g).
+static void OnShownPromptExpired(const std::string& requestId) {
+    if (ShowNextQueuedPromptIfAny()) return;
+    CefPostTask(TID_UI, base::BindOnce([](std::string id) {
+        CefRefPtr<CefBrowser> notif = SimpleHandler::GetNotificationBrowser();
+        if (!notif || !notif->GetMainFrame()) return;
+        LOG_INFO_HTTP("⏱️ Expired prompt " + id + " — asking the modal to close if it still shows it");
+        notif->GetMainFrame()->ExecuteJavaScript(
+            "window.expirePrompt && window.expirePrompt('" + escapeJsonForJs(id) + "')", "", 0);
+    }, requestId));
+}
+
+static bool ShowNextQueuedPromptIfAny() {
     PendingAuthRequest next;
     int queuedFromSite = 0;
-    if (!PendingRequestManager::GetInstance().takeNextQueuedPrompt(next, queuedFromSite)) return;
+    if (!PendingRequestManager::GetInstance().takeNextQueuedPrompt(next, queuedFromSite)) return false;
     LOG_INFO_HTTP("⏭️ Showing next queued prompt " + next.overlayType + " for " + next.domain
                   + " (requestId: " + next.requestId + ", " + std::to_string(queuedFromSite)
                   + " more waiting from this site)");
     CefPostTask(TID_UI, new CreateNotificationOverlayTask(
         next.overlayType, next.domain, next.overlayExtraParams, next.requestId, queuedFromSite));
+    return true;
 }
 
 std::string openDomainApprovalModal(const ModalContext& ctx, const ResumeContext& resume) {
@@ -1859,7 +1882,7 @@ public:
             LOG_DEBUG_HTTP("⏱️ Approval timeout - sending error (released " + timeoutRequestId_ + ")");
             onAuthResponseReceived(errorJson);
             // The expired prompt held the overlay — let the next one have it.
-            if (expired.shown) ShowNextQueuedPrompt();
+            if (expired.shown) OnShownPromptExpired(timeoutRequestId_);
             return;
         }
         if (httpCompleted_.load()) return;  // Already responded, skip
@@ -2543,7 +2566,7 @@ void postIpcAuthTimeout(const std::string& requestId,
         LOG_DEBUG_HTTP("⏰ IPC auth timeout fired for " + requestId
                        + " (answered page id " + ipcId + ")");
         // 10b: the prompt on screen expired — let the next waiting one take the overlay.
-        if (req.shown) ShowNextQueuedPrompt();
+        if (req.shown) OnShownPromptExpired(requestId);
     }, requestId, frame, errorJson), delayMs);
 }
 

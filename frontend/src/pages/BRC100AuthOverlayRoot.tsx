@@ -762,6 +762,20 @@ const BRC100AuthOverlayRoot: React.FC = () => {
       setNotificationDomain('');
     };
 
+    // 2026-09-19 (D-h3) — C++ calls this when the prompt it posted TIMED OUT and no
+    // other prompt replaced it. ⛔ Close only if THIS request is still on screen: the
+    // overlay is shared by every prompt type, so a stale call must never close a
+    // newer modal. `overlay_close` is the same path the Deny/close buttons use, so the
+    // hide is the platform-correct one. No answer is sent — the request was already
+    // popped by its timeout, and answering it would resolve nothing.
+    (window as any).expirePrompt = (requestId: string) => {
+      if (!requestId || requestIdRef.current !== requestId) return;
+      requestIdRef.current = '';
+      setNotificationType('');
+      setNotificationDomain('');
+      window.cefMessage?.send('overlay_close', []);
+    };
+
     // beta.3 Phase 10e — C++ calls this when another request from THIS site queues
     // behind the prompt currently on screen, so the "1 of N" line is live.
     //
@@ -849,6 +863,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     return () => {
       delete (window as any).showNotification;
       delete (window as any).hideNotification;
+      delete (window as any).expirePrompt;
       delete (window as any).updateQueuedCount;
     };
   }, []);
