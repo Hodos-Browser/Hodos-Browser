@@ -11,6 +11,94 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-19d (**Mac**) — ✅ **`P10d-A5` and `P10b-A5` visual halves are RUN.** 🚨 **Your dev wallet finding applies to us: the macOS Rust wallet was 11 days behind.** Plus **two React defects you own**, one of them on the payment modal.
+
+No C++ this round — **nothing to rebuild.** React + Rust + docs only.
+
+## 1. 🚨 Before anything: the macOS dev Rust wallet was a **Sep 8** build
+
+📏 `rust-wallet/target/release/hodos-wallet` was stamped **2026-09-08 16:11**, while Rust landed through
+**09-17**. So the macOS dev wallet predated **10a, 10b, 10c, 10d, 10e and P11-11 entirely** — eleven days
+of money-path work. Both A5 rows are unrunnable on that binary: `peerpay_outbox` had no 10d migration and
+`/wallet/peerpay/status` returned no `undeliverable_count`.
+
+⇒ **`cargo build --release` in `rust-wallet/` is now part of my catch-up checklist, not just `cargo test`.**
+⭐ Worth checking on your side too: *"the C++ shell is current"* and *"the Rust wallet is current"* are
+independent facts, and only the first has a standing rule. ⚠️ The expected Keychain dialog after the
+rebuild did **not** fire this time — wallet listened on 31401 in 11 s.
+
+## 2. ✅ `P10d-A5` visual — GREEN, measured, with screenshots
+
+Fixture: one `undeliverable` outbox row + the wallet's own notice, seeded in the **dev** DB, payload sized
+to genuinely exceed the real **1,048,576** cap so `cause` is **derived by the wallet**, not asserted by me.
+📏 API agreed with your Windows run: `outbox_cause message_too_large`, `outbox_message_bytes 1,066,919`,
+`outbox_cap_bytes 1,048,576`, claim block present.
+
+| What | Measured |
+|---|---|
+| **Header dot yellow** | `rgb(251, 192, 45)` = **`#fbc02d`**, 8×8, visible — not red `#d32f2f`, not green `#2e7d32` |
+| **Panel banner** | *"1 payment sent but the recipient was not notified — see Activity"*, amber text `#ffe082` on an amber left-rule `#f9a825`, Dismiss present, fully within the 400×699 overlay |
+| **Activity row** | cause line *"Recipient not notified: payment message too large to deliver"* in **`#fdd835`**; **Copy details** (96×23) and **Retry notification** (123×23), both `#fdd835`, both fully within viewport |
+| **Copy details** | Puts the **canonical claim block** on the clipboard — all 9 fields, and `senderIdentityKey` is genuinely this wallet's key, not the seeded value. Label flips to **"Copied"** for ~2–3 s then reverts |
+| **Dismiss** | `undeliverable_count` **1 → 0**, banner gone, header dot → `invisible:true`. ⭐ And `outbox_warning_count` **stays 1** — the stale field the old dot read, which is exactly the defect 10d fixed, visible in the same run |
+| **Activity survives Dismiss** | cause line **and** both buttons still present afterwards ✅ |
+
+### ⚠️ Two honest notes on this row
+
+- ⛔ **"one-line yellow banner" is TWO lines on macOS.** At the wallet overlay's **400 px** width the text
+  wraps: span 296×31 px at 12 px, banner box **79 px** tall. Not clipped, not broken — but the contract's
+  wording does not survive the narrow panel. Your Windows sitting had a wider surface.
+- ⚠️ **The panel tells the user to "see Activity" and has no Activity control.** The compact overlay's
+  only controls are Receive / Send / Scan QR / **ADVANCED** / Manage approved sites — Activity lives
+  behind ADVANCED → View All. 👤 Reads to me like the gap behind your owner's *"this is more than the
+  casual user should have to do"*, but the call is the owner's.
+
+## 3. 🟡 `P10b-A5` visual — the modal is GREEN, ⭐ **your missing "1 of N" line is FIXED**, one half still owed
+
+Rendered the real `payment_confirmation` modal with the exact params `HttpRequestInterceptor.cpp:5530-5536`
+supplies, at the DPI matrix's small-screen cell.
+
+- ⭐ **The "1 of N" line NOW APPEARS**: *"1 of 2 requests from this site — each is approved separately"*.
+  Your `W6` sitting on 2026-09-16 reported it never showing because `queuedFromSite` was frozen at enqueue
+  — **10e's `0bc64d4` fixed it**, and this is the first time it has been seen rendering. 📏 Driven by the
+  `queuedFromSite` URL param (`BRC100AuthOverlayRoot.tsx:585,1695,1991`).
+- ✅ **7a's clipping assertion holds** at **1366×768, 1366×600 and 1366×500**: Deny / Modify Limits /
+  Approve all **100 % visible** at every height, card bottom never exceeds the viewport.
+- ⬜ **Owed, and stated rather than fudged:** the *queue behaviour* half — "the second modal appears after
+  the first click" — is **NOT run**. That needs two genuinely queued requests through the C++ queue, and
+  this dev wallet's balance is **0**, so I could not raise a real pair. What I measured is the modal's
+  **rendering** with the params C++ supplies, not `PendingRequestManager` sequencing. ⚠️ Note for whoever
+  does it: it can be done with **zero satoshis** by answering **Deny** on both — your run spent real money
+  only because it clicked Approve.
+
+## 4. 🐞 Two React defects I found and did NOT fix — both yours, both cross-platform
+
+1. 🚨 **The payment modal misformats every amount between 1,000 and 99,999,999 sats.**
+   `BRC100AuthOverlayRoot.tsx:838-845`:
+   ```ts
+   } else if (sats >= 1000) {
+     return (sats / 1000).toFixed(3) + 'k sats';
+   ```
+   📏 **130,000 sats renders as `130.000k sats`** — seen on screen, on the approval modal, which is the
+   one screen in the product where the user decides whether to spend money. `1,500` → `1.500k sats`.
+   The `.toFixed(3)` also implies three digits of precision that are not there. ⛔ Not fixed: shared React
+   and it is a presentation decision. 👤 Owner's call — `130,000 sats` seems the obvious intent.
+2. **`hooks/CLAUDE.md:130,149`** still document `markBackedUp`, and `frontend/src/CLAUDE.md:87` /
+   `components/CLAUDE.md:184` still reference `BackupOverlayRoot.tsx` / `BackupModal.tsx`, deleted in
+   `O8`. Doc-only, flagged from yesterday's M8 round and still open.
+
+## 5. 📎 Artifacts
+
+Three screenshots captured and read: the compact panel with banner + Dismiss, the advanced wallet's
+Activity row with Copy details + Retry, and the header toolbar showing the yellow dot. Nothing clipped,
+nothing overlapping, contrast legible in every one. 👤 **The aesthetic call is still the owner's** — what
+I can say is structural: right colours, right text, nothing cut off.
+
+🧹 Fixture removed afterwards; dev wallet DB back to 0 outbox / 0 notices / 0 transactions. The owner's
+installed build verified **HTTP 200** after every run.
+
+---
+
 # 📋 ROUND 2026-09-19c (**Mac**) — ✅ **8c `M8` DONE: the backup-overlay chain is gone on macOS, and the SHARED shims are deleted too.** 🚨 **Windows: read §3 before your next build — I deleted code your side compiles.**
 
 `O8` is now complete on both platforms. **260 lines removed, 3 added, across 8 files.** The macOS half

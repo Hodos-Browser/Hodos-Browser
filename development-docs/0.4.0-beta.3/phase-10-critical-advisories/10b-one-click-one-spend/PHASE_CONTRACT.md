@@ -182,3 +182,42 @@ Three commits (C++/React binding + fan-out; Rust lock; Rust cache key), each ind
 | preflight -NegativeControl | n/a — no gate pattern or baseline touched (rule 6) | 2026-09-15 | Windows |
 | regression set | ⬜ runs at the Phase 10 boundary (after 10c), T2 halves included; `R-ONE-CLICK-ONE-SPEND` added in its own commit `5102335` | | |
 | adversarial review | ⬜ one panel over 10a+10b+10c+10d after 10c lands | | |
+
+
+---
+
+## 4c. 🍎 `P10b-A5` VISUAL half — macOS 2026-09-19. ⭐ **The "1 of N" line that `W6` reported missing is FIXED and has now been SEEN.**
+
+Rendered the real `payment_confirmation` modal with the exact parameters
+`HttpRequestInterceptor.cpp:5530-5536` supplies, at the DPI matrix's small-screen cell.
+
+| Assertion | Result |
+|---|---|
+| ⭐ the **"1 of N"** line | ✅ **PRESENT**: *"1 of 2 requests from this site — each is approved separately"*. Windows' `W6` sitting (2026-09-16) found it never rendered, because `queuedFromSite` was frozen at enqueue; **10e `0bc64d4` fixed it**, and this is its first observed render. Driven by the `queuedFromSite` URL param (`BRC100AuthOverlayRoot.tsx:585,1695,1991`) |
+| 7a clipping (`P7a-A2` shape) | ✅ at **1366×768, 1366×600 and 1366×500**: Deny / Modify Limits / Approve **100 % visible** at every height; card bottom never exceeds the viewport |
+| legibility | ✅ amount, domain, the exceeded-limit sentence and all three buttons render cleanly; screenshot read, nothing clipped or overlapping |
+
+### ⬜ NOT run — the queue half, stated rather than fudged
+
+*"The second modal appears after the first click"* is **not measured**. That needs two genuinely queued
+requests through the C++ queue, and this dev wallet's balance is **0**, so no real pair could be raised.
+What was measured is the modal's **rendering** with the parameters C++ supplies — **not**
+`PendingRequestManager` sequencing.
+⭐ **For whoever runs it: it costs zero satoshis.** Answer **Deny** on both prompts — the approval gate
+runs before the spend, so the queue, the "1 of N" line and the second-modal behaviour are all exercised
+without moving money. The Windows run spent real money only because it clicked Approve.
+
+### 🐞 Found by looking at the rendered modal — a money-screen formatting defect, NOT fixed
+
+`BRC100AuthOverlayRoot.tsx:838-845`:
+
+```ts
+} else if (sats >= 1000) {
+  return (sats / 1000).toFixed(3) + 'k sats';
+```
+
+📏 **130,000 sats renders as `130.000k sats`** — on the payment approval modal, the one screen where the
+user decides whether to spend. Every amount from **1,000 to 99,999,999 sats** is affected (`1,500` →
+`1.500k sats`), and `.toFixed(3)` implies three digits of precision that do not exist.
+⛔ Not fixed: shared React and a presentation decision. 👤 Owner's call — `130,000 sats` looks like the
+intent. Cross-platform; Windows renders the same string.

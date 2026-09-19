@@ -148,3 +148,44 @@ Three Rust commits (selection + refuse; backup funding; outbox classification + 
 | preflight -NegativeControl | n/a — no gate pattern or baseline touched (rule 6) | 2026-09-15 | Windows |
 | regression set | | | |
 | adversarial review | | | |
+
+
+---
+
+## 4c. 🍎 `P10d-A5` VISUAL half — RUN on macOS 2026-09-19. **The T3 row is no longer owed.**
+
+⚠️ **Prerequisite nobody had noticed:** the macOS dev Rust wallet was a **2026-09-08** build, eleven days
+behind, so it predated 10a–10e entirely — `peerpay_outbox` had no 10d migration and
+`/wallet/peerpay/status` returned no `undeliverable_count`. Rebuilt first. ⇒ *"the shell is current"* and
+*"the Rust wallet is current"* are independent facts and only the first has a standing rule.
+
+**Fixture:** one `undeliverable` outbox row plus the wallet's **own** notice row, seeded in the dev DB.
+⭐ The payload was sized to genuinely exceed the real **1,048,576** cap, so `cause` is **derived by the
+wallet's own code** rather than asserted by the fixture. 📏 API matched the Windows run exactly:
+`outbox_cause message_too_large`, `outbox_message_bytes 1,066,919`, `outbox_cap_bytes 1,048,576`.
+
+| What | Measured |
+|---|---|
+| Header dot **yellow** | `rgb(251, 192, 45)` = `#fbc02d`, 8×8, visible — not red `#d32f2f`, not green `#2e7d32` |
+| Panel banner | *"1 payment sent but the recipient was not notified — see Activity"*; text `#ffe082`, left rule `#f9a825`; Dismiss present; entirely within the 400×699 overlay |
+| Activity row | cause line in `#fdd835`; **Copy details** (96×23) and **Retry notification** (123×23), both `#fdd835`, both fully within viewport |
+| **Copy details** | the canonical claim block, **all 9 fields**, `senderIdentityKey` genuinely this wallet's key (not the seeded value). Label flips to **"Copied"** ~2–3 s then reverts |
+| **Dismiss** | `undeliverable_count` **1 → 0**, banner gone, header dot → `invisible:true`. ⭐ `outbox_warning_count` **stays 1** in the same run — the stale field the old dot read, i.e. the defect 10d exists to fix, visible side by side |
+| Activity survives Dismiss | cause line **and** both buttons still present ✅ |
+
+### ⛔ Two corrections to this contract's own wording, from the measurement
+
+1. **"one-line yellow banner" is TWO lines on macOS.** At the wallet overlay's **400 px** width the text
+   wraps — span 296×31 px at 12 px font, banner box **79 px** tall. Not clipped; the wording just does not
+   survive the narrow panel.
+2. ⚠️ **The panel says "see Activity" and offers no Activity control.** The compact overlay has only
+   Receive / Send / Scan QR / ADVANCED / Manage approved sites; Activity is behind ADVANCED → View All.
+   👤 Owner's call — it reads like the gap behind the `W1` comment *"this is more than the casual user
+   should have to do"*.
+
+### ⭐ Instrument note worth keeping
+
+`document.querySelector('.MuiBadge-badge')` returned the **Privacy Shield** badge, not the Wallet one, and
+reported the dot absent. Enumerating **all** badges and selecting by the parent button's `aria-label`
+found it visible and correctly yellow. ⇒ **A `querySelector` on a class shared by several widgets is a
+blind instrument; enumerate and disambiguate.**
