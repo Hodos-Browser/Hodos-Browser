@@ -7,7 +7,7 @@
 
 | # | Item | Source | Shape |
 |---|---|---|---|
-| 1 | 🟡 **DIAGNOSED, NOT FIXED (2026-09-18 — shipped attempt REVERTED)** — **Cursor is not in the address bar at launch** — a test user had to click elsewhere first | `../TICKET_omnibox_addressbar_interaction_defects.md` #1 | ⭐ First-run blast radius, external reporter. Establish *which* defect first (focus never lands / first click lost / caret invisible) with an instrumented probe on the header browser at startup; then the fix. 👤 Owner's target: on launch, focus is in the address bar with the caret visible, ready to type. T2 probe + T3 human check |
+| 1 | ✅ **FIXED 2026-09-19, owner-confirmed** — **Cursor is not in the address bar at launch** | `../TICKET_omnibox_addressbar_interaction_defects.md` #1 | 📏 **FOUR stacked defects**, three of them native, found with `nativefocusprobe.py` (GetGUIThreadInfo). 👤 *"The caret cursor was in the address bar. I started typing and it worked."* See § Item 1 — the fix below
 | 2 | ✅ **DONE 2026-09-18** — **Omnibox sometimes stays open after selecting a URL** | ticket #2 | 📏 **Reproduced deterministically.** Not the hide path — an uncancelled 150 ms **show** debounce in the header fires after the hide. See § Item 2 below |
 | 3 | ✅ **DONE 2026-09-18** — **URL populates the address bar late after clicking a suggestion** | ticket #3 | 📏 **Not "late" — never.** Measured pre-fix: page navigated at 122 ms, clicked URL absent from the address bar after **35 s**. Fixed: **75 ms**, ahead of the navigation. See § Item 3 below |
 | 4 | ✅ **DONE 2026-09-18** — **Tab / Enter autocomplete behaviour** | ticket #4 | 📏 **There was no inline autocomplete at all** — the Tab branch was unreachable dead code. 👤 Owner chose scope **A (conformance only)**. `PRIOR_ART.md` row logged. See § Item 4 below |
@@ -1192,3 +1192,85 @@ revert the state as well as the code.**
 
 👤 **Owner decision owed:** the installed build's 7 rows are still on disk. Installing a fixed build does
 not remove them — the fix stops new writes, it does not clear history.
+
+---
+
+## Item 1 — launch and type · ✅ FIXED 2026-09-19, owner-confirmed
+
+👤 *"The caret cursor was in the address bar. I started typing and it worked."*
+
+Three attempts in a previous session failed and were reverted. This is the fourth, and the reason it
+worked is that it started from a **measurement** instead of a hypothesis — the one the previous
+write-up demanded and never got:
+
+> "Establish where native keyboard focus actually lands at startup — which HWND, and which CEF
+> browser believes it has focus — **before** changing anything. That measurement does not exist yet."
+
+`nativefocusprobe.py` reads `GetGUIThreadInfo` on the browser UI thread. It exists now.
+
+### 📏 The measurement, and the four defects it exposed
+
+| # | defect | evidence |
+|---|---|---|
+| 1 | **Four overlays pre-warmed `WS_POPUP \| WS_VISIBLE`.** A popup created visible takes activation at `CreateWindowEx`; the `SWP_NOACTIVATE \| SWP_HIDEWINDOW` that follows hides it but never returns focus (`SWP_NOACTIVATE` only means "do not activate during THIS call"). They are created on a stagger — wallet 1.5 s, profile 3 s, bookmarks 4 s, tab-list 4.5 s — and the last one keeps the keyboard | `hwndFocus = CEFTabListPanelOverlayWindow`, a **hidden** window, deterministic over 3 launches |
+| 2 | **`ShellWindowProc` had no `WM_SETFOCUS` case at all** — the only window in the tree without one; all ~14 overlay WndProcs have exactly that handler. So once the theft stopped, focus landed on the shell and died there | `hwndFocus = HodosBrowserWndClass`, real but inert |
+| 3 | **`CEFHostWindow` is registered with `lpfnWndProc = DefWindowProc`** — a bare container. Focusing `tab->hwnd` put the keyboard on a window that discards keystrokes; CEF's real window is its child | `hwndFocus = CEFHostWindow` and still no typing ⇒ target `GetWindowHandle()` |
+| 4 | **The DOM half raced.** A mount-time timer in React loses to `CefBrowserHost::SetFocus`, which resets the document to `BODY` afterwards; and sending `focus_address_bar` from tab registration is **too early** — the render process logged it arriving exactly once and nothing happened, because React had not registered its listener yet | header native-focused, `activeElement = BODY` |
+
+⭐ **This is why attempt 3 "fired and changed nothing".** `header->GetHost()->SetFocus(true)` is
+meaningless while the keyboard belongs to a different top-level window. Both layers, in order, or
+neither works.
+
+### The fix, in four parts
+
+1. `simple_app.cpp` — `WS_POPUP | (showImmediately ? WS_VISIBLE : 0)` at the four pre-warm sites.
+   ⭐ Safe because five sibling overlays (menu, cookie, download, site-info, omnibox) already use
+   plain `WS_POPUP` and show and take input correctly; the `showImmediately` arm is byte-identical to
+   the old behaviour. ⚠️ The BRC-100 auth prompt keeps `WS_VISIBLE` — it is created on demand and
+   *should* take focus.
+2. `cef_browser_shell.cpp` — `ShellWindowProc` gains `WM_SETFOCUS`, forwarding to CEF's own window.
+3. `TabManager.cpp` — re-asserts focus when a tab arrives, because `CreateBrowser` is async and the
+   shell receives focus **before** any tab exists, after which focus never *changes* again so no
+   second `WM_SETFOCUS` ever fires. Guarded on *"the shell already holds the keyboard"* rather than
+   on foreground, so a tab opening in a background window cannot steal it.
+4. `simple_handler.cpp` — `focus_address_bar` sent when the **header finishes loading**, the same
+   point the cookie panel's deferred injection uses, and once per header browser.
+
+⭐ **Content is the axis, not creation type:** the address bar is focused only when the window opens
+on an empty new-tab page. Tear-off and Ctrl+N both come from `CreateFullWindow`, but one arrives
+showing content and the other empty — keying off *how the window was made* gets tear-off wrong.
+`NewTabPage.tsx` no longer auto-focuses its own box, so there is exactly one caret.
+
+### Evidence
+
+| | `hwndFocus` (native) | header `activeElement` | new tab `activeElement` |
+|---|---|---|---|
+| 🔴 pre-session build | `CEFTabListPanelOverlayWindow` (hidden) | BODY | INPUT |
+| 🔴 after defect 1 only | `HodosBrowserWndClass` (inert) | BODY | INPUT |
+| 🔴 after defect 2 only | `CEFHostWindow` (DefWindowProc) | BODY | INPUT |
+| 🔴 after defect 3 only | `Chrome_WidgetWin_1 'New Tab'` | BODY | INPUT |
+| 🟢 **all four** | `Chrome_WidgetWin_1 'Hodos Browser'` | **INPUT, the address bar** | **BODY** |
+
+🟢 **`W8` PASSED** — 👤 owner launched, clicked nothing, typed, and the characters landed in the
+address bar.
+
+### ⛔ The instrument lesson, and it cost four rounds
+
+Every intermediate state above **looked identical to the user**: a caret rendering somewhere while
+keystrokes went nowhere. And four times my measurement said green while the owner saw red, because
+`document.activeElement` answers *"which element gets keys once they arrive at this browser"* and says
+nothing about whether they arrive.
+
+🚨 **And I spent one whole round reading the wrong log file** — `cef_debug.log` rather than
+`debug_output-<pid>.log` — and reported "zero key events received", which was an artefact of the file
+and not a fact about the browser. The decisive instrument was there the whole time:
+`OnPreKeyEvent` already logs **every keystroke with the role that received it**. That is the log to
+read for anything about keyboard delivery.
+
+### 👤 Asked and answered: text left in the address bar
+
+👤 Owner checked Chrome directly: typed text **stays** in both the address bar and a page's search
+box after clicking away. ⛔ I had claimed the address bar reverts to the page URL — **wrong, and
+corrected here by direct observation rather than by my recollection.** 👤 Decision: ours clears the
+address bar on blur and keeps the new-tab box, and that is **fine as-is** — *"if the user clicks out
+and clicks back in, they just start typing again."* No change.

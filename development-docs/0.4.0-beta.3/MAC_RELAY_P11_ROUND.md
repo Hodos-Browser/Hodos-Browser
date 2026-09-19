@@ -129,3 +129,36 @@ assume the Windows fix ports.
 ⭐ Item 5's whole result rests on `OwnOverlayToRequestingWindow`, which is Windows-only
 (`GWLP_HWNDPARENT`). macOS overlays are borderless `NSWindow`s, so **the tear-off question is
 genuinely open there** and the Windows green says nothing about it.
+
+---
+
+# 🍎 Round 3 — item 1 (launch focus), added 2026-09-19
+
+## 🚨 Rebuild required, and this is the biggest C++ change of the phase
+
+| File | What changed |
+|---|---|
+| `src/handlers/simple_app.cpp` | Four overlay creators (wallet, profile, bookmarks, tab-list) now pass `WS_POPUP \| (showImmediately ? WS_VISIBLE : 0)` instead of always `WS_VISIBLE` |
+| `cef_browser_shell.cpp` | `ShellWindowProc` gains a `WM_SETFOCUS` case that forwards the keyboard to CEF's own window — the header on a new-tab page, the tab otherwise |
+| `src/core/TabManager.cpp` | `RegisterTabBrowser` re-asserts that focus when a tab arrives, because `CreateBrowser` is async |
+| `src/handlers/simple_handler.cpp` + `.h` | `focus_address_bar` sent once, when the header finishes loading; new `address_bar_focused_once_` member |
+| `frontend/src/pages/NewTabPage.tsx` | no longer auto-focuses its search box (React, relays with the frontend) |
+
+## ⛔ Almost all of this is Windows-only by construction — do NOT port it literally
+
+`WS_VISIBLE`, `WM_SETFOCUS`, `DefWindowProc`, `GetGUIThreadInfo`, `::SetFocus` and `CEFHostWindow`
+have no macOS analogues. macOS overlays are borderless `NSWindow`s and focus is AppKit's
+first-responder chain.
+
+⬜ **What macOS owes is the same QUESTION, not the same patch:** launch the build, click nothing,
+type — do the characters land in the address bar? 📏 On Windows the answer was no for four separate
+reasons, three of them native.
+
+⭐ **The one genuinely portable finding** is the diagnostic method, and it is worth reusing: the
+instrument that settles keyboard delivery is **`OnPreKeyEvent`'s existing log line**, which names the
+role that received each keystroke, in `debug_output-<pid>.log`. `document.activeElement` answers a
+different question ("which element gets keys once they arrive at this browser") and produced four
+consecutive false greens here.
+
+⚠️ And the macOS equivalent of defect 1 is worth checking on its own: does creating an
+`NSWindow` for a pre-warmed overlay make it key/main before it is ordered out?

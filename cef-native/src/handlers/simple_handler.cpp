@@ -1677,6 +1677,42 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
         }
     }
 
+    // 🚨 beta.3 Phase 11 item 1 (`P11-I1`) - put the caret in the address bar, once,
+    // when the header has finished loading.
+    //
+    // ⛔ TIMING IS THE WHOLE POINT, and two earlier placements failed on it:
+    //   * a mount-time timer in React races CefBrowserHost::SetFocus, which resets the
+    //     document to BODY afterwards - measured: native focus correct, DOM focus BODY;
+    //   * sending the IPC from TabManager::RegisterTabBrowser is too EARLY - measured:
+    //     the render process logged "focus_address_bar received" exactly once and
+    //     nothing happened, because React had not yet registered its message listener.
+    // Here is after the header's own load completes, which is the same point the cookie
+    // panel's deferred shield-domain injection uses for the same reason.
+    //
+    // ⚠️ Native focus is handled separately and must already be on the header - see
+    // ShellWindowProc::WM_SETFOCUS and TabManager::RegisterTabBrowser. This is only the
+    // DOM half; without the native half the caret renders and types nothing.
+    //
+    // ⭐ CONTENT is the axis: only when this window opened on an empty new-tab page.
+    // 👤 Owner: "when they go into settings to make it bigger, that should be
+    // everything" was the zoom rule; this is its sibling - the address bar is where you
+    // start typing on a blank tab, and nowhere else.
+    if (!isLoading && role_ == "header" && !address_bar_focused_once_) {
+        address_bar_focused_once_ = true;
+        BrowserWindow* hdrWin = GetOwnerWindow();
+        Tab* hdrTab = hdrWin ? TabManager::GetInstance().GetActiveTabForWindow(hdrWin->window_id)
+                             : nullptr;
+        const bool onNewTab = hdrTab && (hdrTab->url.empty() ||
+            hdrTab->url.rfind("http://127.0.0.1:5137/newtab", 0) == 0);
+        if (onNewTab && browser->GetMainFrame()) {
+            browser->GetMainFrame()->SendProcessMessage(
+                PID_RENDERER, CefProcessMessage::Create("focus_address_bar"));
+            LOG_INFO_BROWSER("Header loaded on the new-tab page - focusing the address bar");
+        } else {
+            LOG_DEBUG_BROWSER("Header loaded on content - address bar left alone");
+        }
+    }
+
     // Special debug for BRC-100 auth overlay
     if (role_ == "brc100auth") {
             LOG_DEBUG_BROWSER("🔐 BRC-100 AUTH Loading state: " + std::string(isLoading ? "loading..." : "done"));

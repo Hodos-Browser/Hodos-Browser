@@ -1479,6 +1479,82 @@ LRESULT CALLBACK ShellWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             return 0;
         }
 
+        // \U0001f6a8 beta.3 Phase 11 item 1 (`P11-I1`) — hand the keyboard to the active tab.
+        //
+        // ⛔ THE SHELL WINDOW HAD NO WM_SETFOCUS CASE AT ALL, and it is the only window
+        // in the tree that did not. All ~14 overlay WndProcs have exactly this, e.g.
+        // TabListPanelOverlayWndProc:
+        //     case WM_SETFOCUS: { … tl_browser->GetHost()->SetFocus(true); return 0; }
+        // So when the shell received keyboard focus, nothing forwarded it to any CEF
+        // browser — DefWindowProc swallowed the keystrokes and they went nowhere.
+        //
+        // 📏 MEASURED 2026-09-19. GetGUIThreadInfo on the browser UI thread, fresh
+        // launch, nobody having clicked:
+        //     before the overlay fix : hwndFocus = CEFTabListPanelOverlayWindow (hidden!)
+        //     after  the overlay fix : hwndFocus = HodosBrowserWndClass  <- here, and dead
+        // 👤 Both states look identical to the user, and that is the whole difficulty of
+        // this ticket: a caret blinks in the new-tab search box because THAT DOCUMENT
+        // holds DOM focus, while the OS is delivering keys somewhere that discards them.
+        //
+        // ⭐ This is also why item 1's attempt 3 (`header->GetHost()->SetFocus(true)` at
+        // tab registration) "fired and changed nothing": CEF focus is meaningless while
+        // the keyboard belongs to a different top-level window. Fix the native layer
+        // first, then CEF focus means something.
+        //
+        // ⚠️ The ACTIVE TAB is the right target, not the header: it is what every other
+        // browser does (focus goes to the page), and the new-tab page's own search box
+        // already takes DOM focus, so "launch and type" lands somewhere the user can see.
+        // Whether the caret should instead start in the ADDRESS BAR is a separate
+        // product question — see the phase README.
+        case WM_SETFOCUS: {
+            BrowserWindow* focusBw =
+                reinterpret_cast<BrowserWindow*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+            int focusWid = focusBw ? focusBw->window_id : 0;
+            Tab* focusTab = TabManager::GetInstance().GetActiveTabForWindow(focusWid);
+            if (focusTab && focusTab->hwnd && IsWindow(focusTab->hwnd)) {
+                // ⭐ WHICH browser gets the keyboard is decided by CONTENT, not by how the
+                // window was made. 👤 Owner's rule: focus the address bar when the window
+                // opens on an empty new-tab page, never when it opens on a real page.
+                // Keying off creation type would get tear-off wrong - tear-off and Ctrl+N
+                // both come from CreateFullWindow, but one arrives showing content and the
+                // other empty.
+                const bool onNewTab =
+                    focusTab->url.empty() ||
+                    focusTab->url.rfind("http://127.0.0.1:5137/newtab", 0) == 0;
+
+                CefRefPtr<CefBrowser> target;
+                const char* which = "tab";
+                if (onNewTab && focusBw && focusBw->header_browser) {
+                    target = focusBw->header_browser;   // the address bar lives here
+                    which = "header";
+                } else if (focusTab->browser) {
+                    target = focusTab->browser;         // the page
+                }
+
+                // ⛔ CEF's OWN window, not tab->hwnd. 📏 tab->hwnd is a `CEFHostWindow`,
+                // and that class is registered with `lpfnWndProc = DefWindowProc` - a bare
+                // container with no message handling at all. Focusing it put the keyboard
+                // on a window that discards keystrokes, which measured as "hwndFocus is a
+                // CEF host window" and still typed nothing. GetWindowHandle() is the child
+                // CEF actually renders into and routes input to.
+                HWND cefWnd = target ? target->GetHost()->GetWindowHandle() : nullptr;
+                if (cefWnd && IsWindow(cefWnd)) {
+                    ::SetFocus(cefWnd);
+                    target->GetHost()->SetFocus(true);
+                    LOG_DEBUG(std::string("Shell WM_SETFOCUS -> ") + which + " (tab " +
+                              std::to_string(focusTab->id) + ", window " +
+                              std::to_string(focusWid) + ")");
+                }
+            } else {
+                // ⚠️ Normal at startup: focus can arrive before the tab browser exists,
+                // because CreateBrowser is async. TabManager::RegisterTabBrowser re-asserts
+                // focus when the tab appears, which is the other half of this fix.
+                LOG_DEBUG("Shell WM_SETFOCUS with no active tab yet, window " +
+                          std::to_string(focusWid));
+            }
+            return 0;
+        }
+
         case WM_ACTIVATE: {
             // Track which window is active for per-window operations (Ctrl+T, etc.)
             if (LOWORD(wParam) != WA_INACTIVE) {

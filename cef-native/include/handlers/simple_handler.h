@@ -119,6 +119,10 @@ public:
     // profile changed. Mirrors NotifyTabListChanged above.
     static void BroadcastProfilesChanged();
 
+    // P11-I1 - the address bar is focused at most once per header browser, so a later
+    // navigation to the new-tab page cannot yank the caret out from under the user.
+    bool address_bar_focused_once_ = false;
+
     // P11-I8 - same, for settings. Replaces a `header_browser_` static that was
     // never assigned, so the broadcast it guarded had never fired.
     static void BroadcastSettingsChanged();

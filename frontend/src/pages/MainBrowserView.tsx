@@ -104,6 +104,7 @@ const MainBrowserView: React.FC = () => {
         (window as any).removeSplash?.();
     }, []);
 
+
     // P11-I7a — the ctrl+wheel zoom guard used to live here. It moved to App.tsx,
     // which is the shared root for the header, every overlay AND the internal pages a
     // user opens as tabs. All of them share the origin 127.0.0.1:5137, so guarding only
@@ -180,6 +181,19 @@ const MainBrowserView: React.FC = () => {
         reorderTabs,
         tearOffTab,
     } = useTabManager();
+
+    // 🚨 beta.3 Phase 11 item 1 (`P11-I1`) - the caret goes in the address bar at
+    // launch, and C++ drives it. There is deliberately NO effect here.
+    //
+    // ⛔ A mount-time timer DOES NOT WORK and was tried: it races CEF's own focus call
+    // on the header browser, which resets the document's focus to BODY afterwards.
+    // 📏 Measured - native focus correct on the header, address bar still BODY.
+    //
+    // ⭐ Instead the shell sends the existing `focus_address_bar` IPC at the moment it
+    // hands native focus to the header (ShellWindowProc::WM_SETFOCUS and
+    // TabManager::RegisterTabBrowser), so the order is native-focus-then-DOM-focus by
+    // construction rather than by timing. That IPC is already wired end to end and is
+    // what Ctrl+L uses - see the handler further down.
 
     // Cookie blocking (badge count + polling)
     const {

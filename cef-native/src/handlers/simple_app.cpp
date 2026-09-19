@@ -893,7 +893,33 @@ void CreateWalletOverlay(HINSTANCE hInstance, bool showImmediately, int iconRigh
         WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
         L"CEFWalletOverlayWindow",
         L"Wallet Overlay",
-        WS_POPUP | WS_VISIBLE,
+        // \U0001f6a8 beta.3 Phase 11 item 1 (`P11-I1`) — WS_VISIBLE only when we are actually
+        // showing it. A WS_POPUP created WS_VISIBLE is born visible and TAKES THE
+        // KEYBOARD; the SWP_NOACTIVATE|SWP_HIDEWINDOW below hides it again but never
+        // gives focus back, because SWP_NOACTIVATE only means "do not activate during
+        // THIS call" — the theft already happened at CreateWindowEx.
+        //
+        // 📏 MEASURED 2026-09-19 (`nativefocusprobe.py`), three consecutive launches,
+        // nobody having clicked: GetGUIThreadInfo on the browser UI thread reported
+        //     hwndFocus = CEFTabListPanelOverlayWindow
+        // — a HIDDEN window. Four overlays are pre-warmed WS_VISIBLE on a stagger
+        // (wallet 1.5 s, profile 3 s, bookmarks 4 s, tab-list 4.5 s) and each steals the
+        // keyboard in turn; the last one keeps it. 👤 That is the test user's original
+        // report and the owner's: a caret blinks in the new-tab search box (that document
+        // holds DOM focus) while keystrokes go to an invisible overlay and vanish.
+        //
+        // ⛔ DOM focus and NATIVE focus are different layers. Three earlier attempts at
+        // this ticket failed because they moved DOM focus while the OS was sending keys
+        // somewhere else entirely — which is also why attempt 3's
+        // `header->GetHost()->SetFocus(true)` fired and changed nothing.
+        //
+        // ⭐ Safe because five sibling overlays (menu, cookie, download, site-info,
+        // omnibox) are ALREADY created with plain WS_POPUP and show and take input
+        // correctly — their Show* path adds WS_VISIBLE via SWP_SHOWWINDOW. The
+        // `showImmediately` arm below is byte-identical to the old behaviour, so the
+        // "WS_VISIBLE needed for proper keyboard focus" comments these four carried are
+        // still honoured on the path that actually shows the overlay.
+        WS_POPUP | (showImmediately ? WS_VISIBLE : 0),
         overlayX, overlayY, panelWidth, panelHeight,
         g_hwnd, nullptr, hInstance, nullptr);
 
@@ -2522,7 +2548,33 @@ void CreateTabListPanelOverlay(HINSTANCE hInstance, bool showImmediately, int ic
         WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
         L"CEFTabListPanelOverlayWindow",
         L"Tab List Panel Overlay",
-        WS_POPUP | WS_VISIBLE,
+        // \U0001f6a8 beta.3 Phase 11 item 1 (`P11-I1`) — WS_VISIBLE only when we are actually
+        // showing it. A WS_POPUP created WS_VISIBLE is born visible and TAKES THE
+        // KEYBOARD; the SWP_NOACTIVATE|SWP_HIDEWINDOW below hides it again but never
+        // gives focus back, because SWP_NOACTIVATE only means "do not activate during
+        // THIS call" — the theft already happened at CreateWindowEx.
+        //
+        // 📏 MEASURED 2026-09-19 (`nativefocusprobe.py`), three consecutive launches,
+        // nobody having clicked: GetGUIThreadInfo on the browser UI thread reported
+        //     hwndFocus = CEFTabListPanelOverlayWindow
+        // — a HIDDEN window. Four overlays are pre-warmed WS_VISIBLE on a stagger
+        // (wallet 1.5 s, profile 3 s, bookmarks 4 s, tab-list 4.5 s) and each steals the
+        // keyboard in turn; the last one keeps it. 👤 That is the test user's original
+        // report and the owner's: a caret blinks in the new-tab search box (that document
+        // holds DOM focus) while keystrokes go to an invisible overlay and vanish.
+        //
+        // ⛔ DOM focus and NATIVE focus are different layers. Three earlier attempts at
+        // this ticket failed because they moved DOM focus while the OS was sending keys
+        // somewhere else entirely — which is also why attempt 3's
+        // `header->GetHost()->SetFocus(true)` fired and changed nothing.
+        //
+        // ⭐ Safe because five sibling overlays (menu, cookie, download, site-info,
+        // omnibox) are ALREADY created with plain WS_POPUP and show and take input
+        // correctly — their Show* path adds WS_VISIBLE via SWP_SHOWWINDOW. The
+        // `showImmediately` arm below is byte-identical to the old behaviour, so the
+        // "WS_VISIBLE needed for proper keyboard focus" comments these four carried are
+        // still honoured on the path that actually shows the overlay.
+        WS_POPUP | (showImmediately ? WS_VISIBLE : 0),
         overlayX, overlayY, panelWidth, panelHeight,
         g_hwnd, nullptr, hInstance, nullptr);
 
@@ -2775,12 +2827,37 @@ void CreateBookmarksPanelOverlay(HINSTANCE hInstance, bool showImmediately, int 
         if (panelHeight < ScalePx(280, g_hwnd)) panelHeight = ScalePx(280, g_hwnd);
     }
 
-    // WS_VISIBLE needed for proper keyboard focus (same as profile/wallet overlays)
     HWND bookmarks_panel_hwnd = CreateWindowEx(
         WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
         L"CEFBookmarksPanelOverlayWindow",
         L"Bookmarks Panel Overlay",
-        WS_POPUP | WS_VISIBLE,
+        // \U0001f6a8 beta.3 Phase 11 item 1 (`P11-I1`) — WS_VISIBLE only when we are actually
+        // showing it. A WS_POPUP created WS_VISIBLE is born visible and TAKES THE
+        // KEYBOARD; the SWP_NOACTIVATE|SWP_HIDEWINDOW below hides it again but never
+        // gives focus back, because SWP_NOACTIVATE only means "do not activate during
+        // THIS call" — the theft already happened at CreateWindowEx.
+        //
+        // 📏 MEASURED 2026-09-19 (`nativefocusprobe.py`), three consecutive launches,
+        // nobody having clicked: GetGUIThreadInfo on the browser UI thread reported
+        //     hwndFocus = CEFTabListPanelOverlayWindow
+        // — a HIDDEN window. Four overlays are pre-warmed WS_VISIBLE on a stagger
+        // (wallet 1.5 s, profile 3 s, bookmarks 4 s, tab-list 4.5 s) and each steals the
+        // keyboard in turn; the last one keeps it. 👤 That is the test user's original
+        // report and the owner's: a caret blinks in the new-tab search box (that document
+        // holds DOM focus) while keystrokes go to an invisible overlay and vanish.
+        //
+        // ⛔ DOM focus and NATIVE focus are different layers. Three earlier attempts at
+        // this ticket failed because they moved DOM focus while the OS was sending keys
+        // somewhere else entirely — which is also why attempt 3's
+        // `header->GetHost()->SetFocus(true)` fired and changed nothing.
+        //
+        // ⭐ Safe because five sibling overlays (menu, cookie, download, site-info,
+        // omnibox) are ALREADY created with plain WS_POPUP and show and take input
+        // correctly — their Show* path adds WS_VISIBLE via SWP_SHOWWINDOW. The
+        // `showImmediately` arm below is byte-identical to the old behaviour, so the
+        // "WS_VISIBLE needed for proper keyboard focus" comments these four carried are
+        // still honoured on the path that actually shows the overlay.
+        WS_POPUP | (showImmediately ? WS_VISIBLE : 0),
         overlayX, overlayY, panelWidth, panelHeight,
         g_hwnd, nullptr, hInstance, nullptr);
 
@@ -3518,12 +3595,37 @@ void CreateProfilePanelOverlay(HINSTANCE hInstance, bool showImmediately, int ic
                  std::to_string(panelHeight));
 
     // Create HWND for profile panel overlay
-    // WS_VISIBLE is needed for proper keyboard focus (same as wallet overlay)
     HWND profile_panel_hwnd = CreateWindowEx(
         WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
         L"CEFProfilePanelOverlayWindow",
         L"Profile Panel Overlay",
-        WS_POPUP | WS_VISIBLE,
+        // \U0001f6a8 beta.3 Phase 11 item 1 (`P11-I1`) — WS_VISIBLE only when we are actually
+        // showing it. A WS_POPUP created WS_VISIBLE is born visible and TAKES THE
+        // KEYBOARD; the SWP_NOACTIVATE|SWP_HIDEWINDOW below hides it again but never
+        // gives focus back, because SWP_NOACTIVATE only means "do not activate during
+        // THIS call" — the theft already happened at CreateWindowEx.
+        //
+        // 📏 MEASURED 2026-09-19 (`nativefocusprobe.py`), three consecutive launches,
+        // nobody having clicked: GetGUIThreadInfo on the browser UI thread reported
+        //     hwndFocus = CEFTabListPanelOverlayWindow
+        // — a HIDDEN window. Four overlays are pre-warmed WS_VISIBLE on a stagger
+        // (wallet 1.5 s, profile 3 s, bookmarks 4 s, tab-list 4.5 s) and each steals the
+        // keyboard in turn; the last one keeps it. 👤 That is the test user's original
+        // report and the owner's: a caret blinks in the new-tab search box (that document
+        // holds DOM focus) while keystrokes go to an invisible overlay and vanish.
+        //
+        // ⛔ DOM focus and NATIVE focus are different layers. Three earlier attempts at
+        // this ticket failed because they moved DOM focus while the OS was sending keys
+        // somewhere else entirely — which is also why attempt 3's
+        // `header->GetHost()->SetFocus(true)` fired and changed nothing.
+        //
+        // ⭐ Safe because five sibling overlays (menu, cookie, download, site-info,
+        // omnibox) are ALREADY created with plain WS_POPUP and show and take input
+        // correctly — their Show* path adds WS_VISIBLE via SWP_SHOWWINDOW. The
+        // `showImmediately` arm below is byte-identical to the old behaviour, so the
+        // "WS_VISIBLE needed for proper keyboard focus" comments these four carried are
+        // still honoured on the path that actually shows the overlay.
+        WS_POPUP | (showImmediately ? WS_VISIBLE : 0),
         overlayX, overlayY, panelWidth, panelHeight,
         g_hwnd, nullptr, hInstance, nullptr);
 

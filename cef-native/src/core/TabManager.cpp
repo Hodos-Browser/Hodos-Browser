@@ -566,6 +566,41 @@ bool TabManager::RegisterTabBrowser(int tab_id, CefRefPtr<CefBrowser> browser) {
 
     // If this tab is visible, make sure browser has focus and is resized
     if (tab->is_visible && tab->hwnd) {
+        // 🚨 beta.3 Phase 11 item 1 (`P11-I1`) — the other half of the shell's
+        // WM_SETFOCUS handler. CreateBrowser is async, so at startup the shell window
+        // receives keyboard focus BEFORE this tab exists and its handler finds nothing
+        // to hand it to. When the tab finally arrives, re-assert the Win32 focus — but
+        // only if this window is genuinely the foreground one, so a tab created in a
+        // background window can never steal the keyboard from the window in use.
+        // ⛔ The condition is "the shell ALREADY holds the keyboard and has nothing to
+        // hand it to", not "the app is in the foreground". 📏 Measured: at startup the
+        // shell window receives WM_SETFOCUS before any tab exists, so its handler finds
+        // nothing; focus then never CHANGES again, so no second WM_SETFOCUS ever fires
+        // and the keyboard sits on a window that discards it. GetFocus() is per-thread
+        // and this runs on the UI thread that owns the shell, so it reads exactly that
+        // state. The foreground test is kept as the ordinary case.
+        // ⚠️ Both arms only ever move focus INTO a window that already had it at the
+        // top level, so a tab created in a background window cannot steal the keyboard.
+        HWND ownerTop = GetAncestor(tab->hwnd, GA_ROOT);
+        if (ownerTop && (GetFocus() == ownerTop || GetForegroundWindow() == ownerTop ||
+                         GetFocus() == tab->hwnd)) {
+            // ⛔ CEF's own window, not tab->hwnd — `CEFHostWindow` is registered with
+            // DefWindowProc and swallows keys. See the shell's WM_SETFOCUS handler.
+            // ⭐ Same content rule as the shell's WM_SETFOCUS handler: on the new-tab
+            // page the keyboard belongs to the ADDRESS BAR, so hand it to the header
+            // rather than to the empty page.
+            const bool onNewTab =
+                tab->url.empty() ||
+                tab->url.rfind("http://127.0.0.1:5137/newtab", 0) == 0;
+            BrowserWindow* ownerBw =
+                reinterpret_cast<BrowserWindow*>(GetWindowLongPtr(ownerTop, GWLP_USERDATA));
+            CefRefPtr<CefBrowser> target =
+                (onNewTab && ownerBw && ownerBw->header_browser) ? ownerBw->header_browser
+                                                                : browser;
+            HWND cefWnd = target->GetHost()->GetWindowHandle();
+            ::SetFocus((cefWnd && IsWindow(cefWnd)) ? cefWnd : tab->hwnd);
+            target->GetHost()->SetFocus(true);
+        }
         browser->GetHost()->SetFocus(true);
         browser->GetHost()->WasResized();
 

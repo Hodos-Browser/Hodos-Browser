@@ -142,13 +142,29 @@ const NewTabPage: React.FC = () => {
     // ⛔ Do not remove this again without first establishing where native focus actually
     // lands at startup. See `phase-11-ui-leftovers/README.md` item 1.
     //
-    // Auto-focus search bar on mount
-    useEffect(() => {
-        const timer = setTimeout(() => {
-            searchInputRef.current?.focus();
-        }, 100);
-        return () => clearTimeout(timer);
-    }, []);
+    // 🚨 beta.3 Phase 11 item 1 (`P11-I1`) - this page no longer takes the caret.
+    //
+    // ⛔ The warning above said not to remove this "without first establishing where
+    // native focus actually lands at startup". ✅ That has now been established, with
+    // `nativefocusprobe.py` reading GetGUIThreadInfo on the browser UI thread, and it
+    // turned out to be TWO defects below this line:
+    //   1. four overlays were pre-warmed WS_VISIBLE, so each stole the keyboard at
+    //      CreateWindowEx and the last one (tab-list, 4.5 s) kept it - a HIDDEN window;
+    //   2. the shell window had no WM_SETFOCUS handler at all, and `CEFHostWindow` is
+    //      registered with DefWindowProc, so even once the theft stopped the keyboard
+    //      sat on windows that discard keystrokes.
+    // That is why removing this auto-focus previously made typing stop entirely: this
+    // box holding DOM focus was the only thing keeping keys anywhere visible, and the
+    // native layer beneath it was broken the whole time.
+    //
+    // 👤 Owner's target: on launch the caret belongs in the ADDRESS BAR. The shell now
+    // hands native focus to the header when the window opens on this page, and
+    // MainBrowserView focuses the address bar - so this box must NOT compete, or the
+    // user sees two carets (the documented failure of the first attempt).
+    //
+    // ⚠️ The two fields are functionally identical anyway: this box uses the same
+    // isUrl / normalizeUrl / toSearchUrl helpers and the same search-engine setting as
+    // the address bar, and the address bar additionally has the omnibox dropdown.
 
     // Fetch search engine setting
     useEffect(() => {
