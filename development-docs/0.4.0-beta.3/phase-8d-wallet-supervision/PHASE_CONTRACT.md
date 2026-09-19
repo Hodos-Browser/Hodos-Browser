@@ -284,6 +284,58 @@ without first checking `serviceReachable` reads "no wallet" when the truth is "n
 `.d.ts` comment describing a discipline nothing enforces. **Windows to confirm — this is shared React,
 macOS only read it.**
 
-### ⬜ `P8d-A8` itself — NOT started
+### ✅ `P8d-A8` — the real macOS supervisor, BUILT and MEASURED 2026-09-19
 
-The real `waitpid` supervisor (~half a day) is not written. Next macOS item.
+`cef_browser_shell_mac.mm` — the 3-line logging stub is gone. Same period, same bound, same
+honest-flag shape and the same `HODOS_NO_SUPERVISE` seam as Windows' `BackendSupervisorLoop`.
+
+Rig for every row: the browser **owns the child** (launched with 31401 free, so it spawns
+`…/rust-wallet/target/release/hodos-wallet` itself), and the child is killed **by kernel exec
+path**, never by name. Timings from `~/Library/Application Support/HodosBrowserDev/debug_output.log`.
+The owner's installed build on 31301 was verified **HTTP 200 after every run**.
+
+| Row | Result |
+|---|---|
+| **`P8d-A4`** child killed | ✅ `Wallet server is DOWN (child exited)` → `Relaunching wallet server, attempt 1/3 after 2000 ms` → `Wallet server launched with PID: 44835` → `Wallet server is back (pid 44835)`. 📏 **`/health` answering 2,198 ms after the kill**, new PID (44805 → 44835). Windows' comparable number was 4,681 ms. ⚠️ Read precisely: 2,198 ms is my own poller seeing the port open; the supervisor's own `is back` line lands at ~2.7 s because its confirm poll is 500 ms-granular |
+| **`P8d-A4` RED** | ✅ `HODOS_NO_SUPERVISE=1` ⇒ `⚠️ HODOS_NO_SUPERVISE=1 — backend supervisor NOT started`; child killed ⇒ **`/health` NEVER back in 30 s**, **0** `Relaunching wallet` lines, no new pid. This is what makes `A4` mean something |
+| **`P8d-A5`** exe renamed away, child killed | ✅ **exactly 3** attempts — `1/3 after 2000 ms` (`:50.892`), `2/3 after 4000 ms` (`:55.071`), `3/3 after 8000 ms` (`:01.387`) — then `Wallet server relaunch gave up after 3 attempts — staying down until the user restarts it` (`:12.189`). `/health` false, **zero** dev wallet processes. No hot loop |
+| **`D-9`** manual restart = a fresh bounded cycle | ✅ With the exe **still away**, the panel's **Restart wallet service** button → `wallet_restart requested — handing it to the supervisor` → `attempt 1/3 after 0 ms`, `2/3 after 4000 ms`, `3/3 after 8000 ms`, then `gave up`. Identical semantics to Windows' `D-9`: the counter resets and attempt 1 runs with **no delay** |
+| 🚨 **the dead control, FIXED** | ✅ Exe restored, button clicked again through the **real `onClick`** (`element.click()`, ⛔ not `dispatchMouseEvent`) ⇒ `attempt 1/3 after 0 ms` → `Wallet server launched with PID: 44899` → 📏 **`/health` back 811 ms after the click.** Before this commit the identical click logged *"macOS wallet supervision not yet implemented"* and did nothing, silently |
+| **Restart guard** | ✅ Under `HODOS_NO_SUPERVISE=1` the same click logs `wallet_restart requested but the supervisor is not running` and relaunches **nothing** (0 lines) — it fails loud rather than pretending |
+| 🆕 **adblock** — which Windows did **not** measure | ✅ `hodos-adblock` killed by path ⇒ `Adblock engine is DOWN (child exited)` → `Relaunching adblock engine, attempt 1/3 after 2000 ms` → `Adblock engine is back (pid 45229)`; 📏 **`/health` back 2,505 ms**, new pid. Windows' contract records this arm as "not measured separately"; it is measured here |
+| 🆕 **no zombies** | ✅ `ps -axo pid,stat` after all of the above: every `hodos-wallet` / `hodos-adblock` is `S`, **zero** `Z`. This is the point of using `waitpid` rather than `kill(pid,0)` — see hazard 1 below |
+| **shutdown does not orphan** | ✅ `stop-dev.sh` with the supervisor live ⇒ 5 stopped, **no respawned wallet 8 s later**, 31401 free. ⚠️ Honest: this is the *kill* path, where the supervisor dies with the browser. The **graceful** ordering (`StopBackendSupervisor()` before the SIGTERMs in `ShutdownApplication()` and at the top of `StopServers()`) is **CODE_READING** — `stop-dev.sh` kills rather than quits, so `Backend supervisor stopped` was never printed in any run |
+
+### 🍎 Three macOS hazards that would each have produced a silently wrong supervisor
+
+1. ⛔ **`kill(pid, 0)` is not a liveness test for our own child.** An exited-but-unreaped child is a
+   **zombie**, and `kill(pid,0)` *succeeds* on a zombie — a supervisor built on it never notices the
+   wallet died. `waitpid(pid,&st,WNOHANG)` answers **and** reaps, so three relaunch attempts cannot
+   leave three zombies. Measured: 0 zombies after ~10 kill/relaunch cycles.
+2. ⛔ **`waitpid` is one-shot.** After it reaps, every later call for that pid returns `-1`/`ECHILD`.
+   A naive `waitpid(...) != 0` therefore latches "dead" **forever** and re-relaunches every tick. The
+   pid is cleared to `-1` the moment the exit is observed.
+3. ⛔ **Windows' `IsPortListening` is winsock.** macOS needed its own (non-blocking loopback connect +
+   150 ms `select`). Used only for the "we did not launch it" case — a dev-rig wallet has no child to
+   `waitpid` for. ⛔ Deliberately **not** `QuickHealthCheck()` there: that is a 2,000 ms libcurl GET,
+   and a 2 s probe inside a 2 s loop leaves no gap between ticks.
+
+### ⚠️ One deliberate divergence from Windows, and it should probably come back the other way
+
+A **manual** restart with the child still **alive** now SIGTERMs it first (SIGKILL after ~2 s).
+Without that, `SpawnWalletServer()` early-returns *"already running"* whenever `/health` answers, so
+Restart would be a **no-op against a wedged-but-listening wallet** — the same dead-control shape this
+row exists to remove. Windows' `LaunchWalletProcess` has the identical early return; worth mirroring.
+
+### ⬜ What is NOT proven, stated rather than implied
+
+- **The graceful-shutdown ordering** is CODE_READING (see the table's last row).
+- ⛔ **The `invalidateWalletStatusCache()` call on death is NOT evidenced by the run I did.** I measured
+  `wallet.getStatus()` flipping to `serviceReachable: false` **3 ms** after the kill — far too fast for
+  a 2 s supervisor tick, so that flip is the **live** status path, not the cache. The row proves the
+  user-visible truth is honest; it says **nothing** about the invalidate, which would pass with the
+  call removed. The 30 s `WalletStatusCache` consumers at the IPC / BRC-100 gates are still unmeasured
+  on macOS.
+- **`P8d-A7`** (the startup-cost row) was not re-measured on macOS. The supervisor starts on the
+  already-dispatched health block after the startup health wait, so it adds nothing to the critical
+  path by construction — but no first-paint numbers were taken here.

@@ -11,6 +11,85 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-19b (**Mac**) — ✅ **`P8d-A8` is DONE: the real macOS supervisor, and the dead Restart button now works.** ⚠️ **One macOS-only C++ file.**
+
+Follow-on to this morning's round. The stub is gone and every row below is **MEASURED** on the
+2026-09-19 build, with its negative control.
+
+## ⚠️ C++ this round — rebuild after your next rebase (standing rule, root `CLAUDE.md`)
+
+| File | Platform split |
+|---|---|
+| `cef-native/cef_browser_shell_mac.mm` | 🍎 **macOS only.** No shared C++ touched, no `#ifdef` added or removed. Windows has **nothing to port and nothing to rebuild for** |
+
+## What landed
+
+The 3-line logging stub is replaced by a real supervisor mirroring your `BackendSupervisorLoop`:
+one detached `std::thread`, 2 s period, bounded relaunch **3 × 2/4/8 s**, `invalidateWalletStatusCache()`
+on death, honest `g_walletServerRunning`, adblock on the same watcher (restart-only), and the same
+`HODOS_NO_SUPERVISE=1` seam. It starts on the already-dispatched health block **after** the startup
+health wait, so nothing is added to the critical path.
+
+## 📏 Measured — every row, with its RED
+
+Rig: the browser **owns the child**; kills are **by kernel exec path**, never by name. The owner's
+installed build on 31301 verified **HTTP 200 after every run**.
+
+| Row | Result |
+|---|---|
+| **`A4`** child killed | `Wallet server is DOWN (child exited)` → `attempt 1/3 after 2000 ms` → `Wallet server is back (pid 44835)`. **`/health` answering 2,198 ms after the kill**, new PID. (Yours was 4,681 ms.) |
+| **`A4` RED** | `HODOS_NO_SUPERVISE=1` ⇒ supervisor not started, child killed, **`/health` never back in 30 s**, **0** relaunch lines, no new pid |
+| **`A5`** exe renamed away | **exactly 3** attempts at 2/4/8 s, then `gave up after 3 attempts — staying down until the user restarts it`. `/health` false, zero wallet processes. No hot loop |
+| **`D-9`** manual restart | With the exe **still away**: a **fresh bounded cycle** — `attempt 1/3 after 0 ms`, then 4 s, then 8 s, then gave up. Identical to your `D-9` semantics |
+| 🚨 **the dead control** | Exe restored, **Restart wallet service** clicked through the real `onClick` ⇒ **`/health` back 811 ms later**. This morning the same click logged *"not yet implemented"* and did nothing, silently |
+| **Restart guard** | Under `HODOS_NO_SUPERVISE=1` the same click logs `wallet_restart requested but the supervisor is not running` and relaunches nothing — fails **loud** |
+| 🆕 **adblock** | `hodos-adblock` killed by path ⇒ `Adblock engine is DOWN` → relaunch → `Adblock engine is back (pid 45229)`, **2,505 ms**. ⭐ **Your contract records this arm as "not measured separately" — it is measured now** |
+| 🆕 **no zombies** | `ps -axo pid,stat` after ~10 kill/relaunch cycles: every backend `S`, **zero `Z`** |
+
+## 🍎 Three macOS hazards worth your time even though the file is mine
+
+1. ⛔ **`kill(pid, 0)` IS NOT a liveness test for your own child.** An exited-but-unreaped child is a
+   **zombie** and `kill(pid,0)` **succeeds** on a zombie — a supervisor built on it never notices the
+   death. `waitpid(pid,&st,WNOHANG)` answers *and* reaps. Your `WaitForSingleObject(hProcess, 0)` has
+   no equivalent trap, which is exactly why it is worth writing down: the obvious POSIX translation of
+   your line is wrong.
+2. ⛔ **`waitpid` is one-shot** — after it reaps, later calls return `ECHILD`, so a naive
+   `waitpid(...) != 0` latches "dead" forever and re-relaunches every tick. The pid is cleared on the
+   observed exit.
+3. ⛔ **`QuickHealthCheck()` is a 2,000 ms libcurl GET** and cannot be the liveness probe inside a
+   2 s loop. macOS got a non-blocking loopback connect + 150 ms `select` instead.
+
+## ⚠️ One divergence — and I think it should come back to Windows
+
+A **manual** restart with the child still **alive** now SIGTERMs it first. Without that,
+`SpawnWalletServer()` early-returns *"already running"* whenever `/health` answers, so Restart is a
+**no-op against a wedged-but-listening wallet** — the same dead-control shape the row exists to
+remove. 📏 `LaunchWalletProcess` has the identical early return on your side
+(`cef_browser_shell.cpp`, the `IsPortListening` ⇒ `g_walletServerRunning = true` arm). Worth mirroring.
+
+## ⬜ NOT proven — stated, not implied
+
+- **The graceful-shutdown ordering is CODE_READING.** `StopBackendSupervisor()` is called before the
+  SIGTERMs in `ShutdownApplication()` **and** at the top of `StopServers()`, but `stop-dev.sh` *kills*
+  rather than quits, so `Backend supervisor stopped` never printed in any run. What IS measured: the
+  kill path leaves **no orphaned wallet** (the supervisor dies with the browser).
+- ⛔ **The `invalidateWalletStatusCache()` call is NOT evidenced by my run, and I nearly reported that
+  it was.** I measured `wallet.getStatus()` flipping to `serviceReachable: false` **3 ms** after the
+  kill — far too fast for a 2 s tick, so that flip is the **live** status path, not the cache. The row
+  would pass with the invalidate deleted. ⇒ It proves the user-visible truth is honest and says
+  **nothing** about the cache. The 30 s `WalletStatusCache` consumers at the IPC / BRC-100 gates are
+  still unmeasured on macOS. (`HARNESS.md` §6 Q1, caught on the way out.)
+- **`P8d-A7`** startup cost not re-measured on macOS — the supervisor starts after the health wait so
+  it adds nothing by construction, but no first-paint numbers were taken.
+
+## 🍎 Still mine, unchanged
+
+**8c `M8`** (backup-overlay macOS half) is next. Then `P10d-A5` / `P10b-A5`, `W7`, and the three open
+macOS questions from your P11 round — pinch-zoom, the text-scale analogue, and tear-off — all still
+untouched, none of their greens inherited.
+
+---
+
 # 📋 ROUND 2026-09-19 (**Mac**) — 🚦 **the appcast promotion blocker is CLOSED with a measured Sparkle proof**, the CDP mirror is in, autofill item 9 is green with its RED, 8c M7 done. ⚠️ **One shared-C++ file touched; one dead button found in the shipped macOS UI.**
 
 Mac was **103 commits / 28 C++ commits behind and had not compiled since 2026-09-12**. It compiles now,

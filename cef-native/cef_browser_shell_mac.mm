@@ -31,6 +31,7 @@
 #include "OverlayHelpers_mac.h"
 
 #include <atomic>
+#include <thread>   // P8d-A8: the backend supervisor's detached thread
 #include <regex>
 #include <dlfcn.h>
 #include <iostream>
@@ -334,6 +335,18 @@ static CFAbsoluteTime g_tablist_panel_last_hide_time = 0;
 // in s_tabmenu_target_tab_id, which is P4-A2's defect surfaced from the other side.
 static id g_tabmenu_click_monitor = nil;
 static id g_tabmenu_rclick_monitor = nil;
+
+// HttpRequestInterceptor.cpp — drop the 30 s "exists" cache the instant the wallet dies.
+// ⛔ Without this a cached "exists" outlives the wallet by up to 30 s and dApp calls fail as
+// "HTTP 0" instead of WALLET_UNAVAILABLE (Phase 8d contract D-8). Same declaration Windows
+// carries in cef_browser_shell.cpp.
+void invalidateWalletStatusCache();
+
+// Phase 8d `P8d-A8` — forward declarations. ShutdownApplication() calls
+// StopBackendSupervisor() well before the supervisor block is defined further down this
+// same TU, so the declarations have to come first.
+static void StartBackendSupervisor();
+static void StopBackendSupervisor();
 
 // Server process management
 static pid_t g_wallet_server_pid = -1;
@@ -5317,6 +5330,13 @@ void ShutdownApplication() {
     }
 
     // Step 4: Kill background server processes
+    // ⛔ Phase 8d: stop the supervisor BEFORE the SIGTERMs below. This is the earlier of the
+    // two macOS shutdown paths (the other is StopServers() after the message loop exits);
+    // without this the supervisor observes the SIGTERM as a crash and respawns the wallet
+    // while the browser is tearing down. StopBackendSupervisor() is an idempotent flag set,
+    // so calling it on both paths is correct.
+    StopBackendSupervisor();
+
     if (g_wallet_server_pid > 0) {
         LOG_INFO("🔄 Killing wallet server (pid " + std::to_string(g_wallet_server_pid) + ")...");
         kill(g_wallet_server_pid, SIGTERM);
@@ -5373,6 +5393,13 @@ static bool SendShutdownRequest(int port) {
 #include <spawn.h>
 #include <signal.h>
 #include <sys/wait.h>
+// P8d-A8 — IsPortListeningMac(): non-blocking loopback connect + select.
+#include <sys/socket.h>
+#include <sys/select.h>
+#include <netinet/in.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <unistd.h>
 
 extern char **environ;
 
@@ -5427,15 +5454,11 @@ static void SpawnWalletServer() {
     LOG_INFO("Wallet server launched with PID: " + std::to_string(g_wallet_server_pid));
 }
 
-// Phase 8d (2026-09-14) — 🍎 STUB, Mac's lane. The shared `wallet_restart` IPC arm in
-// simple_handler.cpp calls this; on Windows it resets the supervisor's attempt counter and
-// relaunches the wallet child (cef_browser_shell.cpp :: RequestWalletRestart). The macOS
-// supervisor (waitpid(g_wallet_server_pid, WNOHANG) + SpawnWalletServer(), bounded) is the
-// relay item for phase-8d-wallet-supervision; until it lands this only logs, so the shared
-// file links. ⛔ Do not delete — the link depends on it.
-void RequestWalletRestart() {
-    LOG_WARNING("wallet_restart requested — macOS wallet supervision not yet implemented (Phase 8d relay item)");
-}
+// Phase 8d `P8d-A8` — the real supervisor (and `RequestWalletRestart`) live below
+// SpawnAdblockServer, because they drive both spawners. The 3-line logging stub that
+// used to sit here is gone: 📏 2026-09-19 it was measured to make the wallet panel's
+// "Restart wallet service" button a **dead control** — the IPC arrived, this logged, and
+// the user was told nothing.
 
 static void SpawnAdblockServer() {
     if (QuickAdblockHealthCheck()) {
@@ -5475,6 +5498,285 @@ static void SpawnAdblockServer() {
     LOG_INFO("Adblock engine launched with PID: " + std::to_string(g_adblock_server_pid));
 }
 
+// ============================================================================
+// Phase 8d `P8d-A8` — macOS backend supervisor
+// ============================================================================
+// Mirrors cef_browser_shell.cpp :: BackendSupervisorLoop (Windows, 2026-09-14). Same
+// period, same bound, same honest-flag shape, same HODOS_NO_SUPERVISE seam — the
+// differences below are all forced by the platform, and each is commented where it bites.
+//
+//   - one detached std::thread, period 2 s. ⛔ NOT a CefPostDelayedTask(TID_FILE_*) loop:
+//     all three file ids are ONE shared thread (8c O12), and a probe that blocks there
+//     stalls balance / cookie / adblock tasks behind it. This thread touches no CEF.
+//   - relaunch is BOUNDED: 3 attempts, 2 / 4 / 8 s backoff, then it stays down with the
+//     manual Restart still live. ⛔ Never a hot loop — the exe may be quarantined or the
+//     port taken, and a respawn loop there is worse than the outage.
+//   - on death the interceptor's WalletStatusCache is invalidated, or a cached "exists"
+//     outlives the wallet by 30 s and dApp calls fail as "HTTP 0" (contract D-8).
+//   - HODOS_NO_SUPERVISE=1 (rig only, read once in the browser process) disables the
+//     thread: the negative control for `P8d-A4`.
+//
+// 🍎 THREE macOS-specific hazards, all of which would produce a silently wrong supervisor:
+//
+//  1. ⛔ `kill(pid, 0)` IS NOT A LIVENESS TEST for our own child. An exited but unreaped
+//     child is a ZOMBIE, and `kill(pid, 0)` succeeds on a zombie — so a supervisor built
+//     on it never notices the wallet died. `waitpid(pid, &st, WNOHANG)` is the correct
+//     instrument: it answers the question AND reaps, so three relaunch attempts cannot
+//     leave three zombies behind.
+//  2. ⛔ `waitpid` is ONE-SHOT. Once it reaps, every later call for that pid returns -1
+//     (ECHILD). A naive `waitpid(...) != 0` therefore latches "dead" forever and would
+//     re-relaunch on every tick. We clear the pid to -1 the moment we observe the exit.
+//  3. ⛔ Windows' `IsPortListening` is winsock; macOS needs its own. Used only for the
+//     "we did not launch it" case (a dev rig `cargo run` wallet) — there is no child to
+//     waitpid for, so liveness has to come from the port.
+// ============================================================================
+
+static std::atomic<bool> g_supervisorStarted{false};
+static std::atomic<bool> g_supervisorStop{false};
+static std::atomic<bool> g_walletRestartRequested{false};
+static const int kSupervisorPeriodMs   = 2000;
+static const int kRelaunchMaxAttempts  = 3;
+static const int kRelaunchBackoffMs[kRelaunchMaxAttempts] = {2000, 4000, 8000};
+
+// macOS equivalent of Windows' IsPortListening: a non-blocking loopback connect with a
+// short select() window. Loopback either answers immediately or refuses, so 150 ms is
+// generous. ⛔ Deliberately NOT QuickHealthCheck() here — that is a 2000 ms libcurl GET,
+// and a 2 s probe inside a 2 s loop would leave no gap between ticks.
+static bool IsPortListeningMac(int port) {
+    int sock = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) return false;
+    int flags = ::fcntl(sock, F_GETFL, 0);
+    ::fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+
+    struct sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<uint16_t>(port));
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    bool listening = false;
+    int rc = ::connect(sock, (struct sockaddr*)&addr, sizeof(addr));
+    if (rc == 0) {
+        listening = true;                       // connected immediately
+    } else if (errno == EINPROGRESS) {
+        fd_set wset;
+        FD_ZERO(&wset);
+        FD_SET(sock, &wset);
+        struct timeval tv = {0, 150 * 1000};    // 150 ms
+        if (::select(sock + 1, nullptr, &wset, nullptr, &tv) > 0) {
+            int err = 0; socklen_t len = sizeof(err);
+            if (::getsockopt(sock, SOL_SOCKET, SO_ERROR, &err, &len) == 0 && err == 0) {
+                listening = true;
+            }
+        }
+    }
+    ::close(sock);
+    return listening;
+}
+
+// Interruptible sleep so shutdown never waits out a backoff.
+static void SupervisorSleep(int ms) {
+    for (int t = 0; t < ms && !g_supervisorStop; t += 100) usleep(100 * 1000);
+}
+
+// Hazards 1 and 2 above, in one place. Returns true when the child is gone, and clears
+// `pid` so the next tick does not re-observe the same death through an ECHILD.
+static bool ChildExited(pid_t& pid) {
+    if (pid <= 0) return true;                  // nothing of ours is running
+    int status = 0;
+    const pid_t r = ::waitpid(pid, &status, WNOHANG);
+    if (r == 0) return false;                   // still running
+    pid = -1;                                   // r > 0 reaped now; r < 0 == ECHILD, already gone
+    return true;
+}
+
+// One relaunch attempt. True when /health answers (or someone else already holds the port).
+static bool RelaunchWalletProcess() {
+    g_wallet_server_pid = -1;                   // forget the dead child before respawning
+    SpawnWalletServer();
+    if (g_walletServerRunning) return true;     // the port was already listening (dev rig)
+    if (g_wallet_server_pid <= 0) return false; // exe missing or posix_spawn failed
+    for (int i = 0; i < 12 && !g_supervisorStop; i++) {
+        usleep(500 * 1000);
+        if (QuickHealthCheck()) { g_walletServerRunning = true; return true; }
+    }
+    return false;
+}
+
+static bool RelaunchAdblockProcess() {
+    g_adblock_server_pid = -1;
+    SpawnAdblockServer();
+    if (g_adblockServerRunning) return true;
+    if (g_adblock_server_pid <= 0) return false;
+    for (int i = 0; i < 12 && !g_supervisorStop; i++) {
+        usleep(500 * 1000);
+        if (QuickAdblockHealthCheck()) { g_adblockServerRunning = true; return true; }
+    }
+    return false;
+}
+
+static void BackendSupervisorLoop() {
+    LOG_INFO("Backend supervisor started (period " + std::to_string(kSupervisorPeriodMs) +
+             " ms; relaunch bounded to " + std::to_string(kRelaunchMaxAttempts) +
+             " attempts, 2/4/8 s backoff)");
+    // "Owned" = we launched it at least once, so a relaunch is ours to attempt. A dev-rig
+    // wallet (`cargo run`) is not owned: report only — until the user presses Restart,
+    // which launches our own child exactly as startup would with the port free.
+    bool walletOwned  = (g_wallet_server_pid  > 0);
+    bool adblockOwned = (g_adblock_server_pid > 0);
+    int  walletAttempts = 0, adblockAttempts = 0;
+    bool walletGaveUp = false, adblockGaveUp = false;
+
+    while (!g_supervisorStop) {
+        SupervisorSleep(kSupervisorPeriodMs);
+        if (g_supervisorStop) break;
+
+        // ---------------- wallet ----------------
+        const bool manual = g_walletRestartRequested.exchange(false);
+        if (manual) { walletOwned = true; walletAttempts = 0; walletGaveUp = false; }
+
+        // ⛔ Order matters: ChildExited() REAPS, so it must be called on every tick where
+        // we have a child, not short-circuited behind `manual`.
+        const bool childGone = (g_wallet_server_pid > 0)
+            ? ChildExited(g_wallet_server_pid)
+            : !IsPortListeningMac(hodos::WalletPort());
+
+        // 🍎 Divergence from Windows, deliberate: a MANUAL restart with the child still
+        // alive must kill it first. SpawnWalletServer() early-returns "already running"
+        // when /health answers, so without this the Restart button would be a no-op
+        // against a wedged-but-listening wallet — the same dead-control shape this row
+        // exists to remove. Windows' LaunchWalletProcess has the same early return; worth
+        // mirroring there.
+        if (manual && g_wallet_server_pid > 0 && !childGone) {
+            LOG_INFO("Manual restart: terminating the running wallet child (pid " +
+                     std::to_string(g_wallet_server_pid) + ") before relaunching");
+            ::kill(g_wallet_server_pid, SIGTERM);
+            for (int i = 0; i < 40 && !ChildExited(g_wallet_server_pid); i++) usleep(50 * 1000);
+            if (g_wallet_server_pid > 0) {      // still not gone after ~2 s
+                ::kill(g_wallet_server_pid, SIGKILL);
+                ChildExited(g_wallet_server_pid);
+            }
+        }
+
+        const bool walletDead = childGone || manual;
+
+        if (walletDead) {
+            if (g_walletServerRunning) {
+                LOG_WARNING(std::string("Wallet server is DOWN (") +
+                            (walletOwned ? "child exited" : "port not listening") + ")");
+            }
+            g_walletServerRunning = false;
+            invalidateWalletStatusCache();
+
+            if (walletOwned && !walletGaveUp) {
+                if (walletAttempts < kRelaunchMaxAttempts) {
+                    const int delay = manual ? 0 : kRelaunchBackoffMs[walletAttempts];
+                    walletAttempts++;
+                    LOG_INFO("Relaunching wallet server, attempt " + std::to_string(walletAttempts) +
+                             "/" + std::to_string(kRelaunchMaxAttempts) + " after " +
+                             std::to_string(delay) + " ms");
+                    SupervisorSleep(delay);
+                    if (g_supervisorStop) break;
+                    if (RelaunchWalletProcess()) {
+                        LOG_INFO("Wallet server is back (pid " +
+                                 std::to_string(g_wallet_server_pid) + ")");
+                        walletAttempts = 0;
+                        invalidateWalletStatusCache();
+                    } else {
+                        LOG_WARNING("Wallet server relaunch attempt " +
+                                    std::to_string(walletAttempts) + " failed");
+                    }
+                } else {
+                    walletGaveUp = true;
+                    LOG_ERROR("Wallet server relaunch gave up after " +
+                              std::to_string(kRelaunchMaxAttempts) +
+                              " attempts — staying down until the user restarts it");
+                }
+            }
+        } else if (!g_walletServerRunning) {
+            // Alive (our child, or the port came back on its own — a dev-rig restart, or a
+            // slow startup the health wait gave up on). Flip the honest flag.
+            if (IsPortListeningMac(hodos::WalletPort())) {
+                g_walletServerRunning = true;
+                walletAttempts = 0; walletGaveUp = false;
+                invalidateWalletStatusCache();
+                LOG_INFO("Wallet server is reachable again");
+            }
+        }
+
+        // ---------------- adblock (restart-only, no UI) ----------------
+        const bool adblockDead = (g_adblock_server_pid > 0)
+            ? ChildExited(g_adblock_server_pid)
+            : !IsPortListeningMac(hodos::AdblockPort());
+        if (adblockDead) {
+            if (g_adblockServerRunning) {
+                LOG_WARNING(std::string("Adblock engine is DOWN (") +
+                            (adblockOwned ? "child exited" : "port not listening") + ")");
+            }
+            g_adblockServerRunning = false;
+            if (adblockOwned && !adblockGaveUp) {
+                if (adblockAttempts < kRelaunchMaxAttempts) {
+                    const int delay = kRelaunchBackoffMs[adblockAttempts];
+                    adblockAttempts++;
+                    LOG_INFO("Relaunching adblock engine, attempt " +
+                             std::to_string(adblockAttempts) + "/" +
+                             std::to_string(kRelaunchMaxAttempts) + " after " +
+                             std::to_string(delay) + " ms");
+                    SupervisorSleep(delay);
+                    if (g_supervisorStop) break;
+                    if (RelaunchAdblockProcess()) {
+                        LOG_INFO("Adblock engine is back (pid " +
+                                 std::to_string(g_adblock_server_pid) + ")");
+                        adblockAttempts = 0;
+                    } else {
+                        LOG_WARNING("Adblock engine relaunch attempt " +
+                                    std::to_string(adblockAttempts) + " failed");
+                    }
+                } else {
+                    adblockGaveUp = true;
+                    LOG_ERROR("Adblock engine relaunch gave up after " +
+                              std::to_string(kRelaunchMaxAttempts) + " attempts");
+                }
+            }
+        } else if (!g_adblockServerRunning && IsPortListeningMac(hodos::AdblockPort())) {
+            g_adblockServerRunning = true;
+            adblockAttempts = 0; adblockGaveUp = false;
+            LOG_INFO("Adblock engine is reachable again");
+        }
+    }
+    LOG_INFO("Backend supervisor stopped");
+}
+
+static void StartBackendSupervisor() {
+    // ⛔ Read ONCE, in the browser process (a sandboxed child does not inherit the environment).
+    static const bool kNoSupervise = [] {
+        const char* v = std::getenv("HODOS_NO_SUPERVISE");
+        return v && std::string(v) == "1";
+    }();
+    if (kNoSupervise) {
+        LOG_WARNING("⚠️ HODOS_NO_SUPERVISE=1 — backend supervisor NOT started (P8d-A4 negative control)");
+        return;
+    }
+    if (g_supervisorStarted.exchange(true)) return;
+    std::thread(BackendSupervisorLoop).detach();
+}
+
+static void StopBackendSupervisor() {
+    g_supervisorStop = true;
+}
+
+// The wallet panel's "Restart wallet service" button, via the shared `wallet_restart` IPC
+// arm in simple_handler.cpp. 📏 Until 2026-09-19 this was a logging stub and the button was
+// a measured dead control on macOS.
+void RequestWalletRestart() {
+    if (!g_supervisorStarted) {
+        LOG_WARNING("wallet_restart requested but the supervisor is not running "
+                    "(HODOS_NO_SUPERVISE, or before startup finished)");
+        return;
+    }
+    LOG_INFO("wallet_restart requested — handing it to the supervisor");
+    g_walletRestartRequested = true;
+}
+
 static void StartBackendServices() {
     SpawnWalletServer();
     SpawnAdblockServer();
@@ -5505,10 +5807,25 @@ static void StartBackendServices() {
         if (!g_adblockServerRunning) {
             LOG_WARNING("Adblock engine launched but health check timed out");
         }
+
+        // Phase 8d `P8d-A8`: supervision begins only AFTER the startup health wait, on this
+        // already-dispatched block — nothing is added to the critical path (`P8d-A7`).
+        // ⛔ Starting it earlier would have the supervisor racing startup: during the health
+        // wait the wallet is legitimately not yet listening, and a supervisor running then
+        // reads that as death and burns its three relaunch attempts before the first
+        // wallet has finished booting. ⚠️ On this machine that window is not hypothetical —
+        // the wallet Keychain dialog can hold the wallet at main.rs:568, alive but not
+        // listening, for minutes. That case correctly relaunches NOTHING: the child is
+        // alive, so waitpid says "running" and only the honest flag stays false.
+        StartBackendSupervisor();
     });
 }
 
 static void StopServers() {
+    // ⛔ Phase 8d: tell the supervisor FIRST, or it relaunches exactly what we are about to
+    // stop — and on the way out, where the relaunched wallet would outlive the browser.
+    StopBackendSupervisor();
+
     // Graceful shutdown via HTTP
     if (g_walletServerRunning) {
         SendShutdownRequest(hodos::WalletPort());
