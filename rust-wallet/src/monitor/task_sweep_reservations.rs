@@ -110,19 +110,72 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
     let mut released = 0usize;
     let mut released_sats = 0i64;
     let mut withheld = 0usize;
+    let mut resolved = 0usize;
+
+    // Built once, and only reached by the withhold branch below.
+    let client = reqwest::Client::builder()
+        .timeout(crate::services::CallClass::IndexerAsync.timeout())
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
 
     for c in &candidates {
         if !unspent.contains(&(c.txid.clone(), c.vout)) {
-            // Not provably unspent: either the transaction really did broadcast, or the
-            // outpoint belongs to an address outside this wallet (a user-supplied basket
-            // input). Either way there is no evidence, so the reservation stands.
-            warn!(
-                "   ⚠️  {}:{} ({} sats) is not in the on-chain unspent set — leaving reserved",
-                &c.txid[..std::cmp::min(16, c.txid.len())],
-                c.vout,
-                c.satoshis
-            );
-            withheld += 1;
+            // Absence from the unspent set is NOT evidence of a spend. It covers three
+            // different causes -- the transaction really did broadcast, the outpoint belongs
+            // to an address outside this wallet (a user-supplied basket input), or the
+            // address simply could not be read. Releasing on absence is the P0.7
+            // double-spend path; that is why this branch never releases.
+            //
+            // But it also must not go round forever. Ask for POSITIVE spent evidence, and if
+            // we get it, resolve the row instead of declining it again on every future sweep.
+            // `check_outpoint_spent` is two-provider and fails closed to `Unknown` on a flat
+            // contradiction or on providers naming different successors, so only an agreed,
+            // validated successor txid can reach the resolve arm.
+            match crate::reconcile::check_outpoint_spent(&client, &c.txid, c.vout).await {
+                crate::reconcile::SpentStatus::Spent { spending_txid } => {
+                    let db = match state.database.lock() {
+                        Ok(db) => db,
+                        Err(e) => return Err(format!("DB mutex poisoned mid-sweep: {}", e)),
+                    };
+                    let output_repo = crate::database::OutputRepository::new(db.connection());
+                    match output_repo.resolve_reserved_outpoint_as_spent(
+                        &c.txid,
+                        c.vout,
+                        &c.placeholder,
+                        &spending_txid,
+                    ) {
+                        // The row KEEPS `spendable = 0` -- it is spent, and staying spent is
+                        // the correct outcome. What changes is that it is no longer a
+                        // `pending-` placeholder with a NULL spender, so nothing re-examines
+                        // it every sweep and no one mistakes it for a leak.
+                        Ok(1) => resolved += 1,
+                        // 0 rows: re-reserved under a new placeholder, or already resolved.
+                        Ok(_) => {}
+                        Err(e) => warn!("   Failed to resolve {}:{}: {}", c.txid, c.vout, e),
+                    }
+                    drop(db);
+                }
+                // Positively unspent, yet absent from the wallet-wide unspent set: the
+                // outpoint is real but sits on an address outside this wallet. Nothing to do.
+                crate::reconcile::SpentStatus::Unspent => {
+                    warn!(
+                        "   {}:{} ({} sats) reads UNSPENT but is on no address of ours — leaving reserved (verdict: not-ours)",
+                        &c.txid[..std::cmp::min(16, c.txid.len())],
+                        c.vout,
+                        c.satoshis
+                    );
+                    withheld += 1;
+                }
+                crate::reconcile::SpentStatus::Unknown => {
+                    warn!(
+                        "   {}:{} ({} sats) has no conclusive on-chain answer — leaving reserved (verdict: unobservable)",
+                        &c.txid[..std::cmp::min(16, c.txid.len())],
+                        c.vout,
+                        c.satoshis
+                    );
+                    withheld += 1;
+                }
+            }
             continue;
         }
 
@@ -149,6 +202,12 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
         info!(
             "   ♻️  TaskSweepReservations: released {} stale reservation(s), {} sats returned to spendable",
             released, released_sats
+        );
+    }
+    if resolved > 0 {
+        info!(
+            "   🔗 TaskSweepReservations: resolved {} reservation(s) whose outpoint is provably spent — spender recorded, still NOT spendable",
+            resolved
         );
     }
     if withheld > 0 {

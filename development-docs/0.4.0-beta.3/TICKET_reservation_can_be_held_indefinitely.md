@@ -1,6 +1,6 @@
 # A reservation whose outpoint is SPENT is never reconciled — it sits in `pending-` limbo forever
 
-**Found:** 2026-09-17 while measuring `P11-11-A4`. **Status:** 🔴 OPEN — measured, not fixed.
+**Found:** 2026-09-17 while measuring `P11-11-A4`. **Status:** ✅ **FIXED 2026-09-19** — see § *The fix, as built* at the end.
 **Severity:** 🟢 **LOW.** No money is lost, no money is missing from the balance, and the
 sweeper is behaving correctly. It is a data-integrity wart with no live path to it in production.
 
@@ -90,3 +90,72 @@ control that deliberately breaks bookkeeping should say what it left behind.
   different causes; corrected there.
 - `phase-0.7-utxo-reservation-leak/` — why the sweeper is conservative. ⛔ Read before touching it.
 - `rust-wallet/src/monitor/task_sweep_reservations.rs`, `rust-wallet/src/reconcile.rs`.
+
+---
+
+## The fix, as built (2026-09-19)
+
+👤 Owner's call on the ticket's item 2: **log-only, no schema change.** The *resolution* is a
+durable DB write; only the diagnostics live in the log.
+
+### What the sweeper can now say
+
+`TaskSweepReservations` had one verdict -- *observed unspent => release*. It now has two. The
+withhold branch no longer just declines: it asks `reconcile::check_outpoint_spent` for
+**positive** spent evidence, and on `Spent { spending_txid }` resolves the row through the new
+`OutputRepository::resolve_reserved_outpoint_as_spent`.
+
+⛔ **Absence from the unspent set is still never treated as a spend.** That was the whole point of
+the conservative design and it is unchanged -- absence covers three different causes (really
+broadcast / address not ours / could not read). Only a two-provider agreed, validated successor
+txid reaches the resolve arm; `decide_spent` already fails closed to `Unknown` on a flat
+contradiction or on providers naming different successors.
+
+### The three things the ticket's suggested shape did not survive
+
+1. ⛔ **`mark_spent` could not be reused.** Its predicate ends `AND spendable = 1`. Every row we are
+   fixing is `spendable = 0`, so it matches nothing and returns **`Ok(0)` -- a success value for
+   work it did not do**. Pinned by `mark_spent_is_a_silent_noop_on_a_reserved_row`.
+2. ⚠️ **`spent_by` is an FK to `transactions.id`, not a txid.** The ticket says "set `spent_by` to
+   the spending transaction"; that is only possible when the spender is already a row in our own
+   `transactions` table (it is, for M4's coin). When it is not, `spent_by` stays `NULL` and the
+   real txid lands in `spending_description`. That is still a **resolved** row -- placeholder gone,
+   real txid present -- not an unreconciled one, and the docstring says so, because the next
+   reader would otherwise call a `NULL` `spent_by` a bug.
+3. ⭐ **The resolve statement never writes `spendable` at all.** Not "writes 0" -- omits the column.
+   That absence is the load-bearing line of the change.
+
+### Item 2, honestly: partly done
+
+- ✅ **Verdicts are logged** -- each withheld row now says `verdict: not-ours` or
+  `verdict: unobservable` instead of one undifferentiated warning, and the run reports
+  released / resolved / withheld separately.
+- ⬜ **Cross-run decline counts are NOT recorded.** "Declined 320 times" would have needed the
+  column the owner declined. A row that is genuinely spent is now resolved on its first
+  conclusive sweep, so the 320-declines case is the one this fix removes rather than counts.
+
+### Negative control -- observed RED, for the right reason
+
+⛔ The rule is that a green nobody has seen fail proves nothing, so `spendable = 1` was injected
+into the resolve statement and the suite re-run:
+
+```
+assertion `left == right` failed: a SPENT outpoint must never be handed back to the selector (P0.7)
+  left: 1
+ right: 0
+```
+
+Two of the five tests caught it; reverted, all five green again. Full suite: **479 passed, 0
+failed, 0 filtered out** (the filter count was checked -- a filtered run that matches nothing also
+prints `ok`).
+
+⭐ The other half of the control -- *"distinguishes spent from unobservable"* -- was **already
+covered** and is cited rather than duplicated: `reconcile::tests::flat_contradiction_is_unknown`,
+`both_spent_disagreeing_is_unknown`, `no_signal_at_all_is_unknown`, against
+`one_explicit_spent_other_silent_is_spent` and `both_spent_agreeing_is_spent`.
+
+### Not done
+
+⬜ The ticket's **process finding** -- that `PAYMENT_TEST_BATCH.md` M4 should declare the residue it
+leaves -- is untouched. It is a doc change in a file this change does not own, and it is arguably
+the more useful half. Still open.

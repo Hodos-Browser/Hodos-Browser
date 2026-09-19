@@ -1112,6 +1112,80 @@ impl<'a> OutputRepository<'a> {
         Ok(rows_affected)
     }
 
+    /// Resolve a reservation whose outpoint has been positively observed **SPENT** on-chain.
+    ///
+    /// The sweeper's other verdict, and the counterpart to [`Self::restore_outpoint_if_reserved`].
+    /// That one answers *"observed unspent => release"*; this one answers *"observed **spent** =>
+    /// stop asking, record the spender and close the row out"*. Before this existed the second
+    /// case had no owner, so a reservation whose coin was genuinely spent sat in `spendable = 0`
+    /// with `spent_by = NULL` and a `pending-` placeholder **forever**, declining every sweep --
+    /// correctly, but with nothing ever reconciling it
+    /// (`TICKET_reservation_can_be_held_indefinitely.md`).
+    ///
+    /// # This statement CANNOT set `spendable = 1`, by design
+    ///
+    /// It never writes the `spendable` column at all. The row is already `0` and must stay `0`:
+    /// handing a spent output back to the selector is exactly the `P0.7` double-spend path the
+    /// conservative sweeper was written to close. The absence of `spendable` from the SET clause
+    /// is the load-bearing part of this method, and is what the negative control asserts.
+    ///
+    /// # `spent_by` is an FK to `transactions.id`, not a txid
+    ///
+    /// So it can only be filled when the spending transaction is already a row in our own
+    /// `transactions` table. When it is not, `spent_by` stays `NULL` and the real txid is
+    /// recorded in `spending_description` instead -- which is still a resolved row (the
+    /// `pending-` placeholder is gone and a real txid is present), **not** an unreconciled one.
+    /// Do not read a `NULL` `spent_by` here as "never resolved". Same convention as
+    /// [`Self::mark_spent`].
+    ///
+    /// [`Self::mark_spent`] cannot be used for this: its predicate ends `AND spendable = 1`,
+    /// so on a reserved row it matches nothing and returns `Ok(0)` -- a success value for work it
+    /// did not do.
+    ///
+    /// Scoped to `placeholder` for the same `R-NORACE` reason as the release path: between
+    /// listing a stale reservation and resolving it, a concurrent `createAction` may have
+    /// re-reserved the row under a new placeholder. Returns rows affected (0 or 1).
+    pub fn resolve_reserved_outpoint_as_spent(
+        &self,
+        txid: &str,
+        vout: u32,
+        placeholder: &str,
+        spending_txid: &str,
+    ) -> Result<usize> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // Best-effort: absent from `transactions` simply leaves the FK NULL (see docstring).
+        let spent_by: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM transactions WHERE txid = ?1",
+                rusqlite::params![spending_txid],
+                |row| row.get(0),
+            )
+            .ok();
+
+        let rows_affected = self.conn.execute(
+            "UPDATE outputs SET spent_by = ?1, spending_description = ?2, updated_at = ?3
+             WHERE txid = ?4 AND vout = ?5 AND spending_description = ?6 AND spendable = 0",
+            rusqlite::params![spent_by, spending_txid, now, txid, vout, placeholder],
+        )?;
+
+        if rows_affected > 0 {
+            info!(
+                "   🔗 Resolved spent reservation {}:{} → spent by {} (spent_by={:?})",
+                &txid[..std::cmp::min(16, txid.len())],
+                vout,
+                &spending_txid[..std::cmp::min(16, spending_txid.len())],
+                spent_by
+            );
+        }
+
+        Ok(rows_affected)
+    }
+
     /// Remove output from basket (set basket_id to NULL)
     pub fn remove_from_basket(&self, output_id: i64) -> Result<()> {
         let now = SystemTime::now()
@@ -1808,5 +1882,169 @@ mod resolution_failure_tests {
             .query_row("SELECT spending_description FROM outputs WHERE txid='theirs'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(other, "pending-2-0", "the other transaction's reservation is untouched");
+    }
+}
+
+/// `TICKET_reservation_can_be_held_indefinitely.md` -- the sweeper's SECOND verdict.
+///
+/// The load-bearing property is a NEGATIVE one: resolving a reservation whose outpoint is
+/// spent must never hand that outpoint back to the selector. `P0.7` is the double-spend that
+/// caused, so the first test below is written to go RED the moment `spendable = 1` appears in
+/// the statement, and has been observed doing exactly that.
+#[cfg(test)]
+mod spent_reservation_resolution_tests {
+    use super::*;
+    use crate::database::migrations;
+
+    fn seed_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
+        migrations::create_schema_v1(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO users (userId, identity_key, active_storage, created_at, updated_at)
+             VALUES (1, 'k', 'local', 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    /// A reserved row: `spendable = 0`, holding a `pending-` placeholder, spender unknown.
+    fn reserve(conn: &Connection, txid: &str, placeholder: &str) {
+        conn.execute(
+            "INSERT INTO outputs (user_id, spendable, change, vout, satoshis, provided_by,
+                                  purpose, type, txid, spending_description, confirmed,
+                                  created_at, updated_at)
+             VALUES (1, 0, 0, 0, 1419268, 'you', '', 'P2PKH', ?1, ?2, 1, 0, 0)",
+            rusqlite::params![txid, placeholder],
+        )
+        .unwrap();
+    }
+
+    fn insert_tx(conn: &Connection, txid: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO transactions (user_id, txid, reference_number, status, is_outgoing,
+                                       satoshis, created_at, updated_at)
+             VALUES (1, ?1, ?1, 'completed', 1, 5000, 0, 0)",
+            rusqlite::params![txid],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn spendable_of(conn: &Connection, txid: &str) -> i64 {
+        conn.query_row(
+            "SELECT spendable FROM outputs WHERE txid = ?1",
+            rusqlite::params![txid],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// NEGATIVE CONTROL. Resolving a spent reservation records the spender and closes the row
+    /// out -- but the coin is SPENT, so it must stay unspendable. This assertion is the whole
+    /// reason the method omits `spendable` from its SET clause.
+    #[test]
+    fn resolving_a_spent_reservation_never_makes_it_spendable() {
+        let conn = seed_db();
+        let repo = OutputRepository::new(&conn);
+        reserve(&conn, "aa", "pending-1789591461036-0");
+
+        let n = repo
+            .resolve_reserved_outpoint_as_spent("aa", 0, "pending-1789591461036-0", "spender")
+            .unwrap();
+        assert_eq!(n, 1, "the reservation is resolved");
+
+        assert_eq!(
+            spendable_of(&conn, "aa"),
+            0,
+            "a SPENT outpoint must never be handed back to the selector (P0.7)"
+        );
+
+        let desc: String = conn
+            .query_row("SELECT spending_description FROM outputs WHERE txid='aa'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(desc, "spender", "the pending- placeholder is replaced by the real txid");
+    }
+
+    /// The row is only reachable while it still holds the placeholder we listed it under.
+    /// A concurrent `createAction` that re-reserved it under a new one must be left alone
+    /// (`R-NORACE`), exactly as on the release path.
+    #[test]
+    fn resolution_is_scoped_to_the_placeholder_it_was_listed_under() {
+        let conn = seed_db();
+        let repo = OutputRepository::new(&conn);
+        reserve(&conn, "aa", "pending-NEW-0");
+
+        let n = repo
+            .resolve_reserved_outpoint_as_spent("aa", 0, "pending-OLD-0", "spender")
+            .unwrap();
+        assert_eq!(n, 0, "a row re-reserved under a new placeholder is not touched");
+
+        let desc: String = conn
+            .query_row("SELECT spending_description FROM outputs WHERE txid='aa'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(desc, "pending-NEW-0", "the live reservation survives intact");
+    }
+
+    /// `spent_by` is an FK to `transactions.id`. When the spender is a transaction we already
+    /// know about -- the M4 case in the ticket -- the row is linked to it.
+    #[test]
+    fn resolution_links_the_spender_when_the_transaction_is_ours() {
+        let conn = seed_db();
+        let repo = OutputRepository::new(&conn);
+        reserve(&conn, "aa", "pending-1-0");
+        let tx_id = insert_tx(&conn, "spender");
+
+        repo.resolve_reserved_outpoint_as_spent("aa", 0, "pending-1-0", "spender")
+            .unwrap();
+
+        let spent_by: Option<i64> = conn
+            .query_row("SELECT spent_by FROM outputs WHERE txid='aa'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(spent_by, Some(tx_id), "the row is linked to the spending transaction");
+    }
+
+    /// And when the spender is NOT ours, `spent_by` stays NULL while the real txid still lands
+    /// in `spending_description`. That is a RESOLVED row, not an unreconciled one -- the
+    /// distinction the docstring warns about, pinned here so nobody "fixes" it later.
+    #[test]
+    fn resolution_leaves_spent_by_null_when_the_spender_is_unknown_to_us() {
+        let conn = seed_db();
+        let repo = OutputRepository::new(&conn);
+        reserve(&conn, "aa", "pending-1-0");
+
+        repo.resolve_reserved_outpoint_as_spent("aa", 0, "pending-1-0", "a_stranger_tx")
+            .unwrap();
+
+        let spent_by: Option<i64> = conn
+            .query_row("SELECT spent_by FROM outputs WHERE txid='aa'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(spent_by, None, "no FK to point at -- left NULL, by design");
+
+        let desc: String = conn
+            .query_row("SELECT spending_description FROM outputs WHERE txid='aa'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(desc, "a_stranger_tx", "but the row is still resolved: real txid, no placeholder");
+        assert_eq!(spendable_of(&conn, "aa"), 0, "and still not spendable");
+    }
+
+    /// Why `mark_spent` could NOT be reused: its predicate ends `AND spendable = 1`, so on a
+    /// reserved row it matches nothing and returns `Ok(0)` -- a SUCCESS value for work it did
+    /// not do. Pinned so that a future change to either method surfaces here rather than
+    /// silently doing nothing on the money path.
+    #[test]
+    fn mark_spent_is_a_silent_noop_on_a_reserved_row() {
+        let conn = seed_db();
+        let repo = OutputRepository::new(&conn);
+        reserve(&conn, "aa", "pending-1-0");
+
+        let n = repo.mark_spent("aa", 0, "spender").unwrap();
+        assert_eq!(n, 0, "mark_spent cannot see a reserved row -- this is why the sibling exists");
+
+        let desc: String = conn
+            .query_row("SELECT spending_description FROM outputs WHERE txid='aa'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(desc, "pending-1-0", "and it changed nothing while reporting Ok");
     }
 }
