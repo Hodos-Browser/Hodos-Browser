@@ -11,6 +11,139 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-19k (**Mac**) — ✅ **`D-h2` done: the Phase 3.5 overlay-follows-window port is on macOS.** 8/8 measured, negative control run. 🚨 **Shared C++ — rebuild after your next rebase.**
+
+## ⚠️ C++ this round — rebuild after your next rebase
+
+| File | Platform split? | What changed |
+|---|---|---|
+| `cef-native/cef_browser_shell_mac.mm` | 🍎 macOS-only TU | The four new helpers + `BrowserWindow* targetWin` on 10 `Create…`/`Show…` pairs |
+| `cef-native/src/core/WindowManager_mac.mm` | 🍎 macOS-only TU | `windowShouldClose:` calls `ReleaseOverlaysOwnedByMac(sender)` before `RemoveWindow` |
+| `cef-native/src/handlers/simple_handler.cpp` | ✅ **SHARED** | **Only inside `#elif defined(__APPLE__)` arms** — 21 call sites now pass `GetOwnerWindow()`, and their 21 local `extern` declarations gained the parameter. **No Windows arm touched.** |
+| `cef-native/include/handlers/simple_app.h` | ✅ **SHARED header** | `CreateWalletOverlayWithSeparateProcess` (inside the `#elif defined(__APPLE__)` block) gained `BrowserWindow* targetWin = nullptr` |
+
+⇒ Windows compiles `simple_handler.cpp` and includes `simple_app.h`, so **rebuild** — but every edit
+is inside a macOS arm, so I do not expect any behaviour change on your side.
+
+## 1. What was wrong, and what the fix is
+
+Round f §3 measured it: all **23** anchor/attach sites in `cef_browser_shell_mac.mm` named the
+process-global `g_main_window`, so a dropdown opened from a torn-off window B opened **over the
+primary window A**. Your `OwnOverlayToRequestingWindow` (`GWLP_HWNDPARENT`) had no macOS counterpart.
+
+⭐ **The macOS shape is NOT the Windows shape, and that is what kept this small.** You had to engineer
+the z-order fix because *every* overlay was owned by the primary and `SetWindowPos` raises the owner's
+group. On macOS only **four** of these are `addChildWindow:` children (cookie, wallet, omnibox, menu);
+the other six dropdowns attach to **nothing** and therefore already had the property you had to build.
+So:
+
+* **ten** overlays take their **geometry** from the requesting window;
+* only the **four** real child windows also move their **parent**.
+
+Converting the other six into child windows would have been unrequested scope *and* a behaviour change
+— it would introduce exactly the coupling `CreateTabContextMenuOverlayMacOS` deliberately avoids.
+
+⚠️ **There is no `ScalePx` half.** Your `P3.5-A3` converted 12 `ScalePx(x, g_hwnd)` sites because your
+overlays are sized in **physical px** and took DPI from the primary. A macOS OSR overlay is sized in
+**points** and React CSS px *are* points — there is no scale step here to get wrong, and adding one
+would double every offset on a Retina display. `P3.5-A3` has no macOS counterpart; that is not a gap.
+
+New helpers, mirroring yours: `OverlayHostWindow` (resolve, falling back to the primary —
+so a null `targetWin` reproduces exactly the old behaviour), `OwnOverlayToRequestingWindowMac`,
+`DetachOverlayFromParentMac`, `ReleaseOverlaysOwnedByMac`.
+
+⭐ **`GetOwnerWindow()` was already cross-platform**, so the macOS half needed no new plumbing to know
+who asked — the `#elif defined(__APPLE__)` arms simply pass what your `#ifdef _WIN32` arm beside them
+was already passing. That is most of why this was a one-round job.
+
+## 2. 📖 Four AppKit facts, read out of Chromium before writing the diff (root rule 4/5)
+
+`components/remote_cocoa/app_shim/`, read locally. **Three of the four are defects we would otherwise
+have shipped**, and they are worth your knowing because two are invisible failures:
+
+1. 🚨 **`-addChildWindow:` RESETS the child's window level.** `native_widget_mac_nswindow.mm` saves and
+   restores `childWin.level` around the `super` call, commenting exactly that. Without it every one of
+   our `NSPopUpMenuWindowLevel` dropdowns would silently drop to normal level and be coverable.
+2. Re-parenting **removes from the old parent first** (`SetParent`); a window has exactly one parent.
+3. *"Cocoa's childWindow management breaks down when child windows are hidden"* — Chromium removes the
+   child when it becomes invisible. ⇒ **our hide path DETACHES rather than handing ownership back to
+   the primary the way yours does.** That is a deliberate divergence from your shape, not an omission.
+4. Adding a child to a parent not visible on the active space **switches Spaces** (crbug 783521 /
+   798792), so the attach is guarded on `isVisible` + `isOnActiveSpace`.
+
+Logged in `PRIOR_ART.md` as 🟢 paid off.
+
+## 3. 📏 Measured — 8/8, with the negative control
+
+Subject: ONE dev process, A primary (x=0, 1440×795), B torn off by the `tab_tearoff` IPC. Every
+dropdown driven over CDP **from each window's own header**; frames read with
+`CGWindowListCopyWindowInfo` (no Accessibility grant needed); attribution **by frame**, never by the
+keep-alive target URL.
+
+| overlay | from A | from B, pre-fix | from B, post-fix | B-anchored prediction |
+|---|---|---|---|---|
+| menu | 1160 | 1160 | **1110** | B.right 1390 − 280 ✓ |
+| profile | 1060 | 1060 | **1010** | 1390 − 380 ✓ |
+| download | 1040 | 1040 | **990** | 1390 − 400 ✓ |
+| cookie | 1040 | 1040 | **990** | 1390 − 400 ✓ |
+| bookmarks | 0 | 0 | **50** | B.left ✓ |
+| siteinfo | 0 | 0 | **50** | B.left ✓ |
+| tablist | 1100 | 1100 | **1050** | 1390 − 340 ✓ |
+| omnibox | 223 | 223 | **258** | 50 + (1340−924)/2 ✓ |
+
+- 🔴 **Negative control run properly**: `git stash` + rebuild + re-sign, *same* subject, same rig ⇒
+  **8/8 back to A-anchored**. The green is attributable to the change and to nothing else.
+- ✅ **Single-window regression, free**: every `from A` value is **byte-identical** pre- and post-fix.
+- ✅ **Z-order, 3/3 on FIRST creation** (menu, cookie, omnibox driven from B): **B stays in front of A**.
+  ⚠️ One-sided this round — the RED half is round f's pre-fix measurement, not re-run here. Round f
+  also found 24 re-opens afterwards moved nothing, so the row only means anything on a fresh process.
+
+## 4. ⛔ An instrument trap that produced a GREEN-looking result on a build where the fix WORKED
+
+Worth your time — it is the `ClampOverlayToScreen` family and you have the same helper.
+
+My first post-fix run tore B off at x=600. B is 1340 wide on a **1440**-wide screen, so B's right edge
+was **1940**, and `ClampOverlayToScreen` rewrites an overflowing overlay to `maxX - w` = **1440 − w**.
+Window A spans the whole screen (x=0, w=1440), so an **A-anchored** overlay computes **1440 − w too**.
+⇒ **the clamp and the defect produce the same number**, and all five right-anchored overlays read
+"SAME" on a build whose fix was working correctly.
+
+⭐ **What exposed it:** the two *left*-anchored overlays moved while the five right-anchored ones did
+not. No single explanation covers that split — a fix that worked would move all of them, a fix that
+failed would move none. I then checked the arithmetic against `ClampOverlayToScreen` directly rather
+than re-running, and re-placed B at **x=50** so both its edges sit 50 pt inside A's and nothing clamps.
+
+⇒ **The rule: a subject in which the correct answer and the defective answer coincide is not a
+subject.** On a maximised primary that is the *default* state for every right-anchored overlay.
+
+## 5. ⬜ Owed, and NOT claimed — the close safety net
+
+`ReleaseOverlaysOwnedByMac` (window closes while one of its overlays is attached) is **CODE_READING
+only**. I could not drive it, and the first attempt **produced a false GREEN I had to throw away**:
+the script opened the cookie panel from B, "clicked" B's close button, re-opened from A and printed
+"overlay survived B's close" — while the same sample showed `shell windows remaining: 2`. B never
+closed, so the assertion could not fail.
+
+📏 Cause, verified not guessed: **`AXIsProcessTrusted()` is `False`** for this process, so synthetic
+`CGEventPost` events aimed at another app are dropped. A sweep of 8 candidate traffic-light points
+closed nothing.
+
+🐞 **And a finding for you while I was there: `window_close` / `window_minimize` / `window_maximize` /
+`window_start_drag` have NO macOS arm** — that IPC block is `HWND` + `PostMessage` with no
+`#elif defined(__APPLE__)`. On macOS the native title bar covers it, so nothing is visibly broken, but
+the IPC is a silent no-op there. Reporting, not fixing (not in this round's scope).
+
+⇒ Queued as a human row: open a dropdown in a torn-off window, close **that** window, confirm the
+dropdown still opens in the remaining one.
+
+## 6. Rig, committed so nobody rebuilds it
+
+`phase-3.5-layout-window-scoping/`: `p35macprobe.py` (window layer + CDP + the dev/prod guard),
+`setup2win.py`, `p35red.py` (the 8-overlay matrix), `p35zorder.py`, and
+`MEASUREMENTS_MAC_PORT.md` with every number above.
+
+---
+
 # 📋 ROUND 2026-09-19j (**Mac**) — ✅ **`D-h3` done: a queued prompt is never posted with seconds to live, and an expired modal closes itself.** 🚨 Shared C++ + React — rebuild after rebase.
 
 > 🪟 **If you are looking into the connect EMPTY BODY right now: it is already fixed — `8f857d5`, round i below.**

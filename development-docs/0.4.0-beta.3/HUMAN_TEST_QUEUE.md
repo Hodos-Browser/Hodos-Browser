@@ -141,6 +141,12 @@ not an agent's claim (L4).
 |---|---|---|
 | F1 | ⚠️ **Does *Always Allow* on the wallet Keychain dialog actually stop it recurring?** Next dev start after clicking **Always Allow** (not *Allow*) | 📏 2026-09-09 the dialog fired again **with no wallet rebuild** (`SecurityAgent` at 10:36:39 = the wallet spawn second; wallet alive-but-not-listening at `main.rs:568`; binary mtime still Sep 8 16:11). ⇒ "after a rebuild" is not the whole trigger. ⛔ Never diagnose with `security find-generic-password -w` — it hangs on its own prompt. ⛔ The dev stack **cannot come up unattended** while this is unresolved |
 
+## G. Multi-window overlay lifetime — needs a human at the keyboard
+
+| # | Check | Note |
+|---|---|---|
+| G1 | 🪟 **An overlay whose owner window closes.** Tear a tab off into window B, open a dropdown **in B** (cookie/privacy-shield is easiest), then **close B with its close button while the dropdown is still on screen.** Then open that same dropdown in window A. ⇒ it must still open and render | The `D-h2` safety net `ReleaseOverlaysOwnedByMac` — the macOS analogue of Windows' `P3.5-Z3`. ⬜ **CODE_READING only; never measured.** 📏 Cause it is human-bound: **`AXIsProcessTrusted()` is `False`** for the agent's process, so synthetic `CGEventPost` clicks aimed at the browser are dropped — a sweep of 8 traffic-light points closed nothing. ⛔ `window_close` IPC is **no help: it has no macOS arm at all** (`simple_handler.cpp` — `HWND` + `PostMessage`). ⛔ **The first attempt at this row produced a FALSE GREEN** — it asserted "the overlay survived" against a window that had never closed. Read `shell windows remaining` before believing any result here. ⚠️ Alternatively, granting Terminal **Accessibility** would make it agent-runnable |
+
 ---
 
 ## Not human-bound — try these with a harness first

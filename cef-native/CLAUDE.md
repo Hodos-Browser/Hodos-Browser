@@ -359,6 +359,19 @@ on hide (`OwnOverlayToRequestingWindow` / `ReturnOverlayOwnershipToPrimary` / `R
 in `simple_app.cpp`). ⛔ A new overlay must be added to `ReleaseOverlaysOwnedBy`'s list or it is
 destroyed with its owner window:
 
+> 🍎 **macOS has the same guarantee since `D-h2` (2026-09-19), by a different mechanism and over a
+> smaller set.** `cef_browser_shell_mac.mm` gained `OverlayHostWindow` / `OwnOverlayToRequestingWindowMac`
+> / `DetachOverlayFromParentMac` / `ReleaseOverlaysOwnedByMac`. **Ten** overlays take their *geometry*
+> from the requesting window; only the **four** that are genuinely `addChildWindow:` children (cookie,
+> wallet, omnibox, menu) also move their parent — the other six attach to nothing and therefore never
+> had the coupling Windows had to engineer away. ⛔ Two AppKit traps, both read out of Chromium's
+> `remote_cocoa` before writing the diff: `-addChildWindow:` **resets the child's window level** (save
+> and restore it, or every `NSPopUpMenuWindowLevel` dropdown silently drops), and Cocoa's child
+> bookkeeping misbehaves for hidden children — so the macOS hide path **detaches** rather than handing
+> ownership back to the primary the way Windows does. ⚠️ There is **no** `ScalePx` counterpart: macOS
+> OSR overlays are sized in points, so `P3.5-A3` has no macOS half.
+
+
 | HWND global | Handler role | WndProc | Click-outside mouse hook |
 |-------------|--------------|---------|--------------------------|
 | `g_settings_overlay_hwnd` | `settings` | `SettingsOverlayWndProc` | `SettingsPanelMouseHookProc` |
@@ -398,10 +411,13 @@ icon, so its create/show take an `(anchorX, anchorY)` pair rather than an icon o
 `CalculateToolbarOverlayFrame` nor `CalculateRightAnchoredOverlayFrame` applies to it.
 
 ⛔ **Two macOS-specific things about it that are deliberate, not oversights.** (1) It calls **no**
-`addChildWindow:` — the menu/settings overlays attach to the process-global `g_main_window`, which
-`MAC_RELAY_P35_P4_ROUND.md` M2 identifies as the macOS shape of the Phase 3.5 z-order defect; this
-one attaches to nothing, so it cannot reintroduce that coupling. The cost is that it does **not**
-inherit parent hide/minimise, which is why it is registered in **both** `ShutdownApplication()` and
+`addChildWindow:`, and that is **still correct after the Phase 3.5 macOS port** (`D-h2`, 2026-09-19).
+AppKit child windows order *with* their parent, so attaching to the process-global `g_main_window` is
+what dragged the primary forward — `MAC_RELAY_P35_P4_ROUND.md` M2 predicted it and relay round f
+measured it. `D-h2` made the parent **follow the requesting window** for the four overlays that really
+are children (cookie, wallet, omnibox, menu); this one attaches to nothing, so it never had the
+coupling. It takes only the **geometry** half of the port. The cost is that it does **not** inherit
+parent hide/minimise, which is why it is registered in **both** `ShutdownApplication()` and
 `InstallAppFocusLossHandler()` (Phase 3.5's K12 hazard in its macOS form). (2) It applies **no DPI
 scaling** to the anchor, unlike the Windows arm's `ScalePx`: a CEF OSR overlay on macOS is sized in
 **points** and React CSS px are points. 📏 Measured on a Retina display — the overlay window is
@@ -480,6 +496,7 @@ Cross-browser communication (e.g. header find bar → tab search) always routes 
 | `include/core/JsStringEscape.h` | `escapeJsonForJs` — the canonical JS-string-literal encoder (header-only; moved out of `simple_render_process_handler.cpp`, which now `#include`s it) |
 | `src/handlers/simple_handler.cpp` | `OnProcessMessageReceived`, `OnAfterCreated`, `OnBeforeClose`, `GetResourceRequestHandler`, `CefDownloadHandler` (`CanDownload`, `OnBeforeDownload`, `OnDownloadUpdated`), `DownloadInfo` struct, `active_downloads_` map, `NotifyDownloadStateChanged`, `CefFindHandler::OnFindResult`, find IPC (`find_text`, `find_stop`), helpers `CreateNewTabWithUrl()` / `CopyTextToClipboard()` |
 | `src/handlers/simple_app.cpp` | `SimpleApp::OnContextInitialized`, `InjectHodosBrowserAPI`, the 15 `Create…Overlay` functions (+ their `Show…`/`Hide…` pairs), and the overlay-ownership helpers `OwnOverlayToRequestingWindow` / `ReturnOverlayOwnershipToPrimary` / `ReleaseOverlaysOwnedBy` |
+| `cef_browser_shell_mac.mm` | The macOS half of the same contract (`D-h2`): `OverlayHostWindow` / `OwnOverlayToRequestingWindowMac` / `DetachOverlayFromParentMac` / `ReleaseOverlaysOwnedByMac`, plus the `targetWin` parameter on the 10 in-scope `Create…`/`Show…` pairs |
 | `src/core/HttpRequestInterceptor.cpp` | `HttpRequestInterceptor::isWalletEndpoint`, `DomainPermissionCache`, `WalletStatusCache`, `BSVPriceCache`, `AsyncWalletResourceHandler`, `AsyncHTTPClient`, `Async402ResourceHandler` + `Async402HTTPClient`, free functions `TryHandleBrc121_402` / `InstallAsync402HandlerIfPending`, structs `PaidRetryContext`, `PendingEnvelope`, `PendingReload`, `Brc121FailedEntry`, `CertDisclosureInfo`, `ProtocolScope`, `BasketScope`. **`DomainVerifier` was removed** — replaced by the DB-backed `DomainPermissionCache`. |
 | `include/core/PortConfig.h` | `hodos::IsDevEnv`, `WalletPort`, `AdblockPort`, `WalletUrl`, `AdblockUrl` — the only sanctioned source of backend ports. Also the wallet-traffic predicates: `AuthoritySpan`, `OriginFromUrl`, `SplitAuthority`, `IsLoopbackHost`, `IsWalletOrigin`, `IsOurWalletOrigin`, `IsMessageboxOrigin`, `IsWellKnownAuthRequest`, `RepointLoopbackToWallet` |
 | `include/core/AppPaths.h` | `GetAppDirName()` (dev/prod namespace), `GetLogDir()`, `GetInstanceMutexNameW()`, dev/prod safeguard logic |
