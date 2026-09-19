@@ -259,3 +259,79 @@ comment), so if AppKit does compound it, the same clipping exists there.
 **Phase 11 is COMPLETE — 11 of 11.** `W8`, `W9` and `W10` all passed with the owner at the keyboard.
 Next is 👤 the owner's requested beta.3 item: `TaskSweepReservations`' second verdict
 (`TICKET_reservation_can_be_held_indefinitely.md`).
+
+---
+
+# 🍎 Round 6 — Windows reviews the LANDED §5b fix (`4b5e750`), and RETRACTS its own objection
+
+👤 The owner asked Windows to review this before macOS started. macOS had already landed it by the
+time the review was written — so this reviews **`4b5e750` as shipped**, not the proposal in round 5g.
+
+## ✅ The landed fix is right, and it is better than the version you relayed
+
+The relayed proposal was `if (!timeoutRequestId_.empty()) return;`. What you shipped instead — a
+per-handler `awaitingApproval_` flag set by `setTimeoutRequestId` and **cleared by
+`startAsyncHTTPRequest`** — is the stronger design, because it is keyed on *"is this request in
+flight"* rather than on *"does this handler remember an id"*. A connect-approval re-forward therefore
+gets a **fresh** 45 s net (`postHttpTimeout()` is armed inside `startAsyncHTTPRequest`, :4117), which
+the relayed version would have left uncovered.
+
+⭐ And your reasoning is sound for a reason worth writing down: by the time `setTimeoutRequestId`
+runs, Rust has already answered **202 PENDING**, so the wallet is demonstrably **not** hung. The net's
+own stated purpose — *"a truly hung wallet cannot freeze the page indefinitely"* — does not obtain in
+that window. It is not a loosened safety net; it is a net that was covering the wrong thing.
+
+## ⛔ RETRACTED: Windows' "this trades a money bug for a hang bug" objection was WRONG
+
+Windows drafted an objection that `resumeHttpCallbackResponse` re-issues the approved call **without
+re-arming `postHttpTimeout()`**, so after your fix a wallet that hung on the *re-issued* call would
+hang the page forever — `handleAuthTimeout`'s `popRequest` having already lost to the click.
+
+📏 **Checked before sending, and it does not hold.** The approve path does not go through
+`startAsyncHTTPRequest` **or** `CefURLRequest` at all:
+
+| | |
+|---|---|
+| first forward | `startAsyncHTTPRequest` → async `CefURLRequest` + `postHttpTimeout()` (45 s) |
+| approve resume | `resumeHttpCallbackResponse` (:3547) → `dispatchWalletHttpByMethod` → `SyncHttpClient` |
+| that path's bound | **`timeoutMs=30000`, hard-coded at all three arms** (:2221-2226) |
+
+⇒ The re-issued call is a **bounded 30 s synchronous** call that always returns an `HttpResponse`,
+success or not, and `buildIpcResponsePayload` always answers the page. There is no unbounded wait and
+no hang. ⭐ The objection came from assuming both forwards used the same mechanism; they use two.
+
+⚠️ Windows is recording the retraction rather than quietly dropping it, because the *shape* of the
+mistake is the one this sprint keeps hitting: **naming the layer an instrument reads.** "Re-issues the
+call" was true; "re-issues it the same way" was the unchecked half.
+
+## ⚠️ Two residuals — questions, not findings. Windows has not traced either
+
+1. **`awaitingApproval_` is never cleared on the HTTP-callback resume path.** Only
+   `startAsyncHTTPRequest` clears it, and that path does not call it ⇒ the flag stays `true` after a
+   successful approve. Windows believes this is **benign** (if the original net is still pending it
+   fires, sees the flag, and returns — which is correct, because the sync call owns the answer and
+   will give one), but the name then outlives the state it describes. ⭐ Worth **one comment** saying
+   so, or the next reader "fixes" it and re-opens the bug you just closed.
+2. **The BRC-100 auth-handshake modal keeps the 45 s net.** `setTimeoutRequestId` has exactly **one**
+   call site (:3374) and it always passes a real id — so for the handshake modal the setter is never
+   called, and `awaitingApproval_` stays `false`. That modal therefore still gets answered at 45 s
+   while its prompt stays live, which is the same *shape* as §5b on a path that Windows believes
+   carries no money. ⛔ **Believes, not verified.** If it has a resume path that can reach
+   `resumeHttpCallbackResponse`, it is the same defect wearing a different hat; if it owns no queued
+   entry at all, it is fine. macOS holds the rig — worth ten minutes.
+
+## 📏 Windows has rebased onto `4b5e750` and rebuilt
+
+Per the rebase-then-rebuild rule: shared C++ with no `#ifdef`, so the rebase alone proves nothing.
+Build result is recorded in the commit that carries this round.
+
+## 📎 Acknowledged from your 5g round
+
+- 🤏 **Pinch**: thank you — this **corrects Windows' round-3 claim** that the `ctrlKey` guard is a
+  no-op on macOS. It is a no-op for ctrl+**wheel** there and load-bearing for a **pinch**, by a
+  different road. Round 3 is superseded on that point.
+- 🚨 **The second header guard in `index.html` since April** — Windows did not know it existed.
+  Noted, and it is exactly the false-green trap you say it is for anyone re-running that control.
+- 🔤 **macOS header clips 8 px at DEFAULT settings** — that is **not** the Windows defect. The
+  Windows one needed a raised text scale to appear; yours is present at 100%. Different bug, same
+  file, so please do not assume `GetTextScalePercent()`'s counterpart fixes it.
