@@ -5825,8 +5825,26 @@ int main(int argc, char* argv[]) {
         } else {
             settings.remote_debugging_port = (profileId == "Default") ? 9222 : 0;
         }
-        if (hodos::IsDevEnv() && settings.remote_debugging_port != 0)
+        // D2 (Phase 9, `67a9ab6` on Windows) — mirrored here 2026-09-19. A RELEASE build binds
+        // NO debug port at all; only a dev build gets one, offset +100 so it can never collide
+        // with the installed build's 9222.
+        //
+        // ⛔ This was measured missing on macOS: the INSTALLED build (pid 56785, argv
+        // `/Applications/HodosBrowser.app/Contents/MacOS/HodosBrowser --profile=Default`, with
+        // NO `--remote-debugging-port` switch) was holding `127.0.0.1:9222` LISTEN. So until
+        // this line, every shipped macOS build exposed a full-control CDP surface to any local
+        // process. Windows has been gated since `67a9ab6`; the macOS mirror was item 4 of the
+        // Mac queue and is this block.
+        //
+        // ⚠️ SUBJECT trap, cost Windows a run: passing `--remote-debugging-port` on the command
+        // line binds CDP **regardless** of this setting — CEF forwards the switch to Chromium
+        // ahead of CefSettings. Verify the gate by launching WITHOUT that switch and then
+        // `lsof -nP -iTCP:9222 -sTCP:LISTEN`.
+        if (!hodos::IsDevEnv()) {
+            settings.remote_debugging_port = 0;   // D2: release binds no debug port at all
+        } else if (settings.remote_debugging_port != 0) {
             settings.remote_debugging_port += 100;
+        }
 
         LOG_INFO("Cache path: " + cache_path);
         LOG_INFO("Root cache path: " + cache_path);

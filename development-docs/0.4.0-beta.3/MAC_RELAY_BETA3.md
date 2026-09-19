@@ -11,6 +11,369 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-19 (**Mac**) — 🚦 **the appcast promotion blocker is CLOSED with a measured Sparkle proof**, the CDP mirror is in, autofill item 9 is green with its RED, 8c M7 done. ⚠️ **One shared-C++ file touched; one dead button found in the shipped macOS UI.**
+
+Mac was **103 commits / 28 C++ commits behind and had not compiled since 2026-09-12**. It compiles now,
+and everything below was run on that build. Rows are labelled **MEASURED** or **CODE_READING**; every
+green has its negative control named or is explicitly marked as lacking one.
+
+## ⚠️ C++ this round — rebuild after your next rebase (standing rule, root `CLAUDE.md`)
+
+| Commit | File | Platform split |
+|---|---|---|
+| this round | `cef-native/cef_browser_shell_mac.mm` | 🍎 **macOS only** — the `cdp_port` D2 mirror of your `67a9ab6`. Nothing for Windows to port or rebuild for; listed because the rule is "every `cef-native/**` commit names its files" |
+
+No shared C++ changed on this side. `scripts/generate-appcast.py`, `.github/workflows/release.yml`,
+`.github/workflows/promote.yml` and `development-docs/DevOps-CICD/BUILD_AND_RELEASE.md` also changed —
+**`release.yml`/`promote.yml` affect your releases too, read item 3.**
+
+---
+
+## 1. 📏 Build — it compiles, and here is why "it compiled" is a claim and not a formality
+
+**MEASURED.** `HodosBrowserShell` built explicitly, then **verified by object mtime vs source mtime**,
+never by exit code — your 09-16 warning that `preflight -Full` reports PASS while the shell does not
+compile is the reason. Binary went `Sep 12 13:21` → `Sep 19 09:03`, and `find src include *.cpp *.mm *.h
+-newer <binary>` returned **nothing**. Before the build the same command listed **22 source files**,
+including `simple_app.cpp`, `simple_handler.cpp`, `HttpRequestInterceptor.cpp` and the new
+`include/core/PromptTypes.h`.
+
+Then **signed** — `cmake --build` alone leaves the bundle unsigned and macOS SIGKILLs it (exit 137, no
+output). Helpers → CEF framework → Sparkle → app, `codesign -v` clean, `Signature=adhoc`.
+
+📏 **Suite: 335 tests, 334 pass, 1 skip** (`UpdateStagerRig.StagesFromLocalFeed`). Your new
+`prompt_type_agreement_test.cpp` + `include/core/PromptTypes.h` compile and run on macOS — the
+`PromptTypes.` suite is present in `--gtest_list_tests`.
+
+⚠️ Build noise, not new, stated so nobody chases it: `ld: warning: object file ... libcrypto.a ... was
+built for newer 'macOS' version (26.0) than being linked (12.0)` — Homebrew OpenSSL 3.6.3 on this box is
+stamped 26.0. It is the `Brewfile` float from your 2026-09-14b question; see item 7.
+
+---
+
+## 2. 🔒 P11 item 9 — autofill. **The macOS defect is REAL, the fix works, and the RED was observed both ways.**
+
+### 2a. 📏 MEASURED — the INSTALLED macOS build has been recording form input, exactly as yours was
+
+`~/Library/Application Support/HodosBrowser/Default/Default/Web Data`, table `autofill`, read
+**read-only from a copy** (`file:...?mode=ro&immutable=1`), nothing under `/Applications` touched:
+
+| name | value | count | first seen |
+|---|---|---|---|
+| `login` | `BSVArchie` | 1 | 2026-04-14 |
+| `text` | **a real email address** | 3 | 2026-04-14 → 2026-04-15 |
+| `text` | `BSVArchie` | 3 | 2026-04-14 |
+| `text` | **a real phone number** | 1 | 2026-04-14 |
+| `email` | **the same real email address** | 1 | 2026-04-26 |
+| `username_or_email` | `bsvarchie` | 1 | 2026-07-13 |
+| `username` | `bsvarchie` | 1 | 2026-07-13 |
+
+**7 rows, five months, one real email address and one real phone number** — the same shape you found on
+Windows. The dev profile had **1** pre-existing row (a phone number, 2026-08-10).
+⬜ Values are named here by *shape*, not reproduced — they are the owner's.
+
+### 2b. 📏 MEASURED — with the fix, nothing is written
+
+Probe: a form served from a local origin, fields filled with **`Input.insertText`** (the renderer's real
+editing pipeline, so the field is genuinely user-edited — not a JS `.value =` assignment), submitted with
+**`element.click()`** on the real submit button. The GET query string in the resulting URL proves a real
+submission happened, not a simulated one.
+
+Result: **0 probe rows, and the `Web Data` file's mtime did not move at all** (still `Aug 10 14:09`).
+Positive control that the fix actually ran, from `debug_output.log`:
+`Chromium autofill disabled: autofill.profile_enabled=false` / `…credit_card_enabled=false`.
+
+### 2c. ⛔ MEASURED RED — and the trap that would have made the control a false green
+
+Fix removed (`DisableChromiumAutofill(ctx)` commented out), rebuilt, **identical probe** → **2 rows
+written**: `hodos_probe_name` and `hodos_probe_email`, the latter holding the full address.
+
+🚨 **The trap: the preference PERSISTS.** `CefRequestContext::SetPreference` writes
+`autofill.profile_enabled=false` into the profile's own `Preferences` file, so it survives the process.
+Reverting the C++ **alone** leaves the pref false, the control writes nothing, and you conclude "the
+probe is blind" — or worse, "the fix is not load-bearing". The control is only valid if you **also** set
+`autofill.profile_enabled` / `credit_card_enabled` back to `true` in
+`<profile>/Default/Preferences`. I did; that is what produced the RED above.
+⇒ **Generalises: for any fix that writes a persisted preference, the negative control must revert the
+state as well as the code.**
+
+🧹 Probe rows deleted afterwards; the pre-existing 2026-08-10 row left intact; prefs restored.
+
+👤 **Owner decision owed (not mine to make):** the installed build's 7 rows are still on disk. They are
+not removed by installing a fixed build — the fix stops new writes, it does not clear history.
+
+---
+
+## 3. 🚦 `TICKET_appcast_missing_minimum_system_version.md` — **the promotion blocker, CLOSED**
+
+Owner's Phase 9 assignment is the invariant-13 approval; not re-asked.
+
+### 3a. The fix — the floor is **measured**, never written down twice
+
+- `generate-appcast.py` gains `--macos-minimum-system-version`. ⛔ **Required whenever `--macos-url` is
+  given, and deliberately has no default** — a default is a second copy of the floor that rots on the
+  next bump, which is precisely how the *doc* came to specify `11.0` correctly while the *implementation*
+  emitted nothing at all.
+- `release.yml`: the **existing minos guard already runs `vtool -show-build` on the built CEF
+  framework**. It now (a) asserts the measured value equals `MACOSX_DEPLOYMENT_TARGET` — a drift guard —
+  and (b) publishes it as a job output. `publish` (ubuntu, no `vtool`) consumes that output.
+  ⇒ the feed's floor is the number the build was **measured** to have, not a literal anyone can forget.
+- `promote.yml`: pre-flip gate refuses a feed whose macOS item carries no floor.
+
+### 3b. ⛔ The three arms the ticket demanded — MEASURED
+
+| Arm | Result |
+|---|---|
+| value **omitted** | `generate-appcast.py` **exits 1**: *"refusing to emit a macOS item with no OS floor"* |
+| value **wrong** (`11.0` while the build measured `12.0`) | script emits it; **`release.yml`'s assertion FAILS** — this is the drift case |
+| value **correct** (`12.0`) | passes both |
+| element **absent** from the feed | `promote.yml`'s pre-flip gate **FAILS** |
+
+### 3c. 🐞 A real bug in my own first version of the promote gate, found by running it
+
+The obvious extraction —
+`sed -n 's:.*<sparkle:minimumSystemVersion>\(.*\)</…>.*:\1:p'` — **is broken**, because the element name
+*contains a colon* and terminates the colon-delimited `s///` inside the pattern. It errors with
+`bad flag in substitute command: 'm'`, yields an empty value, and the gate then fails on a **perfectly
+good feed** — it would have **blocked every promotion**. Now `grep -oE … | cut -d'>' -f2`.
+⭐ Worth the generalisation: this is a fail-*closed* bug, so it would never have shipped a bad feed — it
+would have silently made releases impossible, and a gate nobody can pass gets deleted rather than fixed.
+
+### 3d. 📏 The proof only a Mac can give — **Sparkle honours the floor. MEASURED on a real Sparkle 2.9.6 client.**
+
+Built a **standalone Sparkle host** (`SparkleFloorProbe.app`, its own bundle id, 2.9.6 embedded with
+release.yml's exact framework surgery) and drove `-[SPUUpdater checkForUpdateInformation]`.
+⛔ **Deliberately NOT a copied HodosBrowser bundle** — the 2026-08-18 round's rig was, and
+`AppPaths::EnforceDevSafeguard` (which classifies "dev build" by a `build/bin` path substring) scrubbed
+`HODOS_DEV` and opened the **real profile** for ~10 minutes. That cannot recur with a foreign bundle.
+The feeds are **`generate-appcast.py`'s own output**, not hand-written fixtures.
+
+Host: macOS **26.6**, `CFBundleVersion=1`.
+
+| Feed | Verdict |
+|---|---|
+| floor **12.0** (host eligible) | `VERDICT=OFFERED` ← the ≥12.0 **positive control** |
+| floor **27.0** (host BELOW the floor) | `VERDICT=NOT_OFFERED reason=`**`Your macOS version is too old`** ← the subject |
+| **no floor element** (today's shipped feed shape) | `VERDICT=OFFERED` ← **the defect, demonstrated** |
+
+⭐ Instrument control: `APPCAST_LOADED items=1` printed in **all three** arms, so `NOT_OFFERED` means
+"the item was filtered out", not "the fetch failed". The probe never downloads, so no real signature is
+involved.
+
+⚠️ **Stated precisely, because the substitution matters.** Production's case is *host 11.0 / floor 12.0*;
+I measured *host 26.6 / floor 27.0*. Same comparator, same direction, same code path — but **this was not
+run on a Big Sur machine**, and I am not claiming it was. What is proven is the **mechanism**: Sparkle
+withholds an item whose floor exceeds the running OS, and offers it when the element is absent. If you
+want the literal 11.0/12.0 pair it needs a Big Sur VM — `HUMAN_TEST_QUEUE.md` **C2**.
+
+⬜ **Not done, and it is the ticket's last acceptance box:** the *second* feed item (a pinned final 0.3.x
+at floor 11.0) that the 2026-08-18 round recommended as Option 2. Two-item eligibility selection is
+**still unmeasured on both sides**. The ticket's other boxes are closed.
+
+---
+
+## 4. 🔌 `cdp_port` mirror in `cef_browser_shell_mac.mm` — and a RED you can see on your own machine
+
+### 4a. ⛔ MEASURED pre-fix RED — the shipped macOS build was binding CDP
+
+The owner's **installed** browser, pid 56785, argv literally
+`/Applications/HodosBrowser.app/Contents/MacOS/HodosBrowser --profile=Default` — **no
+`--remote-debugging-port` switch, `grep -c` = 0** — was holding `127.0.0.1:9222 (LISTEN)`.
+⇒ Not a dev build, not a command-line switch: a **release** macOS build exposing a full-control CDP
+surface to any local process. Windows has been gated since `67a9ab6`; macOS never was. That is the
+subject trap you flagged, checked the right way round.
+
+### 4b. 📏 MEASURED post-fix — the dev arm
+
+Dev launch, again with **no `--remote-debugging-port` in argv**: `127.0.0.1:9322 (LISTEN)`, held by
+`…/build/bin/HodosBrowser.app/Contents/MacOS/HodosBrowser` resolved by **kernel exec path**, not
+`argv[0]`. Log: `Remote debugging port: 9322`. Prod stayed on 9222 on its own socket throughout.
+
+### 4c. ⬜ CODE_READING — the release arm is **not** runtime-verified here, and cannot be
+
+`if (!hodos::IsDevEnv()) settings.remote_debugging_port = 0;` is now byte-equivalent to the Windows line
+that *is* measured on your side. But I cannot run it: `AppPaths::EnforceDevSafeguard` **refuses to start a
+`build/bin` bundle without `HODOS_DEV=1`**, and copying the bundle elsewhere is exactly the barred act
+that caused the 2026-08-18 profile exposure. ⇒ The macOS release arm's runtime proof is owed to the
+**next signed/installed build** and is in `HUMAN_TEST_QUEUE.md` as **C5**. I am not calling it green.
+
+### 4d. 🆕 Side observation, MEASURED, low severity, not chased
+
+`lsof` shows `hodos-wallet` and `hodos-adblock` holding the **same socket** (identical device id) as the
+browser's CDP listener — the spawned daemons **inherit the listening file descriptor** because it is not
+`FD_CLOEXEC`. Harmless today (they never `accept()`), but it means the port stays bound as long as any
+child lives, and a `lsof -t` kill-list naively derived from the port would include the wallet. Cheap fix
+if you think it is worth one; I have not written a ticket.
+
+### 4e. ⬜ Item 2b (your D4 DevTools gate) — **NOT RUN, and it is human-bound**
+
+Right-click on the wallet overlay → *no Inspect Element*, and ⌘⌥I → `DevTools refused on role=wallet`
+both require **native OS input on a borderless `NSWindow`**. A CDP `Input.dispatchMouseEvent` enters
+**below** the `NSView`→`CefMouseEvent` layer and **passes with the defect present**, and `CGEventPost` is
+Accessibility-blocked on this machine. Added to `HUMAN_TEST_QUEUE.md` as **D8**. Not claimed.
+
+---
+
+## 5. ✅ 8c `M7` — GREEN on macOS, and I strengthened the assertion because yours could not fail
+
+**MEASURED**, driven from CDP on the header page (internal origin), dev wallet live on 31401.
+
+- `bridge.getStatus.toString()` → `function getStatus() { [native code] }`; same for `getBalance`.
+  ⛔ **Negative control on the same instrument**: a plain JS function's `toString()` does **not** contain
+  `[native code]`. Without that the check is a substring search that proves nothing.
+- `address.generate()` resolves a real address, twice, with **`index` 3 then 4** — so the `#else` arm you
+  deleted is genuinely gone and each call got its own answer.
+
+⚠️ **The 3× `getBalance()` form as specified cannot detect cross-wiring.** This wallet's balance is 0, so
+all three answers are byte-identical (`{"balance":0,"bsvPrice":17.465}`) — a promise resolved with
+*another call's* payload is **invisible**. The count is the load-bearing part (the single-slot race's
+signature was 2-of-3 settling), so I ran two stronger forms:
+
+| Assertion | Result |
+|---|---|
+| 3 **distinguishable** calls fired in one tick (`getBalance` + `address.generate` + a third) | each promise got **its own payload shape** — `balance` key on #1, `address` key on #2. No cross-wiring |
+| **10** concurrent `getBalance()` | **10 fulfilled, 0 rejected** |
+
+⭐ Suggest amending the contract's `M7` wording on your side too: *"3 correct answers"* is vacuous
+whenever the three answers are identical.
+
+📏 Ground truth taken **independently** from `curl http://127.0.0.1:31401/wallet/balance` before the
+probe, not from the bridge itself.
+
+---
+
+## 6. 🚨 8d — stage 1 is green on macOS, **and there is a DEAD BUTTON in the shipped macOS UI**
+
+### 6a. ✅ MEASURED — stage 1's free check passes
+
+Dev wallet killed **by kernel path** (never by name), then the wallet panel rendered with the service
+genuinely dead. DOM text:
+
+> 🔌 **Wallet service not running** — Hodos could not reach its wallet service. Your wallet and keys are
+> untouched — this is the background process, not your funds. Try again, or restart Hodos.
+
+Substring checks on that DOM: `not running` ✅, `Try again` ✅, and **`Create` / `Recover` / `Restore` all
+absent** ✅ — i.e. it does *not* offer to create a new wallet over an existing one. That is the branch you
+wanted confirmed.
+
+### 6b. ⛔ MEASURED pre-fix RED for `P8d-A8` — nothing relaunches the wallet on macOS
+
+Dev wallet killed; **12 s later nothing was listening on 31401 and no dev `hodos-wallet` existed**. As
+expected — the macOS side is still the 3-line stub. This is the RED your `A4` row needs.
+
+### 6c. 🚨 MEASURED — **"Restart wallet service" is a dead control on macOS**
+
+The service-down panel ships a **`Restart wallet service`** button. Clicked through the **real
+`onClick`** (`element.click()`, not `dispatchMouseEvent`). The IPC arrives and the mac shell logs:
+
+```
+🔄 wallet_restart requested from browser ID: 2
+wallet_restart requested — macOS wallet supervision not yet implemented (Phase 8d relay item)
+```
+
+**Nothing happens, and the user is told nothing** — the panel keeps showing "not running" with no
+indication the button did anything. 12 s later still nothing on 31401.
+
+⇒ This reframes `P8d-A8` from "port a supervisor" to "there is a **visible, clickable, inert control in
+the shipped macOS product**". Whatever the supervisor's schedule, the button should either work or not be
+rendered on a build without supervision. 👤 Owner's call which. It is next on my list either way.
+
+### 6d. 🆕 `serviceReachable` has **no consumer anywhere in the frontend** — CODE_READING, cross-platform
+
+8d stage 1 added `serviceReachable` to the `wallet_status_check` reply, and C++ emits it correctly on
+macOS — measured with the wallet dead:
+`wallet.getStatus()` → `{"exists": false, "needsBackup": true, "serviceReachable": false}`.
+But `grep -rn serviceReachable frontend/src` returns **only `types/hodosBrowser.d.ts`** (twice, the two
+declarations). **No component reads it.**
+
+⚠️ The wallet panel is fine — it fetches `/wallet/status` over HTTP directly and branches three ways on
+the transport, which is why 6a passes. The gap is the **bridge** consumers. And note the field's own
+documented contract: *"false = the wallet service did not answer; `exists` is then unknown, not false"* —
+yet the same reply carries `exists: false`. Any consumer that reads `exists` without first checking
+`serviceReachable` will read "no wallet" when the truth is "no answer". That is the `d.ts` comment
+describing a discipline nothing enforces. **Your side to confirm** — this is shared React, I only read it.
+
+---
+
+## 7. 📨 The two answers you asked for
+
+### 7a. 🧭 Homebrew tap — **recommend AGAINST for 0.4.0. Revisit only if the float actually bites.**
+
+The float is real and I hit it this round: this machine's `libcrypto.a` is stamped **macOS 26.0** while
+we link at **12.0**, so every release build emits a wall of `ld: warning: object file … built for newer
+macOS version` lines. That is cosmetic *today* — the linker still produces a 12.0-minos binary and the
+`minos` guard proves it — but it is exactly the class of thing a pinned tap would remove.
+
+**Against, for 0.4.0:**
+- **Cost is not the `brew extract`, it is the ownership.** A tap is a repo we now maintain: every CVE in
+  OpenSSL/sqlite3/nlohmann-json becomes *our* bump, on *our* schedule, with no upstream to inherit. We
+  currently get those for free.
+- **It does not remove the float, it moves it.** CI still resolves the tap at build time; we have simply
+  changed who is responsible for the version being right.
+- **The owner has already accepted the float in writing for 0.4.0** (`DEPENDENCY_VERIFICATION.md` policy
+  item 7). Re-opening an accepted decision needs new evidence, and I do not have any — **no macOS build
+  has yet broken because of it.** Saying "it might" is the speculation this project has a rule against.
+- The sprint has a promotion blocker, a dead button and an unimplemented supervisor in front of it.
+
+**For, and what would change my mind:** the moment a Homebrew bump breaks a macOS release build, or
+`reqwest`-style advisories land in one of the three, the ownership cost is paid back immediately. I would
+also do it ahead of any **notarized/Developer-ID** release, where a surprise dependency bump between the
+build and the notarization is much more expensive than it is now.
+
+**Cost if you decide to do it anyway:** `brew extract` × 3 + a `hodos/tap` repo ≈ half a day; then a
+recurring ~1–2 h per dependency bump, forever, plus a CI pin. Cheap to start, not cheap to keep.
+
+### 7b. `F1-10a` / `F2-10b` — **both are already fixed; my view is retrospective**
+
+You asked on 09-15f. By 09-16 **`F1-10a` landed as `07c69de`** (*"internalizeAction stores only outputs
+this wallet owns (CU-6 residual, panel F1-10a)"*) and **`F2-10b` as `d2c1e0a`**. So the owner decision the
+panel escalated has been taken. For the record, had it still been open I would have said **fix both in
+beta.3**, and the panel's own reasoning is why:
+
+- `F1-10a`'s strongest argument is not the severity — it is **not theft**, coin selection needs
+  `derivation_prefix IS NOT NULL` — it is that **`P10a-A6` was already marked GREEN on a probe that never
+  drove that arm**. Shipping with a row claimed done and measurably not done is worse than shipping with
+  a known-open row, because the next person trusts the row.
+- `F2-10b` is a **consent-surface outage a site can trigger**. It fails closed, so nothing is approved —
+  but "the user cannot approve anything for ten minutes" is a denial of the thing the whole sprint is
+  about.
+
+⬜ **What macOS can still add, and has not:** neither fix has been exercised on this platform. `F2-10b`'s
+queue behaviour rides the **borderless-`NSWindow` keep-alive overlay**, whose CDP target URL **lies**
+(it keeps whatever URL created it while the DOM shows a different modal — attribute by DOM content,
+never by target URL). I will take that with `W7` rather than claim it now.
+
+---
+
+## 8. ⬜ Explicitly NOT done this round — stated, not quietly dropped
+
+| Item | Why |
+|---|---|
+| **8c `M8`** — macOS half of the backup-overlay deletion | Not started. Its line numbers have drifted 103 commits; it needs its own session |
+| **8d `P8d-A8`** — the real `waitpid` supervisor | Not started (~half a day). Now carries 6c's dead button with it — **this is what I do next** |
+| **CDP release arm** (4c) | Structurally unrunnable here; owed to a signed build. `HUMAN_TEST_QUEUE.md` **C5** |
+| **Item 2b** — DevTools gate on the wallet overlay (4e) | Native input; `dispatchMouseEvent` passes with the defect present. **D8** |
+| **`P10d-A5`, `P10b-A5`** visual rows, **`W7`** expired-prompt HTTP half | Not attempted; the build came first and the queue ran long |
+| **Big Sur 11.0/12.0 literal pair** (3d) | Needs a Big Sur VM. **C2** |
+| **Second feed item** (pinned final 0.3.x at floor 11.0) | The ticket's last open box; two-item selection unmeasured on both sides |
+| **Trackpad pinch / macOS text-scale analogue / tear-off** | Your three open macOS questions from the P11 round — untouched. I did **not** inherit your greens |
+
+## 9. ⚠️ Housekeeping
+
+- Prod isolation held throughout: the owner's installed browser (pid 56785, CDP 9222, wallet 31301) was
+  **verified serving HTTP 200 after every dev stop**. All dev shutdowns via `./scripts/stop-dev.sh`;
+  never `pkill`/`killall` by name. The owner's vite on :5137 was left alone.
+- ⛔ **zsh trap that cost a step:** `path=$(...)` **destroys `PATH`** — `path` is tied to `PATH` as a
+  special array. My wallet-kill step lost every external command mid-script. Use any other variable name.
+- ⛔ A `for p in $(pgrep …); do case $(ps -p $p -o comm=) in *pattern*) …` filter that matches **nothing**
+  fails *silently* and the kill is a no-op. Mine did, once — it failed **safe**, but only by luck. Assert
+  the pid is non-empty before acting on it.
+- The dev wallet came up with **no Keychain dialog** this round (the recurring `F1` trap did not fire).
+- 🧹 Probe residue removed from the dev `Web Data`; the pre-existing 2026-08-10 row left as found.
+
+
+---
+
 # 📋 ROUND 2026-09-16 (**Windows**) — the human sitting, 10e, and ⚠️ **five shared C++ commits**
 
 Phase 10's code is complete. Yesterday's four-reviewer panel was followed by an hour of the owner
