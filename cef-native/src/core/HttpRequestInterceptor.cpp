@@ -1799,6 +1799,20 @@ public:
     // Timeout handling - called by WalletTimeoutTask
     void handleHttpTimeout() {
         if (httpCompleted_.load()) return;  // Already responded, skip
+        // beta.3 W7 (HTTP half) — ⛔ this is a HUNG-WALLET net, not an approval
+        // timeout. It is armed when the call is first forwarded and is still
+        // pending when Rust answers 202 and the request parks on a prompt. Firing
+        // then told the page "Wallet request timeout" at 45 s while the prompt
+        // stayed live, and an Approve any time before the 10-minute auth timeout
+        // re-issued the call with X-User-Approved and SPENT into a response
+        // nobody reads (measured on macOS 2026-09-19: approve at 68 s ⇒
+        // "X-User-Approved consumed" ⇒ createAction ran). While a human is
+        // deciding, handleAuthTimeout owns this request — and pops its entry.
+        if (awaitingApproval_.load()) {
+            LOG_INFO_HTTP("⏱️ Wallet HTTP timeout ignored — request is parked on an approval prompt ("
+                          + timeoutRequestId_ + "); the prompt timeout owns it");
+            return;
+        }
         LOG_DEBUG_HTTP("⏱️ Wallet HTTP request timeout - sending error");
         onHTTPResponseReceived("{\"error\":\"Wallet request timeout\",\"status\":\"error\"}");
         // Cancel the in-flight request (safe even if already completed)
@@ -1841,7 +1855,12 @@ public:
 
     // Panel `F1`: the entry this handler's timeout must release. Empty for the
     // ancillary BRC-100 auth-handshake modal, which owns no queued entry.
-    void setTimeoutRequestId(const std::string& id) { timeoutRequestId_ = id; }
+    // Also marks the request PARKED on that prompt, which stands the 45 s
+    // hung-wallet net down (handleHttpTimeout) until the request is back in flight.
+    void setTimeoutRequestId(const std::string& id) {
+        timeoutRequestId_ = id;
+        awaitingApproval_.store(true);
+    }
 
     // Trigger domain approval notification overlay.
     // Phase 2.5 Commit 6 sub-step 6.c — delegates to free-function opener
@@ -2060,6 +2079,10 @@ private:
     size_t responseOffset_;
     bool requestCompleted_;
     std::atomic<bool> httpCompleted_{false};
+    // W7 — true while this request is parked on an approval prompt; false again
+    // once it is re-forwarded (connect-approval drain → startAsyncHTTPRequest),
+    // so a re-forwarded call keeps its hung-wallet net.
+    std::atomic<bool> awaitingApproval_{false};
 
     // Auto-approve engine: pre-calculated spending for this request.
     // Phase 2.6-E — populated in Open() for payment endpoints from
@@ -3976,6 +3999,10 @@ private:
 // Implementation of AsyncWalletResourceHandler::startAsyncHTTPRequest
 void AsyncWalletResourceHandler::startAsyncHTTPRequest() {
     LOG_DEBUG_HTTP("🌐 Starting async HTTP request to: " + endpoint_);
+
+    // W7 — back in flight (first forward, or re-forward after a connect
+    // approval): the hung-wallet net applies again.
+    awaitingApproval_.store(false);
 
     // Phase 2.6-C.4 — DELETED: the Phase 1.5 Step 1 drain-forward safety net
     // that fired triggerIdentityKeyRevealModal here when an identity-key
