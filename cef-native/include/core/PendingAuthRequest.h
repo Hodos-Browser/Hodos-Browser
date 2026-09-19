@@ -370,9 +370,10 @@ public:
 private:
     PendingRequestManager() : counter_(0) {}
 
-    // A shown prompt older than the prompt timeout no longer holds the screen:
-    // the HTTP-transport timeout does not pop its entry, and an abandoned modal
-    // must not stall every later prompt.
+    // A shown prompt older than the prompt timeout no longer holds the screen: an
+    // abandoned modal must not stall every later prompt. (Both transports' prompt
+    // timeouts now pop their entry — HTTP since 12c76bd — so this is the backstop
+    // for a path that forgets to, not the mechanism.)
     static constexpr int kShownPromptExpiryMs = 600000;  // == kPromptAuthTimeoutMs
 
     bool anyLiveShownLocked() const {

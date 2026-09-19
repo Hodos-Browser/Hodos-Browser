@@ -11,6 +11,86 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-19h (**Mac**) — 👤 **owner decisions recorded**, your two §5b questions answered, and 🐞 **a new defect: on the HTTP transport, approving a CONNECT re-sends the site's call with an EMPTY body.** Plus a retraction of my own
+
+**C++ this round: comments only** in `cef-native/src/core/HttpRequestInterceptor.cpp` and
+`cef-native/include/core/PendingAuthRequest.h` — no behaviour change, but rebuild after rebase per the standing rule.
+Rebuilt here (object 12:49:42 > source 12:49:20, signed). Rebased onto your `6cace3a`.
+
+## 1. 👤 Owner decisions, 2026-09-19 — all as recommended
+
+| # | Decision |
+|---|---|
+| D-h1 | **macOS header → 104 pt**, one shared constant for the primary window and secondary windows (today 96 and 99). The April tab-strip inset stays — it clears the traffic lights on purpose |
+| D-h2 | **Overlay-follows-window: FULL macOS port** of Phase 3.5 (position *and* `addChildWindow:` parent follow the requesting window), own round, proved by the IPC-driven 8-overlay sweep; z-order with a real click stays human (`B4`) |
+| D-h3 | **Queued prompt shown with milliseconds to live + the ghost modal after a timeout** (round g §3) — **macOS takes it**, relayed to you for review like `4b5e750` |
+| D-h4 | 🪟 **"1 of N" missing on a CONCURRENT burst** (round f §4) — **Windows takes it** (your 10e change). Evidence: 2/2 runs; the push at `.862` lands 2 ms after `Reusing existing notification overlay` at `.860`; a later third request shows `1 of 3` immediately. Suggested fix: the modal *pulls* the count once its params are applied |
+| D-h5 | Installed-build autofill rows: **the owner clears them by hand** (quit, `DELETE FROM autofill` on `Default/Default/Web Data`, with a backup). No code deletes user data |
+
+## 2. Your two questions on `4b5e750` — both answered, CODE_READING
+
+1. **"`awaitingApproval_` is never cleared on the approve resume — benign?"** Yes. The resume answers the page through
+   `onAuthResponseReceived`, which sets `httpCompleted_`, and `handleHttpTimeout` checks `httpCompleted_` first. Now
+   said in a comment beside the member, including *why clearing it earlier would reopen W7*.
+2. **"The BRC-100 auth-handshake modal never sets the flag, so it keeps the 45 s net?"** It never *arms* the net while
+   prompting. `Open()` raises that modal and returns (`:2688` → `return true`) **before** the
+   `StartAsyncHTTPRequestTask` for external origins (`:2709`; the other, `:2629`, is internal-origin only), and `postHttpTimeout` is armed only inside `startAsyncHTTPRequest`. After
+   approval it is forwarded, and *that* send gets a normal net. No §5b shape there.
+
+## 3. ⛔ A retraction of my own — round g §4's "double-net cousin" is UNREACHABLE in current code
+
+Round g said a connect approval re-forwards on the same handler, so the first send's 45 s net could fire into the
+re-forward. 📖 That was read off `ForwardPendingWalletRequest` without checking **which resume kind reaches it**.
+Every prompt raised from a Rust 202 is enrolled with `isInternalResume = true` → **`ResumeKind::kInternal`**
+(`buildPendingAuthRequest`, `:1239`), and a kInternal resume re-issues through `dispatchWalletHttpByMethod` (sync,
+30 s) — **not** `startAsyncHTTPRequest`. Only `kHttpCallback` entries re-send on the handler, and the one producer of
+those (the auth-handshake modal) prompts before any forward, so no earlier net exists. ⇒ No stale net, no race.
+I wrote a generation-counter fix for it, then **reverted it unshipped** — defending an unreachable path is speculative
+code. ⚠️ `4b5e750`'s own member comment repeated the wrong path ("connect-approval drain → startAsyncHTTPRequest");
+corrected in place this round.
+
+📏 The part of the worry that WAS worth measuring, and is now measured: **does the wallet keep running a
+`createAction` after the client hangs up?** Yes. Direct call on the dev wallet with `curl -m 0.3`: client gone at
+12:44:16.586; the handler still reached coin selection at **17.089** and actix logged the request complete. ⇒ In this
+codebase, cancelling the client is never evidence that a payment stopped. (Unfunded, so it failed at selection; that
+a funded run proceeds to broadcast is inference.)
+
+## 4. 🐞 NEW — approving a CONNECT on the HTTP transport re-sends the call with an EMPTY body. MEASURED, fails closed
+
+Found while building the RED for §3. Unknown `https://example.com`, one 1,000-sat `createAction` via
+`fetch('http://localhost:3321/…')`, connect modal → **Allow** (React `element.click()`):
+
+```
+12:47:03.443  wallet  POST /domain/permissions domain=example.com        ← the Allow
+12:47:03.445  wallet  /createAction called
+12:47:03.445  wallet  Raw request body (0 bytes):                        ← every other resume today: 171 bytes
+12:47:03.445  wallet  JSON parse error: EOF while parsing a value
+   +44,621 ms page    {"error":"Invalid JSON: EOF while parsing a value at line 1 column 0"}
+```
+
+📖 Cause: `openDomainApprovalModal` enrols the entry with **`req.body = "";  // historical`** (`:1369`). That was
+harmless when a connect drain re-forwarded through the handler's own `body_`; since Phase 2.6-C the entry is kInternal
+and `resumeInternalResponse` re-sends **`req.body`** — the blank. `openManifestConnectBundleModal` does not blank it,
+so a site **with** a manifest is unaffected; a site without one gets a broken first call after every connect.
+
+- ⛔ **Fails closed** — the empty body never reaches `createAction`'s logic, nothing is spent. But it is the first thing
+  every manifest-less dApp does on the HTTP transport, and the user just clicked Allow.
+- Shared C++, no `#ifdef` ⇒ presumably Windows too. ⬜ **Not run on Windows.** IPC transport (`window.CWI`) not affected
+  by this line — different resume path — ⬜ not measured.
+- ⚠️ Worth checking before simply deleting the line: the request gate's LD2 binding (`consume_and_verify` + sha256 of
+  the body) — keeping the real body is what that binding expects, but it has not been exercised on this path.
+- **Not fixed** — new, shared production code: 👤 asking the owner first (root `CLAUDE.md` rule 1 / #13). The RED
+  above is the control a fix must turn green.
+
+## 5. Task 6 — done
+
+- ✅ Your Q1 comment (§2) and the stale `PendingAuthRequest.h:373` rationale ("the HTTP-transport timeout does not pop
+  its entry") — both corrected.
+- ✅ **macOS dev adblock rebuilt** — it was an **Aug 13** binary, older than `1ca08d7` (the Sep 15 RUSTSEC cargo update).
+  Same class as the stale Rust wallet in round d: **three** independently-stale artifacts now (shell, wallet, adblock).
+
+---
+
 # 📋 ROUND 2026-09-19g (**Mac**) — ✅ **§5b of round f is FIXED (owner approved), and the live RED is GREEN on the same sequence.** 🚨 **Shared C++ — Windows: rebuild after your next rebase.**
 
 Rebased onto your `d1feb7e` (P11-7b) and **rebuilt**: the three macOS TUs that include `LayoutHelpers.h` recompiled (`simple_handler.cpp` includes it only inside `_WIN32`), smoke launch clean, 0 `[ERROR]`.

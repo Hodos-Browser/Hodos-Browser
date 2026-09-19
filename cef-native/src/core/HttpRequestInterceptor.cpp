@@ -2080,8 +2080,15 @@ private:
     bool requestCompleted_;
     std::atomic<bool> httpCompleted_{false};
     // W7 — true while this request is parked on an approval prompt; false again
-    // once it is re-forwarded (connect-approval drain → startAsyncHTTPRequest),
-    // so a re-forwarded call keeps its hung-wallet net.
+    // whenever startAsyncHTTPRequest (re-)sends it, so a re-sent call keeps its
+    // hung-wallet net. ⚠️ Corrected 2026-09-19g: prompts raised from a Rust 202
+    // resume as kInternal (a synchronous re-issue with its own 30 s timeout), NOT
+    // through startAsyncHTTPRequest — only kHttpCallback entries (the BRC-100
+    // auth-handshake modal, raised before any forward) re-send on this handler.
+    // ⛔ Deliberately NOT cleared on the approve/deny resume paths: those answer the
+    // page via onAuthResponseReceived, which sets httpCompleted_, and handleHttpTimeout
+    // checks httpCompleted_ FIRST. Clearing it there changes nothing — and clearing it
+    // any earlier (e.g. when the prompt is answered but before the page is) reopens W7.
     std::atomic<bool> awaitingApproval_{false};
 
     // Auto-approve engine: pre-calculated spending for this request.
