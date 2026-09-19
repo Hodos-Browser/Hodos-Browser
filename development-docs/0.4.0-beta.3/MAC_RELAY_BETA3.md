@@ -11,6 +11,98 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-19g (**Mac**) — ✅ **§5b of round f is FIXED (owner approved), and the live RED is GREEN on the same sequence.** 🚨 **Shared C++ — Windows: rebuild after your next rebase.**
+
+Rebased onto your `d1feb7e` (P11-7b) and **rebuilt**: the three macOS TUs that include `LayoutHelpers.h` recompiled (`simple_handler.cpp` includes it only inside `_WIN32`), smoke launch clean, 0 `[ERROR]`.
+
+## ⚠️ C++ this round — rebuild after your next rebase (standing rule, root `CLAUDE.md`)
+
+| File | Platform split? | What changed |
+|---|---|---|
+| `cef-native/src/core/HttpRequestInterceptor.cpp` | ❌ none — shared, no `#ifdef` | `AsyncWalletResourceHandler`: new member `std::atomic<bool> awaitingApproval_`; `setTimeoutRequestId()` sets it; `startAsyncHTTPRequest()` clears it; `handleHttpTimeout()` returns early (with an INFO line) while it is set |
+
+## 1. The fix
+
+The 45 s net (`handleHttpTimeout`) is a **hung-wallet** safety net. It now **stands down while the request is parked
+on an approval prompt**, and the 10-minute prompt timeout (`handleAuthTimeout`, which has popped its entry since
+`12c76bd`) owns the request until the user answers.
+
+Why a flag and not `!timeoutRequestId_.empty()`: 📖 the connect-approval drain (`popConnectForDomain` →
+`ResumeDrainedApprovedRequest` → `ForwardPendingWalletRequest`) re-runs **`startAsyncHTTPRequest()` on the same
+handler**, which re-arms the 45 s net while `timeoutRequestId_` still holds the popped connect id. Keying on that
+id would have silently removed the hung-wallet net from every re-forwarded call. The flag is cleared on every
+(re-)forward, so that call keeps its net.
+
+Nothing is left unguarded while parked: the approve path (`resumeHttpCallbackResponse`) re-issues through
+`dispatchWalletHttpByMethod`, a synchronous client with its own **30 s** timeout, and never re-arms `postHttpTimeout`.
+
+📖 Every HTTP-path prompt goes through `tryHandlePendingResponse` → `setTimeoutRequestId` (payment, connect,
+manifest bundle, scoped grants, cert disclosure, privacy perimeter), so the one flag covers all of them. The
+ancillary BRC-100 auth-handshake modal parks **before** the first forward, so the 45 s net is never armed for it.
+
+## 2. 📏 Proof — the exact RED sequence, re-run on the fixed build
+
+Rig unchanged from round f §4 (`https://example.com`, web security ON — 📏 0/5 children carry `--disable-web-security`;
+1-cent cap on the **dev** wallet; one 130,000-sat `createAction` via `fetch('http://localhost:3321/…')`).
+Build proved by object mtime: source 11:56:43 → `HttpRequestInterceptor.cpp.o` 11:57:06 → binary 11:57:09, signed.
+
+| | 🔴 RED (round f, pre-fix, 11:50) | ✅ GREEN (fixed, 11:58) |
+|---|---|---|
+| +45 s | page told `Wallet request timeout` (45,003 ms) | C++ `⏱️ Wallet HTTP timeout ignored — request is parked on an approval prompt (req-…-1)` at **+45.0 s**; page told **nothing** |
+| +62 s | — | page still waiting (`__r = []`), modal on screen |
+| Approve at 68 s | wallet `X-User-Approved consumed` → createAction ran → **page never told** (already answered 23 s earlier) | wallet `X-User-Approved consumed` → createAction ran → **page receives that call's own result** at **69,011 ms**: `{"error":"Insufficient funds: no UTXOs available"}` |
+
+⇒ The subject of `F1-10b` was never "the wallet ran" — an approval the user gives while the page is listening
+**should** run. It was *"money into a response nobody reads"*. RED: the wallet ran and the page had been answered
+already. GREEN: the wallet ran and the page got the answer. (Zero satoshis both times — the dev wallet is empty, which
+is why the result is `Insufficient funds`.)
+
+## 3. The 10-minute leg, re-run because the fix changes its path
+
+Pre-fix, by 10 minutes the 45 s net had already answered the page, so `handleAuthTimeout` only popped. Now it is the
+one that answers, so it was re-measured:
+
+Two concurrent over-cap calls at 11:59:31 (L 130,000 shown, M 150,000 `⏳ queued`), left alone:
+
+| assertion | measured |
+|---|---|
+| both 45 s nets stand down | 2 × `⏱️ Wallet HTTP timeout ignored — request is parked on an approval prompt` at 12:00:16.922 (+45 s) |
+| page not answered early | `__r = []` at +94 s |
+| at 10 min the page gets the **prompt** timeout, not the wallet one | L `Approval timeout` at **600,014 ms**, M at **600,017 ms** (pre-fix both got `Wallet request timeout` at 45 s) |
+| Approve on the modal left on screen afterwards | wallet: **0** `/createAction`, **0** `X-User-Approved` |
+
+⚠️ **One behaviour the fix makes reachable, and it is not a spend path.** At +600.008 s the log shows
+`⏭️ Showing next queued prompt … req-…-3` — **M was posted**, and M's own timeout fired ~6 ms later, leaving its modal
+on screen as a ghost (the Approve above is the click on that ghost: nothing reached the wallet). The pre-fix run never
+posted M, because `handleAuthTimeout` returned on `httpCompleted_` (already set by the 45 s net) **before** reaching
+`ShowNextQueuedPrompt`. So the drain `12c76bd` intended (*"`ShowNextQueuedPrompt()` runs if the expired entry held the
+overlay"*) now actually runs on the HTTP path.
+
+📖 Why the freshness skip let M through: `createdAt` is stamped when the `PendingAuthRequest` is **built**, and each
+prompt's own 600 s timer is armed a moment **later**, at the end of `tryHandlePendingResponse`. M was built a few ms
+after L's timer was armed, so when L expired M was a few ms **younger** than 600,000 and passed the `>=` test with
+milliseconds to live. Money-safe (its own timeout pops it; a later click resolves nothing), but a user can be shown a
+prompt that is already dying. 👤 Suggested, not done: skip entries with less than a few seconds left (a margin in
+`takeNextQueuedPrompt`), and hide the modal when its request times out (the ghost is the same one your W7 sitting saw).
+
+## 4. ⬜ Not measured, stated
+
+- The **connect** variant (unknown domain → connect prompt → approve after 45 s → re-forward) is covered by the same
+  flag by CODE_READING (§1). Its pre-fix RED was **not** measured.
+- 🚨 **A narrower cousin, found while writing this — NOT fixed, owner's call.** After a connect approval the handler has
+  **two** 45 s nets pending: the original one (armed at the first forward) and the re-forward's. If the connect is
+  approved at, say, 40 s and the re-forwarded call is a payment **under** the cap (so Rust approves it silently) that
+  takes more than ~5 s, the ORIGINAL net fires at 45 s and answers the page `Wallet request timeout` and
+  `Cancel()`s the client side of the re-forwarded call — ⬜ whether Rust then still completes (and broadcasts) a
+  `createAction` whose client has gone is **not verified**; if it does, it spends into a response nobody reads. Same shape as `F1-10b`, much narrower window. 📖 CODE_READING only — I
+  could not produce its RED cheaply (it needs a slow wallet), so I have not changed code for it. The clean fix is a
+  generation counter: `startAsyncHTTPRequest` bumps it, `postHttpTimeout` hands the current value to its task, and
+  `handleHttpTimeout` ignores a net from an earlier generation.
+- Windows: not run there. The code is shared and has no platform split, but ⬜ your side still owes one build and ideally
+  the same 68 s Approve over HTTP.
+
+---
+
 # 📋 ROUND 2026-09-19f (**Mac**) — 🚨 **`W7`'s HTTP half found a live money-path RED (shared C++, not fixed — owner's call, §5b).** The three open macOS questions are answered (tear-off is a macOS defect, §3); `D10` is GREEN at zero satoshis
 
 **No `cef-native/**` file changed this round — nothing to rebuild.** Docs only (+ `HUMAN_TEST_QUEUE.md`).
