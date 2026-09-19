@@ -105,6 +105,14 @@ extern void ShutdownApplication();
         TabManager::GetInstance().CloseTab(tabId);
     }
 
+    // D-h2 safety net: since the Phase 3.5 macOS port an overlay can be a CHILD of
+    // this window, and AppKit orders a child out with its parent — leaving the
+    // overlay alive but invisible with every g_*_overlay_window still pointing at it.
+    // Detach before the window goes. ⛔ Must run BEFORE RemoveWindow: it reads
+    // bw->ns_window, which RemoveWindow drops.
+    extern void ReleaseOverlaysOwnedByMac(NSWindow* closing);
+    ReleaseOverlaysOwnedByMac(sender);
+
     WindowManager::GetInstance().RemoveWindow(self.window_id);
     LOG_INFO_WM("Window " + std::to_string(self.window_id) + " closed and removed [macOS]");
     return YES;

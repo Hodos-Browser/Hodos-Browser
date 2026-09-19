@@ -133,7 +133,7 @@ static bool IsOverlayEffectivelyVisible(HWND hwnd) {
     extern "C" void HideNotificationOverlayWindow();
     extern "C" void SetOverlayIgnoresMouseEvents(void* window, bool ignores);
     extern void HideWalletOverlay();
-    extern void ShowWalletOverlay();
+    extern void ShowWalletOverlay(BrowserWindow* targetWin = nullptr);  // D-h2
     extern void StartQRScreenCaptureMacOS();
 #endif
 
@@ -3200,8 +3200,8 @@ bool SimpleHandler::OnProcessMessageReceived(
         LOG_DEBUG_BROWSER("🔍 Omnibox overlay shown with query: " + query);
         // TODO Phase 2: Send query to overlay browser for suggestion rendering
 #elif defined(__APPLE__)
-        extern void CreateOmniboxOverlayMacOS();
-        extern void ShowOmniboxOverlayMacOS();
+        extern void CreateOmniboxOverlayMacOS(BrowserWindow* targetWin);
+        extern void ShowOmniboxOverlayMacOS(BrowserWindow* targetWin);
         extern bool IsOmniboxOverlayVisible();
         extern bool OmniboxOverlayExists();
 
@@ -3209,9 +3209,9 @@ bool SimpleHandler::OnProcessMessageReceived(
         if (IsOmniboxOverlayVisible()) {
             // Already showing
         } else if (OmniboxOverlayExists()) {
-            ShowOmniboxOverlayMacOS();
+            ShowOmniboxOverlayMacOS(GetOwnerWindow());
         } else {
-            CreateOmniboxOverlayMacOS();
+            CreateOmniboxOverlayMacOS(GetOwnerWindow());
         }
         LOG_DEBUG_BROWSER("Omnibox overlay shown (macOS)");
 #endif
@@ -3348,8 +3348,8 @@ bool SimpleHandler::OnProcessMessageReceived(
 
         LOG_INFO_BROWSER("🛡️ Privacy shield overlay shown with iconRightOffset=" + std::to_string(iconRightOffset));
 #elif defined(__APPLE__)
-        extern void CreateCookiePanelOverlayWithSeparateProcess(int iconRightOffset);
-        extern void ShowCookiePanelOverlay(int iconRightOffset);
+        extern void CreateCookiePanelOverlayWithSeparateProcess(int iconRightOffset, BrowserWindow* targetWin);
+        extern void ShowCookiePanelOverlay(int iconRightOffset, BrowserWindow* targetWin);
         extern void HideCookiePanelOverlay();
         extern bool IsCookiePanelOverlayVisible();
         extern bool WasCookiePanelJustHidden();
@@ -3367,9 +3367,9 @@ bool SimpleHandler::OnProcessMessageReceived(
         // Show or create the overlay
         CefRefPtr<CefBrowser> existing_cookie = GetCookiePanelBrowser();
         if (!existing_cookie) {
-            CreateCookiePanelOverlayWithSeparateProcess(iconRightOffset);
+            CreateCookiePanelOverlayWithSeparateProcess(iconRightOffset, GetOwnerWindow());
         } else {
-            ShowCookiePanelOverlay(iconRightOffset);
+            ShowCookiePanelOverlay(iconRightOffset, GetOwnerWindow());
         }
 
         // Inject domain into overlay via JS callback (same logic as Windows)
@@ -3462,21 +3462,21 @@ bool SimpleHandler::OnProcessMessageReceived(
             (IsOverlayEffectivelyVisible(g_profile_panel_overlay_hwnd) ? "1" : "0") +
             " sinceHide=" + std::to_string(GetTickCount64() - g_profile_last_hide_tick) + "ms");
 #elif defined(__APPLE__)
-        extern void CreateProfilePanelOverlayMacOS(int iconRightOffset);
-        extern void ShowProfilePanelOverlayMacOS(int iconRightOffset);
+        extern void CreateProfilePanelOverlayMacOS(int iconRightOffset, BrowserWindow* targetWin);
+        extern void ShowProfilePanelOverlayMacOS(int iconRightOffset, BrowserWindow* targetWin);
         extern void HideProfilePanelOverlayMacOS();
         extern bool IsProfilePanelOverlayVisible();
         extern bool WasProfilePanelJustHidden();
         extern NSWindow* g_profile_panel_overlay_window;
 
         if (!g_profile_panel_overlay_window) {
-            CreateProfilePanelOverlayMacOS(iconRightOffset);
+            CreateProfilePanelOverlayMacOS(iconRightOffset, GetOwnerWindow());
         } else if (IsProfilePanelOverlayVisible()) {
             HideProfilePanelOverlayMacOS();
         } else if (WasProfilePanelJustHidden()) {
             // suppress — click-outside monitor just hid it
         } else {
-            ShowProfilePanelOverlayMacOS(iconRightOffset);
+            ShowProfilePanelOverlayMacOS(iconRightOffset, GetOwnerWindow());
         }
         LOG_DEBUG_BROWSER("Profile panel toggle (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
 #endif
@@ -3527,21 +3527,24 @@ bool SimpleHandler::OnProcessMessageReceived(
 
         LOG_DEBUG_BROWSER("Menu overlay shown with iconRightOffset=" + std::to_string(iconRightOffset));
 #elif defined(__APPLE__)
-        extern void CreateMenuOverlayMac(int iconRightOffset);
-        extern void ShowMenuOverlayMacOS(int iconRightOffset);
+        // D-h2: GetOwnerWindow() is the same seam Windows uses one arm above —
+        // it is cross-platform (simple_handler.cpp :: GetOwnerWindow), so the
+        // macOS half needed no new plumbing to know who asked.
+        extern void CreateMenuOverlayMac(int iconRightOffset, BrowserWindow* targetWin);
+        extern void ShowMenuOverlayMacOS(int iconRightOffset, BrowserWindow* targetWin);
         extern void HideMenuOverlayMacOS();
         extern bool IsMenuOverlayVisible();
         extern bool WasMenuOverlayJustHidden();
         extern NSWindow* g_menu_overlay_window;
 
         if (!g_menu_overlay_window) {
-            CreateMenuOverlayMac(iconRightOffset);
+            CreateMenuOverlayMac(iconRightOffset, GetOwnerWindow());
         } else if (IsMenuOverlayVisible()) {
             HideMenuOverlayMacOS();
         } else if (WasMenuOverlayJustHidden()) {
             // suppress — click-outside monitor just hid it
         } else {
-            ShowMenuOverlayMacOS(iconRightOffset);
+            ShowMenuOverlayMacOS(iconRightOffset, GetOwnerWindow());
         }
         LOG_DEBUG_BROWSER("Menu overlay toggle (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
 #endif
@@ -3737,17 +3740,17 @@ bool SimpleHandler::OnProcessMessageReceived(
             }
             LOG_DEBUG_BROWSER("🔖 Bookmarks panel opened from menu");
 #elif defined(__APPLE__)
-            extern void CreateBookmarksPanelOverlayMacOS(int iconLeftOffset);
-            extern void ShowBookmarksPanelOverlayMacOS(int iconLeftOffset);
+            extern void CreateBookmarksPanelOverlayMacOS(int iconLeftOffset, BrowserWindow* targetWin);
+            extern void ShowBookmarksPanelOverlayMacOS(int iconLeftOffset, BrowserWindow* targetWin);
             extern NSWindow* g_bookmarks_panel_overlay_window;
             Tab* bmActiveTab = TabManager::GetInstance().GetActiveTab();
             pending_bookmark_url_ = bmActiveTab ? bmActiveTab->url : "";
             pending_bookmark_title_ = bmActiveTab ? bmActiveTab->title : "";
             int bmDefOff = 140;  // approximate anchor near bookmark button (points)
             if (!g_bookmarks_panel_overlay_window) {
-                CreateBookmarksPanelOverlayMacOS(bmDefOff);
+                CreateBookmarksPanelOverlayMacOS(bmDefOff, GetOwnerWindow());
             } else {
-                ShowBookmarksPanelOverlayMacOS(bmDefOff);
+                ShowBookmarksPanelOverlayMacOS(bmDefOff, GetOwnerWindow());
                 CefRefPtr<CefBrowser> bm_browser = GetBookmarksPanelBrowser();
                 if (bm_browser && bm_browser->GetMainFrame()) {
                     std::string js = "if (window.setBookmarkContext) { window.setBookmarkContext('" +
@@ -3827,14 +3830,14 @@ bool SimpleHandler::OnProcessMessageReceived(
         // right unit. Scaling it would put the menu at ~2x the offset on a Retina
         // display. (The mixed-DPI case P3.5-A3 guards against does not arise the same
         // way — AppKit hands each screen its own backing scale factor.)
-        extern void CreateTabContextMenuOverlayMacOS(int anchorX, int anchorY);
-        extern void ShowTabContextMenuOverlayMacOS(int anchorX, int anchorY);
+        extern void CreateTabContextMenuOverlayMacOS(int anchorX, int anchorY, BrowserWindow* targetWin);
+        extern void ShowTabContextMenuOverlayMacOS(int anchorX, int anchorY, BrowserWindow* targetWin);
         extern NSWindow* g_tabmenu_overlay_window;
 
         if (!g_tabmenu_overlay_window) {
-            CreateTabContextMenuOverlayMacOS(anchorX, anchorY);
+            CreateTabContextMenuOverlayMacOS(anchorX, anchorY, GetOwnerWindow());
         } else {
-            ShowTabContextMenuOverlayMacOS(anchorX, anchorY);
+            ShowTabContextMenuOverlayMacOS(anchorX, anchorY, GetOwnerWindow());
         }
         SendTabMenuContext(GetTabMenuBrowser());
 #endif
@@ -5093,7 +5096,7 @@ bool SimpleHandler::OnProcessMessageReceived(
             CreateWalletOverlay(g_hInstance, true, 0);
         }
 #elif defined(__APPLE__)
-        CreateWalletOverlayWithSeparateProcess();
+        CreateWalletOverlayWithSeparateProcess(0, GetOwnerWindow());  // D-h2
 #endif
         return true;
     }
@@ -6134,7 +6137,7 @@ bool SimpleHandler::OnProcessMessageReceived(
             CreateWalletOverlay(g_hInstance, true, iconRightOffset);
         }
 #elif defined(__APPLE__)
-        CreateWalletOverlayWithSeparateProcess(iconRightOffset);
+        CreateWalletOverlayWithSeparateProcess(iconRightOffset, GetOwnerWindow());  // D-h2
 #else
         LOG_DEBUG_BROWSER("toggle_wallet_panel not implemented on this platform");
 #endif
@@ -7371,21 +7374,21 @@ bool SimpleHandler::OnProcessMessageReceived(
 
         LOG_DEBUG_BROWSER("📥 Download panel overlay shown with iconRightOffset=" + std::to_string(iconRightOffset));
 #elif defined(__APPLE__)
-        extern void CreateDownloadPanelOverlayMacOS(int iconRightOffset);
-        extern void ShowDownloadPanelOverlayMacOS(int iconRightOffset);
+        extern void CreateDownloadPanelOverlayMacOS(int iconRightOffset, BrowserWindow* targetWin);
+        extern void ShowDownloadPanelOverlayMacOS(int iconRightOffset, BrowserWindow* targetWin);
         extern void HideDownloadPanelOverlayMacOS();
         extern bool IsDownloadPanelOverlayVisible();
         extern bool WasDownloadPanelJustHidden();
         extern NSWindow* g_download_panel_overlay_window;
 
         if (!g_download_panel_overlay_window) {
-            CreateDownloadPanelOverlayMacOS(iconRightOffset);
+            CreateDownloadPanelOverlayMacOS(iconRightOffset, GetOwnerWindow());
         } else if (IsDownloadPanelOverlayVisible()) {
             HideDownloadPanelOverlayMacOS();
         } else if (WasDownloadPanelJustHidden()) {
             // suppress — click-outside monitor just hid it
         } else {
-            ShowDownloadPanelOverlayMacOS(iconRightOffset);
+            ShowDownloadPanelOverlayMacOS(iconRightOffset, GetOwnerWindow());
         }
         NotifyDownloadStateChanged();
         LOG_DEBUG_BROWSER("Download panel toggle (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
@@ -7460,8 +7463,8 @@ bool SimpleHandler::OnProcessMessageReceived(
         }
         LOG_DEBUG_BROWSER("🔖 Bookmarks panel toggle handled (iconLeftOffset=" + std::to_string(iconLeftOffset) + ")");
 #elif defined(__APPLE__)
-        extern void CreateBookmarksPanelOverlayMacOS(int iconLeftOffset);
-        extern void ShowBookmarksPanelOverlayMacOS(int iconLeftOffset);
+        extern void CreateBookmarksPanelOverlayMacOS(int iconLeftOffset, BrowserWindow* targetWin);
+        extern void ShowBookmarksPanelOverlayMacOS(int iconLeftOffset, BrowserWindow* targetWin);
         extern void HideBookmarksPanelOverlayMacOS();
         extern bool IsBookmarksPanelOverlayVisible();
         extern bool WasBookmarksPanelJustHidden();
@@ -7469,7 +7472,7 @@ bool SimpleHandler::OnProcessMessageReceived(
 
         bool willShow = true;
         if (!g_bookmarks_panel_overlay_window) {
-            CreateBookmarksPanelOverlayMacOS(iconLeftOffset);
+            CreateBookmarksPanelOverlayMacOS(iconLeftOffset, GetOwnerWindow());
         } else if (IsBookmarksPanelOverlayVisible()) {
             HideBookmarksPanelOverlayMacOS();
             willShow = false;
@@ -7480,7 +7483,7 @@ bool SimpleHandler::OnProcessMessageReceived(
             pending_bookmark_url_.clear();
             pending_bookmark_title_.clear();
         } else {
-            ShowBookmarksPanelOverlayMacOS(iconLeftOffset);
+            ShowBookmarksPanelOverlayMacOS(iconLeftOffset, GetOwnerWindow());
         }
 
         if (willShow) {
@@ -7544,21 +7547,21 @@ bool SimpleHandler::OnProcessMessageReceived(
             ", effVisible=" + (IsOverlayEffectivelyVisible(g_tablist_panel_overlay_hwnd) ? "1" : "0") +
             ", sinceHide=" + std::to_string(GetTickCount64() - g_tablist_last_hide_tick) + "ms)");
 #elif defined(__APPLE__)
-        extern void CreateTabListPanelOverlayMacOS(int iconRightOffset);
-        extern void ShowTabListPanelOverlayMacOS(int iconRightOffset);
+        extern void CreateTabListPanelOverlayMacOS(int iconRightOffset, BrowserWindow* targetWin);
+        extern void ShowTabListPanelOverlayMacOS(int iconRightOffset, BrowserWindow* targetWin);
         extern void HideTabListPanelOverlayMacOS();
         extern bool IsTabListPanelOverlayVisible();
         extern bool WasTabListPanelJustHidden();
         extern NSWindow* g_tablist_panel_overlay_window;
 
         if (!g_tablist_panel_overlay_window) {
-            CreateTabListPanelOverlayMacOS(iconLeftOffset);
+            CreateTabListPanelOverlayMacOS(iconLeftOffset, GetOwnerWindow());
         } else if (IsTabListPanelOverlayVisible()) {
             HideTabListPanelOverlayMacOS();
         } else if (WasTabListPanelJustHidden()) {
             // Suppress re-show — the click-outside monitor just hid it
         } else {
-            ShowTabListPanelOverlayMacOS(iconLeftOffset);
+            ShowTabListPanelOverlayMacOS(iconLeftOffset, GetOwnerWindow());
         }
         LOG_DEBUG_BROWSER("Tab-list panel toggle handled (macOS, iconLeftOffset=" + std::to_string(iconLeftOffset) + ")");
 #endif
@@ -7660,8 +7663,8 @@ bool SimpleHandler::OnProcessMessageReceived(
         }
         LOG_DEBUG_BROWSER("🛈 Site-info panel toggle handled (iconLeftOffset=" + std::to_string(iconLeftOffset) + ")");
 #elif defined(__APPLE__)
-        extern void CreateSiteInfoPanelOverlayMacOS(int iconLeftOffset);
-        extern void ShowSiteInfoPanelOverlayMacOS(int iconLeftOffset);
+        extern void CreateSiteInfoPanelOverlayMacOS(int iconLeftOffset, BrowserWindow* targetWin);
+        extern void ShowSiteInfoPanelOverlayMacOS(int iconLeftOffset, BrowserWindow* targetWin);
         extern void HideSiteInfoPanelOverlayMacOS();
         extern bool IsSiteInfoPanelOverlayVisible();
         extern bool WasSiteInfoPanelJustHidden();
@@ -7669,7 +7672,7 @@ bool SimpleHandler::OnProcessMessageReceived(
 
         bool willShow = true;
         if (!g_siteinfo_panel_overlay_window) {
-            CreateSiteInfoPanelOverlayMacOS(iconLeftOffset);
+            CreateSiteInfoPanelOverlayMacOS(iconLeftOffset, GetOwnerWindow());
         } else if (IsSiteInfoPanelOverlayVisible()) {
             HideSiteInfoPanelOverlayMacOS();
             willShow = false;
@@ -7680,7 +7683,7 @@ bool SimpleHandler::OnProcessMessageReceived(
             pending_siteinfo_host_.clear();
             pending_siteinfo_security_.clear();
         } else {
-            ShowSiteInfoPanelOverlayMacOS(iconLeftOffset);
+            ShowSiteInfoPanelOverlayMacOS(iconLeftOffset, GetOwnerWindow());
         }
 
         if (willShow) {
@@ -9262,13 +9265,13 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
                 }
                 NotifyDownloadStateChanged();
 #elif defined(__APPLE__)
-                extern void CreateDownloadPanelOverlayMacOS(int iconRightOffset);
+                extern void CreateDownloadPanelOverlayMacOS(int iconRightOffset, BrowserWindow* targetWin);
                 extern bool IsDownloadPanelOverlayVisible();
                 extern void HideDownloadPanelOverlayMacOS();
                 if (IsDownloadPanelOverlayVisible()) {
                     HideDownloadPanelOverlayMacOS();
                 } else {
-                    CreateDownloadPanelOverlayMacOS(0);
+                    CreateDownloadPanelOverlayMacOS(0, GetOwnerWindow());
                     NotifyDownloadStateChanged();
                 }
 #endif
@@ -9300,18 +9303,18 @@ bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
                     ShowTabListPanelOverlay(g_tablist_icon_left_offset, GetOwnerWindow());
                 }
 #elif defined(__APPLE__)
-                extern void CreateTabListPanelOverlayMacOS(int iconRightOffset);
-                extern void ShowTabListPanelOverlayMacOS(int iconRightOffset);
+                extern void CreateTabListPanelOverlayMacOS(int iconRightOffset, BrowserWindow* targetWin);
+                extern void ShowTabListPanelOverlayMacOS(int iconRightOffset, BrowserWindow* targetWin);
                 extern void HideTabListPanelOverlayMacOS();
                 extern bool IsTabListPanelOverlayVisible();
                 extern NSWindow* g_tablist_panel_overlay_window;
                 int tlDefOff = 60;  // right offset in points — approximate caret position from right edge
                 if (!g_tablist_panel_overlay_window) {
-                    CreateTabListPanelOverlayMacOS(tlDefOff);
+                    CreateTabListPanelOverlayMacOS(tlDefOff, GetOwnerWindow());
                 } else if (IsTabListPanelOverlayVisible()) {
                     HideTabListPanelOverlayMacOS();
                 } else {
-                    ShowTabListPanelOverlayMacOS(tlDefOff);
+                    ShowTabListPanelOverlayMacOS(tlDefOff, GetOwnerWindow());
                 }
 #endif
                 return true;

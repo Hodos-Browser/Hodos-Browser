@@ -61,8 +61,14 @@
     extern NSWindow* g_settings_menu_overlay_window;
 
     // macOS overlay creation functions
+    // ⚠️ `targetWin` is the Phase 3.5 macOS port (`D-h2`): the wallet anchors to and
+    // hangs under the window that asked. It defaults to nullptr = the primary, which
+    // is the pre-port behaviour. Declared here as well as in cef_browser_shell_mac.mm
+    // because simple_handler.cpp reaches the creator through THIS header.
+    // (`class BrowserWindow;` is already forward-declared by simple_handler.h above.)
     void CreateSettingsOverlayWithSeparateProcess(int iconRightOffset = 0);
-    void CreateWalletOverlayWithSeparateProcess(int iconRightOffset = 0);
+    void CreateWalletOverlayWithSeparateProcess(int iconRightOffset = 0,
+                                                BrowserWindow* targetWin = nullptr);
     void CreateBRC100AuthOverlayWithSeparateProcess();
     void CreateNotificationOverlay(const std::string& type, const std::string& domain, const std::string& extraParams = "");
     void CreateSettingsMenuOverlay();

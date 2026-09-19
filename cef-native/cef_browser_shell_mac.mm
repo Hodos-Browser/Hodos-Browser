@@ -624,52 +624,61 @@ void HandleCmdL() {
 // Forward Declarations
 // ============================================================================
 
+// ⭐ `BrowserWindow* targetWin` on the Create/Show pairs below is the macOS port
+// of Phase 3.5 (`D-h2`): the overlay anchors to the window that ASKED, not to the
+// process-global primary. It defaults to nullptr, which resolves back to the
+// primary — see `OverlayHostWindow`. Mirrors Windows' `simple_app.cpp` signatures.
+// ⛔ The four overlays WITHOUT it (settings, settings menu, BRC-100 auth,
+// notification) are the same four Windows leaves primary-owned. Keeping that set
+// identical across platforms is deliberate; see the relay round for the reasoning.
 void ToggleWalletPanel();  // C++ callable function
 void CreateMainWindow();
 void CreateSettingsOverlayWithSeparateProcess(int iconRightOffset);
-void CreateWalletOverlayWithSeparateProcess(int iconRightOffset);
+// ⚠️ NO default arg here — simple_app.h already declares it with one, and repeating
+// a default argument is an error. That header is included above.
+void CreateWalletOverlayWithSeparateProcess(int iconRightOffset, BrowserWindow* targetWin);
 void CreateBRC100AuthOverlayWithSeparateProcess();
 void CreateNotificationOverlay(const std::string& type, const std::string& domain, const std::string& extraParams);
 void CreateSettingsMenuOverlay();
-void CreateMenuOverlayMac(int iconRightOffset);
+void CreateMenuOverlayMac(int iconRightOffset, BrowserWindow* targetWin = nullptr);
 void ShowSettingsMenuOverlay();
 void HideSettingsMenuOverlay();
 bool IsSettingsMenuOverlayVisible();
 bool WasSettingsMenuJustHidden();
-void CreateCookiePanelOverlayWithSeparateProcess(int iconRightOffset);
-void ShowCookiePanelOverlay(int iconRightOffset);
+void CreateCookiePanelOverlayWithSeparateProcess(int iconRightOffset, BrowserWindow* targetWin = nullptr);
+void ShowCookiePanelOverlay(int iconRightOffset, BrowserWindow* targetWin = nullptr);
 void HideCookiePanelOverlay();
 bool IsCookiePanelOverlayVisible();
-void CreateOmniboxOverlayMacOS();
-void ShowOmniboxOverlayMacOS();
+void CreateOmniboxOverlayMacOS(BrowserWindow* targetWin = nullptr);
+void ShowOmniboxOverlayMacOS(BrowserWindow* targetWin = nullptr);
 void HideOmniboxOverlayMacOS();
 bool OmniboxOverlayExists();
-void CreateDownloadPanelOverlayMacOS(int iconRightOffset);
-void ShowDownloadPanelOverlayMacOS(int iconRightOffset);
+void CreateDownloadPanelOverlayMacOS(int iconRightOffset, BrowserWindow* targetWin = nullptr);
+void ShowDownloadPanelOverlayMacOS(int iconRightOffset, BrowserWindow* targetWin = nullptr);
 void HideDownloadPanelOverlayMacOS();
-void CreateProfilePanelOverlayMacOS(int iconRightOffset);
-void ShowProfilePanelOverlayMacOS(int iconRightOffset);
+void CreateProfilePanelOverlayMacOS(int iconRightOffset, BrowserWindow* targetWin = nullptr);
+void ShowProfilePanelOverlayMacOS(int iconRightOffset, BrowserWindow* targetWin = nullptr);
 void HideProfilePanelOverlayMacOS();
-void CreateBookmarksPanelOverlayMacOS(int iconLeftOffset);
-void ShowBookmarksPanelOverlayMacOS(int iconLeftOffset);
+void CreateBookmarksPanelOverlayMacOS(int iconLeftOffset, BrowserWindow* targetWin = nullptr);
+void ShowBookmarksPanelOverlayMacOS(int iconLeftOffset, BrowserWindow* targetWin = nullptr);
 void HideBookmarksPanelOverlayMacOS();
 bool IsBookmarksPanelOverlayVisible();
 bool WasBookmarksPanelJustHidden();
-void CreateSiteInfoPanelOverlayMacOS(int iconLeftOffset);
-void ShowSiteInfoPanelOverlayMacOS(int iconLeftOffset);
+void CreateSiteInfoPanelOverlayMacOS(int iconLeftOffset, BrowserWindow* targetWin = nullptr);
+void ShowSiteInfoPanelOverlayMacOS(int iconLeftOffset, BrowserWindow* targetWin = nullptr);
 void HideSiteInfoPanelOverlayMacOS();
 bool IsSiteInfoPanelOverlayVisible();
 bool WasSiteInfoPanelJustHidden();
-void CreateTabListPanelOverlayMacOS(int iconRightOffset);
-void ShowTabListPanelOverlayMacOS(int iconRightOffset);
+void CreateTabListPanelOverlayMacOS(int iconRightOffset, BrowserWindow* targetWin = nullptr);
+void ShowTabListPanelOverlayMacOS(int iconRightOffset, BrowserWindow* targetWin = nullptr);
 void HideTabListPanelOverlayMacOS();
 bool IsTabListPanelOverlayVisible();
 bool WasTabListPanelJustHidden();
 // Overlay #15 — tab context menu. ⚠️ Cursor-anchored: (anchorX, anchorY) are CSS px in
 // the HEADER browser's viewport (top-left origin, Y down), straight from the React
 // onContextMenu event's clientX/clientY.
-void CreateTabContextMenuOverlayMacOS(int anchorX, int anchorY);
-void ShowTabContextMenuOverlayMacOS(int anchorX, int anchorY);
+void CreateTabContextMenuOverlayMacOS(int anchorX, int anchorY, BrowserWindow* targetWin = nullptr);
+void ShowTabContextMenuOverlayMacOS(int anchorX, int anchorY, BrowserWindow* targetWin = nullptr);
 void HideTabContextMenuOverlayMacOS();
 void ShutdownApplication();
 void ToggleFullScreenMacOS();
@@ -2507,6 +2516,122 @@ void CreateMainWindow() {
 }
 
 // ============================================================================
+// P3.5 macOS port (`D-h2`) — an overlay belongs to the window that ASKED
+// ============================================================================
+// Windows fixed this in Phase 3.5 (`simple_app.cpp :: OwnOverlayToRequestingWindow`,
+// `GWLP_HWNDPARENT`). macOS had no counterpart: every anchor site named the
+// process-global `g_main_window`, so a dropdown opened in a torn-off window B
+// opened over the PRIMARY window A.
+//
+// 📏 MEASURED pre-fix, 2026-09-19 (relay round f §3, re-run this round on
+// `88e6592` before any code was written): tab 2 torn off to a window B at
+// x=600 overlapping A at x=0, every dropdown driven over CDP from EACH header,
+// frames read with `CGWindowListCopyWindowInfo` — **8/8 overlays opened at
+// byte-identical A-relative coordinates whichever window asked** (menu 1160 =
+// A.right−280, profile 1060, download/cookie 1040, tablist 1100, bookmarks and
+// siteinfo 0, omnibox 223). The requesting window had no influence at all.
+//
+// ⭐ THE macOS SHAPE IS NOT THE WINDOWS SHAPE, and that is what keeps this small.
+// Windows had to engineer the z-order fix because every overlay was OWNED by the
+// primary and `SetWindowPos` raises the owner's group. On macOS only FOUR of
+// these overlays are `addChildWindow:` children (cookie, wallet, omnibox, menu);
+// the other dropdowns attach to nothing and therefore already have the property
+// Windows had to build — see the `CreateTabContextMenuOverlayMacOS` note, which
+// chose "attach to nothing" for exactly this reason. So:
+//     * all ten overlays get their GEOMETRY from the requesting window;
+//     * only the four real child windows also get their PARENT moved.
+// Converting the other six into child windows would be unrequested scope AND a
+// behaviour change — it would introduce the parent coupling the tabmenu comment
+// deliberately avoided.
+//
+// ⚠️ NO `ScalePx` COUNTERPART, deliberately. Windows' `P3.5-A3` converted 12
+// `ScalePx(x, g_hwnd)` sites because its overlays are sized in PHYSICAL pixels
+// and took DPI from the primary. A macOS OSR overlay is sized in POINTS and
+// React CSS px are points, so there is no scale step here to get wrong. Adding
+// one would double every offset on a Retina display.
+
+// The NSWindow an overlay should anchor to and hang under.
+// ⛔ Falls back to the primary whenever the requesting window is unusable, so a
+// null `targetWin` reproduces exactly today's behaviour — that fallback is what
+// makes the whole port revertible one call site at a time.
+static NSWindow* OverlayHostWindow(BrowserWindow* targetWin) {
+    if (targetWin && targetWin->ns_window) {
+        NSWindow* w = (__bridge NSWindow*)targetWin->ns_window;
+        if (w && [w isVisible]) return w;
+    }
+    return g_main_window;
+}
+
+// Hand a CHILD overlay to the window that asked. Only the four overlays that are
+// already `addChildWindow:` children call this; the rest need geometry only.
+//
+// 📖 Prior art read before writing this (root CLAUDE.md rule 4 — AppKit child
+// windows are not an API this file had used this way). Chromium
+// `components/remote_cocoa/app_shim/`:
+//   1. `native_widget_ns_window_bridge.mm :: SetParent` removes the window from
+//      its old parent BEFORE adding it to the new one. A window has one parent.
+//   2. `native_widget_mac_nswindow.mm :: -addChildWindow:ordered:` saves and
+//      restores `childWin.level`, with the comment *"Attaching a window to be a
+//      child window resets the window level"*. ⛔ Without this every
+//      `NSPopUpMenuWindowLevel` dropdown silently drops to normal level.
+//   3. `OrderChildren()` bails when the parent is not visible or not on the
+//      active space — *"Adding a child to a window that isn't visible on the
+//      active space will switch to that space"* (crbug 783521, 798792).
+//   4. `SetVisible` REMOVES the child from its parent when it becomes invisible:
+//      *"Cocoa's childWindow management breaks down when child windows are
+//      hidden."* That is why the hide path detaches rather than re-parenting
+//      back to the primary the way Windows does.
+static void OwnOverlayToRequestingWindowMac(NSWindow* overlay, BrowserWindow* targetWin) {
+    if (!overlay) return;
+    NSWindow* newParent = OverlayHostWindow(targetWin);
+    if (!newParent) return;
+
+    NSWindow* current = [overlay parentWindow];
+    if (current == newParent) return;
+    if (current) [current removeChildWindow:overlay];          // (1)
+    if (![newParent isVisible] || ![newParent isOnActiveSpace]) return;  // (3)
+
+    NSInteger level = [overlay level];                          // (2)
+    [newParent addChildWindow:overlay ordered:NSWindowAbove];
+    [overlay setLevel:level];
+}
+
+// The hide half. ⚠️ Detaches rather than handing back to the primary: on macOS a
+// parentless window is a normal state, and Cocoa's own child bookkeeping is
+// documented to misbehave for hidden children (4). The next show re-attaches it
+// to whichever window asks then.
+static void DetachOverlayFromParentMac(NSWindow* overlay) {
+    if (!overlay) return;
+    NSWindow* current = [overlay parentWindow];
+    if (current) [current removeChildWindow:overlay];
+}
+
+// Safety net for the one case the show/hide pair cannot cover: a window closed
+// while one of its overlays is still attached. AppKit orders a child out with
+// its parent, so the overlay would stay alive but invisible with every
+// `g_*_overlay_window` still pointing at it.
+// ⛔ An overlay added to the child-window set later is NOT covered unless it is
+// added here in the same change — same contract as Windows' ReleaseOverlaysOwnedBy.
+void ReleaseOverlaysOwnedByMac(NSWindow* closing) {
+    if (!closing) return;
+    NSWindow* overlays[] = {
+        g_cookie_panel_overlay_window, g_wallet_overlay_window,
+        g_omnibox_overlay_window, g_menu_overlay_window,
+    };
+    int moved = 0;
+    for (NSWindow* ov : overlays) {
+        if (!ov || [ov parentWindow] != closing) continue;
+        [closing removeChildWindow:ov];
+        [ov orderOut:nil];
+        moved++;
+    }
+    if (moved > 0) {
+        LOG_INFO("Detached " + std::to_string(moved) +
+                 " overlay(s) from a closing window (macOS P3.5)");
+    }
+}
+
+// ============================================================================
 // Overlay Window Creation Functions
 // ============================================================================
 
@@ -2612,6 +2737,10 @@ static void RemoveCookiePanelClickOutsideMonitor();
 void HideCookiePanelOverlay() {
     if (g_cookie_panel_overlay_window) {
         [g_cookie_panel_overlay_window orderOut:nil];
+        // D-h2: drop the parent link once hidden — Cocoa's child bookkeeping is
+        // documented to break down for hidden children, and the next show
+        // re-attaches to whichever window asks then.
+        DetachOverlayFromParentMac(g_cookie_panel_overlay_window);
         RemoveCookiePanelClickOutsideMonitor();
         g_cookie_panel_last_hide_time = CFAbsoluteTimeGetCurrent();
         LOG_INFO("Cookie panel overlay hidden (macOS)");
@@ -2658,12 +2787,17 @@ bool WasCookiePanelJustHidden() {
     return (now - g_cookie_panel_last_hide_time) < 0.3;
 }
 
-void ShowCookiePanelOverlay(int iconRightOffset) {
+void ShowCookiePanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
     if (g_cookie_panel_overlay_window) {
         g_mac_cookie_panel_icon_right_offset = iconRightOffset;
 
+        // D-h2: anchor to and hang under the window that asked, BEFORE showing, so
+        // the primary is never the reference frame and never pulled forward.
+        NSWindow* host = OverlayHostWindow(targetWin);
+        OwnOverlayToRequestingWindowMac(g_cookie_panel_overlay_window, targetWin);
+
         // Reposition: flush right, flush below header
-        NSRect panelFrame = CalculateToolbarOverlayFrame(g_main_window, 400, 500, 96);
+        NSRect panelFrame = CalculateToolbarOverlayFrame(host, 400, 500, 96);
         [g_cookie_panel_overlay_window setFrame:panelFrame display:YES];
         [g_cookie_panel_overlay_window makeKeyAndOrderFront:nil];
         InstallCookiePanelClickOutsideMonitor();
@@ -2671,13 +2805,19 @@ void ShowCookiePanelOverlay(int iconRightOffset) {
     }
 }
 
-void CreateCookiePanelOverlayWithSeparateProcess(int iconRightOffset) {
+void CreateCookiePanelOverlayWithSeparateProcess(int iconRightOffset, BrowserWindow* targetWin) {
     LOG_INFO("Creating cookie panel overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
     g_mac_cookie_panel_icon_right_offset = iconRightOffset;
 
+    // D-h2: the CREATE path needs the requesting window too — Windows' `P3.5-A7`
+    // measured the omnibox being created at A-relative coordinates and only
+    // corrected on the later Show, which masks the defect for everything except
+    // the first open.
+    NSWindow* host = OverlayHostWindow(targetWin);
+
     CGFloat panelWidth = 400;
     CGFloat panelHeight = 500;
-    NSRect panelFrame = CalculateToolbarOverlayFrame(g_main_window, panelWidth, panelHeight, 96);
+    NSRect panelFrame = CalculateToolbarOverlayFrame(host, panelWidth, panelHeight, 96);
 
     LOG_INFO("Cookie panel: (" + std::to_string((int)panelFrame.origin.x) + ", " + std::to_string((int)panelFrame.origin.y)
              + ") " + std::to_string((int)panelWidth) + "x" + std::to_string((int)panelHeight));
@@ -2709,8 +2849,8 @@ void CreateCookiePanelOverlayWithSeparateProcess(int iconRightOffset) {
     [g_cookie_panel_overlay_window setHasShadow:NO];
     [g_cookie_panel_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
 
-    // Make this a child window of the main window
-    [g_main_window addChildWindow:g_cookie_panel_overlay_window ordered:NSWindowAbove];
+    // Make this a child window of the REQUESTING window (D-h2), not of the primary.
+    OwnOverlayToRequestingWindowMac(g_cookie_panel_overlay_window, targetWin);
 
     // Create custom view for event handling and rendering
     CookiePanelOverlayView* contentView = [[CookiePanelOverlayView alloc]
@@ -2765,15 +2905,16 @@ void CloseWalletOverlay() {
         wallet_browser->GetHost()->CloseBrowser(false);
     }
 
-    if (g_main_window) {
-        [g_main_window removeChildWindow:g_wallet_overlay_window];
-    }
+    // D-h2: detach from whatever window owns it — after the port that is not
+    // necessarily the primary, and removeChildWindow: on the wrong parent is a no-op
+    // that would leave the link dangling.
+    DetachOverlayFromParentMac(g_wallet_overlay_window);
     [g_wallet_overlay_window orderOut:nil];
     [g_wallet_overlay_window close];
     g_wallet_overlay_window = nullptr;
 }
 
-void CreateWalletOverlayWithSeparateProcess(int iconRightOffset) {
+void CreateWalletOverlayWithSeparateProcess(int iconRightOffset, BrowserWindow* targetWin) {
     LOG_INFO("Creating wallet overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
 
     if (!g_main_window || ![g_main_window isVisible] || [g_main_window frame].size.width < 100) {
@@ -2785,11 +2926,16 @@ void CreateWalletOverlayWithSeparateProcess(int iconRightOffset) {
 
     g_mac_wallet_icon_right_offset = iconRightOffset;
 
+    // D-h2: the wallet is full-height, so BOTH its anchor and its height come from
+    // the requesting window — a torn-off window is shorter than the primary (697 vs
+    // 795 pt as measured), and taking the height from the primary would overhang it.
+    NSWindow* host = OverlayHostWindow(targetWin);
+
     // Position: fixed-width panel, flush right, flush below header, full remaining height
     CGFloat walletWidth = 400;
-    NSRect contentScreen = [g_main_window convertRectToScreen:[[g_main_window contentView] frame]];
+    NSRect contentScreen = [host convertRectToScreen:[[host contentView] frame]];
     CGFloat walletHeight = contentScreen.size.height - 96;
-    NSRect walletFrame = CalculateToolbarOverlayFrame(g_main_window, walletWidth, walletHeight, 96);
+    NSRect walletFrame = CalculateToolbarOverlayFrame(host, walletWidth, walletHeight, 96);
     LOG_INFO("📐 Wallet overlay: " + std::to_string((int)walletFrame.size.width) + " x " + std::to_string((int)walletFrame.size.height));
 
     if (g_wallet_overlay_window) {
@@ -2818,8 +2964,8 @@ void CreateWalletOverlayWithSeparateProcess(int iconRightOffset) {
     [g_wallet_overlay_window setHasShadow:YES];
     [g_wallet_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
 
-    // Child window of main window (moves/minimizes together)
-    [g_main_window addChildWindow:g_wallet_overlay_window ordered:NSWindowAbove];
+    // Child window of the REQUESTING window (moves/minimizes together) — D-h2
+    OwnOverlayToRequestingWindowMac(g_wallet_overlay_window, targetWin);
 
     WalletOverlayView* contentView = [[WalletOverlayView alloc]
         initWithFrame:NSMakeRect(0, 0, walletFrame.size.width, walletFrame.size.height)];
@@ -2897,11 +3043,20 @@ void HideWalletOverlay() {
     }
 
     [g_wallet_overlay_window orderOut:nil];
+    DetachOverlayFromParentMac(g_wallet_overlay_window);  // D-h2
 }
 
-void ShowWalletOverlay() {
+void ShowWalletOverlay(BrowserWindow* targetWin = nullptr) {
     if (!g_wallet_overlay_window) return;
     LOG_INFO("Showing wallet overlay (macOS)");
+
+    // D-h2: re-anchor and re-parent to the window that asked, before showing.
+    NSWindow* host = OverlayHostWindow(targetWin);
+    OwnOverlayToRequestingWindowMac(g_wallet_overlay_window, targetWin);
+    NSRect hostContent = [host convertRectToScreen:[[host contentView] frame]];
+    [g_wallet_overlay_window setFrame:CalculateToolbarOverlayFrame(
+        host, 400, hostContent.size.height - 96, 96) display:YES];
+
     [g_wallet_overlay_window makeKeyAndOrderFront:nil];
     InstallClickOutsideMonitor(g_wallet_overlay_window);
 
@@ -3657,6 +3812,7 @@ static void InstallOmniboxClickOutsideMonitor() {
 void HideOmniboxOverlayMacOS() {
     if (g_omnibox_overlay_window) {
         [g_omnibox_overlay_window orderOut:nil];
+        DetachOverlayFromParentMac(g_omnibox_overlay_window);  // D-h2
         RemoveOmniboxClickOutsideMonitor();
         g_omnibox_last_hide_time = CFAbsoluteTimeGetCurrent();
         LOG_INFO("Omnibox overlay hidden (macOS)");
@@ -3676,10 +3832,14 @@ bool WasOmniboxJustHidden() {
     return (now - g_omnibox_last_hide_time) < 0.3;
 }
 
-void ShowOmniboxOverlayMacOS() {
+void ShowOmniboxOverlayMacOS(BrowserWindow* targetWin) {
     if (g_omnibox_overlay_window) {
+        // D-h2: re-anchor and re-parent to the requesting window first.
+        NSWindow* host = OverlayHostWindow(targetWin);
+        OwnOverlayToRequestingWindowMac(g_omnibox_overlay_window, targetWin);
+
         // Reposition in case window moved/resized since creation
-        NSRect contentScreen = [g_main_window convertRectToScreen:[[g_main_window contentView] frame]];
+        NSRect contentScreen = [host convertRectToScreen:[[host contentView] frame]];
         int omniboxWidth = (int)(contentScreen.size.width * 0.69);
         if (omniboxWidth < 400) omniboxWidth = 400;
         int omniboxHeight = 420;
@@ -3694,10 +3854,14 @@ void ShowOmniboxOverlayMacOS() {
     }
 }
 
-void CreateOmniboxOverlayMacOS() {
+void CreateOmniboxOverlayMacOS(BrowserWindow* targetWin) {
     LOG_INFO("Creating omnibox overlay (macOS)");
 
-    NSRect contentScreen = [g_main_window convertRectToScreen:[[g_main_window contentView] frame]];
+    // D-h2: ⭐ the omnibox is the row Windows called `P3.5-A7` — its CREATE path
+    // positioned against the primary and the later Show corrected it, so the defect
+    // was only visible on the first open. Both paths take the requesting window here.
+    NSWindow* host = OverlayHostWindow(targetWin);
+    NSRect contentScreen = [host convertRectToScreen:[[host contentView] frame]];
     // Position below header (99px) spanning most of the window width
     int omniboxWidth = (int)(contentScreen.size.width * 0.69);
     if (omniboxWidth < 400) omniboxWidth = 400;
@@ -3710,7 +3874,7 @@ void CreateOmniboxOverlayMacOS() {
 
     // Keep-alive: don't destroy existing window
     if (g_omnibox_overlay_window) {
-        ShowOmniboxOverlayMacOS();
+        ShowOmniboxOverlayMacOS(targetWin);
         return;
     }
 
@@ -3734,8 +3898,10 @@ void CreateOmniboxOverlayMacOS() {
     [g_omnibox_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
     [g_omnibox_overlay_window setAcceptsMouseMovedEvents:YES];
 
-    // CRITICAL: Make child of main window so it doesn't steal focus from address bar
-    [g_main_window addChildWindow:g_omnibox_overlay_window ordered:NSWindowAbove];
+    // CRITICAL: child of the REQUESTING window (D-h2) so it doesn't steal focus from
+    // that window's address bar — parenting it to the primary is what made a torn-off
+    // window's omnibox open over the primary.
+    OwnOverlayToRequestingWindowMac(g_omnibox_overlay_window, targetWin);
 
     DropdownOverlayView* contentView = [[DropdownOverlayView alloc]
         initWithFrame:NSMakeRect(0, 0, omniboxWidth, omniboxHeight)];
@@ -3821,11 +3987,13 @@ bool WasDownloadPanelJustHidden() {
     return (now - g_download_panel_last_hide_time) < 0.3;
 }
 
-void ShowDownloadPanelOverlayMacOS(int iconRightOffset) {
+void ShowDownloadPanelOverlayMacOS(int iconRightOffset, BrowserWindow* targetWin) {
     if (g_download_panel_overlay_window) {
         g_mac_download_panel_icon_right_offset = iconRightOffset;
 
-        NSRect panelFrame = CalculateToolbarOverlayFrame(g_main_window, 400, 500, 96);
+        // D-h2: geometry only — this overlay is not an addChildWindow: child, so
+        // it already has no parent to drag forward.
+        NSRect panelFrame = CalculateToolbarOverlayFrame(OverlayHostWindow(targetWin), 400, 500, 96);
         [g_download_panel_overlay_window setFrame:panelFrame display:YES];
 
         [g_download_panel_overlay_window makeKeyAndOrderFront:nil];
@@ -3834,13 +4002,14 @@ void ShowDownloadPanelOverlayMacOS(int iconRightOffset) {
     }
 }
 
-void CreateDownloadPanelOverlayMacOS(int iconRightOffset) {
+void CreateDownloadPanelOverlayMacOS(int iconRightOffset, BrowserWindow* targetWin) {
     LOG_INFO("Creating download panel overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
     g_mac_download_panel_icon_right_offset = iconRightOffset;
 
+    NSWindow* host = OverlayHostWindow(targetWin);  // D-h2
     CGFloat panelWidth = 400;
     CGFloat panelHeight = 500;
-    NSRect panelFrame = CalculateToolbarOverlayFrame(g_main_window, panelWidth, panelHeight, 96);
+    NSRect panelFrame = CalculateToolbarOverlayFrame(host, panelWidth, panelHeight, 96);
 
     if (g_download_panel_overlay_window) {
         [g_download_panel_overlay_window close];
@@ -3970,12 +4139,12 @@ bool WasProfilePanelJustHidden() {
 static const CGFloat kProfilePanelWidth  = 380;
 static const CGFloat kProfilePanelHeight = 520;
 
-void ShowProfilePanelOverlayMacOS(int iconRightOffset) {
+void ShowProfilePanelOverlayMacOS(int iconRightOffset, BrowserWindow* targetWin) {
     if (g_profile_panel_overlay_window) {
         g_mac_profile_panel_icon_right_offset = iconRightOffset;
 
-        NSRect panelFrame = CalculateToolbarOverlayFrame(
-            g_main_window, kProfilePanelWidth, kProfilePanelHeight, 96);
+        NSRect panelFrame = CalculateToolbarOverlayFrame(          // D-h2
+            OverlayHostWindow(targetWin), kProfilePanelWidth, kProfilePanelHeight, 96);
         [g_profile_panel_overlay_window setFrame:panelFrame display:YES];
 
         [g_profile_panel_overlay_window makeKeyAndOrderFront:nil];
@@ -3984,13 +4153,14 @@ void ShowProfilePanelOverlayMacOS(int iconRightOffset) {
     }
 }
 
-void CreateProfilePanelOverlayMacOS(int iconRightOffset) {
+void CreateProfilePanelOverlayMacOS(int iconRightOffset, BrowserWindow* targetWin) {
     LOG_INFO("Creating profile panel overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
     g_mac_profile_panel_icon_right_offset = iconRightOffset;
 
+    NSWindow* host = OverlayHostWindow(targetWin);  // D-h2
     CGFloat panelWidth = kProfilePanelWidth;
     CGFloat panelHeight = kProfilePanelHeight;
-    NSRect panelFrame = CalculateToolbarOverlayFrame(g_main_window, panelWidth, panelHeight, 96);
+    NSRect panelFrame = CalculateToolbarOverlayFrame(host, panelWidth, panelHeight, 96);
 
     if (g_profile_panel_overlay_window) {
         [g_profile_panel_overlay_window close];
@@ -4138,9 +4308,10 @@ bool WasBookmarksPanelJustHidden() {
     return (now - g_bookmarks_panel_last_hide_time) < 0.3;
 }
 
-void ShowBookmarksPanelOverlayMacOS(int iconLeftOffset) {
+void ShowBookmarksPanelOverlayMacOS(int iconLeftOffset, BrowserWindow* targetWin) {
     if (g_bookmarks_panel_overlay_window) {
-        NSRect panelFrame = CalculateLeftAnchoredOverlayFrame(g_main_window, 380, 520, 96, iconLeftOffset);
+        NSRect panelFrame = CalculateLeftAnchoredOverlayFrame(       // D-h2
+            OverlayHostWindow(targetWin), 380, 520, 96, iconLeftOffset);
         [g_bookmarks_panel_overlay_window setFrame:panelFrame display:YES];
 
         [g_bookmarks_panel_overlay_window makeKeyAndOrderFront:nil];
@@ -4151,12 +4322,13 @@ void ShowBookmarksPanelOverlayMacOS(int iconLeftOffset) {
     }
 }
 
-void CreateBookmarksPanelOverlayMacOS(int iconLeftOffset) {
+void CreateBookmarksPanelOverlayMacOS(int iconLeftOffset, BrowserWindow* targetWin) {
     LOG_INFO("Creating bookmarks panel overlay (macOS) iconLeftOffset=" + std::to_string(iconLeftOffset));
 
+    NSWindow* host = OverlayHostWindow(targetWin);  // D-h2
     CGFloat panelWidth = 380;
     CGFloat panelHeight = 520;
-    NSRect panelFrame = CalculateLeftAnchoredOverlayFrame(g_main_window, panelWidth, panelHeight, 96, iconLeftOffset);
+    NSRect panelFrame = CalculateLeftAnchoredOverlayFrame(host, panelWidth, panelHeight, 96, iconLeftOffset);
 
     if (g_bookmarks_panel_overlay_window) {
         [g_bookmarks_panel_overlay_window close];
@@ -4270,9 +4442,10 @@ bool WasSiteInfoPanelJustHidden() {
     return (now - g_siteinfo_panel_last_hide_time) < 0.3;
 }
 
-void ShowSiteInfoPanelOverlayMacOS(int iconLeftOffset) {
+void ShowSiteInfoPanelOverlayMacOS(int iconLeftOffset, BrowserWindow* targetWin) {
     if (g_siteinfo_panel_overlay_window) {
-        NSRect panelFrame = CalculateLeftAnchoredOverlayFrame(g_main_window, 360, 480, 96, iconLeftOffset);
+        NSRect panelFrame = CalculateLeftAnchoredOverlayFrame(       // D-h2
+            OverlayHostWindow(targetWin), 360, 480, 96, iconLeftOffset);
         [g_siteinfo_panel_overlay_window setFrame:panelFrame display:YES];
 
         [g_siteinfo_panel_overlay_window makeKeyAndOrderFront:nil];
@@ -4281,12 +4454,13 @@ void ShowSiteInfoPanelOverlayMacOS(int iconLeftOffset) {
     }
 }
 
-void CreateSiteInfoPanelOverlayMacOS(int iconLeftOffset) {
+void CreateSiteInfoPanelOverlayMacOS(int iconLeftOffset, BrowserWindow* targetWin) {
     LOG_INFO("Creating site-info panel overlay (macOS) iconLeftOffset=" + std::to_string(iconLeftOffset));
 
+    NSWindow* host = OverlayHostWindow(targetWin);  // D-h2
     CGFloat panelWidth = 360;
     CGFloat panelHeight = 480;
-    NSRect panelFrame = CalculateLeftAnchoredOverlayFrame(g_main_window, panelWidth, panelHeight, 96, iconLeftOffset);
+    NSRect panelFrame = CalculateLeftAnchoredOverlayFrame(host, panelWidth, panelHeight, 96, iconLeftOffset);
 
     if (g_siteinfo_panel_overlay_window) {
         [g_siteinfo_panel_overlay_window close];
@@ -4399,9 +4573,10 @@ bool WasTabListPanelJustHidden() {
     return (now - g_tablist_panel_last_hide_time) < 0.3;
 }
 
-void ShowTabListPanelOverlayMacOS(int iconRightOffset) {
+void ShowTabListPanelOverlayMacOS(int iconRightOffset, BrowserWindow* targetWin) {
     if (g_tablist_panel_overlay_window) {
-        NSRect panelFrame = CalculateRightAnchoredOverlayFrame(g_main_window, 340, 480, 96, iconRightOffset);
+        NSRect panelFrame = CalculateRightAnchoredOverlayFrame(      // D-h2
+            OverlayHostWindow(targetWin), 340, 480, 96, iconRightOffset);
         [g_tablist_panel_overlay_window setFrame:panelFrame display:YES];
 
         [g_tablist_panel_overlay_window makeKeyAndOrderFront:nil];
@@ -4421,12 +4596,13 @@ void ShowTabListPanelOverlayMacOS(int iconRightOffset) {
     }
 }
 
-void CreateTabListPanelOverlayMacOS(int iconRightOffset) {
+void CreateTabListPanelOverlayMacOS(int iconRightOffset, BrowserWindow* targetWin) {
     LOG_INFO("Creating tab-list panel overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
 
+    NSWindow* host = OverlayHostWindow(targetWin);  // D-h2
     CGFloat panelWidth = 340;
     CGFloat panelHeight = 480;
-    NSRect panelFrame = CalculateRightAnchoredOverlayFrame(g_main_window, panelWidth, panelHeight, 96, iconRightOffset);
+    NSRect panelFrame = CalculateRightAnchoredOverlayFrame(host, panelWidth, panelHeight, 96, iconRightOffset);
 
     if (g_tablist_panel_overlay_window) {
         [g_tablist_panel_overlay_window close];
@@ -4504,13 +4680,16 @@ void CreateTabListPanelOverlayMacOS(int iconRightOffset) {
 // CalculateToolbarOverlayFrame / CalculateRightAnchoredOverlayFrame pair every other
 // dropdown uses does not apply.
 //
-// ⛔ NO `addChildWindow:`. The menu/settings overlays attach themselves to the
-// process-global `g_main_window`, and MAC_RELAY_P35_P4_ROUND.md M2 identifies that as
-// the macOS shape of the Phase 3.5 z-order defect (AppKit child windows order WITH
-// their parent, so a dropdown opened in a secondary window drags the primary forward).
-// This overlay follows the tab-list/dropdown pattern instead, which attaches to
-// nothing — so it cannot reintroduce that coupling. ⚠️ That also means it does not
-// inherit parent-window hide/minimise for free, which is why it is registered in BOTH
+// ⛔ NO `addChildWindow:`, and that is STILL right after the Phase 3.5 macOS port
+// (`D-h2`, 2026-09-19). AppKit child windows order WITH their parent, so attaching to
+// the process-global `g_main_window` is what made a dropdown opened in a secondary
+// window drag the primary forward — MAC_RELAY_P35_P4_ROUND.md M2 predicted it and
+// round f measured it. `D-h2` fixed that by making the parent FOLLOW the requesting
+// window for the four overlays that are real children; this one keeps attaching to
+// nothing, so it never had the coupling and still does not. It takes only the
+// geometry half of the port (ComputeTabMenuFrameMac resolves the requesting window's
+// frame AND header view). ⚠️ Attaching to nothing also means it does not inherit
+// parent-window hide/minimise for free, which is why it is registered in BOTH
 // InstallAppFocusLossHandler() and ShutdownApplication() below.
 //
 // ⚠️ NO DPI SCALING, deliberately — this is NOT an omission of the Windows ScalePx
@@ -4528,17 +4707,25 @@ static const CGFloat kTabMenuWidthPt  = 240;
 static const CGFloat kTabMenuHeightPt = 241;
 
 // Cursor anchor (header-local, top-down CSS px) -> Cocoa screen rect (bottom-left origin).
-static NSRect ComputeTabMenuFrameMac(int anchorX, int anchorY) {
+static NSRect ComputeTabMenuFrameMac(int anchorX, int anchorY, BrowserWindow* targetWin) {
+    // D-h2: the cursor anchor is relative to the REQUESTING window's header, so both
+    // the window and the header view have to come from that window. Taking the header
+    // from the process global while the anchor came from window B put the menu at B's
+    // offset inside A's frame.
+    NSWindow* host = OverlayHostWindow(targetWin);
+    NSView* hostHeader = (targetWin && targetWin->header_view)
+                             ? (__bridge NSView*)targetWin->header_view
+                             : g_header_view;
     NSRect contentScreen =
-        [g_main_window convertRectToScreen:[[g_main_window contentView] frame]];
+        [host convertRectToScreen:[[host contentView] frame]];
 
     // The anchor is relative to the HEADER browser's viewport, so resolve the header
     // view's own screen rect rather than the window's content rect — they differ by the
     // title bar, and using the window would push the menu down by that much.
     NSRect anchorBase = contentScreen;
-    if (g_header_view) {
-        NSRect headerInWindow = [g_header_view convertRect:[g_header_view bounds] toView:nil];
-        anchorBase = [g_main_window convertRectToScreen:headerInWindow];
+    if (hostHeader) {
+        NSRect headerInWindow = [hostHeader convertRect:[hostHeader bounds] toView:nil];
+        anchorBase = [host convertRectToScreen:headerInWindow];
     }
 
     CGFloat menuX = NSMinX(anchorBase) + (CGFloat)anchorX;
@@ -4632,13 +4819,15 @@ void HideTabContextMenuOverlayMacOS() {
     LOG_INFO("Tab context menu overlay hidden (macOS)");
 }
 
-void ShowTabContextMenuOverlayMacOS(int anchorX, int anchorY) {
+void ShowTabContextMenuOverlayMacOS(int anchorX, int anchorY, BrowserWindow* targetWin) {
     if (!g_tabmenu_overlay_window) {
         LOG_WARNING("Cannot show tab context menu overlay - window does not exist");
         return;
     }
 
-    NSRect menuFrame = ComputeTabMenuFrameMac(anchorX, anchorY);
+    // ⚠️ D-h2 geometry only — this overlay deliberately has NO addChildWindow: parent
+    // (see the note above its creator), so there is nothing to re-own here.
+    NSRect menuFrame = ComputeTabMenuFrameMac(anchorX, anchorY, targetWin);
     [g_tabmenu_overlay_window setFrame:menuFrame display:YES];
     [g_tabmenu_overlay_window makeKeyAndOrderFront:nil];
 
@@ -4660,7 +4849,7 @@ void ShowTabContextMenuOverlayMacOS(int anchorX, int anchorY) {
              std::to_string((int)menuFrame.origin.y));
 }
 
-void CreateTabContextMenuOverlayMacOS(int anchorX, int anchorY) {
+void CreateTabContextMenuOverlayMacOS(int anchorX, int anchorY, BrowserWindow* targetWin) {
     LOG_INFO("Creating tab context menu overlay (macOS) anchor=" +
              std::to_string(anchorX) + "," + std::to_string(anchorY));
 
@@ -4675,7 +4864,7 @@ void CreateTabContextMenuOverlayMacOS(int anchorX, int anchorY) {
         return;
     }
 
-    NSRect menuFrame = ComputeTabMenuFrameMac(anchorX, anchorY);
+    NSRect menuFrame = ComputeTabMenuFrameMac(anchorX, anchorY, targetWin);
 
     g_tabmenu_overlay_window = [[DropdownOverlayWindow alloc]
         initWithContentRect:menuFrame
@@ -6226,6 +6415,7 @@ static void InstallMenuClickOutsideMonitor() {
 void HideMenuOverlayMacOS() {
     if (g_menu_overlay_window) {
         [g_menu_overlay_window orderOut:nil];
+        DetachOverlayFromParentMac(g_menu_overlay_window);  // D-h2
         RemoveMenuClickOutsideMonitor();
         g_menu_overlay_last_hide_time = CFAbsoluteTimeGetCurrent();
         LOG_INFO("Menu overlay hidden (macOS)");
@@ -6241,9 +6431,13 @@ bool WasMenuOverlayJustHidden() {
     return (now - g_menu_overlay_last_hide_time) < 0.3;
 }
 
-void ShowMenuOverlayMacOS(int iconRightOffset) {
+void ShowMenuOverlayMacOS(int iconRightOffset, BrowserWindow* targetWin = nullptr) {
     if (g_menu_overlay_window) {
-        NSRect menuFrame = CalculateToolbarOverlayFrame(g_main_window, 280, 450, 96);
+        // D-h2: anchor and re-parent to the requesting window before showing.
+        NSWindow* host = OverlayHostWindow(targetWin);
+        OwnOverlayToRequestingWindowMac(g_menu_overlay_window, targetWin);
+
+        NSRect menuFrame = CalculateToolbarOverlayFrame(host, 280, 450, 96);
         [g_menu_overlay_window setFrame:menuFrame display:YES];
 
         [g_menu_overlay_window makeKeyAndOrderFront:nil];
@@ -6254,13 +6448,15 @@ void ShowMenuOverlayMacOS(int iconRightOffset) {
     }
 }
 
-void CreateMenuOverlayMac(int iconRightOffset) {
+void CreateMenuOverlayMac(int iconRightOffset, BrowserWindow* targetWin) {
     LOG_INFO("Creating menu overlay (macOS) iconRightOffset=" + std::to_string(iconRightOffset));
 
     if (!g_main_window) {
         LOG_ERROR("Cannot create menu overlay: main window is null");
         return;
     }
+
+    NSWindow* host = OverlayHostWindow(targetWin);  // D-h2
 
     // Destroy existing menu overlay
     if (g_menu_overlay_window) {
@@ -6272,7 +6468,7 @@ void CreateMenuOverlayMac(int iconRightOffset) {
     CGFloat menuHeight = 450;
 
     // Position: flush right, flush below header (96px header)
-    NSRect menuFrame = CalculateToolbarOverlayFrame(g_main_window, menuWidth, menuHeight, 96);
+    NSRect menuFrame = CalculateToolbarOverlayFrame(host, menuWidth, menuHeight, 96);
 
     LOG_INFO("Menu overlay frame: (" + std::to_string((int)menuFrame.origin.x) + ", "
              + std::to_string((int)menuFrame.origin.y) + ") "
@@ -6299,8 +6495,8 @@ void CreateMenuOverlayMac(int iconRightOffset) {
     [g_menu_overlay_window setHasShadow:YES];
     [g_menu_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
 
-    // Child window of main window (moves/minimizes together)
-    [g_main_window addChildWindow:g_menu_overlay_window ordered:NSWindowAbove];
+    // Child window of the REQUESTING window (moves/minimizes together) — D-h2
+    OwnOverlayToRequestingWindowMac(g_menu_overlay_window, targetWin);
 
     // Create GenericOverlayView as content view
     GenericOverlayView* contentView = [[GenericOverlayView alloc]
