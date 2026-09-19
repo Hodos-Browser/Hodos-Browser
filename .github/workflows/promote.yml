@@ -185,7 +185,26 @@ jobs:
           grep -qF -- "HodosBrowser-${VERSION}.dmg"       "$AC" || { echo "::error::appcast missing macOS enclosure for ${VERSION}"; exit 1; }
           grep -qE 'sparkle:dsaSignature="[^"]+"' "$AC" || { echo "::error::Windows enclosure has no DSA signature"; exit 1; }
           grep -qE 'sparkle:edSignature="[^"]+"'  "$AC" || { echo "::error::macOS enclosure has no EdDSA signature"; exit 1; }
-          echo "Appcast pre-flip check OK for ${VERSION}."
+          # ⛔ The macOS item must carry an OS floor. Promoting a feed without one offers
+          # the update to every macOS client, including ones dyld refuses to launch it on —
+          # TICKET_appcast_missing_minimum_system_version.md, filed 2026-08-17. This is the
+          # last gate before the feed goes live, so it fails closed here too.
+          #
+          # ⚠️ Stated honestly: this checks PRESENCE and SHAPE, not the value. Promote runs
+          # on ubuntu with only the DMG, and nothing here can read a Mach-O `minos` out of
+          # it — so the VALUE is checked in release.yml, where `vtool` measured it on the
+          # macos runner and the drift guard compares it with MACOSX_DEPLOYMENT_TARGET.
+          # Do not read this step as proving the floor is right; it proves one is declared.
+          # ⛔ Extract with grep+cut, NOT `sed s:...:...:` — the element name CONTAINS a
+          # colon (`sparkle:minimumSystemVersion`), so a colon-delimited s/// terminates
+          # inside the pattern. Measured 2026-09-19: that form errors with
+          # "bad flag in substitute command: 'm'", yields an empty MSV, and this gate then
+          # fails on a perfectly good feed — it would have blocked every promotion.
+          MSV=$(grep -oE '<sparkle:minimumSystemVersion>[^<]+' "$AC" | head -1 | cut -d'>' -f2)
+          [ -n "$MSV" ] || { echo "::error::appcast macOS item carries no <sparkle:minimumSystemVersion> — refusing to promote a feed that would be offered to macOS versions that cannot launch it"; exit 1; }
+          echo "$MSV" | grep -qE '^[0-9]+(\.[0-9]+){1,2}$' \
+            || { echo "::error::minimumSystemVersion '${MSV}' is not a plain version number"; exit 1; }
+          echo "Appcast pre-flip check OK for ${VERSION} (macOS floor declared: ${MSV})."
 
       # Same fail-closed verifier release.yml ran at draft time, re-run against the
       # PUBLISHED bytes so a tampered/swapped asset can never be promoted. Includes

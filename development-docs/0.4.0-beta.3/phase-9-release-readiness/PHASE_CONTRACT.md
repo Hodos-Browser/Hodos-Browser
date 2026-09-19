@@ -302,3 +302,46 @@ DevTools entry points; none is on the wallet-call, payment, overlay-close or ses
 | preflight -NegativeControl | **all 8 gates seen to fail** (`1>0` ×5, `3>2`, `60>59`, `5>4`), probes cleaned | 2026-09-14 | Claude (Windows) |
 | regression set | **INCOMPLETE** — T1 halves green inside preflight; T2/T3 halves SKIPPED (§9), not rounded up | 2026-09-14 | Claude (Windows) |
 | adversarial review | done, §9 — one instrument rejected (CDP key dispatch), one gate bug caught by its own local run (`tr`) | 2026-09-14 | Claude (Windows) |
+
+---
+
+## 4b. 🍎 macOS rows — measured 2026-09-19
+
+### `P9-M1` — the appcast `minimumSystemVersion` promotion blocker, CLOSED
+
+| | |
+|---|---|
+| 🟢 **GREEN** | `generate-appcast.py` emits `<sparkle:minimumSystemVersion>` on the macOS item, sourced from the value `release.yml`'s minos guard **measured** with `vtool -show-build`; `release.yml` asserts the feed carries that exact value; `promote.yml` refuses a feed with no floor |
+| 🔴 **RED — all four seen** | value **omitted** ⇒ script exits 1; value **wrong** (`11.0` vs a measured `12.0`) ⇒ release.yml assertion fails; element **absent** ⇒ promote.yml pre-flip gate fails; correct value ⇒ both pass |
+| 🎯 **SUBJECT** | the feeds under test are **`generate-appcast.py`'s own output**, not hand-written fixtures; the floor is `vtool`'s reading of the built CEF framework, cross-checked against `MACOSX_DEPLOYMENT_TARGET` by a new drift guard |
+| **Tier** | T0 (script + gates) |
+| **Result** | ✅ **GREEN 2026-09-19.** 🐞 Running the arms caught a bug in my own first promote gate: `sed -n 's:.*<sparkle:minimumSystemVersion>…:…:p'` is broken — the element name contains a colon, which terminates the colon-delimited `s///` inside the pattern (`bad flag in substitute command: 'm'`). It fails **closed**, so it would never have shipped a bad feed; it would have **blocked every promotion**. Replaced with `grep -oE … \| cut -d'>' -f2` |
+
+### `P9-M2` — Sparkle honours the floor (the proof only a Mac can give)
+
+| | |
+|---|---|
+| 🟢 **GREEN** | a Sparkle client **at or above** the floor **is** offered the update |
+| 🔴 **RED** | a Sparkle client **below** the floor is **not** offered it; and a feed with **no** floor element is offered to everyone regardless — the defect itself, demonstrated |
+| 🎯 **SUBJECT** | a real **Sparkle 2.9.6** client driving `-[SPUUpdater checkForUpdateInformation]`. ⛔ Deliberately a **standalone host** (`SparkleFloorProbe.app`, its own bundle id), **not** a copied HodosBrowser bundle — `AppPaths::EnforceDevSafeguard` classifies "dev build" by a `build/bin` path substring, and the 2026-08-18 rig's copied bundle opened the **real profile** for ~10 minutes |
+| **Tier** | T2 |
+| **Result** | ✅ **GREEN 2026-09-19.** Host macOS **26.6**, `CFBundleVersion=1`. floor `12.0` ⇒ `VERDICT=OFFERED`; floor `27.0` ⇒ `VERDICT=NOT_OFFERED reason=`**`Your macOS version is too old`**; **no floor element** ⇒ `VERDICT=OFFERED`. ⭐ Instrument control: `APPCAST_LOADED items=1` printed in **all three** arms, so the refusal is a filter decision and not a failed fetch. The probe never downloads, so no real signature is involved. ⚠️ **Honest gap:** production's case is *host 11.0 / floor 12.0*; this measured *host 26.6 / floor 27.0* — same comparator, same direction, same code path, but **not run on a Big Sur machine** and not claimed as such. `HUMAN_TEST_QUEUE.md` **C2** |
+
+### `P9-M3` — `cdp_port` D2 mirror in `cef_browser_shell_mac.mm`
+
+| | |
+|---|---|
+| 🟢 **GREEN** | dev build (`HODOS_DEV=1`) binds **9322** and nothing else; release build binds **nothing** |
+| 🔴 **RED — measured on the shipped product** | the owner's **installed** macOS build, pid 56785, argv `/Applications/HodosBrowser.app/Contents/MacOS/HodosBrowser --profile=Default` with **no `--remote-debugging-port`** (`grep -c` = 0), was holding `127.0.0.1:9222 (LISTEN)`. A *release* macOS build exposing a full-control CDP surface to any local process |
+| 🎯 **SUBJECT** | owning pid resolved to its **kernel exec path** via `ps -o comm=`, never `argv[0]`; launched **without** `--remote-debugging-port`, because that switch binds CDP regardless of the settings gate (the trap that bit Windows on `P9-A1`) |
+| **Tier** | T2 (dev arm) / ⬜ owed (release arm) |
+| **Result** | 🟡 **PARTIAL 2026-09-19.** Dev arm ✅: `127.0.0.1:9322 (LISTEN)` held by `…/build/bin/HodosBrowser.app/Contents/MacOS/HodosBrowser`, clean argv, log `Remote debugging port: 9322`; prod stayed on 9222 on its own socket throughout. ⬜ **Release arm is CODE_READING only** — `AppPaths::EnforceDevSafeguard` refuses to start a `build/bin` bundle without `HODOS_DEV=1`, and copying the bundle elsewhere is the barred act that caused the 2026-08-18 profile exposure. The line is now byte-equivalent to the Windows one that `P9-A1` measures. Runtime proof owed to the next signed build — `HUMAN_TEST_QUEUE.md` **C6**. **Not claimed green.** |
+| 🆕 **Side observation** | `lsof` shows `hodos-wallet` and `hodos-adblock` holding the **same socket** (identical device id) as the browser's CDP listener — the spawned daemons inherit the listening fd because it is not `FD_CLOEXEC`. Harmless today (they never `accept()`), but the port stays bound while any child lives. No ticket written |
+
+### `P9-M4` — item 2b, the DevTools role gate on the macOS wallet overlay
+
+⬜ **NOT RUN — human-bound, and stated rather than claimed.** Right-click → no *Inspect Element*, and
+⌘⌥I ⇒ `DevTools refused on role=wallet`, both need **native OS input on a borderless `NSWindow`**. A CDP
+`Input.dispatchMouseEvent` enters **below** the `NSView`→`CefMouseEvent` layer and **passes with the
+defect fully present**; `CGEventPost` is Accessibility-blocked on this machine. `HUMAN_TEST_QUEUE.md`
+**D9**. Windows' equivalent passed as `W3` on 2026-09-16.

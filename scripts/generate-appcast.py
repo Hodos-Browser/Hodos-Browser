@@ -11,6 +11,7 @@ Usage:
         --macos-url https://github.com/Hodos-Browser/Hodos-Browser/releases/download/v0.2.0-beta.1/HodosBrowser-0.2.0-beta.1.dmg \
         --macos-size 180000000 \
         --macos-signature "MEUCIQD..." \
+        --macos-minimum-system-version 12.0 \
         --output appcast.xml
 
 The generated XML follows the Sparkle appcast format used by both WinSparkle and Sparkle 2.
@@ -98,6 +99,27 @@ def generate_appcast(args):
             ET.SubElement(item, f'{{{SPARKLE_NS}}}shortVersionString').text = args.version
         ET.SubElement(item, f'{{{SPARKLE_NS}}}os').text = 'macos'
 
+        # ⛔ The OS floor. Without it Sparkle offers this update to EVERY macOS client,
+        # including ones dyld will refuse to launch it on — the update installs, replaces
+        # the working app, and leaves no in-product way back. That is the exact shape of
+        # TICKET_appcast_missing_minimum_system_version.md: our floor moved 11.0 → 12.0
+        # with CEF 150 while the feed kept advertising no constraint at all, and every
+        # feed we have ever published carries zero occurrences of this element.
+        #
+        # ⛔ REQUIRED, never defaulted. A default is a second copy of the floor that rots
+        # silently on the next bump — which is how the DOC (BUILD_AND_RELEASE.md §4.5) came
+        # to specify `11.0` correctly while the implementation emitted nothing. Same
+        # fail-closed posture as the signature check below.
+        # ⭐ release.yml passes the value MEASURED by `vtool -show-build` on the built
+        # framework (the minos guard), not a literal, so the feed cannot disagree with
+        # the binary it points at.
+        if not args.macos_minimum_system_version:
+            sys.exit('ERROR: --macos-url given without --macos-minimum-system-version — '
+                     'refusing to emit a macOS item with no OS floor (it would be offered '
+                     'to clients that cannot launch it)')
+        ET.SubElement(item, f'{{{SPARKLE_NS}}}minimumSystemVersion').text = \
+            args.macos_minimum_system_version
+
         enclosure_attrs = {
             'url': args.macos_url,
             'length': str(args.macos_size or 0),
@@ -121,6 +143,7 @@ def generate_appcast(args):
         print(f'  Windows: {args.windows_url}')
     if args.macos_url:
         print(f'  macOS: {args.macos_url}')
+        print(f'  macOS minimumSystemVersion: {args.macos_minimum_system_version}')
 
 
 def main():
@@ -134,6 +157,10 @@ def main():
     parser.add_argument('--macos-url', help='macOS DMG download URL')
     parser.add_argument('--macos-size', type=int, help='macOS DMG file size in bytes')
     parser.add_argument('--macos-signature', help='macOS EdDSA signature')
+    parser.add_argument('--macos-minimum-system-version',
+                        help='Minimum macOS version for the macOS item, e.g. "12.0". REQUIRED whenever '
+                             '--macos-url is given; deliberately has no default. Pass the value MEASURED '
+                             'from the built Mach-O (release.yml derives it from the minos guard), never a literal.')
     parser.add_argument('--output', default='appcast.xml', help='Output file path')
     args = parser.parse_args()
 

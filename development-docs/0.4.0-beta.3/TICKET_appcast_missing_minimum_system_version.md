@@ -2,7 +2,9 @@
 
 **Filed:** 2026-08-17, during the DevOps-CICD doc review
 **Severity:** 🚨 **auto-update brick risk on macOS 11** — blocks promoting the 0.4.0 line to Sparkle
-**Status:** OPEN — **candidate blocker for promoting 0.4.0**
+**Status:** ✅ **FIXED 2026-09-19 (macOS session)** — the promotion blocker is cleared. One acceptance box
+remains open and it is a *separate* decision, not this defect: the pinned-0.3.x **second feed item**.
+See §Resolution at the foot of this file.
 **Sprint:** 📌 **Phase 9 (release readiness)** — bundled 2026-08-31. 🚦 **Must close before PROMOTION**, which is a different constraint from phase order: 0.4.0 cannot ship without it.
 **⛔ Production code untouched.** Per CLAUDE.md invariant #13 the evidence points at
 `scripts/generate-appcast.py` being wrong, so this is filed for approval rather than fixed.
@@ -98,9 +100,67 @@ in that file: an example in a doc is not evidence the code does it.
 
 ## Acceptance
 
-- [ ] macOS appcast item carries `minimumSystemVersion`, sourced from the build's deployment target
-- [ ] `release.yml` and `promote.yml` both assert it
-- [ ] omitted / wrong values both **measured** to fail the assertion
-- [ ] `BUILD_AND_RELEASE.md` §4.5 example updated to `12.0`
-- [ ] decide whether a Big Sur user on 0.3.x should be offered *anything* (a pinned final 0.3.x, or
-      nothing) rather than silently never updating again
+- [x] macOS appcast item carries `minimumSystemVersion`, sourced from the build's deployment target
+- [x] `release.yml` and `promote.yml` both assert it
+- [x] omitted / wrong values both **measured** to fail the assertion
+- [x] `BUILD_AND_RELEASE.md` §4.5 example updated to `12.0`
+- [ ] ⬜ **STILL OPEN — and it is a product decision, not this defect.** Whether a Big Sur user on 0.3.x
+      should be offered *anything* (a pinned final 0.3.x as a permanent second feed item, or nothing)
+      rather than silently never updating again. The 2026-08-18 macOS round recommended **Option 2**
+      (permanent second item, 0.4.x at 12.0 + last 0.3.x at 11.0). ⛔ **Two-item eligibility selection
+      is unmeasured on both platforms** — Sparkle installing "the newest item eligible for this client's
+      OS" is documented behaviour that we have never run. 👤 Owner's call.
+
+---
+
+## ✅ Resolution — 2026-09-19, macOS session
+
+### What changed
+
+| File | Change |
+|---|---|
+| `scripts/generate-appcast.py` | New `--macos-minimum-system-version`. ⛔ **Required whenever `--macos-url` is given and deliberately undefaulted** — a default is a second copy of the floor that rots on the next bump, which is exactly how §4.5 of the doc came to specify `11.0` correctly while the code emitted nothing |
+| `.github/workflows/release.yml` | The **existing minos guard already measured the floor** with `vtool -show-build`. It now (a) asserts that measurement equals `MACOSX_DEPLOYMENT_TARGET` — a drift guard — and (b) publishes it as a job output. `publish` (ubuntu, no `vtool`) consumes it and fails closed if it is empty. A new offline assertion requires the feed to advertise that exact value |
+| `.github/workflows/promote.yml` | Pre-flip gate refuses a feed whose macOS item carries no floor |
+| `development-docs/DevOps-CICD/BUILD_AND_RELEASE.md` §4.5 | Stale `11.0` → `12.0`, with a note that the number must not be hand-written |
+
+⭐ The ticket asked for the value to come from `MACOSX_DEPLOYMENT_TARGET` rather than a literal. It is
+one better than that: it comes from **`vtool` reading the built framework**, and the CMake value is used
+only to *cross-check* that measurement. The feed cannot disagree with the binary it points at.
+
+### ⛔ Negative controls — all MEASURED
+
+| Arm | Result |
+|---|---|
+| value **omitted** | `generate-appcast.py` exits **1**: *"refusing to emit a macOS item with no OS floor"* |
+| value **wrong** (`11.0` while the build measured `12.0`) | `release.yml`'s assertion **FAILS** — the drift case |
+| value **correct** (`12.0`) | passes both gates |
+| element **absent** from the feed | `promote.yml`'s pre-flip gate **FAILS** |
+
+🐞 Found while running them: the first version of the promote-side extraction used
+`sed -n 's:.*<sparkle:minimumSystemVersion>…:…:p'`, which is **broken** — the element name contains a
+colon and terminates the colon-delimited `s///` inside the pattern. It errored, produced an empty value
+and failed on a *good* feed, i.e. it would have blocked every promotion. Replaced with `grep -oE … | cut`.
+
+### 📏 The Mac-only proof — Sparkle honours the floor
+
+Standalone Sparkle **2.9.6** host (`SparkleFloorProbe.app`, its own bundle id, framework surgery per
+`release.yml`), driving `-[SPUUpdater checkForUpdateInformation]` against feeds produced by
+**`generate-appcast.py` itself**. Host macOS **26.6**, `CFBundleVersion=1`.
+
+| Feed | Verdict |
+|---|---|
+| floor `12.0` (host eligible) | **OFFERED** — the ≥12.0 positive control |
+| floor `27.0` (host below the floor) | **NOT_OFFERED**, Sparkle's own reason: *"Your macOS version is too old"* |
+| **no** floor element (today's shipped shape) | **OFFERED** regardless — the defect, demonstrated |
+
+⭐ Instrument control: `APPCAST_LOADED items=1` printed in **all three** arms, so `NOT_OFFERED` is a
+filter decision and not a failed fetch. The probe never downloads, so no real signature is involved.
+
+⛔ **Deliberately not a copied HodosBrowser bundle.** The 2026-08-18 Sparkle rig was, and
+`AppPaths::EnforceDevSafeguard` — which classifies a "dev build" by a `build/bin` path substring —
+scrubbed `HODOS_DEV` and opened the **real profile** for ~10 minutes. A foreign bundle cannot repeat that.
+
+⚠️ **The one honest gap.** Production's case is *host 11.0 / floor 12.0*; this measured *host 26.6 /
+floor 27.0*. Same comparator, same direction, same code path — but **it was not run on a Big Sur
+machine** and that is not claimed. The literal pair is `HUMAN_TEST_QUEUE.md` **C2**.

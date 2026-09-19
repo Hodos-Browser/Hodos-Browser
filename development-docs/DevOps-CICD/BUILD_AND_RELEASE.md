@@ -1062,8 +1062,15 @@ void OnBrowserExit() {
       <title>Version 1.1.0</title>
       <sparkle:version>1.1.0</sparkle:version>
       <sparkle:os>macos</sparkle:os>
-      <!-- Must match our published floor (CEF 136 = 11.0 Big Sur; 10.15 retired). See CEF_VERSION_UPDATE_TRACKER.md. -->
-      <sparkle:minimumSystemVersion>11.0</sparkle:minimumSystemVersion>
+      <!-- Must match our published floor (CEF 150 = 12.0 Monterey; 11.0 Big Sur retired with
+           the CEF 150 bump). See CEF_VERSION_UPDATE_TRACKER.md.
+           ⛔ Do not hand-write this number. `generate-appcast.py` REQUIRES
+           --macos-minimum-system-version whenever --macos-url is given, and release.yml
+           passes the value the minos guard MEASURED with `vtool -show-build` on the built
+           framework. This example carried a stale 11.0 from 2026-08-17 until 2026-09-19,
+           while the implementation emitted the element not at all — a worked example in a
+           doc is not evidence the code does it. -->
+      <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
       <enclosure
         url="https://github.com/Hodos-Browser/Hodos-Browser/releases/download/v1.1.0/Hodos-1.1.0.dmg"
         sparkle:edSignature="SIGNATURE_HERE"
