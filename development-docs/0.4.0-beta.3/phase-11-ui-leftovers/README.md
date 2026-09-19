@@ -1127,3 +1127,68 @@ still pass "our UI does not". Only the split catches both.
 The red token is deliberately one **esbuild cannot constant-fold** — the previous attempt used
 `false && e.ctrlKey`, which esbuild folded to `if (false)`, deleting the operand being grepped for
 and making the instrument check contradict a correct result.
+
+---
+
+## Item 9 — 🍎 macOS half, MEASURED 2026-09-19 (with its RED)
+
+Windows asked macOS to re-run item 9's evidence on its own profile and to check whether the
+**installed** macOS build had been accumulating rows the same way. Both done.
+
+### 📏 The installed macOS build HAD been recording — 7 rows over five months
+
+`~/Library/Application Support/HodosBrowser/Default/Default/Web Data`, table `autofill`, read
+**read-only from a copy** (`file:…?mode=ro&immutable=1`); nothing under `/Applications` touched.
+
+| name | value | count | first seen |
+|---|---|---|---|
+| `login` | `BSVArchie` | 1 | 2026-04-14 |
+| `text` | **a real email address** | 3 | 2026-04-14 → 2026-04-15 |
+| `text` | `BSVArchie` | 3 | 2026-04-14 |
+| `text` | **a real phone number** | 1 | 2026-04-14 |
+| `email` | **the same real email address** | 1 | 2026-04-26 |
+| `username_or_email` | `bsvarchie` | 1 | 2026-07-13 |
+| `username` | `bsvarchie` | 1 | 2026-07-13 |
+
+Same shape as the Windows finding. The **dev** profile held **1** pre-existing row (a phone number,
+2026-08-10). ⬜ Values named by shape, not reproduced — they are the owner's.
+
+### 📏 GREEN — with the fix, nothing is written
+
+Probe form served from a local origin; fields filled with **`Input.insertText`** (the renderer's real
+editing pipeline, so the field is genuinely user-edited — ⛔ **not** a JS `.value =` assignment, which
+may not mark the field as user-edited at all); submitted with **`element.click()`** on the real submit
+button. The resulting GET query string proves a real submission occurred.
+
+Result: **0 probe rows**, and the `Web Data` file's **mtime did not move** (still `Aug 10 14:09`).
+Positive control that the fix executed, from `~/Library/Application Support/HodosBrowserDev/debug_output.log`:
+
+```
+Chromium autofill disabled: autofill.profile_enabled=false
+Chromium autofill disabled: autofill.credit_card_enabled=false
+```
+
+### ⛔ RED — fix removed, identical probe, 2 rows written
+
+`hodos_probe_name` and `hodos_probe_email`, the latter holding the full address.
+
+### 🚨 The trap that would have made that control a FALSE GREEN
+
+**The preference persists.** `CefRequestContext::SetPreference` writes `autofill.profile_enabled=false`
+into the profile's own `Preferences` file, so it survives the process and outlives the binary that set
+it. Reverting the C++ **alone** leaves the pref `false`, the control writes nothing, and the conclusion
+is either "the probe is blind" or — worse — "the fix is not load-bearing". The control is valid only if
+the persisted state is reverted too:
+
+```jsonc
+// <profile>/Default/Preferences
+"autofill": { "profile_enabled": true, "credit_card_enabled": true }
+```
+
+⇒ **Generalises beyond this item: when a fix writes a persisted preference, the negative control must
+revert the state as well as the code.**
+
+🧹 Probe rows deleted afterwards; the pre-existing 2026-08-10 row left intact; prefs restored.
+
+👤 **Owner decision owed:** the installed build's 7 rows are still on disk. Installing a fixed build does
+not remove them — the fix stops new writes, it does not clear history.

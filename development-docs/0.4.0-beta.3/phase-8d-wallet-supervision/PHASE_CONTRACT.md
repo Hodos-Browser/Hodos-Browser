@@ -225,3 +225,65 @@ Each stage its own commit, own preflight `-Full`, own relay line.
 | **Q5** | The 8c `O12` residual (one shared file thread) | Leave it out of 8d; open a ticket. It is real but no user-visible defect is measured yet |
 
 ✅ **Answered 2026-09-14** — Q1 both · Q2 `WALLET_UNAVAILABLE` · Q3 yes, restart-only. Q4 (dev mode: report only) and Q5 (O12 residual → its own ticket) were stated as assumptions and not objected to.
+
+---
+
+## 4c. 🍎 macOS status — measured 2026-09-19
+
+### ✅ Stage 1 (truth about a dead wallet service) — GREEN on macOS
+
+Dev wallet killed **by kernel exec path** (never by name; `ps -o comm=` matched on the dev bundle
+marker `build/bin/HodosBrowser.app`, and the prod wallet on 31301 was verified serving **HTTP 200**
+afterwards). The wallet panel then rendered with the service genuinely dead:
+
+> 🔌 **Wallet service not running** — Hodos could not reach its wallet service. Your wallet and keys are
+> untouched — this is the background process, not your funds. Try again, or restart Hodos.
+
+Substring checks on that DOM: `not running` ✅ · `Try again` ✅ · **`Create` / `Recover` / `Restore` all
+absent** ✅. The panel does **not** offer to create a new wallet over an existing one — the branch the
+relay asked to have confirmed.
+
+📏 The C++ half is honest too: with the wallet dead, `hodosBrowser.wallet.getStatus()` ⇒
+`{"exists": false, "needsBackup": true, "serviceReachable": false}`.
+
+### ⛔ `P8d-A8` pre-fix RED — nothing relaunches the wallet on macOS
+
+Dev wallet killed; **12 s later nothing was listening on 31401 and no dev `hodos-wallet` process
+existed.** Expected — the macOS side is still the 3-line logging stub. This is the RED that `A4`
+("back ≤ 5 s") needs, measured before any supervisor exists.
+
+### 🚨 NEW, and it raises `P8d-A8`'s priority: **"Restart wallet service" is a dead control on macOS**
+
+The service-down panel ships a **`Restart wallet service`** button. Clicked through the **real
+`onClick`** (`element.click()` — ⛔ not `Input.dispatchMouseEvent`, which enters below the native layer).
+The IPC arrives and the macOS shell logs:
+
+```
+🔄 wallet_restart requested from browser ID: 2
+wallet_restart requested — macOS wallet supervision not yet implemented (Phase 8d relay item)
+```
+
+**Nothing happens and the user is told nothing** — the panel keeps showing "not running" with no
+indication the button did anything. 12 s later, still nothing on 31401.
+
+⇒ This reframes `P8d-A8` from "port a supervisor" to "there is a **visible, clickable, inert control in
+the shipped macOS product**". 👤 **Owner's call** whether the button should be hidden on a build without
+supervision or whether the supervisor simply lands first. Either way it is the next macOS item.
+
+### 🆕 `serviceReachable` has **no consumer anywhere in the frontend** — CODE_READING, cross-platform
+
+Stage 1 added `serviceReachable` to the `wallet_status_check` reply and C++ emits it correctly. But
+`grep -rn serviceReachable frontend/src` returns **only `types/hodosBrowser.d.ts`** (twice, the two
+declarations). **No component reads it.**
+
+⚠️ The wallet panel is unaffected — it fetches `/wallet/status` over HTTP directly and branches three
+ways on the transport, which is why the stage-1 check above passes. The gap is the **bridge** consumers.
+And note the field's own documented contract — *"false = the wallet service did not answer; `exists` is
+then unknown, not false"* — while the same reply carries `exists: false`. Any consumer reading `exists`
+without first checking `serviceReachable` reads "no wallet" when the truth is "no answer". That is a
+`.d.ts` comment describing a discipline nothing enforces. **Windows to confirm — this is shared React,
+macOS only read it.**
+
+### ⬜ `P8d-A8` itself — NOT started
+
+The real `waitpid` supervisor (~half a day) is not written. Next macOS item.

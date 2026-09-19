@@ -792,3 +792,36 @@ weighed, not as an open question.
 (bookmark folder CRUD, cache size) are UI-driven and unlikely to race. ⛔ Recommend migrating all
 anyway — a slot left behind is a slot the next person copies — but it is worth a deliberate answer
 rather than drift.
+
+---
+
+## 4n. 🍎 `O6` / `M7` — macOS verification, measured 2026-09-19
+
+Driven from CDP on the header page (internal origin) against the 2026-09-19 macOS build, dev wallet
+live on 31401. Ground truth taken **independently** from `curl http://127.0.0.1:31401/wallet/balance`
+**before** the probe — not from the bridge under test.
+
+| Assertion | Result |
+|---|---|
+| `hodosBrowser.bridge.getStatus.toString()` contains `[native code]` | ✅ `function getStatus() { [native code] }`; same for `getBalance` |
+| ⛔ **negative control on the same instrument** — a plain JS function must NOT match | ✅ `function ctl(){return 1}` ⇒ no `[native code]`. Without this the check is a substring search that proves nothing |
+| `address.generate()` still resolves (the deleted `#else` arm) | ✅ a real address, twice, with `index` **3** then **4** — so each call got its own answer |
+| 3 concurrent `wallet.getBalance()` ⇒ 3 answers | ✅ `n: 3`, all three settled |
+
+### ⚠️ Correction owed to this contract's own `M7` wording
+
+**"3 correct answers" is vacuous whenever the three answers are identical.** This wallet's balance is 0,
+so all three returned byte-identical `{"balance":0,"bsvPrice":17.465}` — a promise resolved with
+*another call's* payload would be **completely invisible**. The count is the load-bearing half (the
+single-slot race's signature was 2-of-3 settling), so two stronger forms were run:
+
+| Stronger assertion | Result |
+|---|---|
+| 3 **distinguishable** calls fired in one tick — `wallet.getBalance()` + `address.generate()` + a third | ✅ each promise got **its own payload shape**: the `balance` key on #1, the `address` key on #2. No cross-wiring |
+| **10** concurrent `wallet.getBalance()` | ✅ **10 fulfilled, 0 rejected** |
+
+⭐ Suggest amending `M7`'s wording on the Windows side too — as specified, the row cannot fail when the
+wallet's balance is stable.
+
+⬜ **`M8` (the macOS half of the backup-overlay deletion) is NOT started.** Its line numbers have drifted
+across 103 commits; it needs its own session.
