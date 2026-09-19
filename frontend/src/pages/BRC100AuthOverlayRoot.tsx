@@ -572,6 +572,14 @@ const BRC100AuthOverlayRoot: React.FC = () => {
   // which is the whole content of this fix.
   const livePushedCountRef = useRef<number | null>(null);
 
+  // D-h3 — the request most recently INJECTED by C++, set synchronously in
+  // showNotification. ⛔ Deliberately NOT requestIdRef: that one changes only when
+  // applyParams lands (up to 1200 ms later), and until then the screen still shows
+  // the previous prompt — moving it earlier would let a click answer a request the
+  // user has not seen. expirePrompt needs both: "still displayed" AND "nothing newer
+  // is on its way in".
+  const latestInjectedIdRef = useRef<string>('');
+
   // Apply notification params from a query string (used by both initial load and JS injection)
   const applyParams = (queryString: string) => {
     const params = new URLSearchParams(queryString);
@@ -750,6 +758,7 @@ const BRC100AuthOverlayRoot: React.FC = () => {
       // drives it per prompt, so anything not reset here leaks across prompts --
       // `P0.8` defect 5, same overlay, same shape.)
       livePushedCountRef.current = null;
+      latestInjectedIdRef.current = new URLSearchParams(queryString).get('requestId') || '';
 
       const REFRESH_TIMEOUT_MS = 1200;
       Promise.race([
@@ -770,6 +779,10 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     // popped by its timeout, and answering it would resolve nothing.
     (window as any).expirePrompt = (requestId: string) => {
       if (!requestId || requestIdRef.current !== requestId) return;
+      // A newer prompt was injected and is still applying its params: the overlay is
+      // about to be ITS, so closing it now would hide that prompt while it holds the
+      // queue. Leave it — the new prompt's content replaces this one.
+      if (latestInjectedIdRef.current && latestInjectedIdRef.current !== requestId) return;
       requestIdRef.current = '';
       setNotificationType('');
       setNotificationDomain('');
