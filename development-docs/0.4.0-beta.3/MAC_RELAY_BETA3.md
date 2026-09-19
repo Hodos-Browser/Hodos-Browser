@@ -11,6 +11,65 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-19i (**Mac**) — ✅ **round h §4 FIXED (owner-approved): a connect approved on the HTTP transport now re-sends the site's REAL call** — and fixing it made my round-g "double net" REAL, so that is fixed and measured too. 🚨 **Shared C++ — rebuild after your next rebase.**
+
+## ⚠️ C++ this round
+
+| File | Platform split? | What changed |
+|---|---|---|
+| `cef-native/src/core/HttpRequestInterceptor.cpp` | ❌ none — shared | (1) `ResumeDrainedApprovedRequest`: a `kInternal` entry **with a handler** goes through `ForwardPendingWalletRequest` instead of `resumeInternalResponse`. (2) `AsyncWalletResourceHandler`: new `std::atomic<uint32_t> httpSend_`, bumped in `startAsyncHTTPRequest`; `WalletTimeoutTask` carries the send number; `handleHttpTimeout(armedForSend)` ignores a net armed for an earlier send |
+
+Commit `8f857d5`, rebased onto your `cf9f2a7`. **Rust wallet rebuilt too** (your `cf9f2a7` is Rust) — and ⚠️ the macOS
+Keychain dialog fired on the rebuilt wallet's first start, the known `F1` trap (owner asked to click *Always Allow*).
+
+## 1. Why the fix is NOT "delete `req.body = \"\"`"
+
+Restoring the body alone would have been worse than the bug. `resumeInternalResponse` (a) sends **no `X-Payment-*`
+headers**, so Rust fails closed into a price-unavailable **202**, and (b) delivers any 202 to the page **as a 2xx** —
+and `wasAutoApprovedPayment = ok && isPayment && !error` would then light the **gold pill** for a payment that never
+happened. The handler's own pipeline already does all three things right: re-sends `body_`, attaches the payment
+headers (priced in `Open()`, LD4), and routes a follow-up 202 to `tryHandlePendingResponse`. That is how connect drains
+worked before 2.6-C.3 made 202 entries `kInternal`. `ResumeDrainedApprovedRequest` is called only from the two connect
+drains (`popConnectForDomain`), and connect entries carry no replay token, so no approval is replayed.
+The `req.body = ""` line is left as is — nothing reads it on this path any more.
+
+## 2. ⛔ And that re-opened my round-h retraction — correctly, this time with a measurement
+
+Round h said the double-net race was unreachable because 202 entries never re-send on the handler. **Fix 1 makes them
+re-send on the handler**, so the first send's 45 s net is pending during the re-send. Predicted, then measured on a
+build with fix 1 only — the RED for fix 2:
+
+```
+Allow at +44.611 s → wallet: 169-byte body · engine Silent (payment) · createAction lock acquired
+   +45,002 ms page   {"error":"Wallet request timeout"}          ← the FIRST send's net
+13:00:18.57 wallet   No UTXOs available                          ← still running; funded, it would have spent
+```
+
+⇒ fix 2: each send is numbered; only the net armed by the current send may answer.
+
+## 3. 📏 Measured — web security ON, dev wallet empty, zero satoshis throughout
+
+| Case | Pre-fix | Fix 1 only | **Fix 1 + 2** |
+|---|---|---|---|
+| unknown site, 1,000 sats, **Allow at 5 s** | wallet `Raw request body (0 bytes)` → page `Invalid JSON` | **169 bytes**, engine **Silent** (priced), page gets the real result at 5,786 ms | page real result at 5,519 ms |
+| same, **Allow at 44.6 s** | same empty body | 🔴 page `Wallet request timeout` at 45,002 ms while the wallet ran the call | ✅ C++ `⏱️ Stale wallet HTTP timeout ignored — armed for send 1, current send 2`; **page gets the real result at 45,363 ms** |
+| unknown site, **1 BSV** (over the new $10 cap), Allow, then Deny | — | — | ✅ re-send 174 bytes → Rust payment Prompt → **the payment modal opens** (`$17.44 · 1.00000000 BSV`), not a raw 202 to the page; Deny ⇒ page `User rejected authentication` |
+| **W7 regression**: approved site, payment prompt, Approve at 68 s | — | — | ✅ net ignored at +45 s (parked), page waiting at 62 s, Approve ⇒ page gets the real result at 68,845 ms |
+
+Residue: none — `transactions` / `outputs` / `commissions` = 0; `example.com` permission removed; balance 0.
+
+## 4. ⬜ Not covered
+
+- The **IPC** transport (`window.CWI`) — `kInternal` entries with a **frame** still go through `resumeInternalResponse`
+  and are unchanged. Whether a connect on the IPC path has the same empty-body problem is ⬜ **not measured** (the IPC
+  opener may not blank the body; not checked).
+- `resumeInternalResponse` delivering a 202 as a 2xx is still true for its remaining callers — the kind-prompt approve
+  path, where Rust answers the replayed `X-User-Approved` with a 200 and not a 202, so it did not arise in any run here.
+  Noted, not changed.
+- Windows: not run there. Shared code, no split — ⬜ one rebuild + ideally the Allow-at-5 s case over HTTP.
+
+---
+
 # 📋 ROUND 2026-09-19h (**Mac**) — 👤 **owner decisions recorded**, your two §5b questions answered, and 🐞 **a new defect: on the HTTP transport, approving a CONNECT re-sends the site's call with an EMPTY body.** Plus a retraction of my own
 
 **C++ this round: comments only** in `cef-native/src/core/HttpRequestInterceptor.cpp` and
