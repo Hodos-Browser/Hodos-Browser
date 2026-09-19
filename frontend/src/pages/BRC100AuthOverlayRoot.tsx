@@ -564,6 +564,14 @@ const BRC100AuthOverlayRoot: React.FC = () => {
   const requestIdRef = useRef<string>('');
   const [queuedFromSite, setQueuedFromSite] = useState<number>(0);
 
+  // beta.3 `D-h4` -- a live count pushed by C++ while THIS prompt was still
+  // resolving its async refresh. Null means "none arrived; the URL value stands".
+  //
+  // The URL's `queuedFromSite` is a SNAPSHOT taken when C++ built the overlay
+  // params; `updateQueuedCount` is CURRENT. When both exist the current one wins,
+  // which is the whole content of this fix.
+  const livePushedCountRef = useRef<number | null>(null);
+
   // Apply notification params from a query string (used by both initial load and JS injection)
   const applyParams = (queryString: string) => {
     const params = new URLSearchParams(queryString);
@@ -582,7 +590,19 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     // beta.3 Phase 10b — every answer names the request it answers (C++ refuses one
     // without). A ref, because the answer handlers can run from injection callbacks.
     requestIdRef.current = params.get('requestId') || '';
-    setQueuedFromSite(parseInt(params.get('queuedFromSite') || '0') || 0);
+    // beta.3 `D-h4` -- 🚨 this line USED to clobber a live count.
+    //
+    // `applyParams` runs from a `Promise.race` up to 1200 ms after C++ injects
+    // `showNotification`, so on a CONCURRENT burst the order measured on macOS was:
+    // overlay reused at .860 -> C++ pushes `updateQueuedCount(1)` at .862 (correct,
+    // and it rendered) -> `applyParams` lands later and reset it to the URL's
+    // snapshot, which for the FIRST prompt of a burst is always 0 because nothing
+    // else had arrived when the params were built. Net effect: a two-request burst
+    // never showed the "1 of N" line at all, while a third request showed `1 of 3`
+    // immediately -- because by then `applyParams` had already finished and there
+    // was nothing left to clobber. Both halves of that evidence are this one line.
+    const urlQueuedFromSite = parseInt(params.get('queuedFromSite') || '0') || 0;
+    setQueuedFromSite(livePushedCountRef.current ?? urlQueuedFromSite);
     setGrantsLocalAccess(params.get('grantsLocalAccess') === '1');
     setLocalAccessShown(false);   // re-earned on every show, never inherited
     setPermSubmitted(false);  // fresh prompt → re-enable buttons
@@ -724,6 +744,13 @@ const BRC100AuthOverlayRoot: React.FC = () => {
       // Bounded by a timeout so an unreachable wallet cannot swallow the
       // prompt entirely: on timeout we fall through with the last known good
       // refs, which is exactly the old behaviour and no worse.
+      // beta.3 `D-h4` -- cleared SYNCHRONOUSLY, before the await window opens, so a
+      // push belonging to the PREVIOUS prompt can never be inherited by this one.
+      // (This overlay is keep-alive: it mounts once per browser launch and C++
+      // drives it per prompt, so anything not reset here leaks across prompts --
+      // `P0.8` defect 5, same overlay, same shape.)
+      livePushedCountRef.current = null;
+
       const REFRESH_TIMEOUT_MS = 1200;
       Promise.race([
         refreshWalletDefaults(),
@@ -746,7 +773,12 @@ const BRC100AuthOverlayRoot: React.FC = () => {
     // "Modify Limits" form and flashing the overlay blank.
     (window as any).updateQueuedCount = (n: number) => {
       const v = Number(n);
-      if (Number.isFinite(v) && v >= 0) setQueuedFromSite(v);
+      if (Number.isFinite(v) && v >= 0) {
+        // beta.3 `D-h4` -- record it as well as render it, so a later `applyParams`
+        // (still pending on its refresh) reads this instead of the stale URL value.
+        livePushedCountRef.current = v;
+        setQueuedFromSite(v);
+      }
     };
 
     // Phase 1.5 Step 5 — fetch the user's default for the identity-key bundle
