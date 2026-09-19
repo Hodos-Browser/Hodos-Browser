@@ -473,7 +473,6 @@ CefRefPtr<CefBrowser> SimpleHandler::wallet_panel_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::overlay_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::settings_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::wallet_browser_ = nullptr;
-CefRefPtr<CefBrowser> SimpleHandler::backup_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::brc100_auth_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::notification_browser_ = nullptr;
 CefRefPtr<CefBrowser> SimpleHandler::settings_menu_browser_ = nullptr;
@@ -505,12 +504,6 @@ CefRefPtr<CefBrowser> SimpleHandler::GetSettingsBrowser() {
 CefRefPtr<CefBrowser> SimpleHandler::GetWalletBrowser() {
     auto* win = WindowManager::GetInstance().GetPrimaryWindow();
     return win ? win->wallet_browser : nullptr;
-}
-// Kept (returns nullptr on Windows) until the macOS half of the backup-overlay deletion
-// lands: cef_browser_shell_mac.mm still calls it. beta.3 Phase 8c O8, 2026-09-12.
-CefRefPtr<CefBrowser> SimpleHandler::GetBackupBrowser() {
-    auto* win = WindowManager::GetInstance().GetPrimaryWindow();
-    return win ? win->backup_browser : nullptr;
 }
 CefRefPtr<CefBrowser> SimpleHandler::GetBRC100AuthBrowser() {
     auto* win = WindowManager::GetInstance().GetPrimaryWindow();

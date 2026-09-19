@@ -823,5 +823,61 @@ single-slot race's signature was 2-of-3 settling), so two stronger forms were ru
 ⭐ Suggest amending `M7`'s wording on the Windows side too — as specified, the row cannot fail when the
 wallet's balance is stable.
 
-⬜ **`M8` (the macOS half of the backup-overlay deletion) is NOT started.** Its line numbers have drifted
-across 103 commits; it needs its own session.
+### ✅ `M8` / `O8` macOS half — DONE 2026-09-19. **`O8` is now complete on both platforms.**
+
+**260 lines removed, 3 added, 8 files.** The macOS half plus the **shared shims** the Windows round
+deliberately left in place (they were only kept so the macOS build stayed green).
+
+| Scope | Removed |
+|---|---|
+| 🍎 `cef_browser_shell_mac.mm` (−242) | the whole `BackupOverlayView` `NSView` class, `CreateBackupOverlayWithSeparateProcess()`, the `g_backup_overlay_window` global + forward decl, both frame-sync blocks, the shutdown close block, all 7 `GetBackupBrowser()` calls, `"backup"` from the shutdown role list |
+| ⚠️ shared | `SimpleHandler::GetBackupBrowser()` + the `backup_browser_` static (`simple_handler.h/.cpp`); `BrowserWindow::backup_browser` + `backup_overlay_window` and both `role == "backup"` slot lines; `WindowManager`'s `check(win->backup_browser)`; the macOS externs in `simple_app.h` — **and Windows' orphaned `extern HWND g_backup_overlay_hwnd;`**, which their `O8` left behind with no definition and no user |
+
+#### 📏 Completeness proof — and the control that makes it mean something
+
+⛔ This is the `TabManager::GetFaviconUrlForHost` break class (2026-09-08, cost a whole macOS build): a
+symbol deleted on one platform while the other platform's caller survives, and the deleting side's build
+never says so. The sweep therefore covered **every** `*.cpp`/`*.h`/`*.mm` in `cef-native/` including the
+Windows-only TUs (`cef_browser_shell.cpp`, `TabManager.cpp`, `simple_app.cpp`'s `#ifdef _WIN32` blocks).
+
+`g_backup_overlay_window` **0** · `g_backup_overlay_hwnd` **0** · `GetBackupBrowser` **0** ·
+`backup_browser` **0** · `CreateBackupOverlayWithSeparateProcess` **0** · `BackupOverlayView` **0**.
+
+⭐ **Positive control on the identical sweep**, for the BRC-100 overlay's still-present siblings:
+`BRC100AuthOverlayView` **3** · `GetBRC100AuthBrowser` **18** · `brc100_auth_browser` **12** ·
+`CreateBRC100AuthOverlayWithSeparateProcess` **7** · `g_brc100_auth_overlay_window` **31**.
+⇒ the instrument sees this shape of symbol; the zeros are real absences, not a blind grep.
+
+📏 Builds + links clean (verified by **object mtime vs source mtime**, not exit code); suite **335 / 334
+pass / 1 skip**, unchanged. Runtime: browser starts with **0 `[ERROR]` lines**, 2 CDP targets, backends
+up on 31401/31402, and the **wallet overlay still creates through the same `SetBrowserForRole` /
+`GetBrowserForRole` plumbing that was edited**.
+
+#### ⬜ NOT runtime-proven — stated, not implied
+
+- **The shutdown role-close loop** (`"backup"` dropped from the `roles[]` literal) is **CODE_READING +
+  compile**. It runs only inside `ShutdownApplication()` via `[NSApp terminate:]`. ⛔ Deliberately not
+  triggered: `stop-dev.sh` *kills* rather than quits, and an AppleScript `quit` is **unsafe here because
+  the dev and installed bundles share the identifier `com.hodosbrowser.app`** — it could have quit the
+  owner's production browser. The edit removes one array element and changes nothing for the other 13 roles.
+- **Both frame-sync blocks** (`windowDidMove` / `windowDidResize`) are **CODE_READING + compile** — a
+  self-contained `if` removed from each, seams inspected, BRC-100 block textually intact. Resizing a
+  native `NSWindow` is not drivable from an agent session.
+
+#### 🐞 A leak found while smoke-testing — PRE-EXISTING, and proven so rather than assumed
+
+Driving `toggle_wallet_panel` from the header three times produced **three** `wallet-panel` CDP targets:
+it never closes the previous overlay. ⛔ **Control run rather than assumption** — the entire M8 change set
+was stashed, the shell rebuilt, and the identical probe re-run: the control binary leaks **identically
+(1, 2, 3)**. Then restored, rebuilt, and the symbol sweep re-verified. ⇒ not caused by `O8`.
+⚠️ Scope stated: this drove the **raw IPC**; whether the real toolbar button can reach the state is
+**unmeasured** (React may guard it). Not ticketed — someone should decide whether the IPC is meant to be
+idempotent.
+
+#### ⬜ Left alive deliberately — `identity.markBackedUp()` is NOT part of `O8`
+
+Easy to confuse with the deleted `wallet.markBackedUp`, but a **different namespace**: registered at
+`simple_render_process_handler.cpp:928`, handled in `IdentityHandler.cpp:149`. ⚠️ Worth a decision
+though — its fallback posts to **`/wallet/markBackedUp`**, the Rust route `O8`'s own note says does not
+exist, and it has **zero component callers** (only the uncalled `useHodosBrowser` / `useBitcoinBrowser`
+hooks). 👤 Owner's call; out of scope here.

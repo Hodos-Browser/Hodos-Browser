@@ -29,7 +29,6 @@
     extern HWND g_settings_overlay_hwnd;
     extern HWND g_wallet_overlay_hwnd;
     extern bool g_wallet_overlay_prevent_close;
-    extern HWND g_backup_overlay_hwnd;
     extern HWND g_brc100_auth_overlay_hwnd;
     extern HWND g_settings_menu_overlay_hwnd;
     extern HWND g_omnibox_overlay_hwnd;
@@ -57,7 +56,6 @@
     extern NSView* g_webview_view;
     extern NSWindow* g_settings_overlay_window;
     extern NSWindow* g_wallet_overlay_window;
-    extern NSWindow* g_backup_overlay_window;
     extern NSWindow* g_brc100_auth_overlay_window;
     extern NSWindow* g_notification_overlay_window;
     extern NSWindow* g_settings_menu_overlay_window;
@@ -65,7 +63,6 @@
     // macOS overlay creation functions
     void CreateSettingsOverlayWithSeparateProcess(int iconRightOffset = 0);
     void CreateWalletOverlayWithSeparateProcess(int iconRightOffset = 0);
-    void CreateBackupOverlayWithSeparateProcess();
     void CreateBRC100AuthOverlayWithSeparateProcess();
     void CreateNotificationOverlay(const std::string& type, const std::string& domain, const std::string& extraParams = "");
     void CreateSettingsMenuOverlay();

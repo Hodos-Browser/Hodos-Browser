@@ -9,7 +9,6 @@ void BrowserWindow::SetBrowserForRole(const std::string& role, CefRefPtr<CefBrow
     else if (role == "overlay")      overlay_browser = browser;
     else if (role == "settings")     settings_browser = browser;
     else if (role == "wallet")       wallet_browser = browser;
-    else if (role == "backup")       backup_browser = browser;
     else if (role == "brc100auth")   brc100_auth_browser = browser;
     else if (role == "notification") notification_browser = browser;
     else if (role == "settings_menu") settings_menu_browser = browser;
@@ -31,7 +30,6 @@ CefRefPtr<CefBrowser> BrowserWindow::GetBrowserForRole(const std::string& role) 
     if (role == "overlay")           return overlay_browser;
     if (role == "settings")          return settings_browser;
     if (role == "wallet")            return wallet_browser;
-    if (role == "backup")            return backup_browser;
     if (role == "brc100auth")        return brc100_auth_browser;
     if (role == "notification")      return notification_browser;
     if (role == "settings_menu")     return settings_menu_browser;

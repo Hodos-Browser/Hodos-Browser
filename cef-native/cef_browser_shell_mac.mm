@@ -263,7 +263,6 @@ bool g_closing_tab = false;
 // Overlay windows (created on-demand)
 NSWindow* g_settings_overlay_window = nullptr;
 NSWindow* g_wallet_overlay_window = nullptr;
-NSWindow* g_backup_overlay_window = nullptr;
 NSWindow* g_brc100_auth_overlay_window = nullptr;
 NSWindow* g_notification_overlay_window = nullptr;
 NSWindow* g_settings_menu_overlay_window = nullptr;
@@ -629,7 +628,6 @@ void ToggleWalletPanel();  // C++ callable function
 void CreateMainWindow();
 void CreateSettingsOverlayWithSeparateProcess(int iconRightOffset);
 void CreateWalletOverlayWithSeparateProcess(int iconRightOffset);
-void CreateBackupOverlayWithSeparateProcess();
 void CreateBRC100AuthOverlayWithSeparateProcess();
 void CreateNotificationOverlay(const std::string& type, const std::string& domain, const std::string& extraParams);
 void CreateSettingsMenuOverlay();
@@ -1576,156 +1574,6 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
 @end
 
 
-// Backup Overlay View
-@interface BackupOverlayView : NSView
-@property (nonatomic, strong) CALayer* renderLayer;
-@property (nonatomic, strong) NSTrackingArea* overlayTrackingArea;
-@end
-
-@implementation BackupOverlayView
-
-- (instancetype)initWithFrame:(NSRect)frame {
-    self = [super initWithFrame:frame];
-    if (self) {
-        _renderLayer = [CALayer layer];
-        _renderLayer.opaque = NO;
-        [self setLayer:_renderLayer];
-        [self setWantsLayer:YES];
-
-        _overlayTrackingArea = [[NSTrackingArea alloc]
-            initWithRect:self.bounds
-            options:(NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
-                     NSTrackingActiveAlways | NSTrackingInVisibleRect)
-            owner:self
-            userInfo:nil];
-        [self addTrackingArea:_overlayTrackingArea];
-    }
-    return self;
-}
-
-- (BOOL)acceptsFirstResponder { return YES; }
-- (BOOL)canBecomeKeyView { return YES; }
-
-- (void)updateTrackingAreas {
-    [super updateTrackingAreas];
-    if (_overlayTrackingArea) {
-        [self removeTrackingArea:_overlayTrackingArea];
-    }
-    _overlayTrackingArea = [[NSTrackingArea alloc]
-        initWithRect:self.bounds
-        options:(NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
-                 NSTrackingActiveAlways | NSTrackingInVisibleRect)
-        owner:self
-        userInfo:nil];
-    [self addTrackingArea:_overlayTrackingArea];
-}
-
-- (void)mouseDown:(NSEvent *)event {
-    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
-
-    CefMouseEvent mouse_event;
-    mouse_event.x = location.x;
-    mouse_event.y = self.bounds.size.height - location.y;
-    mouse_event.modifiers = 0;
-
-    CefRefPtr<CefBrowser> backup = SimpleHandler::GetBackupBrowser();
-    if (backup) {
-        backup->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, false, 1);
-        backup->GetHost()->SendMouseClickEvent(mouse_event, MBT_LEFT, true, 1);
-        LOG_DEBUG("🖱️ Backup overlay: Left-click forwarded to CEF");
-    }
-}
-
-- (void)rightMouseDown:(NSEvent *)event {
-    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
-
-    CefMouseEvent mouse_event;
-    mouse_event.x = location.x;
-    mouse_event.y = self.bounds.size.height - location.y;
-    mouse_event.modifiers = 0;
-
-    CefRefPtr<CefBrowser> backup = SimpleHandler::GetBackupBrowser();
-    if (backup) {
-        backup->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, false, 1);
-        backup->GetHost()->SendMouseClickEvent(mouse_event, MBT_RIGHT, true, 1);
-        LOG_DEBUG("🖱️ Backup overlay: Right-click forwarded to CEF");
-    }
-}
-
-- (void)mouseMoved:(NSEvent *)event {
-    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
-
-    CefMouseEvent mouse_event;
-    mouse_event.x = location.x;
-    mouse_event.y = self.bounds.size.height - location.y;
-    mouse_event.modifiers = 0;
-
-    CefRefPtr<CefBrowser> backup = SimpleHandler::GetBackupBrowser();
-    if (backup) {
-        backup->GetHost()->SendMouseMoveEvent(mouse_event, false);
-    }
-}
-
-- (void)keyDown:(NSEvent *)event {
-    CefRefPtr<CefBrowser> backup = SimpleHandler::GetBackupBrowser();
-    if (!backup) return;
-
-    NSString* chars = [event characters];
-    NSEventModifierFlags flags = [event modifierFlags];
-
-    int modifiers = 0;
-    if (flags & NSEventModifierFlagShift) modifiers |= EVENTFLAG_SHIFT_DOWN;
-    if (flags & NSEventModifierFlagControl) modifiers |= EVENTFLAG_CONTROL_DOWN;
-    if (flags & NSEventModifierFlagOption) modifiers |= EVENTFLAG_ALT_DOWN;
-    if (flags & NSEventModifierFlagCommand) modifiers |= EVENTFLAG_COMMAND_DOWN;
-
-    // Send RAWKEYDOWN event
-    CefKeyEvent key_event;
-    key_event.type = KEYEVENT_RAWKEYDOWN;
-    key_event.native_key_code = [event keyCode];
-    if (chars.length > 0) {
-        key_event.character = [chars characterAtIndex:0];
-    }
-    key_event.modifiers = modifiers;
-    backup->GetHost()->SendKeyEvent(key_event);
-
-    // Send CHAR event for character input (critical for typing)
-    if (chars.length > 0) {
-        key_event.type = KEYEVENT_CHAR;
-        key_event.character = [chars characterAtIndex:0];
-        key_event.unmodified_character = [chars characterAtIndex:0];
-        backup->GetHost()->SendKeyEvent(key_event);
-    }
-
-    LOG_DEBUG("⌨️ Backup overlay: Key events forwarded to CEF");
-}
-
-- (void)keyUp:(NSEvent *)event {
-    CefRefPtr<CefBrowser> backup = SimpleHandler::GetBackupBrowser();
-    if (!backup) return;
-
-    CefKeyEvent key_event;
-    key_event.type = KEYEVENT_KEYUP;
-    key_event.native_key_code = [event keyCode];
-
-    NSString* chars = [event characters];
-    if (chars.length > 0) {
-        key_event.character = [chars characterAtIndex:0];
-    }
-
-    NSEventModifierFlags flags = [event modifierFlags];
-    int modifiers = 0;
-    if (flags & NSEventModifierFlagShift) modifiers |= EVENTFLAG_SHIFT_DOWN;
-    if (flags & NSEventModifierFlagControl) modifiers |= EVENTFLAG_CONTROL_DOWN;
-    if (flags & NSEventModifierFlagOption) modifiers |= EVENTFLAG_ALT_DOWN;
-    if (flags & NSEventModifierFlagCommand) modifiers |= EVENTFLAG_COMMAND_DOWN;
-    key_event.modifiers = modifiers;
-
-    backup->GetHost()->SendKeyEvent(key_event);
-}
-
-@end
-
 // BRC-100 Auth Overlay View
 @interface BRC100AuthOverlayView : NSView
 @property (nonatomic, strong) CALayer* renderLayer;
@@ -2320,10 +2168,6 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
 
     // Wallet is a child window — moves automatically
 
-    if (g_backup_overlay_window && [g_backup_overlay_window isVisible]) {
-        [g_backup_overlay_window setFrame:mainFrame display:YES];
-    }
-
     if (g_brc100_auth_overlay_window && [g_brc100_auth_overlay_window isVisible]) {
         [g_brc100_auth_overlay_window setFrame:mainFrame display:YES];
     }
@@ -2377,12 +2221,6 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
     }
 
     // Wallet is a child window — moves automatically, no resize needed for fixed-size panel
-
-    if (g_backup_overlay_window && [g_backup_overlay_window isVisible]) {
-        [g_backup_overlay_window setFrame:mainFrame display:YES];
-        CefRefPtr<CefBrowser> backup = SimpleHandler::GetBackupBrowser();
-        if (backup) backup->GetHost()->WasResized();
-    }
 
     if (g_brc100_auth_overlay_window && [g_brc100_auth_overlay_window isVisible]) {
         [g_brc100_auth_overlay_window setFrame:mainFrame display:YES];
@@ -3443,77 +3281,6 @@ void FinishQRScreenCaptureMacOS(bool cancelled, NSRect selection) {
         LOG_INFO("📷 BSV QR code found: " + bestResult.substr(0, 200));
         DeliverQRResultMacOS("{\"status\":\"found\",\"result\":" + bestResult + "}");
     }
-}
-
-void CreateBackupOverlayWithSeparateProcess() {
-    LOG_INFO("🎨 Creating backup overlay with separate process (macOS)");
-
-    NSRect mainFrame = [g_main_window frame];
-
-    if (g_backup_overlay_window) {
-        LOG_INFO("🔄 Destroying existing backup overlay");
-        [g_backup_overlay_window close];
-        g_backup_overlay_window = nullptr;
-    }
-
-    g_backup_overlay_window = [[NSWindow alloc]
-        initWithContentRect:mainFrame
-        styleMask:NSWindowStyleMaskBorderless
-        backing:NSBackingStoreBuffered
-        defer:NO];
-
-    if (!g_backup_overlay_window) {
-        LOG_ERROR("❌ Failed to create backup overlay window");
-        return;
-    }
-
-    [g_backup_overlay_window setOpaque:NO];
-    [g_backup_overlay_window setBackgroundColor:[NSColor clearColor]];
-    [g_backup_overlay_window setLevel:NSNormalWindowLevel];  // Changed from NSFloatingWindowLevel
-    [g_backup_overlay_window setIgnoresMouseEvents:NO];
-    [g_backup_overlay_window setReleasedWhenClosed:NO];
-    [g_backup_overlay_window setHasShadow:NO];
-    [g_backup_overlay_window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary];
-
-    // Make this a child window of the main window
-    [g_main_window addChildWindow:g_backup_overlay_window ordered:NSWindowAbove];
-
-    BackupOverlayView* contentView = [[BackupOverlayView alloc]
-        initWithFrame:NSMakeRect(0, 0, mainFrame.size.width, mainFrame.size.height)];
-    [g_backup_overlay_window setContentView:contentView];
-
-    CefWindowInfo window_info;
-    window_info.SetAsWindowless((__bridge void*)contentView);
-
-    CefBrowserSettings settings;
-    settings.windowless_frame_rate = 30;
-    settings.background_color = CefColorSetARGB(0, 0, 0, 0);
-    settings.javascript = STATE_ENABLED;
-    settings.javascript_access_clipboard = STATE_ENABLED;
-
-    CefRefPtr<SimpleHandler> handler(new SimpleHandler("backup"));
-    CefRefPtr<MyOverlayRenderHandler> render_handler =
-        new MyOverlayRenderHandler((__bridge void*)contentView,
-                                   (int)mainFrame.size.width,
-                                   (int)mainFrame.size.height);
-    handler->SetRenderHandler(render_handler);
-
-    bool result = CefBrowserHost::CreateBrowser(
-        window_info,
-        handler,
-        "http://127.0.0.1:5137/backup",
-        settings,
-        nullptr,
-        CefRequestContext::GetGlobalContext()
-    );
-
-    if (!result) {
-        LOG_ERROR("❌ Failed to create backup overlay CEF browser");
-        return;
-    }
-
-    [g_backup_overlay_window makeKeyAndOrderFront:nil];
-    LOG_INFO("✅ Backup overlay created successfully");
 }
 
 void CreateBRC100AuthOverlayWithSeparateProcess() {
@@ -5210,7 +4977,7 @@ void ShutdownApplication() {
         std::vector<BrowserWindow*> allWindows = WindowManager::GetInstance().GetAllWindows();
         const std::string roles[] = {
             "header", "wallet_panel", "overlay", "settings",
-            "wallet", "backup", "brc100auth", "notification", "settings_menu",
+            "wallet", "brc100auth", "notification", "settings_menu",
             "omnibox", "cookiepanel", "downloadpanel", "profilepanel", "menu"
         };
         for (BrowserWindow* bw : allWindows) {
@@ -5230,7 +4997,6 @@ void ShutdownApplication() {
     CefRefPtr<CefBrowser> webview_browser = SimpleHandler::GetWebviewBrowser();
     CefRefPtr<CefBrowser> settings_browser = SimpleHandler::GetSettingsBrowser();
     CefRefPtr<CefBrowser> wallet_browser = SimpleHandler::GetWalletBrowser();
-    CefRefPtr<CefBrowser> backup_browser = SimpleHandler::GetBackupBrowser();
     CefRefPtr<CefBrowser> brc100_auth_browser = SimpleHandler::GetBRC100AuthBrowser();
     CefRefPtr<CefBrowser> settings_menu_browser = SimpleHandler::GetSettingsMenuBrowser();
     CefRefPtr<CefBrowser> cookie_panel_browser = SimpleHandler::GetCookiePanelBrowser();
@@ -5242,7 +5008,6 @@ void ShutdownApplication() {
     if (webview_browser) webview_browser->GetHost()->CloseBrowser(true);
     if (settings_browser) settings_browser->GetHost()->CloseBrowser(true);
     if (wallet_browser) wallet_browser->GetHost()->CloseBrowser(true);
-    if (backup_browser) backup_browser->GetHost()->CloseBrowser(true);
     if (brc100_auth_browser) brc100_auth_browser->GetHost()->CloseBrowser(true);
     if (settings_menu_browser) settings_menu_browser->GetHost()->CloseBrowser(true);
     if (cookie_panel_browser) cookie_panel_browser->GetHost()->CloseBrowser(true);
@@ -5267,12 +5032,6 @@ void ShutdownApplication() {
         LOG_INFO("🔄 Closing wallet overlay window...");
         [g_wallet_overlay_window close];
         g_wallet_overlay_window = nullptr;
-    }
-
-    if (g_backup_overlay_window) {
-        LOG_INFO("🔄 Closing backup overlay window...");
-        [g_backup_overlay_window close];
-        g_backup_overlay_window = nullptr;
     }
 
     if (g_brc100_auth_overlay_window) {

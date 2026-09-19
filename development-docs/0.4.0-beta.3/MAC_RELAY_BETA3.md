@@ -11,6 +11,140 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-19c (**Mac**) — ✅ **8c `M8` DONE: the backup-overlay chain is gone on macOS, and the SHARED shims are deleted too.** 🚨 **Windows: read §3 before your next build — I deleted code your side compiles.**
+
+`O8` is now complete on both platforms. **260 lines removed, 3 added, across 8 files.** The macOS half
+was mine; the **shared cleanup your round deliberately left in place is also done**, because with my
+callers gone it was safe — but that means **shared files you compile have changed**, so §3 is the part
+that matters to you.
+
+## 1. ⚠️ C++ this round — rebuild after your next rebase (standing rule, root `CLAUDE.md`)
+
+| File | Platform split | What |
+|---|---|---|
+| `cef-native/cef_browser_shell_mac.mm` | 🍎 macOS only | −242 lines: the whole `BackupOverlayView` `NSView` class, `CreateBackupOverlayWithSeparateProcess()`, the `g_backup_overlay_window` global, both frame-sync blocks, the shutdown close block, the 5 + 2 `GetBackupBrowser()` calls, `"backup"` out of the shutdown role list |
+| `cef-native/OverlayHelpers_mac.mm` | 🍎 macOS only | a stale comment naming `BackupOverlayView` |
+| 🚨 `cef-native/include/handlers/simple_app.h` | ⚠️ **SHARED header** | −3: the macOS `extern NSWindow* g_backup_overlay_window` + `CreateBackupOverlayWithSeparateProcess()` decl, **and your orphaned `extern HWND g_backup_overlay_hwnd;`** — see §3 |
+| 🚨 `cef-native/include/handlers/simple_handler.h` | ⚠️ **SHARED** | −2: `GetBackupBrowser()` decl and the `backup_browser_` static decl |
+| 🚨 `cef-native/src/handlers/simple_handler.cpp` | ⚠️ **SHARED** | −7: `GetBackupBrowser()` body and the `backup_browser_` definition |
+| 🚨 `cef-native/include/core/BrowserWindow.h` | ⚠️ **SHARED** | −2: `backup_browser` and `backup_overlay_window` members |
+| 🚨 `cef-native/src/core/BrowserWindow.cpp` | ⚠️ **SHARED** | −2: the two `role == "backup"` slot lines |
+| 🚨 `cef-native/src/core/WindowManager.cpp` | ⚠️ **SHARED** | −1: `check(win->backup_browser)` in the window-ownership scan |
+
+## 2. 📏 How I proved the deletion is complete and symmetric — and the control that makes it mean something
+
+⛔ **This is the `TabManager::GetFaviconUrlForHost` class of break**, which cost us a whole macOS build
+on 2026-09-08: a symbol removed on one platform while the *other* platform's caller survives, and the
+deleting side's build never tells them. So the check was run the other way round too.
+
+**Tree-wide sweep** over every `*.cpp` / `*.h` / `*.mm` in `cef-native/` (build dir excluded), i.e.
+**including every Windows-only TU** — `cef_browser_shell.cpp`, `TabManager.cpp`, the `#ifdef _WIN32`
+blocks of `simple_app.cpp`:
+
+| Symbol | Occurrences after |
+|---|---|
+| `g_backup_overlay_window` | **0** |
+| `g_backup_overlay_hwnd` | **0** |
+| `GetBackupBrowser` | **0** |
+| `backup_browser` | **0** |
+| `CreateBackupOverlayWithSeparateProcess` | **0** |
+| `BackupOverlayView` | **0** (1 comment, rewritten to say it was deleted) |
+
+⭐ **And the positive control, because a zero from a blind grep is worth nothing** — the identical sweep
+for the BRC-100 overlay's siblings, which are definitely still there:
+`BRC100AuthOverlayView` **3** · `GetBRC100AuthBrowser` **18** · `brc100_auth_browser` **12** ·
+`CreateBRC100AuthOverlayWithSeparateProcess` **7** · `g_brc100_auth_overlay_window` **31**.
+⇒ The instrument can see this shape of symbol; the zeros above are real absences.
+
+📏 macOS **builds and links clean**, verified by **object mtime vs source mtime** (not exit code), and
+the suite is **335 tests / 334 pass / 1 skip** — unchanged.
+
+## 3. 🚨 WINDOWS: the three things to check on your side
+
+1. **Rebuild first.** Six shared files above lost symbols. If your working tree has an *uncommitted*
+   caller of `GetBackupBrowser()`, `BrowserWindow::backup_browser`, or `backup_overlay_window`, it will
+   not link. That residual is invisible from here — it is exactly what this note exists for.
+2. ⛔ **I deleted `extern HWND g_backup_overlay_hwnd;` from `include/handlers/simple_app.h`.** Your `O8`
+   round removed its definition, `BackupOverlayWndProc`, the class registration and the creator, but
+   **left the `extern` behind**. 📏 I swept the whole tree: **no definition and no user anywhere**, so
+   it was a dangling declaration. If your tree disagrees, **restore that one line, not the feature.**
+3. **`WindowManager::GetWindowForBrowser` lost one `check(...)` clause.** Behaviour is identical because
+   no browser can ever carry the `backup` role now — but it is a shared hot-ish path and worth your eyes.
+
+## 4. ⬜ What I did NOT delete, and why — two live residuals that are NOT part of `O8`
+
+- ⚠️ **`identity.markBackedUp()` is still a live bridge native and I left it alone.** It is easy to
+  mistake for the deleted `wallet.markBackedUp`, but it is a **different namespace**: the V8 function is
+  registered at `simple_render_process_handler.cpp:928` and handled in `IdentityHandler.cpp:149`.
+  ⛔ Worth someone's attention though: its fallback path posts to **`/wallet/markBackedUp`**
+  (`WalletService.cpp:414`, `WalletService_mac.cpp:228`) — **the Rust route your own `O8` note says does
+  not exist** — and `grep -rn markBackedUp --include=*.tsx frontend/src` returns **zero component
+  callers**. It survives only in `useHodosBrowser.ts` / `useBitcoinBrowser.ts`, which nothing calls.
+  Out of `O8`'s scope, so 👤 **owner's call**, not mine to delete unasked.
+- **Frontend doc drift from your `O8`**, not fixed (React docs are your lane, and they are docs):
+  `frontend/src/CLAUDE.md:87` still lists `pages/BackupOverlayRoot.tsx` as existing;
+  `components/CLAUDE.md:184` says `BackupModal.tsx` is *"superseded by `BackupOverlayRoot.tsx`"*, which
+  no longer exists either. `hooks/CLAUDE.md:130,149` still document `markBackedUp`.
+  ⚠️ `hooks/useHodosBrowser.ts:29` and `useBitcoinBrowser.ts:29` still test `currentPath.includes('/backup')`
+  — dead branch, behaviour-neutral, left alone.
+
+## 5. 🐞 A leak I found while smoke-testing — **PRE-EXISTING, not mine, and proven so**
+
+Driving `toggle_wallet_panel` from the header three times produced **three** `wallet-panel` CDP targets,
+not one. It never closes the previous overlay; each send creates another browser.
+
+⛔ **I did not assume it was pre-existing.** I stashed the entire M8 change set, rebuilt the shell, and
+ran the identical probe: the **control binary leaks identically — 1, 2, 3.** Then restored, rebuilt and
+re-verified the sweep. ⇒ **Not caused by `O8`.**
+
+⚠️ **Scope, stated honestly:** I drove the **raw IPC**. Whether the real toolbar button can reach this
+state is **unmeasured** — React may guard it, in which case this is only reachable by an internal-origin
+sender. Someone should decide whether `toggle_wallet_panel` is meant to be idempotent. Not ticketed.
+
+## 6. ⬜ What is NOT runtime-proven in this round, stated rather than implied
+
+- **The shutdown role-close loop** (`"backup"` removed from the `roles[]` array) is **CODE_READING +
+  compile**. It only runs inside `ShutdownApplication()`, reached via `[NSApp terminate:]`.
+  ⛔ **I deliberately did not trigger it:** `stop-dev.sh` *kills* rather than quits, and the obvious
+  alternative — an AppleScript `quit` — is **unsafe here, because the dev and installed bundles share
+  the identifier `com.hodosbrowser.app`**, so it could have quit the owner's production browser. The
+  edit removes one element from a literal array and changes nothing for the other 13 roles.
+- **Both frame-sync blocks** (`windowDidMove` / `windowDidResize`) are **CODE_READING + compile**. I
+  removed a self-contained `if` block from each; the BRC-100 block immediately following is textually
+  intact (seams inspected). Resizing a native `NSWindow` is not drivable from this session.
+- 📏 **What IS runtime-measured:** the browser starts clean (**0 `[ERROR]` lines**), 2 CDP targets, the
+  wallet and adblock backends come up on 31401 / 31402, the **wallet overlay still creates via its role
+  slot** — which is the same `BrowserWindow::SetBrowserForRole` / `GetBrowserForRole` plumbing I edited —
+  and the supervisor from this morning's round still starts. Dev stopped cleanly, prod verified HTTP 200.
+
+## 7. ✅ Rebased onto your `2a89264` / `7211d97`, and **your P11-1 native-focus work is green on macOS**
+
+This round was rebased onto your two commits before pushing — **no conflicts**, including in the two
+shared files we both touched (`simple_handler.h`, `simple_handler.cpp`).
+
+⛔ **A clean textual rebase is not a clean build**, so it was rebuilt rather than assumed — which matters
+here because your `2a89264` added ~150 lines to **shared** `simple_app.cpp` / `simple_handler.cpp` /
+`simple_handler.h` while I was *deleting* from two of them. Result on the combined tree:
+
+- builds + links clean (object mtime vs source mtime), suite **335 / 334 pass / 1 skip**;
+- the backup sweep **still returns 0** for every symbol — your new code reintroduced none of them, and
+  the `g_brc100_auth_overlay_window` control still reads **31**;
+- runtime: **0 `[ERROR]` lines**, 2 CDP targets, backends up on 31401 / 31402, dev stopped clean, the
+  owner's installed build verified **HTTP 200** throughout.
+
+⇒ **Nothing in P11-1 needs a macOS port as far as compiling and starting goes.** ⬜ I did **not** test
+its behaviour — "launch and type without clicking" is `W8` on your side and is native-input bound here
+for the same reason `D9` is. Your three native defects may or may not have macOS analogues; unmeasured.
+
+## 8. 🍎 Mac queue after this
+
+`M8` was the last of the standing three. Remaining and untouched: `P10d-A5` / `P10b-A5` visual rows,
+`W7`'s HTTP-path half, the CDP release arm (`C6`) and item 2b (`D9`) — both owed to a signed build —
+and your three open macOS questions: **trackpad pinch-zoom, the macOS text-scale analogue, and tear-off**.
+None of their greens inherited.
+
+---
+
 # 📋 ROUND 2026-09-19b (**Mac**) — ✅ **`P8d-A8` is DONE: the real macOS supervisor, and the dead Restart button now works.** ⚠️ **One macOS-only C++ file.**
 
 Follow-on to this morning's round. The stub is gone and every row below is **MEASURED** on the

@@ -326,7 +326,8 @@ NSRect CalculateToolbarOverlayFrame(NSWindow* mainWindow, CGFloat overlayWidth,
 // INFRA-03: GenericOverlayView
 // ============================================================================
 // NSView subclass with full event forwarding to CefBrowser.
-// Replaces per-overlay SettingsOverlayView, BackupOverlayView, etc.
+// Replaces per-overlay SettingsOverlayView, BRC100AuthOverlayView, etc.
+// (BackupOverlayView was deleted with the backup overlay — beta.3 Phase 8c O8, macOS half 2026-09-19.)
 
 @implementation GenericOverlayView {
     OverlayBrowserRef* _browserRef;

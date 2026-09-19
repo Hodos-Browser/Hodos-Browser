@@ -111,7 +111,6 @@ public:
     // Overlay NSWindows (11 total — mirrors Windows overlay HWNDs)
     void* settings_overlay_window = nullptr;
     void* wallet_overlay_window = nullptr;
-    void* backup_overlay_window = nullptr;
     void* brc100_auth_overlay_window = nullptr;
     void* notification_overlay_window = nullptr;
     void* settings_menu_overlay_window = nullptr;
@@ -158,7 +157,6 @@ public:
     CefRefPtr<CefBrowser> overlay_browser;
     CefRefPtr<CefBrowser> settings_browser;
     CefRefPtr<CefBrowser> wallet_browser;
-    CefRefPtr<CefBrowser> backup_browser;
     CefRefPtr<CefBrowser> brc100_auth_browser;
     CefRefPtr<CefBrowser> notification_browser;
     CefRefPtr<CefBrowser> settings_menu_browser;

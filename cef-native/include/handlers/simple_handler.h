@@ -79,7 +79,6 @@ public:
     static CefRefPtr<CefBrowser> GetWalletPanelBrowser();
     static CefRefPtr<CefBrowser> GetSettingsBrowser();
     static CefRefPtr<CefBrowser> GetWalletBrowser();
-    static CefRefPtr<CefBrowser> GetBackupBrowser();  // nullptr on Windows since 8c O8; kept for the macOS half
     static CefRefPtr<CefBrowser> GetBRC100AuthBrowser();
     static CefRefPtr<CefBrowser> GetNotificationBrowser();
     static CefRefPtr<CefBrowser> GetSettingsMenuBrowser();
@@ -357,7 +356,6 @@ private:
     static CefRefPtr<CefBrowser> overlay_browser_;
     static CefRefPtr<CefBrowser> settings_browser_;
     static CefRefPtr<CefBrowser> wallet_browser_;
-    static CefRefPtr<CefBrowser> backup_browser_;
     static CefRefPtr<CefBrowser> brc100_auth_browser_;
     static CefRefPtr<CefBrowser> notification_browser_;
     static CefRefPtr<CefBrowser> settings_menu_browser_;

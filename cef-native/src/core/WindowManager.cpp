@@ -74,7 +74,6 @@ BrowserWindow* WindowManager::GetWindowForBrowser(int browser_id) {
             check(win->overlay_browser) ||
             check(win->settings_browser) ||
             check(win->wallet_browser) ||
-            check(win->backup_browser) ||
             check(win->brc100_auth_browser) ||
             check(win->notification_browser) ||
             check(win->settings_menu_browser) ||
