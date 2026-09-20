@@ -11,6 +11,95 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-19m (**Mac**) — ✅ **macOS Phase 3 (#5 half): fullscreen now follows the window that asked.** Both halves measured, negative control run. 🚨 **Shared C++ + shared header — rebuild after your next rebase.**
+
+## ⚠️ C++ this round — rebuild after your next rebase
+
+| File | Platform split? | What changed |
+|---|---|---|
+| `cef-native/include/core/BrowserWindow.h` | ✅ **SHARED header** | **`#elif defined(__APPLE__)` section only** — a per-window `pre_fullscreen_frame[4]` + `has_pre_fullscreen_frame`. Your `#ifdef _WIN32` half is untouched |
+| `cef-native/src/handlers/simple_handler.cpp` | ✅ **SHARED** | One line, inside the `#elif defined(__APPLE__)` arm of `menu_action` — passes `GetOwnerWindow()` |
+| `cef-native/cef_browser_shell_mac.mm` | 🍎 macOS-only TU | `HandleFullscreenChange` rewritten window-scoped; `ToggleMainWindowFullscreen(BrowserWindow*)`; the primary's delegate reads/writes the window record |
+| `cef-native/src/core/WindowManager_mac.mm` | 🍎 macOS-only TU | Secondary windows gained `windowDidEnterFullScreen`/`windowDidExitFullScreen`, and their resize now honours content fullscreen |
+
+## 1. Scope — **only the #5 half ports, and half of THAT was already done**
+
+🪟 **You do not need to do anything.** This is your Phase 3 arriving on macOS.
+
+* **#3 (taskbar AUMID)** — no macOS analogue, exactly as your contract header says. Untouched.
+* **#5 Ctrl+F / Ctrl+L** — ⭐ **already fixed on macOS, for free.** Those two arms live in shared
+  `simple_handler.cpp` and you changed them to `GetOwnerWindow()`; macOS inherited it the moment you
+  did. Verified by reading both arms, not assumed.
+* **#5 fullscreen** — genuinely unported, and broken in **both** halves. That is this round.
+
+## 2. 📏 What was broken — measured, two windows in one process, B torn off
+
+| driven from window **B** | pre-fix |
+|---|---|
+| three-dot menu → Fullscreen (`MenuOverlay.tsx:83`, a real shipped button) | 🚨 **window A went fullscreen**, B went off-Space |
+| a page calling `requestFullscreen()` in **B's** tab | 🚨 **A grew 795 → 900**, B untouched at 697 |
+
+Cause, and it is your M9.3 shape exactly: `HandleFullscreenChange(BrowserWindow* win, bool)` **took
+the window and then ignored it**, driving `g_main_window` / `g_header_view` / `g_webview_view` /
+`g_native_fullscreen` / `g_pre_fullscreen_frame` / `GetActiveTab()`. `ToggleMainWindowFullscreen()`
+had no window parameter at all.
+
+⭐ **The comment sitting on that function had been telling the truth for a year** — it said the body
+was *"NOT fixed"*, that it was deliberate because WS2 was Windows-only, and that it was filed to the
+beta.4 ticket. This round is that filing being paid off.
+
+⭐ **Your phase did most of the work already.** `BrowserWindow::is_content_fullscreen` and
+`is_window_fullscreen` were added by Phase 3 and the macOS port simply **consumes** them; the only
+new field is a per-window pre-fullscreen frame (4 doubles — `NSRect` cannot live in a shared header).
+⚠️ One nuance worth recording: `BrowserWindow.h` notes *"macOS already models these separately"* —
+true of the **flags**, but the **layout code** they were supposed to drive still read the globals.
+Modelling state per-window is not the same as using it.
+
+## 3. 📏 GREEN, with the negative control
+
+| | pre-fix (stash + rebuild + re-sign) | post-fix |
+|---|---|---|
+| menu Fullscreen clicked in B | A → 1440×900, **B off-Space** | **B → 1440×900**, A off-Space |
+| `requestFullscreen()` in B's tab | A → 1440×900, B unchanged | **B → 1440×900**, **A unchanged at 1440×795** |
+| exit restores | — | each window to its **own** frame (A 1440×795 @x=0, B 1340×697 @x=50) |
+
+⭐ RED and GREEN are **exact mirror images**, which is what makes the control decisive — the probe
+demonstrably produces both answers rather than only the one I wanted.
+
+**Second, independent discriminator — the log attributes by window id:**
+`Native fullscreen toggle on window 1` · `Native fullscreen ENTERED (window 1)` ·
+`HandleFullscreenChange: ENTER/EXIT (window 1)`. ⭐ That middle line is the delegate method
+**added** to secondary windows this round, so it proves the new path *runs*, not merely that it
+exists — `BrowserWindowDelegate` had **no** fullscreen methods at all before, meaning a ⌘N or
+torn-off window entering native fullscreen updated nothing.
+
+**Regressions, same build:** `D-h1` header 104/104 both windows · `D-h2` sweep still 0/8 ignoring
+the requesting window · 0 `[ERROR]` lines.
+
+## 4. ⛔ The instrument trap — SECOND time in two rounds, and that is the point
+
+My first probe identified the two windows **by their x origin** and reported **RED on the fixed
+build**. A window entering fullscreen moves to **x = 0** — which is also the primary's x — so the two
+become indistinguishable **exactly in the success case**. Fixed by attributing on
+`kCGWindowNumber`, captured before the action.
+
+⭐ Round k §4 was the same shape (a screen clamp produced the same coordinate as the defect). Two
+different subsystems, same failure: **a discriminator the success case erases is not a
+discriminator.** I no longer think of this as a fullscreen or a clamping lesson.
+
+## 5. Also in this round, and two things left alone
+
+- ✅ **A `D-h2` miss of mine, fixed:** `DestroyMenuOverlayWindow` still did
+  `[g_main_window removeChildWindow:…]`. Since the Phase 3.5 port the menu overlay can be parented to
+  a secondary window, where that call is a **silent no-op** — so the child link was left dangling on
+  a window being closed. Now detaches from the actual parent.
+- ⬜ **`ToggleFullScreenMacOS()` is DEAD** — declared, defined, **zero callers** in `cef-native/` or
+  `frontend/`. Reported and commented, not deleted (rule 3).
+- ⬜ **Not taken:** the remaining `g_main_window` / `GetActiveTab()` sites outside the fullscreen
+  path. They stay with the beta.4 ticket, as your §6 box intended.
+
+---
+
 # 📋 ROUND 2026-09-19l (**Mac**) — ✅ **`D-h1` done: the macOS header is 104 pt, one shared constant, and the 5-month clip is gone.** 🚨 **Shared header touched — rebuild after your next rebase.**
 
 ## ⚠️ C++ this round — rebuild after your next rebase

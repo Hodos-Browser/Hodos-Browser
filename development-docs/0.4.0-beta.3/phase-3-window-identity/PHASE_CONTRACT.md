@@ -4,6 +4,22 @@
 **Opened:** 2026-08-26 · **Owner:** Matthew · **Platforms:** Windows only (§3 of `SPRINT_PLAN.md`: macOS Spaces is a different mechanism; #3 has no macOS analogue)
 **Standard:** `../HARNESS.md`. Measurements: `MEASUREMENTS.md`.
 
+> 🍎 **AMENDED 2026-09-19 — the #5 half is no longer Windows-only.** The header above still
+> reads *"Platforms: Windows only"*, and that remains correct for **#3** (taskbar AUMID has no
+> macOS analogue). It is **no longer correct for #5**: the macOS port landed on 2026-09-19.
+> - **Ctrl+F / Ctrl+L** needed nothing — those arms live in shared `simple_handler.cpp` and
+>   already resolve `GetOwnerWindow()`, so macOS inherited the fix when Windows made it.
+> - **Fullscreen** was broken on macOS in both halves and is now fixed and measured:
+>   `HandleFullscreenChange` took the `BrowserWindow*` and drove process globals anyway, and
+>   `ToggleMainWindowFullscreen()` always acted on `g_main_window`. 📏 Both reproduced with two
+>   windows in one process and both closed with a negative control — `P3_MAC_RESULTS.md`.
+> - ⭐ The per-window fields this phase added to `BrowserWindow` (`is_content_fullscreen`,
+>   `is_window_fullscreen`) are what the macOS port consumed; it added only a per-window
+>   pre-fullscreen frame. The note in `BrowserWindow.h` that *"macOS already models these
+>   separately"* was true of the FLAGS and not of the LAYOUT they were supposed to drive.
+> - ⬜ Still macOS-global, deliberately out of this port and left to the beta.4 ticket: the
+>   remaining `g_main_window` / `GetActiveTab()` sites outside the fullscreen path.
+
 ---
 
 ## 0. What the kickoff changed about the phase as written
