@@ -11,6 +11,87 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-19l (**Mac**) — ✅ **`D-h1` done: the macOS header is 104 pt, one shared constant, and the 5-month clip is gone.** 🚨 **Shared header touched — rebuild after your next rebase.**
+
+## ⚠️ C++ this round — rebuild after your next rebase
+
+| File | Platform split? | What changed |
+|---|---|---|
+| `cef-native/include/core/LayoutHelpers.h` | ✅ **SHARED** | New `#elif defined(__APPLE__)` block holding `kMacHeaderHeightPt = 104`. ⛔ **`HEADER_CSS_HEIGHT` (96) is UNTOUCHED** — the rest of the Windows diff is comment only. The file is inert for you; it is listed because you compile it |
+| `cef-native/cef_browser_shell_mac.mm` | 🍎 macOS-only TU | 3 header-geometry sites + 22 overlay-anchor sites now read the constant |
+| `cef-native/src/core/WindowManager_mac.mm` | 🍎 macOS-only TU | Secondary windows were **99**; now the same constant |
+
+## 1. What was wrong
+
+Round f §2 measured it and the owner picked the direction (round h, `D-h1`): **104 pt, one shared
+constant for primary and secondary windows, and the April tab-strip inset stays** because it clears
+the traffic lights on purpose.
+
+📏 **Re-measured here on `bad5fb2` before changing anything**, both windows of one process:
+
+| window | header view (`innerHeight`) | React content (`#root`) | hidden behind the webview |
+|---|---|---|---|
+| primary | **96** | 104 | **8 pt** |
+| secondary (torn off) | **99** | 104 | **5 pt** |
+
+Two different wrong answers to the same question. Cause: `5c0bcd7` (2026-04-15) grew the macOS tab
+strip 42 → 50 and the native header stayed at 96 = 42 + 54.
+
+## 2. ⭐ The part that was bigger than round f said — and it is the interesting half
+
+Round f called this *"three sites + the 99s"*. It is **three sites + the 99s + twenty-two overlay
+anchors**, and missing the anchors would have traded one defect for another.
+
+Every dropdown positions itself with `Calculate*OverlayFrame(window, w, h, **96**)` — the `96` is a
+`headerHeight` argument meaning *"hang below the header"*. Grow the header to 104 and leave those at
+96 and **every dropdown opens 8 pt too high, overlapping the toolbar it is supposed to hang below**.
+Same for the omnibox, which computes `contentTop - 96 - height` by hand, and the wallet panel, whose
+full-window height is `contentHeight - 96`.
+
+⇒ All of it is now **one constant**, `kMacHeaderHeightPt`, deliberately placed in `LayoutHelpers.h`
+**next to your `HEADER_CSS_HEIGHT`** — because that header's comment read *"Matches macOS fixed
+headerHeight = 96"*, which stopped being true in April and said so for five months. The two numbers
+genuinely differ (`TabBar.tsx` renders `height: isMac ? 46 : 42` + `paddingTop: isMac ? '4px' : 0`),
+so the fix is to make the pair visible to anyone who changes either, not to unify them.
+
+## 3. 📏 Measured — GREEN, with the RED from the build immediately before it
+
+| assertion | pre-change (`bad5fb2`) | post-change |
+|---|---|---|
+| primary header view vs content | 96 vs 104 — **8 pt clipped** | **104 vs 104, clip 0** |
+| secondary header view vs content | 99 vs 104 — **5 pt clipped** | **104 vs 104, clip 0** |
+| primary window arithmetic | — | 795 = header 104 + webview **691** |
+| secondary window arithmetic | — | 697 = header 104 + webview **593** |
+| space below the address bar, inside the header | **1 px** (round f: its lower edge sat on the webview) | **10 px** |
+| every dropdown's top edge | y = 126 | **y = 134** — all 8, i.e. they moved down exactly with the header |
+
+- ✅ **`D-h2` not regressed**: the same 8-overlay sweep still reads **0/8 ignoring the requesting
+  window**, x values unchanged. The rig from round k pays for itself immediately.
+- ✅ **A real resize ran, not just the create path**: native fullscreen via `menu_action fullscreen`
+  took the primary 795 → 900 → 795 and the header stayed 104/104, clip 0, throughout — so
+  `MainWindowDelegate::windowDidResize` executed with the new constant. ⭐ The secondary window sat at
+  697 the whole time, which is a free confirmation that window layout is per-window.
+- ✅ **Content fullscreen too**: `requestFullscreen()` on a tab (driven with `userGesture:true`, which
+  supplies the transient activation) hid the header and the **exit** arm restored it at 104.
+- ⬜ **One arm still CODE_READING**: `WindowManager_mac.mm`'s *secondary* `windowDidResize`. I can
+  create window B and measure it at 104, but I cannot **resize** B — `ToggleMainWindowFullscreen()`
+  acts on `g_main_window`, and synthetic clicks are dropped (round k §5, `AXIsProcessTrusted` false).
+  It is one line reading the same constant as the three arms that did run.
+
+## 4. 🐞 Two things noticed, NOT fixed (reporting, per scope)
+
+1. **`ToggleMainWindowFullscreen()` is primary-only** — it calls `[g_main_window toggleFullScreen:]`
+   regardless of which window asked, so the menu's Fullscreen item in a torn-off window fullscreens
+   the *other* window. Same family as `D-h2` but in the fullscreen path, which is Phase 3's macOS half
+   rather than 3.5's. 📏 Observed incidentally above: driving it from either header moved the primary.
+2. `HandleFullscreenChange(BrowserWindow* win, …)` **takes the requesting window and then ignores it**,
+   using `g_main_window` throughout — the same "context already in hand and discarded" shape your
+   Phase 3 contract describes for `ShellWindowProc`.
+
+⇒ Both are the macOS Phase 3 port. Flagging for the queue, not taking them in this round.
+
+---
+
 # 📋 ROUND 2026-09-19k (**Mac**) — ✅ **`D-h2` done: the Phase 3.5 overlay-follows-window port is on macOS.** 8/8 measured, negative control run. 🚨 **Shared C++ — rebuild after your next rebase.**
 
 ## ⚠️ C++ this round — rebuild after your next rebase
