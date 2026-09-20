@@ -1235,6 +1235,7 @@ static PendingAuthRequest buildPendingAuthRequest(
     req.method = ctx.method;
     req.endpoint = ctx.endpoint;
     req.body = ctx.body;
+    req.resumeBody = ctx.body;   // survives openDomainApprovalModal's blanking of `body`
     req.type = type;
     req.handler = resume.handler;
     if (resume.isInternalResume) {
@@ -1390,6 +1391,8 @@ std::string openDomainApprovalModal(const ModalContext& ctx, const ResumeContext
     // Preserve that by overriding ctx.body to "" before enrollment.
     PendingAuthRequest req = buildPendingAuthRequest("domain_approval", ctx, resume);
     req.body = "";  // historical: body cleared for domain_approval entries
+                    // ⚠️ `req.resumeBody` still holds the real one — the approve-resume
+                    // needs it, and re-sending a 0-byte body is the defect this pair fixes.
     bool wasFirstForDomain = false;
     std::string requestId = enqueueConnectPrompt(std::move(req), "domain_approval", "",
                                                  wasFirstForDomain);
@@ -3147,8 +3150,45 @@ bool ResumeDrainedApprovedRequest(const PendingAuthRequest& req) {
     if (req.resumeKind == ResumeKind::kInternal && req.handler) {
         return ForwardPendingWalletRequest(req.handler);
     }
+    // beta.3 2026-09-19 — the IPC sibling of the arm above, and the one that matters
+    // more: `window.CWI` is the provider injected into every https dApp page, so this is
+    // the NORMAL BRC-100 path, not a fallback.
+    //
+    // 📏 MEASURED by the owner on Windows (round 8), byte-for-byte the HTTP signature:
+    //     page   {"error":"[Hodos] createAction failed: Invalid JSON: EOF ..."}
+    //     wallet Raw request body (0 bytes):
+    //
+    // ⛔ THE OBVIOUS FIX IS WRONG, and it is worth saying why because it looks right.
+    // "Just put req.body back" leaves this on resumeInternalResponse, which ALSO:
+    //   (a) sends no X-Payment-* headers, so Rust cannot build a payment context and
+    //       fails closed into a price-unavailable 202; and
+    //   (b) treats that 202 as a 2xx and hands it to the page as success — which lights
+    //       the GOLD PILL for a payment that never happened.
+    // ⇒ restoring the body alone would convert a visible parse error into a SILENT FALSE
+    // payment indicator. Strictly worse. (Same reasoning as the HTTP arm, 2026-09-19i.)
+    //
+    // ⭐ So this mirrors the HTTP fix's SHAPE rather than its code: HTTP re-enters the
+    // handler's own pipeline, and the IPC equivalent of that pipeline is
+    // runIpcEngineCascade — which computes the payment cost, injects X-Payment-Satoshis /
+    // -Cents / -Bsv-Price-Available, and routes a follow-up 202 into its own modal via
+    // tryHandlePendingResponse instead of leaking it to the page.
+    //
+    // ⚠️ No re-prompt loop: addDomainPermission() is POSTed to Rust before this drain
+    // runs (simple_handler.cpp, the same ordering the HTTP arm relies on), so Rust sees
+    // the domain as approved and the next 202 — if any — is a DIFFERENT gate, e.g. an
+    // over-cap payment, which is exactly the prompt that should appear.
     if (req.resumeKind == ResumeKind::kInternal && req.frame) {
-        resumeInternalResponse(req, kApprovedStub);
+        const std::string ipcId = !req.originalIpcRequestId.empty()
+            ? req.originalIpcRequestId : req.requestId;
+        // ⛔ resumeBody, not body: openDomainApprovalModal blanks `body` on purpose so the
+        // overlay never renders the payload, and re-sending that blank IS the defect.
+        LOG_INFO_HTTP("🔐 kInternal+frame resume: re-entering the IPC cascade for "
+                      + req.domain + " endpoint=" + req.endpoint
+                      + " bodyBytes=" + std::to_string(req.resumeBody.size()));
+        runIpcEngineCascade(ipcId, req.method, req.endpoint, req.resumeBody,
+                            req.httpMethod.empty() ? "POST" : req.httpMethod,
+                            req.domain, req.frame, req.browserId,
+                            DomainPermissionCache::GetInstance().getPermission(req.domain));
         return true;
     }
     return false;

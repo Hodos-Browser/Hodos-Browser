@@ -33,6 +33,19 @@ struct PendingAuthRequest {
     std::string method;
     std::string endpoint;
     std::string body;
+
+    // The request body as the SITE sent it, kept for the approve-resume.
+    //
+    // ⛔ This is NOT a duplicate of `body`. `body` is what the modal overlay is shown
+    // (`sendAuthRequestDataToOverlay` passes it as arg 3), and `openDomainApprovalModal`
+    // deliberately BLANKS it for connect entries — a connect prompt asks "do you trust
+    // this site", so the call's payload has no business being rendered into the overlay's
+    // renderer process. 🚨 That blank is also what broke the resume: the approved call was
+    // re-sent with 0 bytes and the wallet answered "Invalid JSON: EOF" — measured on the
+    // HTTP transport 2026-09-19h and on the IPC transport (`window.CWI`) 2026-09-19 by the
+    // owner. Keeping the two separate fixes the resume without putting the payload back in
+    // front of the overlay.
+    std::string resumeBody;
     std::string type;  // "domain_approval", "brc100_auth", "no_wallet", "payment_confirmation", "rate_limit_exceeded", "certificate_disclosure", scoped-grant types
     CefRefPtr<CefResourceHandler> handler;  // valid iff resumeKind == kHttpCallback
 
@@ -100,6 +113,7 @@ public:
         req.method = method;
         req.endpoint = endpoint;
         req.body = body;
+        req.resumeBody = body;
         req.type = type;
         req.handler = handler;
         // resumeKind defaults to kHttpCallback; other Commit-6 fields stay default.
