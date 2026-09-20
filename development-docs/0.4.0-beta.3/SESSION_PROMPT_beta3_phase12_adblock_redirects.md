@@ -61,9 +61,12 @@ too. Worth noting when the mechanism is measured — do not assume it.
 
 ## State at handover
 
-- Head **`266be1f`** on `0.4.0`. `preflight -Full` **PASS** (all gates + all T1, nothing skipped).
-  Phase 11 = 11/11 closed.
-- Dev environment is **UP**: wallet `31401`, adblock `31402`, vite `5137`, dev browser running.
+- Head **`b47faf3`** on `0.4.0`. `preflight -Full` **PASS** (all gates + all T1, nothing skipped);
+  `-NegativeControl` **PASS** (every gate seen to fail). Phase 11 = 11/11 closed.
+- ⛔ Dev environment is **DOWN**, deliberately — bring it up yourself so you own a **fresh**
+  `debug_output-<pid>.log` with no prior session's noise in it, and so the first build cannot hit
+  `LNK1104` against a running dev browser. Run order is in the root `CLAUDE.md`: `.\dev-wallet.ps1`,
+  `.\dev-adblock.ps1`, `cd frontend && npm run dev`, then `cd cef-native && .\win_build_run.sh`.
 - ⭐ **`R-GOLD` is GREEN** — real money, correct tab, confirmed in the log and on the chain. First time
   this sprint. ⛔ Still owed: the stub-the-emit RED (build-side) and the **BRC-121 paid-retry** emit route.
   👤 The owner will run the GREEN direction at **real sites** at sprint end; `R-COUNT` likewise.
@@ -75,11 +78,13 @@ too. Worth noting when the mechanism is measured — do not assume it.
 | `TICKET_connect_on_the_IPC_transport_still_resends_an_empty_body.md` | 👤 owner-found; macOS's open arm; NOT fixed |
 | `TICKET_createAction_accepts_an_empty_lockingScript_and_spends_into_it.md` | money path; **asked, not changed** (invariant 13) |
 | `TICKET_transaction_row_can_sit_at_created_while_its_coin_is_on_chain.md` | LOW; its non-coverage is protective |
-| `G11` reports **58 against baseline 59** | improved, wants its ratchet — **its own commit** under rule 6 |
 | Phase 13 **step 0** | the CAPTCHA report came from **0.3.x injected-JS farbling**; re-test on 0.4.0 before designing |
 
 ### Standing rules that bit in the last session
 
+- ⭐ **`G11` was ratcheted 59 → 58 on 2026-09-19** (`b47faf3`) — nothing owed, but the lesson is live: a
+  hand count of **occurrences** disagreed with the gate, which counts matching **lines**, and three
+  plausible explanations were wrong before the real one. ⛔ Never set a baseline by hand.
 - ⛔ **`git fetch && git rebase origin/0.4.0` before starting, and REBUILD after.** macOS pushed **9**
   commits during one session and edited **three** files Windows had also edited — `LayoutHelpers.h`,
   `BRC100AuthOverlayRoot.tsx`, `HttpRequestInterceptor.cpp`. Every rebase was conflict-free, which proves
