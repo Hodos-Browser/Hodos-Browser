@@ -25,6 +25,7 @@
 #include "include/handlers/simple_app.h"
 #include "include/core/AppPaths.h"
 #include "include/core/PortConfig.h"
+#include "include/core/LayoutHelpers.h"   // kMacHeaderHeightPt — D-h1
 #include "include/core/JsStringEscape.h"  // escapeJsonForJs — notification query hardening (P0.5 panel #3)
 #include "include/handlers/my_overlay_render_handler.h"
 #include "include/wrapper/cef_library_loader.h"
@@ -454,7 +455,7 @@ void HandleFullscreenChange(BrowserWindow* win, bool fullscreen) {
             [g_header_view setHidden:NO];
 
             NSRect contentRect = [[g_main_window contentView] bounds];
-            int headerHeight = 96;
+            int headerHeight = kMacHeaderHeightPt;  // D-h1
             NSRect headerRect = NSMakeRect(0, contentRect.size.height - headerHeight,
                                            contentRect.size.width, headerHeight);
             [g_header_view setFrame:headerRect];
@@ -2171,7 +2172,7 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
 
     // Settings overlay: flush right, flush below header
     if (g_settings_overlay_window && [g_settings_overlay_window isVisible]) {
-        NSRect sf = CalculateToolbarOverlayFrame(g_main_window, 450, 450, 96);
+        NSRect sf = CalculateToolbarOverlayFrame(g_main_window, 450, 450, kMacHeaderHeightPt);
         [g_settings_overlay_window setFrame:sf display:YES];
     }
 
@@ -2191,7 +2192,7 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
         // In content fullscreen: webview fills entire content area, header stays hidden
         [g_webview_view setFrame:contentRect];
     } else {
-        int headerHeight = 96;
+        int headerHeight = kMacHeaderHeightPt;  // D-h1
         int webviewHeight = contentRect.size.height - headerHeight;
 
         NSRect headerRect = NSMakeRect(0, contentRect.size.height - headerHeight,
@@ -2223,7 +2224,7 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
 
     // Settings overlay: flush right, flush below header
     if (g_settings_overlay_window && [g_settings_overlay_window isVisible]) {
-        NSRect sf = CalculateToolbarOverlayFrame(g_main_window, 450, 450, 96);
+        NSRect sf = CalculateToolbarOverlayFrame(g_main_window, 450, 450, kMacHeaderHeightPt);
         [g_settings_overlay_window setFrame:sf display:YES];
         CefRefPtr<CefBrowser> settings = SimpleHandler::GetSettingsBrowser();
         if (settings) settings->GetHost()->WasResized();
@@ -2470,7 +2471,7 @@ void CreateMainWindow() {
     int winH = (int)windowRect.size.height;
     int headerHeight = g_picker_mode
         ? winH
-        : 96;  // Header with tabs (42px) + toolbar (54px)
+        : kMacHeaderHeightPt;  // D-h1: tab strip 50 (mac) + toolbar 54
     int webviewHeight = winH - headerHeight;
 
     LOG_INFO("📐 Header height: " + std::to_string(headerHeight) + "px" +
@@ -2641,7 +2642,7 @@ void CreateSettingsOverlayWithSeparateProcess(int iconRightOffset) {
 
     CGFloat panelWidth = 450;
     CGFloat panelHeight = 450;
-    NSRect panelFrame = CalculateToolbarOverlayFrame(g_main_window, panelWidth, panelHeight, 96);
+    NSRect panelFrame = CalculateToolbarOverlayFrame(g_main_window, panelWidth, panelHeight, kMacHeaderHeightPt);
 
     LOG_INFO("📐 Settings panel: (" + std::to_string((int)panelFrame.origin.x) + ", " + std::to_string((int)panelFrame.origin.y)
              + ") " + std::to_string((int)panelWidth) + "x" + std::to_string((int)panelHeight));
@@ -2797,7 +2798,7 @@ void ShowCookiePanelOverlay(int iconRightOffset, BrowserWindow* targetWin) {
         OwnOverlayToRequestingWindowMac(g_cookie_panel_overlay_window, targetWin);
 
         // Reposition: flush right, flush below header
-        NSRect panelFrame = CalculateToolbarOverlayFrame(host, 400, 500, 96);
+        NSRect panelFrame = CalculateToolbarOverlayFrame(host, 400, 500, kMacHeaderHeightPt);
         [g_cookie_panel_overlay_window setFrame:panelFrame display:YES];
         [g_cookie_panel_overlay_window makeKeyAndOrderFront:nil];
         InstallCookiePanelClickOutsideMonitor();
@@ -2817,7 +2818,7 @@ void CreateCookiePanelOverlayWithSeparateProcess(int iconRightOffset, BrowserWin
 
     CGFloat panelWidth = 400;
     CGFloat panelHeight = 500;
-    NSRect panelFrame = CalculateToolbarOverlayFrame(host, panelWidth, panelHeight, 96);
+    NSRect panelFrame = CalculateToolbarOverlayFrame(host, panelWidth, panelHeight, kMacHeaderHeightPt);
 
     LOG_INFO("Cookie panel: (" + std::to_string((int)panelFrame.origin.x) + ", " + std::to_string((int)panelFrame.origin.y)
              + ") " + std::to_string((int)panelWidth) + "x" + std::to_string((int)panelHeight));
@@ -2934,8 +2935,8 @@ void CreateWalletOverlayWithSeparateProcess(int iconRightOffset, BrowserWindow* 
     // Position: fixed-width panel, flush right, flush below header, full remaining height
     CGFloat walletWidth = 400;
     NSRect contentScreen = [host convertRectToScreen:[[host contentView] frame]];
-    CGFloat walletHeight = contentScreen.size.height - 96;
-    NSRect walletFrame = CalculateToolbarOverlayFrame(host, walletWidth, walletHeight, 96);
+    CGFloat walletHeight = contentScreen.size.height - kMacHeaderHeightPt;
+    NSRect walletFrame = CalculateToolbarOverlayFrame(host, walletWidth, walletHeight, kMacHeaderHeightPt);
     LOG_INFO("📐 Wallet overlay: " + std::to_string((int)walletFrame.size.width) + " x " + std::to_string((int)walletFrame.size.height));
 
     if (g_wallet_overlay_window) {
@@ -3055,7 +3056,8 @@ void ShowWalletOverlay(BrowserWindow* targetWin = nullptr) {
     OwnOverlayToRequestingWindowMac(g_wallet_overlay_window, targetWin);
     NSRect hostContent = [host convertRectToScreen:[[host contentView] frame]];
     [g_wallet_overlay_window setFrame:CalculateToolbarOverlayFrame(
-        host, 400, hostContent.size.height - 96, 96) display:YES];
+        host, 400, hostContent.size.height - kMacHeaderHeightPt,
+        kMacHeaderHeightPt) display:YES];
 
     [g_wallet_overlay_window makeKeyAndOrderFront:nil];
     InstallClickOutsideMonitor(g_wallet_overlay_window);
@@ -3715,7 +3717,7 @@ void CreateSettingsMenuOverlay() {
     // Settings menu: flush right, flush below header
     int menuWidth = 300;
     int menuHeight = 480;
-    NSRect menuFrame = CalculateToolbarOverlayFrame(g_main_window, menuWidth, menuHeight, 96);
+    NSRect menuFrame = CalculateToolbarOverlayFrame(g_main_window, menuWidth, menuHeight, kMacHeaderHeightPt);
 
     if (g_settings_menu_overlay_window) {
         LOG_INFO("🔄 Destroying existing settings menu overlay");
@@ -3845,7 +3847,7 @@ void ShowOmniboxOverlayMacOS(BrowserWindow* targetWin) {
         int omniboxHeight = 420;
         CGFloat overlayX = contentScreen.origin.x + (contentScreen.size.width - omniboxWidth) / 2;
         CGFloat contentTop = contentScreen.origin.y + contentScreen.size.height;
-        CGFloat overlayY = contentTop - 96 - omniboxHeight;
+        CGFloat overlayY = contentTop - kMacHeaderHeightPt - omniboxHeight;
         [g_omnibox_overlay_window setFrame:NSMakeRect(overlayX, overlayY, omniboxWidth, omniboxHeight) display:YES];
 
         [g_omnibox_overlay_window orderFront:nil];
@@ -3862,14 +3864,14 @@ void CreateOmniboxOverlayMacOS(BrowserWindow* targetWin) {
     // was only visible on the first open. Both paths take the requesting window here.
     NSWindow* host = OverlayHostWindow(targetWin);
     NSRect contentScreen = [host convertRectToScreen:[[host contentView] frame]];
-    // Position below header (99px) spanning most of the window width
+    // Position below header (kMacHeaderHeightPt) spanning most of the window width
     int omniboxWidth = (int)(contentScreen.size.width * 0.69);
     if (omniboxWidth < 400) omniboxWidth = 400;
     int omniboxHeight = 420;
     // Center horizontally, position below header
     CGFloat overlayX = contentScreen.origin.x + (contentScreen.size.width - omniboxWidth) / 2;
     CGFloat contentTop = contentScreen.origin.y + contentScreen.size.height;
-    CGFloat overlayY = contentTop - 96 - omniboxHeight;
+    CGFloat overlayY = contentTop - kMacHeaderHeightPt - omniboxHeight;
     NSRect omniboxFrame = NSMakeRect(overlayX, overlayY, omniboxWidth, omniboxHeight);
 
     // Keep-alive: don't destroy existing window
@@ -3993,7 +3995,7 @@ void ShowDownloadPanelOverlayMacOS(int iconRightOffset, BrowserWindow* targetWin
 
         // D-h2: geometry only — this overlay is not an addChildWindow: child, so
         // it already has no parent to drag forward.
-        NSRect panelFrame = CalculateToolbarOverlayFrame(OverlayHostWindow(targetWin), 400, 500, 96);
+        NSRect panelFrame = CalculateToolbarOverlayFrame(OverlayHostWindow(targetWin), 400, 500, kMacHeaderHeightPt);
         [g_download_panel_overlay_window setFrame:panelFrame display:YES];
 
         [g_download_panel_overlay_window makeKeyAndOrderFront:nil];
@@ -4009,7 +4011,7 @@ void CreateDownloadPanelOverlayMacOS(int iconRightOffset, BrowserWindow* targetW
     NSWindow* host = OverlayHostWindow(targetWin);  // D-h2
     CGFloat panelWidth = 400;
     CGFloat panelHeight = 500;
-    NSRect panelFrame = CalculateToolbarOverlayFrame(host, panelWidth, panelHeight, 96);
+    NSRect panelFrame = CalculateToolbarOverlayFrame(host, panelWidth, panelHeight, kMacHeaderHeightPt);
 
     if (g_download_panel_overlay_window) {
         [g_download_panel_overlay_window close];
@@ -4144,7 +4146,7 @@ void ShowProfilePanelOverlayMacOS(int iconRightOffset, BrowserWindow* targetWin)
         g_mac_profile_panel_icon_right_offset = iconRightOffset;
 
         NSRect panelFrame = CalculateToolbarOverlayFrame(          // D-h2
-            OverlayHostWindow(targetWin), kProfilePanelWidth, kProfilePanelHeight, 96);
+            OverlayHostWindow(targetWin), kProfilePanelWidth, kProfilePanelHeight, kMacHeaderHeightPt);
         [g_profile_panel_overlay_window setFrame:panelFrame display:YES];
 
         [g_profile_panel_overlay_window makeKeyAndOrderFront:nil];
@@ -4160,7 +4162,7 @@ void CreateProfilePanelOverlayMacOS(int iconRightOffset, BrowserWindow* targetWi
     NSWindow* host = OverlayHostWindow(targetWin);  // D-h2
     CGFloat panelWidth = kProfilePanelWidth;
     CGFloat panelHeight = kProfilePanelHeight;
-    NSRect panelFrame = CalculateToolbarOverlayFrame(host, panelWidth, panelHeight, 96);
+    NSRect panelFrame = CalculateToolbarOverlayFrame(host, panelWidth, panelHeight, kMacHeaderHeightPt);
 
     if (g_profile_panel_overlay_window) {
         [g_profile_panel_overlay_window close];
@@ -4311,7 +4313,7 @@ bool WasBookmarksPanelJustHidden() {
 void ShowBookmarksPanelOverlayMacOS(int iconLeftOffset, BrowserWindow* targetWin) {
     if (g_bookmarks_panel_overlay_window) {
         NSRect panelFrame = CalculateLeftAnchoredOverlayFrame(       // D-h2
-            OverlayHostWindow(targetWin), 380, 520, 96, iconLeftOffset);
+            OverlayHostWindow(targetWin), 380, 520, kMacHeaderHeightPt, iconLeftOffset);
         [g_bookmarks_panel_overlay_window setFrame:panelFrame display:YES];
 
         [g_bookmarks_panel_overlay_window makeKeyAndOrderFront:nil];
@@ -4328,7 +4330,7 @@ void CreateBookmarksPanelOverlayMacOS(int iconLeftOffset, BrowserWindow* targetW
     NSWindow* host = OverlayHostWindow(targetWin);  // D-h2
     CGFloat panelWidth = 380;
     CGFloat panelHeight = 520;
-    NSRect panelFrame = CalculateLeftAnchoredOverlayFrame(host, panelWidth, panelHeight, 96, iconLeftOffset);
+    NSRect panelFrame = CalculateLeftAnchoredOverlayFrame(host, panelWidth, panelHeight, kMacHeaderHeightPt, iconLeftOffset);
 
     if (g_bookmarks_panel_overlay_window) {
         [g_bookmarks_panel_overlay_window close];
@@ -4445,7 +4447,7 @@ bool WasSiteInfoPanelJustHidden() {
 void ShowSiteInfoPanelOverlayMacOS(int iconLeftOffset, BrowserWindow* targetWin) {
     if (g_siteinfo_panel_overlay_window) {
         NSRect panelFrame = CalculateLeftAnchoredOverlayFrame(       // D-h2
-            OverlayHostWindow(targetWin), 360, 480, 96, iconLeftOffset);
+            OverlayHostWindow(targetWin), 360, 480, kMacHeaderHeightPt, iconLeftOffset);
         [g_siteinfo_panel_overlay_window setFrame:panelFrame display:YES];
 
         [g_siteinfo_panel_overlay_window makeKeyAndOrderFront:nil];
@@ -4460,7 +4462,7 @@ void CreateSiteInfoPanelOverlayMacOS(int iconLeftOffset, BrowserWindow* targetWi
     NSWindow* host = OverlayHostWindow(targetWin);  // D-h2
     CGFloat panelWidth = 360;
     CGFloat panelHeight = 480;
-    NSRect panelFrame = CalculateLeftAnchoredOverlayFrame(host, panelWidth, panelHeight, 96, iconLeftOffset);
+    NSRect panelFrame = CalculateLeftAnchoredOverlayFrame(host, panelWidth, panelHeight, kMacHeaderHeightPt, iconLeftOffset);
 
     if (g_siteinfo_panel_overlay_window) {
         [g_siteinfo_panel_overlay_window close];
@@ -4576,7 +4578,7 @@ bool WasTabListPanelJustHidden() {
 void ShowTabListPanelOverlayMacOS(int iconRightOffset, BrowserWindow* targetWin) {
     if (g_tablist_panel_overlay_window) {
         NSRect panelFrame = CalculateRightAnchoredOverlayFrame(      // D-h2
-            OverlayHostWindow(targetWin), 340, 480, 96, iconRightOffset);
+            OverlayHostWindow(targetWin), 340, 480, kMacHeaderHeightPt, iconRightOffset);
         [g_tablist_panel_overlay_window setFrame:panelFrame display:YES];
 
         [g_tablist_panel_overlay_window makeKeyAndOrderFront:nil];
@@ -4602,7 +4604,7 @@ void CreateTabListPanelOverlayMacOS(int iconRightOffset, BrowserWindow* targetWi
     NSWindow* host = OverlayHostWindow(targetWin);  // D-h2
     CGFloat panelWidth = 340;
     CGFloat panelHeight = 480;
-    NSRect panelFrame = CalculateRightAnchoredOverlayFrame(host, panelWidth, panelHeight, 96, iconRightOffset);
+    NSRect panelFrame = CalculateRightAnchoredOverlayFrame(host, panelWidth, panelHeight, kMacHeaderHeightPt, iconRightOffset);
 
     if (g_tablist_panel_overlay_window) {
         [g_tablist_panel_overlay_window close];
@@ -6437,7 +6439,7 @@ void ShowMenuOverlayMacOS(int iconRightOffset, BrowserWindow* targetWin = nullpt
         NSWindow* host = OverlayHostWindow(targetWin);
         OwnOverlayToRequestingWindowMac(g_menu_overlay_window, targetWin);
 
-        NSRect menuFrame = CalculateToolbarOverlayFrame(host, 280, 450, 96);
+        NSRect menuFrame = CalculateToolbarOverlayFrame(host, 280, 450, kMacHeaderHeightPt);
         [g_menu_overlay_window setFrame:menuFrame display:YES];
 
         [g_menu_overlay_window makeKeyAndOrderFront:nil];
@@ -6467,8 +6469,8 @@ void CreateMenuOverlayMac(int iconRightOffset, BrowserWindow* targetWin) {
     CGFloat menuWidth = 280;
     CGFloat menuHeight = 450;
 
-    // Position: flush right, flush below header (96px header)
-    NSRect menuFrame = CalculateToolbarOverlayFrame(host, menuWidth, menuHeight, 96);
+    // Position: flush right, flush below header
+    NSRect menuFrame = CalculateToolbarOverlayFrame(host, menuWidth, menuHeight, kMacHeaderHeightPt);
 
     LOG_INFO("Menu overlay frame: (" + std::to_string((int)menuFrame.origin.x) + ", "
              + std::to_string((int)menuFrame.origin.y) + ") "

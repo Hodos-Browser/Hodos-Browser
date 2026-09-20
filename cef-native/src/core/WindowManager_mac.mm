@@ -8,6 +8,7 @@
 #include "../../include/core/TabManager.h"
 #include "../../include/handlers/simple_handler.h"
 #include "../../include/core/Logger.h"
+#include "../../include/core/LayoutHelpers.h"   // kMacHeaderHeightPt — D-h1
 #include "include/cef_browser.h"
 #include "include/cef_request_context.h"
 #include <algorithm>
@@ -34,9 +35,9 @@ extern void ShutdownApplication();
 
     NSWindow* nsWindow = (__bridge NSWindow*)bw->ns_window;
     NSRect contentRect = [[nsWindow contentView] bounds];
-    int headerHeight = 99;
+    int headerHeight = kMacHeaderHeightPt;  // D-h1 — was 99, the primary was 96
 
-    // Resize header view (fixed 99px at top)
+    // Resize header view (fixed kMacHeaderHeightPt at top)
     NSView* headerView = (__bridge NSView*)bw->header_view;
     if (headerView) {
         [headerView setFrame:NSMakeRect(0, contentRect.size.height - headerHeight,
@@ -140,7 +141,7 @@ BrowserWindow* WindowManager::CreateFullWindow(bool createInitialTab) {
     // macOS origin is bottom-left, so subtract from top
     CGFloat winY = screenRect.origin.y + screenRect.size.height - winH - 50 - offset;
 
-    int headerHeight = 99;
+    int headerHeight = kMacHeaderHeightPt;  // D-h1 — was 99, the primary was 96
 
     // Create NSWindow
     NSRect windowFrame = NSMakeRect(winX, winY, winW, winH);
@@ -169,7 +170,7 @@ BrowserWindow* WindowManager::CreateFullWindow(bool createInitialTab) {
     [nsWindow setDelegate:delegate];
     objc_setAssociatedObject(nsWindow, "delegate", delegate, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
-    // Create header view (99px at top of content area)
+    // Create header view (kMacHeaderHeightPt at top of content area)
     NSRect contentBounds = [[nsWindow contentView] bounds];
     NSRect headerRect = NSMakeRect(0, contentBounds.size.height - headerHeight,
                                    contentBounds.size.width, headerHeight);

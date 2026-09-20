@@ -4,7 +4,14 @@
 #include <windows.h>
 
 // Fixed header height in CSS pixels: tab bar (42px) + toolbar (53px) + 1px buffer.
-// Matches macOS fixed headerHeight = 96.
+// ⛔ This is NOT the macOS number — see `kMacHeaderHeightPt` below, which is 104.
+// The two platforms' tab strips genuinely differ: `TabBar.tsx` renders
+// `height: isMac ? 46 : 42` plus `paddingTop: isMac ? '4px' : 0` (content-box), so
+// the mac strip is 50 and Windows' is 42. ⚠️ The comment here used to read
+// *"Matches macOS fixed headerHeight = 96"* and stayed that way after the April
+// change that grew the mac strip — which is precisely how macOS spent five months
+// rendering 104 px of header into a 96 pt view. If you change one platform's strip,
+// look at both constants.
 static const int HEADER_CSS_HEIGHT = 96;
 
 // \U0001f6a8 beta.3 Phase 11 item 7 route 2 (`P11-I7b`) — the Windows text-scale factor.
@@ -69,4 +76,28 @@ inline int ScalePx(int cssPx, HWND hwnd) {
     return MulDiv(cssPx, dpi, 96);
 }
 
-#endif // _WIN32
+#elif defined(__APPLE__)
+
+// 🍎 macOS header height in POINTS — `D-h1`, owner decision 2026-09-19.
+//
+// ⭐ ONE constant for BOTH the primary window and secondary (⌘N / torn-off) windows.
+// Before this they were 96 and 99 respectively, and the React header has rendered 104
+// since April, so the primary clipped 8 pt and a secondary window clipped 5.
+// 📏 Measured 2026-09-19 pre-fix, both windows of one process:
+//     primary   window.innerHeight 96 · #root scrollHeight 104  -> 8 pt behind the webview
+//     secondary window.innerHeight 99 · #root scrollHeight 104  -> 5 pt behind the webview
+//
+// The number is pinned against React, not chosen: tab strip 50 (`TabBar.tsx` —
+// `height: isMac ? 46 : 42` + `paddingTop: isMac ? '4px' : 0`, content-box) + toolbar 54.
+// ⛔ Changing the mac tab strip without changing this re-creates the original defect,
+// and it fails INVISIBLY: every control stays clickable, the bottom of the toolbar just
+// slides under the webview. Cause of the original: `5c0bcd7` (2026-04-15) grew the strip
+// 42 -> 50 and left the native header at 96.
+//
+// ⚠️ NO DPI TERM, unlike the Windows half above. macOS folds nothing but
+// `backingScaleFactor` into the device scale (`ui/display/mac/screen_mac.mm`), CSS px ARE
+// points, and there is no accessibility text-scale factor to compound — so a point here
+// is a CSS pixel there, always.
+inline constexpr int kMacHeaderHeightPt = 104;
+
+#endif // _WIN32 / __APPLE__
