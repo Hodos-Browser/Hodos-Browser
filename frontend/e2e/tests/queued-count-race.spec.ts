@@ -17,7 +17,11 @@ import { test, expect } from '@playwright/test';
 
 // Pinned to the dev server started from THIS source tree. 5137 was occupied and a
 // stale server there would serve old code — the classic false green.
-const OVERLAY = 'http://127.0.0.1:5138/brc100-auth';
+// 5137 is the canonical dev port (CLAUDE.md run order). Override with OVERLAY_PORT
+// if another server holds it -- a STALE server on this port would serve old code,
+// which is the classic false green.
+const PORT = process.env.OVERLAY_PORT || '5137';
+const OVERLAY = `http://127.0.0.1:${PORT}/brc100-auth`;
 
 // `applyParams` runs from a Promise.race bounded at 1200 ms, so any assertion made
 // before that has not yet been exposed to the clobber this test exists to catch.
