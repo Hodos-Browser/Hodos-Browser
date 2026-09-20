@@ -100,6 +100,26 @@ reads *"baseline lowered by Phase 3.5"*. It was written when the phase was plann
 false. Correcting it is an edit to the instrument and therefore belongs in that same separate commit,
 not in the change it describes.
 
+### ✅ `G11` **59 → 58**, 2026-09-19 — lowered by the macOS twin of the same deletion
+
+📏 **58, MEASURED BY THE SCRIPT** at `33d6d4a`. Earned by the macOS side's `6775b63`
+(*"delete the backup-overlay chain on macOS"*), which removed the remaining
+`WindowManager::GetInstance().GetPrimaryWindow()` lookup while finishing, on its platform, the
+deletion whose Windows half had already earned `60 → 59` at Phase 8c `O8`. ⭐ **The same pair of
+commits opened and closed this ratchet step** — worth noting, because it is the shape a
+cross-platform deletion is supposed to have.
+
+⛔ **Instrument-only commit**, no product code, per working rule 6. `-NegativeControl` re-run.
+
+⚠️ **Bisected, not assumed.** The drop was first noticed as *"58 violations, BELOW baseline 59"*
+and three wrong explanations were checked and discarded before the real one: (a) a hand count of
+**occurrences** said 59 — the gate counts matching **lines**, and one line carries two matches;
+(b) the gate drops whole-line comments, and `simple_handler.cpp` has one commented mention of
+`GetPrimaryWindow()` — but it dates to 2026-08-30 and so predates the 59 baseline; (c) the
+comment-dropping filter itself was suspected of being a late instrument change — it has been in
+the harness since `8ef5b93`, 2026-08-18. ⭐ Only walking every commit from the baseline-setting
+commit forward, counting the way the gate counts, named the right one.
+
 ### ✅ `G11` **60 → 59**, 2026-09-13 — lowered by beta.3 Phase 8c `O8`, in its own commit
 
 Phase 8c's `O8` deleted the dead backup-overlay chain (`267b079`). One of the lines that went with it
@@ -182,7 +202,7 @@ wrong reason.**
 | `G3` | F8 secret-log gate, Rust | **0** | 0 | ported from `test.yml` | — |
 | `G4` | F8 secret-log gate, C++ | **0** | 0 | ported from `test.yml` | — |
 | `G5` | full wallet HTTP response bodies reaching a sink | ~~15~~ → **0** | 0 | Phase 0 | ✅ Phase 0, 2026-08-18 |
-| `G11` | window-scoped work resolved through a process-global (`GetPrimaryWindow()` / `GetActiveTab()`) | ~~60~~ → **59** | 0 | Phase 3 (WS2) | ✅ beta.3 Phase 8c `O8`, 2026-09-13 (one site, with the backup-overlay deletion); beta.4 drives to 0 |
+| `G11` | window-scoped work resolved through a process-global (`GetPrimaryWindow()` / `GetActiveTab()`) | ~~60~~ ~~59~~ → **58** | 0 | Phase 3 (WS2) | ✅ beta.3 Phase 8c `O8`, 2026-09-13 (one site, with the backup-overlay deletion) · ✅ **2026-09-19, its macOS twin `6775b63`** (the remaining `GetPrimaryWindow()` lookup, same deletion finished on macOS); beta.4 drives to 0 |
 | `G12` | unanchored host:port URL matchers on the wallet trust boundary | **4** | 0 | Phase 5 | — (driven to 0 by beta.4 W8) |
 
 ⭐ `G2` deliberately **does not** flag a prefix check — `rfind(X, 0) == 0` or `find(X) != 0`. Those

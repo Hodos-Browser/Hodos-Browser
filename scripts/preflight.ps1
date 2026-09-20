@@ -161,7 +161,7 @@ $Gates = @(
     [pscustomobject]@{
         Id       = 'G11'
         Name     = 'Window-scoped work resolved through a process-global (the wrong-window bug)'
-        Owner    = 'Phase 3 (WS2); 60 -> 59 by beta.3 Phase 8c O8 (2026-09-13); driven to target by beta.4'
+        Owner    = 'Phase 3 (WS2); 60 -> 59 beta.3 Phase 8c O8 (2026-09-13), 59 -> 58 its macOS twin (2026-09-19); driven to target by beta.4'
         # A second launch of the SAME profile does not start a second process -- it forwards
         # over a named pipe and opens a second WINDOW in the running one. So any code that
         # asks a process-global "which window am I?" can act on the wrong one. MEASURED
@@ -202,7 +202,14 @@ $Gates = @(
         # deletion removed CreateBackupOverlayWithSeparateProcess()'s GetPrimaryWindow() lookup
         # in simple_app.cpp. Lowered in its own commit per HARNESS.md section 4 / working rule 6,
         # with -NegativeControl re-run.
-        Baseline = 59
+        #
+        # 2026-09-19: 58, MEASURED BY THIS SCRIPT. Earned by the macOS side's 6775b63
+        # ("delete the backup-overlay chain on macOS"), which removed the remaining
+        # `WindowManager::GetInstance().GetPrimaryWindow()` lookup as it finished the same
+        # deletion on its platform. The Windows half had already landed at 8c O8; this is its
+        # macOS twin, so the pair that opened this ratchet step also closed it.
+        # Lowered in its own commit, -NegativeControl re-run.
+        Baseline = 58
         Target   = 0
         Paths    = @('cef-native/src/handlers', 'cef-native/src/core')
         Include  = @('*.cpp', '__preflight_probe.cpp')
