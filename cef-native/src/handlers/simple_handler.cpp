@@ -3696,8 +3696,9 @@ bool SimpleHandler::OnProcessMessageReceived(
                                  std::to_string(fsWin->window_id) + ")");
             }
 #elif defined(__APPLE__)
-            extern void ToggleMainWindowFullscreen();
-            ToggleMainWindowFullscreen();
+            // macOS Phase 3 port: fullscreen the window whose menu was clicked.
+            extern void ToggleMainWindowFullscreen(BrowserWindow* targetWin);
+            ToggleMainWindowFullscreen(GetOwnerWindow());
 #endif
         } else if (action == "exit") {
 #ifdef _WIN32

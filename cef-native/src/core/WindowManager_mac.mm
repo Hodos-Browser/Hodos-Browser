@@ -37,18 +37,26 @@ extern void ShutdownApplication();
     NSRect contentRect = [[nsWindow contentView] bounds];
     int headerHeight = kMacHeaderHeightPt;  // D-h1 — was 99, the primary was 96
 
-    // Resize header view (fixed kMacHeaderHeightPt at top)
     NSView* headerView = (__bridge NSView*)bw->header_view;
-    if (headerView) {
-        [headerView setFrame:NSMakeRect(0, contentRect.size.height - headerHeight,
-                                        contentRect.size.width, headerHeight)];
-    }
-
-    // Resize webview view (fills below header)
     NSView* webviewView = (__bridge NSView*)bw->webview_view;
-    if (webviewView) {
-        [webviewView setFrame:NSMakeRect(0, 0, contentRect.size.width,
-                                         contentRect.size.height - headerHeight)];
+
+    // macOS Phase 3 port: honour CONTENT fullscreen here the way the primary's
+    // MainWindowDelegate does — otherwise a resize (or a Space change) while a video is
+    // fullscreen in THIS window puts the header back and shrinks the video.
+    if (bw->is_content_fullscreen) {
+        if (webviewView) [webviewView setFrame:contentRect];
+    } else {
+        // Resize header view (fixed kMacHeaderHeightPt at top)
+        if (headerView) {
+            [headerView setFrame:NSMakeRect(0, contentRect.size.height - headerHeight,
+                                            contentRect.size.width, headerHeight)];
+        }
+
+        // Resize webview view (fills below header)
+        if (webviewView) {
+            [webviewView setFrame:NSMakeRect(0, 0, contentRect.size.width,
+                                             contentRect.size.height - headerHeight)];
+        }
     }
 
     // Notify CEF browsers of resize
@@ -70,6 +78,34 @@ extern void ShutdownApplication();
 
 - (void)windowDidBecomeKey:(NSNotification *)notification {
     WindowManager::GetInstance().SetActiveWindowId(self.window_id);
+}
+
+// macOS Phase 3 port — secondary windows had NO fullscreen delegate methods at all.
+// Only the primary's MainWindowDelegate implemented these, so a ⌘N or torn-off window
+// entering native fullscreen updated nothing and `is_window_fullscreen` stayed false
+// for it forever. That matters now that HandleFullscreenChange reads the flag PER
+// WINDOW to decide whether to drive presentation options itself: a secondary window
+// already in native fullscreen would have been treated as a normal window and had its
+// frame overwritten.
+- (void)windowDidEnterFullScreen:(NSNotification *)notification {
+    BrowserWindow* bw = WindowManager::GetInstance().GetWindow(self.window_id);
+    if (bw) bw->is_window_fullscreen = true;
+    LOG_INFO_WM("Native fullscreen ENTERED (window " + std::to_string(self.window_id) + ")");
+}
+
+- (void)windowDidExitFullScreen:(NSNotification *)notification {
+    BrowserWindow* bw = WindowManager::GetInstance().GetWindow(self.window_id);
+    if (bw) bw->is_window_fullscreen = false;
+    LOG_INFO_WM("Native fullscreen EXITED (window " + std::to_string(self.window_id) + ")");
+
+    // Mirrors the primary's arm: leaving NATIVE fullscreen while CONTENT fullscreen is
+    // still active must not restore the header.
+    if (bw && bw->is_content_fullscreen && bw->ns_window) {
+        NSWindow* nsWindow = (__bridge NSWindow*)bw->ns_window;
+        NSRect contentRect = [[nsWindow contentView] bounds];
+        if (bw->webview_view) [(__bridge NSView*)bw->webview_view setFrame:contentRect];
+        if (bw->header_view) [(__bridge NSView*)bw->header_view setHidden:YES];
+    }
 }
 
 - (BOOL)windowShouldClose:(NSWindow *)sender {

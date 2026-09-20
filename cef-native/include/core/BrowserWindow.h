@@ -108,6 +108,15 @@ public:
     void* header_view = nullptr;      // NSView*
     void* webview_view = nullptr;     // NSView* (container for tab NSViews)
 
+    // Frame to restore when CONTENT fullscreen exits, for the window that entered it.
+    // ⚠️ Stored as four doubles rather than an NSRect because this header is shared
+    // C++ and compiles on Windows; `cef_browser_shell_mac.mm` reassembles it.
+    // Was the process-global `g_pre_fullscreen_frame`, which meant two windows shared
+    // one "restore to" rect — fullscreening a video in the second window and leaving it
+    // restored that window to the FIRST window's geometry.
+    double pre_fullscreen_frame[4] = {0.0, 0.0, 0.0, 0.0};  // x, y, w, h
+    bool has_pre_fullscreen_frame = false;
+
     // Overlay NSWindows (11 total — mirrors Windows overlay HWNDs)
     void* settings_overlay_window = nullptr;
     void* wallet_overlay_window = nullptr;

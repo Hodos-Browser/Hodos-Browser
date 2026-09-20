@@ -50,6 +50,10 @@
 void ShutdownApplication();
 void ShowQuitConfirmationAndShutdown();
 void HideApplication();
+// D-h2 overlay-ownership helper, defined with the other three further down — declared
+// here because DestroyMenuOverlayWindow() (above them) has to detach the menu overlay
+// from whichever window actually owns it.
+static void DetachOverlayFromParentMac(NSWindow* overlay);
 void HandleCmdD();  // Cmd+D — Bookmark current page
 void HandleCmdL();  // Cmd+L — Focus address bar
 
@@ -372,52 +376,100 @@ void DebugLog(const std::string& message) {
 // Uses presentation options to cover the screen (like Chrome's "tab fullscreen")
 // rather than a native macOS Space transition via toggleFullScreen.
 //
-// ⚠️ `win` was added in beta.3 Phase 3 so this keeps linking against the shared caller
-// in simple_handler.cpp, which now resolves the owning window. On Windows that fixed a
-// real bug: fullscreening a video in one window hid the OTHER window's header and
-// resized its tabs (owner-observed 2026-08-26).
+// ✅ WINDOW-SCOPED since the macOS Phase 3 port (2026-09-19). `win` is the window whose
+// tab asked, resolved by the shared caller in simple_handler.cpp.
 //
-// ⛔ THE macOS BODY BELOW IS **NOT** FIXED — it still drives the process-global
-// g_main_window / g_header_view / g_webview_view and TabManager::GetActiveTab(), so on
-// a Mac with two windows it has the same defect Windows just had. That is DELIBERATE,
-// not an oversight: WS2 is Windows-only by SPRINT_PLAN.md §3, the macOS window model is
-// structurally different (NSWindow + presentation options, not HWND + child windows),
-// and it cannot be tested from Windows. Making a blind cross-platform change here is
-// exactly the failure this project keeps paying for. Filed for macOS assessment; see
-// development-docs/0.4.0-beta.4/tickets/TICKET_window_scoped_work_uses_process_globals.md.
-void HandleFullscreenChange(BrowserWindow* win, bool fullscreen) {
-    LOG_INFO("HandleFullscreenChange: " + std::string(fullscreen ? "ENTER" : "EXIT"));
+// ⛔ It used to take `win`, record one flag on it, and then drive the process globals
+// g_main_window / g_header_view / g_webview_view / g_native_fullscreen /
+// g_pre_fullscreen_frame and TabManager::GetActiveTab() — the exact shape Windows fixed
+// in Phase 3 and the comment here said so. 📏 MEASURED on macOS before this change, two
+// windows in one process, B torn off: a page calling requestFullscreen() in a tab of
+// window **B** put window **A** into fullscreen (A 795 -> 900, B unchanged at 697) and
+// hid **A's** header. The window that asked did nothing.
+//
+// ⚠️ The Escape monitor stays ONE process-wide NSEvent monitor — that is correct, because
+// it is a keyboard hook and only one window can hold content fullscreen at a time — but
+// it now resolves the tab of the window that entered, not the process-wide active tab.
+// macOS Phase 3 port — the two fullscreen flags are per-window state now
+// (BrowserWindow::is_window_fullscreen / is_content_fullscreen). These two read that
+// record and fall back to the old globals only if the window record has gone, which is
+// the shutdown path.
+static bool WindowIsNativeFullscreen(int windowId) {
+    BrowserWindow* w = WindowManager::GetInstance().GetWindow(windowId);
+    return w ? w->is_window_fullscreen : g_native_fullscreen;
+}
 
-    // Record the state on the window even though the layout below is not yet
-    // window-scoped, so the two platforms agree on where this state LIVES.
+static bool WindowIsContentFullscreen(int windowId) {
+    BrowserWindow* w = WindowManager::GetInstance().GetWindow(windowId);
+    return w ? w->is_content_fullscreen : g_content_fullscreen;
+}
+
+static void SetWindowNativeFullscreen(int windowId, bool on) {
+    BrowserWindow* w = WindowManager::GetInstance().GetWindow(windowId);
+    if (w) w->is_window_fullscreen = on;
+    // ⚠️ The global is kept in step ONLY for window 0, purely so the shutdown-path
+    // fallbacks above stay meaningful. Nothing reads it to make a decision any more.
+    if (windowId == 0) g_native_fullscreen = on;
+}
+
+static NSWindow* FullscreenHostWindow(BrowserWindow* win) {
+    if (win && win->ns_window) return (__bridge NSWindow*)win->ns_window;
+    return g_main_window;
+}
+
+void HandleFullscreenChange(BrowserWindow* win, bool fullscreen) {
+    LOG_INFO("HandleFullscreenChange: " + std::string(fullscreen ? "ENTER" : "EXIT") +
+             " (window " + std::to_string(win ? win->window_id : -1) + ")");
+
     if (win) win->is_content_fullscreen = fullscreen;
 
+    // ⛔ Resolve the window's views on the calling thread and capture them, rather than
+    // re-reading `win` inside the block: the window could be closed between the post and
+    // the run, and BrowserWindow is owned by WindowManager, not by us.
+    NSWindow* nsWin = FullscreenHostWindow(win);
+    NSView* headerView = (win && win->header_view)
+                             ? (__bridge NSView*)win->header_view : g_header_view;
+    NSView* webviewView = (win && win->webview_view)
+                              ? (__bridge NSView*)win->webview_view : g_webview_view;
+    int windowId = win ? win->window_id : 0;
+    CefRefPtr<CefBrowser> headerBrowser =
+        (win && win->header_browser) ? win->header_browser : SimpleHandler::GetHeaderBrowser();
+
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!g_main_window || !g_header_view || !g_webview_view) return;
+        if (!nsWin || !headerView || !webviewView) return;
+
+        BrowserWindow* w = WindowManager::GetInstance().GetWindow(windowId);
+        // Native (menu) fullscreen is per-window too — read it off the window, falling
+        // back to the global only if the record has gone.
+        bool nativeFs = w ? w->is_window_fullscreen : g_native_fullscreen;
 
         if (fullscreen) {
-            if (!g_native_fullscreen) {
-                g_pre_fullscreen_frame = [g_main_window frame];
+            if (!nativeFs && w) {
+                NSRect f = [nsWin frame];
+                w->pre_fullscreen_frame[0] = f.origin.x;
+                w->pre_fullscreen_frame[1] = f.origin.y;
+                w->pre_fullscreen_frame[2] = f.size.width;
+                w->pre_fullscreen_frame[3] = f.size.height;
+                w->has_pre_fullscreen_frame = true;
             }
-            g_content_fullscreen = true;
 
-            [g_header_view setHidden:YES];
+            [headerView setHidden:YES];
 
-            NSRect contentRect = [[g_main_window contentView] bounds];
-            [g_webview_view setFrame:contentRect];
+            NSRect contentRect = [[nsWin contentView] bounds];
+            [webviewView setFrame:contentRect];
 
-            auto* activeTab = TabManager::GetInstance().GetActiveTab();
+            auto* activeTab = TabManager::GetInstance().GetActiveTabForWindow(windowId);
             if (activeTab && activeTab->browser) {
                 activeTab->browser->GetHost()->WasResized();
             }
 
-            if (!g_native_fullscreen) {
+            if (!nativeFs) {
                 [NSApp setPresentationOptions:
                     NSApplicationPresentationAutoHideMenuBar |
                     NSApplicationPresentationAutoHideDock];
 
-                NSRect screenFrame = [[g_main_window screen] frame];
-                [g_main_window setFrame:screenFrame display:YES animate:YES];
+                NSRect screenFrame = [[nsWin screen] frame];
+                [nsWin setFrame:screenFrame display:YES animate:YES];
             }
 
             // Catch Escape at the NSEvent level — macOS presentation
@@ -427,7 +479,10 @@ void HandleFullscreenChange(BrowserWindow* win, bool fullscreen) {
             }
             g_fullscreen_escape_monitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:^NSEvent* (NSEvent* event) {
                 if ([event keyCode] == 53) {  // 53 = kVK_Escape
-                    auto* tab = TabManager::GetInstance().GetActiveTab();
+                    // ⛔ GetActiveTabForWindow, not GetActiveTab: Escape must exit the
+                    // fullscreen that is actually on screen, not whichever tab the
+                    // process last made active.
+                    auto* tab = TabManager::GetInstance().GetActiveTabForWindow(windowId);
                     if (tab && tab->browser && tab->browser->GetMainFrame()) {
                         tab->browser->GetMainFrame()->ExecuteJavaScript(
                             "document.exitFullscreen()", "", 0);
@@ -437,47 +492,54 @@ void HandleFullscreenChange(BrowserWindow* win, bool fullscreen) {
                 return event;
             }];
         } else {
-            g_content_fullscreen = false;
-
             if (g_fullscreen_escape_monitor) {
                 [NSEvent removeMonitor:g_fullscreen_escape_monitor];
                 g_fullscreen_escape_monitor = nil;
             }
 
-            if (!g_native_fullscreen) {
+            if (!nativeFs) {
                 [NSApp setPresentationOptions:NSApplicationPresentationDefault];
 
-                if (!NSIsEmptyRect(g_pre_fullscreen_frame)) {
-                    [g_main_window setFrame:g_pre_fullscreen_frame display:YES animate:YES];
+                if (w && w->has_pre_fullscreen_frame) {
+                    NSRect restore = NSMakeRect(w->pre_fullscreen_frame[0],
+                                                w->pre_fullscreen_frame[1],
+                                                w->pre_fullscreen_frame[2],
+                                                w->pre_fullscreen_frame[3]);
+                    if (!NSIsEmptyRect(restore)) {
+                        [nsWin setFrame:restore display:YES animate:YES];
+                    }
+                    w->has_pre_fullscreen_frame = false;
                 }
             }
 
-            [g_header_view setHidden:NO];
+            [headerView setHidden:NO];
 
-            NSRect contentRect = [[g_main_window contentView] bounds];
+            NSRect contentRect = [[nsWin contentView] bounds];
             int headerHeight = kMacHeaderHeightPt;  // D-h1
             NSRect headerRect = NSMakeRect(0, contentRect.size.height - headerHeight,
                                            contentRect.size.width, headerHeight);
-            [g_header_view setFrame:headerRect];
+            [headerView setFrame:headerRect];
 
             NSRect webviewRect = NSMakeRect(0, 0, contentRect.size.width,
                                             contentRect.size.height - headerHeight);
-            [g_webview_view setFrame:webviewRect];
+            [webviewView setFrame:webviewRect];
 
-            auto* activeTab = TabManager::GetInstance().GetActiveTab();
+            auto* activeTab = TabManager::GetInstance().GetActiveTabForWindow(windowId);
             if (activeTab && activeTab->browser) {
                 activeTab->browser->GetHost()->WasResized();
             }
 
-            CefRefPtr<CefBrowser> header = SimpleHandler::GetHeaderBrowser();
-            if (header) {
-                header->GetHost()->WasResized();
+            if (headerBrowser) {
+                headerBrowser->GetHost()->WasResized();
             }
         }
     });
 }
 
-// Toggle fullscreen for the main window (called from menu_action "fullscreen")
+// ⬜ DEAD as of the macOS Phase 3 port: declared at the top of this file and defined
+// here, with ZERO callers anywhere in cef-native/ or frontend/. The live entry point is
+// ToggleMainWindowFullscreen() below, which simple_handler.cpp's menu_action arm calls.
+// Reported rather than deleted (root CLAUDE.md rule 3 — report unrelated dead code).
 void ToggleFullScreenMacOS() {
     if (g_content_fullscreen) {
         LOG_WARNING("Ignoring native fullscreen toggle — content fullscreen active");
@@ -488,14 +550,29 @@ void ToggleFullScreenMacOS() {
     }
 }
 
-void ToggleMainWindowFullscreen() {
+// Native (menu) fullscreen — the three-dot menu's expand button (MenuOverlay.tsx).
+//
+// ✅ WINDOW-SCOPED since the macOS Phase 3 port. 📏 MEASURED before the change, two
+// windows in one process: clicking Fullscreen in the torn-off window **B** fullscreened
+// window **A** (A 795 -> 900) and left B untouched. `targetWin` is GetOwnerWindow() from
+// the IPC arm, i.e. the window whose menu was clicked.
+//
+// ⚠️ The content-fullscreen guard is read PER WINDOW: another window being in content
+// fullscreen is not a reason to refuse this one's menu toggle.
+void ToggleMainWindowFullscreen(BrowserWindow* targetWin) {
+    NSWindow* nsWin = FullscreenHostWindow(targetWin);
+    int windowId = targetWin ? targetWin->window_id : 0;
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (g_content_fullscreen) {
-            LOG_WARNING("Ignoring native fullscreen toggle — content fullscreen active");
+        BrowserWindow* w = WindowManager::GetInstance().GetWindow(windowId);
+        bool contentFs = w ? w->is_content_fullscreen : g_content_fullscreen;
+        if (contentFs) {
+            LOG_WARNING("Ignoring native fullscreen toggle — content fullscreen active "
+                        "on window " + std::to_string(windowId));
             return;
         }
-        if (g_main_window) {
-            [g_main_window toggleFullScreen:nil];
+        if (nsWin) {
+            LOG_INFO("Native fullscreen toggle on window " + std::to_string(windowId));
+            [nsWin toggleFullScreen:nil];
         }
     });
 }
@@ -533,9 +610,12 @@ static void DestroyMenuOverlayWindow(bool closeBrowser) {
             [(GenericOverlayView*)contentView detachBrowser];
         }
 
-        if (g_main_window) {
-            [g_main_window removeChildWindow:overlayWindow];
-        }
+        // ⛔ D-h2 FOLLOW-UP: this read `[g_main_window removeChildWindow:...]`, which
+        // since the Phase 3.5 macOS port is the WRONG parent whenever the menu was
+        // opened from a secondary window — and `removeChildWindow:` on a window that
+        // is not the parent is a silent no-op, so the link would be left dangling on
+        // a window we are about to close out from under. Detach from the ACTUAL parent.
+        DetachOverlayFromParentMac(overlayWindow);
 
         [overlayWindow orderOut:nil];
         [overlayWindow close];
@@ -2188,7 +2268,7 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
 
     NSRect contentRect = [[g_main_window contentView] bounds];
 
-    if (g_content_fullscreen) {
+    if (WindowIsContentFullscreen(0)) {
         // In content fullscreen: webview fills entire content area, header stays hidden
         [g_webview_view setFrame:contentRect];
     } else {
@@ -2291,14 +2371,14 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
 }
 
 - (void)windowDidEnterFullScreen:(NSNotification *)notification {
-    g_native_fullscreen = true;
-    LOG_INFO("Native fullscreen ENTERED");
+    SetWindowNativeFullscreen(0, true);
+    LOG_INFO("Native fullscreen ENTERED (window 0)");
 }
 
 - (void)windowDidExitFullScreen:(NSNotification *)notification {
-    g_native_fullscreen = false;
-    LOG_INFO("Native fullscreen EXITED");
-    if (g_content_fullscreen) {
+    SetWindowNativeFullscreen(0, false);
+    LOG_INFO("Native fullscreen EXITED (window 0)");
+    if (WindowIsContentFullscreen(0)) {
         NSRect contentRect = [[g_main_window contentView] bounds];
         [g_webview_view setFrame:contentRect];
         [g_header_view setHidden:YES];
