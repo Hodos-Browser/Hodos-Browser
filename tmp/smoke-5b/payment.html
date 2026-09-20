@@ -32,7 +32,7 @@
 
   <div class="row">
     <div>Test recipient:</div>
-    <input id="recipient" value="" style="flex:1; padding:6px;" placeholder="bsv address (paste from wallet)">
+    <input id="recipient" value="1PC7Z6XxtHwvnBbSVcaphywFBZfQ8zw12Q" style="flex:1; padding:6px;" placeholder="bsv address (paste from wallet)">
   </div>
 
   <div class="row">
@@ -46,8 +46,8 @@
 
   <h2>Expected behavior</h2>
   <ul>
-    <li><strong>Low payment</strong>: NO modal, response within seconds, <strong>green-dot animation on the tab</strong>. Verify the tab badge.</li>
-    <li><strong>High payment</strong>: <code>payment_confirmation</code> modal fires; click Approve; response arrives; green-dot animation fires (same chain).</li>
+    <li><strong>Low payment</strong>: NO modal, response within seconds, <strong>GOLD PILL on the originating tab</strong> (never a "green dot"). Verify the tab badge.</li>
+    <li><strong>High payment</strong>: <code>payment_confirmation</code> modal fires; click Approve; response arrives; the gold pill fires (same chain).</li>
     <li>Hodos log file <code>cef-native/build/bin/Release/debug_output.log</code> shows <code>💰 Payment engine decision: Silent</code> for low + <code>💰 Payment engine decision: Prompt</code> for high.</li>
   </ul>
 
@@ -71,7 +71,11 @@
     }
     return [{
       satoshis: sats,
-      lockingScript: '',  // wallet derives P2PKH from address-to-script for canonical createAction
+      // 2026-09-19: this used to send lockingScript:'' and NEVER send the recipient,
+      // so the wallet built an output with NO locking conditions and the sats were
+      // lost (measured on chain: txid 0d1a01e1..., 100 sats to a non-standard output).
+      // Send the address; the wallet derives the P2PKH script from it.
+      address: recip.value,
       outputDescription: 'Hodos 5.b smoke payment'
     }];
   }
