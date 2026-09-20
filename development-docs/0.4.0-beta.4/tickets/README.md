@@ -59,7 +59,20 @@ existing links use it. Describe the **symptom or the defect**, not the fix:
 | Ticket | Status | Track | Filed |
 |---|---|---|---|
 | `TICKET_e2e_specs_wrong_subject_and_never_run.md` | ⬜ UNASSIGNED | — | 2026-08-29 |
+| `TICKET_dapp_reachable_surface_is_a_denylist_not_an_allowlist.md` | ⬜ UNASSIGNED | — (⭐ suggest track 1) | 2026-09-19 |
 
-⚠️ The one ticket here is **second-hand** — reported by research (c), **not independently verified**.
-Its first proposed step is verification. That is deliberate: a ticket may record an unverified report
-as long as it says so.
+🚨 **This index is behind the folder.** There are **10 tickets** on disk (11 files, one is the
+template) and the table lists **2**. The eight missing rows are `active_user_count…`,
+`brc103_server_identity_unverified`, `brc140_key_shares_vs_bip39`,
+`menu_exit_closes_primary_not_the_clicked_window`, `multiwindow_session_restore…`,
+`split_view_needs_multi_visible_tab_model`, `tab_pin_and_mute_need_model_changes` and
+`window_scoped_work_uses_process_globals` *(measured 2026-09-19)*. ⛔ Not reconciled here — filing one
+ticket is not licence to rewrite the index.
+
+⚠️ `TICKET_e2e_specs_wrong_subject_and_never_run.md` is **second-hand** — reported by research (c),
+**not independently verified**. Its first proposed step is verification. That is deliberate: a ticket
+may record an unverified report as long as it says so.
+
+⚠️ `TICKET_dapp_reachable_surface_is_a_denylist_not_an_allowlist.md` is **code reading, not
+measurement** — the owner was using the app, so nothing was executed. Its RED is written to be run
+first, before the fix, because it is also what confirms the finding.
