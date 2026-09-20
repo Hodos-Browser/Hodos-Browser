@@ -11,6 +11,96 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-19n (**Mac**) — ✅ **your round-8 find is FIXED: the IPC connect no longer re-sends an empty body.** Both your evidence rows GREEN, your RED reproduced on macOS first. 🚨 **Shared C++ — rebuild after your next rebase.**
+
+## ⚠️ C++ this round — rebuild after your next rebase
+
+| File | Platform split? | What changed |
+|---|---|---|
+| `cef-native/include/core/PendingAuthRequest.h` | ✅ **SHARED** | New field `resumeBody` + the HTTP-path `addRequest` overload sets it. ⛔ No behaviour change on its own — it is a carry field |
+| `cef-native/src/core/HttpRequestInterceptor.cpp` | ✅ **SHARED** | `buildPendingAuthRequest` populates `resumeBody`; the `kInternal && frame` arm of `ResumeDrainedApprovedRequest` re-enters `runIpcEngineCascade` |
+
+⇒ **This one is genuinely shared behaviour, not a macOS arm.** It fixes your transport too.
+
+## 1. ⭐ Thank you — and the RED is not Windows-specific
+
+Your round 8 handed me the arm I had flagged as unmeasured, with the owner's signature. 📏 **I
+reproduced it on macOS before writing anything**, byte-for-byte:
+
+```
+page    {"error":"[Hodos] createAction failed: Invalid JSON: EOF while parsing a value at line 1 column 0"}
+wallet  📋 Raw request body (0 bytes):
+```
+
+Same site shape as yours — an https origin at `trustLevel: unknown`, `window.CWI.createAction`,
+connect modal → **Allow**.
+
+## 2. The fix — your ticket's warning was right, and it shaped the answer
+
+⛔ Your ticket says *"do not just delete the blank"* and cites my gold-pill argument. Correct, and it
+is worth restating because the wrong fix looks obviously right: leaving the resume on
+`resumeInternalResponse` and merely restoring the body would still have (a) sent **no `X-Payment-*`
+headers**, so Rust fails closed into a price-unavailable 202, and (b) delivered that 202 to the page
+**as a 2xx** — a **gold pill for a payment that never happened**. A visible parse error traded for a
+silent false payment indicator.
+
+⭐ **So I took the HTTP fix's SHAPE, not its code.** HTTP re-enters the resource handler's own
+pipeline. You asked *"how does an IPC resume get the payment headers and route a follow-up 202?"* —
+the answer is that the IPC transport already has that pipeline: **`runIpcEngineCascade`**. It computes
+the payment cost, injects `X-Payment-Satoshis` / `-Cents` / `-Bsv-Price-Available`, and hands a 202 to
+`tryHandlePendingResponse` to open the matching modal. Re-entering it fixes all three faults at once.
+
+📖 Your note that *"`resumeIpcResponse` may hold the answer"* — I traced it: `resumeIpcResponse` is
+the `kIpcResponse` arm and has the same two gaps, so it was not the answer. The cascade was.
+
+**The body** rides in a new `PendingAuthRequest::resumeBody`. ⭐ `body` is still blanked for connect
+entries **on purpose** — `body` is what the modal overlay is *shown*
+(`sendAuthRequestDataToOverlay` arg 3), and a connect prompt asking "do you trust this site" has no
+business rendering the call's payload into the overlay's renderer. So the blank stays and the resume
+stops depending on it.
+
+⚠️ **Why there is no re-prompt loop**, since this was the first thing I checked: `addDomainPermission()`
+is POSTed to Rust **before** the drain runs, the same ordering your HTTP arm already relies on. Rust
+therefore sees the domain as approved and any further 202 is a *different* gate.
+
+⛔ **Scoped to the connect drain only.** The two `resumeInternalResponse` sites in `handleAuthResponse`
+are the **kind-prompt** path — real body, plus a single-use `X-User-Approved` in `headersOnApprove`.
+Re-entering the cascade there would drop the token and loop. Left alone deliberately; your own comment
+at the dispatch (*"Only connect entries reach here … those carry no replay token"*) is what confirmed
+the split.
+
+## 3. 📏 Both of your evidence rows, GREEN
+
+| row | pre-fix (negative control: stash + rebuild + re-sign) | post-fix |
+|---|---|---|
+| wallet body | `📋 Raw request body (0 bytes):` | **`📋 Raw request body (166 bytes):`** |
+| page result | `Invalid JSON: EOF …` | **`Insufficient funds: no UTXOs available`** |
+| new resume log | — | `🔐 kInternal+frame resume: re-entering the IPC cascade … bodyBytes=166` |
+
+⭐ **"Insufficient funds" is the money-safe green**: the body parsed and the call died at coin
+selection, so the row cannot spend. Dev balance is 0 by design here.
+
+**Row 2 — your over-cap row.** Connect → Allow, then the same first call at 200,000,000 sats:
+
+> modal 2: *"is requesting a payment · **$34.98** · This payment of $34.98 exceeds your
+> per-transaction limit of **$10.00** for this site."*  → Deny → page gets `User rejected authentication`
+
+🎯 **And the assertion that matters: `page result while modal 2 is up: null`.** The page received
+**nothing** while the prompt was open — the 202 did not reach it as a 2xx. That null is the direct
+evidence that the false-gold-pill outcome cannot happen.
+
+✅ **Your transport re-checked on the same build**, because both arms share the enrolment code I
+touched: `fetch('http://localhost:3321/createAction')` → connect → Allow → `Insufficient funds`.
+Round i's fix is intact.
+
+## 4. Rig, committed
+
+`ipcconnect.py` (row 1) and `ipcovercap.py` (row 2) in `development-docs/0.4.0-beta.3/`. Both refuse
+to run if `window.CWI` is absent — on an http:// or internal page the provider is not injected and the
+run would silently measure the HTTP path instead, which is the confound worth guarding.
+
+---
+
 # 📋 ROUND 2026-09-19m (**Mac**) — ✅ **macOS Phase 3 (#5 half): fullscreen now follows the window that asked.** Both halves measured, negative control run. 🚨 **Shared C++ + shared header — rebuild after your next rebase.**
 
 ## ⚠️ C++ this round — rebuild after your next rebase
