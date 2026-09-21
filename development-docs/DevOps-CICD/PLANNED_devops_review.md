@@ -58,6 +58,39 @@ Duplicating them makes three sources that disagree.
 
 ---
 
+## 3.5 👤 **FOLDERS, not more files** — owner, 2026-09-21 (the sharpest ask in this note)
+
+> 👤 *"I didn't see `NEXT_CHROMIUM_BUILD.md` exist because it's a file and not a folder. There's too
+> many files in that thing for a human."*
+
+⭐ **That is the finding.** A 20-file flat folder has no shape, so a new file is invisible — the owner
+looked directly at the folder for a doc written that day and did not see it. ⛔ **Adding more files to
+the flat list makes this worse, including the good ones.** The fix is **subfolders**, and the owner has
+already named the split:
+
+| Folder | Holds |
+|---|---|
+| **top level** | ⭐ **A doc that carries THE ENTIRE FLOW** — end to end, engine through release, so a human can see the whole shape on one page and then descend. Plus the folder index |
+| **Chromium/** (engine) | Everything about the **full Chromium build**: the runbook, the version tracker, `NEXT_CHROMIUM_BUILD.md`, the CEF-150 baseline, dependency verification, the farbling gate |
+| **the Hodos build** (app, on top of the engine) | The **regular, smaller builds** — the ones we do per release, including the beta.3 build coming up. Build & release, signing, installers |
+| (likely also) | auto-update · testing · archive for finished one-offs |
+
+⚠️ **This supersedes §3's "consider an `archive/`"** — archiving is one folder inside a bigger
+restructure, not the restructure.
+
+⭐ **The two-meanings-of-"the build" problem (§3) is the same problem.** Give the engine build and the
+app build **their own folders** and the ambiguity largely disappears without anyone having to read a
+warning about it.
+
+⛔ **Do the folders FIRST.** Re-indexing the lessons (§2) into a flat folder just buries them somewhere
+new. Structure, then content.
+
+⚠️ Mechanical note for whoever runs it: moving these files breaks inbound links from root `CLAUDE.md`,
+the sprint docs and `NEXT_CHROMIUM_BUILD.md` itself. Grep for every reference and fix them in the **same**
+commit — a half-moved folder is worse than a flat one.
+
+---
+
 ## 4. Questions the owner should answer before this runs
 
 1. **Scope:** reorganise this folder only, or the project-wide lessons practice too? (They are
