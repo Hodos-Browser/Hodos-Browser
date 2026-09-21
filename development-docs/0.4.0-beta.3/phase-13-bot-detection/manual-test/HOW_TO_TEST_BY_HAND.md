@@ -3,6 +3,14 @@
 👤 Written 2026-09-21 for the owner's question: *"there has to be a site I can just go to that we know
 will trigger a CAPTCHA and try it."*
 
+> ⭐ **Start at `CHALLENGE_TYPE_COVERAGE.md` instead of here if you want the full picture.**
+> 👤 Owner, 2026-09-21: *"I need to test all of these in a comprehensive assessment of the whole
+> CAPTCHA prove you're a human thing."* Fair — this file lists *sites*, which is only half the job.
+> There are **eleven** variants of human-verification and we had exercised **one** (checkbox). The
+> three worth doing first are **audio fallback, rotate/orient and slider**, because those are the ones
+> where something Hodos specifically modifies — WebAudio farbling, canvas/WebGL farbling, and our mouse
+> coordinate path — could plausibly be the cause. None of them has ever been tested.
+
 ## ⚠️ First, the honest caveat — there is no site that challenges everybody
 
 That is the whole design of these systems. A clean residential IP on a real browser is *supposed* to
