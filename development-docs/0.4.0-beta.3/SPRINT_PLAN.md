@@ -1,6 +1,26 @@
 # beta.3 sprint — plan
 
-**Opened:** 2026-08-17 · **Status:** 🚧 SCOPING — workstreams agreed in shape, cut line not yet set.
+**Opened:** 2026-08-17 · **Status:** 🚧 **EXECUTING** — status line corrected 2026-09-21 (it had read
+*"SCOPING — workstreams agreed in shape, cut line not yet set"* since the day the file was opened,
+while phases had been landing since late August).
+
+> ⛔ **THIS FILE IS THE ORIGINAL SCOPING DOCUMENT. IT IS NOT THE STATUS BOARD.**
+> The root `CLAUDE.md` already says the phase folders are authoritative for phase status, and they are:
+> `phase-*/PHASE_CONTRACT.md` or `phase-*/README.md`. §1's raw list and §2's pre-flight findings are
+> preserved as the record of what was *reported and believed on 2026-08-17* — several were later
+> refuted by measurement, and those refutations live in the phase folders, not here.
+>
+> ⚠️ **The cut line was never recorded in this file.** That is a real gap, not an omission being
+> tidied away: scope was settled phase by phase with the owner instead. Do not infer from the absence
+> that everything below shipped.
+>
+> **Snapshot, 2026-09-21** (verified against the phase folders, not from memory):
+> Phase 9 release-readiness **signed off**; Phase 10 critical advisories **code complete** (10a–10e);
+> Phase 11 UI leftovers **done in substance** (items 1–10 plus item 11's `A1`–`A8`);
+> Phase 12 adblock-on-redirect **OPEN** (root cause found 2026-09-21, mitigation landed, real fix needs
+> a CEF patch); Phase 13 bot-detection **planned**, and may collapse to a regression guard.
+> ⏳ **Four phases are blocked on owner sign-off rather than on work** — 0.5 money-path,
+> 1 overlay-input-DPI, 3 window-identity, 7 consent-surface. 38 rows sit in `HUMAN_TEST_QUEUE.md`.
 
 > **Decided:** `v0.4.0-beta.2` will **NOT** be promoted. It is kept as a draft and run locally as a
 > soak build over the coming week. **beta.3 is the release users get**, carrying everything below

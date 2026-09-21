@@ -2,7 +2,15 @@
 
 **Opened:** 2026-09-15, by owner decision, from `../CRITICAL_UPDATES.md` (three BSV Association advisories against
 their TypeScript stack; Hodos ships none of those packages but implements the same protocols, and a code review
-found the same bug shapes). **Status:** 🚧 IN PROGRESS — kickoff `42aac69` (2026-09-15); **10a ✅ Windows**; 10d contracted; 10b, 10c next. **Standard:** `../HARNESS.md`.
+found the same bug shapes). **Status:** ✅ **CODE COMPLETE** — corrected 2026-09-21; this line had still read *"10a ✅ Windows; 10d
+contracted; 10b, 10c next"* from the 2026-09-15 kickoff. All five sub-phases landed: **10a** `57812cf`+`a91a34a`,
+**10b**, **10c**, **10d** (all Windows, 2026-09-15), **10e** items 1–4 (2026-09-16) and item 5's `F3-10a`
+`684ee17` / `F3-10b` `4ce1a8e` / `F9-10d`. macOS ran the two visual rows `P10d-A5` and `P10b-A5` on
+2026-09-19 (`090a20f`). ⬜ **What is still owed is EVIDENCE, not code** — `W4`, `W5`, the HTTP half of
+`W7`, `PAYMENT_TEST_BATCH.md` `M11`, and the `REGRESSION_SET.md` rows owed at this boundary as at the
+previous four; all listed under *"Owed evidence that is not code"* in `10e-panel-remainder/README.md`.
+⚠️ One item was **accepted, not fixed**: the uneven gap between the Activity row's ghost buttons.
+**Standard:** `../HARNESS.md`.
 **Base:** `origin/0.4.0` at the Phase 9 close (`07f9fcf`) plus the 2026-09-15 dependency bumps (`ec6353e`).
 
 > ⛔ **Everything in `CRITICAL_UPDATES.md` is a code reading.** Nothing was built, run or exploited. The kickoff

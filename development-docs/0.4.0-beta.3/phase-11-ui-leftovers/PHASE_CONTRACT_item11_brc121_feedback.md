@@ -1,8 +1,32 @@
 # Phase 11 item 11 — a BRC-121 payment tells the user it is happening · PHASE CONTRACT
 
-**Workstream:** UI leftovers (money path) · **Ticket:** `../TICKET_brc121_paid_retry_aborts_and_mints_a_payment_each_time.md` · **Status:** ⬜ NOT STARTED
+**Workstream:** UI leftovers (money path) · **Ticket:** `../TICKET_brc121_paid_retry_aborts_and_mints_a_payment_each_time.md` · **Status:** ✅ **LANDED — `A1`–`A8` all have commits** (table below)
 **Opened:** 2026-09-17 · **Owner:** Matthew · **Platforms:** Windows / macOS (both)
-**Standard:** `../HARNESS.md`. **Runs FIRST in Phase 11**, ahead of the omnibox cluster.
+
+> ✅ **STATUS CORRECTED 2026-09-21.** The header above read **"⬜ NOT STARTED"** until today, while
+> every evidence row `A1`–`A8` had already landed. Corrected rather than left, because a contract that
+> says NOT STARTED is exactly what makes the next session redo finished work:
+>
+> | row | landed as |
+> |---|---|
+> | `A1` the banner — a silent BRC-121 payment says it is happening | `07eb946` |
+> | `A2` it says when the **site** is slow, and that it is not your payment | `190860a` |
+> | `A3` the `pay402` reuse cache — *"has never once worked: it queried a column that does not exist"* | `a337538` |
+> | `A4` a refused payment releases what it holds instead of leaving a phantom coin | `5afe140` |
+> | `A3`/`A4` race, found by running `A5` | `1ec1b8f` |
+> | `A5` owner clicking, `A3` confirmed with **real money** | `462927d` |
+> | `A6` the pill lands on the **paying** tab; the RED puts it on a bystander | `2aed026` |
+> | `A7` the small-parent rule follows the caller's channel | `f4dda14` |
+> | `A8` selection keeps **total** ancestry under budget, not each coin alone | `44d2304` |
+>
+> ⬜ **Deliberate residuals, not oversights** (each recorded in place below): suppressing the duplicate
+> *handler* rather than the duplicate mint; one item 👤 the owner declined to schedule
+> (*"I don't want to focus on that too much right now"*); one owed as its own small item rather than
+> bundled into a phase closing out; and re-running the **`createAction` half** of `A6` against today's
+> binary, which is explicitly **not claimed** — its live evidence is `PAYMENT_TEST_BATCH.md` `M1`.
+**Standard:** `../HARNESS.md`. ~~**Runs FIRST in Phase 11**, ahead of the omnibox cluster.~~
+⚠️ **The ordering slipped and it does not matter now** — the omnibox cluster (items 1–4) ran first; both
+are done.
 
 ---
 
