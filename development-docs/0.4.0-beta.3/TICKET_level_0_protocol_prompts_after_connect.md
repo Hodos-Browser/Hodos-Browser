@@ -74,3 +74,30 @@ Needs the security level on `PermissionContext` if it is not already there.
   (negative control — a fix that silences every protocol has broken consent).
 - `L0-3` ✅ an **unknown** domain calling a level-0 protocol is still gated by trust.
 - `P13-R1`-style: the engine's existing `p7c_quiet_mode_never_changes_any_scoped_outcome` guard still passes.
+
+---
+
+## 👤 Owner question, 2026-09-21 — "is there any reason that would be bad?" — the trade-off, recorded
+
+**Yes, it is a real trade-off, and it is the reference wallet's.** The security level is an *input to the key*,
+alongside the protocol name and keyID — **the requesting site is not.** So every site asking for
+`[0, "xanaverse"]` / keyID `1` / counterparty `self` derives the **same** key Xanadu uses. Silent level 0 therefore
+means:
+
+1. **Cross-site use of another app's level-0 key.** A connected (approved) site can silently sign, HMAC, encrypt or
+   decrypt under a level-0 protocol another app uses — e.g. produce signatures "as the user" for `xanaverse`.
+2. **Linkability.** Level-0 keys are identical on every site. ⚠️ Not introduced by this fix — `getPublicKey` already
+   has it; see `0.4.0-beta.4/tickets/TICKET_derived_public_keys_have_no_prompt_and_can_match_across_sites.md`,
+   which also confirms `wallet-toolbox` skips the prompt at level 0 even for public-key revelation.
+
+**Why it stands:** BRC-43 defines level 0 as open; apps are to use level 1/2 for anything sensitive, and the reference
+wallet behaves exactly this way. Bounds that still hold: approved domains only (unknown → connect prompt, blocked →
+deny); payments keep their caps; identity-key reveal keeps its own perimeter gate. Level 0 alone cannot move money
+or reveal the identity key.
+
+**Rejected alternative — "only skip if a higher level is already approved":** different levels are different keys,
+so a level-1/2 grant says nothing about the level-0 key; and it would not have fixed Xanadu (`xanaverse` was never
+granted at any level). Every middle option collapses into "ask once and remember" — the prompt the owner rejected.
+
+**Better long-term direction (beta.4):** record *which site* used *which* derived key, so misuse is visible and
+revocable, rather than prompting up front.
