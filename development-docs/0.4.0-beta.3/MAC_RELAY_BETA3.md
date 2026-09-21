@@ -11,6 +11,74 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-21b (**Windows**) — ⛔ **CORRECTION to round 21a: my ask #2 is WITHDRAWN, I did it myself.** Plus a process change that applies to you. ✅ **No new C++ — nothing to rebuild beyond 21a.**
+
+## ⛔ Withdraw ask #2 — do NOT spend a session on `P12-A3`
+
+Round 21a asked you to measure the new-tab arrival (`OnBeforePopup` → `CreateNewTabWithUrl`) because it
+was unmeasured on both platforms. **I measured it on Windows the same day.** Sorry — you may have read
+21a before this landed.
+
+**Result: same defect, the shipped mitigation already covers it, no new defect class.** Two trials,
+distinct video URLs, user-gesture `window.open(url,'_blank')` from `github.com`:
+
+| | trial 1 | trial 2 |
+|---|---|---|
+| `OnBeforePopup` → new tab | ✅ `NEW_FOREGROUND_TAB` | ✅ |
+| `OnBeforeBrowse` pre-cache fired | ✅ | ✅ |
+| renderer **receipt** of that pre-cache | ⛔ **none, in any process** | ⛔ **none** |
+| early injection at `OnContextCreated` | ❌ absent | ❌ absent |
+| mitigation's late-arrival inject | ✅ PID 46012 | ✅ PID 5676 |
+
+⭐ **One detail worth having, and it makes the future CEF patch *easier*.** On a navigate-in-place
+arrival the early push reaches the **wrong** renderer. On a new-tab arrival it reaches **no renderer at
+all** — the brand-new browser has no render process for that frame yet, so the message is dropped
+outright. A browser-side registry that the renderer **pulls** from is indifferent to both, because
+nothing is pushed. ⇒ **No special keying needed for the new-tab case.**
+
+➡️ **Ask #1 from 21a still stands** — rebuild and sanity-check on macOS: a cross-site arrival should
+log `💉 P12: late-arrival inject` in the destination renderer, and a same-process arrival should still
+log `OnContextCreated: injecting` followed by `duplicate payload … dropped`. ⛔ **Distinct video URL per
+trial** — see 21a's trap section. If the new-tab case happens to be free to check while you are there,
+say what you see; it is no longer a separate task.
+
+## ⭐ Process change that applies to you too — engine patches now have a home
+
+👤 Owner's call this session. **`development-docs/DevOps-CICD/NEXT_CHROMIUM_BUILD.md`** is new: the
+plain-language front page for full Chromium/CEF builds, carrying
+
+- **PART 1** — the standing list, in **every** engine build forever (codec `GN_DEFINES`, the farbling
+  patch set), each with how it gets in **and how you'd know it silently didn't**;
+- **PART 2** — the **PENDING queue** of engine patches found since the last build.
+
+⛔ **If you find something on macOS that can only be fixed inside the engine, add a row to PART 2 the
+day you find it.** The old home for that was one line at Step 2 of a 1,335-line runbook, which is where
+such items were being lost. Phase 12's real fix is PART 2's first entry.
+
+⚠️ **Root `CLAUDE.md` changed** — its Build section now warns that "the build" means two different
+things (the ~35-min app build vs the multi-hour engine build) and points at that page. You get it on
+rebase; no action.
+
+⚠️ **A DevOps-CICD folder restructure is planned but NOT scheduled**
+(`DevOps-CICD/PLANNED_devops_review.md`) — subfolders for engine vs app builds, and a lessons-learned
+practice. 👤 Owner's finding: the folder is 20 flat files and he looked straight at it for a doc
+written that day and did not see it. ⛔ Not now, and not your task — but if you are about to add a doc
+there, know that paths will move.
+
+## Where things stand
+
+- **Phase 12 is 🟨 OPEN by design.** Mitigation only: cross-process arrivals inject at **25–41 ms**
+  instead of ~1200 ms, but an inline `<script>` still wins that window. The real fix needs a CEF patch
+  and is scoped in `phase-12-adblock-redirect-arrivals/PHASE_CONTRACT_registry_pull.md`. 👤 **No
+  Chromium build is being run now.**
+- **Windows is moving to Phase 13** (bot-detection compatibility). ⭐ Its **step 0** may collapse the
+  phase: the CAPTCHA complaint came from a **0.3.x** build whose *injected-JS* farbling carried the
+  `toString` tamper tell that 0.4.0 deleted on 2026-08-09. 🍎 The matrix wants macOS too eventually
+  (vendors score platform signals) — **but wait for step 0's result before spending anything on it.**
+- ✅ `preflight -Full` PASS at `05f40e9`; no C++ has changed since round 21a.
+
+---
+
 # 📋 ROUND 2026-09-21a (**Windows**) — 🐞 **Phase 12 root cause found, and it is NOT the redirect: the cosmetic-scriptlet push lands in the WRONG RENDER PROCESS.** Mitigation landed; the real fix needs a CEF patch. 🚨 **Shared C++ — rebuild after your next rebase.**
 
 ## ⚠️ C++ this round — rebuild after your next rebase
