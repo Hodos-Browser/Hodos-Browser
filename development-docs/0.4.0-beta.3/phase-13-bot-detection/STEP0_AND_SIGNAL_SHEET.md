@@ -401,3 +401,65 @@ browser is irrelevant.
   and get native mouse handling, whereas the Phase 11 DPI conversion bug was in *windowless overlays*.
 - ⛔ **Eleven no-ops out of twelve** means site lists are a poor instrument. What produced the one
   result was a **sign-up flow**, which is where vendors are tuned hardest.
+
+---
+
+# ⭐ `P13-B5` — the purpose-built test benches. Hodos vs Chrome vs Brave. 2026-09-21
+
+👤 Owner: *"Is there not some comprehensive thing to let us test for browsers? … I feel like we're just
+stabbing at the dark."* There is, and we had not used it. ⛔ CreepJS and BotD were cited in
+`RESEARCH_steps_1_2.md` as **sources**; nobody ran them as a **test**. These pages exist to hand a
+browser a verdict and a per-signal breakdown, which is the opposite of visiting sites and hoping one
+challenges you (11 of 12 in the human sitting never did).
+
+Harness: `p13_benches.py`. All three driven identically over CDP, debug port bound on each ⇒ read the
+**delta**, not the absolute. Subject gate active for Hodos (it caught two wrong-browser reads, both
+re-run clean).
+
+## The scorecard
+
+| Bench | What it measures | Chrome 152 | **Brave 153** | **Hodos 150** |
+|---|---|---|---|---|
+| **bot.sannysoft.com** | ~57 automation / headless signals | all pass | 🔴 **fails `TRANSPARENT_PIXEL`**; reports an **NVIDIA RTX GPU this machine does not have** and a **1440×900 screen** that is not real | ✅ all pass; **real** Intel GPU; **real** 1920×1080 screen |
+| **CreepJS** | "how headless do you look" | 25% | 🟠 **31%** | ✅ **25% — identical score AND identical hash (`fafdf9d1`) to Chrome** |
+| **iphey.com** | overall trust verdict | **Trustworthy, 100** | 🔴 **Unreliable, 20** — "Browser" tile flagged red | ✅ **Trustworthy, 100** — every tile green |
+| **fingerprint.com** | a commercial bot detector | `not_detected` | `not_detected` | ✅ `not_detected` |
+| pixelscan.net | — | ⬜ needs a "Scan" click | ⬜ | ⬜ — human row |
+| deviceandbrowserinfo | — | ⬜ result box never populated in **any** browser | ⬜ | ⬜ |
+| browserleaks | raw data, no verdict | — | — | — |
+
+📏 **Every bench that produced a verdict — four of them — scored Hodos identically to stock Chrome.**
+**Brave scored worse than Hodos on three of the four.**
+
+## ⭐ What this means, stated plainly
+
+**Brave is used successfully by tens of millions of people, and it looks *more* suspicious to these
+benches than we do.** Brave's farbling is visible: it invents a GPU, invents a screen size, and trips a
+canvas-integrity check. Ours is not visible to any of them — our farbled canvas hash differs from
+Chrome's, but it is **consistent across every frame and sandbox** (sannysoft Canvas1–5 identical), and
+consistency is what these detectors test for.
+
+⇒ **If our fingerprint were what makes people fail CAPTCHAs, Brave would be failing far more than we
+are.** It is not.
+
+## Where all of today's evidence now points
+
+| Source | Finding |
+|---|---|
+| Step 0 | The 0.3.x build carried **7 tamper tells**; 0.4.0 carries **none** |
+| Block B signal sheet | Nearly everything byte-identical to Chrome |
+| **Test benches** | **Hodos = Chrome on every verdict; Brave worse on 3 of 4** |
+| Human sitting | 11 sites never challenged; **reCAPTCHA and hCaptcha passed, including escalation**; the one loop was **DataDome on a dev build with a debug port open** |
+
+⇒ ⭐ **The current build does not have a fingerprinting problem.** The most likely account of the
+original complaint is the one Step 0 already gave: the user was on `0.3.x`, which emitted exactly the
+tells these benches look for. The one reproduction today is most plausibly our **dev debug port**, a
+condition no release build has.
+
+## ⛔ What is still NOT closed
+
+1. **GitHub signup on a build with NO debug port.** The only reproduction of the day, not yet re-run
+   without the confound. If it loops there too, everything above needs revisiting.
+2. pixelscan — a 30-second human click.
+3. These benches measure what a fingerprinting script sees. They are **strong** evidence, not proof,
+   about what DataDome decides at a real checkout.
