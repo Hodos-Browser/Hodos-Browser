@@ -11,6 +11,7 @@ This folder is the **permanent, canonical home** for Hodos Browser's Process & P
 ### Build & Release
 | Doc | Purpose | Status |
 |-----|---------|--------|
+| `PLANNED_devops_review.md` | ⬜ **NOT SCHEDULED** — scoping note for a review/reorganisation of *this folder* plus a real running lessons-learned practice (👤 owner, 2026-09-21). ⭐ Key finding going in: ~870 lines of Chromium-build lessons **already exist**, buried in `CEF_BUILD_RUNBOOK.md` and indexed by build date rather than by topic — so the job is likely *extract and re-index*, not write | ⬜ Planned |
 | `NEXT_CHROMIUM_BUILD.md` | ⭐ **START HERE for anything engine-related.** Plain-language front page for Tier-1 Chromium builds: what a Chromium build is, when we do one, **the standing list** (codecs + farbling — in every build, forever) and **the PENDING queue** (engine patches found since the last build). The runbook is the *how*; this is the *what and why* | **Current** |
 | `BUILD_AND_RELEASE.md` | Canonical build + release guide (tag-derived version, draft → manual-promote gate, branch flow) | Living |
 | `CEF_BUILD_RUNBOOK.md` | Tier-1 custom Chromium/CEF source-build runbook | **Current** — linchpin for the next CEF rebuild sprint |
