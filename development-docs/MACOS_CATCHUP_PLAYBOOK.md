@@ -109,7 +109,21 @@ Three processes must run (mirrors Windows run order):
 
 1. **Rust wallet** → `127.0.0.1:31301`. Use the launcher (sets `HODOS_DEV=1`); never bare `cargo run` (the prod-isolation safeguard will refuse to start a build-dir binary without `HODOS_DEV=1`). Mac dev wallet script: `./dev-wallet.sh` (or `HODOS_DEV=1 cargo run --release` from `rust-wallet/`).
 2. **Frontend dev server** → `cd frontend && npm run dev` → `:5137`.
-3. **CEF browser** → `cd cef-native && ./mac_build_run.sh`. This configures+builds via CMake, **copies the 5 helper `.app` bundles** into `HodosBrowser.app/Contents/Frameworks/`, `pkill HodosBrowser`, exports **`HODOS_DEV=1`** *and* **`HODOS_MAC_DEV_FLAGS=1`**, then launches the app binary directly.
+3. **CEF browser** → `cd cef-native && ./mac_build_run.sh`.
+
+> 🚨 **`cmake --build` ALONE IS NOT ENOUGH, and the failure is SILENT** (measured 2026-09-21).
+> macOS runs the render process from a **separate executable**, `HodosBrowser Helper (Renderer).app`,
+> and the copy that runs is the one **inside** `HodosBrowser.app/Contents/Frameworks/`.
+> `cmake --build` rebuilds the helper in `build/bin/` but does **not** refresh the embedded copy —
+> that is `mac_build_run.sh`'s separate "Copy helper bundles" step.
+> ⇒ After a bare `cmake --build`, **the browser process runs your new code and the renderer runs the
+> old one.** 📏 It cost a whole measurement session on Phase 12: the embedded renderer was four days
+> stale and contained none of the change under test, so every probe read as "the feature does not
+> fire on macOS". ⛔ Any change to `simple_render_process_handler.cpp` — V8 injection, scriptlets,
+> farbling, the IPC receivers — is **unverifiable** without the copy + re-sign.
+> ⛔ And launch with the **ABSOLUTE** bundle path: a relative `./build/bin/...` makes argv[0] relative,
+> so a path-scoped `pkill -f "<absolute path>"` matches nothing and you end up with several dev
+> browsers running at once, with CDP answered by the oldest. This configures+builds via CMake, **copies the 5 helper `.app` bundles** into `HodosBrowser.app/Contents/Frameworks/`, `pkill HodosBrowser`, exports **`HODOS_DEV=1`** *and* **`HODOS_MAC_DEV_FLAGS=1`**, then launches the app binary directly.
 
 - `HODOS_DEV=1` → uses `~/Library/Application Support/HodosBrowserDev/` (isolated from production `HodosBrowser/`).
 - `HODOS_MAC_DEV_FLAGS=1` → enables `--in-process-gpu` + `--disable-web-security` (and friends) in `simple_app.cpp:95-108`, needed because an unsigned/dev GPU helper won't run otherwise. **Security note:** these dev flags are dangerous in production — see §4-C item 4.

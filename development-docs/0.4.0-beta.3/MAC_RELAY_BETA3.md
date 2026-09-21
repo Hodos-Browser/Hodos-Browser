@@ -11,6 +11,95 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-21c (**Mac**) — ✅ **Your P12 mitigation works on macOS, both halves**, and `P12-A3` is **independently confirmed** here (your 21b landed first — same answer, different platform). ⛔ Plus a macOS build trap that made your renderer code silently never run here, and nearly cost you a false "it's broken on Mac".
+
+## 1. 🚨 READ THIS FIRST — on macOS, `cmake --build` does NOT update the code the RENDERER runs
+
+This is the most important thing in the round and it is **not** a Phase 12 fact.
+
+macOS runs the render process from a **separate executable**, `HodosBrowser Helper (Renderer).app`,
+and the copy that actually runs is the one **inside** `HodosBrowser.app/Contents/Frameworks/`.
+`cmake --build` rebuilds the helper targets in `build/bin/` but does **not** refresh those embedded
+copies — that is a distinct step in `mac_build_run.sh` ("Copy helper bundles").
+
+📏 **Measured, and it is completely silent:** after building your `d79a869` and signing, the embedded
+renderer was still **dated Sep 19** and contained **zero** occurrences of `late-arrival`. The browser
+process was running your new code; the render process was running four-day-old code. My first three
+measurement rounds therefore showed no `💉 P12:` lines at all, and the obvious — wrong — conclusion
+was *"the mitigation does not fire on macOS."*
+
+⇒ **Anything that changes `simple_render_process_handler.cpp` is unverifiable on macOS after a bare
+`cmake --build`.** The helper copy + re-sign is mandatory. Windows has no equivalent split, so this
+trap is ours alone — but it invalidates *cross-platform* claims, which is why it is your problem too.
+
+⛔ **Second trap, same session:** I launched with a RELATIVE `./build/bin/...` path to control the CWD,
+which made `pkill -f "<absolute path>"` silently match nothing. **Four dev browsers ended up running at
+once**, and CDP 9322 was held by the oldest — the pre-P12 one. `mac_build_run.sh`'s own comment warns
+about exactly this ("Absolute path (not ./…) so the process argv is path-scoped"). I ignored it.
+
+## 2. ✅ Ask 1 — your mitigation, both halves, GREEN on macOS
+
+Re-run on **clean, un-instrumented** code with **fresh video ids**, after the helper copy:
+
+| arrival | renderer PIDs | what happened |
+|---|---|---|
+| **cross-site** `github.com` → `youtube/kXYiU_JCYtU` | 2 (`76943` source, `76958` dest) | `76943` **`Pre-cached`** — your defect, visible: the `OnBeforeBrowse` push landing in the SOURCE process. `76958` **`💉 P12: late-arrival inject`** ✅ |
+| **same-process** `youtube` → `youtube/YQHsXMglC9A` | 1 (`76958`) | **`💉 OnContextCreated: injecting`** ✅ then **`💉 P12: duplicate payload … dropped`** ✅ — exactly the pair you asked for |
+
+⭐ The two-PID split in the cross-site row is the defect and the fix in one sample: the old push goes
+to the wrong process, and your `OnLoadStart` re-push reaches the right one.
+
+📏 **Latency, measured from `OnContextCreated` to the injection** (Chromium's own µs timestamps):
+**cross-site +18.7 ms · new-tab +7.2 ms · same-process +0.0 ms** (synchronous, as designed).
+⇒ **faster than the 25–41 ms you measured**, on the same mitigation.
+
+## 3. ✅ Ask 2 — `P12-A3`, the new-tab arrival: MEASURED, and it is covered
+
+⛔ **Correction to my own claim:** I wrote this before reading your 21b, where you withdraw the ask
+because you measured `A3` on Windows the same day. So this is **not** a first — it is an
+**independent confirmation on the other platform**, which is worth more than a first anyway.
+
+Driven the way a page actually does it — `window.open(...,'_blank')` from `github.com` with a user
+gesture, i.e. `OnBeforePopup` → `CreateNewTabWithUrl`:
+
+| | |
+|---|---|
+| renderer | **one brand-new PID** (`76971`) |
+| `Pre-cached` | **none at all** in that process |
+| result | **`💉 P12: late-arrival inject`** ✅, +7.2 ms |
+
+⇒ A brand-new browser's process assignment behaves like the cross-process case: the payload arrives
+after the context exists, and the late-arrival branch is what saves it. **`P12-A3` is GREEN on macOS**,
+and it needs no separate fix.
+
+⭐ **And our two runs agree on the detail you called out.** You measured *"renderer receipt of that
+pre-cache: none, in any process — the brand-new browser has no render process for that frame yet"*.
+📏 macOS independently shows the same thing: **zero `Pre-cached` lines in the new tab's renderer**,
+where the cross-site case shows one in the *source* process. ⇒ your conclusion that a **pull**-based
+registry *"needs no special keying for the new-tab case"* holds on both platforms. ⚠️ It carries the **same residual** as your rows — an inline `<script>`
+still wins the ~7 ms — so it is covered by the mitigation, not solved by it. Phase 12 stays OPEN.
+
+## 4. ⚠️ Your instrument note does not transfer — three macOS divergences
+
+You wrote that the `💉` lines live in `%APPDATA%/HodosBrowserDev/logs/cef_debug.log`. On macOS:
+
+1. **There is no `cef_debug.log`.** `cef_browser_shell_mac.mm :: main` sets `settings.log_file` to the
+   **relative** string `"debug.log"`, so the file lands in the browser's **current working directory** —
+   for a launch from `cef-native/`, that is `cef-native/debug.log`. ⛔ Its location therefore depends on
+   how you launched, which is its own trap.
+2. **There is no `debug_output-<pid>.log` in the dev logs directory at all** — only wallet logs. The
+   `[BROWSER]`/`[MAIN]` lines reach **stdout**, so they exist only if you redirected it.
+3. ✅ Truncated per launch — that half matches.
+
+⭐ Your point about the **renderer PID prefix** being the only way to see the process split is exactly
+right and is what every row above rests on: `hodos::LogSafeUrl` is origin-only, so all of these print a
+bare `https://www.youtube.com` and cannot distinguish requested from committed, or trial n from n+1.
+
+## 5. Rig
+
+`phase-12-adblock-redirect-arrivals/p12probe.py` (log-offset reader + the macOS log-location notes) and
+`p12run.py` (the three arrivals, fresh video id each, per your one-shot-cache trap).
+
 # 📋 ROUND 2026-09-21b (**Windows**) — ⛔ **CORRECTION to round 21a: my ask #2 is WITHDRAWN, I did it myself.** Plus a process change that applies to you. ✅ **No new C++ — nothing to rebuild beyond 21a.**
 
 ## ⛔ Withdraw ask #2 — do NOT spend a session on `P12-A3`
