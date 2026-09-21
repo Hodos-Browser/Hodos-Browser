@@ -201,3 +201,65 @@ an owner call, not an implementation detail.
 | A release-shaped subject at head | ⬜ Needs a copied-out binary launched **without** `HODOS_DEV=1`. ⛔ `AppPaths` rule 2 scrubs a stray `HODOS_DEV=1` off a non-build-path binary and there is **no data-root override** ⇒ it will use `%APPDATA%\HodosBrowser`, the owner's **production profile**. Owner approved a back-up-and-restore, but it also **collides with the running installed browser's SingletonLock**, so it needs the owner to close their browser first |
 | Adblock vendor coverage | ⚠️ `hodos-unbreak.txt` has **Cloudflare only**. No reCAPTCHA, hCaptcha, Arkose or GeeTest exception exists. Measure before adding — that is what the matrix is for |
 | 🍎 macOS parity | ⬜ The same two harnesses run unchanged; `--disable-gpu-compositing` is passed on both platforms and the GPU stack differs |
+
+---
+
+# Addendum, same day — 👤 the owner asked the right question: **look at Brave, not Chrome**
+
+Rule 5 names Brave as ⭐ *closest to us in intent*. It is installed on this machine, so this is
+**measured**, not recalled. Same probe, same machine, same day.
+
+## What each browser tells a site it is
+
+| | UA string (tail) | `sec-ch-ua` brand list |
+|---|---|---|
+| **Hodos (head)** | `Chrome/150.0.0.0 Safari/537.36` | `Not;A=Brand;v=8, Chromium;v=150` |
+| **Chrome 152** | `Chrome/152.0.0.0 Safari/537.36` | `Chromium;v=152, Not?A_Brand;v=24, Google Chrome;v=152` |
+| **Brave 153** | `Chrome/153.0.0.0 Safari/537.36` | `Brave;v=153, Not_A Brand;v=8, Chromium;v=153` |
+
+*(Edge 153 is installed but its target set defeated the one-page-target assertion; not measured rather
+than guessed.)*
+
+⭐ **Brave's answer is a deliberate SPLIT, and it is not what either half of the room assumes.**
+Its **UA string carries no "Brave" token at all** — it is byte-shaped like Chrome's. Its **Client
+Hints do name Brave.** So 👤 the owner's recollection (*"Brave just sends Brave"*) is half right: it
+names itself in the new, structured, opt-in header and **lies in the old one that every server parses**.
+
+⛔ **And Brave is internally CONSISTENT.** `Chrome/153` + `Chromium;v=153` + `Brave;v=153` compose into
+one coherent claim: *"I am Brave, which is Chromium 153, presenting as Chrome 153."* Nothing contradicts.
+
+⇒ **`B1` is not "we differ from Brave". It is that we are the only one of the three that contradicts
+itself.** Our UA says Chrome; our brands say a raw, unbranded Chromium with no Chrome in it. Those two
+cannot both be true. That pairing is the CEF/Chromium **default**, so the crowd we are standing in on
+the open web is embedded webviews, CEF-based scrapers and automation — not browsers.
+
+## Cost of fixing it — measured, and it is not where I expected
+
+📏 Launched the dev build with `--user-agent-product=Chrome/150.0.0.0` (subject asserted `role=tab_1`):
+
+```
+  userAgent : ... Chrome/150.0.0.0 Safari/537.36      <- changed
+  sec-ch-ua : Not;A=Brand;v=8, Chromium;v=150          <- UNCHANGED
+```
+
+⛔ **CEF's UA controls (`CefSettings.user_agent`, `user_agent_product`, and the matching switches) do
+not reach the Client Hints brand list.** The brand list is built inside Chromium from the branding
+build flag and product name. ⇒ **`B1` is an ENGINE fix, not a shell fix** — it belongs in
+`DevOps-CICD/NEXT_CHROMIUM_BUILD.md` §PART 2, per the standing rule that engine-only fixes are queued
+the day they are found.
+
+⚠️ **The tempting shortcut is a trap.** We already rewrite request headers in C++ (DNT/GPC), so
+rewriting the `sec-ch-ua` **header** looks cheap. It would fix what the server sees and leave
+`navigator.userAgentData.brands` in JS saying the old thing — so the header and the JS would then
+disagree. That is a **new** inconsistency, in the exact family the signal belongs to, and strictly
+worse than doing nothing. ⛔ Do not do this.
+
+## The two signals pull in opposite directions, and saying which is "worse" depends on the question
+
+| | `B1` — the brand list | `B2` — `window.hodosBrowser` / `CWI` / `__hodos_*` |
+|---|---|---|
+| **"Do I look automated?"** | 🔴 **Worse.** Raw-Chromium-claiming-Chrome is an automation correlate | 🟡 Milder — real users run extensions that add page globals |
+| **"Who exactly are you?"** | 🟡 Says a *category* (some Chromium build), not us | 🔴 **Worse.** Says **Hodos**, by name, uniquely, and that the user runs a BSV wallet — to every site, including ones that never asked |
+| **Where the fix lives** | ⛔ Engine patch (measured above) | ✅ **Our own code** |
+
+⇒ ⭐ **The one we can act on now is `B2`, and it is also the one that actually deanonymises the user.**
