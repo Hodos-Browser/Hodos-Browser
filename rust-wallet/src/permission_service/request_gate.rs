@@ -272,6 +272,14 @@ impl<'a> ScopedCall<'a> {
             ScopedCall::Basket { .. } => CallKind::BasketAccess,
         }
     }
+
+    /// The BRC-43 security level the engine sees — `Some` only for a protocol call.
+    fn protocol_security_level(&self) -> Option<u8> {
+        match self {
+            ScopedCall::Protocol { level, .. } => Some(*level),
+            ScopedCall::Basket { .. } => None,
+        }
+    }
 }
 
 /// Hardcoded protected basket names — never auto-grant, always prompt.
@@ -448,11 +456,12 @@ pub fn dispatch_scoped_grant(
     // the `is_protected_basket(basket)` arm of the `scoped_grant_exists`
     // computation forces `false`, so `default` / `backup-*` / `admin *` reach
     // the engine with no grant and always prompt. That is the one with teeth.
-    let ctx = context_builder::build_scoped_grant_context(
+    let mut ctx = context_builder::build_scoped_grant_context(
         call_kind,
         perm_row.as_ref(),
         scoped_grant_exists,
     );
+    ctx.protocol_security_level = scoped_call.protocol_security_level();
     let decision = permission.decide(&ctx);
 
     match decision {
@@ -1396,6 +1405,18 @@ mod tests {
     }
 
     // -- Phase 2.6-D --
+
+    #[test]
+    fn scoped_call_passes_its_security_level_to_the_engine() {
+        // The wiring half of the level-0 rule: the engine can only exempt what it
+        // is told. Basket calls carry no level and must stay None.
+        for level in [0u8, 1, 2] {
+            let c = ScopedCall::Protocol { level, name: "xanaverse", key_id: "1", counterparty: None };
+            assert_eq!(c.protocol_security_level(), Some(level));
+        }
+        let b = ScopedCall::Basket { basket: "xanaverse-upvotes", access: "read" };
+        assert_eq!(b.protocol_security_level(), None);
+    }
 
     #[test]
     fn scoped_call_classifies_protocol_use() {

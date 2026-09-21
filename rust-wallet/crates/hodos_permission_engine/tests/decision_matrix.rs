@@ -49,6 +49,7 @@ fn baseline_approved() -> PermissionContext {
         call_kind: CallKind::GenericApproved,
         payment_scope_kind_missing: None,
         manifest_present: false,
+        protocol_security_level: None,
     }
 }
 

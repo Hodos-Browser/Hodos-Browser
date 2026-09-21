@@ -5715,6 +5715,23 @@ pub(crate) async fn create_action_internal(
             }));
         };
 
+        // ⛔ Never build an output with an EMPTY locking script. `lockingScript: ''`
+        // decodes to zero bytes and wins over any `address` on the same output, so
+        // it used to be broadcast as an output with no spending conditions —
+        // anyone's coin — while createAction reported success. Checked here, after
+        // every resolution path (script / address / customInstructions), so no
+        // route can produce one. The ReservationGuard above releases the inputs on
+        // this early return, exactly as for the invalid-hex returns in this loop.
+        // 📏 mainnet 0d1a01e1…: 100 sats spent into an empty script.
+        // TICKET_createAction_accepts_an_empty_lockingScript_and_spends_into_it.md
+        if script_bytes.is_empty() {
+            log::error!("   ❌ Output {}: empty locking script — refusing to spend into it", i);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Output {}: empty locking script. An output needs a locking script or an address.", i),
+                "code": "ERR_EMPTY_LOCKING_SCRIPT"
+            }));
+        }
+
         // For send_max, override the first output amount with calculated total_output
         let satoshis = if send_max && i == 0 {
             total_output

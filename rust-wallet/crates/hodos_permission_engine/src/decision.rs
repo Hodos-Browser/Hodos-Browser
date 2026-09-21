@@ -128,6 +128,13 @@ pub enum EngineReason {
     /// "prompt-per-recipient" UX collapse seen with token-issuing dApps like
     /// todo.metanet.app. Phase 2.6-D Fix #3 (2026-06-09).
     SilentCounterpartyDefault,
+    /// ProtocolUse at BRC-43 security level 0 on an approved domain. Level 0 is
+    /// the "open" level — the app itself marks the protocol as not sensitive —
+    /// and the reference wallet never prompts for it
+    /// (`wallet-toolbox :: WalletPermissionsManager.ensureProtocolPermission`:
+    /// `if (level === 0) return true`). beta.3,
+    /// `TICKET_level_0_protocol_prompts_after_connect.md`.
+    SilentProtocolLevelZero,
     // ⛔ `SilentBundledScopeGrant` was removed by beta.3 Phase 7c. It marked a
     // decision that can no longer be reached: quiet mode used to silence every
     // ProtocolUse and BasketAccess on the domain, declared or not. It now

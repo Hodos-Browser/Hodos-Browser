@@ -190,6 +190,16 @@ fn decide_scoped_grant(ctx: &PermissionContext) -> PermissionDecision {
         return PermissionDecision::silent(EngineReason::SilentCounterpartyDefault);
     }
 
+    // Level-0 protocols are open usage — match the reference wallet, which
+    // returns before any permission check. Reached only on an approved domain
+    // (an unknown or blocked domain is stopped by `decide_domain_trust`), and
+    // only for ProtocolUse: level 1 and 2 still need a grant or a prompt.
+    // 📏 Found on zanaadu.com: every "like" signs under `[0, "xanaverse"]`,
+    // which its manifest never declares, so the user was asked on every like.
+    if ctx.call_kind == CallKind::ProtocolUse && ctx.protocol_security_level == Some(0) {
+        return PermissionDecision::silent(EngineReason::SilentProtocolLevelZero);
+    }
+
     if ctx.scoped_grant_exists {
         return PermissionDecision::silent(EngineReason::SilentScopedGrantExists);
     }
@@ -484,6 +494,71 @@ mod tests {
             d,
             PermissionDecision::silent(EngineReason::SilentScopedGrantExists)
         );
+    }
+
+    // -- beta.3: level-0 protocols are open (TICKET_level_0_protocol_prompts_after_connect) --
+
+    fn protocol_ctx(trust: TrustLevel, level: Option<u8>) -> PermissionContext {
+        PermissionContext {
+            call_kind: CallKind::ProtocolUse,
+            trust_level: trust,
+            scoped_grant_exists: false, // the whole point: undeclared, no V18 row
+            protocol_security_level: level,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn level0_protocol_is_silent_on_approved_domain_without_a_grant() {
+        // 📏 zanaadu.com: createSignature under [0, "xanaverse"], not in the manifest.
+        assert_eq!(
+            decide(&protocol_ctx(TrustLevel::Approved, Some(0))),
+            PermissionDecision::silent(EngineReason::SilentProtocolLevelZero)
+        );
+    }
+
+    #[test]
+    fn level1_and_level2_undeclared_protocols_still_prompt() {
+        // ⛔ Negative control. A fix that silenced every protocol would pass the
+        // test above too — this is the one that would go red.
+        for level in [1u8, 2] {
+            assert_eq!(
+                decide(&protocol_ctx(TrustLevel::Approved, Some(level))),
+                PermissionDecision::prompt(
+                    PromptType::ProtocolPermissionPrompt,
+                    EngineReason::ScopedGrantMissing
+                ),
+                "undeclared level-{level} protocol must still prompt"
+            );
+        }
+    }
+
+    #[test]
+    fn protocol_with_no_level_recorded_fails_closed() {
+        // A caller that never wires the level must not get the exemption.
+        assert!(decide(&protocol_ctx(TrustLevel::Approved, None)).is_prompt());
+    }
+
+    #[test]
+    fn level0_protocol_does_not_bypass_domain_trust() {
+        // First contact still asks; a blocked site is still refused.
+        let unknown = decide(&protocol_ctx(TrustLevel::Unknown, Some(0)));
+        assert!(unknown.is_prompt(), "unknown domain must still be asked: {unknown:?}");
+        assert_ne!(unknown, PermissionDecision::silent(EngineReason::SilentProtocolLevelZero));
+        assert!(decide(&protocol_ctx(TrustLevel::Blocked, Some(0))).is_deny());
+    }
+
+    #[test]
+    fn level0_applies_only_to_protocol_use() {
+        // A basket call carrying a stray level must still need its grant.
+        let ctx = PermissionContext {
+            call_kind: CallKind::BasketAccess,
+            trust_level: TrustLevel::Approved,
+            scoped_grant_exists: false,
+            protocol_security_level: Some(0),
+            ..Default::default()
+        };
+        assert!(decide(&ctx).is_prompt());
     }
 
     #[test]

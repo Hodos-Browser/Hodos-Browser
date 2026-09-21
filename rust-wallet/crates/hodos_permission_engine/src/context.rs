@@ -153,6 +153,12 @@ pub struct PermissionContext {
     /// to choose the `manifest_connect_bundle` modal (permissions declared
     /// up-front) over plain `domain_approval`. Ignored unless trust is Unknown.
     pub manifest_present: bool,
+
+    /// BRC-43 security level of the protocol a `ProtocolUse` call derives under
+    /// (`protocolID[0]`): `Some(0|1|2)` for a protocol call, `None` for anything
+    /// else. Read only by `decide_scoped_grant`, which treats level 0 as open —
+    /// see `EngineReason::SilentProtocolLevelZero`.
+    pub protocol_security_level: Option<u8>,
 }
 
 impl Default for PermissionContext {
@@ -178,6 +184,7 @@ impl Default for PermissionContext {
             bundled_scope_grant: false,
             payment_scope_kind_missing: None,
             manifest_present: false,
+            protocol_security_level: None,
         }
     }
 }
