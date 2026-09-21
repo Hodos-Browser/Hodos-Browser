@@ -1,8 +1,15 @@
 # TICKET — a security-level-0 protocol prompts, right after the user approved the site
 
 **Opened** 2026-09-21 by the **owner**, at the keyboard. **Blocks the beta.3 build** (owner's call).
-**Status:** ⬜ OPEN — mechanism found and the reference checked; **not yet observed on Xanadu's own
-request**, and **no code changed**. ⛔ Permission-engine logic ⇒ owner approval before any change.
+**Status:** ⬜ OPEN — ✅ **CONFIRMED on Xanadu's own request 2026-09-21** (below); **no code changed**.
+
+> ### 📏 Confirmed — `zanaadu.com`, owner at the keyboard, 2026-09-21 12:24
+> Every **"like"** does a `createAction` (a 1-sat token into basket `xanaverse-upvotes`) and then a
+> **`createSignature` with `protocolID: [0, "xanaverse"]`, keyID `"1"`, counterparty `self`**. That call
+> produced `protocol_permission_prompt, reason=scoped_grant_missing`. The manifest (`babbage` namespace)
+> declares **10 protocols** and the approval stored exactly those 10 — **`xanaverse` is not among them.**
+> ⇒ exactly the predicted shape: a **level-0** protocol the site uses but never declared. The reference
+> wallet would return `true` without asking. ⛔ Permission-engine logic ⇒ owner approval before any change.
 
 ## What the owner sees
 
