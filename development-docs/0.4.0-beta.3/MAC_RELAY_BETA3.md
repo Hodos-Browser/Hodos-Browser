@@ -11,6 +11,87 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-21a (**Windows**) — 🐞 **Phase 12 root cause found, and it is NOT the redirect: the cosmetic-scriptlet push lands in the WRONG RENDER PROCESS.** Mitigation landed; the real fix needs a CEF patch. 🚨 **Shared C++ — rebuild after your next rebase.**
+
+## ⚠️ C++ this round — rebuild after your next rebase
+
+| File | What |
+|---|---|
+| `cef-native/src/handlers/simple_handler.cpp` | **new** `SimpleHandler::OnLoadStart` override (re-push of `preload_cosmetic_script`) |
+| `cef-native/include/handlers/simple_handler.h` | its declaration, in the `CefLoadHandler` block |
+| `cef-native/src/handlers/simple_render_process_handler.cpp` | receipt handler gains a late-arrival inject + two per-frame maps; `OnContextCreated` gains the bookkeeping |
+
+⛔ All three are **shared**, no `#ifdef`. Nothing here is Windows-specific — it is CEF calls and
+`std::string` — so macOS gets the same behaviour on rebuild, **but it is unverified there**.
+
+## What we thought it was, and what it actually is
+
+The phase hypothesis was: scriptlets pre-cached under the **requested** URL, looked up by the
+**committed** URL, exact match fails on a redirect. ⛔ **Disproved.** A 2×2 factorial (same-process vs
+cross-process × redirect vs no-redirect) showed the URL key is **correct in all four cells** —
+`OnBeforeBrowse` *does* re-fire on the redirect with the final URL.
+
+⭐ **The real mechanism:** `OnBeforeBrowse` ends in `frame->SendProcessMessage(PID_RENDERER, …)`, which
+delivers to whichever render process hosts the frame **at that moment** — the **source** document's.
+Any cross-site navigation commits in a **different** process, and `s_scriptCache` is a process-local
+`static`. The destination process's cache is empty, so the early injection silently never happened.
+Measured: payload receipt in PID 43176 (github's), document committed in PID 8344, no injection line.
+
+⛔ **This is the same delivery bug the farbling block in that very function already documents** —
+*"a push from here is pre-commit, so it lands on the outgoing document"*. That path was fixed by filing
+into `hodos::FarblingRegistry` browser-side and having the renderer **pull** at `OnContextCreated`. The
+cosmetic path was simply never moved across.
+
+⚠️ **It was never about X.** A bare `youtu.be` paste reproduces it, and so does `github.com` → YouTube.
+
+## Why it looked like it worked
+
+Two injection paths; only the early one is broken. The late path in `OnLoadingStateChange` uses
+`browser->GetMainFrame()` **after load completes**, so it is process-correct and always lands. The
+regression is **when**: first mutation of the JS surface moved from **+147 ms (pre-page-JS)** on a
+same-process arrival to **+2650 ms (post-load)** on a cross-process one.
+
+## What landed, and what did not
+
+🟨 **Mitigation only — Phase 12 stays OPEN.** Re-push from `OnLoadStart` (where the frame *is* in the
+destination process) + a renderer-side late-arrival inject. **3/3 cross-process arrivals now inject at
+25–41 ms** instead of ~1200 ms; same-process arrivals are **unchanged** (still pre-JS) and the duplicate
+push is dropped, so nothing double-injects. Negative control run: scriptlets disabled for the host ⇒
+**0 injections** while the YouTube contexts were still created (i.e. red for the right reason).
+`preflight -Full` **PASS**.
+
+⚠️ **Residual exposure is not zero** — an inline `<script>` still wins that 25–41 ms. The real fix is
+the registry + renderer-pull patch, which needs a **CEF fork patch on `hodos/7871` + engine rebuild**.
+
+## 🍎 Two asks
+
+1. **Rebuild and sanity-check on macOS.** Does a cross-site arrival (`github.com` → a YouTube watch URL)
+   produce `💉 P12: late-arrival inject` in the destination renderer, and does a same-process arrival
+   still produce `OnContextCreated: injecting` with a `duplicate payload … dropped` after it? ⛔ Use a
+   **distinct video URL per trial** — see the trap below.
+2. **`P12-A3` is unmeasured on both platforms:** the new-tab arrival (`OnBeforePopup` →
+   `CreateNewTabWithUrl`). Same defect class, but a brand-new browser's process assignment was not
+   exercised. If you get there first, say so.
+
+## 🚨 A trap that cost me a wrong conclusion — do not repeat it
+
+My first three trials reused **one** video URL and scored **2 of 3 GREEN** for a fix that does not work.
+`s_scriptCache` is URL-keyed and one-shot, so trial *n*'s too-late payload **sat in the cache and was
+consumed by trial _n+1_'s context**. With distinct URLs it was **0 of 3**. ⛔ Fresh URL per trial, and
+assert the injection belongs to *this* navigation.
+
+## ⚠️ Instrument note — the phase doc sends you to the wrong file
+
+The `💉 injecting scriptlets` lines are `[RENDER]` and live in
+**`%APPDATA%/HodosBrowserDev/logs/cef_debug.log`** (via `ChildProcessLogSink`), **not** in
+`debug_output-<pid>.log`, which carries `[BROWSER]` lines only. You need **both**, and the renderer
+**PID prefix** in `cef_debug.log` is the only thing that makes the process split visible —
+`hodos::LogSafeUrl` is **origin-only**, so every one of these lines prints `https://www.youtube.com`
+with the path and query stripped and cannot distinguish requested from committed. ⚠️ `cef_debug.log`
+is truncated on every launch.
+
+---
+
 # 📋 ROUND 2026-09-19n (**Mac**) — ✅ **your round-8 find is FIXED: the IPC connect no longer re-sends an empty body.** Both your evidence rows GREEN, your RED reproduced on macOS first. 🚨 **Shared C++ — rebuild after your next rebase.**
 
 ## ⚠️ C++ this round — rebuild after your next rebase

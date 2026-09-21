@@ -160,6 +160,16 @@ public:
                                 bool fullscreen) override;
 
     // CefLoadHandler methods
+    // P12 MITIGATION (2026-09-21): re-push the cosmetic scriptlets here. OnBeforeBrowse's
+    // push is delivered to the SOURCE document's render process, so on a cross-site
+    // navigation the destination process never receives it. By OnLoadStart the frame is in
+    // the destination process. ⚠️ This fires ~16-35 ms AFTER that process has created its
+    // V8 context (measured), so it cannot restore pre-JS injection -- the renderer's
+    // late-arrival path turns it into a ~30 ms delay instead of ~1.2 s. Not the fix.
+    void OnLoadStart(CefRefPtr<CefBrowser> browser,
+                     CefRefPtr<CefFrame> frame,
+                     TransitionType transition_type) override;
+
     void OnLoadError(CefRefPtr<CefBrowser> browser,
                      CefRefPtr<CefFrame> frame,
                      ErrorCode errorCode,

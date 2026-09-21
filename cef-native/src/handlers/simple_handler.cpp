@@ -1604,6 +1604,54 @@ bool SimpleHandler::OnCertificateError(CefRefPtr<CefBrowser> browser,
     return true;
 }
 
+// ============================================================================
+// P12 MITIGATION -- see development-docs/0.4.0-beta.3/phase-12-adblock-redirect-arrivals/README.md
+//
+// ⛔ THIS IS NOT THE FIX AND PHASE 12 IS NOT CLOSED BY IT.
+//
+// Measured 2026-09-19: the `preload_cosmetic_script` push at the end of OnBeforeBrowse is
+// delivered to whichever render process hosts the frame AT THAT MOMENT -- the SOURCE
+// document's. Every cross-site navigation commits in a DIFFERENT process, whose
+// process-local s_scriptCache is empty, so the early injection silently never happened.
+// This is the same delivery bug the farbling block in OnBeforeBrowse already documents
+// ("a push from here is pre-commit, so it lands on the outgoing document"); that path was
+// fixed by filing into hodos::FarblingRegistry browser-side and having the renderer PULL at
+// OnContextCreated, and the cosmetic path was never moved across.
+//
+// By OnLoadStart the frame IS in the destination process, so this push always lands in the
+// right renderer. ⚠️ But OnLoadStart fires AFTER that renderer created its V8 context --
+// 16-35 ms after, across 6 measured trials, never before. So this cannot restore the
+// pre-page-JS injection; it only lets the renderer's late-arrival path inject ~30 ms after
+// context creation instead of the ~1.2 s the load-complete path takes.
+//
+// ⇒ Residual exposure is small but NOT zero, and an inline script still wins. The real fix
+//   is the registry + renderer-pull patch, which needs a CEF fork patch on hodos/7871.
+// ============================================================================
+void SimpleHandler::OnLoadStart(CefRefPtr<CefBrowser> browser,
+                                CefRefPtr<CefFrame> frame,
+                                TransitionType transition_type) {
+    CEF_REQUIRE_UI_THREAD();
+
+    if (ExtractTabIdFromRole(role_) == -1) return;  // tab browsers only
+    if (!frame || !frame->IsMain()) return;
+    if (!g_adblockServerRunning || !AdblockCache::GetInstance().IsGlobalEnabled()) return;
+
+    std::string navUrl = frame->GetURL().ToString();
+    if (navUrl.empty() || shouldSkipAdblockCheck(navUrl)) return;
+
+    // Same fetch as the OnBeforeBrowse pre-cache; AdblockCache serves it from its own cache
+    // on this second call, so this is not a second round-trip to the engine.
+    bool skipScriptlets = !AdblockCache::GetInstance().isScriptletsEnabled(navUrl);
+    auto cosmetic = AdblockCache::GetInstance().fetchCosmeticResources(navUrl, skipScriptlets);
+    if (cosmetic.injectedScript.empty()) return;
+
+    CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("preload_cosmetic_script");
+    CefRefPtr<CefListValue> args = msg->GetArgumentList();
+    args->SetString(0, navUrl);
+    args->SetString(1, cosmetic.injectedScript);
+    frame->SendProcessMessage(PID_RENDERER, msg);
+}
+
 void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
                                          bool isLoading,
                                          bool canGoBack,

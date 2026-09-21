@@ -33,6 +33,23 @@
 static std::mutex s_scriptCacheMutex;
 static std::unordered_map<std::string, std::string> s_scriptCache; // URL → scriptlet JS
 
+// P12 MITIGATION (2026-09-21) -- per-frame bookkeeping for the late-arrival inject below.
+// ⛔ This is NOT the fix for Phase 12; see that phase's README. The fix is to stop PUSHING
+// the payload and have the renderer PULL it at OnContextCreated (the shape libcef already
+// uses for hodos::FarblingRegistry), which needs a CEF fork patch. Until that lands, these
+// two maps let a payload that arrives a few ms AFTER its context was created still inject,
+// instead of waiting for the load-complete path ~1.2 s later.
+//
+// Both are keyed by CefFrame::GetIdentifier() -- a CefString, globally unique per frame
+// (cef_frame.h), NOT an int64 as older CEF exposed.
+//   s_contextRanUrl : the URL whose OnContextCreated has already run in this frame
+//   s_injectedUrl   : the URL actually injected into this frame's current document
+// The pair is what keeps a single navigation from injecting TWICE once the browser process
+// sends the payload from both OnBeforeBrowse and OnLoadStart -- double-injecting scriptlets
+// would double-wrap the very APIs they override.
+static std::unordered_map<std::string, std::string> s_contextRanUrl; // frameId → URL
+static std::unordered_map<std::string, std::string> s_injectedUrl;   // frameId → URL
+
 // NOTE: the fingerprint seed cache (s_domainSeeds/s_seedMutex) and the per-site disable
 // set (s_fingerprintDisabledUrls/s_fpDisabledMutex) were DELETED 2026-08-09 along with
 // FINGERPRINT_PROTECTION_SCRIPT. Farbling is native in Blink now and the renderer holds
@@ -815,13 +832,24 @@ void SimpleRenderProcessHandler::OnContextCreated(
     // This is the earliest possible injection point in CEF.
     std::string url = frame->GetURL().ToString();
     if (!url.empty() && url.find("127.0.0.1") == std::string::npos) {
+        const std::string frameId = frame->GetIdentifier().ToString();
         std::lock_guard<std::mutex> lock(s_scriptCacheMutex);
+
+        // P12: a context being created means a NEW document in this frame, so nothing has
+        // been injected into it yet. Clearing first is what lets a RELOAD of the same URL
+        // inject again instead of being mistaken for the duplicate push.
+        if (!frameId.empty()) {
+            s_injectedUrl.erase(frameId);
+            s_contextRanUrl[frameId] = url;
+        }
+
         auto it = s_scriptCache.find(url);
         if (it != s_scriptCache.end() && !it->second.empty()) {
             LOG_INFO_RENDER("💉 OnContextCreated: injecting scriptlets for " + hodos::LogSafeUrl(url) +
                 " (" + std::to_string(it->second.size()) + " chars)");
             frame->ExecuteJavaScript(it->second, url, 0);
             s_scriptCache.erase(it); // One-shot: don't re-inject on subframe contexts
+            if (!frameId.empty()) s_injectedUrl[frameId] = url;
         }
     }
 
@@ -1539,10 +1567,45 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
             std::string script = args->GetString(1);
 
             if (!url.empty() && !script.empty()) {
+                const std::string frameId = frame ? frame->GetIdentifier().ToString() : std::string();
                 std::lock_guard<std::mutex> lock(s_scriptCacheMutex);
-                s_scriptCache[url] = script;
-                LOG_INFO_RENDER("💉 Pre-cached scriptlets for " + hodos::LogSafeUrl(url) +
-                    " (" + std::to_string(script.size()) + " chars)");
+
+                // P12 MITIGATION. Three cases, and only the first is new:
+                //
+                //  (1) this frame's OnContextCreated ALREADY ran for this exact URL and did
+                //      not inject -- i.e. the payload arrived too late to be pre-cached.
+                //      Measured 2026-09-19: on a CROSS-PROCESS arrival that is the normal
+                //      case, 16-35 ms late, because the payload the browser process pushed
+                //      in OnBeforeBrowse went to the SOURCE document's render process and
+                //      this one's cache was empty. Inject now: ~30 ms beats the ~1.2 s the
+                //      load-complete path would take. ⚠️ It does NOT beat an inline script,
+                //      which is why this is a mitigation and Phase 12 stays OPEN.
+                //
+                //  (2) already injected for this document -- drop it. ⛔ Do NOT cache: a
+                //      leftover entry is consumed by the NEXT navigation to the same URL and
+                //      looks exactly like a working early injection. That artifact scored a
+                //      false 2-of-3 GREEN while measuring this very defect; the phase README
+                //      records it under "The near-miss".
+                //
+                //  (3) the context has not run yet -- the ordinary pre-cache path, unchanged.
+                const bool contextRan =
+                    !frameId.empty() && s_contextRanUrl[frameId] == url;
+                const bool alreadyInjected =
+                    !frameId.empty() && s_injectedUrl[frameId] == url;
+
+                if (contextRan && !alreadyInjected) {
+                    LOG_INFO_RENDER("💉 P12: late-arrival inject for " + hodos::LogSafeUrl(url) +
+                        " (" + std::to_string(script.size()) + " chars)");
+                    frame->ExecuteJavaScript(script, url, 0);
+                    s_injectedUrl[frameId] = url;
+                } else if (contextRan) {
+                    LOG_DEBUG_RENDER("💉 P12: duplicate payload for " + hodos::LogSafeUrl(url) +
+                        " -- already injected, dropped");
+                } else {
+                    s_scriptCache[url] = script;
+                    LOG_INFO_RENDER("💉 Pre-cached scriptlets for " + hodos::LogSafeUrl(url) +
+                        " (" + std::to_string(script.size()) + " chars)");
+                }
             }
             return true;
         }
