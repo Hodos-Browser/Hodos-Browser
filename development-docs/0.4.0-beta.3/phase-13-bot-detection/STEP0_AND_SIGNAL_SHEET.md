@@ -263,3 +263,60 @@ worse than doing nothing. ⛔ Do not do this.
 | **Where the fix lives** | ⛔ Engine patch (measured above) | ✅ **Our own code** |
 
 ⇒ ⭐ **The one we can act on now is `B2`, and it is also the one that actually deanonymises the user.**
+
+---
+
+# `P13-C` first pass — 🔴 **INCONCLUSIVE BY CONSTRUCTION. The negative control did not go red.**
+
+Run 2026-09-21 at the owner's request (*"I guess let's run the matrix"*), harness
+`p13_challenge.py`. ⛔ **Read the verdict before the table.**
+
+## The result
+
+| Page | Chrome 152 | Hodos defaults | 🔴 Hodos **+ `--enable-automation`** |
+|---|---|---|---|
+| reCAPTCHA **v3** (score) | `0.9` | `0.9` | **`0.9`** |
+| reCAPTCHA v2 checkbox | no challenge | no challenge | no challenge |
+| hCaptcha demo | no challenge | no challenge | no challenge |
+| Cloudflare live (`whatsonchain.com`) | loaded, no challenge | loaded, no challenge | *(gate caught a wrong subject — not measured)* |
+
+📏 The control **did** take effect: `navigator.webdriver === True` was read back from a real tab
+(`role=tab_1`) under `--enable-automation`, and is `False` without it. So the flag worked and the
+**page did not care**.
+
+## ⛔ Therefore this proves the pages were reachable, and nothing else
+
+Per the Testing Standards hard rule — *a test that has never been seen to fail has not been shown to
+test anything* — these four rows are **not** evidence that Hodos passes bot detection. A browser openly
+declaring itself automated scored **identically** to stock Chrome. Any "all green" reading of this
+table would be the fourth harness in this sprint that passes with the feature absent.
+
+## Why, and the finding that comes out of it
+
+⭐ **The reCAPTCHA v3 demo's score is a sample, not a live verdict.** The page says so itself, in text
+the harness captured:
+
+> *"NOTE: This is a sample implementation, the score returned here is not a reflection on your …"*
+
+`0.9` in all three columns is that sample. ⛔ **`recaptcha-demo.appspot.com` cannot serve as the
+matrix's instrument**, which is exactly what `W11` had been written around — my error, corrected there.
+
+⚠️ The other three rows are *demo* pages too. A vendor demo is configured to succeed; it is not a site
+with money behind it deciding whether to trust you. ⇒ **The matrix needs real deployments under real
+risk, which is what makes it human-bound** — not merely the image grids.
+
+## The subject gate earned its keep a second time
+
+📏 `cloudflare-live` in the control run: `SUBJECT WRONG: whatsonchain.com was served to role=header,
+not a tab.` Without the gate that would have been silently recorded as a Cloudflare pass measured on
+the **header browser**.
+
+## What this changes
+
+- ⛔ **`P13-M1` is NOT satisfied.** The matrix stays open.
+- ⭐ **It does not reopen Step 0.** Step 0's discriminator is a different, *instrument-insensitive*
+  measurement with its own working negative control (the 0.3.x replay goes red). Nothing here weakens it.
+- 👤 **The owner's own proposal is now the highest-value next step, by some distance:** *"I'll try to
+  specifically get the user to let me know what site it was on."* One real site that actually failed is
+  worth more than any number of vendor demos — it is a subject under real risk, with a known-bad
+  outcome, i.e. the negative control this matrix could not manufacture.
