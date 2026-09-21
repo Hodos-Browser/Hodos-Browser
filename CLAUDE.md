@@ -491,6 +491,14 @@ exactly what produces a hasty kill — which is why the script exists.
 
 **Platform-specific build guides**: See `build-instructions/WINDOWS_BUILD_INSTRUCTIONS.md` or `build-instructions/MACOS_BUILD_INSTRUCTIONS.md` for first-time setup.
 
+> ⚠️ **Two different things are called "the build".** Everything in this section is the **app** build
+> (~35 min, every release, consumes prebuilt engine binaries). Compiling **Chromium/CEF itself** — hours,
+> on the build host, a few times a year — is a separate track with its own entry point:
+> ⭐ **`development-docs/DevOps-CICD/NEXT_CHROMIUM_BUILD.md`**, which carries the standing list (codecs,
+> farbling patches) and the **PENDING queue** of engine patches found since the last build.
+> ⛔ **If you find something that can only be fixed inside the engine, add a row to that queue the day you
+> find it** — otherwise it is lost by the time the next engine build happens. Step-by-step: `CEF_BUILD_RUNBOOK.md`.
+
 **Quick build (all platforms):**
 ```bash
 # 1. CEF wrapper (first time only)

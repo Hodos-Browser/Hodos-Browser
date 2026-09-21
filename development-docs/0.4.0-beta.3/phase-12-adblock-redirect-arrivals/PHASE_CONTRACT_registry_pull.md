@@ -66,10 +66,13 @@ without a Chromium build, and it is the smaller conceptual change. ⛔ **Owner d
   Whatever the registry does about lifetime and eviction must be decided deliberately, not inherited.
 - ⚠️ **The CSS half rides along.** `inject_cosmetic_css` is pushed from the *late* path only, so element
   hiding is also post-load today. A registry that carries the scriptlets should carry the selectors.
-- ⛔ **`P12-A3` is still unmeasured on both platforms** — the new-tab arrival
-  (`OnBeforePopup` → `CreateNewTabWithUrl`). Same defect class, but a brand-new browser's process
-  assignment was never exercised. **Measure it before designing the registry's keying**, in case a
-  freshly created browser needs different treatment.
+- ✅ **`P12-A3` measured 2026-09-21 — no extra work needed.** The new-tab arrival
+  (`OnBeforePopup` → `CreateNewTabWithUrl`) is the **same defect**, and the shipped mitigation already
+  covers it (2/2 trials, distinct URLs). ⭐ One difference, and it makes this patch **easier**: on a
+  navigate-in-place arrival the early push reaches the **wrong** renderer, but on a new-tab arrival it
+  reaches **no renderer at all** — the brand-new browser has no render process for that frame yet, so
+  the message is dropped outright. A browser-side registry the renderer **pulls** from is indifferent to
+  both, because nothing is pushed. ⇒ **No special keying for the new-tab case.**
 - ⭐ Two guards Brave has and we do not, both cheap, both worth porting with the patch:
   **(1)** a **fallback key** — when the URL is empty/invalid/`about:blank`, fall back to the frame's
   security origin, so a miss is impossible rather than silent; **(2)** at document start, **wait** on the
@@ -81,7 +84,7 @@ without a Chromium build, and it is the smaller conceptual change. ⛔ **Owner d
 |---|---|---|
 | `P12-B1` | cross-process arrival (`github.com` → `youtube.com/watch`) injects **inside `OnContextCreated`**, i.e. **0 ms** late — not the mitigation's `late-arrival inject` line | disable scriptlets for the host ⇒ no injection, **while the YouTube V8 context is still created** |
 | `P12-B2` | same-process arrival unchanged, still pre-JS, still exactly **one** injection | as above |
-| `P12-B3` | **`P12-A3`**: new-tab arrival via `OnBeforePopup` injects pre-JS | as above |
+| `P12-B3` | new-tab arrival via `OnBeforePopup` injects **pre-JS** (today it only gets the mitigation's ~30 ms late inject — measured 2026-09-21) | as above |
 | `P12-B4` | an **inline `<script>` at the top of `<head>`** observes the **mutated** surface — the property the mitigation cannot deliver | revert the patch ⇒ it observes the un-mutated surface |
 | `P12-B5` | minimal basket (youtube, x, github) clean, both platforms | — |
 

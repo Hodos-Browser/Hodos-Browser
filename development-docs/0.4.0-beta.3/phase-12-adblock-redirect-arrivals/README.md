@@ -215,9 +215,25 @@ failing to navigate. (Owner's settings file was backed up and restored byte-for-
 inline `<script>` in the document head runs inside that window. The pre-JS guarantee only exists on
 same-process navigations. ⇒ **Phase 12 remains open pending candidate (b).**
 
-⚠️ `P12-A3` (the `OnBeforePopup` → `CreateNewTabWithUrl` new-tab arrival) is **not yet measured** — it is
-the same defect class, but a brand-new browser's process assignment was not exercised here. It belongs to
-the candidate-(b) work.
+### ✅ `P12-A3` — measured 2026-09-21: same defect, mitigation covers it, **no new defect class**
+
+The new-tab arrival (`OnBeforePopup` → `CreateNewTabWithUrl`), driven by a user-gesture
+`window.open(url,'_blank')` from `github.com`. Two trials, distinct video URLs:
+
+| | trial 1 | trial 2 |
+|---|---|---|
+| `OnBeforePopup` → new tab | ✅ `NEW_FOREGROUND_TAB`, role `tab_1` | ✅ role `tab_2` |
+| `OnBeforeBrowse` pre-cache fired | ✅ 34283 chars | ✅ 34283 chars |
+| renderer **receipt** of that pre-cache | ⛔ **none, in any process** | ⛔ **none** |
+| early injection at `OnContextCreated` | ❌ absent | ❌ absent |
+| mitigation's late-arrival inject | ✅ PID 46012 | ✅ PID 5676 |
+
+⭐ **One difference worth carrying into the patch design, and it makes the patch *easier*.** On a
+navigate-in-place arrival the early push reaches the **wrong** renderer. On a new-tab arrival it reaches
+**no renderer at all** — the brand-new browser has no render process for that frame yet, so the message
+is simply dropped. Either way the destination process never sees it. A browser-side registry that the
+renderer **pulls** from is indifferent to both, because nothing is pushed at all. ⇒ No extra keying
+work is needed for the new-tab case.
 
 ⚠️ Scriptlet payload size changed 23130 → 34283 chars between the 09-19 and 09-21 runs — the adblock
 engine's 6-hourly filter-list update, not a code effect. The before/after counts are still comparable

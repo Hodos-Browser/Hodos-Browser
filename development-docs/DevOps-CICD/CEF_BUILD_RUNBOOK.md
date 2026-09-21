@@ -77,7 +77,13 @@ Both use the **same patch toolchain** (`cef/patch/patch.cfg`). The decision for 
 
 ### Step 0 — Decide WHY this full build is happening
 Trigger is one of: (a) Chromium/CEF version bump (A2), (b) new/changed farbling patches (B1),
-(c) codec/flag change, (d) Widevine/VMP change. Record the trigger in the build's changelog entry.
+(c) codec/flag change, (d) Widevine/VMP change, (e) the PENDING queue has piled up enough to be
+worth the hours. Record the trigger in the build's changelog entry.
+
+> ⭐ **Read `NEXT_CHROMIUM_BUILD.md` first.** It is the plain-language front page for Tier-1 builds
+> and carries **the standing list** (what must be in every build) and **the PENDING queue** (engine
+> patches found since the last build). ⛔ Starting a build without draining that queue wastes the
+> hours — you get a fresh engine that still does not contain the fix someone filed two months ago.
 
 ### Step 1 — Choose the CEF branch (A2: latest stable / LTS)
 
@@ -170,7 +176,10 @@ Diff CEF's release notes between branches and run the **dependency-verification*
    author): `PLAN_farbling_blink.md`.
 3. **Extensions** — **N/A on CEF.** Extensions are chrome-layer; self-build does NOT unlock them. Do
    not add extension patches here. (Strategic future item; see `../Future-Features/B4-extensions.md`.)
-4. **Any other custom patches** — list and version them.
+4. **Any other custom patches** — ⛔ **the list lives in `NEXT_CHROMIUM_BUILD.md` § PART 2 (PENDING),
+   not here.** Work that queue now; anything permanent graduates to its § PART 1 once shipped. Keeping
+   the queue on one page is deliberate: an engine patch found *between* builds is easy to lose, and a
+   list buried at step 2 of a 1,300-line runbook is where it gets lost.
 
 ### Step 3 — Build
 
