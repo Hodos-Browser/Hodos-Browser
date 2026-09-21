@@ -11,6 +11,61 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-21d (**Windows**) — ⏸️ **Phase 13 SHELVED. Pull, rebuild, and spend your time on your human-test backlog — we are driving at the beta.3 build.** ✅ No new C++ this round.
+
+## 0. ⛔ First, your own trap from 21c — it applies to every rebuild from here to release
+
+After **any** rebuild, run `mac_build_run.sh`'s **"Copy helper bundles" step and re-sign**. A bare
+`cmake --build` leaves the embedded `HodosBrowser Helper (Renderer).app` stale, so the **renderer runs
+old code** while the browser process runs new code — silently. You measured it: embedded renderer
+still dated Sep 19, zero `late-arrival` strings. ⇒ Every macOS claim from here to the build should be
+made against a helper whose date you have checked.
+
+## 1. ⏸️ Phase 13 (bot detection) — shelved by the owner, not a blocker
+
+👤 *"Let's just leave it for now … get beta.3 done."* What it found, so you don't redo it:
+
+- **Step 0 closed.** The complaint came from a `0.3.x` user; the 0.3.x injected-JS farbling script,
+  replayed verbatim, creates **7 tamper tells** (6 × `toString` no longer `[native code]`, plus
+  `plugins` / `webdriver` as *own* properties of `navigator`). 0.4.0 shows **none**.
+- ⭐ **Purpose-built test benches** (CreepJS, bot.sannysoft, iphey, fingerprint.com): **Hodos scored the
+  same as stock Chrome on every verdict. Brave scored WORSE on 3 of 4** — Brave invents a GPU and a
+  screen size and fails sannysoft's `TRANSPARENT_PIXEL`. ⇒ the current build has no visible
+  fingerprinting problem. Harness: `phase-13-bot-detection/p13_benches.py`.
+- Owner human sitting, 12 real sites: 11 never challenged; **reCAPTCHA and hCaptcha passed incl.
+  escalation**; **one loop — DataDome on `github.com/signup`** (105 requests to `captcha-delivery.com`
+  in 3 min, then a hard block). ⚠️ Run on the **dev build with CDP 9322 bound**, and DataDome published
+  research in Feb 2026 on detecting exactly that — so it is **not yet** evidence of a product defect.
+
+👉 **If you had an idea to try, you're welcome to — but cap it, the owner does not want time sunk here.**
+The one open thread worth a macOS data point, **only if cheap**: `github.com/signup` on a build with
+**no debug port**. Blocks ⇒ real. Passes ⇒ it was the rig. ⛔ Don't start a vendor matrix.
+
+## 2. Decided today, cross-platform, no porting
+
+- **Sec-CH-UA brand:** owner chose **`Hodos`** as our own brand (Brave's shape: UA string stays
+  Chrome-shaped, brand list names us) — ⛔ **not** "Google Chrome", which would be a lie in the one
+  field built to be honest. It is an **engine** change: measured, `--user-agent-product` does not reach
+  the brand list. Queued in `DevOps-CICD/NEXT_CHROMIUM_BUILD.md` PART 2. Nothing for you to do now.
+- New ticket **`TICKET_level_0_protocol_prompts_after_connect.md`** — blocks the build. Owner saw a
+  second prompt for a **security-level-0** protocol right after approving a site's manifest.
+  `wallet-toolbox` returns `true` for level 0 without asking; we prompt. Fix, if approved, is **Rust
+  only** (`matrix_c.rs`) ⇒ you get it on the next pull, **no porting**.
+
+## 3. What Windows is doing next
+
+W7 (approve after 45 s, HTTP path) and the connect-empty-body fix — both **your** fixes, in shared
+code, being **confirmed on Windows** now. Then the level-0 fix, then the build.
+
+## 4. What I need back
+
+- Pull + rebuild **+ helper copy/re-sign**; confirm the helper date.
+- ⭐ Your **human-test backlog** (`HUMAN_TEST_QUEUE.md` macOS rows) — that is the most useful thing
+  you can do while Windows finishes.
+- Anything that should block the build from your side, **now** rather than at the end.
+
+---
+
 # 📋 ROUND 2026-09-21c (**Mac**) — ✅ **Your P12 mitigation works on macOS, both halves**, and `P12-A3` is **independently confirmed** here (your 21b landed first — same answer, different platform). ⛔ Plus a macOS build trap that made your renderer code silently never run here, and nearly cost you a false "it's broken on Mac".
 
 ## 1. 🚨 READ THIS FIRST — on macOS, `cmake --build` does NOT update the code the RENDERER runs
