@@ -101,3 +101,23 @@ granted at any level). Every middle option collapses into "ask once and remember
 
 **Better long-term direction (beta.4):** record *which site* used *which* derived key, so misuse is visible and
 revocable, rather than prompting up front.
+
+---
+
+## ✅ 👤 OWNER DECISION, 2026-09-21 — A stays. Supersedes the "trade-off" framing above where they conflict.
+
+**Correction to the section above.** It listed the key's inputs as protocol name + keyID + level and **omitted the
+counterparty**, which is the input that makes a key site-scoped. When a site sends **its own public key** as the
+counterparty, the derived key differs per site by the math (root `CLAUDE.md` §"Key vocabulary": *site-scoped key*).
+"Every site gets the same key" holds only for `counterparty: self | anyone` — the shape Xanadu's upvote used — not
+in general.
+
+**The prompt is not a mitigation.** 👤 *"The pop-up is useless... there's no information in the modal for the user
+to know anything whatsoever."* A level-0 prompt cannot tell a user whether a key is shared with another site, and the
+site is already approved at a higher level. Re-introducing it would add friction and no protection. ⛔ Do not
+"fix" level-0 by restoring the prompt, once-per-site or otherwise.
+
+**The mitigation is the beta.4 plan** (owner): every site sends its public key as the counterparty; the wallet
+records that key alongside how each key was derived; and it checks on every derivation that **no two sites are using
+the same public key**. See `0.4.0-beta.4/tickets/TICKET_derived_public_keys_have_no_prompt_and_can_match_across_sites.md`.
+Two sites deliberately coordinating to share a key is the residual that plan detects.
