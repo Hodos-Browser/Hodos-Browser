@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hodos CAPTCHA bench</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: light dark; --bg:#fff; --fg:#111; --mut:#666; --line:#ddd; --ok:#0a7c2f; --bad:#b3261e; --card:#fafafa; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#16181c; --fg:#e8e8e8; --mut:#9aa0a6; --line:#33363b; --ok:#5ed67c; --bad:#ff6b5e; --card:#1d2024; } }
+  body { background:var(--bg); color:var(--fg); font:15px/1.55 system-ui,-apple-system,Segoe UI,sans-serif; margin:0; padding:24px 16px 64px; }
+  .wrap { max-width:860px; margin:0 auto; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  p.sub { color:var(--mut); margin:0 0 24px; }
+  section { border:1px solid var(--line); border-radius:10px; padding:16px; margin:0 0 18px; background:var(--card); }
+  h2 { font-size:16px; margin:0 0 4px; }
+  .note { color:var(--mut); font-size:13px; margin:0 0 12px; }
+  .verdict { font-weight:600; margin-top:10px; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); }
+  .env { font:12px/1.6 ui-monospace,Consolas,monospace; white-space:pre-wrap; word-break:break-all; }
+  .warn { border-left:4px solid var(--bad); padding:10px 14px; background:var(--card); border-radius:6px; margin:0 0 22px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>Hodos CAPTCHA bench</h1>
+<p class="sub">Three real widgets, using each vendor's <em>public test keys</em>. Open this in Hodos and in Chrome side by side.</p>
+
+<div class="warn">
+  <strong>What this page does and does not prove.</strong><br>
+  Test keys are configured to <em>always pass</em>. So this page answers
+  <strong>“does the widget load, run and complete in Hodos?”</strong> — which is exactly the
+  Brave failure mode, where the checkbox spins or reloads forever.<br>
+  It does <strong>not</strong> answer &ldquo;does a real site trust us&rdquo;, because no real risk
+  decision is being made &mdash; and for the same reason <strong>you will never see a
+  pick-the-bicycles image grid here.</strong> Test keys always pass, and real risk-scoring sitekeys are
+  domain-locked so they cannot be embedded on localhost. For grids, go to
+  <code>https://2captcha.com/demo/recaptcha-v2</code> (a live widget with a real sitekey) or any sign-up
+  flow &mdash; see <code>HOW_TO_TEST_BY_HAND.md</code>.
+</div>
+
+<section>
+  <h2>1 &middot; Cloudflare Turnstile — forced interactive</h2>
+  <p class="note">Sitekey <code>3x00000000000000000000FF</code>, which forces the interactive widget every time.
+     This is the closest thing to a guaranteed challenge. <strong>Expect a checkbox. Click it.</strong></p>
+  <div id="ts"></div>
+  <div class="verdict" id="ts-v">waiting…</div>
+</section>
+
+<section>
+  <h2>2 &middot; reCAPTCHA v2 checkbox</h2>
+  <p class="note">Google's documented test sitekey. Expect “I'm not a robot”. <strong>Click it.</strong></p>
+  <div class="g-recaptcha" data-sitekey="6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI" data-callback="rcOk"></div>
+  <div class="verdict" id="rc-v">waiting…</div>
+</section>
+
+<section>
+  <h2>3 &middot; hCaptcha</h2>
+  <p class="note">hCaptcha's documented test sitekey. <strong>Click it.</strong></p>
+  <div class="h-captcha" data-sitekey="10000000-ffff-ffff-ffff-000000000001" data-callback="hcOk"></div>
+  <div class="verdict" id="hc-v">waiting…</div>
+</section>
+
+<section>
+  <h2>What this browser is telling the page</h2>
+  <p class="note">Read this in both browsers. The <code>sec-ch-ua</code> line and the extra globals are the
+     two things Phase 13 found.</p>
+  <div class="env" id="env">…</div>
+</section>
+</div>
+
+<script>
+function mark(id, ok, msg) {
+  var e = document.getElementById(id);
+  e.className = 'verdict ' + (ok ? 'ok' : 'bad');
+  e.textContent = msg;
+}
+function rcOk(t) { mark('rc-v', true, 'PASSED — token ' + t.length + ' chars'); }
+function hcOk(t) { mark('hc-v', true, 'PASSED — token ' + t.length + ' chars'); }
+
+window.onloadTurnstile = function () {
+  if (!window.turnstile) { mark('ts-v', false, 'FAILED — turnstile script never loaded'); return; }
+  turnstile.render('#ts', {
+    sitekey: '3x00000000000000000000FF',
+    callback: function (t) { mark('ts-v', true, 'PASSED — token ' + t.length + ' chars'); },
+    'error-callback': function (c) { mark('ts-v', false, 'ERROR from Cloudflare: ' + c); },
+    'timeout-callback': function () { mark('ts-v', false, 'TIMED OUT — this is the loop failure mode'); }
+  });
+};
+
+// Environment readout — the two Phase 13 findings, visible without devtools.
+(function () {
+  var brands = navigator.userAgentData
+      ? navigator.userAgentData.brands.map(function (b) { return b.brand + ';v=' + b.version; }).join(', ')
+      : '(no userAgentData)';
+  var extra = Object.getOwnPropertyNames(window).filter(function (k) {
+      return /hodos|CWI|cefMessage|yours|panda/i.test(k); });
+  document.getElementById('env').textContent =
+      'userAgent   : ' + navigator.userAgent +
+    '\nsec-ch-ua   : ' + brands +
+    '\nwebdriver   : ' + navigator.webdriver +
+    '\nhardwareConc: ' + navigator.hardwareConcurrency +
+    '\nextra globals: ' + (extra.length ? extra.join(', ') : '(none — this is what Chrome shows)');
+})();
+
+// ⛔ The timeout must distinguish "the widget never rendered" (a real failure) from
+// "the widget is up and waiting for you to click it" (normal — two of these three REQUIRE
+// a human click). An earlier version marked both as red after 30s, which would have sent
+// someone chasing a bug that was just a slow click.
+function rendered(sel) {
+  var host = document.querySelector(sel);
+  if (!host) return false;
+  return host.querySelector('iframe, input[type=hidden][name$="-response"], textarea') !== null
+         || host.children.length > 0;
+}
+setTimeout(function () {
+  [['ts-v', '#ts'], ['rc-v', '.g-recaptcha'], ['hc-v', '.h-captcha']].forEach(function (p) {
+    var e = document.getElementById(p[0]);
+    if (e.textContent !== 'waiting…') return;          // already resolved
+    if (rendered(p[1])) {
+      e.className = 'verdict';
+      e.textContent = 'widget rendered OK — waiting for you to click it (this is normal)';
+    } else {
+      mark(p[0], false, 'FAILED — widget never rendered after 30s');
+    }
+  });
+}, 30000);
+</script>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js?onload=onloadTurnstile" async defer></script>
+<script src="https://www.google.com/recaptcha/api.js" async defer></script>
+<script src="https://js.hcaptcha.com/1/api.js" async defer></script>
+</body>
+</html>
