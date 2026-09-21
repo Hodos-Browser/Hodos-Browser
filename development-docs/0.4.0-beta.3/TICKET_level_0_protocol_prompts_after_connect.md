@@ -1,7 +1,7 @@
 # TICKET — a security-level-0 protocol prompts, right after the user approved the site
 
 **Opened** 2026-09-21 by the **owner**, at the keyboard. **Blocks the beta.3 build** (owner's call).
-**Status:** ⬜ OPEN — ✅ **CONFIRMED on Xanadu's own request 2026-09-21** (below); **no code changed**.
+**Status:** ✅ **FIXED 2026-09-21** (`10b2916`) — engine arm `SilentProtocolLevelZero`, 5 engine tests + a wiring test, negative control run. 📏 **Live, owner at the keyboard:** after the fix, 2 `createSignature` calls under `[0, "xanaverse"]` went through with **zero** scoped prompts and 4 likes succeeded (gold pill on the originating tab) — the same call prompted at 12:24:04 on the old wallet. Confirmed again at 13:27 on the rebuilt shell. ⚠️ Owner lesson: this fix *hid* the queue freeze on Xanadu, so it should have landed AFTER that fix was live-verified — see the hang ticket.
 
 > ### 📏 Confirmed — `zanaadu.com`, owner at the keyboard, 2026-09-21 12:24
 > Every **"like"** does a `createAction` (a 1-sat token into basket `xanaverse-upvotes`) and then a

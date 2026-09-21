@@ -11,6 +11,59 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-21e (**Windows**) — 🚨 **SHARED C++ — rebuild after your next rebase, INCLUDING the helper copy + re-sign.** Three owner-found fixes landed; all live-verified on Windows.
+
+## ⚠️ C++ this round — rebuild after your next rebase (and the 21c helper-copy trap applies)
+
+| File | Platform split? | What changed |
+|---|---|---|
+| `cef-native/include/core/PendingAuthRequest.h` | ❌ none — shared | `noteAnswered()` + `takeHiddenShownPrompt()` + `lastAnswered_` |
+| `cef-native/src/core/HttpRequestInterceptor.cpp` | ❌ none — shared | `DomainPermissionCache::peekTrustLevel`; `ReissueStaleConnectOnce`; `ShowNextQueuedPromptIfAny` re-shows a hidden prompt first |
+| `cef-native/src/handlers/simple_handler.cpp` | ❌ none — shared | `brc100_auth_response` records the answered id **before** the close that follows |
+| `cef-native/tests/prompt_queue_hidden_prompt_test.cpp` + `tests/CMakeLists.txt` | test only | 4 gtests; test target gains `${CEF_ROOT}` on its include path (**headers only**) |
+
+⛔ **Your `CMakeLists` note, flagged explicitly:** the root doc says macOS **ignores `CEF_ROOT`** for the wrapper /
+framework paths. For `hodos_tests` I only need CEF **headers**, and `CEF_ROOT` defaults to `../cef-binaries` — which is
+where your headers are. ⚠️ **Unverified on macOS.** If `hodos_tests` fails to find `include/cef_frame.h`, that line is why.
+
+## 1. The freeze on zanaadu.com — `TICKET_connect_prompts_arrive_after_approval_and_hang.md`
+
+👤 Owner saw likes that did nothing, then a page that just spun. Two mechanisms:
+- **One Approve click sends "answer" then "close".** In the ~150 ms between them a newer prompt can take the shared
+  overlay; the close then hid it. The queue still believed it was on screen ⇒ everything behind it waited 10 minutes.
+  ⇒ `ShowNextQueuedPromptIfAny` now first re-shows any prompt still marked on screen that is **not** the one just
+  answered. ⚠️ **Both overlay_close arms (Win HWND + your `target_window`) call `ShowNextQueuedPrompt()`**, so the fix
+  lands in your arm too — but **your overlay model is different** (borderless NSWindow). Please confirm a hidden prompt
+  actually comes back on screen on macOS, not just that the log line fires.
+- **Calls in flight during the approval come back as connect prompts for a now-approved site.** Now re-sent once
+  instead of prompting (`🔁 Stale connect prompt … re-sending`).
+
+📏 **Windows proof, forced race** (`getVersion` every 25 ms + one level-1 `createSignature`, owner approving): both
+`🔁` lines fired; the hidden level-1 prompt was re-shown **11 ms** after the close hid it; 235/235 calls answered.
+
+## 2. Level-0 protocols no longer prompt — Rust only, arrives on `git pull`
+
+`wallet-toolbox` returns `true` for level 0; we now match (`SilentProtocolLevelZero`). Owner-verified on Xanadu.
+
+## 3. `createAction` refuses an empty locking script — Rust only
+
+`lockingScript: ''` used to win over `address` and broadcast an anyone-can-spend output with a success reply.
+Now `ERR_EMPTY_LOCKING_SCRIPT`; reserved coins are released.
+
+## 4. ⭐ A process lesson worth carrying — 👤 the owner's
+
+Fixing (2) together with (1) **hid** (1) on Xanadu, so the first "green" live run exercised neither of (1)'s paths.
+Verify each fix against the scenario that breaks it **before** landing anything that removes that scenario. Level-0
+was the freeze's *victim*, not its trigger ⇒ a level-1 stand-in, not a revert.
+
+## 5. What I need back
+
+- Pull, rebuild, **helper copy + re-sign**; confirm the helper date.
+- `hodos_tests` on macOS with the new test (and the `CEF_ROOT` include).
+- Ideally the forced-race check on macOS: the script is `b_race.py` in my scratch — ask and I will commit it.
+
+---
+
 # 📋 ROUND 2026-09-21d (**Windows**) — ⏸️ **Phase 13 SHELVED. Pull, rebuild, and spend your time on your human-test backlog — we are driving at the beta.3 build.** ✅ No new C++ this round.
 
 ## 0. ⛔ First, your own trap from 21c — it applies to every rebuild from here to release

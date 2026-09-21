@@ -1,7 +1,28 @@
 # TICKET — connect prompts that arrive AFTER the user already approved are orphaned, and the page hangs
 
 **Found** 2026-09-21 by the **owner**, at the keyboard, on `zanaadu.com` (dev build).
-**Status:** ⬜ OPEN — mechanism read from the logs; **no code changed**. **Severity:** HIGH for the
+**Status:** ✅ **FIXED 2026-09-21** (`d1c1a8e`, owner-approved) — **both paths seen firing live under a forced race**, unit-tested with a negative control, `preflight -Full` PASS.
+
+> ### 📏 Live proof — dev build, `zanaadu.com`, owner approving, 2026-09-21 13:47
+> ⛔ A first live run (13:27) looked green but **exercised neither path** — no call happened to be in flight at the
+> click, and the level-0 fix had removed the like's prompt that made the freeze visible. 👤 The owner caught the
+> ordering mistake. So the race was **forced**: the page fired `getVersion` every 25 ms for 6 s, plus one **level-1**
+> `createSignature` (level 1 still prompts — the stand-in for this morning's level-0 like).
+>
+> ```
+> 13:47:29.727  Drained 47 pending request(s) for zanaadu.com after advanced-approval
+> 13:47:29.809  🔁 Stale connect prompt for already-approved zanaadu.com /getVersion — re-sending the call   <- fix 2
+> 13:47:30.253  protocol_permission_prompt opened (req -50)                     <- a real prompt lands in the window
+> 13:47:30.423  Auth response for the CONNECT prompt (req -3) -> its close hides -50
+> 13:47:30.434  🔁 Re-showing prompt protocol_permission_prompt ... hidden by the close of the prompt before it  <- fix 1
+> 13:47:35.156  owner answers -50
+> ```
+> Page: **235 calls sent, 235 answered, 0 errors.** No `timeout ignored` — nothing parked on an invisible prompt.
+> The RED is this morning's run on the pre-fix build: the identical shape left the prompt invisible for 10 minutes.
+>
+> Unit: `cef-native/tests/prompt_queue_hidden_prompt_test.cpp` — with the fix disabled ONLY the stale-close test goes red.
+
+Original status: ⬜ OPEN — mechanism read from the logs; **no code changed**. **Severity:** HIGH for the
 user — the site appears frozen ("just spinning") with nothing on screen to click.
 
 ## What the owner saw
