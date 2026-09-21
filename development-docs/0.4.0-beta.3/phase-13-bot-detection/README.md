@@ -1,7 +1,21 @@
 # Phase 13 — bot-detection compatibility (proving we are not a bot)
 
 **Opened:** 2026-09-15, from a user who could not pass a CAPTCHA in Hodos and stopped using it (site unknown —
-the user does not remember). **Status:** ⬜ PLANNED. **Standard:** `../HARNESS.md`.
+the user does not remember). **Status:** 🟨 **STEP 0 CLOSED, matrix DEFERRED (2026-09-21)** — results in
+⭐ **`STEP0_AND_SIGNAL_SHEET.md`**, read that first. **Standard:** `../HARNESS.md`.
+
+> ⭐ **Step 0 answered: the reported defect's mechanism is gone, demonstrated not assumed.** The 0.3.x
+> script, replayed verbatim in the current engine, creates **7 distinct tells** (6 × `toString` no longer
+> `[native code]`, plus `plugins`/`webdriver` as **own** properties of the `navigator` instance); 0.4.0
+> shows none of them. That same replay is the **negative control** for the 0.4.0 column.
+> ⛔ **LIMIT:** the 0.3.x *script* in a 0.4.0 *engine* — not an A/B against the 0.3.x binary.
+> 👤 Owner's scope call: Block C (the verdict matrix) runs **only if Step 0 shows a failure**. It did not,
+> so the matrix rows now live in `../HUMAN_TEST_QUEUE.md` (`W11`) awaiting a sitting.
+> 🚨 **Two corrections to the session prompt, both load-bearing** — the installed `0.4.0-beta.2` **does**
+> bind CDP 9222 (it predates the D2 gate by four weeks; 81 live targets observed), and
+> `--disable-gpu-compositing` is **measured not to change** the WebGL renderer string.
+> ⛔ **Four residual signals stand** (`B1`–`B4`); `B1` — `sec-ch-ua` carrying **no Chrome brand** while the
+> UA string claims Chrome — is an *internal inconsistency* and the one that needs an owner decision.
 **Shape:** research → measured matrix → fixes. 👤 **The research and the matrix run in parallel with Phase 10**
 (no code, no rig conflict; the result sizes the fix work). Fixes run after Phase 12.
 
