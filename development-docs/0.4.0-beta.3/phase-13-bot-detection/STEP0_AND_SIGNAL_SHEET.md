@@ -320,3 +320,84 @@ the **header browser**.
   specifically get the user to let me know what site it was on."* One real site that actually failed is
   worth more than any number of vendor demos — it is a subject under real risk, with a known-bad
   outcome, i.e. the negative control this matrix could not manufacture.
+
+---
+
+# 🚨 `P13-M1` HUMAN SITTING, 2026-09-21 — one reproduction out of twelve sites, and a rig confound that may explain it
+
+👤 Owner at the keyboard, dev build, farbling + adblock + third-party-cookie-blocking all ON.
+
+## Results
+
+| Site | Vendor | Result |
+|---|---|---|
+| whatsonchain, indeed | Cloudflare | ✅ no check at all |
+| 2captcha reCAPTCHA v2 | reCAPTCHA | ✅ **passed** — checkbox + submit returned true |
+| hCaptcha demo | hCaptcha | ✅ **passed, including the escalation** — 👤 *"it escalated to some tests and that passed as well"* |
+| nytimes, zillow, bestbuy, walmart, ticketmaster | mixed | ✅ never challenged |
+| amazon (full login) | AWS WAF | ✅ never challenged |
+| **github.com signup** | **DataDome** | 🔴 **LOOP, then hard block** |
+
+⚠️ **Eleven of twelve never triggered a check at all**, which the owner correctly called out as the
+weakness of the whole exercise: *"nothing ever even triggered it."* A green from a site that never
+challenged you is not a pass, it is a no-op.
+
+## The one reproduction, in our own logs
+
+⭐ **It was DataDome, not Arkose** — `geo.captcha-delivery.com` / `ct.captcha-delivery.com` is
+DataDome's challenge delivery. (GitHub's octocaptcha front door layers DataDome *and* Arkose.)
+
+📏 From `debug_output-25440.log`:
+- **105 requests** to `captcha-delivery.com` between **10:57:46 and 11:00:42** — 55 GET, 50 POST,
+  alternating roughly once a second. A completed challenge is a handful of requests.
+- **Nine top-level reloads of `github.com` in 4.3 seconds** (10:58:38.5 → 10:58:42.8), each one
+  re-running `Cosmetic P1` and re-injecting the bridge.
+- Then **72 seconds of total silence** (10:58:42 → 10:59:54) — 👤 *"it was just black for like a full
+  minute"*.
+- Ending in DataDome's block page, with its own id `becc5957-01a5-1263-773b-673d780e41a9`.
+
+## What the loop is NOT
+
+| Ruled out | Evidence |
+|---|---|
+| Our cookie blocker eating the pass | 📏 The `datadome` cookie **is in the store**, first-party on `.github.com`. It was never blocked |
+| Our adblock blocking the vendor | 📏 Zero blocked requests or cookies logged for `captcha-delivery.com`; `Cosmetic P1: css=0 script=0` on github.com |
+| "DataDome rejects Hodos" | 📏 `datadome` cookies are **also in the store for `.www.nytimes.com`**, which the owner browsed **with no challenge at all.** Same vendor, two sites, one fine |
+
+## 🚨 The confound — and it is mine, not the product's
+
+DataDome's block page lists its reasons, and two of them are about the **test rig**, not the browser:
+
+> Rapid taps or clicks · JavaScript disabled or not working ·
+> **Automated (bot) activity on your network (IP 64.93.120.110)** ·
+> **Use of developer or inspection tools**
+
+1. ⛔ **The dev build binds CDP on 9322 and passes `--remote-allow-origins=*`. Release binds nothing**
+   (Phase 9, D2). And `RESEARCH_steps_1_2.md` §A already records that **DataDome published research in
+   Feb 2026 specifically on detecting the CDP wire protocol** — `datadome.co/threat-research/how-new-headless-chrome-the-cdp-signal-are-impacting-bot-detection/`.
+   ⇒ **We ran the one vendor publicly known to detect debug ports against a build with a debug port open.**
+   🚨 The session prompt warned about exactly this in capital letters — *"a red cell might be your
+   instrument"* — and the sitting was still set up on the dev build. That is on me.
+2. The owner fumbled the slider and retried, which is itself a listed reason.
+3. The IP is named in the block, so it may be flagged independently of the browser.
+
+## ⇒ The one test that settles it
+
+Re-run **github.com signup** on a build with **no debug port**, same machine, same IP. Blocks again ⇒
+real defect. Passes ⇒ it was the rig, and this never affects a shipped user.
+
+⛔ **Until that runs, this row is NOT evidence of a product defect.** It is a reproduction of a loop
+under conditions no released build has.
+
+⚠️ Also worth a Chrome control on the same IP: if Chrome is blocked too, the IP is flagged and the
+browser is irrelevant.
+
+## ⭐ What it changes regardless
+
+- **DataDome is the vendor to care about**, not Cloudflare. Cloudflare is the one we already tuned, and
+  every Cloudflare site in the sitting sailed through. ⇒ the §4 ranking should put DataDome first.
+- **The slider is variant #6**, marked `NOT RUN` in §4 as too rare. It is the one that broke. ⚠️ Note
+  the mouse-path worry in that row is **weaker than written**: tab browsers are *windowed* CEF browsers
+  and get native mouse handling, whereas the Phase 11 DPI conversion bug was in *windowless overlays*.
+- ⛔ **Eleven no-ops out of twelve** means site lists are a poor instrument. What produced the one
+  result was a **sign-up flow**, which is where vendors are tuned hardest.

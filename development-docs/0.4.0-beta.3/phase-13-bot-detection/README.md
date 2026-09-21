@@ -1,128 +1,149 @@
-# Phase 13 — bot-detection compatibility (proving we are not a bot)
+# Phase 13 — human-verification compatibility ("prove you're not a bot")
 
-**Opened:** 2026-09-15, from a user who could not pass a CAPTCHA in Hodos and stopped using it (site unknown —
-the user does not remember). **Status:** 🟨 **STEP 0 CLOSED, matrix DEFERRED (2026-09-21)** — results in
-⭐ **`STEP0_AND_SIGNAL_SHEET.md`**, read that first. **Standard:** `../HARNESS.md`.
+**Opened** 2026-09-15. **Rewritten 2026-09-21** after the first pass drifted. **Standard:** `../HARNESS.md`.
+**Status:** 🟨 OPEN — deliverables below.
 
-> ⭐ **Step 0 answered: the reported defect's mechanism is gone, demonstrated not assumed.** The 0.3.x
-> script, replayed verbatim in the current engine, creates **7 distinct tells** (6 × `toString` no longer
-> `[native code]`, plus `plugins`/`webdriver` as **own** properties of the `navigator` instance); 0.4.0
-> shows none of them. That same replay is the **negative control** for the 0.4.0 column.
-> ⛔ **LIMIT:** the 0.3.x *script* in a 0.4.0 *engine* — not an A/B against the 0.3.x binary.
-> 👤 Owner's scope call: Block C (the verdict matrix) runs **only if Step 0 shows a failure**. It did not,
-> so the matrix rows now live in `../HUMAN_TEST_QUEUE.md` (`W11`) awaiting a sitting.
-> 🚨 **Two corrections to the session prompt, both load-bearing** — the installed `0.4.0-beta.2` **does**
-> bind CDP 9222 (it predates the D2 gate by four weeks; 81 live targets observed), and
-> `--disable-gpu-compositing` is **measured not to change** the WebGL renderer string.
-> ⛔ **Four residual signals stand** (`B1`–`B4`); `B1` — `sec-ch-ua` carrying **no Chrome brand** while the
-> UA string claims Chrome — is an *internal inconsistency* and the one that needs an owner decision.
-**Shape:** research → measured matrix → fixes. 👤 **The research and the matrix run in parallel with Phase 10**
-(no code, no rig conflict; the result sizes the fix work). Fixes run after Phase 12.
-
-## What the sprint already holds
-
-| Where | What |
-|---|---|
-| `../../0.4.0/chromium-rebuild/farbling_acceptance_battery.py` | **BOT-1**: `navigator.webdriver === false` and the `window.chrome` stub survive; measured on whatsonchain (Cloudflare Turnstile) |
-| `cef-native/cef_browser_shell.cpp` (port block comment) | measured 2026-08-11: binding the CDP port via `CefSettings` does **not** flip `navigator.webdriver`; the command-line switch path would |
-| `../../0.4.0/chromium-rebuild/Q3_farbling_oauth.md` | the auth/OAuth allowlist design: exact-host, per-frame; challenge hosts (`challenges.cloudflare.com`, `hcaptcha.com`, `www.gstatic.com`, …) exempted; parent and challenge iframe farbled with the **same** values so cross-frame consistency checks pass |
-| `cef-native/src/handlers/simple_app.cpp` | note that `--disable-web-security`, `--in-process-gpu` etc. are detectable ("Turnstile rejects them on whatsonchain"), so they are opt-in on macOS; ⚠️ we still pass `--disable-gpu-compositing` unconditionally — its effect on the WebGL renderer string is unmeasured |
-| Phase 9 (`67a9ab6`) | the CDP port and `--remote-allow-origins=*` are now dev-only — one fewer automation tell in release |
-
-What does **not** exist: any pass across vendors other than Cloudflare, and any measurement of *why* a challenge
-fails when it does.
-
-## Step 1 — enumerate the vendors (each has a public demo or test page; find and record the URL)
-
-Cloudflare Turnstile (managed / non-interactive / invisible) and Cloudflare's managed challenge page ·
-Google reCAPTCHA v2 checkbox, v2 invisible, v3, Enterprise · hCaptcha · Arkose Labs FunCaptcha · DataDome ·
-HUMAN Security (PerimeterX) · Akamai Bot Manager · Kasada · Imperva (Incapsula) Advanced Bot Protection · AWS WAF
-Challenge / CAPTCHA · GeeTest · Google's own "unusual traffic" interstitial (search) · Shape/F5. Note which
-vendor each of our standard test sites uses (x.com, github.com, google.com, amazon.com, reddit.com, nytimes.com).
-
-## Step 2 — enumerate the signals they score (read their public docs and the reverse-engineering literature)
-
-| Family | Signals | Where Hodos stands (to be measured, not assumed) |
-|---|---|---|
-| Automation tells | `navigator.webdriver`, `--enable-automation`, headless flags, CDP artefacts (`cdc_` properties), `window.chrome` shape, `navigator.plugins`/`mimeTypes` emptiness | BOT-1 covers two; the rest unmeasured |
-| Environment consistency | UA vs client hints vs `navigator.platform`; `Accept-Language`; screen vs window metrics; timezone vs locale | our UA reports `Chrome/150.0.0.0` on Windows — check every header the engine sends |
-| Fingerprint consistency | canvas/WebGL/audio **same across frames and reads**; WebGL vendor/renderer strings plausible; `deviceMemory`/`hardwareConcurrency` plausible | farbling is deterministic per site and per-frame identical by design (C2); but **randomised values that differ from the machine's real ones can themselves score** — Brave's known tension. `--disable-gpu-compositing` may change the renderer string |
-| Network / TLS | JA3/JA4, HTTP/2 fingerprint, ALPN | Chromium's stack — should match Chrome exactly; verify with a TLS fingerprint echo service |
-| Behaviour | mouse/keyboard timing, focus events | human at the keyboard; only relevant if our input path drops or synthesises events |
-| Storage / cookies | third-party cookie policy, `__cf_bm`, challenge cookies surviving navigation | our cookie filtering (`CookieFilterResourceHandler`) and the adblock lists could strip a challenge cookie — check the unbreak list |
-| Extensions-shaped | our injected `window.hodosBrowser` / `window.CWI` globals, scriptlet-modified `fetch`/`XHR`/`JSON.parse` | detectable as "modified environment"; Phase 12's pre-cache timing matters here |
-
-## Step 3 — the matrix (the deliverable of the research half)
-
-Rows: every vendor demo page from step 1. Columns: **Chrome on the same machine** (positive control — if Chrome
-fails too, the vendor is broken, not us) · **Hodos dev, defaults** · **Hodos, farbling off for the site**
-(Privacy Shield opt-out) · **Hodos, adblock off for the site** · **Hodos, both off**. Cell = pass / interactive
-challenge / loop / block, with the vendor's own error id where it shows one. Three runs per cell (challenge
-outcomes are noisy). Same profile, same network, same day.
-
-⛔ **Negative control for the matrix itself:** one cell must be *made* to fail on purpose (launch with
-`--enable-automation`, or set `navigator.webdriver` true via a dev seam) and be seen to fail — otherwise a
-matrix of all-green proves the pages were reachable, not that the test can detect a bot verdict.
-
-## Step 4 — fixes, decided from the matrix
-
-Expected shapes, in order of likelihood: a flag we pass that reads as automation (measure `--disable-gpu-compositing`
-first); a challenge cookie or script the adblock lists strip (add to `hodos-unbreak.txt`, the `#@#+js()` mechanism
-already exists); a farbled value outside the vendor's plausibility band (tighten the perturbation range, or exempt
-the challenge iframe host — the allowlist mechanism exists); a UA/client-hint inconsistency. Prior art (rule 5):
-**Brave** has this exact tension and ships per-site Shields toggles as the escape hatch; **Tor Browser** chooses
-uniformity for the same reason. Log the rows in `PRIOR_ART.md`.
-
-## Evidence rows (names reserved)
-
-`P13-M1` the matrix, complete, with its negative-control cell red · `P13-F<n>` one row per fix, each with the
-vendor page that was red before and green after, and Chrome as the control · `P13-R1` the farbling acceptance
-battery still passes after any fix (a bot-compat fix must not silently weaken farbling — the constant-seed bug
-was exactly a "fix" nobody measured). 🍎 macOS runs the same matrix (vendors score platform signals).
+> ⛔ **Rewritten because the first version of this phase was scoped wrong.** It was a 210-cell vendor
+> matrix, it ranked work by what was technically interesting rather than by how many users hit it, and
+> it produced a session that chased an **audio-CAPTCHA** lead — a path essentially nobody uses —
+> while the mainline path went untested. 👤 Owner: *"We don't chase things that we find now."*
+> This version is ranked by user impact and says what is **not** being done.
 
 ---
 
-## 🚨 STEP 0, ADDED 2026-09-19 BY THE OWNER — **the complaint predates the farbling rewrite. Re-test before assuming a defect exists.**
+## 1. The problem, in one paragraph
 
-👤 *"The user who made the complaint was still running a version before we moved the farbling into
-the actual Chromium... still running an old 0.3.x-beta. Not with the farbling in the actual Chromium
-build like we now have it in 0.4.0."*
+A user hit a human-verification check in Hodos, could not get past it, and stopped using the browser.
+👤 The owner's account of the symptom is the single most useful fact we have: *"they kept doing it over
+and over again, and it kept coming back over and over again."* **Solve it → asked again → forever.**
+The site is unknown. The user does not remember it. 👤 It was **not** an audio check.
 
-⛔ **This may invalidate the premise of this whole phase, and it must be checked FIRST.**
+⚠️ **This is a retention bug, not a feature gap.** A browser that cannot get through a human check is
+one a person stops using — which is exactly what happened. That is why it outranks its apparent size.
 
-| | |
+---
+
+## 2. What "solve it and it comes back" actually is
+
+A human check has two halves, and only the first is visible.
+
+1. **The check.** You click the box, or pick the bicycles, or the page silently scores you. The vendor
+   decides you are human and hands the page a **token** — a receipt.
+2. **The receipt being cashed.** The page sends the token to the site's server, the server confirms it
+   with the vendor, and the server then gives your browser a **pass** — a cookie (`cf_clearance`,
+   `datadome`, `_px3`, `sec_cpt`). Every later request carries the pass, and the edge stops asking.
+
+⇒ **The loop is half 1 working every time and half 2 failing every time.** The puzzle is not broken.
+The receipt is being lost after you hand it over.
+
+**Three ways half 2 fails:**
+
+| # | Failure | Would we cause it? |
+|---|---|---|
+| C1 | The pass is never **stored** | We ship a cookie blocker, on by default |
+| C2 | The pass is stored but never **sent back** | Same |
+| C3 | The pass is sent and the **edge rejects it** — `cf_clearance` is bound to the exact IP + User-Agent + TLS signature that earned it, and is void if any of them differ | Only if something about us changes between requests |
+
+---
+
+## 3. What was measured on the current build — 2026-09-21
+
+⭐ All of this is **done**. Detail and method: `STEP0_AND_SIGNAL_SHEET.md`.
+
+| Question | Result |
 |---|---|
-| What they ran | `0.3.x-beta` — farbling by **injected JavaScript** (`FingerprintScript.h`) |
-| What we ship now | `0.4.0` — farbling as **Blink patches** in the fork (C1/C3/C4/C5/C6), applied at API-call time |
-| When it changed | `FingerprintScript.h` **deleted 2026-08-09** |
+| **Step 0** — is the reported defect the one 0.4.0 already deleted? | ✅ **The mechanism is gone, demonstrated.** The 0.3.x script replayed verbatim creates **7 tells**; 0.4.0 shows none. ⛔ Limit: the 0.3.x *script* in a 0.4.0 *engine*, not the 0.3.x binary |
+| **C1 — is the pass stored?** | ✅ `cf_clearance` (HttpOnly, Secure) **was stored** on a live Cloudflare site |
+| **C2 — does it survive and get sent back?** | ✅ **Survived a reload** intact |
+| Are our scriptlets rewriting the functions a token is submitted with? | ✅ `fetch`, `XHR.open`, `XHR.send`, `JSON.parse`, `sendBeacon` all **stock native** on three live captcha pages |
+| Does the challenge iframe see a different fingerprint than its parent? | ✅ **No** — cross-frame farbling is consistent (`farbling_iframe_check.py`, strong assertion) |
+| Do we look spoofed the way Brave does? | ✅ **No** — WebGL vendor/renderer/version/extensions **byte-identical** to Chrome; HTTP/2 fingerprint identical; header set **and order** identical |
+| `--disable-gpu-compositing` — the old lead | ✅ **Not the cause.** Proven by direct manipulation in both browsers |
 
-⭐ **And the old implementation had a tell that bot detection specifically looks for.** The root
-`CLAUDE.md` gives it as a reason never to go back:
+⇒ ⛔ **C1 and C2 are ruled out on evidence. C3 is untested and needs a site that actually challenges.**
 
-> *"Do not re-add an injected-JS farbling path: it cannot cover workers, it restores the `toString`
-> tamper tell, and it would double-perturb values Blink already farbles."*
+⚠️ **Two near-misses, recorded so they are not repeated.** A signal sheet was collected from the
+**`tablistpanel` overlay** instead of a tab and reported a headless-looking `screen` of `[340,480]`
+(real answer: identical to Chrome). And a `cf_clearance` present in Hodos but not Chrome looked like
+differential treatment until clearing cookies showed it was **stale from our own earlier testing**.
+Both were caught before being reported; both are why the subject gate now hard-fails.
 
-A patched-in-JS method does not report `[native code]` from `toString()`. That is one of the cheapest,
-most widely deployed bot signals there is — and we were emitting it on every farbled method, on every
-page, in exactly the build this user was running. The native Blink patches report `[native code]`
-again, because the method genuinely *is* native.
+---
 
-⚠️ **So the most likely reading is that the reported failure was caused by the thing 0.4.0 already
-removed.** Not proven — the site is unknown and the user does not remember it — but it reorders the
-work.
+## 4. Every variant, ranked by how many users hit it
 
-### What this changes
+⭐ **This is the comprehensive part.** The ranking is by user impact, not by interest. Everything below
+the line is **deliberately not run**, and says why.
 
-1. ⛔ **Do not design a fix first.** Step 0 is: run the CAPTCHA basket on **0.4.0** and see whether
-   anything fails at all. If nothing does, this phase collapses to a regression guard plus a note.
-2. ⭐ **A cheap discriminator exists and should be the first measurement:** compare
-   `Function.prototype.toString` output for the farbled methods on 0.3.x vs 0.4.0. If 0.3.x shows
-   JS source where 0.4.0 shows `[native code]`, the mechanism is demonstrated rather than assumed.
-   `BOT-1` in `farbling_acceptance_battery.py` already asserts the `[native code]` half on 0.4.0.
-3. 👤 **Owner's own framing:** *"if it works for us, then good. But it's still probably
-   fingerprinting."* 📏 So a green re-test closes the *reported* defect, not the *category* — keep the
-   matrix, drop the assumption that something is currently broken.
+| # | Variant | How common | What it looks like when it fails | Status |
+|---|---|---|---|---|
+| 1 | **Invisible / silent check** (Cloudflare non-interactive, reCAPTCHA v3, AWS WAF Challenge) | ⭐ **Highest.** Runs on a large share of the web; most users never see it | The site is just slow, empty or broken. **No puzzle is ever shown** | 🎯 **IN SCOPE** |
+| 2 | **"Just a moment / Checking your browser" interstitial** | ⭐ **Highest visible.** The most common thing a user actually sees | **Reload cycle.** ⇒ the most likely match for the reported symptom | 🎯 **IN SCOPE** |
+| 3 | **Checkbox** ("I'm not a robot", Turnstile managed) | High — logins, signups, contact forms | Ticks, spins, resets, repeat | 🎯 **IN SCOPE** |
+| 4 | **Image grid** (escalation from 3) | Moderate — the visible escalation | Endless new grids; **or blank tiles**, which is adblock eating the vendor's images | 🎯 **IN SCOPE** |
+| — | — | — | — | — |
+| 5 | **Silent XHR-level challenge** (403/428 on a background request) | Uncommon but nasty | The page looks broken and **no check is ever shown** — anyone testing "did I get a CAPTCHA" scores it as a pass | ⬜ NOT RUN — covered instead by the §5 instrumentation, which catches it without a sitting |
+| 6 | **Slider / drag** (GeeTest, DataDome) | Low in our market | Piece will not drop | ⬜ NOT RUN — 🚩 would stress our mouse-coordinate path, but too rare to spend the sitting on |
+| 7 | **Rotate / orient** (Arkose) | Low — mainly x.com / GitHub **sign-up**, not everyday browsing | Puzzle renders wrong or drag fails | ⬜ NOT RUN — 🚩 canvas/WebGL are farbled, so worth revisiting *if* a report points here |
+| 8 | **Proof-of-work gate** (Akamai `sec-cpt`, Kasada) | Low, and no public demo exists | Hangs or cycles | ⬜ NOT RUN — no reachable test surface |
+| 9 | **Queue / waiting room** (Ticketmaster) | Low, event-driven | Never advances | ⬜ NOT RUN |
+| 10 | **Full-page block** (1020, "unusual traffic") | Low | Instant refusal, no way through | ⬜ NOT RUN — it is a verdict, not a mechanism; nothing for us to break |
+| 11 | **Audio fallback** | ⛔ **Effectively never.** The accessibility path | Distorted or silent | ⛔ **OUT OF SCOPE.** 🚩 It is the one place a thing we farble (WebAudio) is itself content a human must understand, so it is a real *accessibility* question — but it is **not this phase's problem** and chasing it is what derailed the first pass. ⇒ its own ticket if anyone ever wants it |
 
-⭐ **The general lesson, which is the same one this sprint keeps paying for:** a bug report names a
-build. Check that the build is the one you are about to fix before you fix it. This is the
-`feedback_test_subject_must_be_the_production_call` shape, applied to a *report* rather than a test.
+---
+
+## 5. Deliverables
+
+### `P13-I` — instrumentation, so the next report is diagnosable 👤 *owner-chosen, 2026-09-21*
+
+⭐ **The reasoning:** three causes tested clean and the bug does not reproduce here. We cannot fix what
+we cannot see, and guessing a fix for a cause measured clean is how this phase went wrong the first
+time. So the deliverable is to make the **next** occurrence produce evidence instead of a description.
+
+| Row | What |
+|---|---|
+| `P13-I1` | When `CookieBlockManager` blocks a cookie whose name matches a known clearance cookie (`cf_clearance`, `__cf_bm`, `datadome`, `_px3`, `_pxvid`, `sec_cpt`, `_GRECAPTCHA`), log it **distinctly** — not buried in the ordinary blocked-cookie stream |
+| `P13-I2` | Log `403` / `429` / `503` responses from known challenge hosts, with the **Cloudflare Ray ID** when present — that is the one error id a site's admin can actually look up |
+| `P13-I3` | ⛔ **Negative control:** both must be shown firing. `I1` by blocking a synthetic clearance-named cookie; `I2` by pointing at a URL that returns 403. A log line nobody has seen fire is not instrumentation |
+
+⚠️ **Constraints.** Release logging is `warn` and `TICKET_production_debug_logging_unbounded.md` is open
+— these must be **bounded** and must not reintroduce that. ⛔ And they must not log cookie **values**,
+only names: a clearance cookie value is a credential.
+
+### `P13-M` — the mainline human sitting
+
+Variants **1–4** only, in `HUMAN_TEST_QUEUE.md` `W11`. Hodos and Chrome side by side, same network,
+same minute. Four outcomes, because pass/fail cannot express the one that matters:
+
+✅ **pass** · 🟠 **harder** (challenged where Chrome was not) · 🔴 **loop** (solved, asked again) · ⬛ **broken**
+
+⛔ **Being escalated to a puzzle is NOT a failure. Being asked again after solving it is.**
+
+When anything is 🔴 🟠 or ⬛, run the three steps — Chrome → farbling off for that site → adblock off for
+that site. **Which step fixes it is the diagnosis.** (`manual-test/HOW_TO_TEST_BY_HAND.md`.)
+
+### `P13-R1` — the farbling acceptance battery still passes after any fix
+
+A bot-compat fix must not silently weaken farbling. The constant-seed bug was exactly a "fix" nobody
+measured.
+
+---
+
+## 6. Explicitly NOT in this phase
+
+| | Why |
+|---|---|
+| The 210-cell vendor matrix | The first pass proved vendor **demos** cannot decide anything: Chrome 0.9, Hodos 0.9, and Hodos launched with `--enable-automation` also **0.9**, because the reCAPTCHA demo's score is a *sample*. A demo is configured to succeed and has no money behind the decision |
+| Adblock exceptions for reCAPTCHA / hCaptcha / Arkose / GeeTest | ⚠️ The gap is **real** — `hodos-unbreak.txt` has **Cloudflare only**. But scriptlets measured **not** to be patching anything on live captcha pages, so adding them now is a fix for a cause measured clean. ⇒ add only if `P13-M` step 3 points here |
+| The `Sec-CH-UA` brand (`Hodos;v=150`) | Engine fix, queued in `DevOps-CICD/NEXT_CHROMIUM_BUILD.md` PART 2. ⚠️ **Nothing has been observed to fail because of it** |
+| The wallet-bridge globals | `../TICKET_wallet_bridge_plumbing_is_advertised_to_every_site.md` — a **privacy** ticket, not a bot-detection one |
+| Audio, slider, rotate, queue, PoW | §4, below the line |
+
+---
+
+## 7. What would settle it fastest
+
+⭐ 👤 **Get the original complainant to name the site — and which build they were on.** One site that
+really failed is worth more than everything above, because it is the one thing none of this can
+manufacture: a real deployment, under real risk, with a known-bad outcome. And if they were on
+`0.3.x`, §3 already says the cause is gone — ask them to retry before anyone spends another day.
