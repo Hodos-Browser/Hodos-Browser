@@ -1,7 +1,7 @@
 # A connect approved on the **IPC** transport still re-sends the site's call with an EMPTY body
 
 **Found:** 2026-09-19 by the **owner**, at the keyboard, during the `W5`/`R-GOLD` sitting on Windows.
-**Status:** ✅ **FIXED on macOS 2026-09-19** — both evidence rows GREEN, RED reproduced first and a
+**Status:** ✅ **FIXED — macOS 2026-09-19, and CONFIRMED ON WINDOWS 2026-09-21** (owner at the keyboard: `window.CWI.createAction` from unknown `https://example.com`, Allow ⇒ `kInternal+frame resume: re-entering the IPC cascade … bodyBytes=175`, broadcast `4f01f83c…` confirmed on chain, gold pill on the originating tab; a Deny on the same flow returned `User rejected authentication` and did **not** persist a block). Original: **FIXED on macOS 2026-09-19** — both evidence rows GREEN, RED reproduced first and a
 negative control run. **Severity:** MEDIUM. Fails closed (no money moves), but it broke the first
 wallet call of **every manifest-less dApp** immediately after the user clicked Allow.
 
