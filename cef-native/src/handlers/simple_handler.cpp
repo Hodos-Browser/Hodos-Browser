@@ -5316,6 +5316,13 @@ bool SimpleHandler::OnProcessMessageReceived(
                     ", Whitelist: " + std::to_string(whitelist) +
                     ", RequestId: " + requestId);
 
+                // beta.3 — remember which prompt this click answered, BEFORE the
+                // `overlay_close` that follows it, so that close can never re-show it
+                // but can re-show a newer prompt it hid (ShowNextQueuedPromptIfAny).
+                if (!requestId.empty()) {
+                    PendingRequestManager::GetInstance().noteAnswered(requestId);
+                }
+
                 // beta.3 P0.9 — resolve any loopback / local-network permission this
                 // connect modal claimed. Approve -> ACCEPT, which makes Chromium write
                 // a persistent ALLOW by itself (measured: no content-setting code of

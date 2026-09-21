@@ -255,6 +255,38 @@ public:
         return countWaitingForDomainLocked(shown->domain, shown->requestId);
     }
 
+    // beta.3 — the prompt the user most recently answered (every brc100_auth_response
+    // carries its requestId since 10b). Lets the close path tell "close for the prompt
+    // just answered" from "a stale close that hid a NEWER prompt".
+    // TICKET_connect_prompts_arrive_after_approval_and_hang.md
+    void noteAnswered(const std::string& requestId) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        lastAnswered_ = requestId;
+    }
+
+    // A prompt still marked on screen, still pending, and NOT the one just answered was
+    // hidden by the close of the prompt before it: one click sends "answer" and then
+    // "close", and a new prompt can take the shared overlay between the two. The queue
+    // then believes it is on screen while nobody can see it, and every later prompt
+    // waits behind it until it times out (📏 zanaadu.com, 2026-09-21: 10 minutes).
+    // Hands back a copy so the caller can put it back on screen.
+    bool takeHiddenShownPrompt(PendingAuthRequest& out, int& queuedFromSite) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto now = std::chrono::steady_clock::now();
+        for (auto& pair : requests_) {
+            auto& r = pair.second;
+            if (!r.shown || r.overlayType.empty()) continue;
+            if (pair.first == lastAnswered_) continue;  // its own close — never re-show
+            // Same D-h3 rule as takeNextQueuedPrompt: never post one that is about to die.
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - r.createdAt).count()
+                    >= kShownPromptExpiryMs - kMinPostLifetimeMs) continue;
+            out = r;
+            queuedFromSite = countWaitingForDomainLocked(r.domain, r.requestId);
+            return true;
+        }
+        return false;
+    }
+
     // Mark an entry as on screen (posts that bypass addPromptRequest).
     void markShown(const std::string& requestId) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -429,4 +461,5 @@ private:
     std::mutex mutex_;
     std::map<std::string, PendingAuthRequest> requests_;
     uint64_t counter_;
+    std::string lastAnswered_;  // see noteAnswered()
 };

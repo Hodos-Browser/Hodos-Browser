@@ -54,6 +54,7 @@ add_executable(hodos_tests
     audit_log_test.cpp                  # P2 — the money/consent trail that survives debug-log retention
     prompt_type_agreement_test.cpp     # P10e F3-10b — connect-vs-domain-trust lists must agree (header-only)
     aumid_policy_test.cpp               # P3-A1 — AUMID decision (header-only pure half); NC = reintroduce the profile-count gate
+    prompt_queue_hidden_prompt_test.cpp # beta.3 — a stale close must not strand a prompt (header-only); NC = takeHiddenShownPrompt returns false
 
     # Production sources under test (built into the test exe directly).
     # (Phase 2.6-H removed permission_engine_test / permission_gate_test along
@@ -112,6 +113,9 @@ target_compile_definitions(hodos_tests PRIVATE
 
 target_include_directories(hodos_tests PRIVATE
     ../include
+    # beta.3 — CEF HEADERS only (nothing links libcef): PendingAuthRequest.h holds
+    # CefRefPtr members, so prompt_queue_hidden_prompt_test needs the declarations.
+    ${CEF_ROOT}
 )
 
 target_link_libraries(hodos_tests PRIVATE

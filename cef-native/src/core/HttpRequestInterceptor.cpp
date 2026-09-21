@@ -154,6 +154,16 @@ public:
         cache_.clear();
     }
 
+    // Cache-only read — never fetches. For UI-thread callers that must not block on
+    // the wallet (getPermission falls back to a synchronous request on a miss).
+    bool peekTrustLevel(const std::string& domain, std::string& trustLevelOut) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = cache_.find(domain);
+        if (it == cache_.end()) return false;
+        trustLevelOut = it->second.trustLevel;
+        return true;
+    }
+
 private:
     DomainPermissionCache() = default;
     DomainPermissionCache(const DomainPermissionCache&) = delete;
@@ -1369,6 +1379,17 @@ static void OnShownPromptExpired(const std::string& requestId) {
 static bool ShowNextQueuedPromptIfAny() {
     PendingAuthRequest next;
     int queuedFromSite = 0;
+    // beta.3 — first, anything still marked on screen that the user did NOT just answer
+    // was hidden by a stale close; put it back instead of stranding the whole queue
+    // behind an invisible prompt. See PendingRequestManager::takeHiddenShownPrompt.
+    if (PendingRequestManager::GetInstance().takeHiddenShownPrompt(next, queuedFromSite)) {
+        LOG_INFO_HTTP("🔁 Re-showing prompt " + next.overlayType + " for " + next.domain
+                      + " — it was hidden by the close of the prompt before it (requestId: "
+                      + next.requestId + ")");
+        CefPostTask(TID_UI, new CreateNotificationOverlayTask(
+            next.overlayType, next.domain, next.overlayExtraParams, next.requestId, queuedFromSite));
+        return true;
+    }
     if (!PendingRequestManager::GetInstance().takeNextQueuedPrompt(next, queuedFromSite)) return false;
     LOG_INFO_HTTP("⏭️ Showing next queued prompt " + next.overlayType + " for " + next.domain
                   + " (requestId: " + next.requestId + ", " + std::to_string(queuedFromSite)
@@ -3355,6 +3376,56 @@ static std::string buildExtraParamsFromPayload(
     return "";
 }
 
+// beta.3 — re-send a call whose "connect" answer went stale in flight, at most ONCE.
+//
+// 📏 zanaadu.com, 2026-09-21: three calls were sent at 12:24:49.518, the user's approval
+// was written at .631 (and the waiting calls drained), and those three came back as
+// connect prompts at .708–.758 — for a site now approved. They became a duplicate connect
+// question, one of them was hidden by the previous prompt's close, and the page froze.
+//
+// Signal: the browser's own trust cache already says "approved" (addDomainPermission* set
+// it synchronously before the drain). Cache-only read — no wallet call on the UI thread;
+// a cache miss simply means "ask as normal".
+//
+// ⛔ Once per CALL is what makes a loop impossible. If the re-sent call still comes back
+// "connect", the site really is not approved (e.g. deleted, and the cache is stale), and
+// the prompt opens normally. The key survives the re-send: an HTTP call re-runs on the
+// same resource handler, and an IPC call keeps the page-supplied id.
+static bool ReissueStaleConnectOnce(const ModalContext& ctx, const ResumeContext& resume,
+                                    const std::string& promptType) {
+    std::string trust;
+    if (!DomainPermissionCache::GetInstance().peekTrustLevel(ctx.domain, trust)
+        || trust != "approved") {
+        return false;
+    }
+
+    std::string key;
+    if (resume.handler) {
+        key = "http:" + std::to_string(reinterpret_cast<uintptr_t>(resume.handler.get()));
+    } else if (resume.frame && !resume.originalIpcRequestId.empty()) {
+        key = "ipc:" + std::to_string(resume.browserId) + ":" + resume.originalIpcRequestId;
+    } else {
+        return false;
+    }
+
+    static std::mutex mu;
+    static std::map<std::string, std::chrono::steady_clock::time_point> reissued;
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        const auto now = std::chrono::steady_clock::now();
+        for (auto it = reissued.begin(); it != reissued.end();) {
+            if (now - it->second > std::chrono::seconds(60)) it = reissued.erase(it);
+            else ++it;
+        }
+        if (reissued.count(key)) return false;  // already re-sent once — this one is real
+        reissued[key] = now;
+    }
+
+    LOG_INFO_HTTP("🔁 Stale connect prompt for already-approved " + ctx.domain + " " + ctx.endpoint
+                  + " — re-sending the call instead of asking again (" + key + ")");
+    return ResumeDrainedApprovedRequest(buildPendingAuthRequest(promptType, ctx, resume));
+}
+
 // Attempt to handle a wallet HTTP response as a 202 PENDING envelope. MUST be
 // called on TID_UI (modal dispatch + PendingRequestManager). Returns true if
 // the response was an LD2 envelope and the modal was opened — in that case the
@@ -3402,6 +3473,14 @@ static bool tryHandlePendingResponse(
     const bool isDomainTrustPrompt = hodos::IsDomainTrustPromptType(env.promptType);
     if (!isDomainTrustPrompt) {
         resume.headersOnApprove["X-User-Approved"] = env.approvalId;
+    }
+
+    // beta.3 — a connect answer for a site the user has ALREADY approved is stale: the
+    // call was sent before the approval landed and answered after it. Re-send it rather
+    // than put a duplicate connect question on screen. Returns before any prompt or
+    // timeout is created. TICKET_connect_prompts_arrive_after_approval_and_hang.md
+    if (isDomainTrustPrompt && ReissueStaleConnectOnce(modalCtx, resume, env.promptType)) {
+        return true;
     }
 
     std::string newRequestId;
