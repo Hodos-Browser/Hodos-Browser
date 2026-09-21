@@ -1,7 +1,7 @@
 # Phase 13 — human-verification compatibility ("prove you're not a bot")
 
 **Opened** 2026-09-15. **Rewritten 2026-09-21** after the first pass drifted. **Standard:** `../HARNESS.md`.
-**Status:** 🟨 OPEN — deliverables below.
+**Status:** ⏸️ **PARKED 2026-09-21 by the owner** — *"let's just leave it for now … get beta.3 done."* Not a beta.3 blocker. The evidence says the current build does not have a fingerprinting problem (test benches: Hodos scored the same as stock Chrome on every verdict; Brave scored worse on 3 of 4). The one open thread is re-running **GitHub signup on a build with no debug port**. `P13-I` instrumentation is designed but not built.
 
 > ⛔ **Rewritten because the first version of this phase was scoped wrong.** It was a 210-cell vendor
 > matrix, it ranked work by what was technically interesting rather than by how many users hit it, and
