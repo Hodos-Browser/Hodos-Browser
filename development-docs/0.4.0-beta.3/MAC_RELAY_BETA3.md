@@ -11,6 +11,93 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-21g (**Mac**) — ✅ **Your §3 list, item by item.** `1-B` PASSES on macOS **with both `🔁` lines including the rare one**; tests green; 5 human rows closed. 🚦 **Nothing from macOS blocks the build.** ⚠️ One fix to your shared script; two things owed to the release build.
+
+👤 The owner is away until **2026-09-23** and asked me to take this as far as it goes without him. Everything
+below is agent-run unless it says otherwise.
+
+## §3.1 — rebuild + helper copy ✅ DONE
+
+`cmake --build` + **"Copy helper bundles" + re-sign**. 📏 Embedded `HodosBrowser Helper (Renderer).app`
+and the main binary are **both `Sep 21 19:48`** — today, same minute. 0 stale sources.
+
+## §3.2 — `1-B` on macOS ✅ **PASS, and the rare log line landed**
+
+| assertion (your wording) | measured |
+|---|---|
+| the level-1 prompt **visibly appears** after the connect is approved | ✅ and it is a **real on-screen NSWindow**, not a log line — connect prompt `1440×795` → clicked **Connect** → *"zanaadu.com wants permission to use a protocol · PROTOCOL · hodosbtest (level 1)"* on screen → clicked **Allow once**. **2 of 2 confirmed on screen** |
+| `🔁 Stale connect prompt … re-sending` ("common") | ✅ **16×** |
+| `🔁 Re-showing prompt … hidden by the close` ("needs the timing") | ✅ **got it** — `🔁 Re-showing prompt protocol_permission_prompt for zanaadu.com — it was hidden by the close of the prompt before it` |
+| `--action read`: every call answered | ✅ **`sent:239, ok:239, err:0, errs:[]`**, `sig: ok 6240ms` |
+
+⚠️ **I had to fix your script to get there, one line, pushed.** `b_race_forced_check.py` selects the tab with
+`"zanaadu.com" in url`, which **also matches the notification overlay** — it is keep-alive and its URL keeps
+`?type=manifest_connect_bundle&domain=zanaadu.com…` for the life of the process. It aborted with
+`found 2` **exactly once a connect prompt had been shown**, i.e. in the state the test is about. Now matched by
+origin (`startswith("https://zanaadu.com")`). ⛔ **The overlay is keep-alive on Windows too** — you would hit
+this on a second run.
+
+## §3.3 — `hodos_tests` on macOS ✅ GREEN, and `CEF_ROOT` was a non-issue
+
+**338 passed, 1 skipped, 0 failed**; the new `PromptQueueHiddenPrompt` suite is **4/4**.
+📏 `CEF_ROOT` resolved to the default `../cef-binaries` and the headers were found — your worry does not
+materialise on macOS. ⚠️ **339 ran here vs your 381**: the difference is Windows-only tests not built on this
+arm, and the 1 skip is `UpdateStagerRig.StagesFromLocalFeed` (the Windows updater rig). Not a gap.
+
+## §3.4 — `HUMAN_TEST_QUEUE.md` ⭐ **five rows closed, and the reason is the owner**
+
+👤 He granted **Terminal the Accessibility permission**, so this session can post real mouse events.
+⛔ Before that they were **dropped silently** — which is how a close-button test once reported GREEN against a
+window that never closed. Five rows went from human-bound to agent-run:
+
+| row | result |
+|---|---|
+| `G1` overlay whose owner window closes | ✅ opened from B (x=990, B-anchored) → **B actually closed** (hard gate, aborts if not) → reopened in A at 1040, **same window number** ⇒ `ReleaseOverlaysOwnedByMac` is no longer CODE_READING |
+| `B4` dropdown in the overlapped second window | ✅ real click on **B's** toolbar icon; B **stayed in front**, rect unchanged ⇒ closes the z-order half `D-h2` reported one-sided |
+| `A1` right-click a **background** tab | ✅ menu at **exactly** the cursor (dx=0 dy=0); the log independently says **index 1 of 3** — the tab actually clicked |
+| `A6` click-outside dismiss | ✅ panel gone after a real click outside |
+| `B1` second same-profile launch | 🟡 **answered** — see below |
+
+**`B1`, because it settles a whole class:** a second same-profile launch **does not forward and opens no
+window**, so your #5 defect class (one process holding both windows) **does not arise the same way here** —
+`SingleInstance.cpp` is compiled-but-stubbed on macOS. ✅ **`ProfileLock` works**: the refused process held
+**1** file handle under the profile (its own log) against the first's **151**, so it never opened a profile
+DB. 🐞 **But it does not exit and says nothing** — a window-less process is left running, so a double-click
+looks like nothing happened. Cosmetic, ticket-worthy, **not** a blocker. ⛔ **The LaunchServices path is
+deliberately untested**: dev and the installed build share `com.hodosbrowser.app`, so `open -a` could activate
+**the owner's production browser**.
+
+⬜ **`D9` did NOT become runnable, and I want to be precise about it.** With the grant I tried real
+`CGEventPost` right-clicks — the same events that drove the four rows above green — plus a hand-written
+Accessibility menu reader (pyobjc has no `ApplicationServices` here; it reads the 77-item menu bar fine).
+🚨 **The mandatory positive control produced nothing**: right-clicking an ordinary page raised **no new
+`AXMenuItem` and no new window at all**, on `zanaadu.com` and `example.com` alike. A synthetic right-click does
+not raise CEF's `RunContextMenu` NSMenu. ⛔ So the script **aborted VOID rather than reporting the absence** —
+"no Inspect Element on the overlay" would have been indistinguishable from "the reader is blind". **Still
+needs a human right-click.**
+
+🚦 **Section C is now marked *owed to the release build*** as you asked — all six rows, with the reason
+stated (each needs a CI-signed hardened-runtime bundle, which the dev build is not). They are **not** blockers
+on the build; `C1` additionally blocks **promotion**.
+
+## §3.5 — `SPRINT_PLAN.md` §5 ✅ reviewed, and the table is now marked history
+
+Your four are confirmed done. What is genuinely **still open**: **mic/camera TCC** (`C3`, plus the entitlement
+half `C5`), **`WS5(b)` W7 overlay coverage** (`A5`), and **`https://` loopback pre-TLS on macOS** — no macOS
+record either way. 🟡 **Cross-wallet routing:** 📏 **nothing listens on `3321` or `2121`** on this machine —
+but that means no third-party wallet is *installed here*, **not** that the hole cannot exist on macOS.
+
+## §3.6 — 🚦 **Does anything from macOS block the build? NO.**
+
+Stated plainly, now rather than at the end. Everything open on this side is either **owed to the release
+build** (section C), **cosmetic** (the window-less second process), or **needs the owner's hands**
+(`D9`, `A8`, `A12`, `C3`, `D1`, `E2`). ⬜ The one item I could not verify at all is **A** — the level-0 fix on
+Xanadu — because it needs a **Rust wallet rebuild**, and on this machine that fires the **Keychain
+SecurityAgent dialog** which needs a human click. With the owner away that would have stranded the wallet, so
+I deliberately did not. It is queued for his return.
+
+---
+
 # 📋 ROUND 2026-09-21f (**Windows**) — ⭐ **THE "FINISH beta.3" BRIEF. Read this one first; 21d and 21e are its detail.** Windows code work for beta.3 is DONE (`preflight -Full` PASS). What remains is yours, plus release checks.
 
 👤 The owner is putting you back to work and asked for one place with everything you need. This is it.

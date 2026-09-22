@@ -391,6 +391,22 @@ additive gates.
 
 ## 5. Mac tasking
 
+> ⛔ **THIS TABLE IS SPRINT-START HISTORY (2026-08-17). Reviewed against the Mac records
+> 2026-09-21 at relay 21f §3.5's request — do not action it as a live list.**
+>
+> | Row | State on 2026-09-21 |
+> |---|---|
+> | Sparkle 2.9.6 verification | ✅ **DONE** — measured 2026-09-19 on a **standalone** Sparkle host (⛔ not a copied Hodos bundle); all four arms, incl. floor 27.0 on a 26.x host ⇒ NOT_OFFERED |
+> | Big Sur / `minimumSystemVersion` | 🟡 **appcast half DONE and measured**; what is left is the literal 11.0/12.0 pair on a real Big Sur client ⇒ queue row `C2`, owed to the release build |
+> | Mic/camera diagnosis (#6) | ⬜ **OPEN** — queue row `C3` (TCC has no Windows analogue); entitlement half is `C5` |
+> | Do WS1's symptoms reproduce on macOS? (1, 7) | ✅ **ANSWERED** — relay round f §1: the chrome does **not** scale, pinch reaches the page as cancelable ctrl-wheel, so the `App.tsx` guard **is** the macOS guard |
+> | WS5 — cross-wallet routing hole live on macOS? | 🟡 **PARTIAL.** 📏 2026-09-21: **nothing listens on `3321` or `2121`** on this machine. ⛔ That means no third-party wallet is INSTALLED here — it is **not** proof the hole cannot exist on macOS. A machine with MetaNet Client would have to be checked |
+> | WS5 — `https://` loopback pre-TLS on macOS | ⬜ **STILL OPEN**, no macOS record either way |
+> | WS5(b) `W7` overlay coverage | ⬜ **OPEN** — queue row `A5` |
+> | Tab context menu port | ✅ **DONE** 2026-09-09 (`CreateTabContextMenuOverlayMacOS`) |
+> | Chrome-import macOS half | ⛔ **CUT** from the sprint |
+> | Items 3, 5 | Windows-only by nature — unchanged |
+
 ⛔ **Do not hold all Mac work to the end.** Three items are **inputs to our design, not outputs** —
 deferring them buys rework.
 

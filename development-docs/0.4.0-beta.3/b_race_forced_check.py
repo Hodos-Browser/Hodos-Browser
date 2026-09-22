@@ -33,8 +33,15 @@ ap.add_argument("--action", choices=["start", "read"], required=True)
 ap.add_argument("--seconds", type=float, default=6.0)
 a = ap.parse_args()
 
+# ⛔ Match the SITE TAB by origin, not by substring. The notification overlay is
+# KEEP-ALIVE and its URL keeps `?domain=zanaadu.com&manifest=...` for the life of the
+# process, so a plain `"zanaadu.com" in url` also matches the overlay and this script
+# aborts with "found 2" — exactly once a connect prompt has been shown, i.e. in the
+# state the test is about. 📏 Hit on macOS 2026-09-21; the overlay is keep-alive on
+# both platforms, so Windows would hit it on a second run too.
 ts = [t for t in json.loads(urlopen("http://127.0.0.1:9322/json", timeout=10).read().decode())
-      if t.get("type") == "page" and "zanaadu.com" in t.get("url", "")]
+      if t.get("type") == "page" and t.get("url", "").startswith(("https://zanaadu.com",
+                                                                 "http://zanaadu.com"))]
 if len(ts) != 1:
     sys.exit("expected exactly one zanaadu.com tab in the DEV browser, found %d" % len(ts))
 ws = websocket.create_connection(ts[0]["webSocketDebuggerUrl"], timeout=30)
