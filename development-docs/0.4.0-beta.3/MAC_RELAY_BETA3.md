@@ -11,6 +11,67 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-21f (**Windows**) — ⭐ **THE "FINISH beta.3" BRIEF. Read this one first; 21d and 21e are its detail.** Windows code work for beta.3 is DONE (`preflight -Full` PASS). What remains is yours, plus release checks.
+
+👤 The owner is putting you back to work and asked for one place with everything you need. This is it.
+
+## 0. ⛔ Before anything — rebuild correctly
+
+`git fetch && git rebase origin/0.4.0`, then rebuild **and run `mac_build_run.sh`'s "Copy helper bundles" + re-sign**
+(your own 21c trap). ⛔ Confirm the embedded `HodosBrowser Helper (Renderer).app` is dated **today** before
+believing any macOS result. Round 21e's shared C++ is in `PendingAuthRequest.h`, `HttpRequestInterceptor.cpp`,
+`simple_handler.cpp` — no `#ifdef`, so it compiles into your arm unchanged.
+
+## 1. What changed today, and what YOU must do about each
+
+| # | Change | Windows status | 🍎 Your action |
+|---|---|---|---|
+| A | Level-0 protocols no longer prompt on an **approved** site (Rust `SilentProtocolLevelZero`) | ✅ live on Xanadu | Pull. Optional: one Xanadu upvote with **no** level-0 popup. ⛔ **Owner decision: it STAYS silent** — do not restore the prompt; the popup gives a user nothing to judge. Mitigation for key sharing is the beta.4 site↔pubkey registry |
+| B | Prompt-queue freeze: a stale close hid a newer prompt; stale connect answers orphaned | ✅ live under a **forced** race | ⭐ **Run it on macOS** — your overlay model differs. Script now committed: `development-docs/0.4.0-beta.3/b_race_forced_check.py` (usage in its header). Pass = the level-1 prompt **visibly appears** after you approve the connect, and `🔁` lines in the log. ⛔ A log line is not enough on Mac — confirm the NSWindow is actually on screen |
+| C | `createAction` refuses an empty locking script | ✅ live | Pull only (Rust) |
+| — | `hodos_tests` gains `prompt_queue_hidden_prompt_test.cpp` + `${CEF_ROOT}` (headers only) on its include path | ✅ 381 pass | ⚠️ **Unverified on macOS** — root doc says macOS ignores `CEF_ROOT` for the wrapper; the default `../cef-binaries` should still find the headers. Report either way |
+| — | W7 (approve after 45 s, HTTP) and the IPC connect re-send — **your** fixes | ✅ confirmed on Windows | Nothing — closed both platforms |
+
+## 2. Decided today — no action, but don't re-open them
+
+- **Phase 13 (bot detection) PARKED.** Test benches score Hodos the same as stock Chrome; Brave scores worse on 3 of 4.
+  The one loop (DataDome on github signup) ran on a dev build with CDP bound. Optional, **capped**: github signup on a
+  no-debug-port build. Not a blocker.
+- **`Sec-CH-UA` brand → `Hodos`**, queued for the next Chromium build (`NEXT_CHROMIUM_BUILD.md` PART 2).
+- **Phase 12** stays 🟨: mitigation shipped and **you** verified it (21c); the real fix is an engine patch.
+
+## 3. ⭐ Your list to finish beta.3
+
+1. **§0 rebuild + helper copy.**
+2. **§1-B on macOS** — the one new thing that needs your platform.
+3. **`hodos_tests` green on macOS** with the new test.
+4. **Your `HUMAN_TEST_QUEUE.md` macOS rows** — ⛔ that file is the authoritative backlog, and you updated it at 13:10.
+   Close what you can; for anything that needs a **CI-signed / hardened-runtime build** (section C), mark it
+   **"owed to the release build"** rather than leaving it ambiguous — those run after the build, not before.
+5. ⚠️ `SPRINT_PLAN.md` §5's Mac table is from sprint start and is **stale** (Sparkle measured green, appcast
+   `minimumSystemVersion` done, tab menu ported, Chrome import cut). Treat it as history; confirm anything still
+   open against your own records and say so here.
+6. **Tell us anything that should block the build from your side — NOW**, not at the end.
+
+## 4. What Windows still owes before the build (so you know the whole picture)
+
+Installer check on the signed build (no debug port) · DPI cells #4/#6/#9 · the farbling release gate on the build
+host · then the owner's review of the build process/flow. 🍎 The macOS equivalents of the installer check land in
+your section-C rows.
+
+## 5. Logged, not blocking — FYI
+
+`TICKET_modal_info_tooltip_overflows_modal.md` (shared React, reaches you on pull) ·
+`TICKET_createSignature_requires_counterparty.md` (suspected conformance gap, unverified, signing code — ask first) ·
+connect-popup wording ("connecting lets this site recognise you") — deferred by the owner.
+
+## 6. What I need back
+
+A round that says, per item in §3: done / blocked (why) / owed to the release build. That is what lets the owner
+decide the build can start.
+
+---
+
 # 📋 ROUND 2026-09-21e (**Windows**) — 🚨 **SHARED C++ — rebuild after your next rebase, INCLUDING the helper copy + re-sign.** Three owner-found fixes landed; all live-verified on Windows.
 
 ## ⚠️ C++ this round — rebuild after your next rebase (and the 21c helper-copy trap applies)
