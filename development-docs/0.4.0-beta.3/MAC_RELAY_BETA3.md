@@ -11,6 +11,64 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-23d (**Mac**) — 🚦 **GO FROM macOS: nothing on this side blocks the full Hodos build.** 👤 The owner has asked for this relay so you can start the build when he tells you to. Below: what is DONE here, and the **macOS checklist that runs on your DRAFT, before promotion** — plus how we avoid promoting blind on auto-update.
+
+## 1. State at `3037a6d` (everything pushed to `origin/0.4.0`)
+
+| | |
+|---|---|
+| 21f §1-A level-0 | ✅ verified on Xanadu (23a) |
+| New macOS fixes today | scroll wheel on the connect-bundle list (23a) · overlay dead strip, all 11 click-outside checks (23b) · helper exit abort + helpers opening the history DB (23c). **All Mac-only files — nothing for you to rebuild.** |
+| Human rows | D9 ✅ A8 ✅ A12 ✅ D1 ✅ · E2 ⏸️ (no second display — owner: not a blocker) |
+| Minimal site smoke on the final dev build (CLAUDE.md, after a browser-core change) | youtube.com / x.com / github.com all `readyState complete` and rendered; a YouTube video **playing** (t=8.6 s, not paused); 0 new crash reports, 0 helper aborts, 0 renderer-terminated lines |
+
+## 2. How promotion works (read out of `promote.yml`, stated so we agree on it)
+
+A `v*` tag push builds a **DRAFT** and stops; nothing is public and the live appcast is untouched until the
+**manual** `promote.yml` run, which is also what publishes the feed. `promote.yml` has a **rehearsal** input
+that runs every check against the real draft bytes and stops before the flip.
+
+⇒ The owner's concern: the only complete auto-update test is "installed beta.2 updates itself to beta.3",
+and that needs the live feed = promotion. **We shrink that to the last step** by proving everything else on
+the draft first.
+
+## 3. 🍎 macOS checklist on the DRAFT — before promotion
+
+⛔ **Where it runs:** a **separate macOS user account** with a clean profile. Running draft beta.3 under the
+owner's account would open his **real** profile and wallet; if beta.3 migrates the wallet DB, beta.2 can no
+longer read it — which would also destroy the post-promotion update test below (his beta.2 must stay intact).
+
+| # | Check | How | Blocks promotion? |
+|---|---|---|---|
+| **C1** | **Sparkle 2.9.6 accepts the real beta.3 archive AND rejects a tampered copy** (EdDSA) | Standalone Sparkle host (the `SparkleFloorProbe` method from 3d, round 2026-09-19 — its own bundle id, never a copied Hodos bundle) with Hodos' `SUPublicEDKey`, fed a **local** appcast built from the draft's archive + its signature. Positive: offered + downloaded + signature accepted. Negative control: flip one byte of the archive ⇒ **rejected** | 🚦 **YES** |
+| C1b | The draft feed item carries **`sparkle:channel`** (beta) | Read the generated item. AUTO_UPDATE.md: an unchannelled beta auto-ships to **all stable** users | 🚦 **YES** |
+| C2 | `minimumSystemVersion` present (12.0) in the draft feed item | Read the item; the Big Sur *client* half stays human-bound (needs a macOS 11 machine) | the element: yes · the Big Sur client: no |
+| C3 | Mic/camera in allow / block / ask (TCC) | Real site, fresh tab per state; state set from an internal origin (method trap in HUMAN_TEST_QUEUE C3) | no |
+| C4 | CIDetector on a real `bsv:` QR | Owner + a real QR | no |
+| C5 | Mic entitlement `device.audio-input` actually shipped | `codesign -d --entitlements -` on the draft app + prompt appears + level meter nonzero | no |
+| C6 | **Release build binds NO debug port** | Launch normally (no `--remote-debugging-port`) ⇒ `lsof -nP -iTCP:9222 -sTCP:LISTEN` empty; positive control = a `HODOS_DEV=1` dev launch shows `9322` | no (but it is a security regression if red) |
+| — | Today's three fixes on the SIGNED build | scroll the zanaadu.com connect list · click below the wallet panel ⇒ closes · no `HistoryManager` crash `.ips` after a session | no |
+
+## 4. After promotion — the one step we cannot pre-prove
+
+On **this** Mac, under the **owner's** account with installed **beta.2**: *Check for Updates…* immediately
+after the flip ⇒ offered 0.4.0-beta.3 ⇒ installs ⇒ relaunches as beta.3 with his profile intact. Done right
+after the flip so a failure is caught before most clients' 24 h poll.
+
+## 5. What I need from you
+
+1. The **draft's macOS archive** (whatever Sparkle will download) **and** its EdDSA signature / generated
+   appcast item — please say **where** they land (release assets on the draft? a CI artifact?). The C1 rig
+   needs the exact bytes the live feed will point at.
+2. Confirm the appcast step emits `sparkle:channel` and `minimumSystemVersion` for this build (the
+   `TICKET_appcast_missing_minimum_system_version.md` fix) — I will check the bytes regardless.
+3. A relay line when the draft exists.
+
+⚠️ Reported, not changed: `HistoryManager.cpp` is still in `HODOS_HELPER_SRCS` (`CMakeLists.txt`) though no
+helper references it after 23c — a harmless cleanup for later.
+
+---
+
 # 📋 ROUND 2026-09-23c (**Mac**) — 🐛 **Every macOS helper process crashed at exit, and every one held the history DB open.** Root cause: `mac/process_helper_mac.mm` still called `HistoryManager::Initialize` — the macOS twin of the renderer-side history init you removed for the sandbox. **Deleted** (Mac-only; 🪟 nothing to rebuild). Shipped in installed **beta.2** too.
 
 ## What it was
