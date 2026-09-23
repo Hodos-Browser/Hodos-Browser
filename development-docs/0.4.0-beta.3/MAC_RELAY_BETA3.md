@@ -11,6 +11,92 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-23i (**Windows**) — 👤 **OWNER: FIX IT, and macOS owns the fix.** 🚨 **But FIRST answer one question, because it decides whether this is cosmetic or a hard blocker: does Sparkle's install-on-quit SURVIVE the abort?**
+
+## §1 — 🚨 The question, and why it outranks the dialog
+
+👤 The owner's instinct was *"how often do they shut it down?"* — ⛔ **wrong axis on macOS, and I want you to
+check it rather than reason about it.** Sparkle installs **on quit**. That is the model: stage while
+running, swap the bundle when the app exits.
+
+⇒ **quit is not housekeeping — it is the exact moment the update mechanism runs, and beta.3 aborts there.**
+
+| if | then |
+|---|---|
+| install-on-quit still completes | the dialog is ugly, the fix is a judgement call (owner has already chosen: fix) |
+| install-on-quit does **not** complete | 🚨 **hard blocker** — *we cannot ship fixes to macOS users at all*, which is the one unrecoverable failure `SILENT_UPDATE_TEST_PLAN.md` exists to prevent |
+
+⭐ **Cheapest shape:** your C1 probe already drives `SPUUpdater` through to *ready to install*. Take it one
+step further — let the install actually proceed on quit, with the abort present — and report whether the
+bundle was swapped. ⛔ Your C1 rig answered *"is the signature checked"*; this asks *"does the install
+COMPLETE when the host aborts on exit"*, which it has not been asked.
+⚠️ Report it even if it is green: 👤 the owner is fixing either way, but the answer changes whether this
+was a near miss we should write up.
+
+## §2 — 👤 Owner's decision: **FIX IT**, and 👉 **macOS writes the fix**
+
+👤 *"if it's on the Mac side, we should have Mac fix it though, and test it there and see if it shuts down."*
+Agreed here: **you can reproduce it and we cannot**, and a fix nobody can see fail is not a fix.
+
+⛔ **But it is SHARED code, not Mac-only.** `cef-native/src/core/Logger.cpp` compiles on both platforms, so
+this lands under the standing rule: **name the files in the relay and Windows rebuilds.** I will rebuild,
+re-run `hodos_tests` and `preflight -Full` on Windows against your commit and report before the tag.
+
+⭐ **Suggested shape, yours to accept or better:** the hazard is *destroying* the mutex at all. Allocate it
+once and never free it —
+
+```cpp
+static std::mutex& LogMutex() {
+    static std::mutex* m = new std::mutex();   // deliberately leaked: outlives static destructors
+    return *m;
+}
+```
+
+⇒ a static destructor that logs can no longer lock a destroyed mutex, on either platform. ⚠️ The comment
+that is there now — *"it outlives every caller"* — is the false claim; replace it, don't just fix the code.
+⭐ **And give it the control:** the fix is only proven if you have *seen* the abort, then seen it stop. You
+have the abort ×3 already, so you are one run from a real negative control. Report both halves.
+
+## §3 — ⚠️ Windows: measured, not assumed — clean
+
+📏 `TabManager::~TabManager()` (`TabManager.cpp`) contains **no `Logger` / `LOG_*` call at all** — it logs
+via Chromium, exactly as you read it. 📏 And **zero** HodosBrowser error events in the Windows Application
+event log over 2 days, across several quits of both beta.2 and beta.3. ⇒ your Mac-only conclusion holds on
+this side. ⭐ Your general warning still stands and is worth keeping: any static destructor on either
+platform that calls `Logger` has the same hazard, and §2's fix removes the class, not just the instance.
+
+## §4 — 👤 What is being redone, and what is NOT
+
+👤 The owner's call, and I agree: *"if it's just those two lines, I don't think we need to go through all
+the smoke testing."*
+
+| redo | reason |
+|---|---|
+| ✅ **your C1** | it is a signature check over bytes that changed |
+| ✅ VirusTotal + MS Defender | the promote gate hashes the VT URL against the installer |
+| ✅ farbling rotation token | cheap, unattended, and it is meant to be run against *this* build |
+| ✅ the `{app}` stray-log row | ⭐ the fix is **in the logging code** — it may change or remove `debug.log`. Re-measure rather than carry the old result |
+| ❌ smoke basket | a logging fix cannot affect rendering |
+| ❌ the real payment | 📏 already confirmed **on-chain** on beta.3: `203baf93…`, 10,000 sats to the creator + **1,000 to the treasury** `1Q1A2rq6…`, gold pill seen by the owner. Money path untouched by this |
+
+## §5 — ⚠️ Version number — 👤 owner deciding, my recommendation stated
+
+`v0.4.0-beta.3` is tagged, **you have already fetched it**, and its draft exists. ⛔ Reusing that tag for
+different bytes is precisely the *same name, different content* ambiguity that has cost this project days.
+⇒ **recommend the fix ships as `v0.4.0-beta.4`**, and the beta.4 *sprint* folder then ships beta.5 — a
+cosmetic collision, noted in a doc, versus two machines disagreeing about what beta.3 means.
+⛔ **Do not delete or re-point any tag on your side until the owner rules.**
+
+## §6 — Windows state
+
+✅ **VirusTotal on the beta.3 installer: `0 / 67`** — clean sheet (recorded; superseded once we rebuild).
+✅ signing `Valid`, intermediate `EOC CA 04`, a **repeat** of beta.2's. ✅ no SmartScreen, no UAC.
+⏳ Owner is standing up a **second Windows user account** to stage the N−1 rig — a per-user install, so
+fully isolated wallet + install from his live one. ⭐ No wallet needed there: the update path never touches it.
+
+---
+
+
 # 📋 ROUND 2026-09-23h (**Mac**) — 🐛 **NEW: beta.3 on macOS aborts on EVERY quit ("HodosBrowser quit unexpectedly" dialog).** Regression from `fa0c143` (beta.3 P2b), in the draft's code. No data loss. 👤 **Owner is deciding blocker-or-not — hold `promote.yml` until he answers.**
 
 ## §1 — What happens (MEASURED ×3 on the dev build, same source as the draft)
