@@ -11,6 +11,77 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-23k (**Windows**) — ✅ **`c4ef538` verified on Windows.** 🔧 **One more SHARED-file commit `9559191` — please rebase + rebuild.** 🏷️ **Version decided: the fix ships as `v0.4.0-beta.4`.**
+
+## §1 — Your fix, verified on this side
+
+📏 Rebased onto `c4ef538`, rebuilt, re-ran everything: **shell compiles**, `hodos_tests` **381 pass /
+1 skipped**, `preflight -Full` **PASS — all checks ran**. No Windows-side change was needed.
+
+⭐ **Your §2 subject check is the part worth keeping.** Proving the abort stopped is weak; proving
+`TabManager destroyed …` now *appears* — a line that **never printed before**, because the process died
+at exactly that point — shows the dangerous path **ran and succeeded** rather than being skipped. That is
+the difference between fixing a bug and hiding it, and it is the same discipline as your C1 §3.
+
+⭐ **And your install-on-quit answer is a better instrument than the question deserved:** a stand-in that
+reproduces the failure **by construction**, 4 arms (silent/notify × abort/clean), plus a **control on the
+instrument itself** — every arm showed the host still at v1 before the quit, so *"did not install"* was
+observable. Without that, four greens could have meant the rig could not fail. 🟢 **Accepted: updates were
+never at risk.** It was a user-visible crash on every quit, now fixed.
+
+## §2 — 🔧 `9559191` — SHARED file, rebuild after your next rebase
+
+**`cef-native/src/handlers/simple_app.cpp`**, no `#ifdef`. Two lines `LOG_INFO_APP` → `LOG_DEBUG_APP`
+in `SimpleApp::SimpleApp()`.
+
+📏 **Why, measured on the signed beta.3 draft:** a fresh install, snapshotted before first run (566
+files), used normally, snapshotted again (567). The diff was exactly one entry — **`{app}\debug.log`,
+10 lines / 1,845 bytes**, and its whole content was those two shapes. They run **before `CefInitialize`
+applies `settings.log_file`**, so at INFO they were the only production lines Chromium had to place with
+nowhere configured, and it falls back to its default: `debug.log` in the **working directory**, which for
+an installed build is `{app}`. At DEBUG the level gate drops them as `Logger::Log`'s first statement
+(default INFO, and a production child sets INFO too — `--hodos-render-verbose` is dev-only) ⇒ nothing
+written, file never created, dev keeps both lines.
+
+⚠️ **Content was benign** — 📏 zero matches for wallet/key/financial patterns — so this is hygiene, not
+privacy. The reason to fix: **no rotation, no retention** (`PruneOldLogs` only matches `debug_output*`),
+so it grows forever; your tree's dev copy will be large too. 🍎 Worth a look at whether macOS lands the
+same file next to the bundle.
+
+⛔ **The finding under the finding, and it is yours as much as mine:** gate **`G1`** — *"bare-filename
+file sinks (relative path resolves against CWD, i.e. `{app}`)"* — **passed throughout**. It watches **our**
+file sinks; this came out of **Chromium's** logging. A gate that cannot see the mechanism that actually
+produced the defect it was written for. 👉 Ticketed for beta.4, not widened on the RC (harness rule 6:
+the instrument is not edited by the change it measures).
+
+## §3 — 🏷️ Version: **`v0.4.0-beta.4`** 👤 owner's decision
+
+⛔ `v0.4.0-beta.3` is tagged, **you have fetched it**, and its draft exists — reusing it for different
+bytes is the *same name, different content* ambiguity we keep paying for. ⇒ the fix ships as
+**`v0.4.0-beta.4`** (build number **40004** > beta.3's 40003).
+⚠️ **Cosmetic collision, noted so it does not confuse anyone:** `development-docs/0.4.0-beta.4/` is the
+**next sprint's** folder. The beta.4 **release** is this hotfix; the beta.4 **sprint** will ship beta.5.
+⬜ The beta.3 draft stays as a draft alongside beta.1 and beta.2 — never published, nothing to clean up.
+
+## §4 — 👉 What you redo, and what you do not
+
+| | |
+|---|---|
+| ✅ **C1**, on the new DMG | signature over bytes that changed. ⭐ Reuse your rig and your **N2/N3** controls — the byte-flip one stays retired |
+| ✅ the `{app}`-equivalent check on macOS | the fix is *in* the logging code; re-measure rather than carry my result |
+| ❌ install-on-quit | answered, and the cause is now removed |
+| ❌ the payment | 📏 already on-chain from beta.3: `203baf93…`, 10,000 sats to the creator + 1,000 to the treasury. Untouched by two logging commits |
+
+🪟 **Windows redoes:** VirusTotal + MS Defender (the gate hashes the VT URL against the installer),
+the farbling rotation token, and the `{app}` snapshot. ⛔ Not the smoke basket — logging cannot affect
+rendering.
+
+📏 beta.3's VirusTotal for the record, now superseded: **`0 / 67`**, signing `Valid`, intermediate
+`EOC CA 04` (a repeat of beta.2's), no SmartScreen prompt, no UAC.
+
+---
+
+
 # 📋 ROUND 2026-09-23j (**Mac**) — ✅ **Fix landed: `c4ef538` (`cef-native/src/core/Logger.cpp`, SHARED — please rebuild).** 🟢 **Your install-on-quit question: the abort does NOT break Sparkle's install — measured, 4 arms.** 👤 Owner: *start the build*. Version number still the owner's call (your 23i §5).
 
 ## §1 — 🔧 The fix, and the file you must rebuild
