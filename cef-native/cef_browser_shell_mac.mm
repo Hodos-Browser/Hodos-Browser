@@ -2878,8 +2878,7 @@ static void InstallCookiePanelClickOutsideMonitor() {
 
             // Check if click is inside the cookie panel overlay
             NSPoint screenLocation = [NSEvent mouseLocation];
-            NSRect overlayFrame = [g_cookie_panel_overlay_window frame];
-            if (!NSPointInRect(screenLocation, overlayFrame)) {
+            if (!OverlayHitsContent(g_cookie_panel_overlay_window, screenLocation)) {  // transparent pixel = outside
                 // Click outside — hide the overlay
                 HideCookiePanelOverlay();
             }
@@ -3789,8 +3788,7 @@ static void InstallSettingsMenuClickOutsideMonitor() {
 
             // Check if click is inside the settings menu overlay
             NSPoint screenLocation = [NSEvent mouseLocation];
-            NSRect overlayFrame = [g_settings_menu_overlay_window frame];
-            if (!NSPointInRect(screenLocation, overlayFrame)) {
+            if (!OverlayHitsContent(g_settings_menu_overlay_window, screenLocation)) {  // transparent pixel = outside
                 // Click outside — hide the overlay
                 HideSettingsMenuOverlay();
             }
@@ -3920,8 +3918,7 @@ static void InstallOmniboxClickOutsideMonitor() {
                 return event;
             }
             NSPoint screenLocation = [NSEvent mouseLocation];
-            NSRect overlayFrame = [g_omnibox_overlay_window frame];
-            if (!NSPointInRect(screenLocation, overlayFrame)) {
+            if (!OverlayHitsContent(g_omnibox_overlay_window, screenLocation)) {  // transparent pixel = outside
                 [g_omnibox_overlay_window orderOut:nil];
                 RemoveOmniboxClickOutsideMonitor();
                 g_omnibox_last_hide_time = CFAbsoluteTimeGetCurrent();
@@ -4080,8 +4077,7 @@ static void InstallDownloadPanelClickOutsideMonitor() {
                 return event;
             }
             NSPoint screenLocation = [NSEvent mouseLocation];
-            NSRect overlayFrame = [g_download_panel_overlay_window frame];
-            if (!NSPointInRect(screenLocation, overlayFrame)) {
+            if (!OverlayHitsContent(g_download_panel_overlay_window, screenLocation)) {  // transparent pixel = outside
                 [g_download_panel_overlay_window orderOut:nil];
                 RemoveDownloadPanelClickOutsideMonitor();
                 g_download_panel_last_hide_time = CFAbsoluteTimeGetCurrent();
@@ -4216,8 +4212,7 @@ static void InstallProfilePanelClickOutsideMonitor() {
                 return event;
             }
             NSPoint screenLocation = [NSEvent mouseLocation];
-            NSRect overlayFrame = [g_profile_panel_overlay_window frame];
-            if (!NSPointInRect(screenLocation, overlayFrame)) {
+            if (!OverlayHitsContent(g_profile_panel_overlay_window, screenLocation)) {  // transparent pixel = outside
                 [g_profile_panel_overlay_window orderOut:nil];
                 RemoveProfilePanelClickOutsideMonitor();
                 g_profile_panel_last_hide_time = CFAbsoluteTimeGetCurrent();
@@ -4401,8 +4396,7 @@ static void InstallBookmarksPanelClickOutsideMonitor() {
                 return event;
             }
             NSPoint screenLocation = [NSEvent mouseLocation];
-            NSRect overlayFrame = [g_bookmarks_panel_overlay_window frame];
-            if (!NSPointInRect(screenLocation, overlayFrame)) {
+            if (!OverlayHitsContent(g_bookmarks_panel_overlay_window, screenLocation)) {  // transparent pixel = outside
                 [g_bookmarks_panel_overlay_window orderOut:nil];
                 RemoveBookmarksPanelClickOutsideMonitor();
                 g_bookmarks_panel_last_hide_time = CFAbsoluteTimeGetCurrent();
@@ -4535,8 +4529,7 @@ static void InstallSiteInfoPanelClickOutsideMonitor() {
                 return event;
             }
             NSPoint screenLocation = [NSEvent mouseLocation];
-            NSRect overlayFrame = [g_siteinfo_panel_overlay_window frame];
-            if (!NSPointInRect(screenLocation, overlayFrame)) {
+            if (!OverlayHitsContent(g_siteinfo_panel_overlay_window, screenLocation)) {  // transparent pixel = outside
                 [g_siteinfo_panel_overlay_window orderOut:nil];
                 RemoveSiteInfoPanelClickOutsideMonitor();
                 g_siteinfo_panel_last_hide_time = CFAbsoluteTimeGetCurrent();
@@ -4666,8 +4659,7 @@ static void InstallTabListPanelClickOutsideMonitor() {
                 return event;
             }
             NSPoint screenLocation = [NSEvent mouseLocation];
-            NSRect overlayFrame = [g_tablist_panel_overlay_window frame];
-            if (!NSPointInRect(screenLocation, overlayFrame)) {
+            if (!OverlayHitsContent(g_tablist_panel_overlay_window, screenLocation)) {  // transparent pixel = outside
                 [g_tablist_panel_overlay_window orderOut:nil];
                 RemoveTabListPanelClickOutsideMonitor();
                 g_tablist_panel_last_hide_time = CFAbsoluteTimeGetCurrent();
@@ -4900,7 +4892,7 @@ static void InstallTabMenuClickOutsideMonitor() {
             return event;
         }
         NSPoint screenLocation = [NSEvent mouseLocation];
-        if (!NSPointInRect(screenLocation, [g_tabmenu_overlay_window frame])) {
+        if (!OverlayHitsContent(g_tabmenu_overlay_window, screenLocation)) {  // transparent pixel = outside
             HideTabContextMenuOverlayMacOS();
         }
         return event;
@@ -6523,8 +6515,7 @@ static void InstallMenuClickOutsideMonitor() {
                 return event;
             }
             NSPoint screenLocation = [NSEvent mouseLocation];
-            NSRect overlayFrame = [g_menu_overlay_window frame];
-            if (!NSPointInRect(screenLocation, overlayFrame)) {
+            if (!OverlayHitsContent(g_menu_overlay_window, screenLocation)) {  // transparent pixel = outside
                 [g_menu_overlay_window orderOut:nil];
                 RemoveMenuClickOutsideMonitor();
                 g_menu_overlay_last_hide_time = CFAbsoluteTimeGetCurrent();

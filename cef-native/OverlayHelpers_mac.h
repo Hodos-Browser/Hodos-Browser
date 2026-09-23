@@ -17,6 +17,15 @@
 void InstallClickOutsideMonitor(NSWindow* overlayWindow);
 void RemoveClickOutsideMonitor(NSWindow* overlayWindow);
 
+// Does a click at `screenPoint` land on the overlay's CONTENT — inside its frame AND on
+// a pixel that is not fully transparent? Every click-outside check must use this, not
+// NSPointInRect on the frame: overlay windows are larger than what React draws in them
+// (the "dead strip" — 305 px under the wallet panel, measured 2026-09-23), and a click
+// on a transparent pixel must dismiss exactly like a click outside the window. Windows
+// gets this for free from UpdateLayeredWindow(ULW_ALPHA); a macOS NSWindow does not.
+// Fails SAFE to the old frame-only answer when no painted image is available yet.
+bool OverlayHitsContent(NSWindow* overlayWindow, NSPoint screenPoint);
+
 // App focus loss (INFRA-02)
 // Registers NSApplicationDidResignActiveNotification to close
 // dropdown overlays when the user Cmd+Tabs away. Wallet overlay

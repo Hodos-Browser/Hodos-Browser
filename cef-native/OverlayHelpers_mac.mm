@@ -42,6 +42,49 @@ extern void CloseWalletOverlay();
 // When a click lands outside the overlay window, the overlay is closed and
 // the monitors are removed.
 
+bool OverlayHitsContent(NSWindow* overlayWindow, NSPoint screenPoint) {
+    if (!overlayWindow) return false;
+    if (!NSPointInRect(screenPoint, [overlayWindow frame])) return false;
+
+    // From here on every "can't tell" answer is TRUE: the pre-fix behaviour, where the
+    // whole frame counted as the overlay. Never dismiss on a guess.
+    NSView* view = [overlayWindow contentView];
+    id contents = view ? [[view layer] contents] : nil;
+    if (!contents || CFGetTypeID((__bridge CFTypeRef)contents) != CGImageGetTypeID()) return true;
+    CGImageRef image = (__bridge CGImageRef)contents;
+
+    NSRect bounds = [view bounds];
+    size_t imgW = CGImageGetWidth(image), imgH = CGImageGetHeight(image);
+    if (bounds.size.width <= 0 || bounds.size.height <= 0 || imgW == 0 || imgH == 0) return true;
+    // MyOverlayRenderHandler::OnPaint writes 32-bit BGRA (alpha last in memory). Anything
+    // else — or an image whose aspect does not match the view, e.g. a PET_POPUP frame —
+    // cannot be mapped reliably.
+    if (CGImageGetBitsPerPixel(image) != 32) return true;
+    double sx = imgW / bounds.size.width, sy = imgH / bounds.size.height;
+    if (sx / sy < 0.98 || sx / sy > 1.02) return true;
+
+    NSPoint p = [view convertPoint:[overlayWindow convertPointFromScreen:screenPoint] fromView:nil];
+    long px = (long)(p.x * sx);
+    long py = (long)(([view isFlipped] ? p.y : bounds.size.height - p.y) * sy);  // image row 0 = top
+    if (px < 0 || py < 0 || px >= (long)imgW || py >= (long)imgH) return true;
+
+    CFDataRef data = CGDataProviderCopyData(CGImageGetDataProvider(image));
+    if (!data) return true;
+    size_t offset = (size_t)py * CGImageGetBytesPerRow(image) + (size_t)px * 4 + 3;
+    bool hits = true;
+    if (offset < (size_t)CFDataGetLength(data)) {
+        UInt8 alpha = CFDataGetBytePtr(data)[offset];
+        hits = alpha != 0;  // exactly 0, as ULW_ALPHA hit-testing does on Windows
+        if (!hits) {
+            LOG_INFO("🖱️ Click on a transparent overlay pixel (" + std::to_string(px) + "," +
+                     std::to_string(py) + " of " + std::to_string(imgW) + "x" +
+                     std::to_string(imgH) + ") — treated as outside");
+        }
+    }
+    CFRelease(data);
+    return hits;
+}
+
 static NSMutableDictionary<NSValue*, NSArray*>* s_clickOutsideMonitors = nil;
 
 static NSMutableDictionary<NSValue*, NSArray*>* GetMonitorDict() {
@@ -93,9 +136,10 @@ void InstallClickOutsideMonitor(NSWindow* overlayWindow) {
             NSWindow* overlay = unsafeOverlay;
             if (!overlay) return event;
 
-            // If the click is in the overlay window itself, let it through
+            // If the click is on the overlay's drawn content, let it through. A click on
+            // the overlay WINDOW but on a transparent pixel is a click outside.
             NSWindow* clickedWindow = [event window];
-            if (clickedWindow == overlay) {
+            if (clickedWindow == overlay && OverlayHitsContent(overlay, [NSEvent mouseLocation])) {
                 return event;
             }
 

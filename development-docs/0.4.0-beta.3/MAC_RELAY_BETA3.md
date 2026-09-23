@@ -11,6 +11,71 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-23b (**Mac**) — 🐛 **macOS overlay "dead strip" FIXED for every click-outside overlay: a click on a TRANSPARENT pixel of an overlay now dismisses it, exactly like a click outside.** Mac-only C++ (`OverlayHelpers_mac.{h,mm}`, `cef_browser_shell_mac.mm`) — 🪟 **nothing for you to rebuild; no shared code.** Also: D9, A8, A12, D1 PASSED by the owner; E2 deferred.
+
+## 1. What the owner hit
+
+Wallet panel open ⇒ clicking **below** it did nothing; he had to click to its **left** to close it. Same
+disease as Phase 1's "dead strip" (MAC_RELAY_P1_ROUND §D1): the overlay WINDOW is larger than what React
+draws in it. 📏 Wallet: window **691 pt**, panel ends at **386** ⇒ a **305 pt** strip that neither reaches
+content nor dismisses. The 7 dropdowns measured today: cookie 500 vs 269–306, downloads 500 vs 133,
+profile 520 vs 315, menu 450 vs 405, bookmarks 520 vs 248, tab-list 480 vs 181, site-info 480 vs 373.
+
+**Why only macOS feels it:** your overlays are `UpdateLayeredWindow(ULW_ALPHA)` layered windows, and
+Windows hit-tests those by per-pixel alpha — a fully transparent pixel passes the click through to the
+window beneath, which your mouse hooks then treat as outside. A macOS borderless NSWindow takes every
+click inside its frame, and all 11 of our macOS click-outside checks tested the **frame**
+(`NSPointInRect(mouseLocation, [w frame])`, or `[event window] == overlay` for the wallet).
+
+## 2. The fix — one predicate, swapped into all 11 checks
+
+`OverlayHitsContent(NSWindow*, NSPoint screen)` (`OverlayHelpers_mac.mm`): inside the frame **AND** the
+pixel under the point in the view layer's current `CGImage` (the one `MyOverlayRenderHandler::OnPaint`
+sets) has **alpha ≠ 0** — the same threshold ULW_ALPHA uses. Every "can't tell" answer (no image yet,
+unexpected pixel format, image/view aspect mismatch as with a `PET_POPUP` frame) returns **true** = the
+old frame-only behaviour, so it never dismisses on a guess. Logs one INFO line when it decides
+"transparent ⇒ outside".
+
+Swapped into: `InstallClickOutsideMonitor` (wallet + menu + generic), cookie, settings-menu, omnibox,
+downloads, profile, bookmarks, site-info, tab-list, tab context menu (L+R), menu. **Not** touched: the
+consent overlays (notification / brc100auth) — full-window by design, no click-outside.
+
+**Prior art (rule 5):** Windows' ULW_ALPHA hit-testing (above) is the behaviour we are matching. Electron's
+answer for transparent click-through windows is `setIgnoreMouseEvents(true, {forward:true})` toggled on
+hover; I did **not** copy that — toggling `ignoresMouseEvents` from mouse-move tracking can go stale when
+the pointer jumps and cannot be verified by a synthetic click, whereas sampling the pixel at mouse-down
+is stateless. **Owner decision (2026-09-23):** this is the beta.3 fix; the proper **sizing contract**
+(derive each window from its content — the D1 recommendation both of us made in Phase 1) stays the
+**beta.4** joint change, because it also fixes the opposite sign (content taller than its window, your
+profile-edit 627-in-520) which click-through cannot. With the sizing contract in, this becomes a no-op
+safety net.
+
+## 3. Evidence — real `CGEventPost` clicks, not CDP
+
+Script committed: `development-docs/0.4.0-beta.3/overlay_deadstrip_sweep.py` (header has usage).
+
+| Overlay | transparent area | inert text mid-panel | outside | **fix removed** (neg. control) |
+|---|---|---|---|---|
+| wallet | closed | stayed open | closed | transparent ⇒ **stayed open** |
+| cookie, downloads, profile, menu, bookmarks, tab-list, site-info | closed ×7 | stayed open ×7 | closed ×7 | transparent ⇒ **stayed open ×7** |
+
+The negative control is a real rebuild with the three files stashed (`nm` shows 0 `OverlayHitsContent`),
+then the fix restored, rebuilt (helper dated 11:47) and the committed script re-run green on that
+binary. Log: exactly one `🖱️ Click on a transparent overlay pixel … treated as outside` per transparent
+click, **none** for the content clicks ⇒ no panel has a see-through gap inside it at the points tested.
+
+⬜ **Not clicked by the script:** the omnibox dropdown and the tab context menu (need typing / a real
+right-click on a tab) — same one-line swap; asking the owner to try them by hand.
+
+## 4. Human rows today (HUMAN_TEST_QUEUE.md)
+
+D9 ✅ (no menu at all on right-click; ⌘⌥I refused — log `DevTools refused on role=wallet`), A8 ✅ (⚠️ a
+YouTube video click is an in-page swap and does **not** exercise the re-apply; ⌘R did:
+`🔇 Re-applied mute to tab 2 after navigation`), A12 ✅, D1 ✅ (T1g runs as-is on macOS, green + its
+negative control 1.08:1, and the owner read the real modal), E2 ⏸️ no second display.
+
+---
+
 # 📋 ROUND 2026-09-23a (**Mac**) — ✅ **Level-0 (21f §1-A) VERIFIED on macOS.** 🐛 **Found and fixed a macOS-only bug: the connect-bundle permission list could not be scrolled at all** (C++ only, no shared code touched). 🚦 Still nothing on macOS blocks the build.
 
 👤 Owner back today; both results below come from his hands on a real trackpad.
