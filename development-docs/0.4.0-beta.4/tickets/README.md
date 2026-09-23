@@ -65,9 +65,10 @@ existing links use it. Describe the **symptom or the defect**, not the fix:
 | `TICKET_well_known_auth_returns_a_key_it_cannot_sign_for.md` | ⬜ UNASSIGNED | — | 2026-09-21 |
 | `TICKET_brc121_client_has_no_body_transport_for_large_beef.md` | ⬜ UNASSIGNED | — (decision at the microscope pass; waits on BRCs #261) | 2026-09-23 |
 | `TICKET_mkcert_dev_private_key_is_tracked_and_public.md` | ⬜ UNASSIGNED | — (🟡 low; regenerate, do NOT rewrite history) | 2026-09-23 |
+| `TICKET_chromium_default_debug_log_lands_in_install_root.md` | ⬜ UNASSIGNED | — (🟡 low; ⛔ NOT the wallet-data stray log, which is FIXED) | 2026-09-23 |
 
-🚨 **This index is behind the folder.** There are **15 tickets** on disk (16 files, one is the
-template) and the table lists **7**. The eight missing rows are `active_user_count…`,
+🚨 **This index is behind the folder.** There are **16 tickets** on disk (17 files, one is the
+template) and the table lists **8**. The eight missing rows are `active_user_count…`,
 `brc103_server_identity_unverified`, `brc140_key_shares_vs_bip39`,
 `menu_exit_closes_primary_not_the_clicked_window`, `multiwindow_session_restore…`,
 `split_view_needs_multi_visible_tab_model`, `tab_pin_and_mute_need_model_changes` and
