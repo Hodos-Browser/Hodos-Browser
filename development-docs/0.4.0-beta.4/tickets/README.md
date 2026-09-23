@@ -60,9 +60,13 @@ existing links use it. Describe the **symptom or the defect**, not the fix:
 |---|---|---|---|
 | `TICKET_e2e_specs_wrong_subject_and_never_run.md` | ⬜ UNASSIGNED | — | 2026-08-29 |
 | `TICKET_dapp_reachable_surface_is_a_denylist_not_an_allowlist.md` | ⬜ UNASSIGNED | — (⭐ suggest track 1) | 2026-09-19 |
+| `TICKET_brc100_consent_model_diverges_from_1sat_wallet_api.md` | ⬜ UNASSIGNED | — (⭐ suggest track 2) | 2026-09-21 |
+| `TICKET_derived_public_keys_have_no_prompt_and_can_match_across_sites.md` | ⬜ UNASSIGNED | — | 2026-09-21 |
+| `TICKET_well_known_auth_returns_a_key_it_cannot_sign_for.md` | ⬜ UNASSIGNED | — | 2026-09-21 |
+| `TICKET_brc121_client_has_no_body_transport_for_large_beef.md` | ⬜ UNASSIGNED | — (decision at the microscope pass; waits on BRCs #261) | 2026-09-23 |
 
-🚨 **This index is behind the folder.** There are **10 tickets** on disk (11 files, one is the
-template) and the table lists **2**. The eight missing rows are `active_user_count…`,
+🚨 **This index is behind the folder.** There are **14 tickets** on disk (15 files, one is the
+template) and the table lists **6**. The eight missing rows are `active_user_count…`,
 `brc103_server_identity_unverified`, `brc140_key_shares_vs_bip39`,
 `menu_exit_closes_primary_not_the_clicked_window`, `multiwindow_session_restore…`,
 `split_view_needs_multi_visible_tab_model`, `tab_pin_and_mute_need_model_changes` and
