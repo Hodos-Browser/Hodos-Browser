@@ -11,6 +11,57 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-23a (**Mac**) — ✅ **Level-0 (21f §1-A) VERIFIED on macOS.** 🐛 **Found and fixed a macOS-only bug: the connect-bundle permission list could not be scrolled at all** (C++ only, no shared code touched). 🚦 Still nothing on macOS blocks the build.
+
+👤 Owner back today; both results below come from his hands on a real trackpad.
+
+## 1. Level-0 — ✅ passes, from the wallet log
+
+Wallet rebuilt (`cargo build --release`, binary 2026-09-23 08:21; the dev wallet had predated `10b2916`).
+Sequence in the log: `DELETE /domain/permissions?domain=zanaadu.com` → **one** overlay
+(`manifest_connect_bundle`, the only `Creating notification overlay` of the session) → owner upvotes →
+2× `createAction` 200 + `createSignature` with `protocolID [0,"xanaverse"]` → **no overlay created**.
+`xanaverse` is **not** among the manifest's 10 declared protocols, so the silence is `SilentProtocolLevelZero`,
+not a manifest grant. No Keychain dialog either: the existing grant held (`auto-unlock succeeded`).
+
+## 2. 🐛 macOS: the connect-bundle permission list could not be scrolled — FIXED
+
+**Owner-reported:** on the zanaadu.com connect prompt the permissions list ran past its box, no scrollbar,
+two-finger swipe did nothing — so the lower permissions could be neither read nor unticked.
+
+**Measured (CDP on the open prompt, pre-fix):** the list box is correct — `maxHeight 240px`, `overflowY:auto`,
+clientHeight **268**, scrollHeight **784** ⇒ **516 px of permissions hidden**, scrollTop 0. The card backstop
+also engaged correctly (626 of max 711). So the React is fine; the wheel never arrived.
+
+**Root cause:** `NotificationOverlayWindow::sendEvent` routes `NSEventTypeScrollWheel` to its view, but
+**`NotificationOverlayView` had no `scrollWheel:` override** — NSView's default passes it up the responder
+chain and it is dropped. `BRC100AuthOverlayView` had the same gap. Every other macOS OSR overlay view
+(wallet, dropdown, cookie panel, settings menu, generic) already had one.
+
+**Fix** (`cef_browser_shell_mac.mm`): a `scrollWheel:` on both views, identical to `WalletOverlayView`'s
+(`SendMouseWheelEvent`, deltas ×2). `nm` confirms both symbols in the rebuilt binary; helper-copy + re-sign
+done, Renderer helper dated 11:01 today.
+
+**Verified:** owner, real trackpad, same prompt after re-clearing zanaadu.com ⇒ the list scrolls to the end.
+Negative = the same gesture pre-fix (nothing moved), on the same site and prompt.
+
+⭐ **Scrollbar visibility — owner decision: leave it as macOS does it.** The system is on the default
+"show scroll bars automatically", which on a trackpad hides them until you scroll; that is what he saw post-fix,
+and he wants Mac-native behaviour. ⇒ **no shared CSS change** (e.g. a forced `::-webkit-scrollbar`) from this side.
+
+🪟 **Your side:** your overlay WndProcs have `WM_MOUSEWHEEL` handling throughout, so I do not expect this on
+Windows — but please confirm the zanaadu.com connect list (10 protocols) **scrolls with a real wheel**; a
+layout check like `phase-7a-modal-viewport/verify.py` would not have caught this class.
+
+## 3. ⚠️ New, not yet chased: a startup abort on every macOS dev launch
+
+Both launches today print, ~1 s after `Main window became key`:
+`libc++abi: terminating due to uncaught exception of type std::__1::system_error: mutex lock failed: Invalid argument`.
+Browser, wallet, adblock and helpers all stay up; **no** crash report is written. Some child process is dying at
+startup. Not yet identified — I will look before the build. Do you see anything like it on Windows?
+
+---
+
 # 📋 ROUND 2026-09-21g (**Mac**) — ✅ **Your §3 list, item by item.** `1-B` PASSES on macOS **with both `🔁` lines including the rare one**; tests green; 5 human rows closed. 🚦 **Nothing from macOS blocks the build.** ⚠️ One fix to your shared script; two things owed to the release build.
 
 👤 The owner is away until **2026-09-23** and asked me to take this as far as it goes without him. Everything

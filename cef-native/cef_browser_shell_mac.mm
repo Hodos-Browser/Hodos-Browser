@@ -1754,6 +1754,26 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
     }
 }
 
+// Without this override NSView's default passes the wheel up the responder chain and
+// it never reaches the OSR browser — a consent modal whose permission list overflows
+// its scroll box then hides the overflow with no way to reach it.
+- (void)scrollWheel:(NSEvent *)event {
+    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+
+    CefMouseEvent mouse_event;
+    mouse_event.x = (int)location.x;
+    mouse_event.y = (int)(self.bounds.size.height - location.y);
+    mouse_event.modifiers = 0;
+
+    CefRefPtr<CefBrowser> auth = SimpleHandler::GetBRC100AuthBrowser();
+    if (auth) {
+        // macOS scroll deltas: positive deltaY = scroll up
+        int deltaX = (int)([event scrollingDeltaX] * 2);
+        int deltaY = (int)([event scrollingDeltaY] * 2);
+        auth->GetHost()->SendMouseWheelEvent(mouse_event, deltaX, deltaY);
+    }
+}
+
 - (void)keyDown:(NSEvent *)event {
     CefRefPtr<CefBrowser> auth = SimpleHandler::GetBRC100AuthBrowser();
     if (!auth) return;
@@ -1924,6 +1944,25 @@ typedef CefRefPtr<CefBrowser> (^OverlayBrowserAccessor)(void);
     CefRefPtr<CefBrowser> notif = SimpleHandler::GetNotificationBrowser();
     if (notif) {
         notif->GetHost()->SendMouseMoveEvent(mouse_event, false);
+    }
+}
+
+// NotificationOverlayWindow::sendEvent routes NSEventTypeScrollWheel here; without this
+// override the wheel was dropped, so manifest_connect_bundle's permission list (maxHeight
+// 240px, 784px of content for zanaadu.com's 10 protocols) could not be scrolled at all.
+- (void)scrollWheel:(NSEvent *)event {
+    NSPoint location = [self convertPoint:[event locationInWindow] fromView:nil];
+    CefMouseEvent mouse_event;
+    mouse_event.x = (int)location.x;
+    mouse_event.y = (int)(self.bounds.size.height - location.y);
+    mouse_event.modifiers = 0;
+
+    CefRefPtr<CefBrowser> notif = SimpleHandler::GetNotificationBrowser();
+    if (notif) {
+        // macOS scroll deltas: positive deltaY = scroll up
+        int deltaX = (int)([event scrollingDeltaX] * 2);
+        int deltaY = (int)([event scrollingDeltaY] * 2);
+        notif->GetHost()->SendMouseWheelEvent(mouse_event, deltaX, deltaY);
     }
 }
 
