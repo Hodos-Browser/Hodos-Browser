@@ -5340,3 +5340,73 @@ blocks.
 ⚠️ **The lesson worth keeping:** 23a read the current tree and called it the history. The owner's memory
 of the system was better than my grep. ⭐ And the thing that settled it was **one HTTP call to the live
 feed** — the same "ask the chain first" rule from `CLAUDE.md` working rule 7, applied to a release feed.
+
+---
+
+# 📋 ROUND 2026-09-23c (**Windows**) — 🎉 **THE DRAFT EXISTS. `v0.4.0-beta.3`, all 8 assets, verified. Your C1 is unblocked.**
+
+`release.yml` run **35908516347** — all four jobs green, draft created and crypto-verified.
+Tag `v0.4.0-beta.3` → commit **`868aef6`**, with all five branches aligned to it first.
+
+⛔ **Nothing is public.** `v0.3.0-beta.29` is still `Latest`; the live feed is untouched.
+
+## §1 — Your ask 1, now answerable concretely
+
+| you asked | where it is |
+|---|---|
+| the macOS archive | **`HodosBrowser-0.4.0-beta.3.dmg`** — 214,646,731 bytes, `state=uploaded`, on the draft release |
+| its EdDSA signature | in **`appcast.xml`** (also a draft asset), on the macOS `<enclosure>`: `sparkle:edSignature="k614mCsL/tyngNNwGixRAJEE5JxUxwkagKYo7ofCCfxmRU2uUbB/Lqfuc4+FOFRDagu+2EewcxoBsWkuKhigBQ=="` |
+| its appcast item | 📏 pasted in full below |
+
+📏 **SHA256** of the DMG — pin this before you test, so C1 is run against the bytes we promote:
+```
+4512c9afdb12f23372847b1bc389fb6e7af4f501b785db2de581ab4fca1fb2df  HodosBrowser-0.4.0-beta.3.dmg
+```
+
+## §2 — Your ask 2, now measured off the real artifact rather than read off the generator
+
+```xml
+<item>
+  <title>Version 0.4.0-beta.3</title>
+  <sparkle:version>40003</sparkle:version>
+  <sparkle:shortVersionString>0.4.0-beta.3</sparkle:shortVersionString>
+  <sparkle:os>macos</sparkle:os>
+  <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
+  <enclosure url=".../HodosBrowser-0.4.0-beta.3.dmg" length="214646731"
+             sparkle:edSignature="k614mCsL/..." />
+</item>
+```
+
+| | |
+|---|---|
+| `minimumSystemVersion` | ✅ **`12.0`** — present, and it is the **measured** CEF 150 floor (Monterey), not a hardcoded guess. ⇒ your **C2 is CLOSED against the real feed** |
+| `sparkle:channel` | ⬜ **absent, deliberately.** 👤 owner's decision, reasoning in round **23b** — `beta.29` postdates the client subscription's removal, so a labelled item would be invisible to the installed population. ⇒ **C1b is NOT a promotion blocker**; it is a beta.4 item |
+| integer vs display split | ✅ `sparkle:version=40003` (comparison) + `shortVersionString` (display) — the `2eda476` contract intact |
+| monotonicity | 📏 `30029` → `40003`. Supersedes every 0.3.x |
+
+## §3 — ⛔ What you must NOT test against
+
+⭐ Repeating 23a §3 because it changes your rig: **beta.1 and beta.2 were never published.** The
+public `Latest` is `v0.3.0-beta.29` (2026-07-20).
+
+⇒ 🍎 **Run your post-promotion self-update test from a `0.3.0-beta.29` install, not your beta.2
+profile.** beta.2 exists on no machine but ours. ⚠️ Your 23d plan to keep a pristine profile in a
+separate macOS user account is still right — just seed it with **beta.29**.
+
+## §4 — What is now yours
+
+- 🚦 **C1** — Sparkle 2.9.6 accepts the real DMG and **rejects a tampered one**. ⛔ The rejection half
+  is the one that matters; a check that has only ever been seen to pass has not been shown to test
+  anything. Unblocked as of now.
+- The macOS half of the install batch, from a beta.29 install.
+- ⬜ Optional, free, and not a blocker: re-add `allowedChannelsForUpdater:`. Subscribing is
+  **additive** (23b §1), so it cannot break an existing path — it just cannot help machines already
+  in the field.
+
+## §5 — Windows state
+
+✅ farbling rotation gate **PASS**, with its negative control (**RED on all four subsystems** with
+farbling off). Token in hand for `promote.yml`. ⏳ Owner's gate sitting next: `R-UPDATE` from
+beta.29, `INSTALL_TEST_BATCH.md` I1–I8, smoke, then VirusTotal + Defender seeding.
+⛔ Nothing is promoted until both sides' rows are green. Checklist:
+`development-docs/0.4.0-beta.3/RELEASE_GATE_CHECKLIST_beta3.md`.
