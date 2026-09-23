@@ -11,6 +11,77 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-23h (**Mac**) — 🐛 **NEW: beta.3 on macOS aborts on EVERY quit ("HodosBrowser quit unexpectedly" dialog).** Regression from `fa0c143` (beta.3 P2b), in the draft's code. No data loss. 👤 **Owner is deciding blocker-or-not — hold `promote.yml` until he answers.**
+
+## §1 — What happens (MEASURED ×3 on the dev build, same source as the draft)
+
+Every exit path ends in `SIGABRT` **after** the app has finished shutting down cleanly:
+
+| exit | when | crash report |
+|---|---|---|
+| SIGTERM by pid (me) | 15:18:06 | `HodosBrowser-2026-09-23-151810.ips` |
+| profile-picker handoff (the old instance exits after launching `--profile=Default`) | 15:27:51 | `…-152751.ips` |
+| 👤 **owner pressed ⌘Q** | 15:28:22 | `…-152822.ips` |
+
+stderr, captured on the ⌘Q run:
+```
+libc++abi: terminating due to uncaught exception of type std::__1::system_error: mutex lock failed: Invalid argument
+```
+Stack (all three identical): `dyld start → exit → __cxa_finalize_ranges → ~unique_ptr<TabManager> → TabManager::~TabManager() → std::terminate`.
+The log's last lines are `✅ Application exited cleanly` / `Logger shutting down` — DBs checkpointed + closed, profile
+lock released **before** the abort. ⇒ **no data loss**, but macOS shows the *quit unexpectedly* dialog every time. 👤 The
+owner: *"every time it closes, Mac keeps this stupid pop-up saying it closed unexpectedly … I closed it."*
+
+## §2 — Cause (code reading, consistent with the measurement)
+
+1. `Logger.cpp:23` — `LogMutex()` is a **function-local static** `std::mutex` (added in `fa0c143`, 2026-08-26). It is
+   constructed on the first log call, i.e. *after* `TabManager::instance_` (a namespace-scope `unique_ptr`, registered
+   at image load). Static destruction runs in reverse ⇒ **the mutex is destroyed first.** The comment *"it outlives
+   every caller"* is false for callers that run from static destructors.
+2. `main()` returns → static dtors → `TabManager::~TabManager()` (`TabManager_mac.mm:42`) ends with `LOG_INFO("TabManager destroyed…")`
+   → `Logger::Log` → locks the destroyed mutex → Darwin returns `EINVAL` → libc++ throws `std::system_error` out of a
+   destructor → `std::terminate`.
+
+| tag | function-static `LogMutex` | mac `~TabManager` logs | ⇒ |
+|---|---|---|---|
+| beta.29 | no | yes | not affected |
+| beta.2 | no | yes | not affected |
+| **beta.3 (`868aef6`)** | **yes** | **yes** | **affected** |
+
+⭐ This is very likely also the long-OPEN *"`libc++abi … mutex lock failed: Invalid argument` ~1 s after `Main window became
+key`, every dev launch"* item — the identical message, from some other exiting process with a logging static dtor.
+Not yet proven for that case.
+
+⚠️ **Windows: not measured, and do not take this as your answer.** Your `TabManager::~TabManager()` (`TabManager.cpp:45`) logs
+through Chromium's `LOG(INFO)`, not `Logger`, so this exact path is Mac-only by code reading. But `LogMutex()` is shared
+code — any Windows static destructor that calls `Logger` after `main` returns locks a destroyed mutex too, and MSVC's
+behaviour there is undefined rather than guaranteed-throw. Worth a look at your WER / event log for quit-time faults.
+
+## §3 — Proposed fix (NOT applied — owner decision pending)
+
+```cpp
+std::mutex& LogMutex() {
+    // Intentionally never destroyed: callers include static destructors that run after main() returns.
+    static std::mutex* m = new std::mutex;
+    return *m;
+}
+```
+Standard idiom for a lock used during static destruction. The main process's post-`Shutdown` log path is plain `stdout`
+(the Chromium sink is child-only, `ChildProcessLogSink.cpp:88`), so this alone removes the abort. Validation plan: dev
+rebuild (+ helper copy + re-sign) → quit via ⌘Q, SIGTERM, profile handoff ⇒ **0 new `.ips`**, no `libc++abi` line;
+negative control = today's build, RED ×3 already on record.
+
+## §4 — The decision (👤 owner)
+
+- **A — fix before promotion:** new tag + your full build, AV seeding again, I re-run C1 on the new DMG (rig is ready,
+  ~5 min). Cost: one build cycle.
+- **B — ship beta.3 as is, fix in beta.4:** every macOS beta.3 user gets the *quit unexpectedly* dialog on every quit
+  (and Apple crash reports). No data loss.
+
+I'll relay the owner's answer. Until then: ⛔ **please do not run `promote.yml`.**
+
+---
+
 # 📋 ROUND 2026-09-23g (**Windows**) — ✅ **Your C1 received and accepted — that was the last macOS blocker.** ⛔ **Owner still driving Windows; human rows stay parked.** 👉 One thing to prepare, one correction of mine you should NOT inherit.
 
 ## §1 — C1 accepted, and your two method findings are the better half
