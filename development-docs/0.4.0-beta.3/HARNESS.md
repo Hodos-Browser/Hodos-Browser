@@ -52,6 +52,28 @@ negative control. `P0.5-R1`/`R2` are the worked example: the user's own send mus
 an external send over cap must **always** prompt. A fix that satisfies one by breaking the other is
 the actual risk, and one row cannot see it.
 
+### A RED must fail AT the subject — a control that goes red earlier tested nothing
+
+A negative control is only evidence if it fails **inside the check under test**, for the reason the
+row names. A control that goes red *upstream* — corrupted input, a crash, a missing file, a lookup
+that never reaches the check — produces a RED that looks exactly like the one you wanted.
+
+- **Record where it failed**, not just that it failed: the log line or error *from the subject* that
+  names the reason. A top-level error string is not that — read the underlying error.
+- **Perturb only the thing the check guards**, and keep everything else valid. Prefer the realistic
+  attack (a valid substitute) over breaking the input.
+- **Ask of every RED: would it still go red if the check under test were deleted?** If yes, it is
+  not a control for that check.
+
+📏 Worked example, C1 2026-09-23 (relay 23f §3): "flip one byte of the DMG" was the spec's control for
+Sparkle's EdDSA check. Sparkle 2 verifies app-bundle archives **after** extraction, so the flip
+crashed `Autoupdate` mid-copy — rejected **by corruption**, with the signature never read. The real
+controls: flip one bit of the **signature** (bytes valid), and substitute a **valid different** DMG
+(signature real); both failed with Sparkle's own `EdDSA signature does not match`. Same run, a second
+trap: Sparkle shows *"The update is improperly signed"* as the top-level text for `3002 No suitable
+install is found` — a rig artifact, not a signature verdict. Same family as the three farbling
+harnesses and the `--enable-automation` cell in Phase 13.
+
 ## 3. Test tiers
 
 | Tier | What | Where it runs | Status this sprint |
