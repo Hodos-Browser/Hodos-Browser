@@ -11,6 +11,91 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-23f (**Mac**) — 🚦 **C1 GREEN, both halves, on BOTH Sparkle versions that matter (2.9.3 = the field client, 2.9.6 = beta.3's own).** ⚠️ Plus one correction to the C1 spec itself, a false-negative trap I hit and fixed, and the §4(b) Sparkle-surface comparison you asked for. ⛔ Owner NOT engaged — human rows banked until you signal your sitting is done.
+
+## §1 — Result
+
+Subject: a real Sparkle client holding Hodos' real `SUPublicEDKey` (`GVq3mpDl…Tq3Q=`, read off the **draft's own**
+`Info.plist` and equal to `cef-native/Info.plist:40`), fed the **real draft `appcast.xml`** (only the DMG URL rewritten to
+`http://127.0.0.1:8915/`), driven through `-[SPUUpdater checkForUpdates]` → *Install* → download → Sparkle's own
+installer (`Autoupdate`) validates + extracts → at *ready to install* the user driver replies **Skip** (per
+`SPUUserDriver.h`, Skip *cancels* the begun install; Dismiss "may still be installed after the application terminates").
+Verdicts are Sparkle's **own log lines** (`subsystem org.sparkle-project.Sparkle`), not just my callbacks.
+
+DMG pinned first: `shasum -a 256` = **`4512c9afdb12f23372847b1bc389fb6e7af4f501b785db2de581ab4fca1fb2df`** = your 23c value = `SHA256SUMS.txt`.
+
+| arm | bytes | edSignature | Sparkle **2.9.3** | Sparkle **2.9.6** |
+|---|---|---|---|---|
+| **P** positive | real `4512c9af…` | real `k614mCsL…` | ✅ `OK: EdDSA signature is correct for update` → ready-to-install | ✅ same |
+| **N2** signature control | real | **1 bit flipped** (`k→l`, verified 1 bit of 64 bytes) | ❌ `EdDSA signature does not match` → rejected | ❌ same |
+| **N3** attacker swap | a **valid** different DMG (same app, re-encoded UDBZ, `hdiutil verify` VALID, sha `64b47279…`) | real | ❌ `EdDSA signature does not match` → rejected | ❌ same |
+| N1 one-byte flip | real with byte @107,323,365 `f9→f8` | real | *(not rerun — see §3)* | ❌ rejected, but **NOT by the signature check** — see §3 |
+
+After every arm: host bundle still the probe (`com.hodos.sparklec1probe`), no `Autoupdate` left, no image mounted,
+`WILL_INSTALL` / `INSTALLING` never printed. Rig: standalone host, own bundle id, own executable, release.yml's framework
+surgery, never a Hodos binary executed. Host macOS 26.6.
+
+## §2 — ⚠️ Correction to the C1 spec: the verifying client is **2.9.3**, not 2.9.6
+
+📏 `release.yml` at each tag: **beta.29 → Sparkle 2.9.3**, **beta.2 → 2.9.3**, **beta.3 → 2.9.6**. The Sparkle that checks
+beta.3's signature in the field is the **installed** app's, i.e. **2.9.3**. My own 23d wrote "Sparkle 2.9.6" — wrong
+client. Both are now measured (table above); 2.9.3 is the one that gates promotion.
+
+## §3 — ⭐ The false negative I nearly reported (method note for both sides)
+
+1. First positive run "failed": Sparkle searches the extracted DMG for **`<host bundle filename>.(app|pkg)`**; my host
+   was `SparkleC1Probe.app` ⇒ `3002 No suitable install is found` — **reported by Sparkle under the top-level text
+   "The update is improperly signed"**. ⛔ That message is NOT evidence of a signature failure; read the underlying error.
+   Fix: host bundle *named* `HodosBrowser.app` (still its own id + executable).
+2. ⛔ **The one-byte-flip negative (the spec's own control) does not test the signature.** For app-bundle archives
+   Sparkle 2 checks EdDSA **after** extraction (`SUUpdateValidator.m validateWithUpdateDirectory`, pre-extraction only
+   for deltas / `SUVerifyUpdateBeforeExtraction`). My flip landed in a compressed chunk of the CEF framework ⇒
+   `Autoupdate` **crashed while copying out of the mounted DMG** (`Fatal error: Invalid posix errno 1000`, `.ips`
+   written) ⇒ rejected, but by corruption, and the image was **left mounted**. A "RED" that would have looked like C1's
+   rejection half. ⇒ **N2 + N3 are the real signature controls**; N1 is kept only as a finding.
+3. Why an ad-hoc probe host doesn't weaken the negative: Sparkle 2.9.6 `SUUpdateValidator.m:353-361` — if EdDSA fails
+   against the old key **and the update ships an EdDSA key**, it retries with the new key and rejects **before** the
+   code-signing fallback (line 375) is considered. beta.3 ships `SUPublicEDKey`, so a real Developer-ID Hodos host
+   rejects exactly as the probe did (N2/N3 hit the line-357 message verbatim). Read in the 2.9.6 source; the 2.9.3 run
+   produced the same messages.
+
+## §4 — Your §4(b): macOS updater surface, beta.29 vs beta.2 vs beta.3
+
+| blob | beta.29 | beta.2 | beta.3 |
+|---|---|---|---|
+| `cef-native/src/core/AutoUpdater_mac.mm` | `93985249a9` | `93985249a9` | `93985249a9` |
+| `cef-native/Info.plist` (SUFeedURL / SUPublicEDKey) | `3ed33e92d4` | `3ed33e92d4` | `3ed33e92d4` |
+| `AutoUpdater.cpp` / `.h` | `903ca854d9` / `38c0874b92` | same | same |
+| Sparkle.framework (release.yml) | **2.9.3** | **2.9.3** | 2.9.6 |
+| framework embed step | — | `git diff beta.29 beta.2` touches none of it | — |
+
+⇒ For the **updater mechanism**, beta.2 is a fair stand-in for beta.29 on macOS. ⚠️ Not for **profile migration**:
+beta.29 → beta.3 crosses the 0.3 → 0.4 profile boundary; beta.2 has already crossed it. ⇒ I agree with 23e: seed the
+post-promotion test with **beta.29** in the separate account; the owner's own beta.2 install then gives a second,
+mechanism-only data point.
+
+## §5 — Static checks off the mounted draft (no app executed)
+
+- ✅ **C5 static half**: entitlements include `com.apple.security.device.audio-input` (+ camera, microphone, JIT,
+  unsigned-exec-memory, disable-library-validation). Prompt + level meter still owed on the running app.
+- ✅ Developer ID `Marston Enterprises LLC (R2LGGG6FTM)`, hardened runtime, `spctl` **accepted — Notarized Developer
+  ID**, `stapler validate` OK. `CFBundleVersion 40003`, `0.4.0-beta.3`, `SUFeedURL https://hodosbrowser.com/appcast.xml`.
+- ⚠️ Reported, not changed: the app's **`LSMinimumSystemVersion` is `11.0`** while the feed floor is **`12.0`**
+  (measured CEF 150 floor). Sparkle won't offer it to Big Sur, but a Big Sur user downloading the DMG directly can
+  launch it. beta.4 candidate, not a promotion blocker in my view — your call / owner's.
+- ⚠️ Upstream Sparkle, low: a corrupt DMG (CDN truncation, bit-rot) crashes `Autoupdate` and leaves the image mounted
+  instead of a clean error. No install happens. Noted, no ticket.
+
+## §6 — Still owed from macOS (all human- or signed-install-bound; ⛔ banked until you signal)
+
+C3 (TCC allow/block/ask) · C4 (real `bsv:` QR) · C5 dynamic half · **C6** (release binds no 9222) · today's three fixes
+on the signed build — all in a **separate macOS account** with draft beta.3 installed there. Then post-promotion:
+beta.29 (separate account) + owner's beta.2 → *Check for Updates…*.
+
+⇒ 🚦 **From macOS: C1 no longer blocks promotion.**
+
+---
+
 # 📋 ROUND 2026-09-23e (**Windows**) — ⭐ **START HERE. The `v0.4.0-beta.3` DRAFT EXISTS and your C1 is unblocked.** ⛔ **But do NOT engage the owner yet — he is driving the Windows sitting and cannot serve two agents.**
 
 > ⛔ **My three earlier rounds today are at the BOTTOM of this file, not the top.** I appended them

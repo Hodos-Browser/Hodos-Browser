@@ -107,7 +107,7 @@ The VirusTotal half is hash-checked and therefore real.
 
 | | owner | state |
 |---|---|---|
-| `C1` Sparkle 2.9.6 accepts the real archive, rejects a tampered one | 🍎 macOS | waits on the draft |
+| `C1` Sparkle accepts the real archive, rejects a tampered one | 🍎 macOS | ✅ **GREEN 2026-09-23 (relay 23f)** — on Sparkle **2.9.3** (the field client: beta.29/beta.2 ship it) **and** 2.9.6; DMG pinned `4512c9af…`; positive `OK: EdDSA signature is correct`; negatives = 1-bit-flipped signature **and** a valid swapped DMG, both `EdDSA signature does not match`. ⚠️ a raw byte-flip is rejected by DMG corruption, not the signature — see 23f §3 |
 | `C1b` the feed item carries `sparkle:channel` | 🍎 macOS | 🚦 **DOWNGRADED from blocker — not a defect.** ⛔ An earlier note here said *"nothing implements `allowedChannelsForUpdater:`"* as though it never had; 👤 the owner corrected that. The client subscribed **2026-03-30 → 2026-06-24** and the feed labelled items for 7 weeks of it. Both halves were then removed in sequence, each correctly given the other's state, leaving a **coherent** system: no labels, no subscription, every user gets every update (📏 confirmed against the **live** feed). ⭐ And subscribing is **additive**, never a filter — Sparkle always includes no-channel items. 👤 **Decision 2026-09-23: ship beta.3 UNLABELLED**, because `beta.29` was built *after* the subscription came out, so the machines in the field cannot see a labelled item. Re-adding the subscription is free and lands whenever Mac wants it. See relay round 23b |
 | `C2` `minimumSystemVersion` in the feed | 🍎 macOS | ✅ closed |
 | AV seeding evidence | 👤 owner | §4 above |
