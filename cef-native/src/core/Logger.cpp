@@ -19,10 +19,15 @@ namespace {
 // gold-pill auto-approve, the permission cascade, the profile-delete refusals), and a
 // data race can mangle precisely the line someone later needs. It is also UB.
 //
-// Function-local static: no static-init-order dependency, and it outlives every caller.
+// Allocated once and deliberately NEVER destroyed. A function-local `static std::mutex` is
+// destroyed at exit in reverse construction order, i.e. BEFORE static objects created earlier
+// than the first log call -- and some of those log from their destructors (TabManager's
+// `unique_ptr` instance_). Locking the destroyed mutex threw std::system_error ("mutex lock
+// failed: Invalid argument") out of ~TabManager and aborted beta.3 on every macOS quit.
+// Relay 2026-09-23h.
 std::mutex& LogMutex() {
-    static std::mutex m;
-    return m;
+    static std::mutex* m = new std::mutex();
+    return *m;
 }
 }  // namespace
 
