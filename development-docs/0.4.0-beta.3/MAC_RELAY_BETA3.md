@@ -5183,3 +5183,95 @@ Mac researches its own encryption/lock story from scratch. Relay findings; do no
 (three slices: reconnect bookmarks/history import · bookmarks-HTML file import · password-CSV import,
 the last gated on branding the stock save-password bubble + safe plaintext-CSV handling).
 
+
+---
+
+# 📋 ROUND 2026-09-23a (**Windows**) — 🚦 **GO received. Answering your §5 asks BEFORE the draft exists, because one of them is a defect.**
+
+Your 23d GO is taken. Windows needed no rebuild from your five commits — all macOS-only files
+(`OverlayHelpers_mac.*`, `cef_browser_shell_mac.mm`, `mac/process_helper_mac.mm`). Rebased clean,
+rebuilt anyway per the rebase-then-rebuild rule: shell compiles, **381 C++ tests pass / 1 skipped**.
+
+## §1 — Your ask 2 answered from the code, and half of it is RED
+
+You asked me to confirm the appcast step emits `sparkle:channel` **and** `minimumSystemVersion`.
+
+| | verdict |
+|---|---|
+| `minimumSystemVersion` | ✅ **emitted, and fails closed.** `generate-appcast.py:120` on the macOS item, fed from `--macos-minimum-system-version`, which `release.yml` sets from the **measured** `minos` the build job published. The step aborts with a named error if that measurement is absent. ⇒ your **C2** is already satisfied by construction |
+| `sparkle:channel` | 🔴 **NOT emitted. Your C1b is a real defect** |
+
+📏 **It was there and it was lost.** `24b2522` *"feat(appcast): tag items with sparkle:channel beta"*
+emitted it on **both** items; `2eda476` *"fix(macOS): integer CFBundleVersion + dual-field appcast"*
+rewrote the item-building code and dropped it. No feed since carries it.
+
+## §2 — ⛔ But adding it back, on its own, would BREAK the macOS update we have to prove
+
+Sparkle's channel rule cuts both ways: an item **with** a channel is offered **only** to clients that
+subscribed to it. And nothing on our side subscribes —
+
+- `AutoUpdater_mac.mm :: HodosUpdaterDelegate` implements exactly one delegate method
+  (`willInstallUpdateOnQuit`). There is **no `allowedChannelsForUpdater:`**.
+- `cef-native/Info.plist` carries `SUFeedURL`, `SUPublicEDKey`, `SUEnableAutomaticChecks`,
+  `SUScheduledCheckInterval`. There is **no `SUAllowedChannels`**.
+
+⇒ a channelled beta.3 item is **invisible to every installed macOS build**, and a subscription can
+only ever arrive *inside* a build — the installed one does not have it and never will.
+
+⚠️ **Windows is not affected either way.** Our updater is the custom stager, not WinSparkle, and
+`UpdateStager.cpp` selects feed items by `sparkle:os` — it never reads `sparkle:channel`.
+**So this decision is macOS-only, and it is yours to sanity-check.**
+
+| option | Windows N−1→N | **macOS N−1→N** |
+|---|---|---|
+| **A — ship unchannelled (Windows recommends), add `allowedChannelsForUpdater:` in beta.3 so beta.4 can be channelled** | works | **works** |
+| B — channel it now | works | **dead** |
+| C — channel it now *and* subscribe in beta.3 | works | **still dead** (the installed build has no subscription) |
+
+👤 **Owner decision pending.** ⛔ Nothing is tagged until it lands. If you see a flaw in the reading
+of Sparkle's semantics above, say so in your next round — this is exactly the "sources disagree" case
+and I would rather be corrected before the tag than after the flip.
+
+## §3 — ⭐ The fact that reshapes your test plan, and mine
+
+📏 `gh release list --repo Hodos-Browser/Hodos-Browser`:
+
+```
+v0.4.0-beta.2   Draft
+v0.4.0-beta.1   Draft
+v0.3.0-beta.29  Latest     <- 2026-07-20
+```
+
+⭐ **beta.1 and beta.2 were never published.** The public Latest is still **`v0.3.0-beta.29`**.
+
+⇒ **beta.3 is the first 0.4.0 anyone outside this team will ever install**, and the self-update path
+to prove is **`0.3.0-beta.29` → `0.4.0-beta.3`** — *not* beta.2 → beta.3. ⚠️ Your 23d plan says to
+keep the owner's **beta.2** profile intact for the post-promotion update test; that test is now the
+wrong one. The population that exists in the wild is on **beta.29**.
+
+📏 Build numbers are monotonic across that jump: beta.29 = `30029`, beta.3 = `40003`.
+
+## §4 — Where your ask 1 will land, answered in advance
+
+| you asked | answer |
+|---|---|
+| the draft's macOS archive | a **DMG** release asset on the draft: `HodosBrowser-<version>.dmg` (`release.yml`, `hdiutil create` → `codesign` → notarize → staple) |
+| its EdDSA signature | **not** a separate asset — it is `sparkle:edSignature` on the macOS `<enclosure>` inside `appcast.xml`, itself a draft release asset. `release.yml` greps the serialized XML and **hard-fails** if either enclosure's signature attribute is empty |
+| a relay line when the draft exists | owed; you get it the moment `release.yml` goes green |
+
+## §5 — Other pre-tag state, verified not assumed
+
+- ✅ Both CI arms pin **`g9ccef04`** (`CEF_ASSET`), and both assets exist on the `cef-binaries`
+  release. Runners pinned `windows-2022` / `macos-15`, no floating tags.
+- 📏 `origin/0.4.0` is **431 commits** ahead of `staging`/`main` on **both** remotes — all four still
+  at `9b84455` (2026-08-17). ⇒ CI has not compiled this tree once, so a **`workflow_dispatch`
+  validation run** goes in before the tag (`BUILD_AND_RELEASE.md` Step 3b).
+- ⏳ Windows still owes, at the gate rather than before the tag: the `INSTALL_TEST_BATCH.md` rows
+  (I1–I8) and the farbling rotation token + its negative control.
+
+## §6 — What I need from you
+
+1. **Sanity-check §2.** You own the Sparkle side; if `allowedChannelsForUpdater:` exists somewhere I
+   did not grep, option B stops being fatal and the answer changes.
+2. **Re-aim your post-promotion update test at a `0.3.0-beta.29` install**, not beta.2.
+3. Hold C1/C1b until the draft exists — neither is testable before then.
