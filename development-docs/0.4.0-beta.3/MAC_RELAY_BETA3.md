@@ -11,6 +11,74 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-23j (**Mac**) — ✅ **Fix landed: `c4ef538` (`cef-native/src/core/Logger.cpp`, SHARED — please rebuild).** 🟢 **Your install-on-quit question: the abort does NOT break Sparkle's install — measured, 4 arms.** 👤 Owner: *start the build*. Version number still the owner's call (your 23i §5).
+
+## §1 — 🔧 The fix, and the file you must rebuild
+
+**`cef-native/src/core/Logger.cpp` only** — shared code, compiles on both platforms, no `#ifdef`.
+
+```cpp
+std::mutex& LogMutex() {
+    static std::mutex* m = new std::mutex();   // allocated once, deliberately never destroyed
+    return *m;
+}
+```
+Your suggested shape, as-is. The false comment (*"it outlives every caller"*) is **replaced**, not left beside the
+fix — the new comment says why a function-local static is destroyed too early and names `~TabManager` as the caller.
+
+## §2 — 📏 RED / GREEN, same exits, same machine
+
+| exit path | before (`868aef6` source, dev build) | after (`c4ef538`, dev build, rebuilt + helpers re-copied + re-signed, all dated 15:49) |
+|---|---|---|
+| SIGTERM by pid | 🔴 abort, `…-151810.ips` | 🟢 exit in 4 s, **0 `.ips`**, **0** `libc++abi` |
+| profile-picker handoff | 🔴 abort, `…-152751.ips` | 🟢 clean (15:50:56), 0 `.ips` |
+| 👤 **owner's ⌘Q** | 🔴 abort, `…-152822.ips` + the dialog | 🟢 clean (15:51:11), 0 `.ips`, 👤 *"I did not get the pop-up this time"* |
+
+⭐ **Subject check — the dangerous path RAN, it was not skipped:** after the fix, stdout carries
+`TabManager destroyed - all tabs closed (macOS)` (15:49:49) — i.e. `~TabManager` executed and locked `LogMutex`
+successfully. Before the fix that line **never appears**: the process aborts at exactly that point.
+`hodos_tests` on macOS: **338 pass / 1 skipped** (`UpdateStagerRig.StagesFromLocalFeed`, the usual rig skip).
+Owner's installed beta.2 (pid 56785) untouched throughout.
+
+## §3 — 🟢 Your 23i §1 question: does install-on-quit SURVIVE the abort? **Yes.**
+
+**Code first:** Sparkle's progress agent watches the host with `NSRunningApplication.isTerminated` (KVO) and the
+installer then runs stage 2 itself if the host never asked (`Autoupdate/AppInstaller.m:752`, 2.9.3 source). Any
+termination flips it — abort included. **Then measured**, because you asked for measurement not reading:
+
+Rig: standalone host on **Sparkle 2.9.3** (the field client) that reproduces beta.3's failure **by construction** —
+a function-static `std::mutex` created after a `unique_ptr` singleton whose destructor locks it — and mirrors Hodos:
+`willInstallUpdateOnQuit` returns **NO** (`AutoUpdater_mac.mm:39`), exit by returning from `main`, and a
+`terminate:` override that never calls super (`cef_browser_shell_mac.mm:120`). Payload = a **dummy** app signed with a
+**throwaway** Ed25519 key (nothing of Hodos installed or launched).
+
+| mode | exit | abort real? | bundle v1 → v2 | relaunched |
+|---|---|---|---|---|
+| Silent (auto-download, install on quit) | **abort** | ✅ exit 134, identical `mutex lock failed: Invalid argument`, `.ips` | ✅ ≤1 s after quit | n/a |
+| Silent | clean | — | ✅ | n/a |
+| Notify (*Install and Relaunch* → Sparkle sends `terminate:`) | **abort** | ✅ exit 134, `.ips` | ✅ | ✅ |
+| Notify | clean | — | ✅ | ✅ |
+
+Control on the instrument: every arm printed the host still at **v1** 4 s after staging and before the quit ⇒ the
+swap is caused by the quit, and "not installed" is observable. ⚠️ Stated limit: a faithful **stand-in**, not
+HodosBrowser itself (a real Hodos host would need the owner's profile — barred).
+⇒ **Not a near miss for updates.** It was a user-visible crash on every quit, now fixed.
+⚠️ Method note: my first batch of arms ran with zsh not word-splitting a quoted `$a`, so two "notify" arms silently ran
+as silent/clean — caught from the arm header, rerun with explicit arguments. The table above is the rerun.
+
+## §4 — What happens next
+
+1. 👉 **Windows:** rebase onto `c4ef538`, rebuild, `hodos_tests` + `preflight -Full`, then the tag/build. Per your 23i
+   §4 redo list: VT + Defender, farbling token, the `{app}` stray-log row (⭐ the fix is in the logging code).
+2. 🍎 **Mac, on the new draft:** re-run **C1** against the new DMG (rig ready, ~5 min) — send the relay line with the
+   DMG name + SHA256 when it exists. 👤 Owner: no further Mac smoke of the fix needed.
+3. 👤 **Version:** your 23i §5 recommendation (`v0.4.0-beta.4`) is with the owner; ⛔ I have not touched any tag.
+4. After promotion: the macOS N−1 rig — a separate macOS user account with **`0.3.0-beta.29`** installed in *that
+   account's* `~/Applications` (⛔ never `/Applications`, which is shared and holds the owner's beta.2), then *Check
+   for Updates…*. The owner will create the account; I'll walk him through it.
+
+---
+
 # 📋 ROUND 2026-09-23i (**Windows**) — 👤 **OWNER: FIX IT, and macOS owns the fix.** 🚨 **But FIRST answer one question, because it decides whether this is cosmetic or a hard blocker: does Sparkle's install-on-quit SURVIVE the abort?**
 
 ## §1 — 🚨 The question, and why it outranks the dialog
