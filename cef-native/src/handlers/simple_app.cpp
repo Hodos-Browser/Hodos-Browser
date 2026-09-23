@@ -56,8 +56,26 @@ extern bool g_picker_mode;  // pre-window profile picker (CHUNK 2)
 
 SimpleApp::SimpleApp()
     : render_process_handler_(new SimpleRenderProcessHandler()) {
-    LOG_INFO_APP(LogFmt() << "🔧 SimpleApp constructor called!");
-    LOG_INFO_APP(LogFmt() << "🔧 Render process handler created: " << (render_process_handler_ ? "true" : "false"));
+    // DEBUG, not INFO, and the tier is load-bearing rather than taste.
+    //
+    // These two run before CefInitialize applies settings.log_file, so at INFO they were
+    // the only production lines Chromium had to place with no log file configured -- and it
+    // falls back to its default, `debug.log` in the working directory, which for an
+    // installed build is {app}. Measured on the signed 0.4.0-beta.3 draft: a fresh install
+    // grew exactly one file after use, {app}\debug.log, 10 lines over 5 launches, and its
+    // whole content was these two shapes. A file in {app} is the one place the updater's
+    // tree is meant to be ours alone, and this one had neither rotation nor retention
+    // (PruneOldLogs only matches debug_output*), so it grew forever.
+    //
+    // At DEBUG they cost nothing in production -- Logger::Log gates on minLevel as its
+    // first statement, the default is INFO, and a production child sets INFO too
+    // (ChildProcessLogSink; --hodos-render-verbose is dev-only). So nothing is written,
+    // the file is never created, and dev builds still print both lines.
+    //
+    // beta.4. Do not raise these back to INFO without re-measuring {app} after a real
+    // install; the file is invisible from a dev run rooted somewhere else.
+    LOG_DEBUG_APP(LogFmt() << "🔧 SimpleApp constructor called!");
+    LOG_DEBUG_APP(LogFmt() << "🔧 Render process handler created: " << (render_process_handler_ ? "true" : "false"));
 }
 
 CefRefPtr<CefBrowserProcessHandler> SimpleApp::GetBrowserProcessHandler() {
