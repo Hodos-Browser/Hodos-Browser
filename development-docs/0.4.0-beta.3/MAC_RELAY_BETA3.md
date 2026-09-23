@@ -11,6 +11,44 @@
 > **`HUMAN_TEST_QUEUE.md`**, with the measured instrument limit that makes each one human-bound.
 > Add to it rather than letting these scatter across rounds again.
 
+# 📋 ROUND 2026-09-23c (**Mac**) — 🐛 **Every macOS helper process crashed at exit, and every one held the history DB open.** Root cause: `mac/process_helper_mac.mm` still called `HistoryManager::Initialize` — the macOS twin of the renderer-side history init you removed for the sandbox. **Deleted** (Mac-only; 🪟 nothing to rebuild). Shipped in installed **beta.2** too.
+
+## What it was
+
+The `libc++abi: … mutex lock failed: Invalid argument` line printed on every macOS dev launch. macOS's own
+crash reports settle it: **all 8** `HodosBrowser Helper*.ips` on this Mac since 2026-09-19 (plain and
+Alerts) have the triggered thread at `exit → __cxa_finalize_ranges → HistoryManager::~HistoryManager →
+std::terminate → abort`.
+
+Mechanism: the helper's `main` called `HistoryManager::GetInstance()` (static constructed) and *then*
+`Initialize()` logged, constructing `Logger`'s `LogMutex()` static **later**. Statics die in reverse ⇒ the
+mutex is destroyed first, then `~HistoryManager → CloseDatabase` logs "History database closed" and locks a
+destroyed mutex ⇒ EINVAL ⇒ `system_error` ⇒ SIGABRT. Every helper, on every exit. The browser process is
+not affected (it initialises `Logger` before `HistoryManager`).
+
+⚠️ **The worse half:** every helper — including renderers of arbitrary pages — held a read/write handle on
+the profile's `HodosHistory`, and each one ran the schema-create and a `wal_checkpoint(RESTART)` on exit.
+That is exactly what `simple_render_process_handler.cpp`'s comments say was removed ("history.* is serviced
+by the browser process over IPC"); the Windows removal never reached `process_helper_mac.mm`.
+`nm` on `/Applications/HodosBrowser.app` (0.4.0-beta.2) helper shows the `HistoryManager` symbols ⇒ **shipped**.
+
+## Fix + evidence
+
+Deleted the init block and its two orphaned includes (owner-approved — helper entry point, invariant 8).
+`HistoryManager.cpp` is still listed in `HODOS_HELPER_SRCS` and now unreferenced there — ⚠️ reported, not
+removed (separate cleanup).
+
+| | before (11:47 launch) | after (12:01 launch) |
+|---|---|---|
+| `History database opened` at launch | **18** (helpers via ChildProcessLogSink + browser) | **1** (`[MAIN]` only) |
+| `mutex lock failed` | 1 per launch (+1 per helper exit) | **0**, incl. after 4 cross-site navigations that recycle renderers |
+| new `.ips` | 11:02 today | none (count stays 45) |
+| Renderer helper has `HistoryManager::GetInstance` | yes | **no** (`nm`) |
+| history still records | — | example.com, wikipedia (+redirect), iana, example.org rows in `HodosHistory` |
+| history read from a renderer | — | `hodosBrowser.history.searchWithFrecency({query:'iana'})` from the header ⇒ 2 iana.org URLs |
+
+---
+
 # 📋 ROUND 2026-09-23b (**Mac**) — 🐛 **macOS overlay "dead strip" FIXED for every click-outside overlay: a click on a TRANSPARENT pixel of an overlay now dismisses it, exactly like a click outside.** Mac-only C++ (`OverlayHelpers_mac.{h,mm}`, `cef_browser_shell_mac.mm`) — 🪟 **nothing for you to rebuild; no shared code.** Also: D9, A8, A12, D1 PASSED by the owner; E2 deferred.
 
 ## 1. What the owner hit

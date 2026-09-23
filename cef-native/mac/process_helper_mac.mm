@@ -12,10 +12,8 @@
 #include "include/wrapper/cef_library_loader.h"
 #include "include/cef_render_process_handler.h"
 #include "../include/handlers/simple_render_process_handler.h"
-#include "../include/core/HistoryManager.h"
 #include "../include/core/Logger.h"
 #include "../include/core/ChildProcessLogSink.h"
-#include "../include/core/AppPaths.h"
 
 // Minimal CefApp for helpers (only provides render process handler)
 class HelperApp : public CefApp {
@@ -52,35 +50,14 @@ int main(int argc, char* argv[]) {
   // Create main args
   CefMainArgs main_args(argc, argv);
 
-  // Initialize HistoryManager for render processes (so V8 API can access it).
-  // Parse --profile= from argv (propagated by SimpleApp::OnBeforeChildProcessLaunch)
-  // to use the correct per-profile history DB, matching the Windows render-process fix.
-  NSArray* paths = NSSearchPathForDirectoriesInDomains(
-      NSApplicationSupportDirectory, NSUserDomainMask, YES);
-  if (paths && [paths count] > 0) {
-      NSString* appSupport = [paths firstObject];
-      NSString* hodosBrowserDir = [appSupport stringByAppendingPathComponent:
-          [NSString stringWithUTF8String:AppPaths::GetAppDirName().c_str()]];
-
-      std::string profileId;
-      for (int i = 1; i < argc; i++) {
-          std::string arg = argv[i];
-          if (arg.find("--profile=") == 0) {
-              profileId = arg.substr(10);
-              break;
-          }
-      }
-      if (profileId.empty() || profileId.find('/') != std::string::npos ||
-          profileId.find("..") != std::string::npos) {
-          profileId = "Default";
-      }
-
-      NSString* profileDir = [hodosBrowserDir stringByAppendingPathComponent:
-          [NSString stringWithUTF8String:profileId.c_str()]];
-      std::string cache_path = [profileDir UTF8String];
-
-      HistoryManager::GetInstance().Initialize(cache_path);
-  }
+  // ⛔ Helpers do NOT open the history database. history.* is serviced by the browser
+  // process over IPC (simple_render_process_handler.cpp, HistoryV8Handler); a helper
+  // rendering an arbitrary page must not hold a read/write handle on the profile's
+  // history DB. This block survived here after Windows removed its equivalent, and it
+  // also crashed every helper at exit: the HistoryManager static was constructed before
+  // Logger's mutex, so it was destroyed after it, and ~HistoryManager's "database closed"
+  // log line locked a destroyed mutex — "mutex lock failed: Invalid argument", SIGABRT in
+  // HistoryManager::~HistoryManager (8 crash reports 2026-09-19..23, installed beta.2 too).
 
   // Use minimal app with only render process handler (for V8 injections)
   CefRefPtr<HelperApp> app(new HelperApp);
