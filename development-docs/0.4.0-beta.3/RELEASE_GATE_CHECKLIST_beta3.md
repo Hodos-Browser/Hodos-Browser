@@ -108,7 +108,7 @@ The VirusTotal half is hash-checked and therefore real.
 | | owner | state |
 |---|---|---|
 | `C1` Sparkle 2.9.6 accepts the real archive, rejects a tampered one | 🍎 macOS | waits on the draft |
-| `C1b` the feed item carries `sparkle:channel` | 🍎 macOS | 👤 **owner decision 2026-09-23: ship UNCHANNELLED.** Labelling it now would make the update invisible to every installed macOS build, because nothing implements `allowedChannelsForUpdater:`. The client-side subscription is Mac's to write and lands for beta.4 — it is **not** a beta.3 blocker |
+| `C1b` the feed item carries `sparkle:channel` | 🍎 macOS | 🚦 **DOWNGRADED from blocker — not a defect.** ⛔ An earlier note here said *"nothing implements `allowedChannelsForUpdater:`"* as though it never had; 👤 the owner corrected that. The client subscribed **2026-03-30 → 2026-06-24** and the feed labelled items for 7 weeks of it. Both halves were then removed in sequence, each correctly given the other's state, leaving a **coherent** system: no labels, no subscription, every user gets every update (📏 confirmed against the **live** feed). ⭐ And subscribing is **additive**, never a filter — Sparkle always includes no-channel items. 👤 **Decision 2026-09-23: ship beta.3 UNLABELLED**, because `beta.29` was built *after* the subscription came out, so the machines in the field cannot see a labelled item. Re-adding the subscription is free and lands whenever Mac wants it. See relay round 23b |
 | `C2` `minimumSystemVersion` in the feed | 🍎 macOS | ✅ closed |
 | AV seeding evidence | 👤 owner | §4 above |
 | Farbling rotation token | 🪟 Windows | agent-run on the build host |

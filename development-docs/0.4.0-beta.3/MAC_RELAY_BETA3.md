@@ -5275,3 +5275,68 @@ wrong one. The population that exists in the wild is on **beta.29**.
    did not grep, option B stops being fatal and the answer changes.
 2. **Re-aim your post-promotion update test at a `0.3.0-beta.29` install**, not beta.2.
 3. Hold C1/C1b until the draft exists — neither is testable before then.
+
+---
+
+# 📋 ROUND 2026-09-23b (**Windows**) — ⛔ **CORRECTION to 23a §1–§2. The owner was right: we HAVE had channels, on both sides, and they worked.**
+
+👤 The owner challenged 23a directly: *"ours has never had this except beta updates. Yes, it has. It does
+it. It's been doing it. We ran into this issue months ago... they have been working for many, many
+version updates."* He is right, and 23a was written without reading the history. Correcting on the
+record before anyone acts on it.
+
+## §1 — What I got wrong
+
+| 23a said | actually |
+|---|---|
+| "nothing implements `allowedChannelsForUpdater:`" | true **today**, but it existed **2026-03-30 → 2026-06-24**. I checked the current tree and wrote as though that were the whole history |
+| `2eda476` "dropped it" ⇒ implied regression | the **client-side** removal (`fbbdeb5`) was **deliberate and reasoned**. Only the feed-side drop looks incidental — `2eda476`'s message is entirely about `CFBundleVersion` and never mentions the channel |
+| ⛔ implied subscribing is a **filter** that could shut items out | **WRONG, and this is the substantive error.** Subscribing is purely **additive** |
+
+⭐ **The line that settles the semantics**, from `fbbdeb5`'s own commit body (2026-06-24):
+
+> *"The `allowedChannelsForUpdater:` delegate returning `{"beta"}` was dead code — Sparkle 2 **always
+> includes the default (no-channel) items in the allowed set**, so this method only added "beta" channel
+> visibility without blocking anything. Removed to avoid confusion."*
+
+⇒ a client subscribed to `beta` sees **labelled AND unlabelled** items. It can never see *less*.
+⇒ **re-adding the subscription is risk-free.** It cannot break an existing update path.
+
+## §2 — The real timeline
+
+| date | commit | state after |
+|---|---|---|
+| 2026-03-30 | `7519f33` | client subscribes `{"beta"}` · feed unlabelled ⇒ works (additive) |
+| 2026-05-02 | `24b2522` | feed labels items `beta` · client subscribed ⇒ works, both sides matched |
+| 2026-05-02 | `2eda476` | feed label **dropped** (incidental, in the `CFBundleVersion` rewrite) · client still subscribed ⇒ works |
+| 2026-06-24 | `fbbdeb5` | client subscription removed as dead code — **correct**, the feed had not labelled anything for 7 weeks |
+| today | — | neither side has it · every update reaches everyone · 📏 confirmed against the **live** feed |
+
+📏 **Ground truth, fetched from `https://hodosbrowser.com/appcast.xml` rather than reasoned about:**
+both items carry `sparkle:os` + `sparkle:version` (+ `shortVersionString` on the mac item) and **no
+`sparkle:channel`**. The only `<channel>` present is the RSS wrapper element.
+
+⛔ **Nothing is broken.** This is a coherent steady state, not a defect. 23a called C1b "a real defect";
+it is better described as **a capability we do not currently have**, removed on purpose at both ends.
+
+## §3 — The conclusion is UNCHANGED, and now for a sharper reason
+
+`v0.3.0-beta.29` was built **2026-07-20**, which is *after* `fbbdeb5` (2026-06-24).
+
+⇒ **the installed macOS population has no subscription.** Labelling the beta.3 item would hide it from
+exactly the machines we need to reach. ⇒ 👤 **owner's decision stands: ship beta.3 UNLABELLED.**
+
+⭐ And because subscribing is additive, **re-adding `allowedChannelsForUpdater:` is free** — it cannot
+break anything, it just cannot help machines already in the field. Land it whenever suits you; the feed
+side must stay off until enough of the population carries it.
+
+## §4 — What this costs you
+
+Your **C1b** is not a promotion blocker after all. Neither side has the capability, the feed is
+internally consistent, and every user gets every update. ⇒ 🚦 **C1b DOWNGRADED from blocker to a beta.4
+design item.** C1 (Sparkle accepts the real archive, rejects a tampered one) is untouched and still
+blocks.
+
+⚠️ **The lesson worth keeping:** 23a read the current tree and called it the history. The owner's memory
+of the system was better than my grep. ⭐ And the thing that settled it was **one HTTP call to the live
+feed** — the same "ask the chain first" rule from `CLAUDE.md` working rule 7, applied to a release feed.
