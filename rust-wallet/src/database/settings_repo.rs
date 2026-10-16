@@ -124,7 +124,7 @@ impl<'a> SettingsRepository<'a> {
                 storage_name: String::new(),
                 chain: "main".to_string(),
                 db_type: "sqlite".to_string(),
-                max_output_script: 500000,
+                max_output_script: 1024, // B5-T1-P4 inline cap
                 sender_display_name: "Anonymous".to_string(),
                 created_at: 0, // Will be set by upsert
                 updated_at: 0,
@@ -175,7 +175,7 @@ impl<'a> SettingsRepository<'a> {
                 "INSERT INTO settings
                  (storage_identity_key, storage_name, chain, dbtype, max_output_script,
                   created_at, updated_at)
-                 VALUES ('', '', ?1, 'sqlite', 500000, ?2, ?3)",
+                 VALUES ('', '', ?1, 'sqlite', 1024, ?2, ?3)",
                 rusqlite::params![chain, now, now],
             )?;
         }
@@ -187,7 +187,7 @@ impl<'a> SettingsRepository<'a> {
     pub fn get_max_output_script(&self) -> Result<i32> {
         match self.get()? {
             Some(s) => Ok(s.max_output_script),
-            None => Ok(500000), // Default
+            None => Ok(crate::ingest::DEFAULT_MAX_INLINE_SCRIPT as i32), // Default (B5-T1-P4)
         }
     }
 
@@ -245,7 +245,7 @@ impl<'a> SettingsRepository<'a> {
                 "INSERT INTO settings
                  (storage_identity_key, storage_name, chain, dbtype, max_output_script,
                   sender_display_name, created_at, updated_at)
-                 VALUES ('', '', 'main', 'sqlite', 500000, ?1, ?2, ?3)",
+                 VALUES ('', '', 'main', 'sqlite', 1024, ?1, ?2, ?3)",
                 rusqlite::params![name, now, now],
             )?;
         }
@@ -302,7 +302,7 @@ impl<'a> SettingsRepository<'a> {
                  (storage_identity_key, storage_name, chain, dbtype, max_output_script,
                   sender_display_name, default_per_tx_limit_cents, default_per_session_limit_cents,
                   default_rate_limit_per_min, created_at, updated_at)
-                 VALUES ('', '', 'main', 'sqlite', 500000, 'Anonymous', ?1, ?2, ?3, ?4, ?5)",
+                 VALUES ('', '', 'main', 'sqlite', 1024, 'Anonymous', ?1, ?2, ?3, ?4, ?5)",
                 rusqlite::params![per_tx, per_session, rate, now, now],
             )?;
         }
@@ -345,7 +345,7 @@ impl<'a> SettingsRepository<'a> {
                     .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
                 self.conn.execute(
                     "INSERT INTO settings (storage_identity_key, storage_name, chain, dbtype, max_output_script, backup_hash, created_at, updated_at) \
-                     VALUES ('', '', 'main', 'sqlite', 500000, ?1, ?2, ?3)",
+                     VALUES ('', '', 'main', 'sqlite', 1024, ?1, ?2, ?3)",
                     rusqlite::params![hash, now, now],
                 )?;
                 log::info!("   ✅ Created settings row with backup hash: {}...", &hash[..hash.len().min(16)]);
@@ -403,7 +403,7 @@ impl<'a> SettingsRepository<'a> {
                 "INSERT INTO settings
                  (storage_identity_key, storage_name, chain, dbtype, max_output_script,
                   created_at, updated_at)
-                 VALUES (?1, ?2, 'main', 'sqlite', 500000, ?3, ?4)",
+                 VALUES (?1, ?2, 'main', 'sqlite', 1024, ?3, ?4)",
                 rusqlite::params![identity_key, name, now, now],
             )?;
         }

@@ -3024,6 +3024,9 @@ pub async fn wallet_unlock(
         match db.unlock(&body.pin) {
             Ok(()) => {
                 log::info!("   ✅ Wallet unlocked successfully");
+                // B5-T1-P5: the keys are available now — classify what waited for them,
+                // instead of leaving the money held until the next tick.
+                crate::classify::stamp_all(&db, "unlock");
             }
             Err(e) => {
                 let err_msg = e.to_string();
@@ -3108,13 +3111,27 @@ pub async fn wallet_balance(state: web::Data<AppState>) -> HttpResponse {
     // Fetch BSV/USD price (async, cached with 5-min TTL)
     let bsv_usd_price = state.price_cache.get_price().await;
 
+    // B5-T1-P5 (owner decision 2(d)): `balance` is money; coins the wallet holds but has
+    // not proven money are `held` / `heldCount`, shown under the balance. Read when the
+    // DB is free; omitted (not zero) when it is busy, so a caller never shows "0 held"
+    // it did not measure.
+    let held = state.database.try_lock().ok().and_then(|db| {
+        crate::database::OutputRepository::new(db.connection())
+            .calculate_held(state.current_user_id).ok()
+    });
+    let reply = |balance: i64| {
+        let mut body = serde_json::json!({ "balance": balance, "bsvPrice": bsv_usd_price });
+        if let Some((sats, count)) = held {
+            body["held"] = serde_json::json!(sats);
+            body["heldCount"] = serde_json::json!(count);
+        }
+        HttpResponse::Ok().json(body)
+    };
+
     // Check balance cache first (fast path)
     if let Some(cached_balance) = state.balance_cache.get() {
         log::info!("   ✅ Using cached balance: {} satoshis, price: ${:.2}", cached_balance, bsv_usd_price);
-        return HttpResponse::Ok().json(serde_json::json!({
-            "balance": cached_balance,
-            "bsvPrice": bsv_usd_price
-        }));
+        return reply(cached_balance);
     }
 
     log::info!("   🔄 Cache miss - calculating balance from database...");
@@ -3138,16 +3155,10 @@ pub async fn wallet_balance(state: web::Data<AppState>) -> HttpResponse {
             // DB is busy (background task holding lock) — return stale balance
             if let Some(stale) = state.balance_cache.get_or_stale() {
                 log::info!("   ⏳ DB busy, returning last known balance: {} satoshis", stale);
-                return HttpResponse::Ok().json(serde_json::json!({
-                    "balance": stale,
-                    "bsvPrice": bsv_usd_price
-                }));
+                return reply(stale);
             } else {
                 log::warn!("   ⏳ DB busy, no cached balance available");
-                return HttpResponse::Ok().json(serde_json::json!({
-                    "balance": 0,
-                    "bsvPrice": bsv_usd_price
-                }));
+                return reply(0);
             }
         }
     };
@@ -3156,10 +3167,71 @@ pub async fn wallet_balance(state: web::Data<AppState>) -> HttpResponse {
     state.balance_cache.set(balance);
     log::info!("   ✅ Balance: {} satoshis, price: ${:.2}", balance, bsv_usd_price);
 
-    HttpResponse::Ok().json(serde_json::json!({
-        "balance": balance,
-        "bsvPrice": bsv_usd_price
-    }))
+    reply(balance)
+}
+
+/// GET /wallet/held-outputs — B5-T1-P5 (decision 7 ④): every coin the wallet holds but
+/// has not proven money, with the classifier's reason and whether "Treat as money" may
+/// be offered for it. The reason is computed now, never stored.
+pub async fn wallet_held_outputs(state: web::Data<AppState>, http_req: HttpRequest) -> HttpResponse {
+    // First-party only, GET included: the list names this wallet's outpoints, which
+    // would let a site link the user's coins on chain (adversarial review #4). The
+    // middleware's first-party list only refuses mutations; mirrors `wallet_export`.
+    if http_req.headers().get("X-Requesting-Domain").and_then(|v| v.to_str().ok()).map_or(false, |s| !s.is_empty()) {
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "error": "permission_table_is_first_party_only", "endpoint": "/wallet/held-outputs" }));
+    }
+    let db = match state.database.lock() {
+        Ok(db) => db,
+        Err(_) => return HttpResponse::ServiceUnavailable().json(serde_json::json!({ "error": "database busy" })),
+    };
+    match crate::classify::list_held(&db, state.current_user_id) {
+        Ok(held) => HttpResponse::Ok().json(serde_json::json!({ "held": held })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("Database error: {}", e) })),
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct TreatAsMoneyRequest {
+    pub txid: String,
+    pub vout: i32,
+    /// The user confirmed in the UI. Without it the request is refused.
+    #[serde(default)]
+    pub confirm: bool,
+}
+
+/// POST /wallet/held-outputs/treat-as-money — B5-T1-P5: the user says one held coin is
+/// ordinary money. First-party only (`main.rs :: is_permission_surface`). Refused for a
+/// coin in a token / app basket, a script that is not a plain payment to our key, and
+/// without `confirm: true`.
+pub async fn wallet_treat_as_money(
+    state: web::Data<AppState>,
+    body: web::Json<TreatAsMoneyRequest>,
+) -> HttpResponse {
+    use crate::classify::TreatRefusal;
+    let result = {
+        let db = match state.database.lock() {
+            Ok(db) => db,
+            Err(_) => return HttpResponse::ServiceUnavailable().json(serde_json::json!({ "error": "database busy" })),
+        };
+        crate::classify::treat_as_money(&db, &body.txid, body.vout, body.confirm)
+    };
+    match result {
+        Ok(_) => {
+            state.balance_cache.invalidate();
+            HttpResponse::Ok().json(serde_json::json!({ "success": true }))
+        }
+        Err(refusal) => {
+            let (status, code, detail) = match &refusal {
+                TreatRefusal::NotConfirmed => (actix_web::http::StatusCode::BAD_REQUEST, "confirmation_required", String::new()),
+                TreatRefusal::NotFound => (actix_web::http::StatusCode::NOT_FOUND, "not_found", String::new()),
+                TreatRefusal::NotDefaultBasket(b) => (actix_web::http::StatusCode::CONFLICT, "token_basket", b.clone()),
+                TreatRefusal::AlreadyMoney => (actix_web::http::StatusCode::CONFLICT, "already_money", String::new()),
+                TreatRefusal::Refused(r) => (actix_web::http::StatusCode::CONFLICT, "not_allowed", r.rule().to_string()),
+            };
+            HttpResponse::build(status).json(serde_json::json!({ "success": false, "code": code, "detail": detail }))
+        }
+    }
 }
 
 /// POST /wallet/sync — On-demand UTXO sync for pending addresses
@@ -3280,6 +3352,10 @@ pub async fn wallet_sync(
         }
     };
 
+    // B5-T1-P4: read each new coin's script from its verified parent BEFORE the row is written.
+    let observed = crate::ingest::observe_coins_from_chain(&state.database, &state.services,
+        &crate::ingest::coin_keys(&api_utxos)).await;
+
     // Process results: insert new outputs, reconcile stale ones, clear pending flags
     let mut synced_count = 0u32;
     let mut new_utxo_count = 0u32;
@@ -3309,11 +3385,13 @@ pub async fn wallet_sync(
                             &utxo.script,
                             addr.index,
                             utxo.confirmed,
+                            crate::ingest::source_for(&observed, &utxo.txid, utxo.vout),
                         ) {
                             Ok(1) => new_utxo_count += 1,
                             Ok(_) => {}
                             Err(e) => log::warn!("   Failed to insert output {}:{}: {}", utxo.txid, utxo.vout, e),
                         }
+                        crate::classify::after_write(&db, &utxo.txid, utxo.vout, "I7:wallet-sync");
                     }
                     // Mark address as used
                     let _ = address_repo.mark_used(addr_id);
@@ -4039,7 +4117,7 @@ struct PendingTransaction {
     user_input_infos: Vec<UserInputInfo>, // User-provided inputs (from inputBEEF)
     brc29_info: Option<Brc29PaymentInfo>, // BRC-29 payment metadata if applicable
     input_beef: Option<crate::beef::Beef>, // Full inputBEEF for verification chain
-    reservation_placeholder: Option<String>, // pending-{timestamp} for optimistic lock rollback
+    reservation_row: Option<i64>, // B5-T1-P3: the transactions row that owns the reserved coins
     no_send: bool, // Original noSend option from createAction (default false)
 }
 
@@ -4047,42 +4125,52 @@ struct PendingTransaction {
 static PENDING_TRANSACTIONS: Lazy<StdMutex<HashMap<String, PendingTransaction>>> =
     Lazy::new(|| StdMutex::new(HashMap::new()));
 
-/// Monotonic counter making each reservation placeholder unique within the process.
-static RESERVATION_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Mint a fresh `pending-{ts}-{seq}` reservation placeholder.
-///
-/// The placeholder is the *key* a reservation is released by
-/// (`restore_by_spending_description` / `restore_outpoint_if_reserved`), so it has to be
-/// unique per reservation. The original `pending-{timestamp_millis}` was not: two
-/// `createAction`s landing in the same millisecond shared a placeholder, and the
-/// user-provided-input reservation is taken *after* `utxo_selection_lock` is released, so
-/// that collision is reachable. With a scope guard in play a collision is worse than the
-/// leak it fixes -- one call's release would free the other call's reservation, widening
-/// the very selection race the reservation exists to prevent (`R-NORACE`).
-pub(crate) fn new_reservation_placeholder() -> String {
-    let seq = RESERVATION_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!("pending-{}-{}", chrono::Utc::now().timestamp_millis(), seq)
+/// B5-T1-P3: reserve wallet-selected money coins for a new spend — the transaction row
+/// first, then the claim, in ONE SQLite transaction (wallet-toolbox `createAction.ts`).
+/// `Ok(Ok(id))` the coins are owned by row `id`; `Ok(Err(outpoint))` a coin was not free
+/// (another spend holds it — `R-NORACE`) and nothing was written; `Err` SQLite failed and
+/// nothing was written.
+pub(crate) fn reserve_for_new_transaction(
+    conn: &rusqlite::Connection,
+    reference: &str,
+    description: Option<&str>,
+    outpoints: &[(String, u32)],
+) -> rusqlite::Result<Result<i64, (String, u32)>> {
+    reserve_for_new_transaction_with(conn, reference, description, outpoints, &[])
 }
 
-/// Placeholders belonging to transactions that are still live in `PENDING_TRANSACTIONS`.
-///
-/// A reservation whose placeholder appears here is in-flight (createAction has stored the
-/// transaction and is awaiting `signAction`), no matter how old it looks. The sweeper
-/// must leave those alone.
-pub(crate) fn live_reservation_placeholders() -> std::collections::HashSet<String> {
-    match PENDING_TRANSACTIONS.lock() {
-        Ok(pending) => pending
-            .values()
-            .filter_map(|t| t.reservation_placeholder.clone())
-            .collect(),
-        Err(e) => {
-            // Poisoned lock: report "everything is live" so the sweeper releases nothing.
-            // Failing closed here costs a leak; failing open risks a double-spend.
-            log::error!("   ⚠️  PENDING_TRANSACTIONS poisoned ({}) — treating all reservations as live", e);
-            std::collections::HashSet::new()
+/// As `reserve_for_new_transaction`, plus `named` outpoints claimed leniently in the same
+/// SQLite transaction (inputs the route names itself — a previous backup PushDrop, a
+/// certificate token — which are not money and may not be tracked).
+pub(crate) fn reserve_for_new_transaction_with(
+    conn: &rusqlite::Connection,
+    reference: &str,
+    description: Option<&str>,
+    outpoints: &[(String, u32)],
+    named: &[(String, u32)],
+) -> rusqlite::Result<Result<i64, (String, u32)>> {
+    let txn = conn.unchecked_transaction()?;
+    let id = crate::database::TransactionRepository::new(&txn).create_reservation_row(reference, description)?;
+    let output_repo = crate::database::OutputRepository::new(&txn);
+    match output_repo.claim_coins(id, outpoints, true)? {
+        crate::database::Claim::Claimed(_) => {
+            output_repo.claim_coins(id, named, false)?;
+            txn.commit()?;
+            Ok(Ok(id))
         }
+        crate::database::Claim::Conflict { txid, vout } => Ok(Err((txid, vout))), // dropped ⇒ rolled back
     }
+}
+
+/// The response for a claim that lost (`R-NORACE`): nothing was reserved and nothing was
+/// sent. Same 400 + `error` shape as the insufficient-funds refusal around it.
+fn coin_held_response(txid: &str, vout: u32) -> HttpResponse {
+    log::warn!("   ⛔ Coin {}:{} is held by another action — refusing before anything was reserved",
+        &txid[..txid.len().min(16)], vout);
+    HttpResponse::BadRequest().json(serde_json::json!({
+        "error": "Insufficient funds: a coin this payment needs is being spent by another payment. Nothing was sent; try again in a moment.",
+        "code": "coin_reserved",
+    }))
 }
 
 /// RAII release for the UTXO reservation taken inside `create_action_internal`.
@@ -4100,13 +4188,14 @@ pub(crate) fn live_reservation_placeholders() -> std::collections::HashSet<Strin
 /// current exits, at any exit added later, and on panic. The success path calls
 /// [`ReservationGuard::commit`], which disarms it.
 ///
-/// Release is keyed by the unique placeholder, so a guard can only ever free rows its own
-/// call reserved.
+/// B5-T1-P3: keyed on the transaction row that owns the coins, so a guard can only ever
+/// free rows its own call reserved; it also removes the row, which never got a
+/// transaction (the guard is committed before the row is filled).
 pub(crate) struct ReservationGuard {
     database: std::sync::Arc<StdMutex<crate::database::WalletDatabase>>,
     balance_cache: std::sync::Arc<crate::balance_cache::BalanceCache>,
     /// `None` once committed -- `Drop` then does nothing.
-    placeholder: Option<String>,
+    row: Option<i64>,
 }
 
 /// The transaction is signed but **not yet broadcast**, and the wallet just failed to
@@ -4147,7 +4236,6 @@ pub(crate) struct ReservationGuard {
 fn release_unbroadcast_transaction(
     state: &AppState,
     txid: &str,
-    reservation_placeholder: Option<&str>,
 ) -> (usize, usize) {
     let (disabled, restored);
     {
@@ -4163,15 +4251,9 @@ fn release_unbroadcast_transaction(
         };
         let output_repo = crate::database::OutputRepository::new(&txn);
         disabled = output_repo.disable_by_txid(txid).unwrap_or(0);
-        // The reservation may still carry the PLACEHOLDER (resolving it is exactly what
-        // failed) or the txid (resolution worked and something later did not). Try
-        // both; each is a no-op when it does not apply.
-        let mut r = 0usize;
-        if let Some(ph) = reservation_placeholder {
-            r += output_repo.restore_by_spending_description(ph).unwrap_or(0);
-        }
-        r += output_repo.restore_by_spending_description(txid).unwrap_or(0);
-        restored = r;
+        // B5-T1-P3: the coins are owned by the transaction row — labelled with its txid,
+        // or not yet labelled (labelling is exactly what failed on a refusal).
+        restored = output_repo.restore_spent_by_txid(txid).unwrap_or(0);
         let tx_repo = crate::database::TransactionRepository::new(&txn);
         let _ = tx_repo.update_broadcast_status(txid, "failed");
         if let Err(e) = txn.commit() {
@@ -4183,7 +4265,7 @@ fn release_unbroadcast_transaction(
     (disabled, restored)
 }
 
-fn resolution_failed_response(state: &AppState, placeholder: &str, txid: &str, err: &str) -> HttpResponse {
+fn resolution_failed_response(state: &AppState, txid: &str, err: &str) -> HttpResponse {
     // ⛔ Clean up HERE, synchronously. We know at this instant that this transaction
     // will never exist — that is the whole reason we are refusing.
     //
@@ -4194,13 +4276,13 @@ fn resolution_failed_response(state: &AppState, placeholder: &str, txid: &str, e
     // TaskSweepReservations ~19 min) but those are the backstop for a CRASH, where
     // nobody can know what happened. A deliberate refusal is not a crash.
     // 👤 Owner: "if there's a refusal, can we just trigger the cleanup?" — yes.
-    let (disabled, restored) = release_unbroadcast_transaction(state, txid, Some(placeholder));
+    let (disabled, restored) = release_unbroadcast_transaction(state, txid);
     log::info!("   ♻️  Released on refusal: {} created output(s) disabled, {} input(s) restored",
                disabled, restored);
     log::error!(
-        "   ⛔ ABORTING BEFORE BROADCAST — could not resolve reservation {} → {}: {}. \
+        "   ⛔ ABORTING BEFORE BROADCAST — could not record which coins {} spends: {}. \
          No money has moved. Everything it held has been released now.",
-        placeholder, txid, err
+        txid, err
     );
     HttpResponse::InternalServerError().json(serde_json::json!({
         "error": "Transaction was signed but the wallet could not record which coins it spends, \
@@ -4211,11 +4293,11 @@ fn resolution_failed_response(state: &AppState, placeholder: &str, txid: &str, e
 }
 
 impl ReservationGuard {
-    fn new(state: &AppState, placeholder: String) -> Self {
+    pub(crate) fn new(state: &AppState, row: i64) -> Self {
         Self {
             database: state.database.clone(),
             balance_cache: state.balance_cache.clone(),
-            placeholder: Some(placeholder),
+            row: Some(row),
         }
     }
 
@@ -4223,16 +4305,17 @@ impl ReservationGuard {
 /// Hand the reservation over to the pending transaction's own lifecycle.
     ///
     /// Call once the transaction is stored in `PENDING_TRANSACTIONS`: from that point
-    /// `sign_action` resolves the placeholder to the real txid, the broadcast-failure path
-    /// restores it, and the sweeper can see it is in-flight.
-    fn commit(mut self) {
-        self.placeholder = None;
+    /// `sign_action` labels the coins with the real txid, and a failure is cleaned up by
+    /// the transaction's status (`release_unbroadcast_transaction`, the broadcast-failure
+    /// path, `TaskFailAbandoned`).
+    pub(crate) fn commit(mut self) {
+        self.row = None;
     }
 }
 
 impl Drop for ReservationGuard {
     fn drop(&mut self) {
-        let Some(placeholder) = self.placeholder.take() else {
+        let Some(row) = self.row.take() else {
             return; // committed -- the pending transaction owns these rows now
         };
 
@@ -4240,18 +4323,24 @@ impl Drop for ReservationGuard {
         let db = match self.database.lock() {
             Ok(db) => db,
             Err(e) => {
-                log::error!("   ⚠️  ReservationGuard: DB mutex poisoned ({}) — {} left reserved for the sweeper", e, placeholder);
+                log::error!("   ⚠️  ReservationGuard: DB mutex poisoned ({}) — row {} left for TaskFailAbandoned", e, row);
                 return;
             }
         };
-        let output_repo = crate::database::OutputRepository::new(db.connection());
-        match output_repo.restore_by_spending_description(&placeholder) {
+        let released = (|| -> rusqlite::Result<usize> {
+            let txn = db.connection().unchecked_transaction()?;
+            let n = crate::database::OutputRepository::new(&txn).release_coins_of(row)?;
+            crate::database::TransactionRepository::new(&txn).discard_unbuilt_row(row)?;
+            txn.commit()?;
+            Ok(n)
+        })();
+        match released {
             Ok(0) => {}
             Ok(count) => {
-                log::info!("   ♻️  createAction failed — released {} reserved UTXO(s) ({})", count, placeholder);
+                log::info!("   ♻️  createAction failed — released {} reserved UTXO(s) (row {})", count, row);
             }
             Err(e) => {
-                log::warn!("   ⚠️  ReservationGuard: failed to release {}: {} — the sweeper will retry", placeholder, e);
+                log::warn!("   ⚠️  ReservationGuard: failed to release row {}: {} — TaskFailAbandoned will", row, e);
             }
         }
         drop(db);
@@ -4822,9 +4911,25 @@ pub(crate) fn validate_output_amounts(outputs: &[CreateActionOutput]) -> Result<
     Ok(total)
 }
 
+/// What a TEMPORARY broadcast failure does to the action (B5-T1-P2).
+/// `KeepSending` (dApp createAction, owner §12a Q4): row `sending`, inputs reserved.
+/// `Release`: the pre-phase behaviour — for internal callers whose flow cannot
+/// follow a transaction that lands later (certificate publish: it would report
+/// "unpublished" while the token lands with no overlay submission — review M3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OnTemporaryFailure { KeepSending, Release }
+
 pub(crate) async fn create_action_internal(
     state: web::Data<AppState>,
     req: CreateActionRequest,
+) -> HttpResponse {
+    create_action_internal_with(state, req, OnTemporaryFailure::KeepSending).await
+}
+
+pub(crate) async fn create_action_internal_with(
+    state: web::Data<AppState>,
+    req: CreateActionRequest,
+    on_temporary: OnTemporaryFailure,
 ) -> HttpResponse {
     // ============================================================
     // SERIALIZATION LOCK: Only one createAction can run at a time.
@@ -4877,6 +4982,54 @@ pub(crate) async fn create_action_internal(
                         "code": "ERR_INVALID_BASKET_NAME"
                     }));
                 }
+            }
+        }
+
+        // B5-T2-P1 (`P1-A12`, owner decision 4, 2026-10-06): a token a site creates is filed
+        // where the token belongs, whatever basket it named; an asset basket is refused
+        // for an output that is not eligible (BRC-147 / BRC-163: never multi-sat, never an
+        // ordinary payment) — before anything is signed. A 1-sat output with no envelope
+        // may go to `1sat` (an ordinal tip the site moves on: BRC-147 eligibility 1), and a
+        // 1-sat Mandala output to `bsv21` (BRC-163 MAY). Other token shapes stay in the
+        // site's basket (their spend is B5-T2-P2's).
+        if let Some(requested) = normalized_baskets.get(&i).cloned() {
+            use crate::tokens::{verdict, Verdict};
+            // Review #6: `sendMax` replaces output 0's amount after this check — an output
+            // headed for an asset basket can never be the send-max output.
+            let send_max = req.options.as_ref().and_then(|o| o.send_max).unwrap_or(false);
+            let script = output.script.as_deref().and_then(|h| hex::decode(h).ok()).unwrap_or_default();
+            let sats = output.satoshis.unwrap_or(0);
+            let v = verdict(&script, sats);
+            let asset_bound = crate::tokens::is_asset_basket(&requested) || matches!(v, Verdict::File(_));
+            if send_max && i == 0 && asset_bound {
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": format!("Output {}: a token output cannot be the sendMax output", i),
+                    "code": "ERR_INVALID_PARAMETER"
+                }));
+            }
+            match v {
+                Verdict::File(f) => {
+                    if f.basket() != requested {
+                        log::info!("   Output {}: basket '{}' → '{}' (the wallet's recogniser files tokens)",
+                                   i, requested, f.basket());
+                    }
+                    normalized_baskets.insert(i, f.basket().to_string());
+                }
+                v if crate::tokens::is_asset_basket(&requested) => {
+                    let eligible = sats == 1 && if requested == crate::tokens::ONESAT_BASKET {
+                        v == Verdict::NotToken
+                    } else {
+                        v == Verdict::Held("mandala")
+                    };
+                    if !eligible {
+                        log::warn!("   ❌ Output {}: basket '{}' refused — {} sats, not an eligible token", i, requested, sats);
+                        return HttpResponse::BadRequest().json(serde_json::json!({
+                            "error": format!("Output {}: basket '{}' holds only eligible 1-satoshi token outputs (BRC-147 / BRC-163)", i, requested),
+                            "code": "ERR_INVALID_BASKET_NAME"
+                        }));
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -4972,6 +5125,16 @@ pub(crate) async fn create_action_internal(
                     let second_hash = Sha256::digest(&first_hash);
                     let txid = hex::encode(second_hash.iter().rev().copied().collect::<Vec<u8>>());
                     log::info!("      BEEF tx {}: {} ({} bytes)", i, &txid[..16], tx_bytes.len());
+                }
+                // B5-T1-P7a-1 (owner decision 7): a dApp's inputBEEF proofs are checked against our own
+                // headers before anything is signed — they would otherwise be copied unchecked into the
+                // BEEF we broadcast and hand on (`sign_action`).
+                if let Err(r) = crate::spv_checks::check_beef_proofs(&beef, usize::MAX, |root, height| state.chain_tracker.is_valid_root_for_height(root, height)) {
+                    log::warn!("   🚫 inputBEEF refused: {}", r.description());
+                    return HttpResponse::BadRequest().json(serde_json::json!({
+                        "code": r.code(),
+                        "error": format!("Invalid inputBEEF: {}", r.description())
+                    }));
                 }
                 Some(beef)
             }
@@ -5162,10 +5325,17 @@ pub(crate) async fn create_action_internal(
 
     // Wallet UTXOs - only fetch if we need them
     let mut selected_utxos: Vec<crate::utxo_fetcher::UTXO> = Vec::new();
-    let mut reservation_placeholder: Option<String> = None; // Tracks placeholder spent_txid for rollback
-    // Releases the reservation on every failure exit below (19 `return` sites between the
+    // B5-T1-P3: the transactions row that owns the reserved coins (created with the claim).
+    let mut reservation_row: Option<i64> = None;
+    // Releases the reservation on every failure exit below (23 `return` sites between the
     // reservation and the PENDING_TRANSACTIONS insert). Disarmed by `.commit()` on success.
     let mut reservation_guard: Option<ReservationGuard> = None;
+    // Generate reference ID — minted here (B5-T1-P3) because the reservation row is keyed
+    // by it before coins are claimed.
+    // beta.6 P5: BRC-100 references are base64 (the SDK validates
+    // `signableTransaction.reference` as base64; `action-<uuid>` is not). 12 random
+    // bytes, as wallet-toolbox mints them.
+    let reference = general_purpose::STANDARD.encode(rand::random::<[u8; 12]>());
     let addresses: Vec<crate::json_storage::AddressInfo>;
 
     if need_wallet_utxos {
@@ -5221,7 +5391,7 @@ pub(crate) async fn create_action_internal(
             Ok(db_outputs) => {
                 // Convert outputs to fetcher UTXO format using adapter
                 db_outputs.iter()
-                    .map(|output| output_to_fetcher_utxo(output))
+                    .filter_map(|output| output_to_fetcher_utxo(output))
                     .collect::<Vec<_>>()
             }
             Err(e) => {
@@ -5238,7 +5408,7 @@ pub(crate) async fn create_action_internal(
             match output_repo.get_spendable_confirmed_by_user(state.current_user_id) {
                 Ok(db_outputs) => {
                     let confirmed: Vec<_> = db_outputs.iter()
-                        .map(|output| output_to_fetcher_utxo(output))
+                        .filter_map(|output| output_to_fetcher_utxo(output))
                         .collect();
                     let confirmed_balance: i64 = confirmed.iter().map(|u| u.satoshis).sum();
                     log::info!("   📊 Confirmed UTXOs: {} ({} sats) vs All: {} ({} sats)",
@@ -5285,6 +5455,10 @@ pub(crate) async fn create_action_internal(
                 }
             };
 
+            // B5-T1-P4: observe each new coin's real script before it is written.
+            let observed = crate::ingest::observe_coins_from_chain(&state.database, &state.services,
+                &crate::ingest::coin_keys(&api_utxos)).await;
+
             // Cache UTXOs to outputs table
             let db = state.database.lock().unwrap();
             let address_repo = AddressRepository::new(db.connection());
@@ -5308,9 +5482,11 @@ pub(crate) async fn create_action_internal(
                             &utxo.script,
                             addr.index,
                             utxo.confirmed,
+                            crate::ingest::source_for(&observed, &utxo.txid, utxo.vout),
                         ) {
                             log::warn!("   Failed to cache UTXO {}:{} for {}: {}", utxo.txid, utxo.vout, addr.address, e);
                         }
+                        crate::classify::after_write(&db, &utxo.txid, utxo.vout, "I1:create-action-refresh");
                     }
                 }
             }
@@ -5336,7 +5512,7 @@ pub(crate) async fn create_action_internal(
             all_utxos = match output_repo.get_spendable_by_user(state.current_user_id) {
                 Ok(db_outputs) => {
                     db_outputs.iter()
-                        .map(|output| crate::database::output_to_fetcher_utxo(output))
+                        .filter_map(|output| crate::database::output_to_fetcher_utxo(output))
                         .collect::<Vec<_>>()
                 }
                 Err(e) => {
@@ -5350,7 +5526,7 @@ pub(crate) async fn create_action_internal(
                 match output_repo.get_spendable_confirmed_by_user(state.current_user_id) {
                     Ok(db_outputs) => {
                         let confirmed: Vec<_> = db_outputs.iter()
-                            .map(|output| crate::database::output_to_fetcher_utxo(output))
+                            .filter_map(|output| crate::database::output_to_fetcher_utxo(output))
                             .collect();
                         Some(confirmed)
                     }
@@ -5437,33 +5613,31 @@ pub(crate) async fn create_action_internal(
                 log::info!("   Selected {} wallet UTXOs ({} satoshis)", selected_utxos.len(), wallet_total);
             }
 
-            // Mark selected UTXOs as "in use" immediately (still under the lock)
+            // Reserve the selected coins immediately (still under the lock): the
+            // transaction row first, then the claim, in one SQLite transaction (B5-T1-P3).
+            // A claim that loses, or a failed write, reserves nothing and sends nothing.
             if !selected_utxos.is_empty() {
-                let db = state.database.lock().unwrap();
-                let output_repo = crate::database::OutputRepository::new(db.connection());
-
-                // Mark as spent with a placeholder txid (will be updated with real txid after signing)
-                // Using "pending-{timestamp}" to indicate these are reserved but not yet broadcast
-                let placeholder_txid = new_reservation_placeholder();
                 let utxos_to_reserve: Vec<(String, u32)> = selected_utxos.iter()
                     .map(|u| (u.txid.clone(), u.vout))
                     .collect();
-
-                // Arm the scope guard BEFORE reserving, not after. `mark_multiple_spent`
-                // updates the rows one at a time and can fail partway through, leaving some
-                // already reserved; arming first means those are released too.
-                reservation_guard = Some(ReservationGuard::new(&state, placeholder_txid.clone()));
-
-                match output_repo.mark_multiple_spent(&utxos_to_reserve, &placeholder_txid) {
-                    Ok(count) => {
-                        log::info!("   🔒 Reserved {} UTXOs (preventing concurrent selection)", count);
-                        reservation_placeholder = Some(placeholder_txid);
+                let db = state.database.lock().unwrap();
+                let reserved = reserve_for_new_transaction(
+                    db.connection(), &reference, req.description.as_deref(), &utxos_to_reserve);
+                drop(db);
+                match reserved {
+                    Ok(Ok(row)) => {
+                        log::info!("   🔒 Reserved {} UTXOs for transaction row {}", utxos_to_reserve.len(), row);
+                        reservation_row = Some(row);
+                        reservation_guard = Some(ReservationGuard::new(&state, row));
                     }
+                    Ok(Err((txid, vout))) => return coin_held_response(&txid, vout),
                     Err(e) => {
-                        log::warn!("   ⚠️  Failed to reserve UTXOs: {} (continuing anyway)", e);
+                        log::error!("   ⛔ Failed to reserve UTXOs: {} — refusing (nothing reserved, nothing sent)", e);
+                        return HttpResponse::InternalServerError().json(serde_json::json!({
+                            "error": "The wallet could not reserve the coins for this payment. Nothing was sent; please try again."
+                        }));
                     }
                 }
-                drop(db);
             }
         }
         // Lock is released here when _utxo_lock goes out of scope
@@ -5478,37 +5652,43 @@ pub(crate) async fn create_action_internal(
     // to being spent in this transaction. Only affects UTXOs tracked locally
     // (basket outputs); external UTXOs not in our table are silently skipped.
     if !user_inputs.is_empty() {
-        // Ensure we have a placeholder — create one if wallet UTXOs weren't needed
-        if reservation_placeholder.is_none() {
-            reservation_placeholder = Some(new_reservation_placeholder());
-        }
-
-        let placeholder = reservation_placeholder.as_ref().unwrap();
         let user_outpoints: Vec<(String, u32)> = user_inputs.iter()
             .map(|ui| (ui.txid.clone(), ui.vout))
             .collect();
 
+        // Owned by the same transaction row as the wallet coins — created here when the
+        // wallet's coins were not needed. Not strict: a dApp-named input need not be
+        // money or ours (as before P3). One row either way, so one guard releases both.
         let db = state.database.lock().unwrap();
-        let output_repo = crate::database::OutputRepository::new(db.connection());
-
-        // Same reasoning as above, and it also covers the wallet-UTXO-free path where no
-        // guard has been armed yet. One placeholder either way, so one guard releases both.
-        if reservation_guard.is_none() {
-            reservation_guard = Some(ReservationGuard::new(&state, placeholder.clone()));
-        }
-
-        match output_repo.mark_multiple_spent(&user_outpoints, placeholder) {
-            Ok(count) => {
-                if count > 0 {
-                    log::info!("   🔒 Reserved {} user-provided input(s) (basket outputs)", count);
-                    state.balance_cache.invalidate();
+        let claimed = (|| -> rusqlite::Result<(i64, crate::database::Claim)> {
+            let txn = db.connection().unchecked_transaction()?;
+            let row = match reservation_row {
+                Some(row) => row,
+                None => crate::database::TransactionRepository::new(&txn)
+                    .create_reservation_row(&reference, req.description.as_deref())?,
+            };
+            let claim = crate::database::OutputRepository::new(&txn).claim_coins(row, &user_outpoints, false)?;
+            txn.commit()?;
+            Ok((row, claim))
+        })();
+        drop(db);
+        match claimed {
+            Ok((row, claim)) => {
+                reservation_row = Some(row);
+                if reservation_guard.is_none() {
+                    reservation_guard = Some(ReservationGuard::new(&state, row));
+                }
+                if let crate::database::Claim::Claimed(count) = claim {
+                    if count > 0 {
+                        log::info!("   🔒 Reserved {} user-provided input(s) (basket outputs)", count);
+                        state.balance_cache.invalidate();
+                    }
                 }
             }
             Err(e) => {
                 log::warn!("   ⚠️  Failed to reserve user-provided inputs: {} (continuing anyway)", e);
             }
         }
-        drop(db);
     }
 
     // Calculate total input (user inputs + wallet inputs)
@@ -5852,17 +6032,18 @@ pub(crate) async fn create_action_internal(
 
         let wallet_id = wallet.id.unwrap();
 
-        // Use MAX(index) from database instead of wallet.current_index
-        // This is more reliable - current_index can get out of sync
-        let current_index = match address_repo.get_max_index(wallet_id) {
-            Ok(Some(max_idx)) => max_idx + 1,  // Next index is max + 1
-            Ok(None) => 0,  // No addresses yet, start at 0
+        // B5-T1-P6 (`P6-A11`): the one next-index source, shared with generate_address —
+        // never below an index the counter already handed out (a restore can strip rows).
+        let current_index = match wallet_repo.claim_next_receive_index(wallet_id) {
+            Ok(i) => i,
             Err(e) => {
-                log::warn!("   Failed to get max address index: {}, falling back to wallet.current_index", e);
-                wallet.current_index
+                log::error!("   Failed to claim the next change index: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Failed to claim change address index: {}", e)
+                }));
             }
         };
-        log::info!("   Next change address index: {} (from MAX query)", current_index);
+        log::info!("   Next change address index: {} (claimed)", current_index);
 
         // Derive new address for change
         let master_privkey = match get_master_private_key_from_db(&db) {
@@ -5931,10 +6112,6 @@ pub(crate) async fn create_action_internal(
 
         let change_address_id = match address_repo.create(&address_model) {
             Ok(addr_id) => {
-                // Update wallet's current_index
-                if let Err(e) = wallet_repo.update_current_index(wallet_id, current_index + 1) {
-                    log::warn!("   Failed to update wallet index: {}", e);
-                }
                 log::info!("   ✅ Generated new change address: {} (index {}, id {})", change_address, current_index, addr_id);
                 Some(addr_id)
             }
@@ -5953,7 +6130,7 @@ pub(crate) async fn create_action_internal(
                             // Set it to one past this address's index
                             let correct_index = existing_addr.index + 1;
                             if correct_index > current_index {
-                                if let Err(fix_err) = wallet_repo.update_current_index(wallet_id, correct_index) {
+                                if let Err(fix_err) = wallet_repo.raise_current_index(wallet_id, correct_index) {
                                     log::warn!("   Failed to fix wallet current_index: {}", fix_err);
                                 } else {
                                     log::info!("   🔧 Fixed wallet current_index: {} → {}", current_index, correct_index);
@@ -5978,7 +6155,7 @@ pub(crate) async fn create_action_internal(
                                           current_index, addr_at_index.address, change_address);
                                 // Fix current_index to move past this
                                 let correct_index = current_index + 1;
-                                if let Err(fix_err) = wallet_repo.update_current_index(wallet_id, correct_index) {
+                                if let Err(fix_err) = wallet_repo.raise_current_index(wallet_id, correct_index) {
                                     log::warn!("   Failed to fix wallet current_index: {}", fix_err);
                                 } else {
                                     log::info!("   🔧 Fixed wallet current_index: {} → {}", current_index, correct_index);
@@ -6112,12 +6289,6 @@ pub(crate) async fn create_action_internal(
         }
     };
 
-    // Generate reference ID
-    // beta.6 P5: BRC-100 references are base64 (the SDK validates
-    // `signableTransaction.reference` as base64; `action-<uuid>` is not). 12 random
-    // bytes, as wallet-toolbox mints them.
-    let reference = general_purpose::STANDARD.encode(rand::random::<[u8; 12]>());
-
     // Build user input infos for signing
     let user_input_infos: Vec<UserInputInfo> = user_inputs.iter().map(|ui| UserInputInfo {
         txid: ui.txid.clone(),
@@ -6182,7 +6353,7 @@ pub(crate) async fn create_action_internal(
             user_input_infos,
             brc29_info: brc29_info.clone(),
             input_beef: parsed_input_beef.clone(),
-            reservation_placeholder: reservation_placeholder.clone(),
+            reservation_row,
             no_send,
         });
     }
@@ -6243,7 +6414,10 @@ pub(crate) async fn create_action_internal(
             None,  // No output description for change
             true,  // is_change = true
         ) {
-            Ok(_output_id) => {
+            Ok(output_id) => {
+                // B5-T1-P5 (route I6): our own change is money only once the seam has
+                // checked it is the exact template to our key.
+                crate::classify::after_write_id(&db, output_id, "I6:create-action-change");
                 log::info!("   ✅ Change output inserted with 'default' basket - balance will be accurate immediately");
             }
             Err(e) => {
@@ -6295,7 +6469,8 @@ pub(crate) async fn create_action_internal(
                         bo.vout, bo.basket_name, output_id);
 
                     // Assign tags to the output
-                    for tag in &bo.tags {
+                    // B5-T2-P1 (review #2): no site-supplied `id:` on a row in an asset basket.
+                    for tag in bo.tags.iter().filter(|t| !(crate::tokens::is_asset_basket(&bo.basket_name) && t.starts_with("id:"))) {
                         match tag_repo.assign_tag_to_output(output_id, tag) {
                             Ok(_) => {
                                 log::info!("      Tagged with '{}'", tag);
@@ -6380,7 +6555,12 @@ pub(crate) async fn create_action_internal(
         use crate::database::TransactionRepository;
         let db = state.database.lock().unwrap();
         let tx_repo = TransactionRepository::new(db.connection());
-        match tx_repo.add_transaction(&stored_action, state.current_user_id) {
+        // B5-T1-P3: the row that already owns the reserved coins is filled in place.
+        let stored = match reservation_row {
+            Some(row) => tx_repo.fill_reservation_row(row, &stored_action, state.current_user_id),
+            None => tx_repo.add_transaction(&stored_action, state.current_user_id),
+        };
+        match stored {
             Ok(transaction_id) => {
                 log::info!("   💾 Action stored in database with status: created (id={})", transaction_id);
 
@@ -6411,6 +6591,24 @@ pub(crate) async fn create_action_internal(
             }
             Err(e) => {
                 log::warn!("   ⚠️  Failed to store action in database: {}", e);
+                // B5-T1-P3 (review #1): the row that owns the coins could not be filled
+                // (gone, or failed by a backstop while this built). Never sign or send it.
+                if let Some(row) = reservation_row {
+                    PENDING_TRANSACTIONS.lock().unwrap_or_else(|p| p.into_inner()).remove(&reference);
+                    let txn = db.connection().unchecked_transaction();
+                    if let Ok(txn) = txn {
+                        // the change / basket outputs were inserted before the fill (re-review)
+                        let _ = crate::database::OutputRepository::new(&txn).disable_by_txid(&txid);
+                        let _ = crate::database::OutputRepository::new(&txn).release_coins_of(row);
+                        let _ = crate::database::TransactionRepository::new(&txn).discard_unbuilt_row(row);
+                        let _ = txn.commit();
+                    }
+                    state.balance_cache.invalidate();
+                    log::error!("   ⛔ Not sending: the wallet could not record this payment (row {}): {}", row, e);
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": "The wallet could not record this payment, so it was not sent. Nothing was sent; please try again."
+                    }));
+                }
             }
         }
     }
@@ -6437,6 +6635,8 @@ pub(crate) async fn create_action_internal(
     //   sendWith trumps noSend (forces broadcast of batched txids)
     let should_sign = sign_and_process;
     let should_broadcast = !no_send || is_send_with;
+    // One budget for this call's own retries AND its sendWith batch (review M4 / re-review).
+    let broadcast_deadline = std::time::Instant::now() + BROADCAST_RETRY_POLICY.budget;
 
     // Save the pre-signing txid for post-signing reconciliation
     // (BSV txids include unlocking scripts, so signing changes the txid)
@@ -6596,16 +6796,15 @@ pub(crate) async fn create_action_internal(
         // dApp needs for `signAction`. The pending entry and the `unsigned` row already
         // exist, so `signAction(reference)` signs it as in the two-phase path.
         log::info!("   ℹ️  signAndProcess=false — returning signableTransaction (reference {})", reference);
-        // The reservation moves from its placeholder to the txid, as the pre-change flow
-        // did (the "txid didn't change" arm below): `TaskFailAbandoned` releases an
-        // abandoned `unsigned` action by txid, and `sign_action`'s `update_txid` re-keys
-        // txid-held inputs to the signed txid.
-        if let Some(ref placeholder) = reservation_placeholder {
+        // The reserved coins are labelled with the (pre-signing) txid, as the "txid didn't
+        // change" arm below does; `sign_action`'s `update_txid` re-labels them to the
+        // signed txid.
+        if let Some(row) = reservation_row {
             let db = state.database.lock().unwrap();
             let output_repo = crate::database::OutputRepository::new(db.connection());
-            if let Err(e) = output_repo.update_spending_description_batch(placeholder, &txid) {
+            if let Err(e) = output_repo.label_coins_of(row, &txid) {
                 drop(db);
-                return resolution_failed_response(&state, placeholder, &txid, &e.to_string());
+                return resolution_failed_response(&state, &txid, &e.to_string());
             }
         }
         let Some(atomic) = deferred_beef else {
@@ -6655,29 +6854,33 @@ pub(crate) async fn create_action_internal(
                 }
             }
             log::info!("   ✅ Updated {} basket output txid(s)", pending_basket_outputs.len());
+            // B5-T2-P1: the site's token rows were already filed under this final txid by
+            // `sign_action`'s own reconciliation (`file_written_tokens`, "I6:sign-action-basket")
+            // — the one call on both signing paths (/code-review ultra #4).
         }
 
-        // 3. Update spending_description on reserved inputs (placeholder → signed txid)
+        // 3. Label the reserved inputs with the signed txid (a no-op when `sign_action`
+        //    already did).
         //
         // ⛔ Fatal. If the wallet cannot record which coins this transaction spends,
         // it must not broadcast it — see `resolution_failed_response`.
-        if let Some(ref placeholder) = reservation_placeholder {
+        if let Some(row) = reservation_row {
             let output_repo = crate::database::OutputRepository::new(db.connection());
-            if let Err(e) = output_repo.update_spending_description_batch(placeholder, &final_txid) {
+            if let Err(e) = output_repo.label_coins_of(row, &final_txid) {
                 drop(db);
-                return resolution_failed_response(&state, placeholder, &final_txid, &e.to_string());
+                return resolution_failed_response(&state, &final_txid, &e.to_string());
             }
         }
 
         drop(db);
     } else if !final_txid.is_empty() {
-        // Txid didn't change (unsigned or same) — still update spending_description from placeholder
-        if let Some(ref placeholder) = reservation_placeholder {
+        // Txid didn't change (unsigned or same) — still label the reserved inputs
+        if let Some(row) = reservation_row {
             let db = state.database.lock().unwrap();
             let output_repo = crate::database::OutputRepository::new(db.connection());
-            if let Err(e) = output_repo.update_spending_description_batch(placeholder, &final_txid) {
+            if let Err(e) = output_repo.label_coins_of(row, &final_txid) {
                 drop(db);
-                return resolution_failed_response(&state, placeholder, &final_txid, &e.to_string());
+                return resolution_failed_response(&state, &final_txid, &e.to_string());
             }
             drop(db);
         }
@@ -6691,7 +6894,38 @@ pub(crate) async fn create_action_internal(
             let beef_hex = hex::encode(tx_bytes);
             log::info!("   📡 Broadcasting transaction to network...");
 
-            match broadcast_transaction(&beef_hex, &state.services, Some(&state.database), Some(&final_txid)).await {
+            // B5-T1-P3 (owner Q4, 2026-10-04): `sending` BEFORE the broadcast. The row was
+            // `nosend` here ("the app will broadcast") — a crash after the broadcast left it
+            // to TaskCheckForProofs' 10-minute nosend backstop, which fails a transaction
+            // that is merely still in a mempool and restores its spent inputs. `sending`
+            // hands that case to the chain-checking reconcilers (TaskSendWaiting,
+            // TaskCheckForProofs' quorum).
+            //
+            // ⛔ Conditional: if a backstop failed this row (and released its coins) while
+            // it was being built, it must not be sent (B5-T1-P3 review #1).
+            {
+                let db = state.database.lock().unwrap();
+                let moved = db.connection().execute(
+                    "UPDATE transactions SET status = 'sending', updated_at = strftime('%s','now')
+                     WHERE txid = ?1 AND status != 'failed'",
+                    rusqlite::params![&final_txid],
+                );
+                drop(db);
+                if !matches!(moved, Ok(1)) {
+                    log::error!("   ⛔ Not broadcasting {}: its record was given up on before it was sent ({:?})",
+                        &final_txid[..final_txid.len().min(16)], moved);
+                    // Never sent ⇒ release it like any refusal (idempotent when a backstop
+                    // already did): outputs disabled, its coins freed, row failed.
+                    PENDING_TRANSACTIONS.lock().unwrap_or_else(|p| p.into_inner()).remove(&reference);
+                    let (disabled, restored) = release_unbroadcast_transaction(&state, &final_txid);
+                    log::info!("   ♻️  Released on refusal: {} output(s) disabled, {} input(s) restored", disabled, restored);
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": "The wallet gave up on this payment before it was sent, so it was not sent. Nothing was sent; please try again."
+                    }));
+                }
+            }
+
+            match broadcast_with_retries(&state, &beef_hex, &final_txid, &BROADCAST_RETRY_POLICY).await {
                 Ok(_broadcast_msg) => {
                     log::info!("   ✅ Broadcast successful: {}", _broadcast_msg);
 
@@ -6805,7 +7039,26 @@ pub(crate) async fn create_action_internal(
                     // sendWithResults is only for transactions listed in sendWith[],
                     // not for the current transaction's broadcast result.
                 }
-                Err(e) => {
+                Err(fail) if !fail.permanent && on_temporary == OnTemporaryFailure::KeepSending => {
+                    // ⛔ B5-T1-P2 (§12a Q2/Q4): a TEMPORARY failure is not a verdict on the
+                    // transaction. The signed bytes go back to the caller in `tx` and can
+                    // still land, so nothing is released: inputs stay reserved, the change
+                    // output stays, and the row becomes `sending` for TaskSendWaiting.
+                    // The row is `nosend` here (the inner signAction ran with noSend), so
+                    // `sending` must be set explicitly — leaving it `nosend` would hide it
+                    // from TaskSendWaiting (controls-B finding 1).
+                    {
+                        let db = state.database.lock().unwrap();
+                        let tx_repo = crate::database::TransactionRepository::new(db.connection());
+                        if let Err(e) = tx_repo.set_transaction_status(&final_txid, crate::action_storage::TransactionStatus::Sending) {
+                            log::warn!("   ⚠️  Failed to set status 'sending' after a temporary failure: {}", e);
+                        }
+                    }
+                    let outcome = ActionOutcome { txid: final_txid.clone(), status: ReviewStatus::ServiceError, still_sending: true };
+                    return review_actions_error(&final_txid, Some(tx_bytes.as_slice()), &[outcome], &broadcast_failure_message(&fail));
+                }
+                Err(fail) => {
+                    let e = fail.reason.clone();
                     log::error!("   ❌ Broadcast failed: {}", e);
 
                     // Update broadcast_status to 'failed' in database
@@ -6846,7 +7099,7 @@ pub(crate) async fn create_action_internal(
                         // If so, mark inputs as SUSPECTED (not confirmed) — TaskVerifyDoubleSpend
                         // will verify independently against WoC before confirming.
                         // "Missing inputs" is NOT included — could be BEEF validation failure.
-                        let is_double_spend = crate::arc_status::is_double_spend_error(&e.to_string());
+                        let is_double_spend = fail.double_spend;
 
                         if is_double_spend {
                             // Mark inputs as suspected double-spend for independent verification.
@@ -6854,7 +7107,6 @@ pub(crate) async fn create_action_internal(
                             crate::arc_status::mark_inputs_suspected(
                                 db.connection(),
                                 &final_txid,
-                                reservation_placeholder.as_deref(),
                             );
                         }
 
@@ -6865,12 +7117,7 @@ pub(crate) async fn create_action_internal(
                             Ok(count) if count > 0 => {
                                 log::info!("   ♻️  Restored {} input output(s) from failed broadcast", count);
                             }
-                            Ok(_) => {
-                                // spending_description might still be placeholder if signing failed to update
-                                if let Some(ref placeholder) = reservation_placeholder {
-                                    let _ = output_repo.restore_by_spending_description(placeholder);
-                                }
-                            }
+                            Ok(_) => {}
                             Err(e) => {
                                 log::warn!("   ⚠️  Failed to restore input outputs: {}", e);
                             }
@@ -6911,10 +7158,14 @@ pub(crate) async fn create_action_internal(
 
                     // Broadcast failed (non-phantom, or reconcile healed the phantom).
                     // The tx is cleaned up (ghost outputs deleted, inputs restored).
-                    return HttpResponse::InternalServerError().json(serde_json::json!({
-                        "error": format!("Transaction broadcast failed: {}", e),
-                        "code": "ERR_BROADCAST_FAILED"
-                    }));
+                    // B5-T1-P2 (§12a Q4): the SDK-decodable code-5 envelope, not a 500
+                    // `ERR_BROADCAST_FAILED` the SDK turns into a generic HTTP error.
+                    let outcome = ActionOutcome { txid: final_txid.clone(), status: ReviewStatus::of_failure(&fail), still_sending: false };
+                    // Reached by a temporary failure only on the internal Release path.
+                    let message = if fail.permanent { broadcast_failure_message(&fail) } else {
+                        format!("Not broadcast — the transaction was abandoned and its coins released: {}", fail.reason)
+                    };
+                    return review_actions_error(&final_txid, Some(tx_bytes.as_slice()), &[outcome], &message);
                 }
             }
         } else {
@@ -6930,123 +7181,15 @@ pub(crate) async fn create_action_internal(
     // created with noSend=true and should now be broadcast alongside this tx.
     // ═══════════════════════════════════════════════════════════════
     if is_send_with {
-        log::info!("   📡 Processing sendWith: {} transaction(s) to broadcast", send_with_txids.len());
-
-        // Initialize sendWithResults if not already set by the main broadcast
-        let results = send_with_results.get_or_insert_with(Vec::new);
-
-        for sw_txid in &send_with_txids {
-            log::info!("   📡 Broadcasting sendWith txid: {}", sw_txid);
-
-            // ⛔ GATE: the txid MUST be in `nosend` status. (P0.5 panel #3 —
-            // sendWith broadcasts arbitrary local txids.) Without this check the
-            // loop below would hand ANY local raw tx to broadcast_transaction:
-            // parent_transactions.get_by_txid has no status filter, and
-            // get_local_parent_tx filters only `status != 'completed'`. That let
-            // an approved dApp — which learns every txid from /listActions — name
-            //   (a) a BRC-121 nosend payment the browser deliberately withheld
-            //       (402 server never returned 200), paying a server that
-            //       delivered nothing, OR
-            //   (b) a tx TaskUnFail/TaskFailAbandoned had marked `failed` (which
-            //       restored its inputs as spendable), resurrecting it on-chain
-            //       while the wallet re-spends those same inputs — a genuine
-            //       double-spend race over the user's funds.
-            // And the payment gate never priced this: computePaymentCost sums
-            // only outputs[].satoshis, so a 1-sat createAction carrying sendWith
-            // auto-approves SILENTLY (MEASURED 2026-08-21). This mirrors
-            // broadcast_nosend's own `status == "nosend"` guard exactly — the
-            // legitimate flow (a prior noSend=true createAction, status=nosend,
-            // then a second createAction with sendWith=[that txid]) still passes;
-            // anything failed / aborted / completed / already-broadcast is refused.
-            let sw_status: Option<String> = {
-                let db = state.database.lock().unwrap();
-                db.connection()
-                    .query_row(
-                        "SELECT status FROM transactions WHERE txid = ?1 LIMIT 1",
-                        rusqlite::params![sw_txid],
-                        |r| r.get::<_, String>(0),
-                    )
-                    .ok()
-            };
-            if !sendwith_status_is_broadcastable(sw_status.as_deref()) {
-                log::warn!(
-                    "   🛡️ sendWith REFUSED for {}: status={:?}, not 'nosend' — only a withheld \
-                     (noSend) transaction may be broadcast via sendWith",
-                    &sw_txid[..16.min(sw_txid.len())],
-                    sw_status
-                );
-                results.push(SendWithResult {
-                    txid: sw_txid.clone(),
-                    status: "failed".to_string(),
-                });
-                continue;
-            }
-
-            // Look up the signed raw tx from parent_transactions or transactions table
-            let sw_beef_hex = {
-                let db = state.database.lock().unwrap();
-
-                // First check parent_transactions (has signed raw tx if we stored it)
-                let parent_tx_repo = crate::database::ParentTransactionRepository::new(db.connection());
-                match parent_tx_repo.get_by_txid(sw_txid) {
-                    Ok(Some(cached)) if !cached.raw_hex.is_empty() => {
-                        log::info!("   ✅ Found sendWith tx {} in parent_transactions cache", &sw_txid[..16]);
-                        // Build a minimal BEEF V1 for broadcasting: just the raw tx
-                        // ARC accepts raw tx hex directly, so we can broadcast as-is
-                        Some(cached.raw_hex.clone())
-                    }
-                    _ => {
-                        // Fallback: check transactions table
-                        let tx_repo = crate::database::TransactionRepository::new(db.connection());
-                        match tx_repo.get_local_parent_tx(sw_txid) {
-                            Ok(Some(raw_tx_hex)) => {
-                                log::info!("   📋 Found sendWith tx {} in transactions table", &sw_txid[..16]);
-                                Some(raw_tx_hex)
-                            }
-                            _ => {
-                                log::warn!("   ⚠️  sendWith txid {} not found in local storage", sw_txid);
-                                None
-                            }
-                        }
-                    }
-                }
-            };
-
-            match sw_beef_hex {
-                Some(raw_tx_hex) => {
-                    // Broadcast the raw transaction
-                    match broadcast_transaction(&raw_tx_hex, &state.services, Some(&state.database), Some(sw_txid)).await {
-                        Ok(msg) => {
-                            log::info!("   ✅ sendWith broadcast success for {}: {}", &sw_txid[..16], msg);
-                            // Update broadcast status
-                            {
-                                let db = state.database.lock().unwrap();
-                                let tx_repo = crate::database::TransactionRepository::new(db.connection());
-                                let _ = tx_repo.update_broadcast_status(sw_txid, "broadcast");
-                            }
-                            results.push(SendWithResult {
-                                txid: sw_txid.clone(),
-                                status: "unproven".to_string(),
-                            });
-                        }
-                        Err(e) => {
-                            log::warn!("   ⚠️  sendWith broadcast failed for {}: {}", &sw_txid[..16], e);
-                            results.push(SendWithResult {
-                                txid: sw_txid.clone(),
-                                status: "failed".to_string(),
-                            });
-                        }
-                    }
-                }
-                None => {
-                    results.push(SendWithResult {
-                        txid: sw_txid.clone(),
-                        status: "failed".to_string(),
-                    });
-                }
-            }
-        }
-        log::info!("   📡 sendWith processing complete: {} result(s)", results.len());
+        // ⛔ createAction keeps its answer from before B5-T1-P2: 200, with each sendWith
+        // txid's status. Its own payment has gone out by now; a 400 here would hide the
+        // gold pill for a real spend and invite a retry that pays twice (adversarial
+        // review H1, R-GOLD). The code-5 envelope is for its OWN broadcast failing.
+        let outcomes = broadcast_send_with(&state, &send_with_txids, broadcast_deadline).await;
+        send_with_results = Some(outcomes.iter().map(|o| SendWithResult {
+            txid: o.txid.clone(),
+            status: if o.status == ReviewStatus::Success { "unproven" } else { "failed" }.to_string(),
+        }).collect());
     }
 
     // Build response inputs array (user inputs first, then wallet inputs)
@@ -7361,6 +7504,13 @@ fn parse_address_from_script(script_bytes: &[u8]) -> Option<String> {
 
 // Check if an output script belongs to our wallet
 fn is_output_ours(script_bytes: &[u8], our_addresses: &[crate::json_storage::AddressInfo]) -> bool {
+    // B5-T2-P1: a token whose lock is exactly our P2PKH plus one `ord` envelope is
+    // judged by that P2PKH (`tokens::p2pkh_lock` — the envelope never executes).
+    let lock;
+    let script_bytes = match crate::tokens::p2pkh_lock(script_bytes) {
+        Some(hash) => { lock = [&[0x76, 0xa9, 0x14][..], hash, &[0x88, 0xac]].concat(); &lock[..] }
+        None => script_bytes,
+    };
     // Extract pubkey hash from P2PKH script
     if script_bytes.len() == 25 &&
        script_bytes[0] == 0x76 &&  // OP_DUP
@@ -7469,6 +7619,26 @@ fn verify_output_matches_derived_address(script_bytes: &[u8], expected_pubkey_ha
     false
 }
 
+/// B5-T5-P7a — the output `txid:vout` is already stored with this value and script: a payment
+/// that arrives again (another MessageBox server, another message) is the coin we already hold. A
+/// stored row with a different value or script is `false` here; `store_derived_utxo` refuses it.
+/// An unreadable table is an error, never "not stored" (rule 7, trip-wire 2).
+pub fn derived_output_already_stored(
+    conn: &rusqlite::Connection,
+    txid: &str,
+    vout: u32,
+    satoshis: i64,
+    locking_script: &[u8],
+) -> Result<bool, String> {
+    use rusqlite::OptionalExtension;
+    let stored: Option<(i64, Option<Vec<u8>>)> = conn.query_row(
+        "SELECT satoshis, locking_script FROM outputs WHERE txid = ?1 AND vout = ?2",
+        rusqlite::params![txid, vout as i32],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional().map_err(|e| format!("Failed to read output {}:{}: {}", txid, vout, e))?;
+    Ok(matches!(stored, Some((sats, Some(script))) if sats == satoshis && script == locking_script))
+}
+
 /// Store a BRC-42 derived UTXO in the database
 ///
 /// For BRC-29 payment UTXOs, we store:
@@ -7489,6 +7659,7 @@ pub fn store_derived_utxo(
     script_hex: &str,
     _derived_pubkey: &[u8],
     custom_instructions: &serde_json::Value,
+    raw_tx: &[u8],
 ) -> Result<(), String> {
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -7556,27 +7727,44 @@ pub fn store_derived_utxo(
         // confirmed=1 when it verifies the UTXO exists on-chain via WoC.
         // This prevents phantom outputs (from never-mined parent txs) from being
         // selected for spending.
+        // B5-T1-P5: record the script as an OBSERVATION when the caller's raw bytes are
+        // the transaction (txid + value checked, B5-T1-P4 `ingest::observe_output`) —
+        // both callers read the credit from those bytes. Otherwise it is written
+        // unchecked (`script_length` NULL) and the classifier holds it until
+        // `complete_unchecked` observes it.
+        let observed = crate::ingest::observe_output(raw_tx, txid, vout, satoshis).ok()
+            .filter(|o| o.script == locking_script);
+        let source = match &observed {
+            Some(o) => crate::ingest::ScriptSource::Observed(o),
+            None => crate::ingest::ScriptSource::Unchecked,
+        };
+        let (script_col, script_length, script_offset) =
+            crate::ingest::script_columns(conn, script_hex, source);
         conn.execute(
             "INSERT INTO outputs (
                 user_id, txid, vout, satoshis, locking_script,
                 sender_identity_key, derivation_prefix, derivation_suffix,
                 custom_instructions, spendable, change, provided_by, purpose, type,
-                confirmed, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, 0, 'you', 'receive', 'P2PKH', 0, ?10, ?11)",
+                confirmed, created_at, updated_at, script_length, script_offset
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, 0, 'you', 'receive', 'P2PKH', 0, ?10, ?11, ?12, ?13)",
             rusqlite::params![
                 user_id,
                 txid,
                 vout as i32,
                 satoshis,
-                locking_script,
+                script_col,
                 sender_identity_key,
                 db_derivation_prefix,
                 db_derivation_suffix,
                 custom_instructions.to_string(),
                 now,
                 now,
+                script_length,
+                script_offset,
             ],
         ).map_err(|e| format!("Failed to insert output: {}", e))?;
+        // B5-T1-P5 (routes I4 / I5): classify at the door.
+        crate::classify::after_write(db, txid, vout, "I4/I5:brc29-receive");
     }
 
     log::info!("      Stored PeerPay output {}:{} ({} sats) with counterparty derivation", txid, vout, satoshis);
@@ -8234,11 +8422,11 @@ pub struct SignActionResponse {
     /// ⚠️ Not a BRC-100 field — an extra, which the spec tolerates.
     #[serde(rename = "unsignedInputs", skip_serializing_if = "Option::is_none")]
     pub unsigned_inputs: Option<Vec<usize>>,
-    // ⛔ `sendWithResults` is deliberately NOT populated here, though BRC-100
-    // lists it. `SignActionOptions.send_with` is parsed and then never read by
-    // sign_action — the feature does not work — so emitting a result array for it
-    // would be inventing a value. Reported, not fixed:
-    // development-docs/0.4.0-beta.7/tickets/TICKET_signaction_response_not_brc100_shape.md §11.
+
+    /// BRC-100 `SignActionResult.sendWithResults` — present only when the call named
+    /// `options.sendWith` (B5-T1-P2, §12a Q3: honoured through `broadcast_send_with`).
+    #[serde(rename = "sendWithResults", skip_serializing_if = "Option::is_none")]
+    pub send_with_results: Option<Vec<SendWithResult>>,
 }
 
 impl SignActionResponse {
@@ -8272,8 +8460,353 @@ impl SignActionResponse {
                 None
             }
         };
-        SignActionResponse { txid, tx, raw_tx: beef_hex, unsigned_inputs }
+        SignActionResponse { txid, tx, raw_tx: beef_hex, unsigned_inputs, send_with_results: None }
     }
+}
+
+// ============================================================================
+// B5-T1-P2 — a failure on the money path says it failed, in the shape the
+// reference SDK decodes. `@bsv/sdk` 2.8.7 / 3.0.0 `HTTPWalletJSON` rebuilds a typed
+// error ONLY from HTTP 400 + a body with `isError: true` and an integer `code`.
+// Code 5 = WERR_REVIEW_ACTIONS (createAction / signAction only), code 6 =
+// WERR_INVALID_PARAMETER. Field rules read from the SDK at kickoff (contract §2a):
+// `txid` required for code 5; `tx`, if sent, a BYTE ARRAY (Atomic BEEF) matching
+// `txid`; every `sendWithResults` / `reviewActionResults` txid is the subject or one
+// of `options.sendWith`. `sendWithResults` names the subject itself, as
+// wallet-toolbox does (`sending` after serviceError, `failed` otherwise).
+// `error` duplicates `message` for the `window.CWI` shim, which reads `payload.error`.
+// ============================================================================
+
+/// BRC-100 `ReviewActionResult.status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReviewStatus {
+    Success,
+    DoubleSpend,
+    ServiceError,
+    InvalidTx,
+}
+
+impl ReviewStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            ReviewStatus::Success => "success",
+            ReviewStatus::DoubleSpend => "doubleSpend",
+            ReviewStatus::ServiceError => "serviceError",
+            ReviewStatus::InvalidTx => "invalidTx",
+        }
+    }
+
+    pub(crate) fn of_failure(f: &BroadcastFailure) -> Self {
+        if !f.permanent {
+            ReviewStatus::ServiceError
+        } else if f.double_spend {
+            ReviewStatus::DoubleSpend
+        } else {
+            ReviewStatus::InvalidTx
+        }
+    }
+}
+
+/// One transaction's broadcast outcome, for both result arrays.
+#[derive(Debug, Clone)]
+pub(crate) struct ActionOutcome {
+    pub txid: String,
+    pub status: ReviewStatus,
+    /// The wallet's row is `sending` and `TaskSendWaiting` keeps trying. Only then is
+    /// `SendWithResult.status` "sending" (toolbox's meaning); a failure the wallet is
+    /// not retrying is "failed", whatever its review status.
+    pub still_sending: bool,
+}
+
+impl ActionOutcome {
+    fn send_with_status(&self) -> &'static str {
+        match self.status {
+            ReviewStatus::Success => "unproven",
+            _ if self.still_sending => "sending",
+            _ => "failed",
+        }
+    }
+}
+
+/// The `WERR_REVIEW_ACTIONS` (code 5) body. One constructor, used by the handlers and
+/// their tests. `outcomes[0]` is the subject transaction.
+pub(crate) fn review_actions_error_body(
+    subject_txid: &str,
+    tx: Option<&[u8]>,
+    outcomes: &[ActionOutcome],
+    message: &str,
+) -> serde_json::Value {
+    let send_with_results: Vec<serde_json::Value> = outcomes
+        .iter()
+        .map(|o| serde_json::json!({ "txid": o.txid, "status": o.send_with_status() }))
+        .collect();
+    let review_action_results: Vec<serde_json::Value> = outcomes
+        .iter()
+        .map(|o| serde_json::json!({ "txid": o.txid, "status": o.status.as_str() }))
+        .collect();
+    let mut body = serde_json::json!({
+        "isError": true,
+        "code": 5,
+        "name": "WERR_REVIEW_ACTIONS",
+        "message": message,
+        "error": message,
+        "txid": subject_txid,
+        "sendWithResults": send_with_results,
+        "reviewActionResults": review_action_results,
+    });
+    if let Some(bytes) = tx {
+        body["tx"] = serde_json::json!(bytes);
+    }
+    body
+}
+
+pub(crate) fn review_actions_error(
+    subject_txid: &str,
+    tx: Option<&[u8]>,
+    outcomes: &[ActionOutcome],
+    message: &str,
+) -> HttpResponse {
+    HttpResponse::BadRequest().json(review_actions_error_body(subject_txid, tx, outcomes, message))
+}
+
+/// `WERR_INVALID_PARAMETER` (code 6).
+pub(crate) fn invalid_parameter_error(parameter: &str, message: &str) -> HttpResponse {
+    HttpResponse::BadRequest().json(serde_json::json!({
+        "isError": true,
+        "code": 6,
+        "name": "WERR_INVALID_PARAMETER",
+        "parameter": parameter,
+        "message": message,
+        "error": message,
+    }))
+}
+
+/// What the caller is told after a broadcast that did not succeed (owner, §12a Q2:
+/// a temporary failure is reported, not abandoned). "A few minutes" (👤 owner,
+/// 2026-10-04): `TaskCheckForProofs` rolls the action back once three indexers have
+/// not seen it for `ALL_ORACLES_NOT_FOUND_TIMEOUT_SECS` (5 min).
+pub(crate) fn broadcast_failure_message(f: &BroadcastFailure) -> String {
+    if f.permanent {
+        format!("The network refused this transaction: {}", f.reason)
+    } else {
+        format!(
+            "Not broadcast yet — the wallet will keep trying for a few minutes. The signed \
+             transaction is included in this error. Last reason: {}",
+            f.reason
+        )
+    }
+}
+
+/// Retry policy for a broadcast the caller is waiting on (owner, §12a Q1). The whole
+/// loop must end inside the `window.CWI` IPC transport's 30 s cap
+/// (`HttpRequestInterceptor.cpp :: dispatchWalletHttpByMethod`); one round of the
+/// four-provider chain costs up to ~20 s on dead providers, so the budget, not the
+/// count, is usually what stops it.
+pub(crate) struct RetryPolicy {
+    pub max_attempts: u32,
+    pub budget: std::time::Duration,
+    pub pause: std::time::Duration,
+    /// Do not START an attempt with less than this left in the budget.
+    pub min_attempt: std::time::Duration,
+}
+
+pub(crate) const BROADCAST_RETRY_POLICY: RetryPolicy = RetryPolicy {
+    max_attempts: 3,
+    budget: std::time::Duration::from_secs(20),
+    pause: std::time::Duration::from_secs(2),
+    min_attempt: std::time::Duration::from_secs(5),
+};
+
+/// Broadcast the SAME signed bytes up to `max_attempts` times inside the budget.
+/// A permanent refusal stops at once (retrying cannot change it). ⛔ Never re-signs,
+/// never re-selects (R-ONE-CLICK-ONE-SPEND): `beef_hex` is the only input.
+pub(crate) async fn broadcast_with_retries(
+    state: &AppState,
+    beef_hex: &str,
+    txid: &str,
+    policy: &RetryPolicy,
+) -> Result<String, BroadcastFailure> {
+    let start = std::time::Instant::now();
+    let mut reasons: Vec<String> = Vec::new();
+    let mut attempts = 0u32;
+    let mut last: Option<BroadcastFailure> = None;
+
+    while attempts < policy.max_attempts {
+        let remaining = policy.budget.saturating_sub(start.elapsed());
+        if attempts > 0 && remaining < policy.pause + policy.min_attempt {
+            break;
+        }
+        if attempts > 0 {
+            tokio::time::sleep(policy.pause).await;
+        }
+        attempts += 1;
+        log::info!("   📡 broadcast attempt {}/{} for {}", attempts, policy.max_attempts, txid);
+        let remaining = policy.budget.saturating_sub(start.elapsed());
+        let outcome = tokio::time::timeout(
+            remaining,
+            broadcast_transaction_classified(beef_hex, &state.services, Some(ProofSink::of(&state)), Some(txid)),
+        )
+        .await;
+        match outcome {
+            Ok(Ok(msg)) => return Ok(msg),
+            Ok(Err(f)) => {
+                log::warn!("   ⚠️  broadcast attempt {}/{} for {} failed ({}): {}",
+                    attempts, policy.max_attempts, txid,
+                    if f.permanent { "permanent" } else { "temporary" }, f.reason);
+                reasons.push(f.reason.clone());
+                let permanent = f.permanent;
+                last = Some(f);
+                if permanent {
+                    break;
+                }
+            }
+            Err(_) => {
+                let reason = format!("attempt cut off by the {}s budget", policy.budget.as_secs());
+                log::warn!("   ⚠️  broadcast attempt {}/{} for {}: {}", attempts, policy.max_attempts, txid, reason);
+                reasons.push(reason.clone());
+                last = Some(BroadcastFailure { permanent: false, double_spend: false, reason });
+            }
+        }
+    }
+
+    let f = last.unwrap_or(BroadcastFailure {
+        permanent: false,
+        double_spend: false,
+        reason: "no broadcast attempt fitted in the budget".to_string(),
+    });
+    // ⭐ Surfaced (§12a): one error line per final failure — txid, attempts, every reason.
+    log::error!("   ❌ broadcast FAILED for {} after {} attempt(s) in {:.1}s ({}): {}",
+        txid, attempts, start.elapsed().as_secs_f32(),
+        if f.permanent { "permanent" } else { "temporary — left 'sending' for TaskSendWaiting" },
+        reasons.join(" | "));
+    Err(f)
+}
+
+/// Broadcast previously withheld (`noSend`) transactions named in `options.sendWith`.
+/// Shared by `createAction` and `signAction` (owner, §12a Q3: one code path).
+/// ⛔ GATE: only a `nosend` row may be broadcast (P0.5 panel #3 — see
+/// `sendwith_status_is_broadcastable`).
+/// `deadline` bounds the whole loop (adversarial review M4): what is left of the
+/// caller's broadcast budget. A txid not attempted in time is reported, not sent.
+pub(crate) async fn broadcast_send_with(
+    state: &AppState,
+    send_with_txids: &[String],
+    deadline: std::time::Instant,
+) -> Vec<ActionOutcome> {
+    log::info!("   📡 Processing sendWith: {} transaction(s) to broadcast", send_with_txids.len());
+    let mut results: Vec<ActionOutcome> = Vec::new();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
+    for sw_txid in send_with_txids {
+        if !seen.insert(sw_txid.as_str()) {
+            continue; // the same txid twice is one transaction (adversarial review, LOW)
+        }
+        log::info!("   📡 Broadcasting sendWith txid: {}", sw_txid);
+        let failed = |txid: &String| ActionOutcome { txid: txid.clone(), status: ReviewStatus::InvalidTx, still_sending: false };
+
+        // ⛔ GATE: the txid MUST be in `nosend` status. (P0.5 panel #3 —
+        // sendWith broadcasts arbitrary local txids.) Without this check the
+        // loop below would hand ANY local raw tx to broadcast_transaction:
+        // parent_transactions.get_by_txid has no status filter, and
+        // get_local_parent_tx filters only `status != 'completed'`. That let
+        // an approved dApp — which learns every txid from /listActions — name
+        //   (a) a BRC-121 nosend payment the browser deliberately withheld
+        //       (402 server never returned 200), paying a server that
+        //       delivered nothing, OR
+        //   (b) a tx TaskUnFail/TaskFailAbandoned had marked `failed` (which
+        //       restored its inputs as spendable), resurrecting it on-chain
+        //       while the wallet re-spends those same inputs — a genuine
+        //       double-spend race over the user's funds.
+        // And the payment gate never priced this: computePaymentCost sums
+        // only outputs[].satoshis, so a 1-sat createAction carrying sendWith
+        // auto-approves SILENTLY (MEASURED 2026-08-21). This mirrors
+        // broadcast_nosend's own `status == "nosend"` guard exactly — the
+        // legitimate flow (a prior noSend=true createAction, status=nosend,
+        // then a second createAction with sendWith=[that txid]) still passes;
+        // anything failed / aborted / completed / already-broadcast is refused.
+        let sw_status: Option<String> = {
+            let db = state.database.lock().unwrap();
+            db.connection()
+                .query_row(
+                    "SELECT status FROM transactions WHERE txid = ?1 LIMIT 1",
+                    rusqlite::params![sw_txid],
+                    |r| r.get::<_, String>(0),
+                )
+                .ok()
+        };
+        if !sendwith_status_is_broadcastable(sw_status.as_deref()) {
+            log::warn!(
+                "   🛡️ sendWith REFUSED for {}: status={:?}, not 'nosend' — only a withheld \
+                 (noSend) transaction may be broadcast via sendWith",
+                &sw_txid[..16.min(sw_txid.len())],
+                sw_status
+            );
+            results.push(failed(sw_txid));
+            continue;
+        }
+
+        // Look up the signed raw tx from parent_transactions or transactions table
+        let sw_beef_hex = {
+            let db = state.database.lock().unwrap();
+
+            // First check parent_transactions (has signed raw tx if we stored it)
+            let parent_tx_repo = crate::database::ParentTransactionRepository::new(db.connection());
+            match parent_tx_repo.get_by_txid(sw_txid) {
+                Ok(Some(cached)) if !cached.raw_hex.is_empty() => {
+                    log::info!("   ✅ Found sendWith tx {} in parent_transactions cache", &sw_txid[..16.min(sw_txid.len())]);
+                    // ARC accepts raw tx hex directly, so we can broadcast as-is
+                    Some(cached.raw_hex.clone())
+                }
+                _ => {
+                    // Fallback: check transactions table
+                    let tx_repo = crate::database::TransactionRepository::new(db.connection());
+                    match tx_repo.get_local_parent_tx(sw_txid) {
+                        Ok(Some(raw_tx_hex)) => {
+                            log::info!("   📋 Found sendWith tx {} in transactions table", &sw_txid[..16.min(sw_txid.len())]);
+                            Some(raw_tx_hex)
+                        }
+                        _ => {
+                            log::warn!("   ⚠️  sendWith txid {} not found in local storage", sw_txid);
+                            None
+                        }
+                    }
+                }
+            }
+        };
+
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match sw_beef_hex {
+            Some(_) if remaining.is_zero() => {
+                log::warn!("   ⏱️ sendWith {} not attempted: broadcast budget spent", &sw_txid[..16.min(sw_txid.len())]);
+                results.push(ActionOutcome { txid: sw_txid.clone(), status: ReviewStatus::ServiceError, still_sending: false });
+            }
+            Some(raw_tx_hex) => {
+                let attempt = tokio::time::timeout(remaining,
+                    broadcast_transaction_classified(&raw_tx_hex, &state.services, Some(ProofSink::of(&state)), Some(sw_txid))).await
+                    .unwrap_or_else(|_| Err(BroadcastFailure { permanent: false, double_spend: false,
+                        reason: "cut off by the broadcast budget".to_string() }));
+                match attempt {
+                    Ok(msg) => {
+                        log::info!("   ✅ sendWith broadcast success for {}: {}", &sw_txid[..16.min(sw_txid.len())], msg);
+                        {
+                            let db = state.database.lock().unwrap();
+                            let tx_repo = crate::database::TransactionRepository::new(db.connection());
+                            let _ = tx_repo.update_broadcast_status(sw_txid, "broadcast");
+                        }
+                        results.push(ActionOutcome { txid: sw_txid.clone(), status: ReviewStatus::Success, still_sending: false });
+                    }
+                    Err(f) => {
+                        log::warn!("   ⚠️  sendWith broadcast failed for {}: {}", &sw_txid[..16.min(sw_txid.len())], f.reason);
+                        // Row left as it was (`nosend`) — not re-queued, so "failed".
+                        results.push(ActionOutcome { txid: sw_txid.clone(), status: ReviewStatus::of_failure(&f), still_sending: false });
+                    }
+                }
+            }
+            None => results.push(failed(sw_txid)),
+        }
+    }
+    log::info!("   📡 sendWith processing complete: {} result(s)", results.len());
+    results
 }
 
 // /signAction - Sign transaction inputs
@@ -8315,7 +8848,7 @@ pub async fn sign_action(
     let user_input_infos = pending_tx.user_input_infos;
     let brc29_info = pending_tx.brc29_info;
     let input_beef = pending_tx.input_beef;
-    let reservation_placeholder = pending_tx.reservation_placeholder;
+    let reservation_row = pending_tx.reservation_row;
     let pending_no_send = pending_tx.no_send;
 
     // Determine effective noSend: request options take priority, fallback to createAction's original option.
@@ -8393,6 +8926,22 @@ pub async fn sign_action(
         log::info!("   Input {} (user): {}:{} - left unsigned (SDK signs via two-phase)",
             i, &user_input.txid[..16], user_input.vout);
         unsigned_inputs.push(i);
+    }
+
+    // B5-T1-P2 (§12a Q3, P2-A15): `sendWith` is honoured only when this call completes
+    // the transaction. With inputs still unsigned the transaction is not final, and
+    // broadcasting the batch now would send the held transactions ahead of it. Refused
+    // here — before any wallet input is signed or any row written — with the SDK's
+    // WERR_INVALID_PARAMETER, so the caller can retry once every input is signed.
+    let send_with_txids: Vec<String> = req.options.as_ref()
+        .and_then(|o| o.send_with.clone())
+        .unwrap_or_default();
+    if !send_with_txids.is_empty() && !unsigned_inputs.is_empty() {
+        log::warn!("   🛡️ sendWith refused: {} input(s) still unsigned {:?}", unsigned_inputs.len(), unsigned_inputs);
+        return invalid_parameter_error(
+            "options.sendWith",
+            "sendWith can be used only when this signAction completes the transaction — some inputs are still unsigned",
+        );
     }
 
     // Sign WALLET inputs
@@ -8638,11 +9187,10 @@ pub async fn sign_action(
             log::info!("   ⏭️  Parent tx {} already in BEEF (index {}), skipping duplicate fetch", &utxo.txid[..16], existing_idx);
             // Still try to attach a Merkle proof if not already present
             if existing_idx < beef.tx_to_bump.len() && beef.tx_to_bump[existing_idx].is_none() {
-                // No BUMP yet — try to fetch one from proven_txs
+                // No BUMP yet — a stored proof, unless our headers refute it (B5-T1-P7a-2 `C9b`)
                 let cached_tsc = {
                     let db = state.database.lock().unwrap();
-                    let proven_tx_repo = crate::database::ProvenTxRepository::new(db.connection());
-                    proven_tx_repo.get_merkle_proof_as_tsc(&utxo.txid).unwrap_or(None)
+                    crate::proof_store::stored_proof_for_beef(db.connection(), &*state.chain_tracker, &utxo.txid).unwrap_or(None)
                 };
                 if let Some(tsc) = cached_tsc {
                     log::info!("   ✅ Attaching proven_txs Merkle proof to existing BEEF entry");
@@ -8886,117 +9434,13 @@ pub async fn sign_action(
             }
         };
 
-        let tx_index = beef.add_parent_transaction(parent_tx_bytes);
+        let tx_index = beef.add_parent_transaction(parent_tx_bytes.clone());
 
-        // STEP 2: Try to get Merkle proof from proven_txs
-        let enhanced_tsc = {
-            // Check proven_txs for cached proof
-            let cached_tsc = {
-                let db = state.database.lock().unwrap();
-                let proven_tx_repo = crate::database::ProvenTxRepository::new(db.connection());
-                proven_tx_repo.get_merkle_proof_as_tsc(&utxo.txid).unwrap_or(None)
-            };
-
-            match cached_tsc {
-                Some(tsc) => {
-                    log::info!("   ✅ Using proven_txs Merkle proof for {}", utxo.txid);
-                    tsc
-                }
-                None => {
-                    // No proven_txs record — fetch from API
-                    log::info!("   🌐 No proven_txs record - fetching TSC proof from API...");
-
-                    match crate::cache_helpers::fetch_tsc_proof_from_api(&state.services, &utxo.txid).await {
-                        Ok(Some(tsc_json)) => {
-                            // Enhance with block height (lock scoped, dropped before any network I/O)
-                            let enhanced_result = {
-                                let target_hash = tsc_json["target"].as_str()
-                                    .ok_or_else(|| crate::cache_errors::CacheError::InvalidData("Missing target hash in TSC proof".to_string()));
-                                match target_hash {
-                                    Ok(hash) => {
-                                        // Step A: Check cache (brief lock)
-                                        let cached_height = {
-                                            let db = state.database.lock().unwrap();
-                                            let block_header_repo = crate::database::BlockHeaderRepository::new(db.connection());
-                                            crate::cache_helpers::get_cached_block_height(&block_header_repo, hash)
-                                        }; // lock dropped
-
-                                        // Step B: Fetch from API on miss (no lock held)
-                                        let height_result = match cached_height {
-                                            Ok(Some(h)) => Ok(h),
-                                            Ok(None) => crate::cache_helpers::fetch_and_cache_block_header(&state.services, &state.database, hash).await,
-                                            Err(e) => Err(e),
-                                        };
-
-                                        // Step C: Enhance TSC with height
-                                        height_result.map(|height| {
-                                            let mut enhanced = tsc_json.clone();
-                                            enhanced["height"] = serde_json::json!(height);
-                                            enhanced
-                                        })
-                                    }
-                                    Err(e) => Err(e),
-                                }
-                            };
-
-                            match enhanced_result {
-                                Ok(enhanced_tsc) => {
-                                    // Cache as proven_txs record
-                                    {
-                                        let db = state.database.lock().unwrap();
-                                        let conn = db.connection();
-
-                                        let block_height = enhanced_tsc["height"].as_u64().unwrap_or(0) as u32;
-                                        let tx_index_val = enhanced_tsc["index"].as_u64().unwrap_or(0);
-                                        let block_hash = enhanced_tsc["target"].as_str().unwrap_or("");
-
-                                        let merkle_path_bytes = serde_json::to_vec(&enhanced_tsc).unwrap_or_default();
-
-                                        // Get raw_tx from parent_transactions cache
-                                        let raw_tx_bytes = {
-                                            let parent_tx_repo = crate::database::ParentTransactionRepository::new(conn);
-                                            match parent_tx_repo.get_by_txid(&utxo.txid) {
-                                                Ok(Some(cached)) => hex::decode(&cached.raw_hex).unwrap_or_default(),
-                                                _ => Vec::new(),
-                                            }
-                                        };
-
-                                        let proven_tx_repo = crate::database::ProvenTxRepository::new(conn);
-                                        match proven_tx_repo.insert_or_get(
-                                            &utxo.txid, block_height, tx_index_val,
-                                            &merkle_path_bytes, &raw_tx_bytes,
-                                            block_hash, "",
-                                        ) {
-                                            Ok(proven_tx_id) => {
-                                                let _ = proven_tx_repo.link_transaction(&utxo.txid, proven_tx_id);
-                                                log::info!("   💾 Created proven_txs record for {}", utxo.txid);
-                                            }
-                                            Err(e) => {
-                                                log::warn!("   ⚠️  Failed to cache proven_tx for {}: {}", utxo.txid, e);
-                                            }
-                                        }
-                                    }
-
-                                    enhanced_tsc
-                                }
-                                Err(e) => {
-                                    log::warn!("   ⚠️  Failed to enhance TSC proof for {}: {}", utxo.txid, e);
-                                    serde_json::Value::Null
-                                }
-                            }
-                        }
-                        Ok(None) => {
-                            log::warn!("   ⚠️  TSC proof not available (tx not confirmed)");
-                            serde_json::Value::Null
-                        }
-                        Err(e) => {
-                            log::warn!("   ⚠️  Failed to fetch TSC proof: {}", e);
-                            serde_json::Value::Null
-                        }
-                    }
-                }
-            }
-        };
+        // STEP 2: the parent's merkle proof — stored, or fetched and checked against our own headers
+        // (B5-T1-P7a-2 `C9b`: the same rule as `build_beef_for_txid`, one implementation).
+        let enhanced_tsc = crate::beef_helpers::proof_for_beef(
+            &utxo.txid, &parent_tx_bytes, &state.database, &state.services, &*state.chain_tracker,
+        ).await.unwrap_or(serde_json::Value::Null);
 
         // STEP 3: Add proof to BEEF
         if !enhanced_tsc.is_null() {
@@ -9063,7 +9507,7 @@ pub async fn sign_action(
                         ancestor_txid,
                         &mut beef,
                         &state.database,
-                        &state.services,
+                        &state.services, &*state.chain_tracker,
                     ).await {
                         Ok(_) => {
                             log::info!("   ✅ Added ancestry chain for {}", &ancestor_txid[..std::cmp::min(16, ancestor_txid.len())]);
@@ -9150,14 +9594,11 @@ pub async fn sign_action(
                 report.confirmed_txs, report.unconfirmed_txs, beef.bumps.len());
         }
         Err(e) => {
-            // 1.6d.C-patch fix #3: don't hard-abort here. broadcast_transaction
-            // converts BEEF → EF before sending to ARC, and EF only needs the
-            // *immediate* parent outputs (which we have from the first BEEF level).
-            // Confirmed parents we couldn't trace via merkle proofs still get
-            // validated by ARC against its own indexed state. The original
-            // "permanent graveyard" concern only applied if we sent malformed BEEF
-            // directly to ARC; we don't — we send EF.
-            log::warn!("   ⚠️ BEEF ancestry incomplete: {} — falling back to EF (no merkle proofs needed for ARC to validate against indexed parents)", e);
+            // 1.6d.C-patch fix #3: don't hard-abort here. B5-T1-P7b correction: there is
+            // no EF conversion — broadcast_transaction sends this BEEF to ARC (Atomic
+            // header stripped) and its raw subject to Bitails, MAPI and WhatsOnChain,
+            // which validate it against their own indexed parents.
+            log::warn!("   ⚠️ BEEF ancestry incomplete: {} — broadcasting anyway (raw-tx providers validate against indexed parents)", e);
         }
     }
 
@@ -9241,6 +9682,8 @@ pub async fn sign_action(
                         if count > 0 {
                             log::info!("   💾 Updated {} change output(s) to use signed txid", count);
                         }
+                        // B5-T2-P1: tokens the site created, now under their final txid.
+                        crate::classify::file_written_tokens(&db, &txid, "I6:sign-action-basket");
                     }
                     Err(e) => {
                         log::warn!("   ⚠️  Failed to update output txids: {}", e);
@@ -9323,22 +9766,20 @@ pub async fn sign_action(
             }
         }
 
-        // Update reserved outputs: placeholder spending_description → final signed txid.
-        // Covers BOTH wallet outputs and user-provided basket outputs that were
-        // reserved during createAction with the same placeholder.
-        if let Some(ref placeholder) = reservation_placeholder {
-            match output_repo.update_spending_description_batch(placeholder, &txid) {
+        // Label the reserved coins with the final signed txid. Covers BOTH wallet outputs
+        // and user-provided basket outputs, which createAction reserved under the same
+        // transaction row (B5-T1-P3).
+        if let Some(row) = reservation_row {
+            match output_repo.label_coins_of(row, &txid) {
                 Ok(count) => {
-                    log::info!("   ✅ Updated spending_description on {} reserved output(s): {} → {}",
-                        count,
-                        &placeholder[..std::cmp::min(20, placeholder.len())],
-                        &txid[..std::cmp::min(16, txid.len())]);
+                    log::info!("   ✅ Labelled {} reserved output(s) of row {} with {}",
+                        count, row, &txid[..std::cmp::min(16, txid.len())]);
                     state.balance_cache.invalidate();
                 }
                 Err(e) => {
                     // ⛔ Fatal — the broadcast below has not happened yet.
                     drop(db);
-                    return resolution_failed_response(&state, placeholder, &txid, &e.to_string());
+                    return resolution_failed_response(&state, &txid, &e.to_string());
                 }
             }
         } else {
@@ -9388,9 +9829,11 @@ pub async fn sign_action(
     // for phase 2. For the internal single-phase path, create_action_internal passes
     // noSend=true in options to suppress this broadcast (it handles broadcast itself).
     // ARC is idempotent — duplicate broadcasts return "already known" (safe).
+    // One budget for the subject's retries AND the sendWith batch (adversarial review M4).
+    let broadcast_deadline = std::time::Instant::now() + BROADCAST_RETRY_POLICY.budget;
     if !effective_no_send && unsigned_inputs.is_empty() {
         log::info!("   📡 Broadcasting fully-signed transaction to network...");
-        match broadcast_transaction(&beef_hex, &state.services, Some(&state.database), Some(&txid)).await {
+        match broadcast_with_retries(&state, &beef_hex, &txid, &BROADCAST_RETRY_POLICY).await {
             Ok(msg) => {
                 log::info!("   ✅ Broadcast successful: {}", msg);
                 {
@@ -9417,11 +9860,67 @@ pub async fn sign_action(
                 }
                 state.balance_cache.invalidate();
             }
-            Err(e) => {
-                log::error!("   ❌ Broadcast failed: {}", e);
-                // Leave status as 'sending' — TaskSendWaiting (120s) will retry
+            Err(fail) => {
+                // ⛔ B5-T1-P2: a refused broadcast is never reported as success (it used
+                // to fall through to the 200 below — the signAction ticket's §14).
+                let atomic = hex::decode(&beef_hex).ok();
+                if fail.permanent {
+                    // Release only through the existing paths: the monitor's failure
+                    // cleanup (mark failed, disable created outputs, restore — or mark
+                    // suspected for a double spend), then the chain-evidence phantom
+                    // heal `create_action_internal` also runs.
+                    let tx_row_id: Option<i64> = {
+                        let db = state.database.lock().unwrap();
+                        db.connection().query_row(
+                            "SELECT id FROM transactions WHERE txid = ?1",
+                            rusqlite::params![&txid], |r| r.get(0)).ok()
+                    };
+                    if let Some(id) = tx_row_id {
+                        crate::monitor::task_send_waiting::cleanup_failed_sending_impl(&state, &txid, id, fail.double_spend);
+                    }
+                    let candidates: Vec<(String, u32)> =
+                        input_utxos.iter().map(|u| (u.txid.clone(), u.vout)).collect();
+                    let report = reconcile_missing_inputs(&state, &fail.reason, &candidates).await;
+                    if report.changed() {
+                        log::info!("   ✅ reconcile healed ({} marked spent, {} change recovered)",
+                            report.marked_spent, report.change_recovered);
+                    }
+                } else {
+                    // Temporary: the row stays `sending` (set above, before broadcasting)
+                    // and the inputs stay reserved — the signed bytes are handed back in
+                    // `tx` and can still land. TaskSendWaiting keeps trying.
+                    log::warn!("   ⏳ {} left 'sending' after a temporary failure", txid);
+                }
+                let outcome = ActionOutcome {
+                    txid: txid.clone(),
+                    status: ReviewStatus::of_failure(&fail),
+                    still_sending: !fail.permanent,
+                };
+                return review_actions_error(&txid, atomic.as_deref(), &[outcome], &broadcast_failure_message(&fail));
             }
         }
+    }
+
+    // B5-T1-P2 (§12a Q3): broadcast the withheld transactions named in `sendWith`
+    // (all inputs are signed here — refused above otherwise). Any that does not go
+    // out makes the call a WERR_REVIEW_ACTIONS, as in wallet-toolbox.
+    let mut send_with_results: Option<Vec<SendWithResult>> = None;
+    if !send_with_txids.is_empty() {
+        let outcomes = broadcast_send_with(&state, &send_with_txids, broadcast_deadline).await;
+        if outcomes.iter().any(|o| o.status != ReviewStatus::Success) {
+            let mut all = Vec::with_capacity(outcomes.len() + 1);
+            if !effective_no_send {
+                all.push(ActionOutcome { txid: txid.clone(), status: ReviewStatus::Success, still_sending: false });
+            }
+            all.extend(outcomes);
+            let atomic = hex::decode(&beef_hex).ok();
+            return review_actions_error(&txid, atomic.as_deref(), &all,
+                "One or more sendWith transactions were not broadcast — see reviewActionResults");
+        }
+        send_with_results = Some(outcomes.iter().map(|o| SendWithResult {
+            txid: o.txid.clone(),
+            status: "unproven".to_string(),
+        }).collect());
     }
 
     // Note: BRC-29 payments are detected in create_action and handled there by deriving
@@ -9443,11 +9942,13 @@ pub async fn sign_action(
     // ⛔ Construct through from_atomic_beef, never a struct literal: it derives
     // BRC-100's `tx` and the deprecated `rawTx` from one hex string so they
     // cannot diverge, and it is the seam the shape tests share with this handler.
-    HttpResponse::Ok().json(SignActionResponse::from_atomic_beef(
+    let mut response = SignActionResponse::from_atomic_beef(
         txid,
         beef_hex,
         unsigned_for_response,
-    ))
+    );
+    response.send_with_results = send_with_results;
+    HttpResponse::Ok().json(response)
 }
 
 // Request structure for /processAction
@@ -9633,7 +10134,7 @@ pub async fn process_action(
     let status = if should_broadcast {
         log::info!("   Broadcasting to network...");
 
-        let broadcast_result = broadcast_transaction(&raw_tx, &state.services, Some(&state.database), Some(&txid)).await;
+        let broadcast_result = broadcast_transaction(&raw_tx, &state.services, Some(ProofSink::of(&state)), Some(&txid)).await;
 
         // Handle double-spend errors by marking inputs as SUSPECTED (not confirmed).
         // TaskVerifyDoubleSpend will verify independently against WoC.
@@ -9747,15 +10248,8 @@ pub async fn process_action(
 
 // (check_tx_exists_on_chain is defined earlier in the file)
 
-/// Classify whether a broadcast error is fatal (tx itself is invalid).
-/// Fatal errors mean no broadcaster will accept this tx — stop everything immediately.
-/// Delegates to the centralized arc_status module.
-fn is_fatal_broadcast_error(error: &str) -> bool {
-    crate::arc_status::is_fatal_broadcast_error(error)
-}
-
-/// Broadcast a transaction through the Phase 1.6d.D `WalletServices` chain
-/// (ARC GorillaPool → TAAL ARC → GorillaPool MAPI → WhatsOnChain).
+/// Broadcast a transaction through the `WalletServices` chain
+/// (ARC GorillaPool → Bitails → GorillaPool MAPI → WhatsOnChain; B5-T1-P7b).
 ///
 /// `services` provides the 4-tier provider chain with adaptive soft-timeout
 /// (5s + 50ms/KiB cap 30s) and `moveServiceToLast` demotion. The hand-rolled
@@ -9765,15 +10259,109 @@ fn is_fatal_broadcast_error(error: &str) -> bool {
 /// confirmation, ARC merkle-proof caching, broadcast_status=confirmed update,
 /// and txid-collision detection.
 ///
-/// `beef_or_raw_hex` accepts BEEF (V1, V2, or Atomic) or raw tx hex. Raw tx is
-/// wrapped in a minimal V1 BEEF (no BUMPs, one tx, no proof) before being
-/// handed to the chain — providers extract the main tx via `Beef::from_bytes`.
+/// `beef_or_raw_hex` accepts BEEF (V1, V2, or Atomic) or raw tx hex. An Atomic
+/// BEEF is sent as the BEEF inside it (B5-T1-P7b: ARC reads the `01010101` header
+/// as a raw tx and answers 400). Raw tx is wrapped in a minimal V1 BEEF (no BUMPs,
+/// one tx, no parents — ARC refuses that with 463; the raw-only providers accept
+/// it) before being handed to the chain — providers extract the main tx via
+/// `Beef::from_bytes`.
 pub(crate) async fn broadcast_transaction(
     beef_or_raw_hex: &str,
     services: &crate::services::WalletServices,
-    db_for_cache: Option<&std::sync::Arc<std::sync::Mutex<crate::database::WalletDatabase>>>,
+    db_for_cache: Option<ProofSink<'_>>,
     txid_for_cache: Option<&str>,
 ) -> Result<String, String> {
+    broadcast_transaction_classified(beef_or_raw_hex, services, db_for_cache, txid_for_cache)
+        .await
+        .map_err(|f| f.reason)
+}
+
+/// Why one broadcast did not succeed (B5-T1-P2). `reason` is exactly the string
+/// `broadcast_transaction` has always returned.
+#[derive(Debug, Clone)]
+pub(crate) struct BroadcastFailure {
+    /// Every provider that answered refused the transaction itself (missing inputs,
+    /// double spend, script failure, …). A chain where any provider timed out, was
+    /// unreachable or answered 5xx is NOT permanent: that provider may hold the tx.
+    pub permanent: bool,
+    /// Permanent, and a provider named a double spend.
+    pub double_spend: bool,
+    pub reason: String,
+}
+
+/// What one provider's failure says about the transaction (B5-T1-P2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProviderVerdict {
+    /// The provider judged the transaction itself invalid (missing inputs, script
+    /// failure, double spend, ARC `REJECTED` / orphan …). It cannot land as signed.
+    Refused { double_spend: bool },
+    /// The provider may hold the transaction: it timed out, was unreachable, answered
+    /// 5xx, gave a weak acceptance (ARC `ANNOUNCED_TO_NETWORK`, `MINED_IN_STALE_BLOCK`)
+    /// or an answer we could not read.
+    MayHold,
+    /// Not accepted, but no verdict on the transaction (401/403 auth, 429, fee policy):
+    /// the transaction is valid and could still land through another route.
+    NotAccepted,
+}
+
+pub(crate) fn provider_verdict(f: &crate::services::ProviderFailure) -> ProviderVerdict {
+    use crate::services::FailureKind;
+    match f.kind {
+        FailureKind::SoftTimeout | FailureKind::Transport => return ProviderVerdict::MayHold,
+        FailureKind::Status(s) if s >= 500 => return ProviderVerdict::MayHold,
+        // ARC answers a processing timeout with 409 (`DeadlineExceeded`) — it may well
+        // hold the tx (re-review HIGH: read as NotAccepted, a raw-tx-only "Missing
+        // inputs" after it then made the chain permanent and freed the coins).
+        FailureKind::Status(409) => return ProviderVerdict::MayHold,
+        FailureKind::NotFound => return ProviderVerdict::NotAccepted,
+        _ => {}
+    }
+    let m = f.message.to_lowercase();
+    // ARC reports its own refusals as `txStatus=<STATUS>` (often with HTTP 200 —
+    // `arc_gorillapool.rs :: interpret_broadcast_response`), which the text
+    // classifier's phrases ("double spend", "orphan mempool") do not match.
+    if m.contains("txstatus=double_spend_attempted") || crate::arc_status::is_double_spend_error(&m) {
+        return ProviderVerdict::Refused { double_spend: true };
+    }
+    if m.contains("txstatus=rejected") || m.contains("txstatus=seen_in_orphan_mempool")
+        || crate::arc_status::is_fatal_broadcast_error(&m)
+    {
+        return ProviderVerdict::Refused { double_spend: false };
+    }
+    if m.contains("announced_to_network") || m.contains("mined_in_stale_block")
+        || f.kind == FailureKind::Invalid || matches!(f.kind, FailureKind::Status(s) if s < 300)
+    {
+        return ProviderVerdict::MayHold;
+    }
+    ProviderVerdict::NotAccepted
+}
+
+/// Temporary vs permanent over the WHOLE chain, never its last link (B5-T1-P2,
+/// controls-B finding 5; adversarial review M1): permanent only when at least one
+/// provider REFUSED the transaction and none MAY HOLD it. ARC can time out holding the
+/// tx while WhatsOnChain — handed only the raw tx, no parents — answers "Missing
+/// inputs"; the last error alone reads that as permanent and frees coins of a tx that
+/// can still land. Returns (permanent, double_spend).
+pub(crate) fn classify_chain_failures(failures: &[crate::services::ProviderFailure]) -> (bool, bool) {
+    let verdicts: Vec<ProviderVerdict> = failures.iter().map(provider_verdict).collect();
+    let refused = verdicts.iter().any(|v| matches!(v, ProviderVerdict::Refused { .. }));
+    let may_hold = verdicts.iter().any(|v| *v == ProviderVerdict::MayHold);
+    let permanent = refused && !may_hold;
+    let double_spend = permanent
+        && verdicts.iter().any(|v| *v == ProviderVerdict::Refused { double_spend: true });
+    (permanent, double_spend)
+}
+
+/// `broadcast_transaction`, keeping the temporary/permanent verdict.
+pub(crate) async fn broadcast_transaction_classified(
+    beef_or_raw_hex: &str,
+    services: &crate::services::WalletServices,
+    db_for_cache: Option<ProofSink<'_>>,
+    txid_for_cache: Option<&str>,
+) -> Result<String, BroadcastFailure> {
+    // A decode failure is about OUR stored bytes, not the transaction: temporary, so no
+    // caller (TaskSendWaiting) frees coins over it (adversarial review, LOW).
+    let undecodable = |reason: String| BroadcastFailure { permanent: false, double_spend: false, reason };
     let is_beef = beef_or_raw_hex.starts_with("0100beef")
         || beef_or_raw_hex.starts_with("0200beef")
         || beef_or_raw_hex.starts_with("01010101");
@@ -9782,8 +10370,21 @@ pub(crate) async fn broadcast_transaction(
     // (matches `Beef::to_v1_bytes` shape for 0 BUMPs / 1 tx / no proof).
     let beef_bytes: Vec<u8> = if is_beef {
         match hex::decode(beef_or_raw_hex) {
+            // B5-T1-P7b: the Atomic header is not sent (measured 2026-10-10: ARC answers it with 400).
+            // ARC answers for the LAST transaction, so the BEEF sent is built around the subject the
+            // header names — its ancestry, subject last, V1 — as for counterparty BEEF (review 162 #7).
+            Ok(b) if b.starts_with(&crate::beef::ATOMIC_BEEF_MARKER) => {
+                if b.len() <= 36 {
+                    return Err(undecodable(format!("Atomic BEEF too short: {} bytes", b.len())));
+                }
+                match crate::beef::Beef::from_atomic_beef_bytes(&b).and_then(|(subject, beef)| beef.broadcast_v1_for(&subject)) {
+                    Ok(v1) => v1,
+                    // Not parseable here: the inner bundle as it is (the providers judge it).
+                    Err(_) => b[36..].to_vec(),
+                }
+            }
             Ok(b) => b,
-            Err(e) => return Err(format!("Failed to decode BEEF hex: {}", e)),
+            Err(e) => return Err(undecodable(format!("Failed to decode BEEF hex: {}", e))),
         }
     } else {
         match hex::decode(beef_or_raw_hex) {
@@ -9796,33 +10397,50 @@ pub(crate) async fn broadcast_transaction(
                 beef.push(0x00); // has_bump = 0
                 beef
             }
-            Err(e) => return Err(format!("Failed to decode raw tx hex: {}", e)),
+            Err(e) => return Err(undecodable(format!("Failed to decode raw tx hex: {}", e))),
         }
     };
 
     log::info!(
-        "   📡 Broadcasting via Services chain (ARC GP → TAAL → MAPI → WoC): {} bytes (is_beef={})",
+        "   📡 Broadcasting via Services chain (ARC GP → Bitails → MAPI → WoC): {} bytes (is_beef={})",
         beef_bytes.len(),
         is_beef
     );
 
-    match services.broadcast_beef(&beef_bytes).await {
+    let (result, failures) = services.broadcast_beef_traced(&beef_bytes).await;
+
+    // B5-T1-P2 (P2-A14): one line per provider the chain fell through, with OUR txid.
+    // Before this, a fall-through left no trace of the provider's answer (an ARC
+    // weak status, a 5xx, a timeout) — only the winner's or the last error.
+    // `warn` (👤 owner, 2026-10-04): production logs only keep warn and above, and these
+    // lines are the data the "on the network" line will be chosen from (§12a Q6).
+    let txid_label = txid_for_cache.unwrap_or("?");
+    for f in &failures {
+        log::warn!("   ↪️ broadcast fall-through: provider={} txid={} kind={:?}: {}",
+            f.provider, txid_label, f.kind, f.message);
+    }
+
+    match result {
         Ok(br) => {
             accept_broadcast_result(br, db_for_cache, txid_for_cache, |txid| async move {
                 broadcast_lookup_verdict(services.tx_status_unanimous(&txid).await)
             })
             .await
+            // An acknowledgement we could not bind to our txid is not a verdict on
+            // the transaction: temporary.
+            .map_err(|reason| BroadcastFailure { permanent: false, double_spend: false, reason })
         }
         Err(err) => {
             let err_str = err.to_string();
             log::warn!("   ⚠️ Services broadcast chain exhausted: {}", err_str);
 
-            // Fatal short-circuit. `is_fatal_broadcast_error` covers script-verify
-            // failures, missing-inputs, and similar tx-level invalidity signals —
-            // the chain already tried every provider and they all said the same.
-            if is_fatal_broadcast_error(&err_str) {
+            // Fatal short-circuit — only when EVERY provider that answered refused the
+            // tx itself (`classify_chain_failures`). The text classifier is
+            // `arc_status::is_fatal_broadcast_error`, applied per provider.
+            let (is_permanent, double_spend) = classify_chain_failures(&failures);
+            if is_permanent {
                 log::error!("   ❌ Fatal broadcast error: {}", err_str);
-                return Err(extract_core_error(&err_str));
+                return Err(BroadcastFailure { permanent: true, double_spend, reason: extract_core_error(&err_str) });
             }
 
             // ARC 409-timeout → tx_status confirmation. If the last error in the
@@ -9866,7 +10484,7 @@ pub(crate) async fn broadcast_transaction(
                 }
             }
 
-            Err(extract_core_error(&err_str))
+            Err(BroadcastFailure { permanent: false, double_spend: false, reason: extract_core_error(&err_str) })
         }
     }
 }
@@ -9894,7 +10512,7 @@ pub(crate) async fn broadcast_transaction(
 /// `broadcast_lookup_verdict(tx_status_unanimous(..))`.
 async fn accept_broadcast_result<F, Fut>(
     br: crate::services::BroadcastResult,
-    db_for_cache: Option<&std::sync::Arc<std::sync::Mutex<crate::database::WalletDatabase>>>,
+    db_for_cache: Option<ProofSink<'_>>,
     txid_for_cache: Option<&str>,
     verify: F,
 ) -> Result<String, String>
@@ -9953,9 +10571,10 @@ where
         }
     }
 
-    // Bound (or no expected txid to bind to): cache the provider's merkle proof under
-    // the txid it names, and record an immediate MINED.
-    if let (Some(ref merkle_path), Some(db)) = (&br.merkle_path_bump, db_for_cache) {
+    // Bound (or no expected txid to bind to): store the provider's merkle proof under the
+    // txid it names — only if our own headers verify it (B5-T1-P7a-2 `C3`).
+    let mut verified = None;
+    if let (Some(ref merkle_path), Some(sink)) = (&br.merkle_path_bump, db_for_cache) {
         if !merkle_path.is_empty() && !br.txid.is_empty() {
             log::info!(
                 "   📋 {} returned merklePath ({} hex chars) for txid={}",
@@ -9963,20 +10582,34 @@ where
                 merkle_path.len(),
                 &br.txid[..br.txid.len().min(16)]
             );
-            cache_arc_merkle_proof(db, &br.txid, merkle_path);
+            verified = cache_arc_merkle_proof(sink, &br.txid, merkle_path);
         }
     }
 
-    // Update broadcast_status="confirmed" on immediately-MINED.
-    if let (Some(db), Some(cache_txid)) = (db_for_cache, txid_for_cache) {
+    // An immediate MINED: `completed` only with that verified proof (owner decision 6, `C14-e`);
+    // otherwise the transaction is unproven — the indexer's report is recorded, so the proof task
+    // keeps asking and never times it out (`C21`).
+    if let (Some(sink), Some(cache_txid)) = (db_for_cache, txid_for_cache) {
         if br.tx_status == "MINED" {
-            if let Some(height) = br.block_height {
-                log::info!("   📦 {} reports MINED at height {}", br.provider, height);
-                if let Ok(db_guard) = db.lock() {
+            {
+                let height = br.block_height;
+                log::info!("   📦 {} reports MINED at height {:?}", br.provider, height);
+                if let Ok(db_guard) = sink.db.lock() {
                     let tx_repo = crate::database::TransactionRepository::new(
                         db_guard.connection(),
                     );
-                    let _ = tx_repo.update_broadcast_status(cache_txid, "confirmed");
+                    match verified.map(|r: crate::proof_store::VerifiedRow| r.height()).or(height) {
+                        Some(h) => { let _ = tx_repo.update_confirmations(cache_txid, 1, Some(h)); }
+                        // No height in the answer: record the report, keep any height already known (xhigh 168 #8).
+                        None => { let _ = db_guard.connection().execute(
+                            "UPDATE transactions SET confirmations = MAX(confirmations, 1) WHERE txid = ?1", [cache_txid]); }
+                    }
+                    if verified.is_some() && !matches!(tx_repo.get_broadcast_status(cache_txid), Ok(Some(ref s)) if s == "failed") {
+                        // (a failed row is left to TaskUnFail, which recovers it from the stored proof)
+                        let _ = tx_repo.update_broadcast_status(cache_txid, "confirmed");
+                    } else if matches!(tx_repo.get_broadcast_status(cache_txid), Ok(Some(ref s)) if s == "sending" || s == "nosend") {
+                        let _ = tx_repo.update_broadcast_status(cache_txid, "broadcast"); // → unproven
+                    }
                 }
             }
         }
@@ -9989,6 +10622,16 @@ where
 }
 
 // Helper function to extract a clean, user-friendly error message from broadcast errors
+/// The first `n` bytes of `s`, cut back to a character boundary (provider text is not ours: a byte
+/// slice inside a multi-byte character panics — review 162 #14).
+fn cut_at(s: &str, n: usize) -> &str {
+    let mut i = n.min(s.len());
+    while !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    &s[..i]
+}
+
 fn extract_core_error(error: &str) -> String {
     // Look for "ERROR: 16:" pattern (script verification errors)
     if let Some(start) = error.find("ERROR: 16:") {
@@ -10007,7 +10650,7 @@ fn extract_core_error(error: &str) -> String {
             let end = error_part.find('\n')
                 .or_else(|| error_part.find(';'))
                 .unwrap_or(error_part.len().min(100));
-            let core_error = error_part[..end].trim();
+            let core_error = cut_at(error_part, end).trim();
             format!("Transaction broadcast failed: ERROR: 16: {}", core_error)
         } else {
             "Transaction broadcast failed: ERROR: 16: mandatory-script-verify-flag-failed (Script failed an OP_EQUALVERIFY operation)".to_string()
@@ -10016,7 +10659,7 @@ fn extract_core_error(error: &str) -> String {
         // For other errors, try to extract a meaningful part
         // Limit to first 200 characters to keep it manageable
         let truncated = if error.len() > 200 {
-            format!("{}...", &error[..200])
+            format!("{}...", cut_at(error, 200))
         } else {
             error.to_string()
         };
@@ -10024,84 +10667,69 @@ fn extract_core_error(error: &str) -> String {
     }
 }
 
-/// Cache a merkle proof from ARC response into the database
-///
-/// Parses the BUMP hex from ARC's merklePath, converts to TSC format,
-/// and stores in the merkle_proofs table for future BEEF building.
-/// Cache an ARC merkle proof as a proven_txs record.
-///
-/// Parses the BUMP hex merkle path from ARC, creates an immutable proven_txs record,
-/// and links it to the transaction. This replaces the old approach of writing to
-/// parent_transactions + merkle_proofs tables.
-pub fn cache_arc_merkle_proof(
-    db: &std::sync::Mutex<crate::database::WalletDatabase>,
+/// Where a broadcaster's answer may be recorded: the database, and the chain its merkle proof is
+/// checked against (B5-T1-P7a-2).
+#[derive(Clone, Copy)]
+pub(crate) struct ProofSink<'a> {
+    pub db: &'a std::sync::Arc<std::sync::Mutex<crate::database::WalletDatabase>>,
+    pub chain: &'a dyn crate::proof_store::RootOracle,
+}
+
+impl<'a> ProofSink<'a> {
+    pub(crate) fn of(state: &'a AppState) -> Self {
+        ProofSink { db: &state.database, chain: &*state.chain_tracker }
+    }
+}
+
+/// Store a broadcaster's merkle proof (BUMP hex) for `txid` — only if our own headers verify it — and
+/// link it to the transaction. `None`: nothing stored (not held yet, refuted, or unreadable).
+pub(crate) fn cache_arc_merkle_proof(
+    sink: ProofSink<'_>,
     txid: &str,
     merkle_path_hex: &str,
-) {
-    // Parse BUMP hex to TSC format
-    let tsc = match crate::beef::parse_bump_hex_to_tsc(merkle_path_hex) {
-        Ok(tsc) => tsc,
-        Err(e) => {
-            log::warn!("   ⚠️  Failed to parse ARC merklePath for {}: {}", txid, e);
-            return;
+) -> Option<crate::proof_store::VerifiedRow> {
+    use crate::proof_store::ProofCheck;
+    let proof = match crate::proof_store::check_bump_hex(sink.chain, txid, merkle_path_hex) {
+        ProofCheck::Verified(p) => p,
+        ProofCheck::NotHeld => {
+            log::info!("   ⏳ broadcaster proof for {}: block not in our headers yet — not stored", txid);
+            return None;
+        }
+        ProofCheck::Wrong { height } => {
+            log::warn!("   ❌ broadcaster proof for {} does not match our header at {} — not stored", txid, height);
+            return None;
+        }
+        ProofCheck::Malformed(e) => {
+            log::warn!("   ⚠️  Failed to parse broadcaster merklePath for {}: {}", txid, e);
+            return None;
         }
     };
 
-    let height = tsc["height"].as_u64().unwrap_or(0) as u32;
-    let tx_index = tsc["index"].as_u64().unwrap_or(0);
-
-    // Serialize TSC JSON to bytes for proven_txs.merkle_path BLOB
-    let merkle_path_bytes = match serde_json::to_vec(&tsc) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            log::warn!("   ⚠️  Failed to serialize TSC JSON for {}: {}", txid, e);
-            return;
-        }
-    };
-
-    let db_guard = match db.lock() {
+    let db_guard = match sink.db.lock() {
         Ok(g) => g,
         Err(e) => {
             log::warn!("   ⚠️  Failed to lock DB for merkle proof caching: {}", e);
-            return;
+            return None;
         }
     };
-
     let conn = db_guard.connection();
 
-    // Get raw_tx from transactions table
-    let raw_tx_bytes = {
-        let tx_repo = crate::database::TransactionRepository::new(conn);
-        match tx_repo.get_by_txid(txid) {
-            Ok(Some(stored)) => hex::decode(&stored.raw_tx).unwrap_or_default(),
-            _ => Vec::new(),
-        }
+    let raw_tx_bytes = match crate::database::TransactionRepository::new(conn).get_by_txid(txid) {
+        Ok(Some(stored)) => hex::decode(&stored.raw_tx).unwrap_or_default(),
+        _ => Vec::new(),
     };
 
-    // Create immutable proven_txs record
-    let proven_tx_repo = crate::database::ProvenTxRepository::new(conn);
-    match proven_tx_repo.insert_or_get(
-        txid, height, tx_index,
-        &merkle_path_bytes, &raw_tx_bytes,
-        "", "",
-    ) {
-        Ok(proven_tx_id) => {
-            log::info!("   💾 Created proven_txs record {} for {} (height: {}, index: {})", proven_tx_id, txid, height, tx_index);
-
-            // Link transaction to proven_txs
-            if let Err(e) = proven_tx_repo.link_transaction(txid, proven_tx_id) {
-                log::warn!("   ⚠️  Failed to link transaction {} to proven_tx: {}", txid, e);
+    match crate::proof_store::store(conn, sink.chain, &proof, &raw_tx_bytes, "") {
+        Ok(row) => {
+            log::info!("   💾 Stored verified proof {} for {} (height: {}, index: {})", row.proven_tx_id(), txid, row.height(), proof.tx_index());
+            if let Err(e) = crate::proof_store::link(conn, &row, txid) {
+                log::warn!("   ⚠️  Failed to link transaction {} to its proof: {}", txid, e);
             }
-
-            // Update proven_tx_reqs if one exists
-            let req_repo = crate::database::ProvenTxReqRepository::new(conn);
-            if let Ok(Some(req)) = req_repo.get_by_txid(txid) {
-                let _ = req_repo.update_status(req.proven_tx_req_id, "completed");
-                let _ = req_repo.link_proven_tx(req.proven_tx_req_id, proven_tx_id);
-            }
+            Some(row)
         }
         Err(e) => {
-            log::warn!("   ⚠️  Failed to create proven_txs record for {}: {}", txid, e);
+            log::warn!("   ⚠️  Failed to store proof for {}: {}", txid, e);
+            None
         }
     }
 }
@@ -10655,10 +11283,6 @@ pub async fn generate_address(state: web::Data<AppState>, _body: web::Bytes) -> 
         };
 
         let wallet_id = wallet.id.unwrap();
-        let current_index = wallet.current_index;
-
-        // Increment index for new address
-        let next_index = current_index + 1;
 
         let privkey = match get_master_private_key_from_db(&db) {
             Ok(k) => k,
@@ -10680,15 +11304,18 @@ pub async fn generate_address(state: web::Data<AppState>, _body: web::Bytes) -> 
             }
         };
 
-        // Update wallet's current_index BEFORE deriving address
-        // This ensures we don't retry with same index if derivation fails
-        if let Err(e) = wallet_repo.update_current_index(wallet_id, next_index) {
-            log::error!("   Failed to update wallet index: {}", e);
-            drop(db);
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to update wallet index: {}", e)
-            }));
-        }
+        // B5-T1-P6 (`P6-A11`): the one next-index source, shared with change derivation.
+        // Claimed BEFORE deriving, so a failed derivation never hands the index out twice.
+        let next_index = match wallet_repo.claim_next_receive_index(wallet_id) {
+            Ok(i) => i,
+            Err(e) => {
+                log::error!("   Failed to claim the next receive index: {}", e);
+                drop(db);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Failed to update wallet index: {}", e)
+                }));
+            }
+        };
 
         drop(db);
         (wallet_id, next_index, privkey, pubkey)
@@ -11236,7 +11863,7 @@ pub async fn send_transaction(
     // broadcast_transaction detects the 01010101 Atomic BEEF prefix, strips the header,
     // converts to BEEF V1, and submits to ARC. This allows ARC to validate unconfirmed
     // parent transactions that would be rejected as "missing inputs" in raw tx broadcast.
-    match broadcast_transaction(&atomic_beef_hex, &state.services, Some(&state.database), Some(&txid)).await {
+    match broadcast_transaction(&atomic_beef_hex, &state.services, Some(ProofSink::of(&state)), Some(&txid)).await {
         Ok(message) => {
             log::info!("   ✅ Transaction broadcast successful: {}", message);
 
@@ -12851,18 +13478,11 @@ where
         if changed != 1 {
             return Err((true, format!("status of {} changed while aborting; nothing was released", txid)));
         }
-        let placeholder = PENDING_TRANSACTIONS.lock()
-            .map_err(|e| failed(&e))?
-            .get(&reference)
-            .and_then(|p| p.reservation_placeholder.clone());
         let output_repo = crate::database::OutputRepository::new(&txn);
         let disabled = output_repo.disable_by_txid(&txid).map_err(|e| failed(&e))?;
-        let mut restored = 0;
-        // Before signing the reservation carries the placeholder; after, the txid.
-        if let Some(ph) = placeholder.as_deref() {
-            restored += output_repo.restore_by_spending_description(ph).map_err(|e| failed(&e))?;
-        }
-        restored += output_repo.restore_by_spending_description(&txid).map_err(|e| failed(&e))?;
+        // B5-T1-P3: the coins are owned by this transaction row (labelled with its txid,
+        // or not yet labelled).
+        let restored = output_repo.restore_spent_by_txid(&txid).map_err(|e| failed(&e))?;
         txn.commit().map_err(|e| failed(&e))?;
         // Still under the DB lock, so `sign_action`'s update block (which re-checks the
         // status under the same lock) sees either both changes or neither.
@@ -13164,12 +13784,29 @@ pub async fn internalize_action(
         }
     };
 
-    // ******************************************************************************
-    // ** SPV MERKLE PROOF VALIDATION - UNTESTED **
-    // ** This code validates BUMP (Block Unspent Merkle Proof) structures. **
-    // ** It verifies merkle paths and transaction inclusion but has NOT been **
-    // ** tested against real-world SPV proofs from block explorers yet. **
-    // ******************************************************************************
+    // B5-T1-P7a-1: every merkle proof (BUMP) in the BEEF is checked against the wallet's OWN verified
+    // block headers (`chain_tracker`), before anything is asked of an indexer or broadcast. A proof
+    // that does not match refuses the whole BEEF; a proof for a block not yet held is neither believed
+    // nor refused (owner decision 4) and nothing from it is stored as verified.
+    let beef_proofs = match parsed_beef.as_ref() {
+        Some(beef) => {
+            let subject_idx = beef.transactions.iter().position(|t| *t == main_tx_bytes).unwrap_or(usize::MAX);
+            match crate::spv_checks::check_beef_proofs(beef, subject_idx, |root, height| state.chain_tracker.is_valid_root_for_height(root, height)) {
+                Ok(p) => p,
+                Err(r) => {
+                    log::warn!("   🚫 BEEF refused: {}", r.description());
+                    return HttpResponse::BadRequest().json(serde_json::json!({
+                        "status": "error",
+                        "code": r.code(),
+                        "description": r.description()
+                    }));
+                }
+            }
+        }
+        None => crate::spv_checks::BeefProofs::default(),
+    };
+    log::info!("   🔐 Merkle proofs checked against our headers: {} valid, {} for blocks not yet held{}",
+        beef_proofs.valid.len(), beef_proofs.unknown.len(), if beef_proofs.subject_valid { " (the subject is mined)" } else { "" });
 
     if let Some(ref beef) = parsed_beef {
         // Validate ancestry
@@ -13187,73 +13824,6 @@ pub async fn internalize_action(
             }
         }
 
-        // Validate SPV merkle proofs (BUMPs) if present
-        if beef.has_proofs() {
-            log::info!("   🔐 Validating {} SPV merkle proof(s)...", beef.bumps.len());
-
-            for (bump_idx, bump) in beef.bumps.iter().enumerate() {
-                log::info!("      BUMP {}: block_height={}, tree_height={}, levels={}",
-                    bump_idx, bump.block_height, bump.tree_height, bump.levels.len());
-
-                // ******************************************************************************
-                // ** MERKLE PROOF VALIDATION LOGIC - UNTESTED **
-                // ** This validates that the merkle proof correctly proves transaction inclusion. **
-                // ** It checks merkle path structure and computes merkle root. **
-                // ** Has NOT been tested against real block headers or TSC proofs yet. **
-                // ******************************************************************************
-
-                // Validate merkle proof structure
-                if bump.levels.is_empty() {
-                    log::warn!("      ⚠️  BUMP {} has no merkle levels", bump_idx);
-                    continue;
-                }
-
-                // Each level should have nodes
-                for (level_idx, level) in bump.levels.iter().enumerate() {
-                    if level.is_empty() {
-                        log::warn!("      ⚠️  BUMP {} level {} is empty", bump_idx, level_idx);
-                        continue;
-                    }
-
-                    // Validate each node in the level
-                    for (node_idx, node) in level.iter().enumerate() {
-                        if node.is_empty() {
-                            log::warn!("      ⚠️  BUMP {} level {} node {} is empty", bump_idx, level_idx, node_idx);
-                            continue;
-                        }
-
-                        // BUMP node format: [offset (varint)][flags (1 byte)][hash (32 bytes, optional)]
-                        // Minimum size: offset (1 byte) + flags (1 byte) = 2 bytes
-                        if node.len() < 2 {
-                            log::warn!("      ⚠️  BUMP {} level {} node {} too short: {} bytes",
-                                bump_idx, level_idx, node_idx, node.len());
-                            continue;
-                        }
-
-                        // TODO: Parse offset and flags, validate hash if present
-                        // TODO: Compute merkle root from proof and verify against block header
-                        // TODO: Fetch block header and verify merkle root matches
-                        // TODO: Verify transaction index matches proof position
-                    }
-                }
-
-                log::info!("      ✅ BUMP {} structure validated (merkle root verification not yet implemented)", bump_idx);
-            }
-
-            // Check BUMP associations with transactions
-            for (tx_idx, bump_idx_opt) in beef.tx_to_bump.iter().enumerate() {
-                if let Some(bump_idx) = bump_idx_opt {
-                    if *bump_idx < beef.bumps.len() {
-                        log::info!("      Transaction {} has BUMP {} (block_height={})",
-                            tx_idx, bump_idx, beef.bumps[*bump_idx].block_height);
-                    } else {
-                        log::warn!("      ⚠️  Transaction {} references invalid BUMP index {}", tx_idx, bump_idx);
-                    }
-                }
-            }
-        } else {
-            log::info!("   ℹ️  No SPV proofs present in BEEF");
-        }
     }
 
     log::info!("   Transaction size: {} bytes", main_tx_bytes.len());
@@ -13270,6 +13840,59 @@ pub async fn internalize_action(
             }));
         }
     };
+
+    // B5-T2-P1 (owner decision Q1, 2026-10-07): a "wallet payment" is money — its output
+    // must be exactly the plain payment script, as `@bsv/wallet-toolbox` requires (`ts-stack`
+    // `52fc6465c2`, signer `internalizeAction.ts :: setupWalletPaymentForOutput`). A token
+    // sent as a wallet payment is refused, BEFORE the chain check below can broadcast the
+    // sender's transaction (refusing after a broadcast would leave the token at our key,
+    // unrecorded). Tokens arrive by basket insertion.
+    if let Some(ref outputs) = req.outputs {
+        for spec in outputs {
+            let is_payment = matches!(spec.protocol.as_deref(), Some("wallet payment") | Some("") | None)
+                && spec.payment_remittance.is_some();
+            // Positive test, as `wallet-toolbox` does: the lock must BE the plain payment
+            // script — not merely "not a token" (adversarial review #4: a non-token,
+            // non-plain script would otherwise be broadcast, then refused as not ours).
+            let plain = parsed_tx.outputs.get(spec.output_index as usize)
+                .map_or(false, |o| o.script.len() == 25 && crate::utxo_fetcher::is_p2pkh_script(&o.script));
+            if is_payment && !plain {
+                log::warn!("   🚫 Output {} is a wallet payment not locked by a plain payment script — refused", spec.output_index);
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "status": "error",
+                    "code": "ERR_INVALID_PARAMETER",
+                    "description": format!("Output {}: a wallet payment must be locked by a plain BRC-29 payment script; send a token with the \"basket insertion\" protocol", spec.output_index)
+                }));
+            }
+        }
+    }
+
+    // B5-T1-P7a-1: BRC-67 checks 2 (fee) and 4 (finality), BEFORE the chain check below can broadcast
+    // the sender's transaction. Skipped only when the subject's own proof matched our headers: a mined
+    // transaction already passed both by consensus (and BRC-62 lets its BEEF omit the parents).
+    if !beef_proofs.subject_valid {
+        let view = crate::spv_checks::ChainView {
+            tip_height: state.chain_tracker.current_height(),
+            tip_median_time_past: state.chain_tracker.tip_median_time_past(),
+            synced: state.chain_tracker.is_synced(),
+        };
+        let checked = match parsed_beef.as_ref() {
+            Some(beef) => crate::spv_checks::check_fee(&parsed_tx, beef).and_then(|_| crate::spv_checks::check_final(&parsed_tx, view)),
+            None => Err(crate::spv_checks::Refusal::MissingParent {
+                input: 0,
+                prev_txid: parsed_tx.inputs.first().map(|i| i.prev_txid.clone()).unwrap_or_default(),
+                prev_vout: parsed_tx.inputs.first().map(|i| i.prev_vout).unwrap_or(0),
+            }),
+        };
+        if let Err(r) = checked {
+            log::warn!("   🚫 Refused before any chain check or broadcast: {}", r.description());
+            let body = serde_json::json!({ "status": "error", "code": r.code(), "description": r.description() });
+            return match r {
+                crate::spv_checks::Refusal::HeadersUnavailable { .. } => HttpResponse::ServiceUnavailable().json(body),
+                _ => HttpResponse::BadRequest().json(body),
+            };
+        }
+    }
 
     log::info!("   Parsed transaction:");
     log::info!("      Version: {}", parsed_tx.version);
@@ -13304,9 +13927,17 @@ pub async fn internalize_action(
     if !tx_exists {
         log::info!("   📡 Transaction not on-chain, broadcasting...");
 
-        // Broadcast the transaction ourselves
-        let raw_tx_hex = hex::encode(&main_tx_bytes);
-        match broadcast_transaction(&raw_tx_hex, &state.services, Some(&state.database), Some(&txid)).await {
+        // Broadcast the transaction ourselves. B5-T1-P7b: as the BEEF the sender gave us, so ARC gets
+        // the parents (a parentless raw tx is refused by ARC with 463); raw only when no BEEF came.
+        let broadcast_hex = match parsed_beef.as_ref().map(|beef| beef.broadcast_v1_for(&txid)) {
+            Some(Ok(v1)) => hex::encode(v1),
+            Some(Err(e)) => {
+                log::warn!("   ⚠️ Could not build the broadcast BEEF ({}) — broadcasting the raw transaction", e);
+                hex::encode(&main_tx_bytes)
+            }
+            None => hex::encode(&main_tx_bytes),
+        };
+        match broadcast_transaction(&broadcast_hex, &state.services, Some(ProofSink::of(&state)), Some(&txid)).await {
             Ok(broadcast_msg) => {
                 // broadcast_transaction returns a message string, not a txid.
                 // Our locally-computed txid is authoritative (passed via txid_for_cache).
@@ -13480,7 +14111,11 @@ pub async fn internalize_action(
         let output_index = i as u32;
 
         // First, check if output matches a known address in our database
-        if is_output_ours(&output.script, &our_addresses) {
+        // B5-T2-P1 (review #4b): the token layout (`tokens::p2pkh_lock`) counts as ours
+        // only for an output the caller files by basket insertion — never one counted
+        // as a payment or carried along with no spec.
+        let plain = output.script.len() == 25;
+        if (plain || insertion_map.contains_key(&output_index)) && is_output_ours(&output.script, &our_addresses) {
             total_received += output.value;
             our_output_indices.push(output_index);
             log::info!("   ✅ Output {} is ours (known address): {} satoshis", i, output.value);
@@ -13538,7 +14173,7 @@ pub async fn internalize_action(
                 "derivationSuffix": remittance.derivation_suffix
             });
 
-            match store_derived_utxo(&db, &txid, *vout, *satoshis, &hex::encode(script), pubkey, &custom_instructions) {
+            match store_derived_utxo(&db, &txid, *vout, *satoshis, &hex::encode(script), pubkey, &custom_instructions, &main_tx_bytes) {
                 Ok(_) => {
                     log::info!("   💾 Stored BRC-42 derived UTXO {}:{} ({} sats)", txid, vout, satoshis);
                 }
@@ -13599,28 +14234,44 @@ pub async fn internalize_action(
             let satoshis = output.value;
             let script_hex = hex::encode(&output.script);
 
+            // B5-T2-P1 (`P1-A12`): the wallet's recogniser files tokens, never the
+            // sender's basket request. Anything token-shaped (filed, held or unreadable)
+            // goes to the default pool, where the seam below files it into `1sat` /
+            // `bsv21` or holds it; a non-token asked into an asset basket goes there
+            // too — a sender cannot hide a payment from the balance in `1sat`, nor file
+            // an ordinal into an app basket a later grant could spend from.
+            let token_shaped = crate::tokens::verdict(&output.script, satoshis) != crate::tokens::Verdict::NotToken;
+            // Owner decision (review #1, 2026-10-07): a 1-sat output with no envelope that the
+            // sender explicitly files into `1sat` is a transferred ordinal tip (BRC-160: the
+            // envelope "does not need to be repeated"; BRC-147 eligibility 1) — kept in `1sat`
+            // as a CLAIM until B5-T2-P3 verifies its origin. Pulled into the held line it
+            // would be offered "Treat as money" and could be spent, destroying the NFT.
+            let transfer_tip = insertion.basket == crate::tokens::ONESAT_BASKET && satoshis == 1 && !token_shaped;
+            let basket_name = if transfer_tip {
+                crate::tokens::ONESAT_BASKET
+            } else if token_shaped || crate::tokens::is_asset_basket(&insertion.basket) {
+                "default"
+            } else {
+                insertion.basket.as_str()
+            };
+            if basket_name != insertion.basket {
+                log::info!("   🧺 Output {}: sender asked for basket '{}' — filed by the wallet's recogniser instead",
+                           output_index, insertion.basket);
+            }
+
             // Get or create basket
-            let basket_id = match basket_repo.find_or_insert(&insertion.basket, state.current_user_id) {
+            let basket_id = match basket_repo.find_or_insert(basket_name, state.current_user_id) {
                 Ok(id) => id,
                 Err(e) => {
-                    log::error!("   ❌ Failed to get basket '{}': {}", insertion.basket, e);
+                    log::error!("   ❌ Failed to get basket '{}': {}", basket_name, e);
                     continue;
                 }
             };
 
-            // Build custom instructions JSON
-            let custom_json = if let Some(ref ci) = insertion.custom_instructions {
-                serde_json::json!({
-                    "type": "basket_insertion",
-                    "basket": insertion.basket,
-                    "appData": ci
-                }).to_string()
-            } else {
-                serde_json::json!({
-                    "type": "basket_insertion",
-                    "basket": insertion.basket
-                }).to_string()
-            };
+            // B5-T2-P1 (`P1-A8`): BRC-37 — "store and forward the entire string unchanged".
+            // Rows written before this change carry `{"type":"basket_insertion",…,"appData":…}`;
+            // `list_outputs` unwraps those on read (`legacy_basket_insertion_ci`).
+            let custom_json = insertion.custom_instructions.clone();
 
             // Insert output with basket assignment
             match output_repo.insert_output(
@@ -13632,17 +14283,23 @@ pub async fn internalize_action(
                 Some(basket_id),
                 None,  // No derivation prefix for internalized outputs
                 None,  // No derivation suffix for internalized outputs
-                Some(&custom_json),
+                custom_json.as_deref(),
                 None,  // No output description for internalized outputs
                 false,  // is_change = false
             ) {
                 Ok(output_id) => {
+                    // B5-T1-P5 (route I4): only a row in `default` is a candidate — every
+                    // token-shaped output was put there above, so the seam files or holds it.
+                    crate::classify::after_write_id(&db, output_id, "I4:internalize-basket");
                     log::info!("   💾 Stored basket insertion output {}:{} in basket '{}' ({} sats)",
-                              txid, output_index, insertion.basket, satoshis);
+                              txid, output_index, basket_name, satoshis);
 
-                    // Assign tags if provided
+                    // Assign tags if provided. B5-T2-P1 (review #2): BRC-147 — "Receivers MUST
+                    // ignore a counterparty-supplied `id:`". Dropped on anything the seam may
+                    // file, so `p 1sat id` (ungated by BRC-165) cannot read a sender's key.
                     if let Some(ref tags) = insertion.tags {
-                        for tag in tags {
+                        for tag in tags.iter().filter(|t| !((token_shaped || basket_name == "default"
+                                                        || crate::tokens::is_asset_basket(basket_name)) && t.starts_with("id:"))) {
                             if let Err(e) = tag_repo.assign_tag_to_output(output_id, tag) {
                                 log::warn!("   ⚠️  Failed to assign tag '{}' to output: {}", tag, e);
                             } else {
@@ -13765,6 +14422,46 @@ pub async fn internalize_action(
         }
     }
 
+    // B5-T1-P7a-2 `C1b` (K-l): a subject BUMP our own headers verified is stored through the one seam,
+    // and the payment is completed at once (the toolbox's `newInternalize`). A BUMP for a block we do
+    // not hold yet stores nothing; TaskCheckForProofs asks for the proof again (`A15`).
+    if beef_proofs.subject_valid {
+        let subject_bump = parsed_beef.as_ref().and_then(|beef| {
+            let i = beef.transactions.iter().position(|t| *t == main_tx_bytes)?;
+            beef.bumps.get((*beef.tx_to_bump.get(i)?)?)
+        });
+        let check = subject_bump.map(|b| crate::proof_store::check_bump(&*state.chain_tracker, &txid, b));
+        if let Some(crate::proof_store::ProofCheck::Verified(proof)) = check {
+            let failed_row = {
+                let db = state.database.lock().unwrap();
+                let conn = db.connection();
+                match crate::proof_store::store(conn, &*state.chain_tracker, &proof, &main_tx_bytes, "") {
+                    Ok(row) => {
+                        let _ = crate::proof_store::link(conn, &row, &txid);
+                        let tx_repo = crate::database::TransactionRepository::new(conn);
+                        let _ = tx_repo.update_confirmations(&txid, 1, Some(row.height()));
+                        log::info!("   🔐 Stored the payment's own proof (verified at height {})", row.height());
+                        if matches!(tx_repo.get_broadcast_status(&txid), Ok(Some(ref s)) if s == "failed") {
+                            Some(row)
+                        } else {
+                            let _ = tx_repo.update_broadcast_status(&txid, "confirmed");
+                            None
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("   ⚠️  Failed to store the payment's verified proof: {}", e);
+                        None
+                    }
+                }
+            };
+            // A row an earlier pass failed is recovered with its bookkeeping (inputs re-marked,
+            // outputs re-enabled), never by a bare status write.
+            if let Some(row) = failed_row {
+                crate::monitor::task_unfail::recover_transaction(&state, &txid, row);
+            }
+        }
+    }
+
     log::info!("✅ Incoming transaction internalized: {}", txid);
     if has_beef {
         if is_atomic_beef {
@@ -13773,7 +14470,8 @@ pub async fn internalize_action(
             log::info!("   📦 Standard BEEF format");
         }
         if parsed_beef.is_some() && parsed_beef.as_ref().unwrap().has_proofs() {
-            log::info!("   🔐 SPV merkle proofs included and validated");
+            log::info!("   🔐 SPV merkle proofs included: {} matched our headers, {} for blocks not yet held",
+                beef_proofs.valid.len(), beef_proofs.unknown.len());
         }
     }
 
@@ -13854,7 +14552,7 @@ async fn build_signable_beef(
     parents.sort();
     parents.dedup();
     for parent in &parents {
-        crate::beef_helpers::build_beef_for_txid(parent, &mut beef, &state.database, &state.services).await
+        crate::beef_helpers::build_beef_for_txid(parent, &mut beef, &state.database, &state.services, &*state.chain_tracker).await
             .map_err(|e| format!("ancestry for {} unavailable: {}", parent, e))?;
     }
     beef.set_main_transaction(unsigned);
@@ -13970,7 +14668,8 @@ fn brc100_action_json(
             if let Some(script) = output.script.as_ref().filter(|s| !s.is_empty()) {
                 o["lockingScript"] = serde_json::json!(script);
             }
-            if let Some(ci) = ours.as_ref().and_then(|o| o.3.clone()) {
+            // B5-T2-P1 (/code-review ultra #5): the same pre-fix wrapper `list_outputs` unwraps.
+            if let Some(ci) = ours.as_ref().and_then(|o| o.3.as_deref()).and_then(legacy_basket_insertion_ci) {
                 o["customInstructions"] = serde_json::json!(ci);
             }
             outputs.push(o);
@@ -14119,7 +14818,7 @@ pub async fn wallet_activity(
     if filter == "all" || filter == "sent" {
         let mut stmt = match db.connection().prepare(
             "SELECT txid, satoshis, is_outgoing, status, created_at, description, price_usd_cents
-             FROM transactions ORDER BY created_at DESC"
+             FROM transactions WHERE txid NOT LIKE 'unbuilt-%' ORDER BY created_at DESC"
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -14202,9 +14901,13 @@ pub async fn wallet_activity(
 
     let mut received_items: Vec<serde_json::Value> = Vec::new();
     if filter == "all" || filter == "received" {
-        // Group non-change outputs by txid, summing satoshis per tx.
-        // change=0 excludes change outputs from outgoing transactions.
-        // Outputs with no transaction_id are standalone (address sync / PeerPay UTXOs).
+        // Group received outputs by txid, summing satoshis per tx.
+        // B5-T1-P5: "received" = not an output of one of our own outgoing transactions
+        // (no transaction row — address sync — or an incoming one: PeerPay /
+        // internalizeAction). It used to be `o.change = 0`, which stopped meaning
+        // "not our change" once the classifier stamps received money `change = 1`.
+        // Measured on the dev wallet: the old rule listed 75 token outputs of the
+        // user's own actions as "received" and hid 4 real received payments.
         let mut stmt = match db.connection().prepare(
             "SELECT o.txid, SUM(o.satoshis) as total_sats,
                     MIN(o.created_at) as created_at,
@@ -14215,7 +14918,7 @@ pub async fn wallet_activity(
              LEFT JOIN output_baskets b ON o.basket_id = b.basketId
              WHERE o.user_id = ?1
                AND o.satoshis > 0
-               AND o.change = 0
+               AND (o.transaction_id IS NULL OR t.is_outgoing = 0)
                AND (b.name IS NULL OR b.name != 'wallet-backup')
              GROUP BY COALESCE(o.txid, CAST(o.outputId AS TEXT))
              ORDER BY created_at DESC"
@@ -15049,6 +15752,11 @@ pub async fn do_onchain_backup(
     let previous_sats = previous_pushdrop_sats + previous_marker_sats + extra_marker_sats;
     let amount_needed = backup_output_sats + marker_sats + estimated_fee - previous_sats;
 
+    // B5-T1-P3: selection and the claim run under `utxo_selection_lock`, like every other
+    // money route (this route used to take neither lock). The claim's own 0-rows check
+    // is what actually closes the race (`R-NORACE`); the lock keeps two routes from
+    // picking the same coin in the first place.
+    let utxo_lock = state.utxo_selection_lock.lock().await;
     let funding_utxos = {
         let db = state.database.lock().unwrap();
         let output_repo = OutputRepository::new(db.connection());
@@ -15067,13 +15775,13 @@ pub async fn do_onchain_backup(
             .unwrap_or_default()
             .iter()
             .filter(exclude_prev_backup)
-            .map(|o| crate::database::output_to_fetcher_utxo(o))
+            .filter_map(|o| crate::database::output_to_fetcher_utxo(o))
             .collect();
         let all_utxos: Vec<_> = output_repo.get_spendable_by_user(state.current_user_id)
             .unwrap_or_default()
             .iter()
             .filter(exclude_prev_backup)
-            .map(|o| crate::database::output_to_fetcher_utxo(o))
+            .filter_map(|o| crate::database::output_to_fetcher_utxo(o))
             .collect();
         drop(db);
 
@@ -15107,23 +15815,37 @@ pub async fn do_onchain_backup(
     log::info!("   💰 Inputs: {} funding UTXOs ({} sats) + previous backup ({} sats) = {} sats total",
         funding_utxos.len(), funding_total, previous_sats, total_in);
 
-    // Step 7: Reserve inputs with placeholder
-    let placeholder_txid = format!("pending-backup-{}", chrono::Utc::now().timestamp_millis());
-    {
-        let db = state.database.lock().unwrap();
-        let output_repo = OutputRepository::new(db.connection());
-        let mut utxos_to_reserve: Vec<(String, u32)> = funding_utxos.iter()
+    // Step 7: Reserve inputs — B5-T1-P3: the backup's transaction row first, then the
+    // claim, in one SQLite transaction. The row carries a `backup-` reference so the
+    // backup payload excludes it like every other backup row, and no description until
+    // the backup is recorded (the legacy `'On-chain wallet backup'` + `sending` sweeps
+    // release without a chain check and must never match an in-flight backup).
+    let backup_row = {
+        let funding: Vec<(String, u32)> = funding_utxos.iter()
             .map(|u| (u.txid.clone(), u.vout))
             .collect();
+        let mut named: Vec<(String, u32)> = Vec::new();
         if let Some((ref prev_txid, prev_vout, _, _)) = previous_pushdrop {
-            utxos_to_reserve.push((prev_txid.clone(), prev_vout));
+            named.push((prev_txid.clone(), prev_vout));
         }
         if let Some((ref prev_txid, prev_vout, _, _)) = previous_marker {
-            utxos_to_reserve.push((prev_txid.clone(), prev_vout));
+            named.push((prev_txid.clone(), prev_vout));
         }
         // Extra markers are on-chain orphans not tracked in DB — no reservation needed
-        let _ = output_repo.mark_multiple_spent(&utxos_to_reserve, &placeholder_txid);
-    }
+        let reference = format!("backup-{}", uuid::Uuid::new_v4().simple());
+        let db = state.database.lock().unwrap();
+        let reserved = reserve_for_new_transaction_with(db.connection(), &reference, None, &funding, &named);
+        drop(db);
+        match reserved {
+            Ok(Ok(row)) => row,
+            Ok(Err((t, v))) => {
+                log::warn!("   ⛔ Backup funding coin {}:{} is held by another payment — backup will retry", &t[..t.len().min(16)], v);
+                return Err("A funding coin is being spent by another payment; the backup will retry".to_string());
+            }
+            Err(e) => return Err(format!("Could not reserve backup inputs: {}", e)),
+        }
+    };
+    drop(utxo_lock);
     state.balance_cache.invalidate();
 
     // Step 8: Build transaction
@@ -15202,7 +15924,7 @@ pub async fn do_onchain_backup(
         let sighash = match calculate_sighash(&tx, input_idx, &prev_script_bytes, prev_sats, SIGHASH_ALL_FORKID) {
             Ok(h) => h,
             Err(e) => {
-                rollback_backup(&state, &placeholder_txid, "").await;
+                rollback_backup(&state, backup_row, "").await;
                 return Err(format!("Sighash failed: {}", e));
             }
         };
@@ -15225,7 +15947,7 @@ pub async fn do_onchain_backup(
         let sighash = match calculate_sighash(&tx, input_idx, &prev_script_bytes, prev_sats, SIGHASH_ALL_FORKID) {
             Ok(h) => h,
             Err(e) => {
-                rollback_backup(&state, &placeholder_txid, "").await;
+                rollback_backup(&state, backup_row, "").await;
                 return Err(format!("Sighash failed: {}", e));
             }
         };
@@ -15246,7 +15968,7 @@ pub async fn do_onchain_backup(
         let sighash = match calculate_sighash(&tx, input_idx, &extra_script_bytes, *extra_sats, SIGHASH_ALL_FORKID) {
             Ok(h) => h,
             Err(e) => {
-                rollback_backup(&state, &placeholder_txid, "").await;
+                rollback_backup(&state, backup_row, "").await;
                 return Err(format!("Sighash failed (extra marker): {}", e));
             }
         };
@@ -15280,7 +16002,7 @@ pub async fn do_onchain_backup(
         let private_key_bytes = match key_result {
             Ok(k) => k,
             Err(e) => {
-                rollback_backup(state, &placeholder_txid, "").await;
+                rollback_backup(state, backup_row, "").await;
                 return Err(e);
             }
         };
@@ -15289,7 +16011,7 @@ pub async fn do_onchain_backup(
         let sighash = match calculate_sighash(&tx, input_idx, &funding_prev_script, utxo.satoshis, SIGHASH_ALL_FORKID) {
             Ok(h) => h,
             Err(e) => {
-                rollback_backup(&state, &placeholder_txid, "").await;
+                rollback_backup(&state, backup_row, "").await;
                 return Err(format!("Sighash failed: {}", e));
             }
         };
@@ -15308,14 +16030,14 @@ pub async fn do_onchain_backup(
     let txid = match tx.txid() {
         Ok(t) => t,
         Err(e) => {
-            rollback_backup(&state, &placeholder_txid, "").await;
+            rollback_backup(&state, backup_row, "").await;
             return Err(format!("txid failed: {}", e));
         }
     };
     let raw_tx_hex = match tx.to_hex() {
         Ok(h) => h,
         Err(e) => {
-            rollback_backup(&state, &placeholder_txid, "").await;
+            rollback_backup(&state, backup_row, "").await;
             return Err(format!("Serialize failed: {}", e));
         }
     };
@@ -15366,7 +16088,7 @@ pub async fn do_onchain_backup(
                 continue;
             }
             match crate::beef_helpers::build_beef_for_txid(
-                ancestor_txid, &mut beef, &state.database, &state.services,
+                ancestor_txid, &mut beef, &state.database, &state.services, &*state.chain_tracker,
             ).await {
                 Ok(_) => log::info!("   ✅ Ancestry for {}...", &ancestor_txid[..16.min(ancestor_txid.len())]),
                 Err(e) => log::warn!("   ⚠️  Ancestry failed for {}...: {}", &ancestor_txid[..16.min(ancestor_txid.len())], e),
@@ -15380,16 +16102,47 @@ pub async fn do_onchain_backup(
         match beef.to_bytes() {
             Ok(b) => b,
             Err(e) => {
-                rollback_backup(&state, &placeholder_txid, "").await;
+                rollback_backup(&state, backup_row, "").await;
                 return Err(format!("BEEF serialization failed: {}", e));
             }
         }
     };
     log::info!("   📦 BEEF: {} bytes", beef_bytes.len());
 
-    // Broadcast — if this fails, only the placeholder reservation exists (no ghost outputs)
+    // B5-T1-P3: before the broadcast, the row gets the txid and the signed bytes, the
+    // coins are labelled with the txid, and the row goes `sending` — so a crash after
+    // the broadcast is reconciled against the chain (TaskSendWaiting, TaskCheckForProofs),
+    // never released on the clock. ⛔ If the coins cannot be labelled, do not broadcast
+    // (P8b) — this used to happen after the broadcast, where it could not abort.
+    {
+        let db = state.database.lock().unwrap();
+        let prepared = (|| -> rusqlite::Result<()> {
+            let txn = db.connection().unchecked_transaction()?;
+            // ⛔ Only if still `unsigned` — not failed by a backstop while this built
+            // (review #1); the clock restarts as the row becomes a sent transaction.
+            let n = txn.execute(
+                "UPDATE transactions SET txid = ?1, raw_tx = ?2, status = 'sending', satoshis = ?3,
+                        user_id = 1, updated_at = strftime('%s','now'), created_at = strftime('%s','now')
+                 WHERE id = ?4 AND status = 'unsigned'",
+                rusqlite::params![&txid, &raw_tx_hex, estimated_fee, backup_row],
+            )?;
+            if n != 1 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            OutputRepository::new(&txn).label_coins_of(backup_row, &txid)?;
+            txn.commit()
+        })();
+        drop(db);
+        if let Err(e) = prepared {
+            log::error!("   ⛔ ABORTING BACKUP BEFORE BROADCAST — could not record which coins {} spends: {}. No money has moved.", txid, e);
+            rollback_backup(&state, backup_row, "").await;
+            return Err(format!("Could not record backup inputs: {}", e));
+        }
+    }
+
+    // Broadcast — if this fails, the reservation row is rolled back (no ghost outputs)
     let beef_hex = hex::encode(&beef_bytes);
-    match broadcast_transaction(&beef_hex, &state.services, Some(&state.database), Some(&txid)).await {
+    match broadcast_transaction(&beef_hex, &state.services, Some(ProofSink::of(&state)), Some(&txid)).await {
         Ok(_) => {
             log::info!("   ✅ On-chain backup broadcast successful: {}", txid);
         }
@@ -15403,8 +16156,8 @@ pub async fn do_onchain_backup(
                 let db = state.database.lock().unwrap();
                 let marked = db.connection().execute(
                     "UPDATE outputs SET spending_description = ?1
-                     WHERE spending_description = ?2 AND spendable = 0",
-                    rusqlite::params![&suspected_desc, &placeholder_txid],
+                     WHERE spending_description = ?2 AND spendable = 0 AND spent_by = ?3",
+                    rusqlite::params![&suspected_desc, &txid, backup_row],
                 ).unwrap_or(0);
                 if marked > 0 {
                     log::warn!("   ⚠️  Suspected double-spend: marked {} backup input(s) for verification", marked);
@@ -15412,7 +16165,7 @@ pub async fn do_onchain_backup(
                 drop(db);
             }
 
-            rollback_backup(&state, &placeholder_txid, "").await;
+            rollback_backup(&state, backup_row, "").await;
 
             // WS1 c5b: heal funding phantoms so the next TaskBackup cycle selects real coins
             // (mirrors the send sites; no in-place retry — backup re-runs on its schedule,
@@ -15440,25 +16193,21 @@ pub async fn do_onchain_backup(
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
         let db = state.database.lock().unwrap();
 
-        // Create transaction record (status: unproven — already broadcast)
+        // Record the transaction (status: unproven — already broadcast). B5-T1-P3: the
+        // reservation row is updated in place; it already owns the inputs.
         tx_record_id = match db.connection().execute(
-            "INSERT OR IGNORE INTO transactions (
-                user_id, txid, status, reference_number,
-                description, raw_tx, is_outgoing, satoshis,
-                created_at, updated_at
-            ) VALUES (?1, ?2, 'unproven', ?3, ?4, ?5, 1, ?6, ?7, ?8)",
-            rusqlite::params![
-                1i64, txid,
-                format!("backup-{}", &txid[..8]),
-                "On-chain wallet backup",
-                raw_tx_bytes,
-                estimated_fee,
-                now, now,
-            ],
+            "UPDATE transactions SET status = 'unproven', description = ?1, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params!["On-chain wallet backup", now, backup_row],
         ) {
-            Ok(rows) if rows > 0 => Some(db.connection().last_insert_rowid()),
+            Ok(rows) if rows > 0 => Some(backup_row),
             _ => None,
         };
+        // The reference recovered-backup rows use; best-effort (UNIQUE) — the minted
+        // `backup-<uuid>` reference is equally excluded from the payload.
+        let _ = db.connection().execute(
+            "UPDATE transactions SET reference_number = ?1 WHERE id = ?2",
+            rusqlite::params![format!("backup-{}", &txid[..8]), backup_row],
+        );
 
         // Record backup outputs
         let output_repo = OutputRepository::new(db.connection());
@@ -15495,6 +16244,7 @@ pub async fn do_onchain_backup(
                 Some("2-receive address"), Some(&addr_idx.to_string()),
                 None, None, true,
             );
+            crate::classify::after_write(&db, &txid, 2, "I6:onchain-backup-change");
         }
 
         // Link outputs to transaction
@@ -15502,29 +16252,8 @@ pub async fn do_onchain_backup(
             let _ = output_repo.link_outputs_to_transaction(&txid, tx_id);
         }
 
-        // Update input reservations from placeholder to real txid.
-        //
-        // 🚨 **This site cannot abort, and that is the one place it differs from the
-        // other five.** `TICKET_placeholder_resolution_failure_broadcasts_anyway.md` §2
-        // asserts *"at every one of these sites the transaction is signed but not yet
-        // sent"* — that is **false here**. The broadcast happens ~110 lines above, so by
-        // the time this can fail the money has already moved and there is nothing left
-        // to refuse. Verified 2026-09-08: both statements are in `do_onchain_backup`,
-        // broadcast first.
-        //
-        // So the harm is unavoidable; only its *visibility* is in our control. Log at
-        // error with the placeholder and txid so the row is findable, and do not
-        // hand-release: the outpoints are genuinely spent, so the sweeper will correctly
-        // withhold them forever. The residue is a permanent reservation plus an
-        // unattributed spend — bookkeeping, not a double-spend (Phase 0.7 closed that).
-        if let Err(e) = output_repo.update_spending_description_batch(&placeholder_txid, &txid) {
-            log::error!(
-                "   🚨 BACKUP ALREADY BROADCAST but its inputs could not be recorded: \
-                 {} → {}: {}. spent_by is unset and reservation {} will never release. \
-                 Manual repair needed; this is not a double-spend.",
-                placeholder_txid, txid, e, placeholder_txid
-            );
-        }
+        // (B5-T1-P3: the inputs were owned by this row from the claim and labelled with
+        // the txid before the broadcast — nothing is left to resolve here.)
 
         // Create proven_tx_req for proof tracking
         let ptx_repo = crate::database::ProvenTxReqRepository::new(db.connection());
@@ -15568,17 +16297,38 @@ pub async fn do_onchain_backup(
     Ok(txid)
 }
 
-/// Rollback helper for failed on-chain backup
-async fn rollback_backup(state: &AppState, placeholder_txid: &str, txid: &str) {
+/// Rollback helper for failed on-chain backup.
+///
+/// B5-T1-P3: the backup's transaction row owns its inputs. One SQLite transaction: the row
+/// goes `failed`, any outputs recorded under `txid` are disabled, the coins it holds in
+/// the ordinary way are released (a `dss:` hold is not), and the row — which never
+/// recorded a backup — is removed unless something still points at it.
+async fn rollback_backup(state: &AppState, backup_row: i64, txid: &str) {
     let db = state.database.lock().unwrap();
-    let output_repo = crate::database::OutputRepository::new(db.connection());
-    if !txid.is_empty() {
-        let tx_repo = crate::database::TransactionRepository::new(db.connection());
-        let _ = tx_repo.set_transaction_status(txid, crate::action_storage::TransactionStatus::Failed);
-        let _ = output_repo.disable_by_txid(txid);
-        let _ = output_repo.restore_by_spending_description(txid);
+    let rolled_back = (|| -> rusqlite::Result<usize> {
+        let txn = db.connection().unchecked_transaction()?;
+        txn.execute(
+            "UPDATE transactions SET status = 'failed', failed_at = strftime('%s','now'),
+                    updated_at = strftime('%s','now')
+             WHERE id = ?1",
+            rusqlite::params![backup_row],
+        )?;
+        let output_repo = crate::database::OutputRepository::new(&txn);
+        if !txid.is_empty() {
+            output_repo.disable_by_txid(txid)?;
+        }
+        let released = output_repo.release_coins_of(backup_row)?;
+        txn.execute(
+            "DELETE FROM transactions WHERE id = ?1
+               AND NOT EXISTS (SELECT 1 FROM outputs WHERE spent_by = ?1 OR transaction_id = ?1)",
+            rusqlite::params![backup_row],
+        )?;
+        txn.commit()?;
+        Ok(released)
+    })();
+    if let Err(e) = rolled_back {
+        log::error!("   ⚠️  Backup rollback of row {} failed: {} — TaskFailAbandoned / the reconcilers will retry", backup_row, e);
     }
-    let _ = output_repo.restore_by_spending_description(placeholder_txid);
     drop(db);
     state.balance_cache.invalidate();
 }
@@ -15747,7 +16497,7 @@ async fn reconcile_spent_inputs(
 ) -> crate::reconcile::ReconcileReport {
     use crate::reconcile::{
         check_outpoint_spent, check_outpoint_unspent, derive_receive_address, parse_tx_outputs,
-        recover_change_index, verify_raw_txid, SpentStatus, UnspentProbe,
+        verify_raw_txid, SpentStatus, UnspentProbe,
     };
     use crate::monitor::task_unfail::PromoteOutcome;
 
@@ -15793,7 +16543,7 @@ async fn reconcile_spent_inputs(
         // Recovering S's own wallet-owned outputs may enqueue further (z, S, v) entries
         // (Fix #2 — a discovered-spent intermediate is followed + marked, not dropped).
         const MAX_HOPS: usize = 5;
-        let mut recovered: Vec<(String, u32, i64, String, i32)> = Vec::new();
+        let mut recovered: Vec<(String, u32, i64, String, i32, Option<crate::ingest::Observed>)> = Vec::new();
         let mut explicit_marks: Vec<(String, u32, String)> = Vec::new(); // (in_txid, in_vout, foreign_spender)
         let mut worklist: Vec<(String, String, u32)> = vec![(first_successor.clone(), txid.clone(), *vout)];
         let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -15837,9 +16587,18 @@ async fn reconcile_spent_inputs(
                 Ok(v) => v,
                 Err(_) => { log::info!("   reconcile: successor {} unconfirmed/unavailable — skip", short(&succ)); continue; }
             };
-            match crate::cache_helpers::verify_tsc_proof_against_block(http, &succ, &tsc).await {
-                Ok(true) => {}
-                _ => { log::warn!("   reconcile: successor {} merkle proof did not verify — fail closed", short(&succ)); continue; }
+            // B5-T1-P7a-2: checked against our own headers; anything but a verified proof (refuted,
+            // or a block we do not hold yet) fails closed.
+            // A refuted or unreadable proof fails closed. One for a block our chain does not hold (older
+            // than our checkpoint) still marks a foreign spender's input — that only takes a coin out of
+            // selection, as the indexer's word did before; promoting our own transaction needs a
+            // verified proof (`promote_proven_local_tx` checks again).
+            // Anything but a proof our own headers verify fails closed (xhigh 168 #4): an unheld one
+            // may name a stale or made-up block, and marking our coin spent on it hides money. A
+            // spender older than our checkpoint waits for B5-T1-P7a-3's history.
+            match crate::proof_store::check_tsc(&*state.chain_tracker, &succ, &tsc) {
+                crate::proof_store::ProofCheck::Verified(_) => {}
+                other => { log::warn!("   reconcile: successor {} proof not verified by our headers ({:?}) — fail closed", short(&succ), other.verdict()); continue; }
             }
 
             // Ensure (in_txid,in_vout) — the outpoint `succ` spent — is durably marked.
@@ -15866,6 +16625,7 @@ async fn reconcile_spent_inputs(
                 }
             }
 
+
             let outputs = match parse_tx_outputs(&raw) {
                 Ok(o) => o,
                 Err(e) => { log::warn!("   reconcile: parse outputs failed for {}: {}", short(&succ), e); continue; }
@@ -15877,10 +16637,17 @@ async fn reconcile_spent_inputs(
 
                 // Ours + signable? (short DB read; re-derivation verify inside — skips
                 // foreign / BIP32 / backup / non-verifying).
-                let index = {
+                // B5-T1-P6 (/code-review ultra #1): bounded by the wallet's high-water mark,
+                // not a window around rows a restore may have stripped. Only the two reads take
+                // the DB lock; the derivation search (up to high-water + 50) runs without it
+                // (ultra review 2, #5), so other wallet requests are not held behind it.
+                let (cache_candidates, high_water) = {
                     let db = state.database.lock().unwrap();
-                    recover_change_index(db.connection(), &master_priv, &master_pub, wallet_id, script)
+                    (crate::reconcile::cached_receive_candidates(db.connection(), wallet_id, script),
+                     crate::database::WalletRepository::new(db.connection()).receive_high_water(wallet_id).unwrap_or(0))
                 };
+                let index = crate::reconcile::find_receive_index_pure(
+                    &master_priv, &master_pub, &cache_candidates, high_water, script);
                 let index = match index { Some(n) => n, None => continue };
 
                 // Is THIS output already spent? Drives follow-vs-insert.
@@ -15901,7 +16668,9 @@ async fn reconcile_spent_inputs(
                         };
                         match check_outpoint_unspent(&address, &succ, v).await {
                             UnspentProbe::Present => {
-                                recovered.push((succ.clone(), v, *sats, hex::encode(script), index));
+                                // B5-T1-P4: `raw` passed verify_raw_txid above — record the observation.
+                                let obs = crate::ingest::observe_output(&raw, &succ, v, *sats).ok();
+                                recovered.push((succ.clone(), v, *sats, hex::encode(script), index, obs));
                             }
                             // Absent/Error → do NOT insert. Could be indexer lag or a spend
                             // whose successor we can't resolve; a later send failure
@@ -15927,14 +16696,19 @@ async fn reconcile_spent_inputs(
             };
             let output_repo = crate::database::OutputRepository::new(&dbtx);
             let mut burst_recovered = 0u32;
-            for (succ, v, sats, script_hex, index) in &recovered {
+            for (succ, v, sats, script_hex, index, obs) in &recovered {
+                let source = match obs {
+                    Some(o) => crate::ingest::ScriptSource::Observed(o),
+                    None => crate::ingest::ScriptSource::Unchecked,
+                };
                 match output_repo.upsert_received_utxo_with_confirmed(
-                    state.current_user_id, succ, *v, *sats, script_hex, *index, true,
+                    state.current_user_id, succ, *v, *sats, script_hex, *index, true, source,
                 ) {
                     Ok(n) if n > 0 => burst_recovered += 1,
                     Ok(_) => {} // already present (INSERT OR IGNORE no-op) — don't over-count
                     Err(e) => log::warn!("   reconcile: insert recovered {}:{} failed: {}", short(succ), v, e),
                 }
+                crate::classify::after_write(&db, succ, *v, "I7:reconcile-spent-inputs");
             }
             // Explicit marks for FOREIGN spenders (spent_by stays NULL → step-3-revert-safe).
             let mut burst_marked = 0u32;
@@ -15963,48 +16737,25 @@ async fn reconcile_spent_inputs(
     report
 }
 
+/// Reconcile the restored wallet with its own backup transaction: the payload was
+/// captured BEFORE that transaction, so its funding coin still reads spendable and its
+/// change is missing. Marks the inputs spent (by this transaction's row, so
+/// `TaskReviewStatus` can never revive them) and inserts the change at the index whose
+/// key re-derives its script.
+///
+/// B5-T1-P6: the parse is bounds-checked (corrupt bytes ⇒ `Err`, never a panic), and
+/// the change lookup re-derives up to `high_water + 20` instead of reading `addresses`
+/// (a stripped address row silently lost the change coin — G2, `P6-A3`).
 fn reconcile_backup_tx(
     state: &AppState,
     backup_txid: &str,
     raw_tx: &[u8],
+    high_water: i32,
 ) -> Result<(u32, bool), String> {
-    use crate::transaction::decode_varint;
-
-    let mut pos = 4; // Skip version
-
-    // Parse inputs
-    let (input_count, consumed) = decode_varint(&raw_tx[pos..])
-        .map_err(|e| format!("input count varint: {:?}", e))?;
-    pos += consumed;
-
-    let mut inputs: Vec<(String, u32)> = Vec::new();
-    for _ in 0..input_count {
-        let txid_bytes = &raw_tx[pos..pos+32];
-        let txid_hex: String = txid_bytes.iter().rev().map(|b| format!("{:02x}", b)).collect();
-        let vout = u32::from_le_bytes(raw_tx[pos+32..pos+36].try_into().unwrap());
-        pos += 36;
-        let (script_len, consumed) = decode_varint(&raw_tx[pos..])
-            .map_err(|e| format!("input script varint: {:?}", e))?;
-        pos += consumed + script_len as usize + 4; // script + sequence
-        inputs.push((txid_hex, vout));
-    }
-
-    // Parse all outputs: vout 0 = PushDrop, vout 1 = marker, vout 2 = change
-    let (output_count, consumed) = decode_varint(&raw_tx[pos..])
-        .map_err(|e| format!("output count varint: {:?}", e))?;
-    pos += consumed;
-
-    let mut output_data: Vec<(i64, String)> = Vec::new(); // (sats, script_hex)
-    for _i in 0..output_count as usize {
-        let value = u64::from_le_bytes(raw_tx[pos..pos+8].try_into().unwrap());
-        pos += 8;
-        let (script_len, consumed) = decode_varint(&raw_tx[pos..])
-            .map_err(|e| format!("output script varint: {:?}", e))?;
-        pos += consumed;
-        let script_hex = hex::encode(&raw_tx[pos..pos + script_len as usize]);
-        output_data.push((value as i64, script_hex));
-        pos += script_len as usize;
-    }
+    let (inputs, outputs) = crate::reconcile::parse_tx_spans(raw_tx)?;
+    let output_data: Vec<(i64, String)> = outputs.iter()
+        .map(|&(value, offset, len)| (value, hex::encode(&raw_tx[offset..offset + len])))
+        .collect();
 
     let db = state.database.lock().unwrap();
     let output_repo = crate::database::OutputRepository::new(db.connection());
@@ -16039,7 +16790,7 @@ fn reconcile_backup_tx(
     for (txid, vout) in &inputs {
         match db.connection().execute(
             "UPDATE outputs SET spendable = 0, spent_by = ?1, spending_description = ?2
-             WHERE txid = ?3 AND vout = ?4 AND spendable = 1",
+             WHERE lower(txid) = lower(?3) AND vout = ?4 AND spendable = 1",
             rusqlite::params![
                 spent_by_id,
                 format!("spent-by-backup-{}", &backup_txid[..16]),
@@ -16098,19 +16849,20 @@ fn reconcile_backup_tx(
     if let Some((sats, ref script_hex)) = output_data.get(2) {
         if *sats > 546 {
             let change_addr_index = {
-                let addr_repo = crate::database::AddressRepository::new(db.connection());
                 let wallet_repo = crate::database::WalletRepository::new(db.connection());
-                let wallet = wallet_repo.get_primary_wallet().ok().flatten();
-                let wid = wallet.and_then(|w| w.id).unwrap_or(1);
-                let addresses = addr_repo.get_all_by_wallet(wid).unwrap_or_default();
-
+                let wid = wallet_repo.get_primary_wallet().ok().flatten().and_then(|w| w.id).unwrap_or(1);
                 let change_script_bytes = hex::decode(script_hex).unwrap_or_default();
-                addresses.iter().find_map(|a| {
-                    let addr_script = crate::recovery::address_to_p2pkh_script(&a.address);
-                    if let Ok(s) = addr_script {
-                        if s == change_script_bytes { Some(a.index) } else { None }
-                    } else { None }
-                }).unwrap_or(-1)
+                let keys = crate::database::get_master_private_key_from_db(&db)
+                    .and_then(|k| Ok((k, crate::database::get_master_public_key_from_db(&db)?)));
+                match keys {
+                    Ok((privkey, pubkey)) => crate::reconcile::find_receive_index_upto(
+                        db.connection(), &privkey, &pubkey, wid, high_water, &change_script_bytes,
+                    ).unwrap_or(-1),
+                    Err(e) => {
+                        log::warn!("   ⚠️  reconcile: master keys unavailable ({}) — change not identified", e);
+                        -1
+                    }
+                }
             };
 
             if change_addr_index >= 0 {
@@ -16121,31 +16873,217 @@ fn reconcile_backup_tx(
                     *sats,
                     script_hex,
                     change_addr_index,
+                    crate::ingest::ScriptSource::Built,
                 );
+                crate::classify::after_write(&db, backup_txid, 2, "I3:reconcile-backup-change");
                 change_inserted = true;
             }
         }
     }
 
-    // Restore token/certificate outputs that were falsely marked as external-spend
-    // in the old wallet. This happens when TaskValidateUtxos reconciles master address
-    // outputs against WoC — PushDrop/nonstandard scripts don't appear in address UTXO
-    // queries, so reconciliation marks them as spent. After recovery, restore any output
-    // that is spendable=0, spending_description='external-spend', spent_by IS NULL,
-    // and belongs to a non-default basket (tokens, certificates, etc.).
-    let restored = db.connection().execute(
-        "UPDATE outputs SET spendable = 1, spending_description = NULL, updated_at = strftime('%s', 'now')
-         WHERE spendable = 0 AND spending_description = 'external-spend' AND spent_by IS NULL
-           AND basket_id IS NOT NULL
-           AND basket_id NOT IN (SELECT basketId FROM output_baskets WHERE name IN ('default', 'change'))",
-        [],
-    ).unwrap_or(0);
-    if restored > 0 {
-        log::info!("   ✅ Restored {} token/certificate output(s) falsely marked as external-spend", restored);
-    }
+    // B5-T1-P6: token/certificate outputs falsely marked 'external-spend' in the old
+    // wallet are restored by `restore_false_external_spends`, on the chain's answer —
+    // no longer by this string heuristic alone.
 
     state.balance_cache.invalidate();
     Ok((inputs_marked, change_inserted))
+}
+
+/// Attempts at `reconcile_backup_tx` before the restore reports it failed (K10c).
+const BACKUP_RECONCILE_ATTEMPTS: u32 = 3;
+
+/// The restore's post-fetch work, as its response reports it (B5-T1-P6).
+struct RestoreFinish {
+    refetch: serde_json::Value,
+    /// The address counter written back from the backup: `{ "restored": n }` or `{ "error": … }`.
+    counter: serde_json::Value,
+    reconcile: Result<(u32, bool), String>,
+    reconcile_attempts: u32,
+    /// Token/certificate rows the old wallet falsely marked spent, checked on chain.
+    external_spend: serde_json::Value,
+    /// The backup reconciled — the late-payment scan may run (it is started in the
+    /// background by the handler). Scanning over an unreconciled backup is the March phantom.
+    scan_allowed: bool,
+}
+
+impl RestoreFinish {
+    fn reconcile_json(&self) -> serde_json::Value {
+        match &self.reconcile {
+            Ok((marked, change)) => serde_json::json!({
+                "reconciled": true, "attempts": self.reconcile_attempts,
+                "inputs_marked_spent": marked, "change_inserted": change,
+            }),
+            Err(e) => serde_json::json!({
+                "reconciled": false, "attempts": self.reconcile_attempts, "error": e,
+                "warning": "The wallet may still show a coin its own backup transaction spent. \
+                            Do not spend until this is resolved; try the restore again later.",
+            }),
+        }
+    }
+
+}
+
+/// NC-11 rig/// NC-11 rig (`P6-A16`): skip `reconcile_backup_tx` AS IF it succeeded, to reproduce the
+/// March phantom on a dev build. Double key — `HODOS_DEV=1` **and** the rig variable —
+/// the same pattern as the other dev rigs; `main.rs :: enforce_dev_safeguard` strips a
+/// stray `HODOS_DEV` from a non-dev binary.
+fn skip_backup_reconcile_rig(env: impl Fn(&str) -> Option<String>) -> bool {
+    env("HODOS_DEV").as_deref() == Some("1") && env("HODOS_RIG_SKIP_BACKUP_RECONCILE").is_some()
+}
+
+/// Steps 5–6 of `wallet_recover_onchain`, after the backup has been fetched: import,
+/// address counter, re-fetch stripped data, reconcile the backup transaction (retried,
+/// re-fetching its bytes), check falsely-marked token rows on chain, then the scan —
+/// which runs **only** if reconciliation succeeded: scanning over an unreconciled
+/// backup is how the March phantom (a spent coin beside its own change) appeared.
+///
+/// `Err` only when the import itself fails (the caller answers 500, as before).
+async fn finish_onchain_restore(
+    state: &AppState,
+    wallet_id: i64,
+    user_id: i64,
+    payload: &crate::backup::BackupPayload,
+    backup_txid: &str,
+    raw_tx: Vec<u8>,
+    chain: &dyn crate::scan::ScanChain,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<RestoreFinish, String> {
+    // Import (the payload's ids are remapped onto the new wallet + user).
+    {
+        let db = state.database.lock().unwrap();
+        let conn = db.connection();
+        let _ = conn.execute("DELETE FROM addresses WHERE wallet_id = ?1", rusqlite::params![wallet_id]);
+        let _ = conn.execute("DELETE FROM output_baskets WHERE user_id = ?1", rusqlite::params![user_id]);
+        let _ = conn.execute("DELETE FROM users WHERE userId = ?1", rusqlite::params![user_id]);
+        log::info!("   🧹 Cleaned up auto-created records before import");
+        crate::backup::import_to_db_with_ids(conn, payload, wallet_id, user_id)?;
+        log::info!("   ✅ Backup entities imported successfully");
+        // B5-T1-P5 (route I3): the import wrote every coin unstamped; classify now.
+        crate::classify::stamp_all(&db, "I3:restore-onchain");
+    }
+
+    // The address counter (`P6-A10`): the new wallet row starts at 0, which would hand
+    // out addresses the old wallet already gave away. Written BEFORE reconcile, whose
+    // change lookup is bounded by the high-water mark.
+    let counter = {
+        let db = state.database.lock().unwrap();
+        let repo = crate::database::WalletRepository::new(db.connection());
+        match repo.raise_current_index(wallet_id, payload.wallet.current_index) {
+            Ok(()) => {
+                log::info!("   ✅ Address counter restored to {}", payload.wallet.current_index);
+                serde_json::json!({ "restored": payload.wallet.current_index })
+            }
+            Err(e) => {
+                log::error!("   ❌ Address counter NOT restored: {}", e);
+                serde_json::json!({ "error": e.to_string() })
+            }
+        }
+    };
+    let high_water = {
+        let db = state.database.lock().unwrap();
+        crate::database::WalletRepository::new(db.connection()).receive_high_water(wallet_id).unwrap_or(0)
+    };
+
+    // Re-fetch stripped data (raw_tx, merkle proofs, etc.)
+    let refetch = refetch_stripped_data(state, payload).await;
+
+    // Reconcile the backup transaction, retried; each retry re-fetches the bytes (the
+    // parse is deterministic — retrying the same bytes can never succeed).
+    let mut raw = raw_tx;
+    let mut attempts = 0u32;
+    let reconcile = loop {
+        attempts += 1;
+        if skip_backup_reconcile_rig(&env) {
+            log::warn!("   🧪 RIG: HODOS_RIG_SKIP_BACKUP_RECONCILE — skipping reconcile_backup_tx (NC-11)");
+            break Ok((0, false));
+        }
+        log::info!("   🔄 Processing backup tx {} to reconcile funding/change (attempt {})...",
+                   &backup_txid[..16.min(backup_txid.len())], attempts);
+        let result = if crate::reconcile::verify_raw_txid(&raw, backup_txid) {
+            reconcile_backup_tx(state, backup_txid, &raw, high_water)
+        } else {
+            Err("backup transaction bytes do not hash to its txid".to_string())
+        };
+        match result {
+            Ok(r) => {
+                log::info!("   ✅ Backup tx reconciled: {} inputs marked spent, change {}",
+                           r.0, if r.1 { "inserted" } else { "skipped" });
+                break Ok(r);
+            }
+            Err(e) if attempts >= BACKUP_RECONCILE_ATTEMPTS => {
+                log::error!("   ❌ Backup tx reconciliation failed after {} attempts: {}", attempts, e);
+                break Err(e);
+            }
+            Err(e) => {
+                log::warn!("   ⚠️  Backup tx reconciliation failed (attempt {}): {} — re-fetching", attempts, e);
+                match chain.raw_tx(backup_txid.to_string()).await {
+                    Ok(bytes) => raw = bytes,
+                    Err(fe) => log::warn!("   ⚠️  Backup tx re-fetch failed: {}", fe),
+                }
+            }
+        }
+    };
+
+    let external_spend = restore_false_external_spends(state, chain).await;
+
+    let scan_allowed = reconcile.is_ok();
+    if !scan_allowed {
+        log::warn!("   ⛔ scan skipped: backup reconciliation failed");
+    }
+    state.balance_cache.invalidate();
+
+    Ok(RestoreFinish { refetch, counter, reconcile, reconcile_attempts: attempts, external_spend, scan_allowed })
+}
+
+/// Token/certificate outputs the OLD wallet marked `'external-spend'` because an
+/// address-UTXO query never lists PushDrop/nonstandard scripts. A string match alone
+/// used to restore them all; now the chain is asked first (B5-T1-P6, P5 route W2): an
+/// explicit `Spent` leaves the row spent. `Unknown` restores it as before — no provider
+/// answers an explicit "unspent" for these outputs (measured 2026-10-07), so requiring
+/// one would leave every restored certificate unusable; WhatsOnChain's spend index
+/// covers any script, so a real spend is seen. Both counts are reported.
+async fn restore_false_external_spends(
+    state: &AppState,
+    chain: &dyn crate::scan::ScanChain,
+) -> serde_json::Value {
+    let candidates: Vec<(i64, String, u32)> = {
+        let db = state.database.lock().unwrap();
+        let mut stmt = match db.connection().prepare(
+            "SELECT outputId, txid, vout FROM outputs
+             WHERE spendable = 0 AND spending_description = 'external-spend' AND spent_by IS NULL
+               AND txid IS NOT NULL AND basket_id IS NOT NULL
+               AND basket_id NOT IN (SELECT basketId FROM output_baskets WHERE name IN ('default', 'change'))",
+        ) {
+            Ok(s) => s,
+            Err(e) => return serde_json::json!({ "error": e.to_string() }),
+        };
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? as u32)));
+        match rows {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(e) => return serde_json::json!({ "error": e.to_string() }),
+        }
+    };
+    let (mut restored, mut spent) = (0u32, 0u32);
+    for (output_id, txid, vout) in candidates {
+        match chain.spent(txid.clone(), vout).await {
+            crate::reconcile::SpentStatus::Unspent | crate::reconcile::SpentStatus::Unknown => {
+                let db = state.database.lock().unwrap();
+                match db.connection().execute(
+                    "UPDATE outputs SET spendable = 1, spending_description = NULL, updated_at = strftime('%s', 'now')
+                     WHERE outputId = ?1 AND spendable = 0 AND spent_by IS NULL",
+                    rusqlite::params![output_id],
+                ) {
+                    Ok(n) => restored += n as u32,
+                    Err(e) => log::warn!("   ⚠️  {}:{} not restored: {}", txid, vout, e),
+                }
+            }
+            crate::reconcile::SpentStatus::Spent { .. } => spent += 1,
+        }
+    }
+    if restored + spent > 0 {
+        log::info!("   🔎 external-spend check: {} restored, {} really spent on chain (left spent)", restored, spent);
+    }
+    serde_json::json!({ "restored": restored, "spent_on_chain": spent })
 }
 
 /// Fetch and decrypt the on-chain backup from the blockchain.
@@ -16514,33 +17452,8 @@ pub async fn wallet_recover_onchain(
     log::info!("   ✅ On-chain backup found: {} txs, {} outputs, {} certs",
         backup_payload.transactions.len(), backup_payload.outputs.len(), backup_payload.certificates.len());
 
-    // Clean up auto-created records that conflict with backup import
-    {
-        let db = state.database.lock().unwrap();
-        let conn = db.connection();
-        let _ = conn.execute("DELETE FROM addresses WHERE wallet_id = ?1", rusqlite::params![wallet_id]);
-        let _ = conn.execute("DELETE FROM output_baskets WHERE user_id = ?1", rusqlite::params![user_id]);
-        let _ = conn.execute("DELETE FROM users WHERE userId = ?1", rusqlite::params![user_id]);
-        log::info!("   🧹 Cleaned up auto-created records before import");
-    }
-
-    // Import all entities
-    {
-        let db = state.database.lock().unwrap();
-        match crate::backup::import_to_db_with_ids(db.connection(), &backup_payload, wallet_id, user_id) {
-            Ok(()) => log::info!("   ✅ Backup entities imported successfully"),
-            Err(e) => {
-                log::error!("   ❌ Import failed: {}", e);
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "success": false,
-                    "error": format!("Import failed: {}", e),
-                    "wallet_created": true,
-                    "backup_found": true
-                }));
-            }
-        }
-    }
-
+    // Steps 5–6 (B5-T1-P6): import, restore the address counter, reconcile the backup
+    // transaction (retried), and — only if that succeeded — scan for late payments.
     let restored_counts = serde_json::json!({
         "transactions": backup_payload.transactions.len(),
         "outputs": backup_payload.outputs.len(),
@@ -16548,23 +17461,23 @@ pub async fn wallet_recover_onchain(
         "certificates": backup_payload.certificates.len(),
         "proven_txs": backup_payload.proven_txs.len(),
     });
-
-    // Re-fetch stripped data (raw_tx, merkle proofs, etc.)
-    let refetch_result = refetch_stripped_data(&state, &backup_payload).await;
-
-    // Process backup transaction: the payload captures pre-backup state, so the
-    // funding UTXO spent by the backup tx is still spendable in the DB. Parse the
-    // backup tx to mark its inputs as spent and insert the change output.
-    {
-        log::info!("   🔄 Processing backup tx {} to reconcile funding/change...", &backup_txid[..16]);
-        match reconcile_backup_tx(&state, &backup_txid, &backup_raw_tx) {
-            Ok((inputs_marked, change_inserted)) => {
-                log::info!("   ✅ Backup tx reconciled: {} inputs marked spent, change {}",
-                    inputs_marked, if change_inserted { "inserted" } else { "skipped" });
-            }
-            Err(e) => log::warn!("   ⚠️  Backup tx reconciliation failed: {} (sync will fix later)", e),
+    let chain: std::sync::Arc<dyn crate::scan::ScanChain> =
+        std::sync::Arc::new(crate::scan::LiveChain { services: state.services.clone() });
+    let finish = match finish_onchain_restore(
+        &state, wallet_id, user_id, &backup_payload, &backup_txid, backup_raw_tx,
+        chain.as_ref(), |k| std::env::var(k).ok(),
+    ).await {
+        Ok(f) => f,
+        Err(e) => {
+            log::error!("   ❌ Import failed: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Import failed: {}", e),
+                "wallet_created": true,
+                "backup_found": true
+            }));
         }
-    }
+    };
 
     // Step 6b: Store backup hash so TaskBackup doesn't overwrite the on-chain backup
     // with degraded recovered data. The recovered DB is a subset of the original
@@ -16621,6 +17534,17 @@ pub async fn wallet_recover_onchain(
     log::info!("   ✅ Recovery complete: {} spendable UTXOs, {} satoshis",
         spendable_count, total_balance);
 
+    // The late-payment scan, in the BACKGROUND (/code-review ultra 2, #1) — only over a
+    // reconciled backup.
+    let scan_status = if !finish.scan_allowed {
+        serde_json::json!({ "ran": false, "reason": "scan skipped: backup reconciliation failed" })
+    } else if start_background_scan(&state, user_id, wallet_id, master_privkey.clone(), master_pubkey.clone(),
+                                     "I3:restore-scan", chain.clone(), false) {
+        serde_json::json!({ "ran": "background" })
+    } else {
+        serde_json::json!({ "ran": false, "reason": "a sync is already running — use Find late payments later" })
+    };
+
     HttpResponse::Ok().json(serde_json::json!({
         "success": true,
         "backup_found": true,
@@ -16628,7 +17552,11 @@ pub async fn wallet_recover_onchain(
         "restored": restored_counts,
         "balance_satoshis": total_balance,
         "spendable_utxos": spendable_count,
-        "refetch": refetch_result,
+        "refetch": finish.refetch,
+        "address_counter": finish.counter,
+        "reconcile": finish.reconcile_json(),
+        "external_spend_check": finish.external_spend,
+        "scan": scan_status,
     }))
 }
 
@@ -16664,6 +17592,18 @@ async fn refetch_stripped_data(
             txids_to_fetch.push(ptx.txid.clone());
         }
     }
+    // B5-T1-P4: an offloaded script lives only in its raw parent, and a backup does not
+    // carry `parent_transactions` — so re-fetch the parent of every offloaded output,
+    // including received coins whose txid is in neither list above.
+    let offloaded = {
+        let db = state.database.lock().unwrap();
+        crate::ingest::offloaded_txids(db.connection())
+    };
+    for txid in offloaded {
+        if !txids_to_fetch.contains(&txid) {
+            txids_to_fetch.push(txid);
+        }
+    }
 
     log::info!("   🔄 Re-fetching stripped data for {} unique txids...", txids_to_fetch.len());
 
@@ -16677,6 +17617,13 @@ async fn refetch_stripped_data(
     for txid in &txids_to_fetch {
         // 1. Fetch raw transaction hex
         let raw_tx_hex = match crate::cache_helpers::fetch_parent_transaction_from_api(&state.services, txid).await {
+            // B5-T1-P4: bytes that do not hash to the txid are written NOWHERE — not to
+            // transactions, proven_txs, the parent cache, or any output's script.
+            Ok(hex) if !hex::decode(&hex).map(|b| crate::reconcile::verify_raw_txid(&b, txid)).unwrap_or(false) => {
+                log::warn!("   ⚠️  Raw tx for {} failed the txid check — not restored", &txid[..16.min(txid.len())]);
+                errors += 1;
+                None
+            }
             Ok(hex) => {
                 raw_tx_fetched += 1;
                 Some(hex)
@@ -16706,10 +17653,7 @@ async fn refetch_stripped_data(
                 let db = state.database.lock().unwrap();
                 let raw_bytes = hex::decode(hex).unwrap_or_default();
                 if !raw_bytes.is_empty() {
-                    let _ = db.connection().execute(
-                        "UPDATE proven_txs SET raw_tx = ?1 WHERE txid = ?2 AND (raw_tx IS NULL OR LENGTH(raw_tx) = 0)",
-                        rusqlite::params![raw_bytes, txid],
-                    );
+                    let _ = crate::proof_store::fill_restored_raw_tx(db.connection(), txid, &raw_bytes);
                 }
             }
 
@@ -16723,47 +17667,30 @@ async fn refetch_stripped_data(
                 }
             }
 
-            // Restore spent output locking_scripts by parsing the raw tx
+            // Restore stripped output locking_scripts — through the verified observation
+            // (txid + value) and the inline cap (B5-T1-P4 `P4-A15`).
             if let Ok(raw_bytes) = hex::decode(hex) {
                 let db = state.database.lock().unwrap();
-                // Find outputs for this txid that have NULL or empty locking_script
-                let mut stmt = db.connection().prepare(
-                    "SELECT outputId, vout FROM outputs WHERE txid = ?1 AND (locking_script IS NULL OR LENGTH(locking_script) = 0)"
-                ).unwrap();
-                let missing: Vec<(i64, i32)> = stmt.query_map(
-                    rusqlite::params![txid],
-                    |row| Ok((row.get(0)?, row.get(1)?))
-                ).unwrap().filter_map(|r| r.ok()).collect();
-                drop(stmt);
-
-                for (output_id, vout) in &missing {
-                    if let Ok(script) = extract_output_script(&raw_bytes, *vout as usize) {
-                        let _ = db.connection().execute(
-                            "UPDATE outputs SET locking_script = ?1 WHERE outputId = ?2",
-                            rusqlite::params![script, output_id],
-                        );
-                        scripts_restored += 1;
-                    }
-                }
+                scripts_restored += crate::ingest::restore_scripts_from_raw(db.connection(), txid, &raw_bytes);
             }
         }
 
         // 2. Fetch merkle proof (TSC format)
         match crate::cache_helpers::fetch_tsc_proof_from_api(&state.services, txid).await {
-            Ok(Some(proof_json)) => {
-                let db = state.database.lock().unwrap();
-                // Store proof as BLOB in proven_txs
-                let proof_bytes = serde_json::to_vec(&proof_json).unwrap_or_default();
-                if !proof_bytes.is_empty() {
-                    let updated = db.connection().execute(
-                        "UPDATE proven_txs SET merkle_path = ?1 WHERE txid = ?2 AND (merkle_path IS NULL OR LENGTH(merkle_path) = 0)",
-                        rusqlite::params![proof_bytes, txid],
-                    ).unwrap_or(0);
-                    if updated > 0 {
-                        proofs_fetched += 1;
+            // B5-T1-P7a-2 `C11`: written only when our own headers verify it and it names the same
+            // height and position as the restored row. A proof for a block we do not hold yet leaves
+            // the row empty (no retry here — older history is B5-T1-P7a-3).
+            Ok(Some(proof_json)) => match crate::proof_store::check_tsc(&*state.chain_tracker, txid, &proof_json) {
+                crate::proof_store::ProofCheck::Verified(proof) => {
+                    let db = state.database.lock().unwrap();
+                    match crate::proof_store::fill_restored_proof(db.connection(), &proof) {
+                        Ok(true) => proofs_fetched += 1,
+                        Ok(false) => log::warn!("   ⚠️  proof for {} does not match the restored row's height/index — not written", &txid[..16.min(txid.len())]),
+                        Err(e) => { log::warn!("   ⚠️  writing proof for {} failed: {}", &txid[..16.min(txid.len())], e); errors += 1; }
                     }
                 }
-            }
+                other => log::warn!("   ⚠️  proof for {} not verified by our headers ({:?}) — not written", &txid[..16.min(txid.len())], other.verdict()),
+            },
             Ok(None) => {
                 // Not yet mined or no proof available — normal for unconfirmed txs
             }
@@ -16928,6 +17855,10 @@ pub struct SyncStatus {
     #[serde(skip)]
     pub completed_at: Option<std::time::Instant>,
     pub result_seen: bool,
+    /// B5-T1-P6: the last late-payment scan's full result (found, unchecked ranges,
+    /// unverified coins, the self-only note) — what the "Find late payments" card reads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report: Option<serde_json::Value>,
 }
 
 impl Default for SyncStatus {
@@ -16941,6 +17872,7 @@ impl Default for SyncStatus {
             error: None,
             completed_at: None,
             result_seen: true, // default to true so no stale banner on fresh start
+            report: None,
         }
     }
 }
@@ -16949,6 +17881,86 @@ impl Default for SyncStatus {
 pub async fn get_sync_status(state: web::Data<AppState>) -> HttpResponse {
     let status = state.sync_status.read().unwrap();
     HttpResponse::Ok().json(&*status)
+}
+
+/// B5-T1-P6 (/code-review ultra 2, #1): mark the sync active and run the late-payment
+/// scan in the BACKGROUND. The wallet UI reaches these routes through a bridge that gives
+/// up after 30 s; a scan of a wallet with hundreds of addresses, or under WhatsOnChain's
+/// rate limiting, runs far longer — answering only after it made a successful restore look
+/// failed. Progress and the result are in `/wallet/sync-status` (`report`), which the
+/// wallet panel already polls. `false` when a sync is already running.
+pub(crate) fn start_background_scan(
+    state: &web::Data<AppState>,
+    user_id: i64,
+    wallet_id: i64,
+    master_privkey: Vec<u8>,
+    master_pubkey: Vec<u8>,
+    route: &'static str,
+    chain: std::sync::Arc<dyn crate::scan::ScanChain>,
+    rewatch_all: bool,
+) -> bool {
+    {
+        let mut status = state.sync_status.write().unwrap();
+        if status.active {
+            return false;
+        }
+        *status = SyncStatus { active: true, phase: "scanning".to_string(), result_seen: false, ..SyncStatus::default() };
+    }
+    let state = state.clone();
+    actix_web::rt::spawn(async move {
+        let _ = run_background_scan(&state, user_id, wallet_id, &master_privkey, &master_pubkey, route,
+                                    chain.as_ref(), rewatch_all).await;
+    });
+    true
+}
+
+/// What the background scan runs (tests await it directly): the scan and its writer,
+/// then the balance and the sync status — `error` = why it is incomplete, `report` = the
+/// full result. `rewatch_all` restarts the 90-day watch on every address (the button).
+pub(crate) async fn run_background_scan(
+    state: &AppState,
+    user_id: i64,
+    wallet_id: i64,
+    master_privkey: &[u8],
+    master_pubkey: &[u8],
+    route: &str,
+    chain: &dyn crate::scan::ScanChain,
+    rewatch_all: bool,
+) -> Result<crate::scan::ScanOutcome, String> {
+    let outcome = crate::scan::find_late_payments(
+        &state.database, user_id, wallet_id, master_privkey, master_pubkey, route, chain,
+    ).await;
+    let balance = {
+        let db = state.database.lock().unwrap();
+        if rewatch_all {
+            let _ = crate::database::AddressRepository::new(db.connection()).set_all_pending_utxo_check(wallet_id);
+        }
+        crate::database::OutputRepository::new(db.connection()).calculate_balance(user_id).unwrap_or(0)
+    };
+    state.balance_cache.invalidate();
+    state.balance_cache.set(balance);
+    let mut status = state.sync_status.write().unwrap();
+    status.active = false;
+    status.phase = "idle".to_string();
+    status.total_satoshis = balance.max(0) as u64;
+    status.completed_at = Some(std::time::Instant::now());
+    status.result_seen = false;
+    match &outcome {
+        Ok(o) => {
+            status.addresses_scanned = o.result.addresses_found;
+            status.utxos_found = o.write.written.len() as u32;
+            status.error = o.incomplete_message();
+            status.report = Some(rescan_response(o, balance));
+            log::info!("   ✅ Late-payment scan [{}] finished: {} new coin(s), balance {} sats, complete={}",
+                       route, o.write.written.len(), balance, o.complete());
+        }
+        Err(e) => {
+            log::warn!("   ⚠️  Late-payment scan [{}] could not run: {}", route, e);
+            status.error = Some(format!("Scan failed: {}", e));
+            status.report = None;
+        }
+    }
+    outcome
 }
 
 /// POST /wallet/sync-status/seen — marks the completion summary as consumed
@@ -16979,6 +17991,13 @@ pub struct RecoveryResponse {
     pub utxos_found: u32,
     pub total_balance: i64,
     pub message: String,
+    /// B5-T1-P4: false when some address ranges could not be read — the counts above
+    /// then cover only what was read.
+    pub complete: bool,
+    /// Inclusive `[from, to]` index ranges the scan could not read.
+    pub unchecked_ranges: Vec<(u32, u32)>,
+    /// B5-T1-P6: the scan runs in the background — progress in `/wallet/sync-status`.
+    pub scan_running: bool,
 }
 
 /// Recover wallet from mnemonic (Phase 1a)
@@ -16998,6 +18017,16 @@ pub struct RecoveryResponse {
 pub async fn wallet_recover(
     state: web::Data<AppState>,
     req: web::Json<RecoveryRequest>,
+) -> HttpResponse {
+    let chain = std::sync::Arc::new(crate::scan::LiveChain { services: state.services.clone() });
+    wallet_recover_with(state, req, chain).await
+}
+
+/// `wallet_recover`, with its chain reads injected (B5-T1-P6).
+async fn wallet_recover_with(
+    state: web::Data<AppState>,
+    req: web::Json<RecoveryRequest>,
+    chain: std::sync::Arc<dyn crate::scan::ScanChain>,
 ) -> HttpResponse {
     log::info!("🔍 /wallet/recover called");
 
@@ -17062,167 +18091,49 @@ pub async fn wallet_recover(
         }
     }; // DB lock released
 
-    // Set sync status to active before scan
-    {
-        let mut status = state.sync_status.write().unwrap();
-        *status = SyncStatus {
-            active: true,
-            phase: "scanning".to_string(),
-            addresses_scanned: 0,
-            utxos_found: 0,
-            total_satoshis: 0,
-            error: None,
-            completed_at: None,
-            result_seen: false,
-        };
-    }
-
-    // 4. Scan blockchain with NO lock held (network calls)
-    let options = crate::recovery::RecoveryOptions {
-        mnemonic: mnemonic_trimmed,
-        gap_limit: req.gap_limit.unwrap_or(20),
-        start_index: req.start_index.unwrap_or(0),
-        max_index: req.max_index,
+    // 4. The scan of the wallet's own BRC-42 receive addresses — never BIP-32 (owner, K1).
+    // A fresh wallet's high-water mark is 0, so the gap limit (K9) does the work. It runs in
+    // the BACKGROUND (/code-review ultra 2, #1); the balance fills in as it finishes.
+    let keys = {
+        let db = state.database.lock().unwrap();
+        crate::database::get_master_private_key_from_db(&db)
+            .and_then(|k| Ok((k, crate::database::get_master_public_key_from_db(&db)?)))
     };
-
-    let scan_result = crate::recovery::recover_wallet_from_mnemonic(options).await;
-
-    let result = match scan_result {
-        Ok(r) => r,
+    crate::monitor::Monitor::start(state.clone());
+    state.balance_cache.set(0);
+    let (master_privkey, master_pubkey) = match keys {
+        Ok(k) => k,
         Err(e) => {
-            log::warn!("   ⚠️  Blockchain scan failed, but wallet was created: {}", e);
-            // Update sync status with error
-            {
-                let mut status = state.sync_status.write().unwrap();
-                status.active = false;
-                status.phase = "idle".to_string();
-                status.error = Some(format!("Blockchain scan failed: {}", e));
-                status.completed_at = Some(std::time::Instant::now());
-            }
-            // Partial success: wallet exists, but no UTXOs found
-            // Start Monitor anyway — TaskSyncPending will find UTXOs later
-            crate::monitor::Monitor::start(state.clone());
-            state.balance_cache.set(0);
+            log::warn!("   ⚠️  Master keys unavailable after wallet creation: {}", e);
             return HttpResponse::Ok().json(RecoveryResponse {
                 success: true,
                 addresses_found: 0,
                 utxos_found: 0,
                 total_balance: 0,
-                message: format!(
-                    "Wallet created but blockchain scan failed: {}. \
-                     Use Sync to find your UTXOs.",
-                    e
-                ),
+                message: format!("Wallet created but the blockchain scan could not start: {}. Use Find late payments to try again.", e),
+                complete: false,
+                unchecked_ranges: Vec::new(),
+                scan_running: false,
             });
         }
     };
-
-    log::info!("   📊 Scan found {} addresses with {} UTXOs, total balance: {} sats",
-              result.addresses_found, result.utxos_found, result.total_balance);
-
-    // 5. DB lock: insert discovered addresses + UTXOs + update wallet index
-    let mut max_index: i32 = 0;
-    {
-        let db = state.database.lock().unwrap();
-        let conn = db.connection();
-        let address_repo = crate::database::AddressRepository::new(conn);
-        let output_repo = crate::database::OutputRepository::new(conn);
-        let wallet_repo = crate::database::WalletRepository::new(conn);
-
-        for addr in &result.addresses {
-            let addr_index = addr.index as i32;
-            if addr_index > max_index {
-                max_index = addr_index;
-            }
-
-            // Check if address already exists at this index (index 0 + master are created above)
-            if address_repo.get_by_wallet_and_index(wallet_id, addr_index).ok().flatten().is_none() {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64;
-
-                let address_model = crate::database::Address {
-                    id: None,
-                    wallet_id,
-                    index: addr_index,
-                    address: addr.address.clone(),
-                    public_key: addr.public_key.clone(),
-                    used: addr.has_utxos,
-                    balance: addr.balance,
-                    pending_utxo_check: true,
-                    created_at: now,
-                };
-                if let Err(e) = address_repo.create(&address_model) {
-                    log::error!("   ❌ Failed to insert address idx={}: {}", addr_index, e);
-                }
-            }
-
-            // Insert UTXOs with correct derivation method
-            for utxo in &addr.utxos {
-                if let Err(e) = output_repo.upsert_received_utxo_with_derivation(
-                    user_id,
-                    &utxo.txid,
-                    utxo.vout,
-                    utxo.satoshis,
-                    &utxo.script,
-                    addr_index,
-                    &addr.derivation_method,
-                    // P0.5 panel #2, 1.6 — this was always available and never written.
-                    utxo.confirmed,
-                ) {
-                    log::error!("   ❌ Failed to insert UTXO {}:{}: {}",
-                              &utxo.txid[..std::cmp::min(16, utxo.txid.len())], utxo.vout, e);
-                }
-            }
-        }
-
-        // Update wallet's current_index to the highest discovered address
-        if max_index > 0 {
-            if let Err(e) = wallet_repo.update_current_index(wallet_id, max_index) {
-                log::error!("   ❌ Failed to update wallet current_index: {}", e);
-            }
-        }
-    } // DB lock released
-
-    // 6. Start Monitor
-    crate::monitor::Monitor::start(state.clone());
-
-    // 7. Seed balance cache
-    {
-        let db = state.database.lock().unwrap();
-        let output_repo = crate::database::OutputRepository::new(db.connection());
-        match output_repo.calculate_balance(user_id) {
-            Ok(bal) => state.balance_cache.set(bal),
-            Err(_) => state.balance_cache.set(result.total_balance),
-        }
-    }
-
-    // Update sync status to complete
-    {
-        let mut status = state.sync_status.write().unwrap();
-        status.active = false;
-        status.phase = "idle".to_string();
-        status.addresses_scanned = result.addresses_found;
-        status.utxos_found = result.utxos_found;
-        status.total_satoshis = result.total_balance as u64;
-        status.error = None;
-        status.completed_at = Some(std::time::Instant::now());
-        status.result_seen = false;
-    }
-
-    log::info!("   ✅ Recovery complete! {} addresses, {} UTXOs, {} sats",
-              result.addresses_found, result.utxos_found, result.total_balance);
+    let started = start_background_scan(&state, user_id, wallet_id, master_privkey, master_pubkey,
+                                        "I2:wallet-recover", chain, false);
+    log::info!("   ✅ Wallet created; blockchain scan {}", if started { "running in the background" } else { "NOT started (a sync is running)" });
 
     HttpResponse::Ok().json(RecoveryResponse {
         success: true,
-        addresses_found: result.addresses_found,
-        utxos_found: result.utxos_found,
-        total_balance: result.total_balance,
-        message: format!(
-            "Recovery complete! Found {} addresses with {} UTXOs, total balance: {} satoshis.",
-            result.addresses_found, result.utxos_found, result.total_balance
-        ),
+        addresses_found: 0,
+        utxos_found: 0,
+        total_balance: 0,
+        message: if started {
+            "Wallet created. Searching the blockchain for your coins — this continues in the background, and your balance updates when it finishes.".to_string()
+        } else {
+            "Wallet created, but a sync is already running. Use Find late payments once it finishes.".to_string()
+        },
+        complete: false,
+        unchecked_ranges: Vec::new(),
+        scan_running: started,
     })
 }
 
@@ -17240,6 +18151,12 @@ pub async fn wallet_rescan(
     state: web::Data<AppState>,
     _body: web::Bytes,
 ) -> HttpResponse {
+    let chain = std::sync::Arc::new(crate::scan::LiveChain { services: state.services.clone() });
+    wallet_rescan_with(state, chain).await
+}
+
+/// `wallet_rescan`, with its chain reads injected (B5-T1-P6).
+async fn wallet_rescan_with(state: web::Data<AppState>, chain: std::sync::Arc<dyn crate::scan::ScanChain>) -> HttpResponse {
     log::info!("🔍 POST /wallet/rescan called");
 
     // 1. Check sync not already running
@@ -17252,8 +18169,8 @@ pub async fn wallet_rescan(
         }
     }
 
-    // 2. Phase 1 (DB lock): read mnemonic + current max address index
-    let (mnemonic_str, wallet_id, user_id, current_max_index) = {
+    // 2. Phase 1 (DB lock): the master keys (wallet must be unlocked) and the wallet row
+    let (master_privkey, master_pubkey, wallet_id, user_id) = {
         let db = match state.database.lock() {
             Ok(g) => g,
             Err(e) => {
@@ -17263,17 +18180,13 @@ pub async fn wallet_rescan(
             }
         };
 
-        // Check wallet is unlocked
-        let mnemonic = match db.get_cached_mnemonic() {
-            Ok(m) => m.to_string(),
-            Err(_) => {
-                return HttpResponse::Locked().json(serde_json::json!({
-                    "error": "Wallet is locked. Unlock with PIN first."
-                }));
-            }
-        };
+        if db.get_cached_mnemonic().is_err() {
+            return HttpResponse::Locked().json(serde_json::json!({
+                "error": "Wallet is locked. Unlock with PIN first."
+            }));
+        }
 
-        use crate::database::{WalletRepository, AddressRepository};
+        use crate::database::{WalletRepository, get_master_private_key_from_db, get_master_public_key_from_db};
         let wallet_repo = WalletRepository::new(db.connection());
         let wallet = match wallet_repo.get_primary_wallet() {
             Ok(Some(w)) => w,
@@ -17288,163 +18201,39 @@ pub async fn wallet_rescan(
                 }));
             }
         };
+        let keys = get_master_private_key_from_db(&db).and_then(|k| Ok((k, get_master_public_key_from_db(&db)?)));
+        let (privkey, pubkey) = match keys {
+            Ok(k) => k,
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Failed to read master keys: {}", e)
+                }));
+            }
+        };
 
-        let wid = wallet.id.unwrap();
-        let max_idx = wallet.current_index;
-
-        (mnemonic, wid, state.current_user_id, max_idx)
+        (privkey, pubkey, wallet.id.unwrap(), state.current_user_id)
     }; // DB lock released
 
-    // 3. Set sync status to active
-    {
-        let mut status = state.sync_status.write().unwrap();
-        *status = SyncStatus {
-            active: true,
-            phase: "rescanning".to_string(),
-            addresses_scanned: 0,
-            utxos_found: 0,
-            total_satoshis: 0,
-            error: None,
-            completed_at: None,
-            result_seen: false,
-        };
+    // 3. The scan, in the BACKGROUND (/code-review ultra 2, #1): the button's request
+    // returns at once; progress and the result (`report`) are in /wallet/sync-status.
+    if !start_background_scan(&state, user_id, wallet_id, master_privkey, master_pubkey, "I2:rescan", chain, true) {
+        return HttpResponse::Conflict().json(serde_json::json!({
+            "error": "A sync or rescan is already in progress"
+        }));
     }
-
-    // 4. Phase 2 (no lock): run recovery scanner
-    let scan_max = std::cmp::max(current_max_index + 20, 100) as u32;
-    let options = crate::recovery::RecoveryOptions {
-        mnemonic: mnemonic_str,
-        gap_limit: 20,
-        start_index: 0,
-        max_index: Some(scan_max),
-    };
-
-    let scan_result = crate::recovery::recover_wallet_from_mnemonic(options).await;
-
-    let result = match scan_result {
-        Ok(r) => r,
-        Err(e) => {
-            log::warn!("   ⚠️  Rescan blockchain scan failed: {}", e);
-            let mut status = state.sync_status.write().unwrap();
-            status.active = false;
-            status.phase = "idle".to_string();
-            status.error = Some(format!("Scan failed: {}", e));
-            status.completed_at = Some(std::time::Instant::now());
-            return HttpResponse::ServiceUnavailable().json(serde_json::json!({
-                "error": format!("Blockchain scan failed: {}", e)
-            }));
-        }
-    };
-
-    // 5. Phase 3 (DB lock): insert newly discovered addresses + UTXOs
-    let mut new_addresses_found = 0u32;
-    let mut new_utxos_found = 0u32;
-    let mut max_index = current_max_index;
-    {
-        let db = state.database.lock().unwrap();
-        let conn = db.connection();
-        let address_repo = crate::database::AddressRepository::new(conn);
-        let output_repo = crate::database::OutputRepository::new(conn);
-        let wallet_repo = crate::database::WalletRepository::new(conn);
-
-        for addr in &result.addresses {
-            let addr_index = addr.index as i32;
-            if addr_index > max_index {
-                max_index = addr_index;
-            }
-
-            // Check if address already exists at this index
-            let exists = address_repo.get_by_wallet_and_index(wallet_id, addr_index)
-                .ok().flatten().is_some();
-
-            if !exists {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64;
-
-                let address_model = crate::database::Address {
-                    id: None,
-                    wallet_id,
-                    index: addr_index,
-                    address: addr.address.clone(),
-                    public_key: addr.public_key.clone(),
-                    used: addr.has_utxos,
-                    balance: addr.balance,
-                    pending_utxo_check: true,
-                    created_at: now,
-                };
-                if let Err(e) = address_repo.create(&address_model) {
-                    log::error!("   ❌ Failed to insert address idx={}: {}", addr_index, e);
-                } else {
-                    new_addresses_found += 1;
-                }
-            }
-
-            // Insert UTXOs (upsert — skips existing)
-            for utxo in &addr.utxos {
-                match output_repo.upsert_received_utxo_with_derivation(
-                    user_id,
-                    &utxo.txid,
-                    utxo.vout,
-                    utxo.satoshis,
-                    &utxo.script,
-                    addr_index,
-                    &addr.derivation_method,
-                    // P0.5 panel #2, 1.6 — this was always available and never written.
-                    utxo.confirmed,
-                ) {
-                    Ok(1) => new_utxos_found += 1,
-                    Ok(_) => {} // Already existed
-                    Err(e) => log::error!("   ❌ Failed to insert UTXO {}:{}: {}",
-                        &utxo.txid[..std::cmp::min(16, utxo.txid.len())], utxo.vout, e),
-                }
-            }
-        }
-
-        // Update wallet current_index if we found addresses beyond current max
-        if max_index > current_max_index {
-            if let Err(e) = wallet_repo.update_current_index(wallet_id, max_index) {
-                log::error!("   ❌ Failed to update wallet current_index: {}", e);
-            }
-        }
-
-        // Re-enable UTXO monitoring for ALL addresses (restart 90-day window)
-        let _ = address_repo.set_all_pending_utxo_check(wallet_id);
-    } // DB lock released
-
-    // 6. Invalidate and recalculate balance
-    state.balance_cache.invalidate();
-    let balance = {
-        let db = state.database.lock().unwrap();
-        let output_repo = crate::database::OutputRepository::new(db.connection());
-        let bal = output_repo.calculate_balance(user_id).unwrap_or(0);
-        state.balance_cache.set(bal);
-        bal
-    };
-
-    // 7. Update sync status
-    {
-        let mut status = state.sync_status.write().unwrap();
-        status.active = false;
-        status.phase = "idle".to_string();
-        status.addresses_scanned = result.addresses_found;
-        status.utxos_found = new_utxos_found;
-        status.total_satoshis = balance as u64;
-        status.error = None;
-        status.completed_at = Some(std::time::Instant::now());
-        status.result_seen = false;
-    }
-
-    log::info!("   ✅ Rescan complete! Scanned {} addresses, found {} new addresses, {} new UTXOs, balance: {} sats",
-              result.addresses_found, new_addresses_found, new_utxos_found, balance);
-
     HttpResponse::Ok().json(serde_json::json!({
-        "addresses_scanned": result.addresses_found,
-        "new_addresses_found": new_addresses_found,
-        "new_utxos_found": new_utxos_found,
-        "balance": balance
+        "started": true,
+        "message": "Scanning this wallet's addresses in the background — progress and the result are in /wallet/sync-status.",
+        "note": crate::scan::SCAN_SELF_ONLY_NOTE,
     }))
+}
+
+/// The scan's report (`/wallet/sync-status` → `report`) — the one builder, so the card copy
+/// and the report cannot drift (`P6-A9`).
+fn rescan_response(outcome: &crate::scan::ScanOutcome, balance: i64) -> serde_json::Value {
+    let mut body = outcome.to_json();
+    body["balance"] = serde_json::json!(balance);
+    body
 }
 
 // ============================================================================
@@ -17471,6 +18260,10 @@ pub struct ExternalRecoveryResponse {
     pub total_fees: u64,
     pub brc42_balance: i64,
     pub message: String,
+    /// B5-T1-P5: coins found on the external wallet and deliberately NOT swept (a token,
+    /// an inscription, a 1-sat carrier, or a coin whose script could not be read).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub withheld: Vec<serde_json::Value>,
 }
 
 /// Recover from an external BIP39 wallet (e.g. Centbee) by sweeping funds to BRC-42.
@@ -17495,6 +18288,7 @@ pub async fn wallet_recover_external(
             error: Some("Recovery requires explicit confirmation. Set 'confirm': true".to_string()),
             utxos_found: 0, total_balance: 0, sweep_txids: vec![],
             total_fees: 0, brc42_balance: 0, message: String::new(),
+            withheld: vec![],
         });
     }
 
@@ -17505,6 +18299,7 @@ pub async fn wallet_recover_external(
             error: Some(format!("Unsupported wallet type: '{}'. Supported: 'centbee'", req.wallet_type)),
             utxos_found: 0, total_balance: 0, sweep_txids: vec![],
             total_fees: 0, brc42_balance: 0, message: String::new(),
+            withheld: vec![],
         });
     }
 
@@ -17517,6 +18312,7 @@ pub async fn wallet_recover_external(
                 error: Some("Centbee PIN must be exactly 4 digits".to_string()),
                 utxos_found: 0, total_balance: 0, sweep_txids: vec![],
                 total_fees: 0, brc42_balance: 0, message: String::new(),
+                withheld: vec![],
             });
         }
         None => {
@@ -17525,6 +18321,7 @@ pub async fn wallet_recover_external(
                 error: Some("Centbee recovery requires a 4-digit PIN as passphrase".to_string()),
                 utxos_found: 0, total_balance: 0, sweep_txids: vec![],
                 total_fees: 0, brc42_balance: 0, message: String::new(),
+                withheld: vec![],
             });
         }
     };
@@ -17538,6 +18335,7 @@ pub async fn wallet_recover_external(
             error: Some(format!("Expected 12 words, got {}", word_count)),
             utxos_found: 0, total_balance: 0, sweep_txids: vec![],
             total_fees: 0, brc42_balance: 0, message: String::new(),
+            withheld: vec![],
         });
     }
     let mnemonic = match bip39::Mnemonic::parse_in(bip39::Language::English, &mnemonic_trimmed) {
@@ -17548,6 +18346,7 @@ pub async fn wallet_recover_external(
                 error: Some("Invalid mnemonic — check spelling and word order".to_string()),
                 utxos_found: 0, total_balance: 0, sweep_txids: vec![],
                 total_fees: 0, brc42_balance: 0, message: String::new(),
+                withheld: vec![],
             });
         }
     };
@@ -17564,6 +18363,7 @@ pub async fn wallet_recover_external(
                 error: Some("Wallet already exists".to_string()),
                 utxos_found: 0, total_balance: 0, sweep_txids: vec![],
                 total_fees: 0, brc42_balance: 0, message: String::new(),
+                withheld: vec![],
             });
         }
     } // DB lock released
@@ -17576,7 +18376,7 @@ pub async fn wallet_recover_external(
     let gap_limit = req.gap_limit.unwrap_or(25);
 
     log::info!("   🔍 Scanning {} wallet with gap limit {}...", config.name, gap_limit);
-    let scan_result = match crate::recovery::scan_external_wallet(&external_seed, &config, gap_limit).await {
+    let mut scan_result = match crate::recovery::scan_external_wallet(&external_seed, &config, gap_limit).await {
         Ok(r) => r,
         Err(e) => {
             log::error!("   ❌ External wallet scan failed: {}", e);
@@ -17585,8 +18385,35 @@ pub async fn wallet_recover_external(
                 error: Some(format!("Scan failed: {}", e)),
                 utxos_found: 0, total_balance: 0, sweep_txids: vec![],
                 total_fees: 0, brc42_balance: 0, message: String::new(),
+                withheld: vec![],
             });
         }
+    };
+
+    // B5-T1-P5 (`R-NOSPEND` b): read each coin's real script from its verified parent
+    // and sweep only plain payments. The scan's script was assumed from the address.
+    let withheld: Vec<serde_json::Value> = {
+        let keys: Vec<(String, u32, i64)> = scan_result.utxos.iter()
+            .map(|u| (u.txid.clone(), u.vout, u.satoshis)).collect();
+        let mut observed: std::collections::HashMap<(String, u32), Vec<u8>> = std::collections::HashMap::new();
+        loop {
+            // `observe_coins` fetches at most OBSERVE_FETCH_BUDGET parents per call.
+            let pending: Vec<_> = keys.iter().filter(|(t, v, _)| !observed.contains_key(&(t.clone(), *v))).cloned().collect();
+            if pending.is_empty() { break; }
+            let got = crate::ingest::observe_coins_from_chain(&state.database, &state.services, &pending).await;
+            if got.is_empty() { break; }
+            observed.extend(got.into_iter().map(|(k, o)| (k, o.script)));
+        }
+        let (sweep, held) = crate::recovery::split_by_observed_script(std::mem::take(&mut scan_result.utxos), &observed);
+        scan_result.total_balance = sweep.iter().map(|u| u.satoshis).sum();
+        scan_result.utxos = sweep;
+        scan_result.token_reserved.iter().map(|u| (u, "one_sat"))
+            .chain(held.iter().map(|(u, r)| (u, *r)))
+            .map(|(u, reason)| {
+                log::info!("   🔒 Withheld from sweep: {}:{} ({} sats) — {}", &u.txid[..16.min(u.txid.len())], u.vout, u.satoshis, reason);
+                serde_json::json!({ "txid": u.txid, "vout": u.vout, "satoshis": u.satoshis, "address": u.address, "reason": reason })
+            })
+            .collect()
     };
 
     // 8. If no UTXOs found, return error (don't create wallet)
@@ -17594,9 +18421,14 @@ pub async fn wallet_recover_external(
         log::info!("   ⚠️  No funds found on external wallet");
         return HttpResponse::Ok().json(ExternalRecoveryResponse {
             success: false,
-            error: Some("No funds found on this wallet. Check your mnemonic and Centbee PIN.".to_string()),
+            error: Some(if withheld.is_empty() {
+                "No funds found on this wallet. Check your mnemonic and Centbee PIN.".to_string()
+            } else {
+                format!("Nothing to sweep: {} output(s) on this wallet are not plain payments                          (or their scripts could not be read) and were left where they are.", withheld.len())
+            }),
             utxos_found: 0, total_balance: 0, sweep_txids: vec![],
             total_fees: 0, brc42_balance: 0, message: String::new(),
+            withheld: withheld.clone(),
         });
     }
 
@@ -17627,6 +18459,7 @@ pub async fn wallet_recover_external(
                     total_balance: scan_result.total_balance,
                     sweep_txids: vec![], total_fees: 0, brc42_balance: 0,
                     message: String::new(),
+                    withheld: withheld.clone(),
                 });
             }
         }
@@ -17655,6 +18488,7 @@ pub async fn wallet_recover_external(
                 total_balance: scan_result.total_balance,
                 sweep_txids: vec![], total_fees: 0, brc42_balance: 0,
                 message: String::new(),
+                withheld: withheld.clone(),
             });
         }
     };
@@ -17720,9 +18554,11 @@ pub async fn wallet_recover_external(
 
             if let Err(e) = output_repo.upsert_received_utxo(
                 user_id, txid, 0, output_value, &script_hex, 0,
+                crate::ingest::ScriptSource::Built,
             ) {
                 log::error!("   ❌ Failed to record sweep output {}:{}: {}", &txid[..16.min(txid.len())], 0, e);
             }
+            crate::classify::after_write(&db, txid, 0, "I8:recover-external-sweep");
         }
     } // DB lock released
 
@@ -17761,6 +18597,7 @@ pub async fn wallet_recover_external(
         total_fees,
         brc42_balance,
         message,
+        withheld: withheld.clone(),
     })
 }
 
@@ -17821,6 +18658,60 @@ pub struct WalletOutput {
 
 /// POST /listOutputs - BRC-100 Call Code 6
 /// Lists spendable outputs within a specific basket
+/// B5-T2-P1 (`P1-A10`): the rows a `p 1sat <scope>` view returns — storage basket `1sat`,
+/// the axis tag (every scope but `all`) as a **mandatory** filter that `tagQueryMode` cannot
+/// drop (BRC-165), and the caller's other tags narrowing further per `require_all`.
+fn p1sat_rows(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+    axis_tag: Option<&str>,
+    caller_tags: &[String],
+    require_all: bool,
+) -> rusqlite::Result<(i64, Vec<crate::database::Output>)> {
+    let basket_id = crate::database::BasketRepository::new(conn).find_or_insert(crate::tokens::ONESAT_BASKET, user_id)?;
+    let tag_repo = crate::database::TagRepository::new(conn);
+    let output_repo = crate::database::OutputRepository::new(conn);
+    let mut rows = match axis_tag {
+        None => output_repo.get_spendable_by_basket(basket_id)?,
+        Some(axis) => match tag_repo.find_tag_ids(&[axis.to_string()])?.as_slice() {
+            [] => Vec::new(),
+            ids => output_repo.get_spendable_by_basket_with_tags(basket_id, Some(ids), false)?,
+        },
+    };
+    let extras: Vec<String> = caller_tags.iter().map(|t| t.trim().to_lowercase())
+        .filter(|t| Some(t.as_str()) != axis_tag).collect();
+    // `all`: every caller tag. `any`: the axis tag (itself a caller tag) already satisfies
+    // it; with no axis (`p 1sat all`), at least one caller tag.
+    if !extras.is_empty() && (require_all || axis_tag.is_none()) {
+        rows.retain(|o| {
+            let tags = o.output_id.and_then(|id| tag_repo.get_tags_for_output(id).ok()).unwrap_or_default();
+            if require_all { extras.iter().all(|e| tags.contains(e)) } else { extras.iter().any(|e| tags.contains(e)) }
+        });
+    }
+    Ok((basket_id, rows))
+}
+
+/// B5-T2-P1 (`P1-A9`): rows internalized before the BRC-37 fix stored a sender's
+/// `customInstructions` wrapped as `{"type":"basket_insertion","basket":…,"appData":<ci>}`.
+/// Hand back the sender's original string (`None` when they sent none); any other stored
+/// value — including every row written since — is returned unchanged.
+pub(crate) fn legacy_basket_insertion_ci(stored: &str) -> Option<String> {
+    let Ok(serde_json::Value::Object(m)) = serde_json::from_str::<serde_json::Value>(stored) else {
+        return Some(stored.to_string());
+    };
+    let wrapped = m.get("type").and_then(|t| t.as_str()) == Some("basket_insertion")
+        && m.contains_key("basket")
+        && m.keys().all(|k| matches!(k.as_str(), "type" | "basket" | "appData"));
+    if !wrapped {
+        return Some(stored.to_string());
+    }
+    match m.get("appData") {
+        Some(serde_json::Value::String(ci)) => Some(ci.clone()),
+        Some(other) => Some(other.to_string()),
+        None => None,
+    }
+}
+
 pub async fn list_outputs(
     state: web::Data<AppState>,
     http_req: HttpRequest,
@@ -17828,8 +18719,41 @@ pub async fn list_outputs(
 ) -> HttpResponse {
     log::info!("📋 /listOutputs called");
 
+    // B5-T2-P1 (`P1-A10`/`P1-A11`): a `p 1sat <scope>` basket is a BRC-165 view of storage
+    // basket `1sat`, gated by its own view grant (`p 1sat all`, or `p 1sat <scope> <value>`;
+    // `all` covers the others) — payment grants never cover it. `p 1sat id` needs no grant
+    // (BRC-165 "MUST NOT require grant all"). Malformed requests are refused here.
+    let view = peek_scoped_grant_scope_basket(&body)
+        .map(|b| {
+            let tags: Vec<String> = serde_json::from_slice::<serde_json::Value>(&body).ok()
+                .and_then(|j| j.get("tags").and_then(|t| t.as_array()).map(|a|
+                    a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()))
+                .unwrap_or_default();
+            crate::tokens::p1sat_view(&b, &tags)
+        })
+        .unwrap_or(crate::tokens::P1satView::NotP1sat);
+    if let crate::tokens::P1satView::Reject(msg) = &view {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": msg, "code": "ERR_INVALID_BASKET_NAME"
+        }));
+    }
+    if let crate::tokens::P1satView::View { grant_key: Some(key), .. } = &view {
+        let outcome = crate::permission_service::dispatch_scoped_grant(
+            &state.permission,
+            &state.database,
+            state.current_user_id,
+            &http_req,
+            &body,
+            "/listOutputs",
+            crate::permission_service::ScopedCall::Basket { basket: key, access: "read" },
+        );
+        if let crate::permission_service::GateOutcome::EarlyReturn(resp) = outcome {
+            return resp;
+        }
+    }
+
     // Phase 2.6-D scoped-grant gate (basket access, read).
-    if let Some(basket_name) = peek_scoped_grant_scope_basket(&body) {
+    if let (crate::tokens::P1satView::NotP1sat, Some(basket_name)) = (&view, peek_scoped_grant_scope_basket(&body)) {
         let outcome = crate::permission_service::dispatch_scoped_grant(
             &state.permission,
             &state.database,
@@ -17873,14 +18797,42 @@ pub async fn list_outputs(
     // Phase 2.6-D D.3: protected basket guardrail (defense-in-depth in the
     // endpoint itself). The engine ALSO blocks but the endpoint enforces too.
     // BRC-100 spec also prohibits "default" as a user-facing listOutputs target.
-    if crate::permission_service::is_protected_basket(&req.basket.trim().to_lowercase()) {
+    // B5-T2-P1: BRC-99 — a `p <scheme>` basket the wallet does not implement is refused
+    // (until now it was silently created and listed as empty).
+    if matches!(view, crate::tokens::P1satView::NotP1sat) && req.basket.trim().to_lowercase().starts_with("p ") {
         return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "Basket name is reserved and cannot be accessed via listOutputs",
+            "error": format!("Basket '{}' names a permission scheme this wallet does not implement (BRC-99)", req.basket),
+            "code": "ERR_INVALID_BASKET_NAME"
         }));
     }
 
+    // B5-T2-P1: `1sat` is read only through `p 1sat <scope>` (BRC-165); `bsv21` (no
+    // view scheme of its own) is readable but always prompts — the gate above forces it.
+    let requested = req.basket.trim().to_lowercase();
+    let routed = matches!(view, crate::tokens::P1satView::View { .. });
+    if !routed && crate::permission_service::is_protected_basket(&requested) && requested != crate::tokens::BSV21_BASKET {
+        let error = if requested == crate::tokens::ONESAT_BASKET {
+            "Basket '1sat' is read through 'p 1sat <scope>' (BRC-165)"
+        } else {
+            "Basket name is reserved and cannot be accessed via listOutputs"
+        };
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": error }));
+    }
+
     // Phase 4D: Get database - scoped to drop lock before BEEF building (which re-locks internally)
-    let (basket_id, filtered_outputs) = {
+    let (basket_id, filtered_outputs) = if let crate::tokens::P1satView::View { axis_tag, .. } = &view {
+        let db = state.database.lock().unwrap();
+        match p1sat_rows(db.connection(), state.current_user_id, axis_tag.as_deref(),
+                         req.tags.as_deref().unwrap_or(&[]), req.tag_query_mode.as_deref() == Some("all")) {
+            Ok(r) => r,
+            Err(e) => {
+                log::error!("   Failed to query 1sat view: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Failed to query outputs: {}", e)
+                }));
+            }
+        }
+    } else {
         let db = state.database.lock().unwrap();
         let basket_repo = crate::database::BasketRepository::new(db.connection());
         let tag_repo = crate::database::TagRepository::new(db.connection());
@@ -18017,13 +18969,17 @@ pub async fn list_outputs(
             satoshis: db_output.satoshis,
             spendable: true,  // All returned outputs are spendable (filtered by get_spendable_*)
             locking_script: if include_locking_scripts {
-                // Phase 4D: Convert locking_script bytes to hex string
-                db_output.locking_script.as_ref().map(|bytes| hex::encode(bytes))
+                // B5-T1-P4: through the accessor — a script above the inline cap is
+                // read from its raw parent, not returned as missing.
+                let db = state.database.lock().unwrap();
+                crate::database::OutputRepository::new(db.connection())
+                    .locking_script_for(db_output)
+                    .map(|bytes| hex::encode(bytes))
             } else {
                 None
             },
             custom_instructions: if include_custom_instructions {
-                db_output.custom_instructions.clone()
+                db_output.custom_instructions.as_deref().and_then(legacy_basket_insertion_ci)
             } else {
                 None
             },
@@ -18045,7 +19001,7 @@ pub async fn list_outputs(
                     txid,
                     &mut beef,
                     &state.database,
-                    &state.services,
+                    &state.services, &*state.chain_tracker,
                 ).await {
                     log::warn!("   ⚠️  Failed to build BEEF for transaction {}: {}, continuing...", txid, e);
                     // Continue processing other outputs even if one fails
@@ -18292,246 +19248,47 @@ pub struct GetHeaderForHeightRequest {
 }
 
 /// POST /getHeight - BRC-100 Call Code 25
-/// Returns the current blockchain height (chain tip)
-pub async fn get_height(_body: web::Bytes) -> HttpResponse {
+/// Returns the chain tip — the wallet's own verified tip (B5-T1-P7a-1), never an indexer's claim.
+/// Before the first header sync of this process reaches a source's tip, the only tip held is the
+/// compiled checkpoint's (months stale), so the answer is an error, never a height and never 0.
+pub async fn get_height(state: web::Data<AppState>, _body: web::Bytes) -> HttpResponse {
     log::info!("📋 /getHeight called");
-
-    // Fetch current blockchain height from WhatsOnChain API
-    let url = "https://api.whatsonchain.com/v1/bsv/main/chain/info";
-    let client = reqwest::Client::builder()
-        .timeout(crate::services::CallClass::IndexerSync.timeout())
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-
-    match client.get(url).send().await {
-        Ok(response) => {
-            if !response.status().is_success() {
-                log::error!("   WhatsOnChain API returned status: {}", response.status());
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("API returned status: {}", response.status())
-                }));
-            }
-
-            match response.json::<serde_json::Value>().await {
-                Ok(json) => {
-                    // Extract "blocks" field which contains current height
-                    let height = json["blocks"].as_u64()
-                        .or_else(|| json["blocks"].as_i64().map(|h| h as u64))
-                        .unwrap_or(0) as u32;
-
-                    log::info!("   Current blockchain height: {}", height);
-
-                    HttpResponse::Ok().json(serde_json::json!({
-                        "height": height
-                    }))
-                }
-                Err(e) => {
-                    log::error!("   Failed to parse API response: {}", e);
-                    HttpResponse::InternalServerError().json(serde_json::json!({
-                        "error": format!("Failed to parse API response: {}", e)
-                    }))
-                }
-            }
-        }
-        Err(e) => {
-            log::error!("   Failed to fetch blockchain height: {}", e);
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to fetch blockchain height: {}", e)
-            }))
-        }
+    if !state.chain_tracker.is_synced() {
+        log::warn!("   Block headers not synced yet — no verified tip to report");
+        return HttpResponse::ServiceUnavailable().json(serde_json::json!({
+            "error": "The wallet's block headers are not synced yet; try again shortly"
+        }));
     }
+    let height = state.chain_tracker.current_height();
+    log::info!("   Verified chain tip: {}", height);
+    HttpResponse::Ok().json(serde_json::json!({
+        "height": height
+    }))
 }
 
 /// POST /getHeaderForHeight - BRC-100 Call Code 26
-/// Returns the 80-byte block header for a given height
+/// Returns the 80-byte block header at a height from the wallet's own verified chain (B5-T1-P7a-1).
+/// A height the chain does not hold (above the tip, or below the compiled checkpoint) is an error,
+/// never an empty header and never an unchecked indexer answer.
 pub async fn get_header_for_height(
     state: web::Data<AppState>,
     req: web::Json<GetHeaderForHeightRequest>,
 ) -> HttpResponse {
     log::info!("📋 /getHeaderForHeight called");
     log::info!("   Height: {}", req.height);
-
-    // Check database cache first
-    let db = state.database.lock().unwrap();
-    let block_header_repo = crate::database::BlockHeaderRepository::new(db.connection());
-
-    match block_header_repo.get_by_height(req.height) {
-        Ok(Some(cached_header)) => {
-            log::info!("   ✅ Found block header in cache");
-            drop(db);
-            return HttpResponse::Ok().json(serde_json::json!({
-                "header": cached_header.header_hex
-            }));
-        }
-        Ok(None) => {
-            log::info!("   🌐 Cache miss - fetching from API...");
-        }
-        Err(e) => {
-            log::warn!("   ⚠️  Database error checking cache: {}, fetching from API", e);
-        }
-    }
-    drop(db);
-
-    // Fetch from WhatsOnChain API
-    // First, get block info by height to get the hash
-    let block_info_url = format!("https://api.whatsonchain.com/v1/bsv/main/block/height/{}", req.height);
-    let client = reqwest::Client::builder()
-        .timeout(crate::services::CallClass::IndexerSync.timeout())
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-
-    // Step 1: Get block hash from height
-    let block_hash = match client.get(&block_info_url).send().await {
-        Ok(response) => {
-            if !response.status().is_success() {
-                log::error!("   WhatsOnChain API returned status: {}", response.status());
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("API returned status: {}", response.status())
-                }));
-            }
-
-            match response.json::<serde_json::Value>().await {
-                Ok(json) => {
-                    // Extract block hash
-                    match json["hash"].as_str() {
-                        Some(hash) => hash.to_string(),
-                        None => {
-                            log::error!("   Missing 'hash' field in block info response");
-                            return HttpResponse::InternalServerError().json(serde_json::json!({
-                                "error": "Missing 'hash' field in API response"
-                            }));
-                        }
-                    }
-                }
-                Err(e) => {
-                    log::error!("   Failed to parse block info response: {}", e);
-                    return HttpResponse::InternalServerError().json(serde_json::json!({
-                        "error": format!("Failed to parse API response: {}", e)
-                    }));
-                }
-            }
-        }
-        Err(e) => {
-            log::error!("   Failed to fetch block info: {}", e);
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to fetch block info: {}", e)
-            }));
-        }
-    };
-
-    // Step 2: Get block header by hash using /block/{hash}/header endpoint (as per ts-brc100)
-    let block_header_url = format!("https://api.whatsonchain.com/v1/bsv/main/block/{}/header", block_hash);
-
-    match client.get(&block_header_url).send().await {
-        Ok(response) => {
-            if !response.status().is_success() {
-                log::error!("   WhatsOnChain API returned status: {}", response.status());
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("API returned status: {}", response.status())
-                }));
-            }
-
-            match response.json::<serde_json::Value>().await {
-                Ok(json) => {
-                    // The /block/{hash}/header endpoint returns WocHeader format (same as ts-brc100)
-                    // Construct 80-byte block header from individual fields
-                    // Block header format: version (4) + prev_hash (32) + merkle_root (32) + time (4) + bits (4) + nonce (4) = 80 bytes
-
-                    let version = json["version"].as_u64().unwrap_or(0) as u32;
-                    let prev_hash = json["previousblockhash"].as_str().unwrap_or("");
-                    let merkle_root = json["merkleroot"].as_str().unwrap_or("");
-                    let time = json["time"].as_u64().unwrap_or(0) as u32;
-                    // bits can be number or hex string (as per WocHeader interface)
-                    let bits = json["bits"].as_u64()
-                        .or_else(|| {
-                            json["bits"].as_str()
-                                .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-                        })
-                        .unwrap_or(0) as u32;
-                    let nonce = json["nonce"].as_u64().unwrap_or(0) as u32;
-
-                    // Decode hex strings and reverse (Bitcoin uses little-endian)
-                    let prev_hash_bytes = match hex::decode(prev_hash) {
-                        Ok(bytes) => bytes,
-                        Err(e) => {
-                            log::error!("   Invalid previousblockhash hex: {}", e);
-                            return HttpResponse::InternalServerError().json(serde_json::json!({
-                                "error": format!("Invalid previousblockhash hex: {}", e)
-                            }));
-                        }
-                    };
-
-                    let merkle_root_bytes = match hex::decode(merkle_root) {
-                        Ok(bytes) => bytes,
-                        Err(e) => {
-                            log::error!("   Invalid merkleroot hex: {}", e);
-                            return HttpResponse::InternalServerError().json(serde_json::json!({
-                                "error": format!("Invalid merkleroot hex: {}", e)
-                            }));
-                        }
-                    };
-
-                    if prev_hash_bytes.len() != 32 {
-                        return HttpResponse::InternalServerError().json(serde_json::json!({
-                            "error": format!("Invalid previousblockhash length: {} (expected 32)", prev_hash_bytes.len())
-                        }));
-                    }
-                    if merkle_root_bytes.len() != 32 {
-                        return HttpResponse::InternalServerError().json(serde_json::json!({
-                            "error": format!("Invalid merkleroot length: {} (expected 32)", merkle_root_bytes.len())
-                        }));
-                    }
-
-                    // Reverse bytes (little-endian)
-                    let mut prev_hash_rev = prev_hash_bytes.clone();
-                    prev_hash_rev.reverse();
-                    let mut merkle_root_rev = merkle_root_bytes.clone();
-                    merkle_root_rev.reverse();
-
-                    // Build 80-byte header
-                    let mut header_bytes = Vec::with_capacity(80);
-                    header_bytes.extend_from_slice(&version.to_le_bytes());  // 4 bytes
-                    header_bytes.extend_from_slice(&prev_hash_rev);          // 32 bytes
-                    header_bytes.extend_from_slice(&merkle_root_rev);        // 32 bytes
-                    header_bytes.extend_from_slice(&time.to_le_bytes());     // 4 bytes
-                    header_bytes.extend_from_slice(&bits.to_le_bytes());     // 4 bytes
-                    header_bytes.extend_from_slice(&nonce.to_le_bytes());    // 4 bytes
-
-                    let header_hex = hex::encode(header_bytes);
-
-                    // Extract height for caching (should match requested height)
-                    let height = json["height"].as_u64().unwrap_or(req.height as u64) as u32;
-
-                    // Cache the header for future use
-                    {
-                        let db = state.database.lock().unwrap();
-                        let block_header_repo = crate::database::BlockHeaderRepository::new(db.connection());
-                        if let Err(e) = block_header_repo.upsert(&block_hash, height, &header_hex) {
-                            log::warn!("   ⚠️  Failed to cache block header: {}", e);
-                        } else {
-                            log::info!("   💾 Cached block header for height {}", height);
-                        }
-                    }
-
-                    log::info!("   ✅ Fetched block header ({} bytes)", header_hex.len() / 2);
-
-                    HttpResponse::Ok().json(serde_json::json!({
-                        "header": header_hex
-                    }))
-                }
-                Err(e) => {
-                    log::error!("   Failed to parse API response: {}", e);
-                    HttpResponse::InternalServerError().json(serde_json::json!({
-                        "error": format!("Failed to parse API response: {}", e)
-                    }))
-                }
-            }
-        }
-        Err(e) => {
-            log::error!("   Failed to fetch block header: {}", e);
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to fetch block header: {}", e)
-            }))
+    match state.chain_tracker.header_for_height(req.height) {
+        Some(header) => HttpResponse::Ok().json(serde_json::json!({
+            "header": hex::encode(header)
+        })),
+        None => {
+            let tip = state.chain_tracker.current_height();
+            let reason = if req.height > tip {
+                format!("Height {} is above the wallet's verified tip ({})", req.height, tip)
+            } else {
+                format!("Height {} is below the wallet's header checkpoint ({})", req.height, state.chain_tracker.checkpoint_height())
+            };
+            log::warn!("   {}", reason);
+            HttpResponse::NotFound().json(serde_json::json!({ "error": reason }))
         }
     }
 }
@@ -18593,21 +19350,36 @@ pub async fn wallet_cleanup(state: web::Data<AppState>, _body: web::Bytes) -> Ht
     let mut valid_sats = 0i64;
 
     // Check unique txids (multiple UTXOs can share same txid with different vouts)
-    let mut checked_txids: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+    let mut unchecked = 0;
+    let mut unchecked_sats = 0i64;
+    let mut checked_txids: std::collections::HashMap<String, ChainPresence> = std::collections::HashMap::new();
 
     for (txid, vout, satoshis, _address_id) in &unspent_utxos {
         checked += 1;
 
         // Cache the on-chain check per txid
-        let is_on_chain = if let Some(&cached) = checked_txids.get(txid) {
-            cached
+        let presence = if let Some(cached) = checked_txids.get(txid) {
+            cached.clone()
         } else {
-            let result = check_tx_exists_on_chain(&state.services, txid).await.unwrap_or(false);
-            checked_txids.insert(txid.clone(), result);
+            let result = chain_presence_verdict(state.services.tx_status_unanimous(txid).await);
+            checked_txids.insert(txid.clone(), result.clone());
             result
         };
 
-        if is_on_chain {
+        // ⛔ B5-T1-P2 (P2-A10/A11): mark a ghost ONLY on a positive "every provider
+        // says it does not exist". An error, `Unknown`, orphan/stale or rejected answer
+        // is not evidence of absence — it used to read as "absent" here
+        // (`.unwrap_or(false)` over a helper that already mapped Unknown ⇒ false) and
+        // write a durable `ghost-cleanup` over a real coin.
+        if let ChainPresence::CouldNotTell(ref why) = presence {
+            unchecked += 1;
+            unchecked_sats += satoshis;
+            log::warn!("   ❔ Could not check {}:{} ({} sats) — left untouched: {}",
+                &txid[..std::cmp::min(16, txid.len())], vout, satoshis, why);
+            continue;
+        }
+
+        if presence == ChainPresence::Present {
             valid_count += 1;
             valid_sats += satoshis;
         } else {
@@ -18622,8 +19394,8 @@ pub async fn wallet_cleanup(state: web::Data<AppState>, _body: web::Bytes) -> Ht
         }
     }
 
-    log::info!("   🧹 Cleanup complete: {} checked, {} valid ({} sats), {} ghosts removed ({} sats)",
-              checked, valid_count, valid_sats, ghosts_removed, ghost_sats);
+    log::info!("   🧹 Cleanup complete: {} checked, {} valid ({} sats), {} ghosts removed ({} sats), {} could not be checked ({} sats)",
+              checked, valid_count, valid_sats, ghosts_removed, ghost_sats, unchecked, unchecked_sats);
 
     HttpResponse::Ok().json(serde_json::json!({
         "checked": checked,
@@ -18631,7 +19403,46 @@ pub async fn wallet_cleanup(state: web::Data<AppState>, _body: web::Bytes) -> Ht
         "validSats": valid_sats,
         "ghostsRemoved": ghosts_removed,
         "ghostSats": ghost_sats,
+        "unchecked": unchecked,
+        "uncheckedSats": unchecked_sats,
     }))
+}
+
+/// What the chain says about one txid, for a caller that makes a **destructive**
+/// write on "absent" (B5-T1-P2). Three-way on purpose: `check_tx_exists_on_chain`
+/// collapses "could not tell" into `false`, which is safe for callers that
+/// rebroadcast on absent and wrong for one that writes.
+/// ⭐ T4-P1 should adopt this rather than add a second strict reader.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ChainPresence {
+    Present,
+    /// Every provider in the chain answered "not found" (`tx_status_unanimous`).
+    Absent,
+    CouldNotTell(String),
+}
+
+/// Read one `tx_status_unanimous` answer. `Absent` only on the `NotFound`
+/// **variant** — never on error text, an `Unknown` state, an ARC orphan/stale
+/// status, or a rejection (none of those says the transaction does not exist).
+pub(crate) fn chain_presence_verdict(
+    result: Result<crate::services::TxStatus, crate::services::IndexerError>,
+) -> ChainPresence {
+    use crate::services::{IndexerError, TxState};
+    match result {
+        Err(IndexerError::NotFound) => ChainPresence::Absent,
+        Err(e) => ChainPresence::CouldNotTell(e.to_string()),
+        Ok(status) => {
+            if let Some(raw) = status.raw_provider_status.as_deref() {
+                if raw == "SEEN_IN_ORPHAN_MEMPOOL" || raw == "MINED_IN_STALE_BLOCK" {
+                    return ChainPresence::CouldNotTell(raw.to_string());
+                }
+            }
+            match status.state {
+                TxState::Mined | TxState::InMempool => ChainPresence::Present,
+                other => ChainPresence::CouldNotTell(format!("state {:?}", other)),
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -18768,6 +19579,25 @@ pub async fn wallet_import(
     http_req: HttpRequest,
     body: web::Json<WalletImportRequest>,
 ) -> HttpResponse {
+    let chain = std::sync::Arc::new(crate::scan::LiveChain { services: state.services.clone() });
+    wallet_import_with(state, http_req, body, chain).await
+}
+
+/// The user the last import remapped every entity onto (the lowest `userId`, as
+/// `wallet_import` chooses it).
+fn db_user_id(db: &std::sync::Mutex<crate::database::WalletDatabase>) -> i64 {
+    db.lock().unwrap().connection()
+        .query_row("SELECT userId FROM users ORDER BY userId ASC LIMIT 1", [], |r| r.get(0))
+        .unwrap_or(1)
+}
+
+/// `wallet_import`, with the chain reads its post-import scan makes injected (B5-T1-P6).
+async fn wallet_import_with(
+    state: web::Data<AppState>,
+    http_req: HttpRequest,
+    body: web::Json<WalletImportRequest>,
+    chain: std::sync::Arc<dyn crate::scan::ScanChain>,
+) -> HttpResponse {
     log::info!("   /wallet/import called");
 
     // Security (OQ-4 / bridge migration): import OVERWRITES the live wallet from a
@@ -18892,12 +19722,45 @@ pub async fn wallet_import(
             }));
         }
 
-        // Update wallet's current_index from backup
-        let _ = conn.execute(
-            "UPDATE wallets SET current_index = ?1, backed_up = 1 WHERE id = ?2",
-            rusqlite::params![payload.wallet.current_index, payload.wallet.id],
-        );
+        // The address counter, written to the RESTORED row (B5-T1-P6 `P6-A10`): this used
+        // to target the backup's old id, which misses whenever the ids differ (a retried
+        // import gets id 2) — and its result was discarded.
+        let _ = conn.execute("UPDATE wallets SET backed_up = 1 WHERE id = ?1", rusqlite::params![import_wallet_id]);
+        if let Err(e) = crate::database::WalletRepository::new(conn)
+            .raise_current_index(import_wallet_id, payload.wallet.current_index)
+        {
+            log::error!("   ❌ Address counter NOT restored: {}", e);
+        }
+        // B5-T1-P5 (route I3): the import wrote every coin unstamped; classify now.
+        crate::classify::stamp_all(&db, "I3:wallet-import");
     } // DB lock released
+
+    // B5-T1-P6 (K4): a restore scans for payments that reached the wallet's addresses
+    // after the backup was taken.
+    let scan = {
+        let keys = {
+            let db = state.database.lock().unwrap();
+            let wallet_id = crate::database::WalletRepository::new(db.connection())
+                .get_primary_wallet().ok().flatten().and_then(|w| w.id);
+            crate::database::get_master_private_key_from_db(&db)
+                .and_then(|k| Ok((k, crate::database::get_master_public_key_from_db(&db)?)))
+                .map_err(|e| e.to_string())
+                .and_then(|(k, p)| wallet_id.map(|w| (k, p, w)).ok_or_else(|| "no wallet row".to_string()))
+        };
+        match keys {
+            Ok((privkey, pubkey, wallet_id)) => {
+                // The user the import remapped onto — not `state.current_user_id`, fixed at
+                // startup (B5-T1-P6 review #6). In the BACKGROUND (/code-review ultra 2, #1).
+                let user_id: i64 = db_user_id(&state.database);
+                if start_background_scan(&state, user_id, wallet_id, privkey, pubkey, "I3:import-scan", chain, false) {
+                    serde_json::json!({ "ran": "background" })
+                } else {
+                    serde_json::json!({ "ran": false, "reason": "a sync is already running — use Find late payments later" })
+                }
+            }
+            Err(e) => serde_json::json!({ "ran": false, "reason": e }),
+        }
+    };
 
     // 6. Start Monitor
     crate::monitor::Monitor::start(state.clone());
@@ -18924,6 +19787,7 @@ pub async fn wallet_import(
         "outputs": payload.outputs.len(),
         "certificates": payload.certificates.len(),
         "proven_txs": payload.proven_txs.len(),
+        "scan": scan,
     }))
 }
 
@@ -19382,7 +20246,7 @@ pub async fn peerpay_send(
     }
 
     // Broadcast the transaction
-    match broadcast_transaction(&atomic_beef_hex, &state.services, Some(&state.database), Some(&txid)).await {
+    match broadcast_transaction(&atomic_beef_hex, &state.services, Some(ProofSink::of(&state)), Some(&txid)).await {
         Ok(msg) => {
             log::info!("   ✅ PeerPay broadcast OK: {} - {}", txid, msg);
             let db = state.database.lock().unwrap();
@@ -19437,32 +20301,64 @@ pub async fn peerpay_send(
 
     // Send via encrypted MessageBox (BRC-2 + BRC-103). The payment token was built
     // and size-checked before broadcasting (10d `P10d-A2`, above).
+    // B5-T5-P7a: to the host the recipient advertises, else to every known host.
     let mb_client = crate::messagebox::MessageBoxClient::new(master_privkey, master_pubkey);
-    match mb_client.send_message(&recipient_pubkey, "payment_inbox", &payload_bytes).await {
-        Ok(_) => {
-            log::info!("   ✅ PeerPay message sent via MessageBox (encrypted)");
-        }
+    // B5-T5-P7a (review 178-6 #5): the owed message is recorded BEFORE it is posted (a pending outbox
+    // row with the exact request; first retry in 60 s). If the wallet stops, or this call is cut off,
+    // while the lookup and posts run, the outbox still delivers it. The row is then updated with the
+    // result: delivered, undeliverable, or the hosts that took it.
+    let prepared = mb_client.prepare_message(&recipient_pubkey, "payment_inbox", &payload_bytes).map(std::sync::Arc::new);
+    if let Err(e) = &prepared {
+        log::warn!("   ⚠️  PeerPay message could not be built: {} — queued for retry", e);
+    }
+    let outbox_id = {
+        let db = state.database.lock().unwrap();
+        let request = prepared.as_ref().ok().map(|p| p.request_body().to_vec());
+        crate::database::PeerPayRepository::insert_outbox(
+            db.connection(), &txid, &hex::encode(&recipient_pubkey), &payload_bytes, req.amount_satoshis,
+            &[], request.as_deref(),
+        ).and_then(|_| crate::database::PeerPayRepository::outbox_id_by_txid(db.connection(), &txid))
+    };
+    let outbox_id = match outbox_id {
+        Ok(id) => Some(id),
         Err(e) => {
-            // Non-fatal — transaction is already broadcast on-chain.
+            log::error!("   ❌ Failed to record the owed PeerPay message: {}", e);
+            None
+        }
+    };
+    // Review 178-7 #1: the post runs even when the record above failed — the payment is broadcast, and
+    // this post is then the only delivery it gets.
+    if let Ok(prepared) = prepared {
+        // The fallback to the known hosts (if every advertised host refuses) is left to the outbox:
+        // this call runs inside the wallet panel's 30 s budget (review 178-3 #5).
+        let delivery = mb_client.deliver(&recipient_pubkey, prepared, &[], crate::messagebox::Fallback::Defer).await;
+        log::info!("   PeerPay message delivery: {}", delivery.summary());
+        if let Some(id) = outbox_id {
             let db = state.database.lock().unwrap();
-            // 10d `P10d-A4`: a refusal is permanent for these bytes — record it as
-            // undeliverable at once (yellow notice, Retry / Copy details) instead of
-            // queuing twenty retries that cannot succeed. Transient failures still
-            // queue for background retry so the recipient eventually gets notified.
-            let queued = if e.is_permanent() {
-                log::warn!("   🚫 MessageBox refused the payment message — recorded as undeliverable: {}", e);
-                crate::database::PeerPayRepository::insert_outbox_undeliverable(
-                    db.connection(), &txid, &hex::encode(&recipient_pubkey), &payload_bytes, req.amount_satoshis,
-                )
-            } else {
-                log::warn!("   ⚠️  MessageBox delivery failed, queuing for retry: {}", e);
-                crate::database::PeerPayRepository::insert_outbox(
-                    db.connection(), &txid, &hex::encode(&recipient_pubkey), &payload_bytes, req.amount_satoshis,
-                )
+            let recorded = match delivery.verdict() {
+                crate::messagebox::DeliveryVerdict::Delivered => {
+                    log::info!("   ✅ PeerPay message sent via MessageBox (encrypted)");
+                    crate::database::PeerPayRepository::mark_outbox_delivered(db.connection(), id)
+                }
+                // 10d `P10d-A4`: a refusal is permanent for these bytes — undeliverable at once (yellow
+                // notice, Retry / Copy details), not twenty retries that cannot succeed.
+                crate::messagebox::DeliveryVerdict::Undeliverable => {
+                    log::warn!("   🚫 MessageBox refused the payment message — recorded as undeliverable");
+                    crate::database::PeerPayRepository::mark_outbox_undeliverable(db.connection(), id)
+                }
+                // Transient: the outbox retries; the hosts that took it are not posted to again (V31).
+                crate::messagebox::DeliveryVerdict::Retry => {
+                    log::warn!("   ⚠️  MessageBox delivery incomplete, queued for retry");
+                    crate::database::PeerPayRepository::record_outbox_delivery(db.connection(), id, &delivery.accepted, None)
+                }
             };
-            if let Err(db_err) = queued {
-                log::error!("   ❌ Failed to queue outbox entry: {}", db_err);
+            if let Err(db_err) = recorded {
+                log::error!("   ❌ Failed to record the delivery result: {}", db_err);
             }
+        } else {
+            // If the row was written and only reading its id back failed, the outbox still retries it
+            // (a second post of the same request; the recipient credits a payment once).
+            log::error!("   ❌ PeerPay delivery result for txid {} is not recorded ({})", txid, delivery.summary());
         }
     }
 
@@ -19489,9 +20385,7 @@ pub async fn peerpay_check(
     log::info!("📬 /wallet/peerpay/check called");
 
     // Trigger immediate poll (same as background task)
-    // dummy — task_check_peerpay::run ignores the client arg (sig is `_client:`); intentional no-timeout.
-    let dummy_client = reqwest::Client::new();
-    if let Err(e) = crate::monitor::task_check_peerpay::run(&state, &dummy_client).await {
+    if let Err(e) = crate::monitor::task_check_peerpay::run(&state).await {
         log::warn!("   peerpay_check poll error: {}", e);
     }
 
@@ -19556,6 +20450,18 @@ pub async fn peerpay_status(
         crate::database::PeerPayRepository::get_outbox_summary(conn)
             .unwrap_or((0, 0, 0));
 
+    // B5-T1-P7b — incoming PeerPay messages stored but not credited yet (held, retried). Its own
+    // count: not part of unread_count.
+    // Review 163 #13: an unreadable held table is an error, never "nothing held" (rule 7, trip-wire 2).
+    // (review 164-5 #11: null, not a 500 for the whole route — the other counts still show)
+    let (held_count, held_overdue_count) = match crate::database::PeerPayRepository::held_summary(conn) {
+        Ok((c, o)) => (Some(c), Some(o)),
+        Err(e) => {
+            log::warn!("peerpay_status: held payments could not be read: {}", e);
+            (None, None)
+        }
+    };
+
     HttpResponse::Ok().json(serde_json::json!({
         "unread_count": receive_count + failure_count + rejected_count + undeliverable_count,
         "unread_amount": receive_amount + failure_amount,
@@ -19564,6 +20470,8 @@ pub async fn peerpay_status(
         "failure_count": failure_count,
         "failure_amount": failure_amount,
         "rejected_count": rejected_count,
+        "held_count": held_count,
+        "held_overdue_count": held_overdue_count,
         "undeliverable_count": undeliverable_count,
         "undeliverable_amount": undeliverable_amount,
         "outbox_warning_count": outbox_warning_count,
@@ -19734,6 +20642,7 @@ mod pay402_reuse_sql_tests {
     fn a3_the_reuse_status_query_runs_against_the_real_schema() {
         let conn = Connection::open_in_memory().unwrap();
         crate::database::migrations::create_schema_v1(&conn).unwrap();
+        crate::database::migrations::install_money_index(&conn).unwrap();
 
         // prepare() is what fails on an unknown column, and it is what the handler does
         // implicitly via query_row.
@@ -19750,6 +20659,7 @@ mod pay402_reuse_sql_tests {
     fn a3_a_nosend_row_reads_back_as_nosend() {
         let conn = Connection::open_in_memory().unwrap();
         crate::database::migrations::create_schema_v1(&conn).unwrap();
+        crate::database::migrations::install_money_index(&conn).unwrap();
         // The subject here is which COLUMN the query reads, not referential integrity —
         // seeding a whole user row would add fixture surface that proves nothing extra.
         conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
@@ -19771,6 +20681,7 @@ mod pay402_reuse_sql_tests {
     fn a3_a_missing_row_is_distinguishable_from_a_broken_query() {
         let conn = Connection::open_in_memory().unwrap();
         crate::database::migrations::create_schema_v1(&conn).unwrap();
+        crate::database::migrations::install_money_index(&conn).unwrap();
 
         let missing = conn.query_row(
             PAY402_REUSE_STATUS_SQL, rusqlite::params![&"nope"], |r| r.get::<_, String>(0));
@@ -20247,7 +21158,7 @@ pub async fn pay_402(
              BRC-121 header budget — releasing txid={} and NOT returning a payment",
             atomic_beef_bytes.len(), b64_len, BRC121_MAX_BEEF_BYTES, txid
         );
-        let (disabled, restored) = release_unbroadcast_transaction(state.get_ref(), &txid, None);
+        let (disabled, restored) = release_unbroadcast_transaction(state.get_ref(), &txid);
         log::warn!("   🧹 released: {} output(s) disabled, {} input(s) restored", disabled, restored);
         state.balance_cache.invalidate();
         return HttpResponse::UnprocessableEntity().json(serde_json::json!({
@@ -20454,7 +21365,7 @@ pub async fn release_nosend(
         }
     }
 
-    let (disabled, restored) = release_unbroadcast_transaction(state.get_ref(), &req.txid, None);
+    let (disabled, restored) = release_unbroadcast_transaction(state.get_ref(), &req.txid);
     let _ = {
         let db = state.database.lock().unwrap();
         let conn = db.connection();
@@ -20540,7 +21451,7 @@ pub async fn broadcast_nosend(
         }
     };
 
-    match broadcast_transaction(&raw_tx_hex, &state.services, Some(&state.database), Some(&req.txid)).await {
+    match broadcast_transaction(&raw_tx_hex, &state.services, Some(ProofSink::of(&state)), Some(&req.txid)).await {
         Ok(msg) => {
             log::info!("   ✅ broadcast-nosend OK: {} - {}", req.txid, msg);
             // Move nosend → sending so the Monitor's existing pipeline picks
@@ -20867,7 +21778,7 @@ pub async fn paymail_send(
     let atomic_beef_hex = hex::encode(&atomic_beef_bytes);
 
     // Broadcast the transaction
-    match broadcast_transaction(&atomic_beef_hex, &state.services, Some(&state.database), Some(&txid)).await {
+    match broadcast_transaction(&atomic_beef_hex, &state.services, Some(ProofSink::of(&state)), Some(&txid)).await {
         Ok(msg) => {
             log::info!("   Paymail broadcast OK: {} - {}", txid, msg);
             let db = state.database.lock().unwrap();
@@ -21600,7 +22511,7 @@ pub async fn debug_validate_beef(
             parent_txid,
             &mut beef,
             &state.database,
-            &state.services,
+            &state.services, &*state.chain_tracker,
         ).await {
             Ok(_) => {
                 input_details.push(serde_json::json!({
@@ -21723,7 +22634,10 @@ pub async fn debug_repair_nosend(
                     &script_hex, default_basket_id,
                     None, None, None, None, true,
                 ) {
-                    Ok(id) => repairs.push(format!("change output {}:{} created (id={}, {} sats)", &txid[..16], change_vout, id, change_sats)),
+                    Ok(id) => {
+                        crate::classify::after_write_id(&db, id, "I9:debug-repair-nosend");
+                        repairs.push(format!("change output {}:{} created (id={}, {} sats)", &txid[..16], change_vout, id, change_sats))
+                    }
                     Err(e) => repairs.push(format!("change output failed: {}", e)),
                 }
             } else {
@@ -21821,7 +22735,7 @@ pub async fn debug_broadcast_nosend(
             continue;
         }
         if let Err(e) = crate::beef_helpers::build_beef_for_txid(
-            &input.prev_txid, &mut beef, &state.database, &state.services,
+            &input.prev_txid, &mut beef, &state.database, &state.services, &*state.chain_tracker,
         ).await {
             log::warn!("   ⚠️  Failed to build ancestry for {}: {}", &input.prev_txid[..16], e);
         }
@@ -21854,7 +22768,7 @@ pub async fn debug_broadcast_nosend(
     log::info!("   📡 Broadcasting {} bytes of BEEF V1 to ARC...", beef_v1_hex.len() / 2);
 
     // Broadcast to ARC
-    match broadcast_transaction(&beef_v1_hex, &state.services, Some(&state.database), Some(&txid)).await {
+    match broadcast_transaction(&beef_v1_hex, &state.services, Some(ProofSink::of(&state)), Some(&txid)).await {
         Ok(msg) => {
             log::info!("   ✅ ARC accepted: {}", msg);
 
@@ -21905,7 +22819,10 @@ pub async fn debug_broadcast_nosend(
                                 None, None,
                                 true, // is_change
                             ) {
-                                Ok(id) => log::info!("   ✅ Re-created change output {}:{} ({} sats, id={})", &txid[..16], change_vout, change_output.value, id),
+                                Ok(id) => {
+                                    crate::classify::after_write_id(&db, id, "I9:debug-broadcast-nosend");
+                                    log::info!("   ✅ Re-created change output {}:{} ({} sats, id={})", &txid[..16], change_vout, change_output.value, id)
+                                }
                                 Err(e) => log::warn!("   ⚠️  Failed to re-create change output: {}", e),
                             }
                         } else {
@@ -22093,10 +23010,13 @@ mod abort_action_tests {
             recovery_just_completed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pay402_reuse: std::sync::Arc::new(StdMutex::new(HashMap::new())),
             permission: std::sync::Arc::new(crate::permission_service::PermissionService::new()),
+            chain_tracker: std::sync::Arc::new(crate::chain_tracker::ChainTracker::from_chain(
+                crate::header_chain::mainnet_header_chain().unwrap())),
         })
     }
 
-    /// Where the input's reservation currently sits.
+    /// Where the input's reservation currently sits (B5-T1-P3: always owned by the row;
+    /// `Placeholder` = claimed, not yet labelled — what a placeholder used to mark).
     #[derive(Clone, Copy)]
     pub(super) enum Reserved { Placeholder, Txid }
 
@@ -22108,7 +23028,6 @@ mod abort_action_tests {
         let reference = uuid::Uuid::new_v4().to_string();
         let txid = hex::encode(rand::random::<[u8; 32]>());
         let input_txid = hex::encode(rand::random::<[u8; 32]>());
-        let placeholder = new_reservation_placeholder();
         let db = state.database.lock().unwrap();
         let c = db.connection();
         c.execute(
@@ -22122,11 +23041,11 @@ mod abort_action_tests {
              VALUES (1, ?1, 1, 1, 0, 900, ?2, 0, 0)",
             rusqlite::params![tid, txid],
         ).unwrap();
-        let spending = match reserved { Reserved::Placeholder => placeholder.clone(), Reserved::Txid => txid.clone() };
+        let spending: Option<String> = match reserved { Reserved::Placeholder => None, Reserved::Txid => Some(txid.clone()) };
         c.execute(
-            "INSERT INTO outputs (user_id, spendable, vout, satoshis, txid, spending_description, created_at, updated_at)
-             VALUES (1, 0, 0, 1000, ?1, ?2, 0, 0)",
-            rusqlite::params![input_txid, spending],
+            "INSERT INTO outputs (user_id, spendable, vout, satoshis, txid, spent_by, spending_description, created_at, updated_at)
+             VALUES (1, 0, 0, 1000, ?1, ?2, ?3, 0, 0)",
+            rusqlite::params![input_txid, tid, spending],
         ).unwrap();
         let mut tx = Transaction::new();
         tx.add_output(TxOutput::new(900, vec![0x6a]));
@@ -22136,7 +23055,7 @@ mod abort_action_tests {
             user_input_infos: vec![],
             brc29_info: None,
             input_beef: None,
-            reservation_placeholder: Some(placeholder),
+            reservation_row: Some(tid),
             no_send: true,
         });
         Seeded { reference, txid, input_txid }
@@ -22392,7 +23311,8 @@ mod abort_action_tests {
 
     /// `P2-A4` edges: a second abort is refused and releases nothing; an unrelated
     /// action is untouched; an `unsigned` action with no pending entry (process
-    /// restarted) is aborted but its placeholder reservation stays for the sweeper.
+    /// restarted) is aborted and — B5-T1-P3 — its not-yet-labelled input is released too,
+    /// because the row owns it (before P3 a placeholder left it for the sweeper).
     #[tokio::test]
     async fn p2_a4_double_abort_isolation_and_no_pending_entry() {
         let state = app_state();
@@ -22416,7 +23336,26 @@ mod abort_action_tests {
         PENDING_TRANSACTIONS.lock().unwrap().remove(&s.reference);
         let (code, _) = abort_with(&state, &s.reference, Err(IndexerError::NotFound)).await;
         assert_eq!(code, 200);
-        assert_eq!(rows(&state, &s), ("failed".into(), 0, 0), "placeholder reservation must wait for the sweeper");
+        assert_eq!(rows(&state, &s), ("failed".into(), 0, 1), "the row's own unlabelled input is released with it (B5-T1-P3)");
+    }
+
+    /// `P3-A8` (T1): `release_unbroadcast_transaction` — the one release the refusal,
+    /// `abort_action`, `pay_402` and `release_nosend` call — frees exactly the coins of
+    /// the transaction it is given (labelled with its txid, or claimed and not yet
+    /// labelled), disables its created output, fails it; another unbroadcast
+    /// transaction is untouched. RED (scratch): key `restore_spent_by_txid`'s row arm on
+    /// the wrong transaction ⇒ U1's unlabelled coin stays held.
+    #[tokio::test]
+    async fn p3_a8_release_unbroadcast_frees_exactly_its_own_coins() {
+        let state = app_state();
+        for reserved in [Reserved::Txid, Reserved::Placeholder] {
+            let u1 = seed(&state, "nosend", true, reserved);
+            let u2 = seed(&state, "nosend", true, reserved);
+            let (disabled, restored) = release_unbroadcast_transaction(&state, &u1.txid);
+            assert_eq!((disabled, restored), (1, 1), "U1: its created output disabled, its one coin released");
+            assert_eq!(rows(&state, &u1), ("failed".into(), 0, 1), "U1 failed, output disabled, coin free");
+            assert_untouched(&state, &u2, "nosend");
+        }
     }
 
     /// `P2-A4` edge: an action whose created output another action already spends is
@@ -22569,7 +23508,7 @@ mod amounts_broadcast_tests {
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let seen = calls.clone();
         let expected = ours.to_string();
-        let r = accept_broadcast_result(br, Some(&state.database), Some(ours), move |asked| async move {
+        let r = accept_broadcast_result(br, Some(ProofSink::of(&state)), Some(ours), move |asked| async move {
             seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             assert_eq!(asked, expected, "verify was asked about a txid that is not ours");
             verdict
@@ -22581,11 +23520,14 @@ mod amounts_broadcast_tests {
     #[tokio::test]
     async fn p3_a3_unbound_acknowledgement_is_verified_and_never_confirms_ours() {
         let state = app_state();
-        // Control: bound + MINED + proof ⇒ proof cached, ours confirmed, no verification.
+        // Control: bound + MINED + proof ⇒ ours recorded as mined (status leaves `sending`), no
+        // verification. B5-T1-P7a-2: the proof is not stored and ours is `unproven`, not `completed` —
+        // `bump_for` claims block 800,000, which our headers do not hold (decision 6). The "proof
+        // stored on a bound ack" half is held by `p7a2_tests::c3_a_real_broadcaster_proof_*` (real FX2).
         let s = seed(&state, "sending", true, Reserved::Txid);
         let (r, calls) = accept(&state, ack(&s.txid, "MINED", Some(bump_for(&s.txid))), &s.txid, Ok(false)).await;
         assert!(r.is_ok(), "bound: {:?}", r);
-        assert_eq!((calls, proven(&state, &s.txid), status_of(&state, &s.txid).as_str()), (0, 1, "completed"),
+        assert_eq!((calls, proven(&state, &s.txid), status_of(&state, &s.txid).as_str()), (0, 0, "unproven"),
                    "control: (verify calls, proofs cached, status) for a bound MINED ack");
 
         // Different txid + MINED + proof ("BEEF ancestry"): never confirms ours, caches nothing.
@@ -22705,21 +23647,24 @@ mod brc100_shape_tests {
         assert_eq!(action_json("unproven", Some("fee"))["description"], "", "a 3-char description is not valid BRC-100");
     }
 
-    /// `P5-B3` (review HIGH-1): an abandoned deferred action is released only if its
-    /// reservation is held under the TXID — `TaskFailAbandoned` restores by txid. This is
-    /// why the deferred branch renames placeholder → txid. Real `task_fail_abandoned::run`.
+    /// `P5-B3` (review HIGH-1), re-stated for B5-T1-P3: an abandoned deferred action
+    /// releases the inputs its row owns — labelled with its txid or not yet labelled —
+    /// and nothing another row owns. (Before P3 an input still under a placeholder was NOT
+    /// released here.) Real `task_fail_abandoned::run`.
     #[tokio::test]
-    async fn p5_b3_abandoned_unsigned_action_is_released_only_when_held_by_txid() {
+    async fn p5_b3_abandoned_unsigned_action_releases_its_own_inputs() {
         let state = app_state();
         let by_txid = seed(&state, "unsigned", true, Reserved::Txid);
-        let by_placeholder = seed(&state, "unsigned", true, Reserved::Placeholder);
+        let unlabelled = seed(&state, "unsigned", true, Reserved::Placeholder);
+        let live = seed(&state, "sending", true, Reserved::Placeholder);
         crate::monitor::task_fail_abandoned::run(&state).await.unwrap();
         let held = |s: &abort_action_tests::Seeded| -> i64 {
             state.database.lock().unwrap().connection().query_row(
                 "SELECT spendable FROM outputs WHERE txid = ?1", [&s.input_txid], |r| r.get(0)).unwrap()
         };
         assert_eq!(held(&by_txid), 1, "input held under the txid was not released");
-        assert_eq!(held(&by_placeholder), 0, "control: a placeholder-held input is NOT released by this task");
+        assert_eq!(held(&unlabelled), 1, "the row's unlabelled input was not released");
+        assert_eq!(held(&live), 0, "control: an input another (live) row owns is NOT released");
     }
 
     #[test]
@@ -22729,3 +23674,1442 @@ mod brc100_shape_tests {
         assert_eq!(v["totalCertificates"], 3, "{}", v);
     }
 }
+
+// ============================================================================
+// B5-T1-P2 — a failure on the money path says it failed. Shared test scaffolding:
+// the real handlers over a real `WalletDatabase` on a temp file, with the chain
+// replaced by scripted providers (`WalletServices::with_test_chains`).
+// Contract: development-docs/0.4.0-beta.7/track-1-money-path/phase-P2-a-failure-says-it-failed/
+// ============================================================================
+#[cfg(test)]
+pub(crate) mod p2_test_support {
+    use super::*;
+    use crate::services::{BroadcastResult, IndexerError, IndexerProvider, TxState, TxStatus};
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A scripted chain provider. `tx_status` answers from `status_for(txid)`;
+    /// `broadcast_beef` answers from `broadcast` and records the SHA-256 of every
+    /// byte string it was handed (the bytes that actually left the wallet).
+    pub(crate) struct ScriptedProvider {
+        pub name: &'static str,
+        pub status_for: Box<dyn Fn(&str) -> Result<TxStatus, IndexerError> + Send + Sync>,
+        pub broadcast: Box<dyn Fn(&[u8]) -> Result<BroadcastResult, IndexerError> + Send + Sync>,
+        pub broadcast_delay: std::time::Duration,
+        pub broadcasts: StdMutex<Vec<[u8; 32]>>,
+        pub status_calls: AtomicUsize,
+        /// B5-T1-P7b: default `Unspent` — what the WhatsOnChain provider answers for an unspent coin.
+        pub outspend_for: Box<dyn Fn(&str, u32) -> Result<crate::services::OutspendStatus, IndexerError> + Send + Sync>,
+        /// B5-T1-P7a-2: proof / raw tx / header answers. Default **panics**: an `Err` default would claim
+        /// "the indexer has no proof", which makes every "nothing stored" assertion pass for free.
+        pub proof_for: Box<dyn Fn(&str) -> Result<serde_json::Value, IndexerError> + Send + Sync>,
+        pub raw_tx_for: Box<dyn Fn(&str) -> Result<Vec<u8>, IndexerError> + Send + Sync>,
+        pub header_for: Box<dyn Fn(&crate::services::BlockKey) -> Result<crate::services::BlockHeader, IndexerError> + Send + Sync>,
+        pub proof_calls: AtomicUsize,
+        pub header_calls: AtomicUsize,
+    }
+
+    impl ScriptedProvider {
+        pub(crate) fn new(name: &'static str) -> Self {
+            ScriptedProvider {
+                name,
+                status_for: Box::new(|_| Err(IndexerError::Transport("unscripted".into()))),
+                broadcast: Box::new(|_| Err(IndexerError::Transport("unscripted".into()))),
+                broadcast_delay: std::time::Duration::ZERO,
+                broadcasts: StdMutex::new(Vec::new()),
+                status_calls: AtomicUsize::new(0),
+                outspend_for: Box::new(|_, _| Ok(crate::services::OutspendStatus::Unspent)),
+                proof_for: Box::new(|t| panic!("unscripted proof request for {}", t)),
+                raw_tx_for: Box::new(|t| panic!("unscripted raw tx request for {}", t)),
+                header_for: Box::new(|k| panic!("unscripted header request for {:?}", k)),
+                proof_calls: AtomicUsize::new(0),
+                header_calls: AtomicUsize::new(0),
+            }
+        }
+        pub(crate) fn broadcast_hashes(&self) -> Vec<[u8; 32]> {
+            self.broadcasts.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl IndexerProvider for ScriptedProvider {
+        fn name(&self) -> &'static str { self.name }
+        async fn tx_status(&self, txid: &str) -> Result<TxStatus, IndexerError> {
+            self.status_calls.fetch_add(1, Ordering::SeqCst);
+            (self.status_for)(txid)
+        }
+        async fn outspend(&self, txid: &str, vout: u32) -> Result<crate::services::OutspendStatus, IndexerError> {
+            (self.outspend_for)(txid, vout)
+        }
+        async fn get_merkle_proof_tsc(&self, txid: &str) -> Result<serde_json::Value, IndexerError> {
+            self.proof_calls.fetch_add(1, Ordering::SeqCst);
+            (self.proof_for)(txid)
+        }
+        async fn get_raw_tx(&self, txid: &str) -> Result<Vec<u8>, IndexerError> {
+            (self.raw_tx_for)(txid)
+        }
+        async fn get_block_header(&self, key: crate::services::BlockKey) -> Result<crate::services::BlockHeader, IndexerError> {
+            self.header_calls.fetch_add(1, Ordering::SeqCst);
+            (self.header_for)(&key)
+        }
+        async fn broadcast_beef(&self, beef: &[u8]) -> Result<BroadcastResult, IndexerError> {
+            use sha2::{Digest, Sha256};
+            self.broadcasts.lock().unwrap().push(Sha256::digest(beef).into());
+            if !self.broadcast_delay.is_zero() {
+                tokio::time::sleep(self.broadcast_delay).await;
+            }
+            (self.broadcast)(beef)
+        }
+    }
+
+    pub(crate) fn status(txid: &str, state: TxState, raw: Option<&str>) -> TxStatus {
+        TxStatus {
+            txid: txid.to_string(),
+            state,
+            block_height: None,
+            block_hash: None,
+            merkle_path_bump: None,
+            raw_provider_status: raw.map(|s| s.to_string()),
+        }
+    }
+
+    pub(crate) fn app_state_with(services: crate::services::WalletServices) -> web::Data<AppState> {
+        let path = std::env::temp_dir().join(format!("hodos_t1p2_{}.db", uuid::Uuid::new_v4()));
+        let db = crate::database::WalletDatabase::new(path).unwrap();
+        db.connection().execute(
+            "INSERT INTO users (userId, identity_key, active_storage, created_at, updated_at)
+             VALUES (1, 'test_identity_key', 'local', 0, 0)",
+            [],
+        ).unwrap();
+        app_state_from(db, services)
+    }
+
+    pub(crate) fn app_state_from(db: crate::database::WalletDatabase, services: crate::services::WalletServices) -> web::Data<AppState> {
+        app_state_from_with_tracker(db, services, crate::chain_tracker::ChainTracker::from_chain(
+            crate::header_chain::mainnet_header_chain().unwrap()))
+    }
+
+    /// `app_state_from` with a chosen header chain (B5-T1-P7b: lock and proof rows need a tip).
+    pub(crate) fn app_state_from_with_tracker(
+        db: crate::database::WalletDatabase,
+        services: crate::services::WalletServices,
+        tracker: crate::chain_tracker::ChainTracker,
+    ) -> web::Data<AppState> {
+        let database = std::sync::Arc::new(StdMutex::new(db));
+        web::Data::new(AppState {
+            database: database.clone(),
+            auth_sessions: std::sync::Arc::new(crate::auth_session::AuthSessionManager::new()),
+            balance_cache: std::sync::Arc::new(crate::balance_cache::BalanceCache::new()),
+            fee_rate_cache: std::sync::Arc::new(crate::fee_rate_cache::FeeRateCache::new()),
+            price_cache: std::sync::Arc::new(crate::price_cache::PriceCache::new(None)),
+            services: std::sync::Arc::new(services),
+            ship_cache: crate::overlay::ship_cache::ShipDiscoveryCache::new(),
+            utxo_selection_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            create_action_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            derived_key_cache: std::sync::Arc::new(StdMutex::new(HashMap::new())),
+            current_user_id: 1,
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            sync_status: std::sync::Arc::new(std::sync::RwLock::new(SyncStatus::default())),
+            backup_check_needed: std::sync::Arc::new(StdMutex::new(None)),
+            recovery_just_completed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pay402_reuse: std::sync::Arc::new(StdMutex::new(HashMap::new())),
+            permission: std::sync::Arc::new(crate::permission_service::PermissionService::new()),
+            chain_tracker: std::sync::Arc::new(tracker),
+        })
+    }
+
+    /// Every log record from this test process, as (level, message). Installed once;
+    /// no other test in the crate sets a logger. Filter by something unique (a txid).
+    pub(crate) fn captured_logs() -> &'static StdMutex<Vec<(log::Level, String)>> {
+        static LINES: std::sync::OnceLock<StdMutex<Vec<(log::Level, String)>>> = std::sync::OnceLock::new();
+        struct Capture;
+        impl log::Log for Capture {
+            fn enabled(&self, _: &log::Metadata) -> bool { true }
+            fn log(&self, r: &log::Record) {
+                if let Some(lines) = LINES.get() {
+                    lines.lock().unwrap().push((r.level(), r.args().to_string()));
+                }
+            }
+            fn flush(&self) {}
+        }
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        let lines = LINES.get_or_init(|| StdMutex::new(Vec::new()));
+        INSTALL.call_once(|| {
+            if log::set_boxed_logger(Box::new(Capture)).is_ok() {
+                log::set_max_level(log::LevelFilter::Trace);
+            }
+        });
+        lines
+    }
+
+    /// Capture a real handler response for the SDK decode check (sdk_decode.js) when
+    /// `HODOS_P2_DUMP_DIR` is set. Test-only; writes nowhere otherwise.
+    pub(crate) fn dump(name: &str, call: &str, status: u16, body: &serde_json::Value, args: serde_json::Value) {
+        if let Ok(dir) = std::env::var("HODOS_P2_DUMP_DIR") {
+            let cap = serde_json::json!({ "call": call, "status": status, "body": body, "args": args });
+            let _ = std::fs::write(std::path::Path::new(&dir).join(format!("{name}.json")), cap.to_string());
+        }
+    }
+
+    pub(crate) async fn body_json(resp: HttpResponse) -> (u16, serde_json::Value) {
+        let status = resp.status().as_u16();
+        let bytes = actix_web::body::to_bytes(resp.into_body()).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+    }
+}
+
+// ----------------------------------------------------------------------------
+// P2-A10 / P2-A11 — `/wallet/cleanup` writes `ghost-cleanup` only on a positive
+// "every provider says not found".
+// ----------------------------------------------------------------------------
+#[cfg(test)]
+mod wallet_cleanup_tests {
+    use super::*;
+    use super::p2_test_support::*;
+    use crate::services::{IndexerError, IndexerProvider, TxState};
+
+    const REAL: [&str; 3] = [
+        "1111111111111111111111111111111111111111111111111111111111111111",
+        "2222222222222222222222222222222222222222222222222222222222222222",
+        "3333333333333333333333333333333333333333333333333333333333333333",
+    ];
+    const FAKE: &str = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+
+    fn seed(state: &AppState, txids: &[&str]) {
+        let db = state.database.lock().unwrap();
+        for t in txids {
+            db.connection().execute(
+                "INSERT INTO outputs (user_id, spendable, vout, satoshis, txid, created_at, updated_at)
+                 VALUES (1, 1, 0, 1000, ?1, 0, 0)",
+                rusqlite::params![t],
+            ).unwrap();
+        }
+    }
+
+    /// (spendable, spending_description) for a seeded txid.
+    fn row(state: &AppState, txid: &str) -> (i64, Option<String>) {
+        let db = state.database.lock().unwrap();
+        db.connection().query_row(
+            "SELECT spendable, spending_description FROM outputs WHERE txid = ?1",
+            rusqlite::params![txid], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap()
+    }
+
+    async fn run_with(providers: Vec<ScriptedProvider>, txids: &[&str]) -> (web::Data<AppState>, serde_json::Value) {
+        let ps: Vec<std::sync::Arc<dyn IndexerProvider>> = providers.into_iter()
+            .map(|p| std::sync::Arc::new(p) as std::sync::Arc<dyn IndexerProvider>).collect();
+        let state = app_state_with(crate::services::WalletServices::with_test_chains(ps, vec![]));
+        seed(&state, txids);
+        let (code, body) = body_json(wallet_cleanup(state.clone(), web::Bytes::new()).await).await;
+        assert_eq!(code, 200);
+        (state, body)
+    }
+
+    /// P2-A10, first case: the chain errors (not `NotFound`) ⇒ nothing marked, all
+    /// counted as could-not-check. RED: `.unwrap_or(false)` reinstated ⇒ all 3 marked.
+    #[actix_web::test]
+    async fn chain_error_marks_nothing_and_reports_unchecked() {
+        let mut p = ScriptedProvider::new("fake");
+        p.status_for = Box::new(|_| Err(IndexerError::Transport("connection refused".into())));
+        let (state, body) = run_with(vec![p], &REAL).await;
+        for t in REAL { assert_eq!(row(&state, t), (1, None), "{t} must be untouched"); }
+        assert_eq!(body["ghostsRemoved"], 0, "{body}");
+        assert_eq!(body["unchecked"], 3, "{body}");
+    }
+
+    /// P2-A10, second case: `TxState::Unknown`. RED: the old helper
+    /// (`check_tx_exists_on_chain`) maps Unknown to false before any unwrap ⇒ marked.
+    #[actix_web::test]
+    async fn unknown_state_marks_nothing() {
+        let mut p = ScriptedProvider::new("fake");
+        p.status_for = Box::new(|t| Ok(status(t, TxState::Unknown, None)));
+        let (state, body) = run_with(vec![p], &REAL).await;
+        for t in REAL { assert_eq!(row(&state, t), (1, None)); }
+        assert_eq!(body["ghostsRemoved"], 0, "{body}");
+        assert_eq!(body["unchecked"], 3, "{body}");
+    }
+
+    /// Orphan / stale / double-spend are not "does not exist" either.
+    #[actix_web::test]
+    async fn orphan_stale_and_double_spend_mark_nothing() {
+        let mut p = ScriptedProvider::new("fake");
+        p.status_for = Box::new(|t| Ok(match t.as_bytes()[0] {
+            b'1' => status(t, TxState::Rejected, Some("SEEN_IN_ORPHAN_MEMPOOL")),
+            b'2' => status(t, TxState::Rejected, Some("MINED_IN_STALE_BLOCK")),
+            _ => status(t, TxState::DoubleSpendAttempted, Some("DOUBLE_SPEND_ATTEMPTED")),
+        }));
+        let (state, body) = run_with(vec![p], &REAL).await;
+        for t in REAL { assert_eq!(row(&state, t), (1, None)); }
+        assert_eq!(body["unchecked"], 3, "{body}");
+    }
+
+    /// P2-A11: a positive "not found" for one txid ⇒ exactly that row is marked,
+    /// while the chain errors for the real ones. RED (i): return early on the first
+    /// error ⇒ the fake row is never marked.
+    #[actix_web::test]
+    async fn positive_not_found_marks_exactly_that_row() {
+        let mut p = ScriptedProvider::new("fake");
+        p.status_for = Box::new(|t| if t == FAKE { Err(IndexerError::NotFound) }
+                                    else { Err(IndexerError::Transport("down".into())) });
+        let mut all = REAL.to_vec();
+        all.insert(1, FAKE);
+        let (state, body) = run_with(vec![p], &all).await;
+        assert_eq!(row(&state, FAKE), (0, Some("ghost-cleanup".to_string())));
+        for t in REAL { assert_eq!(row(&state, t), (1, None)); }
+        assert_eq!(body["ghostsRemoved"], 1, "{body}");
+        assert_eq!(body["unchecked"], 3, "{body}");
+    }
+
+    /// P2-A11 (ii) SUBJECT: the mark follows the chain's answer for THAT txid — a
+    /// txid the chain says is mined is never marked, though seeded the same way.
+    #[actix_web::test]
+    async fn mined_is_never_marked() {
+        let mut p = ScriptedProvider::new("fake");
+        p.status_for = Box::new(|t| Ok(status(t, TxState::Mined, Some("MINED"))));
+        let (state, body) = run_with(vec![p], &[FAKE]).await;
+        assert_eq!(row(&state, FAKE), (1, None));
+        assert_eq!(body["valid"], 1, "{body}");
+        assert_eq!(body["ghostsRemoved"], 0, "{body}");
+    }
+
+    /// "Not found" from one provider while another errors is not unanimous.
+    #[actix_web::test]
+    async fn not_found_from_one_provider_while_another_errors_is_not_absent() {
+        let mut a = ScriptedProvider::new("a");
+        a.status_for = Box::new(|_| Err(IndexerError::NotFound));
+        let mut b = ScriptedProvider::new("b");
+        b.status_for = Box::new(|_| Err(IndexerError::Transport("down".into())));
+        let (state, body) = run_with(vec![a, b], &[FAKE]).await;
+        assert_eq!(row(&state, FAKE), (1, None));
+        assert_eq!(body["unchecked"], 1, "{body}");
+    }
+}
+
+// ----------------------------------------------------------------------------
+// B5-T1-P2 — signAction: a refused broadcast answers with the SDK's code-5
+// envelope; temporary failures retry the SAME bytes, then keep the row `sending`.
+// The real `sign_action` over a temp DB; the pending action and its reserved input
+// come from `abort_action_tests::seed` (placeholder reservation, moved to the
+// signed txid by sign_action itself); the broadcast chain is a ScriptedProvider.
+// ----------------------------------------------------------------------------
+#[cfg(test)]
+mod p2_sign_action_tests {
+    use super::*;
+    use super::p2_test_support::*;
+    use super::abort_action_tests::{seed, Reserved, Seeded};
+    use crate::services::{BroadcastResult, IndexerError, IndexerProvider};
+    use std::sync::Arc;
+
+    fn refuse(body: &'static str) -> Box<dyn Fn(&[u8]) -> Result<BroadcastResult, IndexerError> + Send + Sync> {
+        Box::new(move |_| Err(IndexerError::ProviderStatus { provider: "fake", status: 400, body: body.to_string() }))
+    }
+    fn accept() -> Box<dyn Fn(&[u8]) -> Result<BroadcastResult, IndexerError> + Send + Sync> {
+        // Empty txid = "already known" (WoC/mAPI shape): sent, unproven — no lookup needed.
+        Box::new(|_| Ok(BroadcastResult { provider: "fake", txid: String::new(), tx_status: "SEEN_ON_NETWORK".into(),
+                                           merkle_path_bump: None, block_height: None }))
+    }
+
+    /// One scripted broadcaster; returns the state and a handle on the provider.
+    fn rig(p: ScriptedProvider) -> (web::Data<AppState>, Arc<ScriptedProvider>) {
+        let p = Arc::new(p);
+        let as_dyn: Arc<dyn IndexerProvider> = p.clone();
+        (app_state_with(crate::services::WalletServices::with_test_chains(vec![], vec![as_dyn])), p)
+    }
+
+    async fn sign(state: &web::Data<AppState>, s: &Seeded, options: serde_json::Value) -> (u16, serde_json::Value) {
+        let req = serde_json::json!({ "reference": s.reference, "options": options });
+        body_json(sign_action(state.clone(), web::Bytes::from(req.to_string())).await).await
+    }
+
+    /// (status, input spendable, input spending_description, created output spendable)
+    fn rows(state: &AppState, s: &Seeded, signed_txid: &str) -> (String, i64, Option<String>, i64) {
+        let db = state.database.lock().unwrap();
+        let c = db.connection();
+        let status: String = c.query_row("SELECT status FROM transactions WHERE reference_number = ?1",
+            [&s.reference], |r| r.get(0)).unwrap();
+        let (sp, desc): (i64, Option<String>) = c.query_row(
+            "SELECT spendable, spending_description FROM outputs WHERE txid = ?1",
+            [&s.input_txid], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        let created: i64 = c.query_row("SELECT spendable FROM outputs WHERE txid = ?1",
+            [signed_txid], |r| r.get(0)).unwrap();
+        (status, sp, desc, created)
+    }
+
+    fn assert_envelope(code: u16, json: &serde_json::Value, review: &str, send_with: &str) -> String {
+        assert_eq!(code, 400, "{json}");
+        assert_eq!(json["isError"], true, "{json}");
+        assert_eq!(json["code"], 5, "{json}");
+        let txid = json["txid"].as_str().expect("txid").to_string();
+        assert_eq!(txid.len(), 64);
+        assert_eq!(json["reviewActionResults"], serde_json::json!([{ "txid": txid, "status": review }]), "{json}");
+        assert_eq!(json["sendWithResults"], serde_json::json!([{ "txid": txid, "status": send_with }]), "{json}");
+        let tx = json["tx"].as_array().expect("tx must be a byte array (SDK rejects hex/base64)");
+        assert!(tx.len() > 36 && tx[..4] == [1, 1, 1, 1].map(serde_json::Value::from), "tx is Atomic BEEF");
+        assert_eq!(json["message"], json["error"], "shim reads `error`, SDK reads `message`");
+        txid
+    }
+
+    /// P2-A1: every provider permanently refuses ("Missing inputs") ⇒ 400 code 5
+    /// invalidTx, reason in `message`; one attempt only (retrying cannot change it).
+    /// RED (i): today's arm fell through to `HttpResponse::Ok` ⇒ 200, no isError.
+    #[actix_web::test]
+    async fn a1_permanent_refusal_is_a_code_5_envelope() {
+        let mut p = ScriptedProvider::new("fake");
+        p.broadcast = refuse("Missing inputs");
+        let (state, p) = rig(p);
+        let s = seed(&state, "unsigned", true, Reserved::Placeholder);
+        let (code, json) = sign(&state, &s, serde_json::json!({ "noSend": false })).await;
+        dump("a1_permanent", "signAction", code, &json, serde_json::json!({ "reference": "cmVm", "spends": {} }));
+        let txid = assert_envelope(code, &json, "invalidTx", "failed");
+        assert!(json["message"].as_str().unwrap().to_lowercase().contains("missing inputs"), "{json}");
+        assert_eq!(p.broadcast_hashes().len(), 1, "a permanent refusal is not retried");
+        // A4 permanent half: failed, created output disabled, input released by the
+        // monitor's cleanup (restore_spent_by_txid on the signed txid).
+        assert_eq!(rows(&state, &s, &txid), ("failed".into(), 1, None, 0));
+    }
+
+    /// P2-A1, double-spend variant ⇒ doubleSpend, inputs marked suspected (not restored).
+    #[actix_web::test]
+    async fn a1_double_spend_refusal() {
+        let mut p = ScriptedProvider::new("fake");
+        p.broadcast = refuse("txn-mempool-conflict: double spend attempted");
+        let (state, _p) = rig(p);
+        let s = seed(&state, "unsigned", true, Reserved::Placeholder);
+        let (code, json) = sign(&state, &s, serde_json::json!({ "noSend": false })).await;
+        dump("a1_double_spend", "signAction", code, &json, serde_json::json!({ "reference": "cmVm", "spends": {} }));
+        let txid = assert_envelope(code, &json, "doubleSpend", "failed");
+        let (status, sp, desc, _) = rows(&state, &s, &txid);
+        assert_eq!((status.as_str(), sp), ("failed", 0));
+        assert_eq!(desc, Some(format!("{}{}", crate::arc_status::SUSPECTED_DOUBLE_SPEND_PREFIX, txid)));
+    }
+
+    /// P2-A2 + A3 + A4 (temporary half): every provider unreachable ⇒ exactly 3
+    /// attempts of byte-identical bytes, then 400 serviceError; the row stays
+    /// `sending`, the input stays reserved to the signed txid, the change survives.
+    #[actix_web::test]
+    async fn a2_a3_a4_temporary_failure_retries_same_bytes_then_keeps_sending() {
+        let mut p = ScriptedProvider::new("fake");
+        p.broadcast = Box::new(|_| Err(IndexerError::Transport("connection refused".into())));
+        let (state, p) = rig(p);
+        let s = seed(&state, "unsigned", true, Reserved::Placeholder);
+        let started = std::time::Instant::now();
+        let (code, json) = sign(&state, &s, serde_json::json!({ "noSend": false })).await;
+        dump("a2_temporary", "signAction", code, &json, serde_json::json!({ "reference": "cmVm", "spends": {} }));
+        let txid = assert_envelope(code, &json, "serviceError", "sending");
+        assert!(json["message"].as_str().unwrap().contains("keep trying for a few minutes"), "{json}");
+        let hashes = p.broadcast_hashes();
+        assert_eq!(hashes.len(), 3, "attempts counted at the provider");
+        assert!(hashes.iter().all(|h| *h == hashes[0]), "every retry must carry the same bytes");
+        assert!(started.elapsed() < BROADCAST_RETRY_POLICY.budget + std::time::Duration::from_secs(2));
+        assert_eq!(rows(&state, &s, &txid), ("sending".into(), 0, Some(txid.clone()), 1));
+    }
+
+    /// A mixed chain — one provider unreachable, the other "Missing inputs" — is
+    /// TEMPORARY (controls-B finding 5): the unreachable one may hold the tx.
+    #[actix_web::test]
+    async fn mixed_chain_failure_is_temporary() {
+        let mut a = ScriptedProvider::new("arc");
+        a.broadcast = Box::new(|_| Err(IndexerError::Transport("timeout".into())));
+        let mut b = ScriptedProvider::new("woc");
+        b.broadcast = refuse("Missing inputs");
+        let ps: Vec<Arc<dyn IndexerProvider>> = vec![Arc::new(a), Arc::new(b)];
+        let state = app_state_with(crate::services::WalletServices::with_test_chains(vec![], ps));
+        let s = seed(&state, "unsigned", true, Reserved::Placeholder);
+        let (code, json) = sign(&state, &s, serde_json::json!({ "noSend": false })).await;
+        let txid = assert_envelope(code, &json, "serviceError", "sending");
+        assert_eq!(rows(&state, &s, &txid).0, "sending");
+    }
+
+    /// P2-A5: a successful broadcast is unchanged — 200, `tx` bytes, `rawTx` hex, no
+    /// error fields. (Two-sided with A1/A2: an always-error handler fails here.)
+    #[actix_web::test]
+    async fn a5_success_is_still_a_success() {
+        let mut p = ScriptedProvider::new("fake");
+        p.broadcast = accept();
+        let (state, _p) = rig(p);
+        let s = seed(&state, "unsigned", true, Reserved::Placeholder);
+        let (code, json) = sign(&state, &s, serde_json::json!({ "noSend": false })).await;
+        dump("a5_success", "signAction", code, &json, serde_json::json!({ "reference": "cmVm", "spends": {} }));
+        assert_eq!(code, 200, "{json}");
+        assert!(json.get("isError").is_none(), "{json}");
+        assert!(json["tx"].is_array() && json["rawTx"].is_string(), "{json}");
+        assert!(json.get("sendWithResults").is_none(), "no sendWith asked ⇒ no results: {json}");
+        assert_eq!(rows(&state, &s, json["txid"].as_str().unwrap()).0, "unproven");
+    }
+
+    /// A withheld (`nosend`) transaction whose raw bytes are stored, for sendWith.
+    fn seed_nosend(state: &AppState, status: &str) -> String {
+        let txid = hex::encode(rand::random::<[u8; 32]>());
+        let mut t = Transaction::new();
+        t.add_output(TxOutput::new(1, vec![0x6a, 0x01, 0x42]));
+        let raw = t.to_hex().unwrap();
+        state.database.lock().unwrap().connection().execute(
+            "INSERT INTO transactions (txid, reference_number, raw_tx, status, is_outgoing, satoshis, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 1, -1, 0, 0)",
+            rusqlite::params![txid, uuid::Uuid::new_v4().to_string(), raw, status]).unwrap();
+        txid
+    }
+
+    /// P2-A6: `sendWith` honoured — the withheld tx is broadcast and listed.
+    /// RED (i): today's sign_action never read `send_with` ⇒ one broadcast, no results.
+    #[actix_web::test]
+    async fn a6_send_with_is_honoured() {
+        let mut p = ScriptedProvider::new("fake");
+        p.broadcast = accept();
+        let (state, p) = rig(p);
+        let s = seed(&state, "unsigned", true, Reserved::Placeholder);
+        let held = seed_nosend(&state, "nosend");
+        let (code, json) = sign(&state, &s, serde_json::json!({ "noSend": false, "sendWith": [held] })).await;
+        dump("a6_send_with", "signAction", code, &json, serde_json::json!({ "reference": "cmVm", "spends": {}, "options": { "sendWith": [held] } }));
+        assert_eq!(code, 200, "{json}");
+        assert_eq!(json["sendWithResults"], serde_json::json!([{ "txid": held, "status": "unproven" }]), "{json}");
+        assert_eq!(p.broadcast_hashes().len(), 2, "subject + the held transaction");
+    }
+
+    /// P2-A6 (ii): the gate — a `failed` row named in sendWith is never broadcast, and
+    /// the call is a review error naming it.
+    #[actix_web::test]
+    async fn a6_send_with_refuses_a_failed_row() {
+        let mut p = ScriptedProvider::new("fake");
+        p.broadcast = accept();
+        let (state, p) = rig(p);
+        let s = seed(&state, "unsigned", true, Reserved::Placeholder);
+        let dead = seed_nosend(&state, "failed");
+        let (code, json) = sign(&state, &s, serde_json::json!({ "noSend": false, "sendWith": [dead] })).await;
+        dump("a6_gate", "signAction", code, &json, serde_json::json!({ "reference": "cmVm", "spends": {}, "options": { "sendWith": [dead] } }));
+        assert_eq!((code, json["code"].clone()), (400, 5.into()), "{json}");
+        let txid = json["txid"].as_str().unwrap();
+        assert_eq!(json["reviewActionResults"], serde_json::json!([
+            { "txid": txid, "status": "success" }, { "txid": dead, "status": "invalidTx" }]), "{json}");
+        assert_eq!(p.broadcast_hashes().len(), 1, "only the subject went out");
+    }
+
+    /// P2-A15: sendWith while inputs remain unsigned ⇒ code 6 naming `options.sendWith`,
+    /// nothing broadcast, nothing written. RED (ii): today ⇒ 200 listing the unsigned
+    /// input. Control (A6 above): the same sendWith on a complete tx is honoured.
+    #[actix_web::test]
+    async fn a15_send_with_refused_while_inputs_are_unsigned() {
+        let mut p = ScriptedProvider::new("fake");
+        p.broadcast = accept();
+        let (state, p) = rig(p);
+        let s = seed(&state, "unsigned", true, Reserved::Placeholder);
+        let held = seed_nosend(&state, "nosend");
+        {
+            // Give the pending action one user input with no unlocking script.
+            let mut pending = PENDING_TRANSACTIONS.lock().unwrap();
+            let ptx = pending.get_mut(&s.reference).unwrap();
+            ptx.tx.inputs.insert(0, TxInput::new(OutPoint::new("aa".repeat(32), 0)));
+            ptx.user_input_infos.push(UserInputInfo {
+                txid: "aa".repeat(32), vout: 0, satoshis: 10, locking_script: vec![0x51],
+                source_tx: None, is_pre_signed: false,
+            });
+        }
+        let (code, json) = sign(&state, &s, serde_json::json!({ "noSend": false, "sendWith": [held] })).await;
+        dump("a15_code6", "signAction", code, &json, serde_json::json!({ "reference": "cmVm", "spends": {}, "options": { "sendWith": [held] } }));
+        assert_eq!((code, json["code"].clone(), json["parameter"].clone()),
+                   (400, 6.into(), "options.sendWith".into()), "{json}");
+        assert!(json["message"].is_string(), "{json}");
+        assert_eq!(p.broadcast_hashes().len(), 0);
+        let status: String = state.database.lock().unwrap().connection().query_row(
+            "SELECT status FROM transactions WHERE reference_number = ?1", [&s.reference], |r| r.get(0)).unwrap();
+        assert_eq!(status, "unsigned", "refused before any row was written");
+    }
+
+    /// P2-A14: a fall-through is logged at WARN with the provider, OUR txid and the
+    /// provider's own answer — here ARC's weak `ANNOUNCED_TO_NETWORK` before a later
+    /// provider accepts (the 11-of-13 case from the kickoff logs). The winner's
+    /// `🎉 … accepted` line and the all-fail `chain exhausted` line cannot satisfy it:
+    /// the fixture succeeds, and the asserted line must name the LOSING provider.
+    #[actix_web::test]
+    async fn a14_fall_through_is_logged_with_txid_at_warn() {
+        let logs = captured_logs();
+        let mut arc = ScriptedProvider::new("arc_gp_fake");
+        arc.broadcast = Box::new(|_| Err(IndexerError::ProviderStatus {
+            provider: "arc_gp_fake", status: 200,
+            body: "ANNOUNCED_TO_NETWORK — weak signal, advancing chain to next broadcaster".into() }));
+        let mut woc = ScriptedProvider::new("woc_fake");
+        woc.broadcast = accept();
+        let ps: Vec<Arc<dyn IndexerProvider>> = vec![Arc::new(arc), Arc::new(woc)];
+        let state = app_state_with(crate::services::WalletServices::with_test_chains(vec![], ps));
+        let txid = hex::encode(rand::random::<[u8; 32]>());
+        let r = broadcast_transaction_classified("0100beef00", &state.services, Some(ProofSink::of(&state)), Some(&txid)).await;
+        assert!(r.is_ok(), "{:?}", r);
+        let hits: Vec<_> = logs.lock().unwrap().iter()
+            .filter(|(_, m)| m.contains(&txid) && m.contains("arc_gp_fake") && m.contains("ANNOUNCED_TO_NETWORK"))
+            .cloned().collect();
+        assert_eq!(hits.len(), 1, "one fall-through line for the losing provider: {:?}", hits);
+        assert_eq!(hits[0].0, log::Level::Warn, "must reach production logs (warn+)");
+    }
+
+    /// P2-A2 (ii): the budget, not the count, ends a slow chain — measured on the
+    /// real loop with a shortened policy (each attempt outlives what is left).
+    #[actix_web::test]
+    async fn a2_budget_bounds_wall_time() {
+        let mut p = ScriptedProvider::new("slow");
+        p.broadcast = Box::new(|_| Err(IndexerError::Transport("late".into())));
+        // 700 ms per attempt: the second attempt starts at ~750 ms and only the
+        // per-attempt timeout (what is left of the budget) stops it at 1000 ms.
+        p.broadcast_delay = std::time::Duration::from_millis(700);
+        let (state, p) = rig(p);
+        let policy = RetryPolicy {
+            max_attempts: 5,
+            budget: std::time::Duration::from_millis(1000),
+            pause: std::time::Duration::from_millis(50),
+            min_attempt: std::time::Duration::from_millis(100),
+        };
+        let started = std::time::Instant::now();
+        let r = broadcast_with_retries(&state, "0100beef00", &"ab".repeat(32), &policy).await;
+        let took = started.elapsed();
+        assert!(matches!(r, Err(ref f) if !f.permanent), "{:?}", r);
+        assert!(took < std::time::Duration::from_millis(1150), "took {:?}", took);
+        let n = p.broadcast_hashes().len();
+        assert_eq!(n, 2, "attempts: the budget must stop it before max_attempts=5");
+    }
+}
+
+// ----------------------------------------------------------------------------
+// B5-T1-P2 — createAction (P2-A12) and the real-transaction halves of A1/A4, on a
+// FUNDED temp wallet: a real wallet (fresh mnemonic, temp DB) holding one coin it
+// can sign — a P2PKH to its own `2-receive address`/0 key, whose parent transaction
+// is cached so the Atomic BEEF carries it (the SDK checks value against parents).
+// ----------------------------------------------------------------------------
+#[cfg(test)]
+mod p2_create_action_tests {
+    use super::*;
+    use super::p2_test_support::*;
+    use crate::services::{BroadcastResult, IndexerError, IndexerProvider};
+    use std::sync::Arc;
+
+    const COIN_SATS: i64 = 100_000;
+
+    struct Funded {
+        state: web::Data<AppState>,
+        coin_txid: String,
+    }
+
+    fn funded(broadcast: Vec<Arc<dyn IndexerProvider>>, tx_status: Vec<Arc<dyn IndexerProvider>>) -> Funded {
+        funded_with(crate::services::WalletServices::with_test_chains(tx_status, broadcast))
+    }
+
+    fn funded_with(services: crate::services::WalletServices) -> Funded {
+        use sha2::{Digest, Sha256};
+        use ripemd::Ripemd160;
+        let path = std::env::temp_dir().join(format!("hodos_t1p2_funded_{}.db", uuid::Uuid::new_v4()));
+        let mut db = crate::database::WalletDatabase::new(path).unwrap();
+        db.create_wallet_with_first_address(None).unwrap();
+        let key = crate::database::derive_key_for_output(&db, Some("2-receive address"), Some("0"), None).unwrap();
+        let secp = secp256k1::Secp256k1::new();
+        let pubkey = secp256k1::PublicKey::from_secret_key(&secp, &secp256k1::SecretKey::from_slice(&key).unwrap()).serialize();
+        let h160 = Ripemd160::digest(Sha256::digest(pubkey));
+        let mut script = vec![0x76, 0xa9, 0x14];
+        script.extend_from_slice(&h160);
+        script.extend_from_slice(&[0x88, 0xac]);
+
+        let mut parent = Transaction::new();
+        parent.add_input(TxInput::new(OutPoint::new("cd".repeat(32), 0)));
+        parent.add_output(TxOutput::new(COIN_SATS, script.clone()));
+        let coin_txid = parent.txid().unwrap();
+        let raw = parent.to_hex().unwrap();
+        {
+            let c = db.connection();
+            c.execute(
+                "INSERT INTO outputs (user_id, spendable, change, vout, satoshis, txid, derivation_prefix, derivation_suffix,
+                                      locking_script, script_length, confirmed, created_at, updated_at)
+                 VALUES (1, 1, 1, 0, ?1, ?2, '2-receive address', '0', ?3, ?4, 1, 0, 0)",
+                rusqlite::params![COIN_SATS, coin_txid, script, script.len() as i64],
+            ).unwrap();
+            let id = c.last_insert_rowid();
+            crate::database::ParentTransactionRepository::new(c).upsert(Some(id), &coin_txid, &raw).unwrap();
+            // A stored proof (TSC, as WoC returns it) so the strict two-phase BEEF builder
+            // stops at this parent like any confirmed coin. Not verified against headers
+            // by the builder or by the SDK's result validation.
+            let tsc = serde_json::json!({ "index": 0, "txOrId": coin_txid, "target": "00".repeat(32),
+                                          "nodes": ["11".repeat(32)], "height": 800_000 });
+            crate::database::ProvenTxRepository::new(c).insert_or_get(&coin_txid, 800_000, 0,
+                tsc.to_string().as_bytes(), &hex::decode(&raw).unwrap(), &"00".repeat(32), &"00".repeat(32)).unwrap();
+        }
+        let state = app_state_from(db, services);
+        Funded { state, coin_txid }
+    }
+
+    fn create_req() -> CreateActionRequest {
+        serde_json::from_value(serde_json::json!({
+            "description": "p2 test",
+            "outputs": [{ "satoshis": 1000, "lockingScript": "6a", "outputDescription": "p2 output" }],
+        })).unwrap()
+    }
+
+    /// (tx status, coin spendable, coin spending_description) for the funded coin.
+    fn coin(f: &Funded, txid: &str) -> (Option<String>, i64, Option<String>) {
+        let db = f.state.database.lock().unwrap();
+        let c = db.connection();
+        let status = c.query_row("SELECT status FROM transactions WHERE txid = ?1", [txid], |r| r.get(0)).ok();
+        let (sp, desc) = c.query_row("SELECT spendable, spending_description FROM outputs WHERE txid = ?1 AND vout = 0",
+            [&f.coin_txid], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        (status, sp, desc)
+    }
+
+    fn one(p: ScriptedProvider) -> (Vec<Arc<dyn IndexerProvider>>, Arc<ScriptedProvider>) {
+        let p = Arc::new(p);
+        (vec![p.clone() as Arc<dyn IndexerProvider>], p)
+    }
+
+    /// Control: the fixture really spends — a funded createAction succeeds.
+    #[actix_web::test]
+    async fn fixture_create_action_succeeds() {
+        let mut p = ScriptedProvider::new("fake");
+        p.broadcast = Box::new(|_| Ok(BroadcastResult { provider: "fake", txid: String::new(),
+            tx_status: "SEEN_ON_NETWORK".into(), merkle_path_bump: None, block_height: None }));
+        let (b, p) = one(p);
+        let f = funded(b, vec![]);
+        let (code, json) = body_json(create_action_internal(f.state.clone(), create_req()).await).await;
+        dump("c_success", "createAction", code, &json, serde_json::json!({
+            "description": "p2 test", "outputs": [{ "satoshis": 1000, "lockingScript": "6a", "outputDescription": "p2 output" }] }));
+        assert_eq!(code, 200, "{json}");
+        assert_eq!(p.broadcast_hashes().len(), 1);
+        let txid = json["txid"].as_str().unwrap().to_string();
+        assert_eq!(coin(&f, &txid), (Some("unproven".into()), 0, Some(txid.clone())));
+    }
+
+    /// P2-A12 temporary: every provider unreachable ⇒ 400 code 5 serviceError; the row
+    /// is `sending` (not `nosend` — controls-B finding 1), the coin stays reserved to
+    /// the signed txid. RED (iii): today's arm restores the coin and fails the row.
+    #[actix_web::test]
+    async fn a12_temporary_failure_keeps_the_coin_reserved_and_row_sending() {
+        let mut p = ScriptedProvider::new("fake");
+        p.broadcast = Box::new(|_| Err(IndexerError::Transport("connection refused".into())));
+        let (b, p) = one(p);
+        let f = funded(b, vec![]);
+        let (code, json) = body_json(create_action_internal(f.state.clone(), create_req()).await).await;
+        dump("c_temporary", "createAction", code, &json, serde_json::json!({
+            "description": "p2 test", "outputs": [{ "satoshis": 1000, "lockingScript": "6a", "outputDescription": "p2 output" }] }));
+        assert_eq!((code, json["code"].clone()), (400, 5.into()), "{json}");
+        let txid = json["txid"].as_str().unwrap().to_string();
+        assert_eq!(json["reviewActionResults"], serde_json::json!([{ "txid": txid, "status": "serviceError" }]));
+        assert_eq!(json["sendWithResults"], serde_json::json!([{ "txid": txid, "status": "sending" }]));
+        assert_eq!(p.broadcast_hashes().len(), 3);
+        assert_eq!(coin(&f, &txid), (Some("sending".into()), 0, Some(txid.clone())));
+    }
+
+    // ---- B5-T1-P3 on the funded wallet ------------------------------------------------
+
+    /// The fake broadcaster records the spend's row status AT the broadcast (P3-A9 T1):
+    /// it reads the DB through a handle filled in after the state is built.
+    fn status_recording_provider() -> (ScriptedProvider, Arc<StdMutex<Option<std::sync::Arc<StdMutex<crate::database::WalletDatabase>>>>>, Arc<StdMutex<Vec<String>>>) {
+        let handle: Arc<StdMutex<Option<std::sync::Arc<StdMutex<crate::database::WalletDatabase>>>>> = Arc::new(StdMutex::new(None));
+        let seen: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
+        let (h, s) = (handle.clone(), seen.clone());
+        let mut p = ScriptedProvider::new("fake");
+        p.broadcast = Box::new(move |_| {
+            if let Some(db) = h.lock().unwrap().as_ref() {
+                if let Ok(db) = db.try_lock() {
+                    let st: String = db.connection().query_row(
+                        "SELECT status FROM transactions WHERE is_outgoing = 1 ORDER BY id DESC LIMIT 1", [], |r| r.get(0))
+                        .unwrap_or_else(|_| "<none>".into());
+                    s.lock().unwrap().push(st);
+                } else {
+                    s.lock().unwrap().push("<db locked during broadcast>".into());
+                }
+            }
+            Ok(BroadcastResult { provider: "fake", txid: String::new(),
+                tx_status: "SEEN_ON_NETWORK".into(), merkle_path_bump: None, block_height: None })
+        });
+        (p, handle, seen)
+    }
+
+    /// `P3-A9` (T1) + reservation by row (S1): after a real spend the coin is owned by the
+    /// spend's own transaction row, it has left the money index, no placeholder was
+    /// written, no `unbuilt-` row remains — and the row was `sending` at the broadcast.
+    /// RED (scratch): remove the `sending`-before-broadcast write ⇒ the recorded status
+    /// is `nosend` (the row a crash would leave to the 10-minute nosend backstop).
+    #[actix_web::test]
+    async fn p3_a9_create_action_is_sending_at_broadcast_and_owns_its_coin_by_row() {
+        let (p, handle, seen) = status_recording_provider();
+        let (b, p) = one(p);
+        let f = funded(b, vec![]);
+        *handle.lock().unwrap() = Some(f.state.database.clone());
+        let (code, json) = body_json(create_action_internal(f.state.clone(), create_req()).await).await;
+        assert_eq!(code, 200, "{json}");
+        assert_eq!(p.broadcast_hashes().len(), 1);
+        assert_eq!(*seen.lock().unwrap(), vec!["sending".to_string()], "row status at the broadcast");
+        let txid = json["txid"].as_str().unwrap().to_string();
+        let db = f.state.database.lock().unwrap();
+        let c = db.connection();
+        let row: i64 = c.query_row("SELECT id FROM transactions WHERE txid = ?1", [&txid], |r| r.get(0)).unwrap();
+        let (spent_by, desc): (Option<i64>, Option<String>) = c.query_row(
+            "SELECT spent_by, spending_description FROM outputs WHERE txid = ?1 AND vout = 0", [&f.coin_txid],
+            |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!((spent_by, desc), (Some(row), Some(txid.clone())), "owned by its own row, labelled with its txid");
+        let indexed: i64 = c.query_row(
+            "SELECT COUNT(*) FROM money_utxos m JOIN outputs o ON o.outputId = m.output_id WHERE o.txid = ?1 AND o.vout = 0",
+            [&f.coin_txid], |r| r.get(0)).unwrap();
+        assert_eq!(indexed, 0, "a spent coin is not in the money index");
+        let leftovers: i64 = c.query_row(
+            "SELECT (SELECT COUNT(*) FROM outputs WHERE spending_description LIKE 'pending-%')
+                  + (SELECT COUNT(*) FROM transactions WHERE txid LIKE 'unbuilt-%')", [], |r| r.get(0)).unwrap();
+        assert_eq!(leftovers, 0, "no placeholder, no unbuilt row (P3-A13)");
+    }
+
+    /// `P3-A2a` (S1) and `P3-A2b` (S2 send-max): a money coin missing from the index is
+    /// never spent — the wallet says it has no funds and sends nothing, although
+    /// `outputs` still calls the coin spendable. The refusal must come from SELECTION
+    /// (not `coin_reserved`, the claim's refusal): the claim is a second, independent
+    /// layer (an unindexed coin cannot be claimed), tested at the repository.
+    /// RED (scratch): point `get_spendable_by_user` back at `outputs` ⇒ the coin is
+    /// selected and only the claim stops it (`coin_reserved`) ⇒ this goes red.
+    #[actix_web::test]
+    async fn p3_a2_s1_s2_a_coin_missing_from_the_index_is_never_spent() {
+        for send_max in [false, true] {
+            let mut p = ScriptedProvider::new("fake");
+            p.broadcast = Box::new(|_| Ok(BroadcastResult { provider: "fake", txid: String::new(),
+                tx_status: "SEEN_ON_NETWORK".into(), merkle_path_bump: None, block_height: None }));
+            let (b, p) = one(p);
+            let f = funded(b, vec![]);
+            f.state.database.lock().unwrap().connection().execute(
+                "DELETE FROM money_utxos WHERE output_id = (SELECT outputId FROM outputs WHERE txid = ?1 AND vout = 0)",
+                [&f.coin_txid]).unwrap();
+            let req: CreateActionRequest = serde_json::from_value(serde_json::json!({
+                "description": "p3 test",
+                "outputs": [{ "satoshis": 1000,
+                              "lockingScript": format!("76a914{}88ac", "11".repeat(20)),
+                              "outputDescription": "p3 output" }],
+                "options": { "sendMax": send_max },
+            })).unwrap();
+            let (code, json) = body_json(create_action_internal(f.state.clone(), req).await).await;
+            assert_eq!(code, 400, "send_max={send_max}: {json}");
+            assert!(json["error"].as_str().unwrap_or("").contains("Insufficient funds"), "send_max={send_max}: {json}");
+            assert_ne!(json["code"].as_str(), Some("coin_reserved"),
+                "send_max={send_max}: refused by selection, not by the claim: {json}");
+            assert_eq!(p.broadcast_hashes().len(), 0, "send_max={send_max}: nothing broadcast");
+            let sp: i64 = f.state.database.lock().unwrap().connection().query_row(
+                "SELECT spendable FROM outputs WHERE txid = ?1 AND vout = 0", [&f.coin_txid], |r| r.get(0)).unwrap();
+            assert_eq!(sp, 1, "SUBJECT: outputs still says spendable — the index is what refused it");
+        }
+    }
+
+    /// B5-T1-P5 — plant two coins next to the funded wallet's one stamped coin:
+    /// (i) a pre-P4-shaped Unknown row — `script_length NULL`, the fabricated P2PKH to our
+    ///     own receive key (so `output_to_fetcher_utxo` would accept it), 500,000 sats so
+    ///     any selection that can see it takes it first;
+    /// (ii) a 1-sat exact-P2PKH coin to our key, observed (R-DUST's coin).
+    /// Then the classification pass runs, as the tick would. Returns the two outpoint txids.
+    fn p5_plant(f: &Funded) -> (String, String) {
+        let db = f.state.database.lock().unwrap();
+        let script: Vec<u8> = db.connection().query_row(
+            "SELECT locking_script FROM outputs WHERE txid = ?1 AND vout = 0", [&f.coin_txid], |r| r.get(0)).unwrap();
+        let unknown = "5a".repeat(32);
+        let one_sat = "1d".repeat(32);
+        crate::classify::p5_tests::raw_row(&db, &unknown, 0, 500_000, Some(&script), false,
+            Some("2-receive address"), Some("0"), false);
+        crate::classify::p5_tests::raw_row(&db, &one_sat, 0, 1, Some(&script), true,
+            Some("2-receive address"), Some("0"), false);
+        crate::classify::stamp_all(&db, "test");
+        (unknown, one_sat)
+    }
+
+    fn le(txid: &str) -> Vec<u8> {
+        let mut b = hex::decode(txid).unwrap();
+        b.reverse();
+        b
+    }
+
+    /// `P5-A5c` (`R-NOSPEND` c) + `P5-A12` (`R-DUST` re-based) — S1 normal send (with the
+    /// 5,000-sat lazy consolidation threshold) and S2 send-max: the serialised broadcast
+    /// never carries the Unknown row or the 1-sat coin, and neither is in the money index.
+    /// REDs (scratch, contract §4b): the stamp term removed from `money_eligible` ⇒ the
+    /// Unknown row is an input; `satoshis > 1` dropped from the seam ⇒ the 1-sat coin is
+    /// in the index (the floor alone still keeps it out of the inputs — two layers).
+    #[actix_web::test]
+    async fn p5_a5c_a12_selection_never_takes_an_unclassified_or_one_sat_coin() {
+        for send_max in [false, true] {
+            let seen: Arc<StdMutex<Vec<Vec<u8>>>> = Arc::new(StdMutex::new(Vec::new()));
+            let seen2 = seen.clone();
+            let mut p = ScriptedProvider::new("fake");
+            p.broadcast = Box::new(move |b| {
+                seen2.lock().unwrap().push(b.to_vec());
+                Ok(BroadcastResult { provider: "fake", txid: String::new(),
+                    tx_status: "SEEN_ON_NETWORK".into(), merkle_path_bump: None, block_height: None })
+            });
+            let (b, _p) = one(p);
+            let f = funded(b, vec![]);
+            let (unknown, one_sat) = p5_plant(&f);
+            {
+                let db = f.state.database.lock().unwrap();
+                let indexed = |t: &str| db.connection().query_row(
+                    "SELECT COUNT(*) FROM money_utxos m JOIN outputs o ON o.outputId = m.output_id WHERE o.txid = ?1",
+                    [t], |r| r.get::<_, i64>(0)).unwrap();
+                assert_eq!(indexed(&f.coin_txid), 1, "control: the funded coin is money");
+                assert_eq!(indexed(&unknown), 0, "the Unknown row is in the money index");
+                assert_eq!(indexed(&one_sat), 0, "R-DUST: the classifier let the 1-sat coin into the index");
+            }
+            let req: CreateActionRequest = serde_json::from_value(serde_json::json!({
+                "description": "p5 test",
+                "outputs": [{ "satoshis": 1000,
+                              "lockingScript": format!("76a914{}88ac", "11".repeat(20)),
+                              "outputDescription": "p5 output" }],
+                "options": { "sendMax": send_max },
+            })).unwrap();
+            let (code, json) = body_json(create_action_internal(f.state.clone(), req).await).await;
+            assert_eq!(code, 200, "send_max={send_max}: {json}");
+            let sent = seen.lock().unwrap().clone();
+            assert_eq!(sent.len(), 1, "send_max={send_max}: one broadcast");
+            assert!(sent[0].windows(32).any(|w| w == le(&f.coin_txid).as_slice()),
+                "control: the funded coin's outpoint is findable in what was sent");
+            assert!(!sent[0].windows(32).any(|w| w == le(&unknown).as_slice()),
+                "send_max={send_max}: the Unknown row was spent");
+            assert!(!sent[0].windows(32).any(|w| w == le(&one_sat).as_slice()),
+                "send_max={send_max}: the 1-sat coin was spent");
+        }
+    }
+
+    /// `P5-A11` — the activity feed: a received payment (no transaction row) stamped
+    /// money still shows as **received** with its amount; our own change does not.
+    /// RED (scratch): restore `AND o.change = 0` ⇒ the received payment disappears.
+    #[actix_web::test]
+    async fn p5_a11_activity_feed_keeps_received_payments_after_the_stamp() {
+        let (b, _p) = one(ScriptedProvider::new("fake"));
+        let f = funded(b, vec![]); // the funded coin: received, no transaction row, stamped change = 1
+        {
+            let db = f.state.database.lock().unwrap();
+            let c = db.connection();
+            c.execute("INSERT INTO transactions (txid, reference_number, raw_tx, status, is_outgoing, satoshis, created_at, updated_at)
+                       VALUES (?1, 'own', '', 'completed', 1, 0, 0, 0)", [&"0c".repeat(32)]).unwrap();
+            let tid = c.last_insert_rowid();
+            c.execute("INSERT INTO outputs (user_id, transaction_id, spendable, change, vout, satoshis, txid, provided_by, purpose, type, created_at, updated_at)
+                       VALUES (1, ?1, 1, 1, 1, 4321, ?2, 'you', 'change', 'P2PKH', 0, 0)", rusqlite::params![tid, "0c".repeat(32)]).unwrap();
+        }
+        let mut q = std::collections::HashMap::new();
+        q.insert("filter".to_string(), "received".to_string());
+        q.insert("limit".to_string(), "100".to_string());
+        let (code, json) = body_json(wallet_activity(f.state.clone(), web::Query(q)).await).await;
+        assert_eq!(code, 200, "{json}");
+        let items = json.to_string();
+        assert!(items.contains(&f.coin_txid), "the stamped received payment is missing from the feed: {json}");
+        assert!(!items.contains(&"0c".repeat(32)), "our own change is listed as received: {json}");
+    }
+
+    /// `P5-A5a` (`R-NOSPEND` a) — the dust consolidator, driven through
+    /// `task_consolidate_dust::run` (the exact call the Monitor's timer makes; the 24 h
+    /// schedule itself is not exercised). Fixture: one real parent with 20 stamped
+    /// 1,000-sat dust coins (vouts 0–19) and, at vout 20, a pre-P4-shaped Unknown row
+    /// (`script_length NULL`, the fabricated 25-byte P2PKH to our key, 900 sats) — the
+    /// row `is_consolidation_candidate` accepts and only the stamp refuses. A real
+    /// inscription would be refused by `is_p2pkh_script` alone and prove nothing here.
+    /// The consolidation must be BROADCAST (not skipped) and its inputs must not name
+    /// vout 20. RED (scratch): the stamp term removed from `money_eligible` ⇒ vout 20 is
+    /// an input.
+    #[actix_web::test]
+    async fn p5_a5a_dust_consolidation_never_takes_an_unclassified_coin() {
+        let seen: Arc<StdMutex<Vec<Vec<u8>>>> = Arc::new(StdMutex::new(Vec::new()));
+        let seen2 = seen.clone();
+        let mut p = ScriptedProvider::new("fake");
+        p.broadcast = Box::new(move |b| {
+            seen2.lock().unwrap().push(b.to_vec());
+            Ok(BroadcastResult { provider: "fake", txid: String::new(),
+                tx_status: "SEEN_ON_NETWORK".into(), merkle_path_bump: None, block_height: None })
+        });
+        let (b, _p) = one(p);
+        let f = funded(b, vec![]);
+        let parent_txid = {
+            let db = f.state.database.lock().unwrap();
+            let c = db.connection();
+            let script: Vec<u8> = c.query_row(
+                "SELECT locking_script FROM outputs WHERE txid = ?1 AND vout = 0", [&f.coin_txid], |r| r.get(0)).unwrap();
+            let mut parent = Transaction::new();
+            parent.add_input(TxInput::new(OutPoint::new("ce".repeat(32), 0)));
+            for _ in 0..20 { parent.add_output(TxOutput::new(1_000, script.clone())); }
+            parent.add_output(TxOutput::new(900, script.clone()));
+            let txid = parent.txid().unwrap();
+            let raw = parent.to_hex().unwrap();
+            for v in 0..21 {
+                let (sats, stamped, len) = if v < 20 { (1_000, 1, Some(25i64)) } else { (900, 0, None) };
+                c.execute(
+                    "INSERT INTO outputs (user_id, spendable, change, vout, satoshis, txid, derivation_prefix, derivation_suffix,
+                                          locking_script, script_length, confirmed, created_at, updated_at)
+                     VALUES (1, 1, ?1, ?2, ?3, ?4, '2-receive address', '0', ?5, ?6, 1, 0, 0)",
+                    rusqlite::params![stamped, v, sats, txid, script, len]).unwrap();
+            }
+            let id = c.last_insert_rowid();
+            crate::database::ParentTransactionRepository::new(c).upsert(Some(id), &txid, &raw).unwrap();
+            let tsc = serde_json::json!({ "index": 0, "txOrId": txid, "target": "00".repeat(32),
+                                          "nodes": ["11".repeat(32)], "height": 800_001 });
+            crate::database::ProvenTxRepository::new(c).insert_or_get(&txid, 800_001, 0,
+                tsc.to_string().as_bytes(), &hex::decode(&raw).unwrap(), &"00".repeat(32), &"00".repeat(32)).unwrap();
+            crate::classify::stamp_all(&db, "test"); // the tick's pass: vout 20 stays held
+            txid
+        };
+        crate::monitor::task_consolidate_dust::run(&f.state).await.unwrap();
+        let sent = seen.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1, "the consolidation was broadcast (a Skipped run would measure nothing)");
+        let outpoint = |v: u32| {
+            let mut b = hex::decode(&parent_txid).unwrap();
+            b.reverse();
+            b.extend_from_slice(&v.to_le_bytes());
+            b
+        };
+        assert!(sent[0].windows(36).any(|w| w == outpoint(0).as_slice()), "control: a dust input is findable");
+        assert!(!sent[0].windows(36).any(|w| w == outpoint(20).as_slice()), "the unclassified coin was consolidated");
+    }
+
+    /// `P5-A13` (CVE-2026-56744 question) — the one route where an unsigned transaction
+    /// sits between two calls is two-phase createAction → signAction. A payee script
+    /// planted in STORAGE between the phases (`transactions.raw_tx` of that action) must
+    /// not reach what is signed and broadcast; the same plant made in the in-memory
+    /// pending transaction (the real source, `PENDING_TRANSACTIONS`) does — built-in
+    /// control that the broadcast inspection can see a substituted payee at all.
+    #[actix_web::test]
+    async fn p5_a13_a_payee_script_planted_in_storage_is_not_signed() {
+        let honest = hex::decode(format!("76a914{}88ac", "77".repeat(20))).unwrap();
+        let attacker = hex::decode(format!("76a914{}88ac", "66".repeat(20))).unwrap();
+        for plant_in_memory in [false, true] {
+            let seen: Arc<StdMutex<Vec<Vec<u8>>>> = Arc::new(StdMutex::new(Vec::new()));
+            let seen2 = seen.clone();
+            let mut p = ScriptedProvider::new("fake");
+            p.broadcast = Box::new(move |b| {
+                seen2.lock().unwrap().push(b.to_vec());
+                Ok(BroadcastResult { provider: "fake", txid: String::new(),
+                    tx_status: "SEEN_ON_NETWORK".into(), merkle_path_bump: None, block_height: None })
+            });
+            let (b, _p) = one(p);
+            let f = funded(b, vec![]);
+            let req: CreateActionRequest = serde_json::from_value(serde_json::json!({
+                "description": "p5 a13",
+                "outputs": [{ "satoshis": 1000, "lockingScript": hex::encode(&honest), "outputDescription": "payee" }],
+                "options": { "signAndProcess": false },
+            })).unwrap();
+            let (code, created) = body_json(create_action_internal(f.state.clone(), req).await).await;
+            assert_eq!(code, 200, "{created}");
+            let reference = created["signableTransaction"]["reference"].as_str().unwrap().to_string();
+            if plant_in_memory {
+                let mut pending = PENDING_TRANSACTIONS.lock().unwrap();
+                let tx = &mut pending.get_mut(&reference).unwrap().tx;
+                for o in tx.outputs.iter_mut() {
+                    if o.script_pubkey == honest { o.script_pubkey = attacker.clone(); }
+                }
+            } else {
+                let mut forged = Transaction::new();
+                forged.add_input(TxInput::new(OutPoint::new("ab".repeat(32), 0)));
+                forged.add_output(TxOutput::new(1000, attacker.clone()));
+                let n = f.state.database.lock().unwrap().connection().execute(
+                    "UPDATE transactions SET raw_tx = ?1 WHERE reference_number = ?2",
+                    rusqlite::params![hex::decode(forged.to_hex().unwrap()).unwrap(), reference]).unwrap();
+                assert_eq!(n, 1, "the storage plant hit the action's row");
+            }
+            let sreq = serde_json::json!({ "reference": reference, "spends": {}, "options": { "noSend": false } });
+            let (code, json) = body_json(sign_action(f.state.clone(), web::Bytes::from(sreq.to_string())).await).await;
+            assert_eq!(code, 200, "{json}");
+            let sent = seen.lock().unwrap().clone();
+            assert_eq!(sent.len(), 1);
+            let has = |s: &[u8]| sent[0].windows(s.len()).any(|w| w == s);
+            if plant_in_memory {
+                assert!(has(&attacker), "control: a substituted payee in the signing source IS visible in the broadcast");
+            } else {
+                assert!(has(&honest) && !has(&attacker), "a payee planted in storage was signed");
+            }
+        }
+    }
+
+    /// Adversarial review #4 / `P5-X1` (GET half) — the held list names this wallet's
+    /// outpoints; a request carrying `X-Requesting-Domain` (any website, approved or not)
+    /// is refused, the wallet UI (no header) is served. RED (scratch): drop the header
+    /// check ⇒ 200 with the list.
+    #[actix_web::test]
+    async fn p5_x1_held_outputs_list_is_first_party_only() {
+        let (b, _p) = one(ScriptedProvider::new("fake"));
+        let f = funded(b, vec![]);
+        let site = actix_web::test::TestRequest::default()
+            .insert_header(("X-Requesting-Domain", "evil.example")).to_http_request();
+        let (code, json) = body_json(wallet_held_outputs(f.state.clone(), site).await).await;
+        assert_eq!(code, 403, "a website read the held list: {json}");
+        let ui = actix_web::test::TestRequest::default().to_http_request();
+        let (code, json) = body_json(wallet_held_outputs(f.state.clone(), ui).await).await;
+        assert_eq!(code, 200, "control: the wallet UI is served: {json}");
+    }
+
+    /// Two-phase on a real transaction: createAction(signAndProcess:false) then
+    /// signAction — the path 1Sat / OpNS dApps use. Captured for the SDK decode check
+    /// with the real signed tx (parents in the BEEF). `mode`: success / temporary / permanent.
+    async fn two_phase(mode: &str) -> (u16, serde_json::Value) {
+        let mut p = ScriptedProvider::new("fake");
+        p.broadcast = match mode {
+            "success" => Box::new(|_| Ok(BroadcastResult { provider: "fake", txid: String::new(),
+                tx_status: "SEEN_ON_NETWORK".into(), merkle_path_bump: None, block_height: None })),
+            "temporary" => Box::new(|_| Err(IndexerError::Transport("connection refused".into()))),
+            _ => Box::new(|_| Err(IndexerError::ProviderStatus { provider: "fake", status: 400, body: "Missing inputs".into() })),
+        };
+        let (b, _p) = one(p);
+        let f = funded(b, vec![]);
+        let req: CreateActionRequest = serde_json::from_value(serde_json::json!({
+            "description": "p2 test",
+            "outputs": [{ "satoshis": 1000, "lockingScript": "6a", "outputDescription": "p2 output" }],
+            "options": { "signAndProcess": false },
+        })).unwrap();
+        let (code, created) = body_json(create_action_internal(f.state.clone(), req).await).await;
+        assert_eq!(code, 200, "{created}");
+        let reference = created["signableTransaction"]["reference"].as_str()
+            .unwrap_or_else(|| panic!("no signableTransaction.reference: {created}")).to_string();
+        let sreq = serde_json::json!({ "reference": reference, "spends": {}, "options": { "noSend": false } });
+        let (code, json) = body_json(sign_action(f.state.clone(), web::Bytes::from(sreq.to_string())).await).await;
+        dump(&format!("s2_{mode}"), "signAction", code, &json, serde_json::json!({ "reference": "cmVm", "spends": {} }));
+        (code, json)
+    }
+
+    #[actix_web::test]
+    async fn two_phase_sign_action_real_tx() {
+        assert_eq!(two_phase("success").await.0, 200);
+        let (code, json) = two_phase("temporary").await;
+        assert_eq!((code, json["reviewActionResults"][0]["status"].clone()), (400, "serviceError".into()), "{json}");
+        let (code, json) = two_phase("permanent").await;
+        assert_eq!((code, json["reviewActionResults"][0]["status"].clone()), (400, "invalidTx".into()), "{json}");
+    }
+
+    /// P2-A4 / A12 chain-evidence half (T2, real chain, read-only — `#[ignore]`): after a
+    /// permanent "Missing inputs", release goes through `reconcile_missing_inputs`, which
+    /// re-marks an input the CHAIN says is spent. Fixture: a real mainnet outpoint spent by
+    /// a mined tx (8a5f699a…:1, spent by dc757ff9…, block 969648 — checked on WoC
+    /// 2026-10-04) sits in the wallet as spendable (the phantom). RED: a refusal whose text
+    /// is not "missing inputs" skips reconcile ⇒ the phantom stays spendable.
+    #[actix_web::test]
+    #[ignore = "network: asks WhatsOnChain about a real spent outpoint"]
+    async fn a4_reconcile_marks_a_chain_spent_phantom() {
+        const SPENT_TXID: &str = "8a5f699a06945ec7ed62753003ea6fd3db79d3d104e94b90f33f4de11211e3a4";
+        for (err, expect_spendable) in [("Missing inputs", 0i64), ("txn-mempool-conflict", 1i64)] {
+            // Real read-only providers: reconcile fetches the spender and proves it mined.
+            let f = funded_with(crate::services::WalletServices::new());
+            f.state.database.lock().unwrap().connection().execute(
+                "INSERT INTO outputs (user_id, spendable, change, vout, satoshis, txid, derivation_prefix, derivation_suffix, confirmed, created_at, updated_at)
+                 VALUES (1, 1, 1, 1, 1000, ?1, '2-receive address', '0', 1, 0, 0)", [SPENT_TXID]).unwrap();
+            let logs = captured_logs();
+            let start = logs.lock().unwrap().len();
+            let report = reconcile_missing_inputs(&f.state, err, &[(SPENT_TXID.to_string(), 1)]).await;
+            for (_, l) in logs.lock().unwrap()[start..].iter().filter(|(_, l)| l.contains("reconcile") || l.contains("8a5f699a") || l.contains("dc757ff9") || l.contains("check_outpoint")) {
+                eprintln!("LOG {}", &l[..l.len().min(300)]);
+            }
+            let sp: i64 = f.state.database.lock().unwrap().connection().query_row(
+                "SELECT spendable FROM outputs WHERE txid = ?1 AND vout = 1", [SPENT_TXID], |r| r.get(0)).unwrap();
+            assert_eq!(sp, expect_spendable, "error {:?}: report {:?}", err, (report.marked_spent, report.change_recovered));
+        }
+    }
+
+    /// Review H1 / R-GOLD: a createAction whose OWN payment went out answers 200 with no
+    /// error key, even when a sendWith entry was not broadcast — the gold pill's
+    /// condition (`ok && !isErrorInResponse`, HttpRequestInterceptor.cpp). RED: the
+    /// toolbox-style 400 that briefly shipped in 44c34ee hid the pill on a real spend.
+    #[actix_web::test]
+    async fn h1_create_action_send_with_failure_keeps_200_and_no_error_key() {
+        let mut p = ScriptedProvider::new("fake");
+        p.broadcast = Box::new(|_| Ok(BroadcastResult { provider: "fake", txid: String::new(),
+            tx_status: "SEEN_ON_NETWORK".into(), merkle_path_bump: None, block_height: None }));
+        let (b, p) = one(p);
+        let f = funded(b, vec![]);
+        let bogus = hex::encode(rand::random::<[u8; 32]>());
+        let req: CreateActionRequest = serde_json::from_value(serde_json::json!({
+            "description": "p2 test",
+            "outputs": [{ "satoshis": 1000, "lockingScript": "6a", "outputDescription": "p2 output" }],
+            "options": { "sendWith": [bogus] },
+        })).unwrap();
+        let (code, json) = body_json(create_action_internal(f.state.clone(), req).await).await;
+        assert_eq!(code, 200, "{json}");
+        assert!(json.get("error").is_none() && json.get("isError").is_none(), "pill condition: {json}");
+        assert_eq!(json["sendWithResults"], serde_json::json!([{ "txid": bogus, "status": "failed" }]), "{json}");
+        assert_eq!(p.broadcast_hashes().len(), 1, "the payment itself went out");
+    }
+
+    /// Review M3: certificate publish uses `Release` — a temporary failure abandons the
+    /// action as before this phase (row failed, coin restored), so "unpublished" is true.
+    #[actix_web::test]
+    async fn m3_release_path_restores_on_temporary_failure() {
+        let mut p = ScriptedProvider::new("fake");
+        p.broadcast = Box::new(|_| Err(IndexerError::Transport("connection refused".into())));
+        let (b, _p) = one(p);
+        let f = funded(b, vec![]);
+        let (code, json) = body_json(create_action_internal_with(f.state.clone(), create_req(), OnTemporaryFailure::Release).await).await;
+        assert_eq!((code, json["code"].clone()), (400, 5.into()), "{json}");
+        let txid = json["txid"].as_str().unwrap().to_string();
+        assert_eq!(json["sendWithResults"], serde_json::json!([{ "txid": txid, "status": "failed" }]));
+        let (status, sp, _) = coin(&f, &txid);
+        assert_eq!((status.as_deref(), sp), (Some("failed"), 1), "Release: abandoned, coin back");
+        assert!(!json["message"].as_str().unwrap().contains("keep trying"), "{json}");
+    }
+
+    /// P2-A12 permanent: "Missing inputs" from every provider ⇒ 400 code 5 invalidTx,
+    /// row failed, coin released by the existing cleanup. ⚠️ This does NOT measure the
+    /// chain-evidence half of A4: `reconcile_spent_inputs` asks WhatsOnChain over raw
+    /// HTTP, and for this fixture's made-up txid every answer means "no evidence", so a
+    /// blind restore would pass too (adversarial review). That half is a live row.
+    #[actix_web::test]
+    async fn a12_permanent_failure_releases_through_chain_evidence() {
+        let mut p = ScriptedProvider::new("fake");
+        p.broadcast = Box::new(|_| Err(IndexerError::ProviderStatus { provider: "fake", status: 400, body: "Missing inputs".into() }));
+        let (b, _p) = one(p);
+        let f = funded(b, vec![]);
+        let (code, json) = body_json(create_action_internal(f.state.clone(), create_req()).await).await;
+        dump("c_permanent", "createAction", code, &json, serde_json::json!({
+            "description": "p2 test", "outputs": [{ "satoshis": 1000, "lockingScript": "6a", "outputDescription": "p2 output" }] }));
+        assert_eq!((code, json["code"].clone()), (400, 5.into()), "{json}");
+        let txid = json["txid"].as_str().unwrap().to_string();
+        assert_eq!(json["reviewActionResults"], serde_json::json!([{ "txid": txid, "status": "invalidTx" }]));
+        let (status, sp, _) = coin(&f, &txid);
+        assert_eq!(status.as_deref(), Some("failed"));
+        assert_eq!(sp, 1, "coin released (no chain evidence that it is spent)");
+    }
+
+    // ------------------------------------------------------------------------------
+    // B5-T1-P6 `P6-A11` — generate_address and change derivation take the next index
+    // from one function: across a mixed sequence, no index is handed out twice, none
+    // falls at or below what the wallet already issued, and the counter never drops.
+    // Seeds: S1 = counter 12 / rows 0..5 (a restored counter over stripped rows — the
+    // state the P6-A10 fix creates); S2 = counter 5 / rows 0..12. Both call orders.
+    // ------------------------------------------------------------------------------
+
+    /// A second confirmed coin at receive 0 (parent outpoint distinct from the first).
+    fn add_coin(f: &Funded, salt: &str) {
+        let db = f.state.database.lock().unwrap();
+        let key = crate::database::derive_key_for_output(&db, Some("2-receive address"), Some("0"), None).unwrap();
+        let script = crate::classify::p5_tests::p2pkh_for_key(&key);
+        let mut parent = Transaction::new();
+        parent.add_input(TxInput::new(OutPoint::new(salt.repeat(32), 0)));
+        parent.add_output(TxOutput::new(COIN_SATS, script.clone()));
+        let txid = parent.txid().unwrap();
+        let raw = parent.to_hex().unwrap();
+        let c = db.connection();
+        c.execute(
+            "INSERT INTO outputs (user_id, spendable, change, vout, satoshis, txid, derivation_prefix, derivation_suffix,
+                                  locking_script, script_length, confirmed, created_at, updated_at)
+             VALUES (1, 1, 1, 0, ?1, ?2, '2-receive address', '0', ?3, ?4, 1, 0, 0)",
+            rusqlite::params![COIN_SATS, txid, script, script.len() as i64]).unwrap();
+        let id = c.last_insert_rowid();
+        crate::database::ParentTransactionRepository::new(c).upsert(Some(id), &txid, &raw).unwrap();
+        let tsc = serde_json::json!({ "index": 0, "txOrId": txid, "target": "00".repeat(32),
+                                      "nodes": ["11".repeat(32)], "height": 800_000 });
+        crate::database::ProvenTxRepository::new(c).insert_or_get(&txid, 800_000, 0,
+            tsc.to_string().as_bytes(), &hex::decode(&raw).unwrap(), &"00".repeat(32), &"00".repeat(32)).unwrap();
+    }
+
+    fn seed(f: &Funded, counter: i32, rows_to: i32) -> Vec<String> {
+        let db = f.state.database.lock().unwrap();
+        let (k, p) = crate::scan::tests::keys(&db);
+        let wid = crate::database::WalletRepository::new(db.connection()).get_primary_wallet().unwrap().unwrap().id.unwrap();
+        for i in 1..=rows_to {
+            let address = crate::reconcile::derive_receive_address(&k, &p, i).unwrap();
+            crate::database::AddressRepository::new(db.connection()).create(&crate::database::Address {
+                id: None, wallet_id: wid, index: i, address, public_key: String::new(),
+                used: true, balance: 0, pending_utxo_check: false, created_at: 0 }).unwrap();
+        }
+        db.connection().execute("UPDATE wallets SET current_index = ?1 WHERE id = ?2", rusqlite::params![counter, wid]).unwrap();
+        (0..=counter.max(rows_to)).map(|i| crate::reconcile::derive_receive_address(&k, &p, i).unwrap()).collect()
+    }
+
+    fn counter(f: &Funded) -> i32 {
+        f.state.database.lock().unwrap().connection().query_row("SELECT current_index FROM wallets", [], |r| r.get(0)).unwrap()
+    }
+
+    #[actix_web::test]
+    async fn p6_a11_mixed_generate_and_send_never_repeat_an_index() {
+        for (counter_seed, rows_to) in [(12, 5), (5, 12)] {
+            for order in ["GSGS", "SGSG"] {
+                let mut p = ScriptedProvider::new("fake");
+                p.broadcast = Box::new(|_| Ok(BroadcastResult { provider: "fake", txid: String::new(),
+                    tx_status: "SEEN_ON_NETWORK".into(), merkle_path_bump: None, block_height: None }));
+                let (b, _p) = one(p);
+                let f = funded(b, vec![]);
+                add_coin(&f, "ce");
+                let issued = seed(&f, counter_seed, rows_to);
+                let floor = counter_seed.max(rows_to);
+                let mut handed: Vec<(char, i32)> = Vec::new();
+                let mut last_counter = counter(&f);
+                for step in order.chars() {
+                    let index = if step == 'G' {
+                        let (code, json) = body_json(generate_address(f.state.clone(), web::Bytes::new()).await).await;
+                        assert_eq!(code, 200, "seed {}/{} {}: generate {}", counter_seed, rows_to, order, json);
+                        assert!(!issued.contains(&json["address"].as_str().unwrap().to_string()),
+                                "seed {}/{} {}: generate handed out an issued address", counter_seed, rows_to, order);
+                        json["index"].as_i64().unwrap() as i32
+                    } else {
+                        let (code, json) = body_json(create_action_internal(f.state.clone(), create_req()).await).await;
+                        assert_eq!(code, 200, "seed {}/{} {}: send {}", counter_seed, rows_to, order, json);
+                        f.state.database.lock().unwrap().connection().query_row(
+                            "SELECT \"index\" FROM addresses ORDER BY id DESC LIMIT 1", [], |r| r.get(0)).unwrap()
+                    };
+                    handed.push((step, index));
+                    let now = counter(&f);
+                    assert!(now >= last_counter, "seed {}/{} {}: the counter dropped {} → {}", counter_seed, rows_to, order, last_counter, now);
+                    last_counter = now;
+                }
+                let idx: Vec<i32> = handed.iter().map(|h| h.1).collect();
+                assert!(idx.windows(2).all(|w| w[0] < w[1]) && idx[0] > floor,
+                        "seed {}/{} {}: indices {:?} not strictly increasing above {}", counter_seed, rows_to, order, handed, floor);
+            }
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// B5-T1-P2 P2-A8 — the auto-unlock rejection logs no phrase and no key. Uses the
+// process-wide capture logger (bin crate), so the check reads every line the wallet
+// actually logged during the rejection, not the format string.
+// ----------------------------------------------------------------------------
+#[cfg(all(test, windows))]
+mod p2_auto_unlock_log_tests {
+    use super::p2_test_support::captured_logs;
+
+    const OTHER: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+    #[test]
+    fn rejection_logs_neither_phrase_nor_keys() {
+        let logs = captured_logs();
+        let path = std::env::temp_dir().join(format!("hodos_t1p2_a8_{}.db", uuid::Uuid::new_v4()));
+        let mut db = crate::database::WalletDatabase::new(path).unwrap();
+        let (wallet_id, own_phrase, _) = db.create_wallet_with_first_address(Some("1234")).unwrap();
+        let own_key = crate::database::helpers::master_public_key_hex_from_phrase(&own_phrase).unwrap();
+        let other_key = crate::database::helpers::master_public_key_hex_from_phrase(OTHER).unwrap();
+        db.store_dpapi_blob(wallet_id, OTHER).unwrap();
+        db.clear_cached_mnemonic();
+        let start = logs.lock().unwrap().len();
+        assert!(!db.try_dpapi_unlock().unwrap(), "fixture: the planted phrase must be rejected");
+        let lines: Vec<String> = logs.lock().unwrap()[start..].iter().map(|(_, m)| m.clone()).collect();
+        assert!(lines.iter().any(|l| l.contains("Credential-store auto-unlock REJECTED")),
+            "SUBJECT: the rejection line must be among the captured lines: {:?}", lines);
+        // Runs of 3 consecutive phrase words (single BIP39 words like "about" occur in prose),
+        // for BOTH phrases, plus both public keys.
+        let mut needles: Vec<String> = vec![own_key, other_key];
+        for phrase in [OTHER, own_phrase.as_str()] {
+            let w: Vec<&str> = phrase.split_whitespace().collect();
+            needles.extend(w.windows(3).map(|t| t.join(" ")));
+        }
+        for l in &lines {
+            for n in &needles {
+                assert!(!l.contains(n.as_str()), "secret material in a log line: {:?} contains {:?}", l, n);
+            }
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// B5-T1-P2 — fixes from the adversarial review (H1, M1, M3, M4, LOW).
+// ----------------------------------------------------------------------------
+#[cfg(test)]
+mod p2_review_fix_tests {
+    use super::*;
+    use super::p2_test_support::*;
+    use crate::services::{BroadcastResult, FailureKind, IndexerError, IndexerProvider, ProviderFailure};
+    use std::sync::Arc;
+
+    fn pf(kind: FailureKind, message: &str) -> ProviderFailure {
+        ProviderFailure { provider: "p", kind, message: message.to_string() }
+    }
+
+    /// M1: ARC's own refusal shapes (HTTP 200 + `txStatus=…`) are verdicts; a 401 is
+    /// not; a timeout or a weak acceptance may hold the tx.
+    #[test]
+    fn provider_verdicts_read_arc_shapes() {
+        use ProviderVerdict::*;
+        let arc_ds = "provider ARC_GORILLAPOOL returned status 200: txStatus=DOUBLE_SPEND_ATTEMPTED: {\"txid\":\"..\"}";
+        assert_eq!(provider_verdict(&pf(FailureKind::Status(200), arc_ds)), Refused { double_spend: true });
+        assert_eq!(provider_verdict(&pf(FailureKind::Status(200), "txStatus=REJECTED: {}")), Refused { double_spend: false });
+        assert_eq!(provider_verdict(&pf(FailureKind::Status(200), "txStatus=SEEN_IN_ORPHAN_MEMPOOL: {}")), Refused { double_spend: false });
+        assert_eq!(provider_verdict(&pf(FailureKind::Status(400), "Missing inputs")), Refused { double_spend: false });
+        assert_eq!(provider_verdict(&pf(FailureKind::Status(200), "ANNOUNCED_TO_NETWORK — weak signal")), MayHold);
+        assert_eq!(provider_verdict(&pf(FailureKind::Status(200), "txStatus=MINED_IN_STALE_BLOCK: {}")), MayHold);
+        assert_eq!(provider_verdict(&pf(FailureKind::SoftTimeout, "soft timeout")), MayHold);
+        assert_eq!(provider_verdict(&pf(FailureKind::Transport, "connection refused")), MayHold);
+        assert_eq!(provider_verdict(&pf(FailureKind::Status(503), "unavailable")), MayHold);
+        assert_eq!(provider_verdict(&pf(FailureKind::Status(401), "unauthorized")), NotAccepted);
+        assert_eq!(provider_verdict(&pf(FailureKind::Status(429), "rate limited")), NotAccepted);
+    }
+
+    /// M1, whole chain: ARC double-spend + TAAL 401 + WoC "Missing inputs" ⇒ permanent
+    /// double spend (was temporary). Timeout anywhere ⇒ temporary. Only 401/429 ⇒
+    /// temporary (the tx is valid; it could land elsewhere).
+    #[test]
+    fn chain_classification() {
+        let ds = "txStatus=DOUBLE_SPEND_ATTEMPTED: {}";
+        assert_eq!(classify_chain_failures(&[pf(FailureKind::Status(200), ds),
+            pf(FailureKind::Status(401), "unauthorized"), pf(FailureKind::Status(400), "Missing inputs")]), (true, true));
+        assert_eq!(classify_chain_failures(&[pf(FailureKind::SoftTimeout, "soft timeout"),
+            pf(FailureKind::Status(400), "Missing inputs")]), (false, false));
+        // ARC's 409 timeout may hold the tx (re-review HIGH).
+        assert_eq!(classify_chain_failures(&[pf(FailureKind::Status(409),
+            "provider ARC_GORILLAPOOL returned status 409: ARC timeout/error 409: DeadlineExceeded — "),
+            pf(FailureKind::Status(400), "Missing inputs")]), (false, false));
+        assert_eq!(classify_chain_failures(&[pf(FailureKind::Status(401), "unauthorized"),
+            pf(FailureKind::Status(429), "slow down")]), (false, false));
+        assert_eq!(classify_chain_failures(&[]), (false, false));
+    }
+
+    /// M1 through the real handler: ARC's real double-spend shape first in the chain.
+    #[actix_web::test]
+    async fn sign_action_reports_arc_double_spend_as_double_spend() {
+        let mut arc = ScriptedProvider::new("arc");
+        arc.broadcast = Box::new(|_| Err(IndexerError::ProviderStatus { provider: "arc", status: 200,
+            body: "txStatus=DOUBLE_SPEND_ATTEMPTED: {\"txid\":\"x\"}".into() }));
+        let mut taal = ScriptedProvider::new("taal");
+        taal.broadcast = Box::new(|_| Err(IndexerError::ProviderStatus { provider: "taal", status: 401, body: "unauthorized".into() }));
+        let ps: Vec<Arc<dyn IndexerProvider>> = vec![Arc::new(arc), Arc::new(taal)];
+        let state = app_state_with(crate::services::WalletServices::with_test_chains(vec![], ps));
+        let s = super::abort_action_tests::seed(&state, "unsigned", true, super::abort_action_tests::Reserved::Placeholder);
+        let req = serde_json::json!({ "reference": s.reference, "options": { "noSend": false } });
+        let (code, json) = body_json(sign_action(state.clone(), web::Bytes::from(req.to_string())).await).await;
+        assert_eq!((code, json["reviewActionResults"][0]["status"].clone()), (400, "doubleSpend".into()), "{json}");
+    }
+
+    /// LOW: our own undecodable bytes are not a verdict on the transaction.
+    #[actix_web::test]
+    async fn undecodable_bytes_are_temporary() {
+        let state = app_state_with(crate::services::WalletServices::with_test_chains(vec![], vec![]));
+        let r = broadcast_transaction_classified("zz-not-hex", &state.services, None, Some("ab")).await;
+        assert!(matches!(r, Err(ref f) if !f.permanent), "{:?}", r);
+    }
+
+    /// M4 + LOW: sendWith past the deadline is reported, not sent; a duplicate txid
+    /// is one transaction.
+    #[actix_web::test]
+    async fn send_with_respects_deadline_and_collapses_duplicates() {
+        let mut p = ScriptedProvider::new("fake");
+        p.broadcast = Box::new(|_| Ok(BroadcastResult { provider: "fake", txid: String::new(),
+            tx_status: "SEEN_ON_NETWORK".into(), merkle_path_bump: None, block_height: None }));
+        let p = Arc::new(p);
+        let state = app_state_with(crate::services::WalletServices::with_test_chains(vec![], vec![p.clone() as Arc<dyn IndexerProvider>]));
+        let held = {
+            let txid = hex::encode(rand::random::<[u8; 32]>());
+            let mut t = Transaction::new();
+            t.add_output(TxOutput::new(1, vec![0x6a]));
+            state.database.lock().unwrap().connection().execute(
+                "INSERT INTO transactions (txid, reference_number, raw_tx, status, is_outgoing, satoshis, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, 'nosend', 1, -1, 0, 0)",
+                rusqlite::params![txid, uuid::Uuid::new_v4().to_string(), t.to_hex().unwrap()]).unwrap();
+            txid
+        };
+        let spent = broadcast_send_with(&state, &[held.clone()], std::time::Instant::now()).await;
+        assert_eq!((spent.len(), spent[0].status), (1, ReviewStatus::ServiceError));
+        assert_eq!(p.broadcast_hashes().len(), 0, "nothing sent once the budget is spent");
+        let twice = broadcast_send_with(&state, &[held.clone(), held.clone()],
+            std::time::Instant::now() + std::time::Duration::from_secs(5)).await;
+        assert_eq!(twice.len(), 1, "{:?}", twice);
+        assert_eq!(twice[0].status, ReviewStatus::Success);
+    }
+}
+
+#[cfg(test)]
+#[path = "handlers_t2p1_tests.rs"]
+mod t2p1_route_tests;
+
+#[cfg(test)]
+#[path = "a7_restore_tests.rs"]
+mod a7_restore_tests;
+
+#[cfg(test)]
+#[path = "handlers_p7a_tests.rs"]
+mod p7a_route_tests;  // B5-T1-P7a-1
+
+#[cfg(test)]
+#[path = "handlers_p7b_tests.rs"]
+mod p7b_route_tests;  // B5-T1-P7b
+
+#[cfg(test)]
+#[path = "handlers_p7a2_tests.rs"]
+mod p7a2_tests;  // B5-T1-P7a-2
+
+#[cfg(test)]
+#[path = "p6_restore_tests.rs"]
+mod p6_restore_tests;

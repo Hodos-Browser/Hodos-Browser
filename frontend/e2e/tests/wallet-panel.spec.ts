@@ -105,37 +105,44 @@ test.describe('Wallet Panel — Live Wallet State (#49 Section 1)', () => {
 });
 
 test.describe('Wallet Panel — No Wallet State (#49 Section 1)', () => {
-  test('shows create/recover UI when no wallet exists', async ({ page }) => {
-    page.on('pageerror', (err) => {
-      if (err.message.includes('Failed to fetch') || err.message.includes('127.0.0.1')) return;
-    });
-
-    // Inject mock but clear the wallet exists flag
+  // Wallet calls ride the C++ `__hodos_walletCall` IPC bridge, never HTTP — so a
+  // `page.route('**/wallet/status')` cannot answer them (B5-T1-P6: this test failed
+  // before the phase for that reason, and for expecting 'Recover Existing Wallet').
+  // Stub the bridge: status says "no wallet", every other call is refused and recorded.
+  async function noWallet(page: import('@playwright/test').Page) {
     await page.addInitScript({
       content: BRIDGE_MOCK_SCRIPT + `
         localStorage.removeItem('hodos_wallet_exists');
         localStorage.removeItem('hodos_identity_key');
+        window.__walletCalls = [];
+        window.__hodos_walletCall = (m, endpoint) => {
+          window.__walletCalls.push(endpoint);
+          return endpoint.startsWith('/wallet/status')
+            ? Promise.resolve({ exists: false, locked: false })
+            : Promise.reject({ body: { error: 'stub' }, status: 400 });
+        };
       `,
     });
-
-    // Also intercept the wallet status fetch to return no-wallet
-    await page.route('**/wallet/status', (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ exists: false, locked: false }),
-      });
-    });
-
     await page.goto('/wallet-panel', { waitUntil: 'networkidle' });
-    await page.waitForTimeout(1500);
+  }
 
-    // Should show "Create Wallet" button
-    const createButton = page.getByText('Create New Wallet');
-    await expect(createButton).toBeVisible({ timeout: 5000 });
+  test('shows create/recover UI when no wallet exists', async ({ page }) => {
+    await noWallet(page);
+    await expect(page.getByText('No Wallet Found')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByText('Create New Wallet')).toBeVisible();
+    await expect(page.getByText('Recover Hodos Wallet')).toBeVisible();
+  });
 
-    // Should show "Recover Existing Wallet" option
-    const recoverButton = page.getByText('Recover Existing Wallet');
-    await expect(recoverButton).toBeVisible({ timeout: 5000 });
+  // B5-T1-P6 `P6-A13b` (owner K5): external-wallet (Centbee) recovery is not offered.
+  test('offers no external-wallet recovery', async ({ page }) => {
+    await noWallet(page);
+    // Anchor first: the no-wallet screen really rendered (not "service not running").
+    await expect(page.getByText('No Wallet Found')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByText('Recover Hodos Wallet')).toBeVisible();
+    await expect(page.getByText(/centbee/i)).toHaveCount(0);
+    await page.getByText('Recover Hodos Wallet').click();
+    await expect(page.getByText(/centbee/i)).toHaveCount(0);
+    const calls: string[] = await page.evaluate(() => (window as any).__walletCalls);
+    expect(calls.some((c) => c.includes('/wallet/recover-external'))).toBe(false);
   });
 });

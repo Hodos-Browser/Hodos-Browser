@@ -27,7 +27,7 @@ use crate::database::CertificateRepository;
 const MAX_OVERLAY_RETRIES: i32 = 20;
 
 /// Run the TaskReplayOverlay task
-pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Result<(), String> {
+pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
     // Ensure the overlay_retry_count column exists (idempotent)
     {
         let db = state.database.lock().map_err(|e| format!("DB lock: {}", e))?;
@@ -129,12 +129,8 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
 
         // Add merkle proof for publish tx via Services
         if let Ok(Some(proof_obj)) = crate::cache_helpers::fetch_tsc_proof_from_api(&state.services, publish_txid).await {
-            // resolve_block_height still needs a reqwest::Client because it hits a
-            // hash→height endpoint not yet on the Services facade. Out of T1 scope.
-            let block_height = resolve_block_height(&proof_obj, client).await;
-            if let Some(height) = block_height {
-                let mut tsc = proof_obj.clone();
-                tsc["height"] = serde_json::json!(height);
+            // B5-T1-P7a-2 `C15`: checked against our own headers before it is embedded.
+            if let Some(tsc) = crate::beef_helpers::embeddable_proof(publish_txid, &proof_obj, &state.services, &*state.chain_tracker).await {
                 if let Some(tx_idx) = beef.find_txid(publish_txid) {
                     let _ = beef.add_tsc_merkle_proof(publish_txid, tx_idx, &tsc);
                 }
@@ -145,8 +141,7 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
         beef.set_main_transaction(spending_raw_tx);
         {
             let db = state.database.lock().map_err(|e| format!("DB lock: {}", e))?;
-            let proven_tx_repo = crate::database::ProvenTxRepository::new(db.connection());
-            if let Ok(Some(tsc_json)) = proven_tx_repo.get_merkle_proof_as_tsc(&spending_txid) {
+            if let Ok(Some(tsc_json)) = crate::proof_store::stored_proof_for_beef(db.connection(), &*state.chain_tracker, &spending_txid) {
                 if let Some(tx_idx) = beef.find_txid(&spending_txid) {
                     let _ = beef.add_tsc_merkle_proof(&spending_txid, tx_idx, &tsc_json);
                 }
@@ -223,21 +218,3 @@ fn increment_retry_count(state: &web::Data<AppState>, publish_txid: &str) {
     }
 }
 
-/// Resolve block height from a TSC proof's target (block hash) via WoC
-async fn resolve_block_height(
-    proof_obj: &serde_json::Value,
-    client: &reqwest::Client,
-) -> Option<u32> {
-    if let Some(h) = proof_obj.get("height").and_then(|v| v.as_u64()).filter(|h| *h > 0) {
-        return Some(h as u32);
-    }
-    if let Some(h) = proof_obj.get("blockHeight").and_then(|v| v.as_u64()).filter(|h| *h > 0) {
-        return Some(h as u32);
-    }
-    let target = proof_obj.get("target").and_then(|v| v.as_str()).filter(|t| !t.is_empty())?;
-    let header_url = format!("https://api.whatsonchain.com/v1/bsv/main/block/hash/{}", target);
-    let resp = client.get(&header_url).send().await.ok()?;
-    if !resp.status().is_success() { return None; }
-    let header_json: serde_json::Value = resp.json().await.ok()?;
-    header_json.get("height").and_then(|v| v.as_u64()).map(|h| h as u32)
-}

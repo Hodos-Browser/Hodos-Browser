@@ -56,6 +56,25 @@ pub struct BackupPayload {
     pub domain_permissions: Vec<BackupDomainPermission>,
     #[serde(default)]
     pub cert_field_permissions: Vec<BackupCertFieldPermission>,
+    /// B5-T1-P7b (owner, 2026-10-10): held PeerPay payments, as small as possible — the derivation
+    /// and txid only, and only while held. The message body stays local.
+    #[serde(default)]
+    pub peerpay_held: Vec<BackupHeldPayment>,
+}
+
+/// A held PeerPay payment: what a restored wallet needs to derive the key and find the coin.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct BackupHeldPayment {
+    pub message_id: String,
+    pub sender: String,
+    pub derivation_prefix: String,
+    pub derivation_suffix: String,
+    pub txid: String,
+    pub held_at: i64,
+    /// The stored message (base64), only for a payment not on chain yet — the one case a restore
+    /// cannot recover from the chain (owner, 2026-10-11). Gone from the next backup once credited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -785,20 +804,10 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
         rows
     };
 
-    // Block headers
-    let block_headers = {
-        let mut stmt = conn.prepare(
-            "SELECT id, block_hash, height, header_hex, cached_at FROM block_headers ORDER BY id ASC"
-        )?;
-        let rows = stmt.query_map([], |row| Ok(BackupBlockHeader {
-            id: row.get(0)?,
-            block_hash: row.get(1)?,
-            height: row.get(2)?,
-            header_hex: row.get(3)?,
-            cached_at: row.get(4)?,
-        }))?.collect::<Result<Vec<_>>>()?;
-        rows
-    };
+    // Block headers: derived data, never exported (B5-T1-P7a-1, owner decision 1, 2026-10-09). The
+    // field stays, empty, so an older Hodos can still read this payload; a restored wallet re-syncs
+    // its headers from the compiled checkpoint and refetches any cached ones on demand.
+    let block_headers: Vec<BackupBlockHeader> = Vec::new();
 
     // Domain permissions (Phase 2.1)
     let domain_permissions = {
@@ -835,6 +844,44 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
         rows
     };
 
+    // B5-T1-P7b: a held row is carried only when it names a derivation and a txid — garbage with
+    // nothing to recover stays local. The prefix and suffix are sender text: bounded (a BRC-29 value
+    // is a short base64 string), so no sender can grow the backup.
+    // Review 164 #5: bodies are carried newest first up to 256 KiB in all (each ≤ 32 KiB, in SQL), so
+    // no sender can grow the on-chain backup; a row past the budget is carried without its body.
+    let mut body_budget: usize = 256 * 1024;
+    const HELD_DERIVATION_MAX: usize = 128;
+    let restorable = |reason: &str| matches!(reason,
+        "chain_check_error" | "broadcast_failed" | "headers_unavailable" | "recent_bad_proof" | "non_final" | "non_final_far"
+        | "missing_parent" | "restored");
+    // Review 164 #7: rows the backup will not carry are dropped BEFORE the body budget is spent.
+    let mut held_rows: Vec<_> = crate::database::PeerPayRepository::held_for_backup(conn)?
+        .into_iter()
+        .filter(|m| restorable(&m.reason) && m.message_id.len() <= HELD_DERIVATION_MAX
+            && m.sender.len() == 66 && m.sender.bytes().all(|c| c.is_ascii_hexdigit())
+            && m.derivation_prefix.as_ref().map(|s| s.len() <= HELD_DERIVATION_MAX).unwrap_or(false)
+            && m.derivation_suffix.as_ref().map(|s| s.len() <= HELD_DERIVATION_MAX).unwrap_or(false)
+            && m.txid.as_ref().map(|t| t.len() == 64 && t.bytes().all(|c| c.is_ascii_hexdigit())).unwrap_or(false))
+        .collect();
+    held_rows.sort_by(|a, b| b.held_at.cmp(&a.held_at));
+    for m in held_rows.iter_mut() {
+        if let Some(body) = &m.body {
+            if body.len() <= body_budget { body_budget -= body.len(); } else { m.body = None; }
+        }
+    }
+    held_rows.sort_by(|a, b| (a.held_at, &a.message_id).cmp(&(b.held_at, &b.message_id)));
+    // Every row here passed the carry rules above (one copy of them — review 164-5 #13).
+    let peerpay_held = held_rows
+        .into_iter()
+        .filter_map(|m| match (m.derivation_prefix, m.derivation_suffix, m.txid) {
+            (Some(derivation_prefix), Some(derivation_suffix), Some(txid)) => Some(BackupHeldPayment {
+                message_id: m.message_id, sender: m.sender, derivation_prefix, derivation_suffix, txid, held_at: m.held_at,
+                body: m.body.map(|b| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b)),
+            }),
+            _ => None,
+        })
+        .collect();
+
     let payload = BackupPayload {
         version: 1,
         identity_key: identity_key.to_string(),
@@ -860,6 +907,7 @@ pub fn collect_payload(conn: &Connection, identity_key: &str, mnemonic: &str) ->
         block_headers,
         domain_permissions,
         cert_field_permissions,
+        peerpay_held,
     };
 
     info!("   Collected: {} users, {} addresses, {} txs, {} outputs, {} certs",
@@ -1367,6 +1415,12 @@ pub fn import_to_db_with_ids(
             conn.execute("COMMIT", [])
                 .map_err(|e| format!("Failed to commit: {}", e))?;
             info!("   Import committed successfully");
+            // B5-T1-P3: the money index is derived and never carried in a backup —
+            // rebuild it from the imported `outputs` (the insert triggers have already
+            // filled it; this is the backstop, and it reports any difference).
+            if let Err(e) = crate::database::migrations::rebuild_money_index(conn) {
+                log::warn!("   ⚠️  Money index rebuild after import failed: {} — it is rebuilt at the next start", e);
+            }
             Ok(())
         }
         Err(e) => {
@@ -1450,6 +1504,12 @@ fn import_entities(conn: &Connection, payload: &BackupPayload, target_wallet_id:
     }
 
     // 6. outputs (FK → users, transactions, output_baskets, spent_by → transactions) — remap user_id
+    //
+    // ⛔ B5-T1-P5 (owner Q5, 2026-10-05): the payload's `change` is NOT trusted. Every row
+    // is imported `change = 0` (not money); the classification seam re-stamps what it
+    // proves (`classify::stamp_pending`, after the import and on every sync tick). A
+    // forged or old backup cannot mark a coin money — and old backups carry `change = 0`
+    // on every received payment anyway.
     for o in &payload.outputs {
         let locking_script = match &o.locking_script {
             Some(b64) => Some(base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64)
@@ -1463,7 +1523,7 @@ fn import_entities(conn: &Connection, payload: &BackupPayload, target_wallet_id:
              script_length, script_offset, locking_script, created_at, updated_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
             rusqlite::params![o.output_id, target_user_id, o.transaction_id, o.basket_id,
-                             o.spendable as i32, o.change as i32, o.vout, o.satoshis,
+                             o.spendable as i32, 0i32, o.vout, o.satoshis,
                              o.provided_by, o.purpose, o.output_type, o.output_description,
                              o.txid, o.sender_identity_key, o.derivation_prefix, o.derivation_suffix,
                              o.custom_instructions, o.spent_by, o.sequence_number, o.spending_description,
@@ -1592,6 +1652,27 @@ fn import_entities(conn: &Connection, payload: &BackupPayload, target_wallet_id:
         }
     }
 
+    // 16b. held PeerPay payments (B5-T1-P7b): restored without a body, due at the next poll, which
+    // fetches the transaction by txid and checks it against our own headers. A payment already
+    // credited in this wallet is not held again.
+    for h in &payload.peerpay_held {
+        // V4: a payment already among the restored outputs (credited before the backup) is not held
+        // again. The body, when carried, is bounded like any held message.
+        let body: Option<Vec<u8>> = h.body.as_deref()
+            .and_then(|b| base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b).ok())
+            .filter(|b| b.len() <= crate::database::peerpay_repo::HELD_BODY_MAX);
+        conn.execute(
+            "INSERT OR IGNORE INTO peerpay_held_messages
+                (message_id, sender, body, derivation_prefix, derivation_suffix, txid, reason, held_at, lock_time, next_check_at, attempts)
+             SELECT ?1, ?2, ?8, ?3, ?4, ?5, 'restored', ?6, NULL, 0, 0
+              WHERE NOT EXISTS (SELECT 1 FROM peerpay_received WHERE message_id = ?1)
+                AND NOT EXISTS (SELECT 1 FROM outputs WHERE txid = ?5 AND derivation_suffix = ?3 || ' ' || ?4)
+                AND (SELECT COUNT(*) FROM peerpay_held_messages) < ?7",
+            rusqlite::params![h.message_id, h.sender, h.derivation_prefix, h.derivation_suffix, h.txid, h.held_at,
+                              crate::database::peerpay_repo::HELD_TOTAL_MAX, body],
+        ).map_err(|e| format!("Insert peerpay_held_messages: {}", e))?;
+    }
+
     // 17. settings (no FKs)
     for s in &payload.settings {
         conn.execute(
@@ -1620,12 +1701,10 @@ fn import_entities(conn: &Connection, payload: &BackupPayload, target_wallet_id:
         ).map_err(|e| format!("Insert parent_transactions: {}", e))?;
     }
 
-    // 20. block_headers (no FKs)
-    for bh in &payload.block_headers {
-        conn.execute(
-            "INSERT INTO block_headers (id, block_hash, height, header_hex, cached_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![bh.id, bh.block_hash, bh.height, bh.header_hex, bh.cached_at],
-        ).map_err(|e| format!("Insert block_headers: {}", e))?;
+    // 20. block_headers: never imported (B5-T1-P7a-1, owner decision 1). Header data is derived,
+    // and a header a backup carries is a claim, not a check. Older payloads still hold rows here.
+    if !payload.block_headers.is_empty() {
+        info!("   Skipped {} cached block header(s) from the backup (headers are re-synced, never restored)", payload.block_headers.len());
     }
 
     info!("   Imported: {} users, {} addresses, {} txs, {} outputs, {} certs, {} proven_txs",
@@ -2028,6 +2107,35 @@ pub fn export_to_json(db: &WalletDatabase, dest_path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    // ---- B5-T1-P7a-1 `P7a-A19`: header data is never backed up or restored ----------
+
+    fn a19_db(tag: &str) -> crate::database::WalletDatabase {
+        let path = std::env::temp_dir().join(format!("hodos_a19_{}_{}_{}.db", tag, std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        crate::database::WalletDatabase::new(path).unwrap()
+    }
+
+    #[test]
+    fn a19_headers_are_never_exported_and_never_imported() {
+        let src = a19_db("src");
+        src.connection().execute("INSERT INTO wallets (mnemonic, created_at, updated_at) VALUES ('x', 0, 0)", []).unwrap();
+        src.connection().execute(
+            "INSERT INTO block_headers (block_hash, height, header_hex, cached_at) VALUES ('aa', 970000, '', 0)", []).unwrap();
+        crate::database::VerifiedHeaderRepository::new(src.connection())
+            .insert("bb", 970001, "aa", &[0u8; 80], &[0u8; 32], true).unwrap();
+        let mut payload = collect_payload(src.connection(), "k", "").unwrap();
+        assert!(payload.block_headers.is_empty(), "the export carries no headers");
+        assert!(!serde_json::to_string(&payload).unwrap().contains("verified_headers"));
+
+        // An older backup still carries rows: they are not imported.
+        payload.block_headers.push(BackupBlockHeader { id: 1, block_hash: "cc".into(), height: 970002, header_hex: "00".into(), cached_at: 0 });
+        let dst = a19_db("dst");
+        dst.connection().execute("INSERT INTO wallets (mnemonic, created_at, updated_at) VALUES ('x', 0, 0)", []).unwrap();
+        import_to_db(dst.connection(), &payload).unwrap();
+        let n = |t: &str| -> i64 { dst.connection().query_row(&format!("SELECT COUNT(*) FROM {}", t), [], |r| r.get(0)).unwrap() };
+        assert_eq!((n("block_headers"), n("verified_headers")), (0, 0));
+    }
+
     // ---- F7 path-hardening tests -------------------------------------------
 
     #[cfg(windows)]
@@ -2163,6 +2271,7 @@ mod tests {
             block_headers: vec![],
             domain_permissions: vec![],
             cert_field_permissions: vec![],
+            peerpay_held: vec![],
         };
 
         // Serialize to JSON, compress, encrypt
@@ -2241,6 +2350,7 @@ mod tests {
             block_headers: vec![],
             domain_permissions: vec![],
             cert_field_permissions: vec![],
+            peerpay_held: vec![],
         };
 
         // Encrypt with correct key

@@ -81,6 +81,22 @@ function PinInput({
   );
 }
 
+/**
+ * B5-T1-P6: what a restore's late-payment scan status means for the user. The scan runs
+ * in the background after the restore answers (the wallet panel shows its progress and
+ * result); here we only say that it is running, or why it did not run.
+ */
+function lateScanNotes(scan: { ran?: unknown; reason?: string } | undefined): string[] {
+  if (!scan) return [];
+  if (scan.ran === 'background') {
+    return ['Checking for payments that arrived after the backup — this continues in the background, and your balance updates when it finishes.'];
+  }
+  if (scan.ran === false) {
+    return [`The check for payments received after the backup did not run (${scan.reason || 'unknown reason'}). Use Find late payments once this is resolved.`];
+  }
+  return [];
+}
+
 export default function WalletPanelPage() {
   const [, setPanelHeight] = useState<number | null>(null);
 
@@ -154,6 +170,8 @@ export default function WalletPanelPage() {
     total_balance: number;
     spendable_utxos: number;
     fromBackup: boolean;
+    /** What the restore could not do or check (B5-T1-P6) — shown, never hidden. */
+    warnings: string[];
   } | null>(null);
 
   // Backup import state
@@ -168,6 +186,8 @@ export default function WalletPanelPage() {
     outputs: number;
     addresses: number;
     certificates: number;
+    /** The late-payment scan's status (B5-T1-P6) — shown, never hidden. */
+    warnings: string[];
   } | null>(null);
 
   // PIN state (for initial wallet creation/recovery only — not for unlock)
@@ -184,22 +204,6 @@ export default function WalletPanelPage() {
   const [unlockError, setUnlockError] = useState<string | null>(null);
 
   const [cancelling, setCancelling] = useState(false);
-
-  // Centbee recovery state
-  const [showCentbeeRecovery, setShowCentbeeRecovery] = useState(false);
-  const [centbeeWords, setCentbeeWords] = useState<string[]>(Array(12).fill(''));
-  const [centbeePinDigits, setCentbeePinDigits] = useState<string[]>(['', '', '', '']);
-  const [centbeeRecovering, setCentbeeRecovering] = useState(false);
-  const [centbeeError, setCentbeeError] = useState<string | null>(null);
-  const [centbeeProgress, setCentbeeProgress] = useState<string | null>(null);
-  const [centbeeResult, setCentbeeResult] = useState<{
-    utxos_found: number;
-    total_balance: number;
-    sweep_txids: string[];
-    total_fees: number;
-    brc42_balance: number;
-    message: string;
-  } | null>(null);
 
   // Prevent close during mnemonic display or PIN creation steps.
   // C++ sets g_wallet_overlay_prevent_close=true at overlay creation (synchronous).
@@ -287,12 +291,6 @@ export default function WalletPanelPage() {
         setRecoveryError(null);
         setRecoveryResult(null);
         setShowImportForm(false);
-        setShowCentbeeRecovery(false);
-        setCentbeeWords(Array(12).fill(''));
-        setCentbeePinDigits(['', '', '', '']);
-        setCentbeeError(null);
-        setCentbeeProgress(null);
-        setCentbeeResult(null);
         setMnemonic(null);
         setPinStep(null);
         setPendingAction(null);
@@ -317,12 +315,6 @@ export default function WalletPanelPage() {
     // Reset all setup/recovery form state so reopening the panel is clean
     setShowRecoveryInput(false);
     setRecoveryWords(Array(12).fill(''));
-    setShowCentbeeRecovery(false);
-    setCentbeeWords(Array(12).fill(''));
-    setCentbeePinDigits(['', '', '', '']);
-    setCentbeeError(null);
-    setCentbeeProgress(null);
-    setCentbeeResult(null);
 
     if (window.hodosBrowser?.overlay?.close) {
       window.hodosBrowser.overlay.close();
@@ -506,6 +498,11 @@ export default function WalletPanelPage() {
 
       if (data.success && data.backup_found) {
         const restored = data.restored || {};
+        const warnings: string[] = [];
+        if (data.reconcile && data.reconcile.reconciled === false) {
+          warnings.push(data.reconcile.warning || 'The backup could not be fully reconciled. Do not spend until this is resolved.');
+        }
+        warnings.push(...lateScanNotes(data.scan));
         setRecoveryResult({
           transactions: restored.transactions || 0,
           outputs: restored.outputs || 0,
@@ -514,6 +511,7 @@ export default function WalletPanelPage() {
           total_balance: data.balance_satoshis || 0,
           spendable_utxos: data.spendable_utxos || 0,
           fromBackup: true,
+          warnings,
         });
       } else if (data.backup_found === false) {
         // No backup token — fall back to mnemonic-only recovery (gap-limit chain scan)
@@ -535,6 +533,10 @@ export default function WalletPanelPage() {
               total_balance: fb.total_balance || 0,
               spendable_utxos: fb.utxos_found || 0,
               fromBackup: false,
+              // B5-T1-P6: the scan runs in the background; the wallet panel shows its progress.
+              warnings: fb.scan_running
+                ? ['Searching the blockchain for your coins — this continues in the background, and your balance updates when it finishes.']
+                : (fb.message ? [fb.message] : []),
             });
           } else {
             setRecoveryError(fb.error || fb.message || 'Mnemonic recovery failed.');
@@ -653,6 +655,7 @@ export default function WalletPanelPage() {
         outputs: data.outputs || 0,
         addresses: data.addresses || 0,
         certificates: data.certificates || 0,
+        warnings: lateScanNotes(data.scan),
       });
     } catch {
       setImportError('Failed to connect to wallet server');
@@ -670,123 +673,6 @@ export default function WalletPanelPage() {
     setImportPassword('');
     setImportBackupText('');
     setImportFile(null);
-    setWalletStatus('exists');
-  };
-
-  // --- Centbee Recovery Flow ---
-
-  const handleCentbeeWordChange = (index: number, value: string) => {
-    const pastedWords = value.trim().split(/\s+/);
-    if (pastedWords.length > 1) {
-      const newWords = [...centbeeWords];
-      for (let i = 0; i < 12; i++) {
-        const wi = i - index;
-        if (wi >= 0 && wi < pastedWords.length) {
-          newWords[i] = pastedWords[wi].toLowerCase();
-        }
-      }
-      setCentbeeWords(newWords);
-      setCentbeeError(null);
-      const lastFilled = Math.min(index + pastedWords.length - 1, 11);
-      const el = document.getElementById(`centbee-word-${lastFilled}`);
-      if (el) setTimeout(() => el.focus(), 0);
-      return;
-    }
-    const newWords = [...centbeeWords];
-    newWords[index] = value.toLowerCase().replace(/\s/g, '');
-    setCentbeeWords(newWords);
-    setCentbeeError(null);
-  };
-
-  const handleCentbeeWordKeyDown = (index: number, e: React.KeyboardEvent) => {
-    if (e.key === ' ' || e.key === 'Tab') {
-      if (index < 11) {
-        e.preventDefault();
-        const el = document.getElementById(`centbee-word-${index + 1}`);
-        if (el) el.focus();
-      }
-    } else if (e.key === 'Backspace' && centbeeWords[index] === '' && index > 0) {
-      e.preventDefault();
-      const el = document.getElementById(`centbee-word-${index - 1}`);
-      if (el) el.focus();
-    }
-  };
-
-  const handleCentbeeRecover = async () => {
-    // Validate words
-    const filledWords = centbeeWords.map(w => w.trim().toLowerCase()).filter(w => w.length > 0);
-    if (filledWords.length !== 12) {
-      setCentbeeError(`Expected 12 words, got ${filledWords.length}. Fill in all boxes.`);
-      return;
-    }
-    const emptyBox = centbeeWords.findIndex(w => w.trim() === '');
-    if (emptyBox !== -1) {
-      setCentbeeError(`Word ${emptyBox + 1} is empty.`);
-      return;
-    }
-
-    // Validate PIN
-    const pin = centbeePinDigits.join('');
-    if (pin.length !== 4 || !/^\d{4}$/.test(pin)) {
-      setCentbeeError('Enter your 4-digit Centbee PIN.');
-      return;
-    }
-
-    const mnemonicPhrase = centbeeWords.map(w => w.trim().toLowerCase()).join(' ');
-    setCentbeeRecovering(true);
-    setCentbeeError(null);
-    setCentbeeProgress('Scanning Centbee addresses for funds...');
-
-    try {
-      const res = await walletFetch('/wallet/recover-external', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          mnemonic: mnemonicPhrase,
-          passphrase: pin,
-          wallet_type: 'centbee',
-          gap_limit: 25,
-          confirm: true,
-        }),
-      });
-
-      const data = await res.json();
-
-      if (res.status === 409) {
-        setCentbeeError('A wallet already exists. Delete the existing wallet first.');
-        setCentbeeRecovering(false);
-        setCentbeeProgress(null);
-        return;
-      }
-
-      if (data.success) {
-        setCentbeeResult({
-          utxos_found: data.utxos_found || 0,
-          total_balance: data.total_balance || 0,
-          sweep_txids: data.sweep_txids || [],
-          total_fees: data.total_fees || 0,
-          brc42_balance: data.brc42_balance || 0,
-          message: data.message || 'Migration complete!',
-        });
-      } else {
-        setCentbeeError(data.error || 'No funds found — check your mnemonic and Centbee PIN.');
-      }
-    } catch {
-      setCentbeeError('Failed to connect to wallet server');
-    }
-
-    setCentbeeRecovering(false);
-    setCentbeeProgress(null);
-  };
-
-  const handleCentbeeComplete = async () => {
-    localStorage.setItem('hodos_wallet_exists', 'true');
-    await cacheIdentityKey();
-
-    setCentbeeResult(null);
-    setShowCentbeeRecovery(false);
-    setCentbeeWords(Array(12).fill(''));
-    setCentbeePinDigits(['', '', '', '']);
     setWalletStatus('exists');
   };
 
@@ -984,6 +870,23 @@ export default function WalletPanelPage() {
               </div>
             </div>
 
+            {recoveryResult.warnings.length > 0 && (
+              <div style={{
+                background: 'rgba(166, 124, 0, 0.1)',
+                border: '2px solid #f9a825',
+                borderRadius: '8px',
+                padding: '12px 16px',
+                marginBottom: '16px',
+                textAlign: 'left',
+              }}>
+                {recoveryResult.warnings.map((w, i) => (
+                  <p key={i} style={{ color: tokens.textSecondary, fontSize: '12px', margin: i ? '6px 0 0' : 0, lineHeight: '1.5' }}>
+                    {w}
+                  </p>
+                ))}
+              </div>
+            )}
+
             <HodosButton
               variant="primary"
               onClick={handleRecoveryComplete}
@@ -1136,6 +1039,23 @@ export default function WalletPanelPage() {
               </div>
             </div>
 
+            {importResult.warnings.length > 0 && (
+              <div style={{
+                background: 'rgba(166, 124, 0, 0.1)',
+                border: '2px solid #f9a825',
+                borderRadius: '8px',
+                padding: '12px 16px',
+                marginBottom: '16px',
+                textAlign: 'left',
+              }}>
+                {importResult.warnings.map((w, i) => (
+                  <p key={i} style={{ color: tokens.textSecondary, fontSize: '12px', margin: i ? '6px 0 0' : 0, lineHeight: '1.5' }}>
+                    {w}
+                  </p>
+                ))}
+              </div>
+            )}
+
             <HodosButton
               variant="primary"
               onClick={handleImportComplete}
@@ -1254,192 +1174,9 @@ export default function WalletPanelPage() {
               Back
             </HodosButton>
           </>
-        ) : centbeeResult ? (
-          /* Centbee migration success */
-          <>
-            <div style={{ fontSize: '48px', marginBottom: '16px' }}>&#x2705;</div>
-            <h3 style={{ margin: '0 0 8px', color: tokens.textPrimary, fontSize: '18px' }}>Centbee Migration Complete</h3>
-            <p style={{ color: tokens.textSecondary, fontSize: '13px', margin: '0 0 16px' }}>
-              {centbeeResult.message}
-            </p>
-
-            <div style={{
-              background: tokens.bgElevated,
-              border: `2px solid ${tokens.borderDefault}`,
-              borderRadius: '8px',
-              padding: '16px',
-              marginBottom: '16px',
-              textAlign: 'left',
-            }}>
-              <div style={{ fontSize: '13px', color: tokens.textPrimary, marginBottom: '8px' }}>
-                <strong>UTXOs found:</strong> {centbeeResult.utxos_found}
-              </div>
-              <div style={{ fontSize: '13px', color: tokens.textPrimary, marginBottom: '8px' }}>
-                <strong>Original balance:</strong> {(centbeeResult.total_balance / 100_000_000).toFixed(8)} BSV
-                <span style={{ color: tokens.textMuted, marginLeft: '8px' }}>
-                  ({centbeeResult.total_balance.toLocaleString()} sats)
-                </span>
-              </div>
-              <div style={{ fontSize: '13px', color: tokens.textPrimary, marginBottom: '8px' }}>
-                <strong>Fees:</strong> {centbeeResult.total_fees.toLocaleString()} sats
-              </div>
-              <div style={{ fontSize: '13px', color: tokens.textPrimary }}>
-                <strong>BRC-42 balance:</strong> {(centbeeResult.brc42_balance / 100_000_000).toFixed(8)} BSV
-                <span style={{ color: tokens.textMuted, marginLeft: '8px' }}>
-                  ({centbeeResult.brc42_balance.toLocaleString()} sats)
-                </span>
-              </div>
-            </div>
-
-            {/* Migration notice */}
-            <div style={{
-              background: 'rgba(166, 124, 0, 0.1)',
-              border: '2px solid #f9a825',
-              borderRadius: '8px',
-              padding: '12px 16px',
-              marginBottom: '16px',
-              textAlign: 'left',
-            }}>
-              <p style={{ color: tokens.gold, fontSize: '12px', fontWeight: 700, margin: '0 0 6px' }}>
-                Migration Notice
-              </p>
-              <p style={{ color: tokens.textSecondary, fontSize: '12px', margin: 0, lineHeight: '1.5' }}>
-                Your wallet has been migrated to BRC-42 derivation. Your mnemonic is the same &mdash; only the address derivation scheme changed.
-              </p>
-            </div>
-
-            <HodosButton
-              variant="primary"
-              onClick={handleCentbeeComplete}
-              style={{ width: '100%' }}
-            >
-              Continue to Wallet
-            </HodosButton>
-          </>
-        ) : showCentbeeRecovery ? (
-          /* Centbee recovery form */
-          <>
-            <div style={{ fontSize: '48px', marginBottom: '16px' }}>&#x1F4F1;</div>
-            <h3 style={{ margin: '0 0 8px', color: tokens.textPrimary, fontSize: '18px' }}>Recover from Centbee</h3>
-            <p style={{ color: tokens.textSecondary, fontSize: '13px', margin: '0 0 12px' }}>
-              Enter your Centbee mnemonic and PIN. Your funds will be swept from Centbee addresses to BRC-42.
-            </p>
-
-            {/* 12-box mnemonic grid */}
-            <div style={{
-              display: 'grid',
-              gridTemplateColumns: '1fr 1fr 1fr',
-              gap: '8px',
-              marginBottom: '12px',
-            }}>
-              {centbeeWords.map((word, i) => (
-                <div key={i} style={{ position: 'relative' }}>
-                  <span style={{
-                    position: 'absolute',
-                    left: '8px',
-                    top: '50%',
-                    transform: 'translateY(-50%)',
-                    fontSize: '10px',
-                    color: tokens.textMuted,
-                    pointerEvents: 'none',
-                    fontFamily: tokens.fontMono,
-                  }}>
-                    {i + 1}.
-                  </span>
-                  <input
-                    id={`centbee-word-${i}`}
-                    type="text"
-                    value={word}
-                    onChange={e => handleCentbeeWordChange(i, e.target.value)}
-                    onKeyDown={e => handleCentbeeWordKeyDown(i, e)}
-                    disabled={centbeeRecovering}
-                    autoComplete="off"
-                    spellCheck={false}
-                    style={{
-                      width: '100%',
-                      padding: '10px 8px 10px 28px',
-                      borderRadius: '6px',
-                      border: `2px solid ${word ? tokens.gold : tokens.borderDefault}`,
-                      background: tokens.bgElevated,
-                      fontFamily: tokens.fontMono,
-                      fontSize: '13px',
-                      color: tokens.textPrimary,
-                      boxSizing: 'border-box',
-                      outline: 'none',
-                      transition: 'border-color 0.15s',
-                    }}
-                    onFocus={e => { e.target.style.borderColor = tokens.gold; }}
-                    onBlur={e => { e.target.style.borderColor = word ? tokens.gold : tokens.borderDefault; }}
-                  />
-                </div>
-              ))}
-            </div>
-
-            {/* Centbee PIN */}
-            <p style={{ color: tokens.textPrimary, fontSize: '13px', fontWeight: 600, margin: '0 0 8px', textAlign: 'left' }}>
-              Centbee PIN
-            </p>
-            <PinInput digits={centbeePinDigits} onChange={d => { setCentbeePinDigits(d); setCentbeeError(null); }} disabled={centbeeRecovering} />
-            <p style={{ color: tokens.textMuted, fontSize: '11px', margin: '8px 0 12px', fontStyle: 'italic' }}>
-              This is the PIN you set in Centbee — it's needed to derive your addresses.
-            </p>
-
-            {centbeeError && (
-              <p style={{
-                color: tokens.error,
-                fontSize: '12px',
-                margin: '0 0 12px',
-                textAlign: 'left',
-              }}>
-                {centbeeError}
-              </p>
-            )}
-
-            {centbeeRecovering && centbeeProgress && (
-              <div style={{
-                background: tokens.bgElevated,
-                border: `2px solid ${tokens.borderDefault}`,
-                borderRadius: '8px',
-                padding: '12px 16px',
-                marginBottom: '12px',
-                textAlign: 'left',
-              }}>
-                <p style={{ color: tokens.textPrimary, fontSize: '13px', fontWeight: 600, margin: '0 0 4px' }}>
-                  {centbeeProgress}
-                </p>
-                <p style={{ color: tokens.textMuted, fontSize: '12px', margin: 0 }}>
-                  This may take a minute. Scanning addresses and sweeping funds to your new wallet.
-                </p>
-              </div>
-            )}
-
-            <HodosButton
-              variant="primary"
-              onClick={handleCentbeeRecover}
-              disabled={centbeeRecovering || centbeeWords.every(w => w.trim() === '')}
-              loading={centbeeRecovering}
-              loadingText="Recovering..."
-              style={{ width: '100%', marginBottom: '12px' }}
-            >
-              Recover from Centbee
-            </HodosButton>
-
-            <HodosButton
-              variant="secondary"
-              onClick={() => {
-                setShowCentbeeRecovery(false);
-                setCentbeeWords(Array(12).fill(''));
-                setCentbeePinDigits(['', '', '', '']);
-                setCentbeeError(null);
-              }}
-              disabled={centbeeRecovering}
-              style={{ width: '100%' }}
-            >
-              Back
-            </HodosButton>
-          </>
         ) : !mnemonic ? (
-          /* Default: Create + Recover + Import + Centbee buttons */
+          /* Default: Create + Recover buttons. (External-wallet recovery was
+             removed from the panel — owner, B5-T1-P6 K5; the backend endpoint remains.) */
           <>
             <div style={{ fontSize: '48px', marginBottom: '16px' }}>&#x1F512;</div>
             <h3 style={{ margin: '0 0 8px', color: tokens.textPrimary, fontSize: '18px' }}>No Wallet Found</h3>
@@ -1466,14 +1203,6 @@ export default function WalletPanelPage() {
               style={{ width: '100%', marginBottom: '12px' }}
             >
               Recover Hodos Wallet
-            </HodosButton>
-
-            <HodosButton
-              variant="secondary"
-              onClick={() => setShowCentbeeRecovery(true)}
-              style={{ width: '100%', marginBottom: '12px' }}
-            >
-              Recover from Centbee
             </HodosButton>
 
             {/* Import from Backup File — hidden for now, backend still supports it */}

@@ -246,7 +246,18 @@ impl WalletDatabase {
                 // entry. That makes the failure self-healing in one prompt instead of
                 // permanent.
                 match Self::validated_mnemonic(mnemonic) {
-                    Ok(good) => { self.cached_mnemonic = Some(good); Ok(true) }
+                    Ok(good) => match self.phrase_belongs_to_this_wallet(&good) {
+                        Ok(()) => { self.cached_mnemonic = Some(good); Ok(true) }
+                        Err(why) => {
+                            // ⛔ B5-T1-P2 (P2-A7/A8): a VALID phrase can still be another
+                            // wallet's (a stale entry, a shared Keychain service name, a copied
+                            // profile). Caching it would run this wallet on another wallet's keys.
+                            // Same recovery as a malformed entry: stay locked, the PIN screen
+                            // rewrites the entry. ⛔ Never log the phrase or either key.
+                            error!("🔑 Credential-store auto-unlock REJECTED: {} — leaving the wallet locked so the PIN screen can repair the stored entry.", why);
+                            Ok(false)
+                        }
+                    },
                     Err(e) => {
                         error!("🔑 Credential-store auto-unlock REJECTED: {} — the stored \
                                 value is not a recovery phrase. Leaving the wallet locked so \
@@ -261,6 +272,24 @@ impl WalletDatabase {
                     Some(format!("DPAPI unlock failed: {}", e))
                 ))
             }
+        }
+    }
+
+    /// B5-T1-P2: does `phrase` derive this wallet's master public key
+    /// (`users.identity_key`)? The `Err` text names the reason only — never the phrase,
+    /// never a key. A wallet with no user row cannot be checked and is refused
+    /// (fail closed: the PIN still unlocks it).
+    fn phrase_belongs_to_this_wallet(&self, phrase: &str) -> std::result::Result<(), String> {
+        let expected = super::UserRepository::new(&self.conn)
+            .get_default()
+            .map_err(|e| format!("could not read this wallet's identity key ({})", e))?
+            .map(|u| u.identity_key)
+            .ok_or_else(|| "this wallet has no identity key to check against".to_string())?;
+        let actual = super::helpers::master_public_key_hex_from_phrase(phrase)?;
+        if actual.eq_ignore_ascii_case(expected.trim()) {
+            Ok(())
+        } else {
+            Err("the stored recovery phrase belongs to a different wallet (its master public key is not this wallet's identity key)".to_string())
         }
     }
 
@@ -1082,6 +1111,70 @@ impl WalletDatabase {
             info!("   ✅ Schema V25 applied");
         }
 
+        if current_version < 26 {
+            // B5-T1-P4 (owner decision 1 + §12 Q1, 2026-10-02): inline script cap 1024 B.
+            info!("   Applying migration V26 (inline script cap)...");
+            migrations::migrate_v25_to_v26(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (26)", [])?;
+            info!("   ✅ Schema V26 applied");
+        }
+
+        if current_version < 27 {
+            // B5-T1-P3 (owner decision 2a, invariant 2 approved 2026-09-27; kickoff Q5
+            // 2026-10-04): the money index `money_utxos`, kept by triggers.
+            info!("   Applying migration V27 (money index)...");
+            migrations::migrate_v26_to_v27(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (27)", [])?;
+            info!("   ✅ Schema V27 applied");
+        }
+
+        if current_version < 28 {
+            // B5-T1-P5 (owner decisions 2 + 7; invariant 2 approved 2026-10-05): money
+            // only when the classification seam stamped `change = 1`.
+            info!("   Applying migration V28 (money = stamped coins only)...");
+            migrations::migrate_v27_to_v28(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (28)", [])?;
+            info!("   ✅ Schema V28 applied");
+        }
+
+        if current_version < 29 {
+            // B5-T1-P7a-1 (owner decision 1; invariant 2 approved 2026-10-09): the verified
+            // block-header chain.
+            info!("   Applying migration V29 (verified_headers)...");
+            migrations::migrate_v28_to_v29(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (29)", [])?;
+            info!("   ✅ Schema V29 applied");
+        }
+
+        if current_version < 30 {
+            // B5-T1-P7b (owner decision 1; invariant 2 approved 2026-10-10): PeerPay messages held
+            // before they are acknowledged.
+            info!("   Applying migration V30 (peerpay_held_messages)...");
+            migrations::migrate_v29_to_v30(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (30)", [])?;
+            info!("   ✅ Schema V30 applied");
+        }
+
+        if current_version < 31 {
+            // B5-T5-P7a (invariant 2 approved 2026-10-15): which MessageBox hosts took an outbox message.
+            info!("   Applying migration V31 (peerpay_outbox delivered_hosts, message_request)...");
+            migrations::migrate_v30_to_v31(&self.conn)?;
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (31)", [])?;
+            info!("   ✅ Schema V31 applied");
+        }
+
+        // B5-T1-P7b (review 164-5 #1): `checked_at` joined V30 after its first form; a table created by
+        // that first form gets it here (nothing shipped it, but no build may run without the column).
+        let held_has_checked_at = {
+            let mut stmt = self.conn.prepare("PRAGMA table_info(peerpay_held_messages)")?;
+            let cols: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?.filter_map(|r| r.ok()).collect();
+            cols.is_empty() || cols.iter().any(|c| c == "checked_at")
+        };
+        if !held_has_checked_at {
+            info!("   Repair: adding checked_at to peerpay_held_messages");
+            self.conn.execute("ALTER TABLE peerpay_held_messages ADD COLUMN checked_at INTEGER", [])?;
+        }
+
         // Startup repair: V12 migration may have recorded version but failed to add columns
         // (INSERT INTO schema_version succeeded but ALTER TABLE was skipped/failed).
         // Re-run the column checks unconditionally to patch any inconsistent DBs.
@@ -1155,6 +1248,16 @@ impl WalletDatabase {
                 "ALTER TABLE settings ADD COLUMN last_backup_at INTEGER NOT NULL DEFAULT 0", [])?;
         }
 
+        // B5-T1-P3: the money index is derived — (re)install it if absent (a DB stamped
+        // V27 by a merge without the table is repaired, not trusted) and rebuild it from
+        // `outputs` at every open. A downgrade/upgrade cycle or a missed write cannot
+        // survive a restart (contract §2, P3-A10/A11).
+        // B5-T1-P5: and replace triggers an older rule wrote (they are `IF NOT EXISTS`).
+        if migrations::ensure_money_index_current(&self.conn)? {
+            log::warn!("   ⚠️ Money index triggers were from an older rule — reinstalled");
+        }
+        migrations::rebuild_money_index(&self.conn)?;
+
         Ok(())
     }
 
@@ -1175,5 +1278,266 @@ impl WalletDatabase {
 impl Drop for WalletDatabase {
     fn drop(&mut self) {
         info!("🔒 Closing database connection");
+    }
+}
+
+// ============================================================================
+// B5-T1-P2 (P2-A7) — auto-unlock refuses a valid recovery phrase that is another
+// wallet's. Real `WalletDatabase` on a temp file; on Windows the credential-store
+// entry is a real DPAPI blob written by `store_dpapi_blob` into the TEMP DB only.
+// ⛔ No macOS end-to-end test here: the Keychain item outlives a temp DB (contract
+// P2-A7 residue note) — the Keychain arm is a manual row on a scratch profile.
+// ============================================================================
+#[cfg(test)]
+mod auto_unlock_identity_tests {
+    use super::*;
+
+    /// BIP39 test vector — a valid phrase that is certainly not the fresh wallet's.
+    const OTHER: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+    fn fresh_wallet() -> (WalletDatabase, i64, String) {
+        let path = std::env::temp_dir().join(format!("hodos_t1p2_unlock_{}.db", uuid::Uuid::new_v4()));
+        let mut db = WalletDatabase::new(path).unwrap();
+        let (wallet_id, phrase, _addr) = db.create_wallet_with_first_address(Some("1234")).unwrap();
+        (db, wallet_id, phrase)
+    }
+
+    fn identity_key(db: &WalletDatabase) -> String {
+        super::super::UserRepository::new(db.connection()).get_default().unwrap().unwrap().identity_key
+    }
+
+    /// The comparison's reference is right: the helper derives exactly the key the
+    /// wallet stored at creation. (RED: derive a child — e.g. the `2-receive address`
+    /// key — instead of the master ⇒ this fails, which is the mass-lockout story.)
+    #[test]
+    fn helper_derives_the_identity_key_written_at_creation() {
+        let (db, _, phrase) = fresh_wallet();
+        assert_eq!(super::super::helpers::master_public_key_hex_from_phrase(&phrase).unwrap(), identity_key(&db));
+        assert_ne!(super::super::helpers::master_public_key_hex_from_phrase(OTHER).unwrap(), identity_key(&db),
+            "fixture: OTHER must not be this wallet's phrase");
+    }
+
+    /// Other wallet's phrase in the credential store ⇒ stays locked.
+    /// RED (scratch build, comparison reverted) ⇒ unlocks, and the cached phrase
+    /// derives OTHER's master key, not this wallet's.
+    #[cfg(windows)]
+    #[test]
+    fn another_wallets_phrase_leaves_the_wallet_locked() {
+        let (mut db, wallet_id, _) = fresh_wallet();
+        db.store_dpapi_blob(wallet_id, OTHER).unwrap();
+        db.clear_cached_mnemonic();
+        let unlocked = db.try_dpapi_unlock().unwrap();
+        let cached_key = db.get_cached_mnemonic().ok()
+            .map(|p| super::super::helpers::master_public_key_hex_from_phrase(p).unwrap());
+        assert_eq!(cached_key, None, "wallet must not be running on another wallet's phrase");
+        assert!(!unlocked && !db.is_unlocked());
+    }
+
+    /// This wallet's own phrase ⇒ unlocks as before (the other half's control).
+    #[cfg(windows)]
+    #[test]
+    fn own_phrase_unlocks() {
+        let (mut db, wallet_id, phrase) = fresh_wallet();
+        db.store_dpapi_blob(wallet_id, &phrase).unwrap();
+        db.clear_cached_mnemonic();
+        assert!(db.try_dpapi_unlock().unwrap());
+        assert!(db.is_unlocked());
+        assert_eq!(super::super::helpers::get_master_public_key_from_db(&db).map(hex::encode).unwrap(), identity_key(&db));
+    }
+}
+
+// ============================================================================
+// B5-T1-P3 — real wallet databases: upgrade parity (P3-A1 on real data, P3-A10) and
+// restore (P3-A12, T1 half). Opt-in: `HODOS_P3_FIXTURES=<dir of *.db snapshots>`.
+// The snapshots are COPIES (SQLite backup API, read-only on the source); each is copied
+// again to a temp file before anything opens it, so a fixture is never modified.
+// ============================================================================
+#[cfg(test)]
+mod p3_real_wallet_fixture_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    fn legacy(conn: &Connection, user: i64, confirmed_only: bool) -> BTreeSet<(String, i64)> {
+        let sql = if confirmed_only {
+            "SELECT o.txid, o.vout FROM outputs o
+             LEFT JOIN transactions t ON o.transaction_id = t.id
+             LEFT JOIN output_baskets b ON o.basket_id = b.basketId
+             WHERE o.user_id = ?1 AND o.spendable = 1
+               AND (t.status = 'completed' OR (o.transaction_id IS NULL AND o.confirmed = 1))
+               AND o.derivation_prefix IS NOT NULL
+               AND (o.basket_id IS NULL OR b.name = 'default')"
+        } else {
+            "SELECT o.txid, o.vout FROM outputs o
+             LEFT JOIN transactions t ON o.transaction_id = t.id
+             LEFT JOIN output_baskets b ON o.basket_id = b.basketId
+             WHERE o.user_id = ?1 AND o.spendable = 1
+               AND (t.status IS NULL OR t.status NOT IN ('unsigned', 'failed', 'nosend', 'nonfinal'))
+               AND o.derivation_prefix IS NOT NULL
+               AND (o.basket_id IS NULL OR b.name = 'default')
+               AND (o.transaction_id IS NOT NULL OR o.confirmed = 1)"
+        };
+        let mut stmt = conn.prepare(sql).unwrap();
+        let rows = stmt.query_map([user], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))).unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    }
+
+    fn current(conn: &Connection, user: i64, confirmed_only: bool) -> BTreeSet<(String, i64)> {
+        let repo = super::super::OutputRepository::new(conn);
+        let v = if confirmed_only { repo.get_spendable_confirmed_by_user(user) } else { repo.get_spendable_by_user(user) };
+        v.unwrap().into_iter().map(|o| (o.txid.unwrap_or_default(), o.vout as i64)).collect()
+    }
+
+    fn users(conn: &Connection) -> Vec<i64> {
+        let mut stmt = conn.prepare("SELECT userId FROM users").unwrap();
+        let rows = stmt.query_map([], |r| r.get::<_, i64>(0)).unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    }
+
+    fn temp_copy(src: &std::path::Path, tag: &str) -> std::path::PathBuf {
+        let dst = std::env::temp_dir().join(format!("hodos_p3_fx_{}_{}.db", tag, uuid::Uuid::new_v4()));
+        std::fs::copy(src, &dst).unwrap();
+        dst
+    }
+
+    fn short(s: &BTreeSet<(String, i64)>) -> Vec<String> {
+        s.iter().take(5).map(|(t, v)| format!("{}:{}", &t[..t.len().min(16)], v)).collect()
+    }
+
+    /// The pre-P5 balance query, verbatim (`calculate_balance` before B5-T1-P5 split it
+    /// into money + held) — the figure the user saw before the upgrade.
+    fn pre_p5_balance(conn: &Connection, user: i64) -> i64 {
+        conn.query_row(
+            "SELECT COALESCE(SUM(o.satoshis), 0) FROM outputs o
+             LEFT JOIN transactions t ON o.transaction_id = t.id
+             LEFT JOIN output_baskets b ON o.basket_id = b.basketId
+             WHERE o.user_id = ?1 AND o.spendable = 1
+               AND (t.status IS NULL OR t.status NOT IN ('unsigned', 'failed', 'nonfinal'))
+               AND COALESCE(o.derivation_prefix, '') != '1-wallet-backup'
+               AND (o.basket_id IS NULL OR b.name = 'default')",
+            [user], |r| r.get(0)).unwrap()
+    }
+
+    /// Opt-in real-data run (`HODOS_P3_FIXTURES` = a folder of read-only `.db` snapshots
+    /// taken with the SQLite backup API). B5-T1-P3's `P3-A1/A10/A12` re-based by
+    /// B5-T1-P5 (`P5-A4`, `P5-A9`): P5 changes membership on purpose, so parity is now
+    /// "nothing vanished": after the upgrade and the classifier, **money + held = the
+    /// pre-upgrade balance**, the money set is a subset of the pre-P5 coin set, and
+    /// every coin that left it is listed as held with a reason. The classifier needs the
+    /// keys: the copy is unlocked with DPAPI (same Windows user as the wallet); if that
+    /// fails the run says so and checks the locked state (money 0, everything held).
+    #[test]
+    #[ignore] // opt-in: HODOS_P3_FIXTURES
+    fn p3_a1_a10_a12_real_wallets_upgrade_and_restore_with_the_same_money() {
+        let dir = std::env::var("HODOS_P3_FIXTURES").expect("set HODOS_P3_FIXTURES");
+        let mut paths: Vec<_> = std::fs::read_dir(&dir).unwrap()
+            .map(|e| e.unwrap().path()).filter(|p| p.extension().map_or(false, |x| x == "db")).collect();
+        paths.sort();
+        assert!(!paths.is_empty(), "no fixtures in {}", dir);
+        for src in paths {
+            let name = src.file_stem().unwrap().to_string_lossy().to_string();
+
+            // ---- upgrade (P3-A10 → P5-A4) ------------------------------------------------
+            let copy = temp_copy(&src, &name);
+            let (from_version, before): (i64, Vec<(i64, i64, BTreeSet<(String, i64)>)>) = {
+                let raw = Connection::open(&copy).unwrap();
+                let v: i64 = raw.query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0)).unwrap();
+                let b = users(&raw).into_iter().map(|u| (u, pre_p5_balance(&raw, u), legacy(&raw, u, false))).collect();
+                (v, b)
+            };
+            let mut db = WalletDatabase::new(copy.clone()).unwrap();
+            let to_version: i64 = db.connection().query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0)).unwrap();
+            assert_eq!(to_version, 30, "{name}: migrated to the latest schema (V30, B5-T1-P7b)");
+            for (u, bal, _) in &before {
+                let repo = super::super::OutputRepository::new(db.connection());
+                assert_eq!(repo.calculate_balance(*u).unwrap(), 0, "{name}: before the classifier nothing is money");
+                assert_eq!(repo.calculate_held(*u).unwrap().0, *bal, "{name}: …and every coin is shown as held");
+            }
+            let unlocked = matches!(db.try_dpapi_unlock(), Ok(true));
+            if !unlocked {
+                println!("{name}: V{from_version}→V{to_version} — could not unlock (another OS user's wallet; on macOS a test build reads the Keychain only with HODOS_KEYCHAIN_TEST=1 HODOS_DEV=1); ⚠️ locked state checked only — money + held = balance NOT checked");
+            } else {
+                crate::classify::stamp_all(&db, "fixture");
+                let conn = db.connection();
+                let held = crate::classify::list_held(&db, 1).unwrap();
+                for (u, bal, all) in &before {
+                    let repo = super::super::OutputRepository::new(conn);
+                    let money = repo.calculate_balance(*u).unwrap();
+                    let (held_sats, held_n) = repo.calculate_held(*u).unwrap();
+                    let now_all = current(conn, *u, false);
+                    println!("{name}: V{from_version}→V{to_version} user {u}: money {} sats ({} selectable coins), held {} sats in {} coin(s), pre-upgrade {} sats",
+                             money, now_all.len(), held_sats, held_n, bal);
+                    assert_eq!(money + held_sats, *bal, "{name} user {u}: money + held ≠ the pre-upgrade balance");
+                    let extra: BTreeSet<_> = now_all.difference(all).cloned().collect();
+                    assert!(extra.is_empty(), "{name} user {u}: P5 made coins selectable that were not before: {:?}", short(&extra));
+                    for (t, v) in all.difference(&now_all) {
+                        let reason = held.iter().find(|h| h.txid.as_deref() == Some(t.as_str()) && h.vout as i64 == *v)
+                            .map(|h| format!("{:?}", h.reason)).unwrap_or_else(|| "NOT LISTED".into());
+                        println!("{name}:   no longer selectable {}:{} — held ({})", &t[..t.len().min(16)], v, reason);
+                        assert_ne!(reason, "NOT LISTED", "{name}: {}:{} left the money set without being shown as held", t, v);
+                    }
+                }
+                // Built-in RED: the instrument can fail — an emptied index makes the
+                // money set empty while `money + held` (read from `outputs`) is unchanged.
+                if let Some((u, _, all)) = before.iter().find(|(_, _, all)| !all.is_empty()) {
+                    conn.execute("SAVEPOINT red", []).unwrap();
+                    conn.execute("DELETE FROM money_utxos", []).unwrap();
+                    assert!(current(conn, *u, false).is_empty() && !all.is_empty(), "{name}: the comparison must be able to fail");
+                    conn.execute("ROLLBACK TO red", []).unwrap();
+                    conn.execute("RELEASE red", []).unwrap();
+                }
+
+                // ---- restore (P3-A12 → P5-A9): production encode / decode, fresh wallet from the same phrase
+                let phrase = db.get_cached_mnemonic().unwrap().to_string();
+                let ik: String = conn.query_row("SELECT identity_key FROM users ORDER BY userId LIMIT 1", [], |r| r.get(0)).unwrap();
+                let key = [7u8; 32];
+                let compressed = crate::backup::compress_for_onchain(conn, &ik, chrono::Utc::now().timestamp()).unwrap();
+                let encrypted = crate::backup::encrypt_compressed(&key, &compressed).unwrap();
+                let payload = crate::backup::deserialize_from_onchain(&encrypted, &key).unwrap();
+                let fresh_path = std::env::temp_dir().join(format!("hodos_p5_fx_restore_{}_{}.db", name, uuid::Uuid::new_v4()));
+                let mut fresh = WalletDatabase::new(fresh_path.clone()).unwrap();
+                fresh.create_wallet_from_existing_mnemonic(&phrase, None).unwrap();
+                {
+                    let c = fresh.connection();
+                    let wid: i64 = c.query_row("SELECT id FROM wallets ORDER BY id LIMIT 1", [], |r| r.get(0)).unwrap();
+                    c.execute("DELETE FROM addresses WHERE wallet_id = ?1", [wid]).unwrap();
+                    c.execute("DELETE FROM output_baskets", []).unwrap();
+                    c.execute("DELETE FROM users", []).unwrap();
+                    crate::backup::import_to_db_with_ids(c, &payload, wid, 1).unwrap();
+                }
+                crate::classify::stamp_all(&fresh, "fixture-restore");
+                let src_money: BTreeSet<_> = before.iter().flat_map(|(u, _, _)| current(conn, *u, false)).collect();
+                let restored = current(fresh.connection(), 1, false);
+                let extra: Vec<_> = restored.difference(&src_money).filter(|(t, v)| {
+                    // Known, owned by B5-T3a-P2.1 (BS-L3): an unconfirmed received coin restores confirmed.
+                    let bs_l3: bool = conn.query_row(
+                        "SELECT confirmed = 0 AND transaction_id IS NULL FROM outputs WHERE txid = ?1 AND vout = ?2",
+                        rusqlite::params![t, v], |r| r.get(0)).unwrap_or(false);
+                    !bs_l3
+                }).cloned().collect();
+                assert!(extra.is_empty(), "{name}: the restore offers coins the source did not: {:?}", extra);
+                println!("{name}: restored wallet offers {} coin(s) as money (source: {})", restored.len(), src_money.len());
+                drop(fresh);
+                let _ = std::fs::remove_file(&fresh_path);
+            }
+
+            // ---- P3-A10 (ii): stamped by a merge without the table — repaired at open ----
+            let stamped = temp_copy(&src, &format!("{name}_stamped"));
+            {
+                let raw = Connection::open(&stamped).unwrap();
+                raw.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)", []).unwrap();
+                raw.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (28)", []).unwrap();
+            }
+            let sdb = WalletDatabase::new(stamped.clone()).unwrap();
+            let has: i64 = sdb.connection().query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='money_utxos'", [], |r| r.get(0)).unwrap();
+            assert_eq!(has, 1, "{name}: a DB stamped V28 without the table is repaired at open");
+            drop(sdb);
+            drop(db);
+            for p in [&copy, &stamped] {
+                for ext in ["", "-wal", "-shm"] {
+                    let _ = std::fs::remove_file(format!("{}{}", p.display(), ext));
+                }
+            }
+        }
     }
 }

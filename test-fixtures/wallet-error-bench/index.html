@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hodos P2 test bench</title>
+<style>
+  :root { --bg:#f7f7f5; --fg:#1d1d1b; --muted:#6b6b66; --card:#fff; --line:#ddd; --ok:#1b7f3b; --bad:#b3261e; --accent:#1a5fb4; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.45 system-ui, sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 20px 16px 60px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  p.lead { color: var(--muted); margin: 0 0 18px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; margin: 14px 0; }
+  h2 { font-size: 16px; margin: 0 0 6px; }
+  .why { color: var(--muted); font-size: 13px; margin: 0 0 10px; }
+  button { font: inherit; padding: 7px 12px; margin: 4px 6px 4px 0; border: 1px solid var(--accent); background: #fff; color: var(--accent); border-radius: 6px; cursor: pointer; }
+  button:hover { background: #eef3fb; }
+  pre { background: #f1f1ee; padding: 10px; border-radius: 6px; overflow-x: auto; font-size: 12.5px; white-space: pre-wrap; word-break: break-all; }
+  .verdict { font-weight: 600; }
+  .pass { color: var(--ok); } .fail { color: var(--bad); }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Hodos P2 test bench</h1>
+  <p class="lead">B5-T1-P2 owner sitting. Each button calls the wallet the way a dApp does and prints exactly what the page received.</p>
+
+  <section>
+    <h2>Status</h2>
+    <pre id="env"></pre>
+  </section>
+
+  <section>
+    <h2>Test 1 — a failed payment reaches the page as an error, with the gold pill</h2>
+    <p class="why">Needs the scratch wallet with a broken broadcaster. Spends nothing that leaves the wallet unless the mode is "temporary" and the wallet is later restarted normally (then it lands — that is the point of the pill).</p>
+    <button id="t1cwi">1a — createAction via window.CWI</button>
+    <button id="t1http">1b — createAction via HTTP (port 3321)</button>
+    <pre id="t1out">(not run)</pre>
+  </section>
+
+  <section>
+    <h2>Test 3 — sendWith broadcasts a held transaction (real, a few cents)</h2>
+    <p class="why">Needs the NORMAL wallet. Makes a held (noSend) transaction, then a second one whose signAction carries sendWith = [held]. Each transaction is an empty OP_RETURN output plus the wallet's 1,000-sat service fee.</p>
+    <button id="t3">3 — run the sendWith flow</button>
+    <pre id="t3out">(not run)</pre>
+  </section>
+</main>
+<script>
+  const OUT = [{ satoshis: 0, lockingScript: '006a', outputDescription: 'hodos p2 test output' }];
+  const $ = (id) => document.getElementById(id);
+  const show = (id, obj) => { $(id).textContent = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2); };
+
+  function envReport() {
+    const shim = typeof window.__hodos_walletResponse === 'function'
+      ? window.__hodos_walletResponse.toString().includes('reviewActionResults') : null;
+    show('env', {
+      origin: location.origin,
+      windowCWI: typeof window.CWI,
+      shimIsNewBuild: shim,   // true = the shim from this phase is running
+    });
+  }
+  envReport();
+
+  function errorReport(e, ms) {
+    return {
+      elapsedMs: Math.round(ms),
+      name: e && e.name, code: e && e.code, isError: e && e.isError,
+      txid: e && e.txid, reviewActionResults: e && e.reviewActionResults,
+      sendWithResults: e && e.sendWithResults, txIsByteArray: Array.isArray(e && e.tx),
+      message: e && String(e.message).slice(0, 300),
+    };
+  }
+
+  $('t1cwi').onclick = async () => {
+    show('t1out', 'calling window.CWI.createAction …');
+    const t0 = performance.now();
+    try {
+      const r = await window.CWI.createAction({ description: 'hodos p2 test 1a', outputs: OUT });
+      show('t1out', { RESULT: 'resolved — no error reached the page', elapsedMs: Math.round(performance.now() - t0), txid: r.txid });
+    } catch (e) {
+      show('t1out', { RESULT: 'threw', ...errorReport(e, performance.now() - t0) });
+    }
+  };
+
+  $('t1http').onclick = async () => {
+    show('t1out', 'POST http://localhost:3321/createAction …');
+    const t0 = performance.now();
+    try {
+      const res = await fetch('http://localhost:3321/createAction', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({ description: 'hodos p2 test 1b', outputs: OUT }),
+      });
+      const body = await res.json().catch(() => null);
+      show('t1out', { RESULT: 'HTTP ' + res.status, elapsedMs: Math.round(performance.now() - t0),
+        isError: body && body.isError, code: body && body.code, txid: body && body.txid,
+        reviewActionResults: body && body.reviewActionResults, sendWithResults: body && body.sendWithResults,
+        message: body && (body.message || body.error) });
+    } catch (e) {
+      show('t1out', { RESULT: 'fetch failed', elapsedMs: Math.round(performance.now() - t0), message: String(e) });
+    }
+  };
+
+  $('t3').onclick = async () => {
+    const log = [];
+    const step = (s, o) => { log.push({ step: s, ...o }); show('t3out', log); };
+    try {
+      step('a', { doing: 'createAction noSend:true (the held transaction)' });
+      const held = await window.CWI.createAction({ description: 'hodos p2 held tx', outputs: OUT, options: { noSend: true } });
+      step('a', { heldTxid: held.txid });
+      step('b', { doing: 'createAction signAndProcess:false (the subject)' });
+      const sub = await window.CWI.createAction({ description: 'hodos p2 subject tx', outputs: OUT, options: { signAndProcess: false } });
+      const ref = sub.signableTransaction && sub.signableTransaction.reference;
+      step('b', { reference: ref });
+      step('c', { doing: 'signAction with sendWith:[held]' });
+      const t0 = performance.now();
+      const signed = await window.CWI.signAction({ reference: ref, spends: {}, options: { sendWith: [held.txid] } });
+      step('c', { elapsedMs: Math.round(performance.now() - t0), subjectTxid: signed.txid, sendWithResults: signed.sendWithResults,
+        check: [ 'https://whatsonchain.com/tx/' + held.txid, 'https://whatsonchain.com/tx/' + signed.txid ] });
+    } catch (e) {
+      step('error', errorReport(e, 0));
+    }
+  };
+</script>
+</body>
+</html>

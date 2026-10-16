@@ -1,4 +1,4 @@
-//! BSV/USD price cache with WhatsOnChain + CoinGecko + MEXC fallback chain
+//! BSV/USD price cache with WhatsOnChain + Banana Blocks + CoinGecko + MEXC fallback chain
 //! and SQLite-backed restart persistence.
 //!
 //! Caches the BSV/USD exchange rate for display and spending-limit
@@ -12,11 +12,15 @@
 //!
 //! 1. **WhatsOnChain** — `/v1/bsv/main/exchangerate`. BSV-native indexer
 //!    we already depend on for UTXO + tx fetch. No API key.
-//! 2. **CoinGecko** — generic crypto-data aggregator. Slug
+//! 2. **Banana Blocks** — BSV block explorer, `/api/v1/exchangerate`, same
+//!    shape as WhatsOnChain's plus a `currency` field we check. No API key.
+//!    Added 2026-10-03 (B5-T1-P1a) so the chain has four live sources.
+//! 3. **CoinGecko** — generic crypto-data aggregator. Slug
 //!    `bitcoin-cash-sv` (NOT the old `bitcoin-sv` slug, which CoinGecko
 //!    delisted/renamed in 2026 without warning — the renaming was what
-//!    triggered this redesign). No API key.
-//! 3. **MEXC** — real exchange with native BSV/USDT trading pair. Real-time
+//!    triggered this redesign). No API key. ⚠️ Answers 403 to a request with
+//!    no `User-Agent` (measured 2026-10-02), so the client below sends one.
+//! 4. **MEXC** — real exchange with native BSV/USDT trading pair. Real-time
 //!    market data, simple JSON shape. No API key. (USDT≈USD; for cents-
 //!    granularity spending limits, the <0.5% deviation is well within the
 //!    `validate_price` sanity-range filter.)
@@ -35,7 +39,7 @@
 //! cache as "stale-but-better-than-nothing". On every successful live fetch,
 //! the new price is persisted back to the table.
 //!
-//! This means a cold-start wallet on a day when all three live sources fail
+//! This means a cold-start wallet on a day when all four live sources fail
 //! still has the last known good price to fall back on — the engine returns
 //! `Silent` instead of `Prompt(price_unavailable)` and the dashboard renders
 //! a real USD value. A future polish item could surface "(price is N hours
@@ -51,6 +55,7 @@ use crate::database::WalletDatabase;
 const CACHE_TTL_SECONDS: u64 = 300;
 
 const WHATSONCHAIN_URL: &str = "https://api.whatsonchain.com/v1/bsv/main/exchangerate";
+const BANANABLOCKS_URL: &str = "https://bananablocks.com/api/v1/exchangerate";
 const COINGECKO_URL: &str =
     "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin-cash-sv&vs_currencies=usd";
 const MEXC_URL: &str = "https://api.mexc.com/api/v3/ticker/price?symbol=BSVUSDT";
@@ -86,6 +91,9 @@ impl PriceCache {
             cache: RwLock::new(None),
             client: reqwest::Client::builder()
                 .timeout(crate::services::CallClass::IndexerAsync.timeout())
+                // CoinGecko refuses requests without one (403). Price APIs only —
+                // no other wallet client sends a User-Agent.
+                .user_agent(concat!("Hodos-Wallet/", env!("CARGO_PKG_VERSION")))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
             db,
@@ -106,7 +114,7 @@ impl PriceCache {
     /// The loaded price is treated as "stale-but-acceptable" — the in-memory
     /// cache's `cached_at` is set to the persisted `fetched_at`, so the next
     /// `get_price` call will (correctly) see it as expired vs the 5-min TTL
-    /// and try a live fetch. Only if all three live sources fail does the
+    /// and try a live fetch. Only if all four live sources fail does the
     /// stale-fallback path return this value.
     pub fn load_persisted(&self) {
         let Some(ref db) = self.db else { return; };
@@ -253,6 +261,14 @@ async fn fetch_bsv_price(client: &reqwest::Client) -> Result<(f64, String), Stri
         }
     }
 
+    match fetch_bananablocks(client).await {
+        Ok(p) => return Ok((p, "bananablocks".to_string())),
+        Err(e) => {
+            warn!("   Banana Blocks failed: {}", e);
+            errors.push(format!("bananablocks: {}", e));
+        }
+    }
+
     match fetch_coingecko(client).await {
         Ok(p) => return Ok((p, "coingecko".to_string())),
         Err(e) => {
@@ -290,6 +306,35 @@ async fn fetch_whatsonchain(client: &reqwest::Client) -> Result<f64, String> {
         .and_then(|v| v.as_f64())
         .ok_or_else(|| "missing rate field".to_string())?;
     validate_price(price, "WhatsOnChain")
+}
+
+/// Banana Blocks `/api/v1/exchangerate` → `{"currency":"USD","rate":19.27,"updated_at":"…"}`.
+async fn fetch_bananablocks(client: &reqwest::Client) -> Result<f64, String> {
+    let response = client
+        .get(BANANABLOCKS_URL)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| format!("HTTP error: {}", e))?;
+    if !response.status().is_success() {
+        return Err(format!("status {}", response.status()));
+    }
+    let json: serde_json::Value =
+        response.json().await.map_err(|e| format!("parse error: {}", e))?;
+    parse_bananablocks(&json)
+}
+
+/// Pure half of `fetch_bananablocks`: refuses anything but a USD rate.
+fn parse_bananablocks(json: &serde_json::Value) -> Result<f64, String> {
+    let currency = json.get("currency").and_then(|v| v.as_str()).unwrap_or("");
+    if currency != "USD" {
+        return Err(format!("currency '{}' is not USD", currency));
+    }
+    let price = json
+        .get("rate")
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| "missing rate field".to_string())?;
+    validate_price(price, "Banana Blocks")
 }
 
 /// CoinGecko with current slug → `{"bitcoin-cash-sv": {"usd": 11.72}}`.
@@ -385,6 +430,20 @@ mod tests {
         assert!(validate_price(10_000.0, "test").is_ok());
         // Just outside the upper boundary
         assert!(validate_price(10_000.01, "test").is_err());
+    }
+
+    #[test]
+    fn p1a_a4_bananablocks_parser_refuses_all_but_a_sane_usd_rate() {
+        let ok = serde_json::json!({"currency":"USD","rate":19.27,"updated_at":"2026-10-02T21:55:00Z"});
+        assert_eq!(parse_bananablocks(&ok), Ok(19.27));
+        let eur = serde_json::json!({"currency":"EUR","rate":17.9});
+        assert!(parse_bananablocks(&eur).is_err(), "a non-USD rate must be refused");
+        let no_currency = serde_json::json!({"rate":19.27});
+        assert!(parse_bananablocks(&no_currency).is_err());
+        let no_rate = serde_json::json!({"currency":"USD"});
+        assert!(parse_bananablocks(&no_rate).is_err());
+        let absurd = serde_json::json!({"currency":"USD","rate":0.0});
+        assert!(parse_bananablocks(&absurd).is_err());
     }
 
     #[test]

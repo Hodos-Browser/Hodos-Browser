@@ -9,10 +9,15 @@ winresource = "0.1"
 
 [dependencies]
 # HTTP server (pinned to 4.11 — 4.13+ requires Rust 1.88)
-actix-web = "=4.11.0"
+# Default features minus `http2` (B5-T1-P1, 2026-10-02): the server binds
+# plain-TCP HTTP/1.1 (`HttpServer::bind` -> `.tcp()`, no TLS, no h2c), so the h2
+# code was unreachable, and it kept h2 0.3.27 (RUSTSEC-2026-0258) in Cargo.lock.
+actix-web = { version = "=4.11.0", default-features = false, features = ["macros", "compress-brotli", "compress-gzip", "compress-zstd", "cookies", "unicode", "compat"] }
 
 # Ad & tracker blocking engine (Brave's adblock-rust)
-# Pinned to 0.10.3: last version compatible with stable Rust 1.85 (0.10.4+ needs unstable unsigned_is_multiple_of)
+# Pinned to 0.10.3. The original reason (0.10.4+ needed a newer Rust than 1.85) no longer
+# holds — rust-toolchain.toml pins 1.97.1. The upgrade is its own ticket (B5-T0-P6 §12 Q3);
+# note 0.13.x still cannot parse uBO's current ES-module scriptlets either.
 # default-features = false disables "unsync-regex-caching" — enables Send+Sync for RwLock<Engine>
 adblock = { version = "=0.10.3", default-features = false, features = [
     "embedded-domain-resolver",
@@ -29,11 +34,18 @@ serde_json = "1.0"
 tokio = { version = "1", features = ["full"] }
 
 # HTTP client for downloading filter lists
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { version = "0.12", features = ["json"] }
 
 # Base64 encoding (for custom scriptlet resources)
 base64 = "0.22"
 
+# SHA-256 pin over the fetched uBlock Origin scriptlet sources (B5-T0-P6)
+sha2 = "0.10"
+
 # Logging
 log = "0.4"
 env_logger = "0.11"
+
+[dev-dependencies]
+# Paused clock for the update-schedule test (P6-A8). Same tokio as above, test-only feature.
+tokio = { version = "1", features = ["full", "test-util"] }

@@ -32,6 +32,22 @@ struct AuthSession {
     client_initial_nonce: String,    // base64
 }
 
+/// Largest handshake answer read (B5-T5-P7a, review 178-6 #1). A real one is well under 2 KB.
+const HANDSHAKE_MAX_BYTES: usize = 64 * 1024;
+
+/// Read a response body up to `cap` bytes; more is an error, never a larger allocation (B5-T5-P7a:
+/// several of the hosts we talk to are named by a recipient).
+pub(crate) async fn read_capped(mut response: reqwest::Response, cap: usize) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        bytes.extend_from_slice(&chunk);
+        if bytes.len() > cap {
+            return Err(format!("answer over {} bytes", cap));
+        }
+    }
+    Ok(bytes)
+}
+
 /// AuthFetch error types
 #[derive(Debug, thiserror::Error)]
 pub enum AuthFetchError {
@@ -61,10 +77,18 @@ impl AuthFetchClient {
     /// * `identity_key` - 33-byte compressed public key
     /// * `private_key` - 32-byte private key
     pub fn new(identity_key: Vec<u8>, private_key: Vec<u8>) -> Self {
+        // B5-T5-P7a (review 178-5 #1): never follow a redirect. Since P7a this client talks to hosts a
+        // RECIPIENT names (their signed advertisement); a redirect to http://127.0.0.1:<wallet port>
+        // would re-send our request into our own wallet API, where a call without
+        // `X-Requesting-Domain` is trusted as internal. The fallback is redirect-free too.
         let http_client = reqwest::Client::builder()
             .timeout(crate::services::CallClass::ThirdPartyNoFallback.timeout())
+            .redirect(reqwest::redirect::Policy::none())
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+            .unwrap_or_else(|_| reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("an HTTP client without redirects"));
 
         Self {
             identity_key,
@@ -131,15 +155,18 @@ impl AuthFetchClient {
             .await?;
 
         let status = response.status().as_u16();
+        // B5-T5-P7a (review 178-6 #1): the host may be one a RECIPIENT named — never read its answer
+        // without a bound.
+        let body = read_capped(response, HANDSHAKE_MAX_BYTES).await
+            .map_err(|e| AuthFetchError::Handshake(format!("server returned {}: answer unreadable: {}", status, e)))?;
         if status != 200 {
-            let body = response.text().await.unwrap_or_default();
             return Err(AuthFetchError::Handshake(format!(
                 "server returned {} (expected 200): {}",
-                status, body
+                status, String::from_utf8_lossy(&body)
             )));
         }
 
-        let response_json: serde_json::Value = response.json().await?;
+        let response_json: serde_json::Value = serde_json::from_slice(&body)?;
 
         let (server_identity_key, server_nonce) =
             verify_initial_response(&self.private_key, &response_json, &client_nonce)?;

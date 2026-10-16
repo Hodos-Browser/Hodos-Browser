@@ -157,19 +157,31 @@ pub async fn run_inner(state: &web::Data<AppState>) -> Result<ConsolidateResult,
         return Ok(ConsolidateResult::Skipped(format!("Net value {} sats below dust limit after re-check", net_value)));
     }
 
-    // 6. Reserve UTXOs (mark as spent with placeholder)
-    let placeholder_txid = format!("consolidate-{}", chrono::Utc::now().timestamp_millis());
-    {
+    // 6. Reserve UTXOs — B5-T1-P3: the transaction row first, then the claim, in one
+    // SQLite transaction (a coin another spend holds ⇒ nothing reserved). The guard
+    // releases them on every early exit until the row is filled (this route used to
+    // leave them to the sweeper, which never saw the `consolidate-` placeholder).
+    let reference = format!("consolidate-{}", uuid::Uuid::new_v4());
+    let (consolidation_row, reservation_guard) = {
         let db = state.database.lock().map_err(|e| format!("DB lock: {}", e))?;
-        let output_repo = OutputRepository::new(db.connection());
         let utxos_to_reserve: Vec<(String, u32)> = dust_outputs.iter()
             .map(|u| (u.txid.clone(), u.vout))
             .collect();
-        let reserved = output_repo.mark_multiple_spent(&utxos_to_reserve, &placeholder_txid)
+        let description = format!("Automatic dust consolidation ({} UTXOs)", dust_outputs.len());
+        let reserved = crate::handlers::reserve_for_new_transaction(
+            db.connection(), &reference, Some(&description), &utxos_to_reserve)
             .map_err(|e| format!("Failed to reserve UTXOs: {}", e))?;
-        info!("   🔒 Reserved {} dust UTXOs", reserved);
-        state.balance_cache.invalidate();
-    }
+        drop(db);
+        match reserved {
+            Ok(row) => {
+                info!("   🔒 Reserved {} dust UTXOs for transaction row {}", utxos_to_reserve.len(), row);
+                state.balance_cache.invalidate();
+                (row, crate::handlers::ReservationGuard::new(state, row))
+            }
+            Err((t, v)) => return Err(format!(
+                "Dust coin {}:{} is being spent by another payment", &t[..t.len().min(16)], v)),
+        }
+    };
 
     // 7. Generate new change address for the consolidated output
     let (change_address_index, change_script_bytes, change_script_hex) = {
@@ -182,10 +194,9 @@ pub async fn run_inner(state: &web::Data<AppState>) -> Result<ConsolidateResult,
             .ok_or("No wallet found")?;
         let wallet_id = wallet.id.unwrap();
 
-        let next_index = address_repo.get_max_index(wallet_id)
-            .unwrap_or(Some(0))
-            .map(|i| i + 1)
-            .unwrap_or(0);
+        // B5-T1-P6: the one next-index source (never below an index already handed out).
+        let next_index = wallet_repo.claim_next_receive_index(wallet_id)
+            .map_err(|e| format!("Change index: {}", e))?;
 
         let master_privkey = get_master_private_key_from_db(&db)
             .map_err(|e| format!("Master key: {}", e))?;
@@ -230,8 +241,8 @@ pub async fn run_inner(state: &web::Data<AppState>) -> Result<ConsolidateResult,
             created_at,
         };
 
-        if address_repo.create(&address_model).is_ok() {
-            let _ = wallet_repo.update_current_index(wallet_id, next_index + 1);
+        if let Err(e) = address_repo.create(&address_model) {
+            log::warn!("   consolidate: change address row for index {} not created: {}", next_index, e);
         }
 
         (next_index, script.bytes.clone(), hex::encode(&script.bytes))
@@ -306,7 +317,7 @@ pub async fn run_inner(state: &web::Data<AppState>) -> Result<ConsolidateResult,
 
         let action = StoredAction {
             txid: txid.clone(),
-            reference_number: format!("consolidate-{}", uuid::Uuid::new_v4()),
+            reference_number: reference.clone(),
             raw_tx: raw_tx_hex.clone(),
             description: Some(format!("Automatic dust consolidation ({} UTXOs)", dust_outputs.len())),
             labels: vec!["dust-consolidation".to_string()],
@@ -336,7 +347,8 @@ pub async fn run_inner(state: &web::Data<AppState>) -> Result<ConsolidateResult,
         let db = state.database.lock().map_err(|e| format!("DB lock: {}", e))?;
         let tx_repo = TransactionRepository::new(db.connection());
 
-        match tx_repo.add_transaction(&action, state.current_user_id) {
+        // B5-T1-P3: the reservation row is filled in place (it already owns the inputs).
+        match tx_repo.fill_reservation_row(consolidation_row, &action, state.current_user_id) {
             Ok(transaction_id) => {
                 let output_repo = OutputRepository::new(db.connection());
                 let basket_repo = BasketRepository::new(db.connection());
@@ -356,16 +368,22 @@ pub async fn run_inner(state: &web::Data<AppState>) -> Result<ConsolidateResult,
                     Some("Dust consolidation"),
                     true,  // is_change
                 );
+                crate::classify::after_write(&db, &txid, 0, "I6:consolidate-dust");
 
                 let _ = output_repo.link_outputs_to_transaction(&txid, transaction_id);
 
                 // ⛔ Fatal — the broadcast at step 13 has not happened yet. If the wallet
-                // cannot record which coins this consolidation spends, it must not send it.
-                // Nothing is hand-released: the outpoints are genuinely unspent, so
-                // TaskSweepReservations frees them after its on-chain check.
-                if let Err(e) = output_repo.update_spending_description_batch(&placeholder_txid, &txid) {
-                    error!("   ⛔ ABORTING BEFORE BROADCAST — could not resolve consolidation \
-                            reservation {} → {}: {}. No money has moved.", placeholder_txid, txid, e);
+                // cannot record which coins this consolidation spends, it must not send it;
+                // it is never sent, so everything it holds is released now.
+                if let Err(e) = output_repo.label_coins_of(transaction_id, &txid) {
+                    error!("   ⛔ ABORTING BEFORE BROADCAST — could not record which coins \
+                            consolidation {} spends: {}. No money has moved.", txid, e);
+                    let _ = tx_repo.update_broadcast_status(&txid, "failed");
+                    let _ = output_repo.disable_by_txid(&txid);
+                    let _ = output_repo.release_coins_of(transaction_id);
+                    reservation_guard.commit();
+                    drop(db);
+                    state.balance_cache.invalidate();
                     return Err(format!("Could not record consolidation inputs, not broadcasting: {}", e));
                 }
 
@@ -384,18 +402,28 @@ pub async fn run_inner(state: &web::Data<AppState>) -> Result<ConsolidateResult,
                 });
 
                 info!("   💾 Consolidation tx stored (id={})", transaction_id);
+
+                // B5-T1-P3 (owner Q4): `sending` BEFORE the broadcast, so a crash after it
+                // is reconciled against the chain, never released on the clock by
+                // TaskFailAbandoned (which fails `unsigned` rows after 5 minutes).
+                let _ = tx_repo.set_transaction_status(&txid, crate::action_storage::TransactionStatus::Sending);
             }
             Err(e) => {
-                warn!("   ⚠️  Failed to store consolidation tx: {}", e);
+                // ⛔ Not broadcast without a record (was: warn and send anyway). The guard
+                // releases the inputs and removes the unbuilt row.
+                error!("   ⛔ Failed to store consolidation tx: {} — not broadcasting", e);
+                return Err(format!("Could not record the consolidation, not broadcasting: {}", e));
             }
         }
     }
+    // From here the row is `sending`: a failure is cleaned up below by status.
+    reservation_guard.commit();
 
     state.balance_cache.invalidate();
 
     // 13. Broadcast (all inputs are confirmed, so raw tx broadcast is sufficient)
     // ARC will accept raw tx and validate against confirmed parents.
-    match broadcast_transaction(&raw_tx_hex, &state.services, Some(&state.database), Some(&txid)).await {
+    match broadcast_transaction(&raw_tx_hex, &state.services, Some(crate::handlers::ProofSink::of(&state)), Some(&txid)).await {
         Ok(msg) => {
             info!("   ✅ Consolidation broadcast successful: {}", msg);
 
@@ -426,19 +454,9 @@ pub async fn run_inner(state: &web::Data<AppState>) -> Result<ConsolidateResult,
                 let output_repo = OutputRepository::new(conn);
                 let _ = output_repo.disable_by_txid(&txid);
 
-                // Restore dust inputs (un-mark as spent)
-                let _ = conn.execute(
-                    "UPDATE outputs SET spendable = 1, spent_by = NULL, spending_description = NULL
-                     WHERE spending_description = ?1 AND spendable = 0",
-                    rusqlite::params![txid],
-                );
-
-                // Also try placeholder in case spending_description wasn't updated yet
-                let _ = conn.execute(
-                    "UPDATE outputs SET spendable = 1, spent_by = NULL, spending_description = NULL
-                     WHERE spending_description = ?1 AND spendable = 0",
-                    rusqlite::params![placeholder_txid],
-                );
+                // Restore dust inputs (un-mark as spent) — B5-T1-P3: the ones this
+                // transaction row holds in the ordinary way.
+                let _ = output_repo.release_coins_of(consolidation_row);
             }
 
             state.balance_cache.invalidate();
@@ -469,20 +487,8 @@ fn is_consolidation_candidate(o: &crate::database::Output) -> bool {
         && o.locking_script.as_ref().map(|s| is_p2pkh_script(s)).unwrap_or(false)
 }
 
-/// Check if a locking script is standard P2PKH (OP_DUP OP_HASH160 <20 bytes> OP_EQUALVERIFY OP_CHECKSIG)
-/// This guards against accidentally trying to spend PushDrop tokens or other non-standard scripts.
-///
-/// ⚠️ Not a token guard. For any output discovered by address sync this check cannot
-/// fail, because the stored locking script was generated from the address rather than
-/// read from the chain. `is_consolidation_candidate`'s value floor is what excludes tokens.
-fn is_p2pkh_script(script: &[u8]) -> bool {
-    script.len() == 25
-        && script[0] == 0x76  // OP_DUP
-        && script[1] == 0xa9  // OP_HASH160
-        && script[2] == 0x14  // Push 20 bytes
-        && script[23] == 0x88 // OP_EQUALVERIFY
-        && script[24] == 0xac // OP_CHECKSIG
-}
+/// Moved to `utxo_fetcher` (B5-T1-P4) so the coin-pool guard shares it.
+use crate::utxo_fetcher::is_p2pkh_script;
 
 /// Internal struct for dust UTXO tracking
 struct DustUtxo {

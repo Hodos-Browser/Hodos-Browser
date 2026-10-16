@@ -1,6 +1,6 @@
 //! GorillaPool MAPI provider — legacy broadcast fallback (raw-tx hex, JSON envelope).
 //!
-//! Position: 3rd-tier broadcast per DESIGN §3 (after ARC GP, after TAAL ARC, before WoC).
+//! Position: 3rd-tier broadcast (after ARC GP and Bitails, before WoC; B5-T1-P7b).
 //! MAPI accepts raw tx hex (not BEEF), so this impl extracts the main tx from the
 //! BEEF wrapper before sending.
 //!

@@ -241,6 +241,42 @@ inline PaymentCost ComputePaymentCost(const std::string& endpoint,
     return c;
 }
 
+// B5-T1-P2 (👤 owner, 2026-10-04). A payment the wallet could not broadcast YET but
+// keeps sending — the BRC-100 WERR_REVIEW_ACTIONS (code 5) reply whose subject
+// transaction is still "sending" — is money committed: it usually lands minutes
+// later, from the wallet's background retry. The gold pill is the user's safeguard
+// against a silent spend, so it lights for this reply too. A permanent refusal
+// (invalidTx / doubleSpend) or an abandoned action ("failed") does not.
+inline bool IsInFlightPaymentReply(const std::string& body) {
+    try {
+        const auto j = nlohmann::json::parse(body);
+        if (!j.is_object() || j.value("isError", false) != true) return false;
+        if (!j.contains("code") || !j["code"].is_number_integer() || j["code"].get<int>() != 5) return false;
+        const auto txid = j.value("txid", std::string());
+        if (txid.empty() || !j.contains("sendWithResults") || !j["sendWithResults"].is_array()) return false;
+        for (const auto& r : j["sendWithResults"]) {
+            if (r.is_object() && r.value("txid", std::string()) == txid)
+                return r.value("status", std::string()) == "sending";
+        }
+    } catch (...) {}
+    return false;
+}
+
+// Does a wallet reply to a PAYMENT endpoint light the gold pill? `ok` is the
+// transport's success (2xx on the IPC path; UR_SUCCESS on the HTTP path). Unchanged
+// rule: ok and no "error" key (an unparseable body counts as no error, as before) —
+// plus the in-flight reply above.
+inline bool PaymentReplyLightsPill(bool ok, const std::string& body) {
+    if (ok) {
+        bool hasError = false;
+        try {
+            hasError = nlohmann::json::parse(body).contains("error");
+        } catch (...) {}
+        if (!hasError) return true;
+    }
+    return IsInFlightPaymentReply(body);
+}
+
 }  // namespace hodos
 
 #endif  // HODOS_PAYMENT_COST_H_

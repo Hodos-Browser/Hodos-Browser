@@ -10,11 +10,20 @@
 //! - Derivation info stored directly on output (derivation_prefix/suffix)
 //! - `locking_script` is BLOB instead of hex text
 
-use rusqlite::{Connection, Result};
+use rusqlite::{Connection, OptionalExtension, Result};
 use log::{info, warn, debug};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::Output;
+
+/// Outcome of claiming coins for a transaction row (B5-T1-P3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Claim {
+    /// The coins are now owned by the transaction (count of coins marked).
+    Claimed(usize),
+    /// This coin was not free: another spend holds it. The caller must roll back.
+    Conflict { txid: String, vout: u32 },
+}
 
 /// A `pending-%` reservation that has outlived the sweep threshold.
 ///
@@ -34,6 +43,18 @@ pub struct StaleReservation {
 
 pub struct OutputRepository<'a> {
     conn: &'a Connection,
+}
+
+/// The `len` script bytes at `off` inside the locally held raw transaction `txid`, after
+/// checking those bytes are that transaction (B5-T1-P4: scripts above the inline cap live
+/// only there). `None` when the parent is absent or fails the txid check.
+pub fn script_in_parent(conn: &Connection, txid: &str, len: i64, off: i64) -> Option<Vec<u8>> {
+    let (len, off) = (usize::try_from(len).ok()?, usize::try_from(off).ok()?);
+    let raw = crate::ingest::local_raw_tx(conn, txid)?;
+    if !crate::reconcile::verify_raw_txid(&raw, txid) {
+        return None;
+    }
+    raw.get(off..off.checked_add(len)?).map(|s| s.to_vec())
 }
 
 impl<'a> OutputRepository<'a> {
@@ -79,9 +100,15 @@ impl<'a> OutputRepository<'a> {
         }
     }
 
-    /// Get all spendable outputs for a user
+    /// Get all spendable **money** for a user — the coins every money-selecting route may
+    /// spend (S1, S2 and the fallback pools of S3, S4).
     ///
-    /// Excludes outputs from transactions that are unsigned or failed.
+    /// B5-T1-P3: reads the money index first. A coin is offered only if it has a **free**
+    /// `money_utxos` row (membership = what the index's triggers say is money); the join
+    /// back to `outputs`/`transactions` applies the rules that change on the transaction
+    /// (parent `unsigned/failed/nosend/nonfinal`; unconfirmed only if we built it), and
+    /// re-checks `spendable = 1` so a drifted index can never offer a spent coin
+    /// (`R-NODOUBLE`).
     pub fn get_spendable_by_user(&self, user_id: i64) -> Result<Vec<Output>> {
         let mut stmt = self.conn.prepare(
             "SELECT o.outputId, o.user_id, o.transaction_id, o.basket_id, o.spendable, o.change,
@@ -89,13 +116,11 @@ impl<'a> OutputRepository<'a> {
                     o.txid, o.sender_identity_key, o.derivation_prefix, o.derivation_suffix,
                     o.custom_instructions, o.spent_by, o.sequence_number, o.spending_description,
                     o.script_length, o.script_offset, o.locking_script, o.created_at, o.updated_at
-             FROM outputs o
+             FROM money_utxos m
+             JOIN outputs o ON o.outputId = m.output_id
              LEFT JOIN transactions t ON o.transaction_id = t.id
-             LEFT JOIN output_baskets b ON o.basket_id = b.basketId
-             WHERE o.user_id = ?1 AND o.spendable = 1
+             WHERE m.user_id = ?1 AND m.reserved_by IS NULL AND o.spendable = 1
                AND (t.status IS NULL OR t.status NOT IN ('unsigned', 'failed', 'nosend', 'nonfinal'))
-               AND o.derivation_prefix IS NOT NULL
-               AND (o.basket_id IS NULL OR b.name = 'default')
                AND (o.transaction_id IS NOT NULL OR o.confirmed = 1)
              ORDER BY o.satoshis DESC"
         )?;
@@ -132,6 +157,9 @@ impl<'a> OutputRepository<'a> {
     /// Used for confirmed-output preference in UTXO selection to avoid building
     /// long chains of unconfirmed transactions. Falls back to all spendable outputs
     /// if confirmed outputs are insufficient.
+    ///
+    /// B5-T1-P3: reads the money index first, like `get_spendable_by_user`; the confirmed
+    /// rule is applied by the join (S3, S5, S6 and the confirmed-first pass of S1, S4).
     pub fn get_spendable_confirmed_by_user(&self, user_id: i64) -> Result<Vec<Output>> {
         let mut stmt = self.conn.prepare(
             "SELECT o.outputId, o.user_id, o.transaction_id, o.basket_id, o.spendable, o.change,
@@ -139,13 +167,11 @@ impl<'a> OutputRepository<'a> {
                     o.txid, o.sender_identity_key, o.derivation_prefix, o.derivation_suffix,
                     o.custom_instructions, o.spent_by, o.sequence_number, o.spending_description,
                     o.script_length, o.script_offset, o.locking_script, o.created_at, o.updated_at
-             FROM outputs o
+             FROM money_utxos m
+             JOIN outputs o ON o.outputId = m.output_id
              LEFT JOIN transactions t ON o.transaction_id = t.id
-             LEFT JOIN output_baskets b ON o.basket_id = b.basketId
-             WHERE o.user_id = ?1 AND o.spendable = 1
+             WHERE m.user_id = ?1 AND m.reserved_by IS NULL AND o.spendable = 1
                AND (t.status = 'completed' OR (o.transaction_id IS NULL AND o.confirmed = 1))
-               AND o.derivation_prefix IS NOT NULL
-               AND (o.basket_id IS NULL OR b.name = 'default')
              ORDER BY o.satoshis DESC"
         )?;
 
@@ -304,20 +330,36 @@ impl<'a> OutputRepository<'a> {
         // question rather than guessed at; see `10e-panel-remainder/README.md`.
         //
         // ⚠️ `nosend` stays INCLUDED — see the note above; that is deliberate UX.
-        let balance: i64 = self.conn.query_row(
-            "SELECT COALESCE(SUM(o.satoshis), 0)
+        //
+        // B5-T1-P5 (owner decision 2(d)): the balance is the **money** — rows the
+        // classification seam stamped `change = 1`. The rest of what this query used to
+        // count is returned by `calculate_held` and shown under the balance, so
+        // `calculate_balance + calculate_held` is exactly the pre-P5 figure: no coin
+        // disappears from view.
+        let (balance, _) = self.balance_split(user_id, 1)?;
+        Ok(balance)
+    }
+
+    /// B5-T1-P5: the coins the balance query counted before P5 that are **not** proven
+    /// money (`change = 0`) — held / Unknown, shown under the balance. `(satoshis, count)`.
+    pub fn calculate_held(&self, user_id: i64) -> Result<(i64, i64)> {
+        self.balance_split(user_id, 0)
+    }
+
+    fn balance_split(&self, user_id: i64, change: i64) -> Result<(i64, i64)> {
+        self.conn.query_row(
+            "SELECT COALESCE(SUM(o.satoshis), 0), COUNT(*)
              FROM outputs o
              LEFT JOIN transactions t ON o.transaction_id = t.id
              LEFT JOIN output_baskets b ON o.basket_id = b.basketId
              WHERE o.user_id = ?1 AND o.spendable = 1
                AND (t.status IS NULL OR t.status NOT IN ('unsigned', 'failed', 'nonfinal'))
                AND COALESCE(o.derivation_prefix, '') != '1-wallet-backup'
-               AND (o.basket_id IS NULL OR b.name = 'default')",
-            rusqlite::params![user_id],
-            |row| row.get(0),
-        )?;
-
-        Ok(balance)
+               AND (o.basket_id IS NULL OR b.name = 'default')
+               AND o.change = ?2",
+            rusqlite::params![user_id, change],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
     }
 
     /// Calculate total balance from spendable outputs (all users)
@@ -396,7 +438,10 @@ impl<'a> OutputRepository<'a> {
     /// * `derivation_suffix` - Optional derivation suffix (e.g., "0", "1")
     /// * `custom_instructions` - Optional custom instructions (BRC-78)
     /// * `output_description` - Optional output description (BRC-100)
-    /// * `is_change` - Whether this is a change output
+    /// * `is_change` - Whether the caller built this as change. ⛔ B5-T1-P5: **not**
+    ///   written — every row is inserted `change = 0` (not money) and the caller runs the
+    ///   classification seam (`classify::after_write`), which stamps it only when the
+    ///   script is the exact P2PKH template to a key this wallet signs with.
     ///
     /// # Returns
     /// The ID of the newly created output
@@ -412,22 +457,23 @@ impl<'a> OutputRepository<'a> {
         derivation_suffix: Option<&str>,
         custom_instructions: Option<&str>,
         output_description: Option<&str>,
-        is_change: bool,
+        _is_change: bool,
     ) -> Result<i64> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
 
-        // Convert hex script to bytes
-        let locking_script = hex::decode(script_hex).ok();
+        // B5-T1-P4: we built this transaction, so the script is known — record its length.
+        let (locking_script, script_length, _) =
+            crate::ingest::script_columns(self.conn, script_hex, crate::ingest::ScriptSource::Built);
 
         self.conn.execute(
             "INSERT INTO outputs (
                 user_id, txid, vout, satoshis, locking_script, basket_id,
                 derivation_prefix, derivation_suffix, custom_instructions, output_description,
-                spendable, change, provided_by, purpose, type, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, 'you', 'change', 'P2PKH', ?12, ?13)",
+                spendable, change, provided_by, purpose, type, created_at, updated_at, script_length
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, 0, 'you', 'change', 'P2PKH', ?11, ?12, ?13)",
             rusqlite::params![
                 user_id,
                 txid,
@@ -439,9 +485,9 @@ impl<'a> OutputRepository<'a> {
                 derivation_suffix,
                 custom_instructions.unwrap_or(""),
                 output_description,
-                is_change as i32,
                 now,
                 now,
+                script_length,
             ],
         )?;
 
@@ -475,14 +521,19 @@ impl<'a> OutputRepository<'a> {
         satoshis: i64,
         script_hex: &str,
         address_index: i32,
+        source: crate::ingest::ScriptSource,
     ) -> Result<usize> {
-        self.upsert_received_utxo_with_confirmed(user_id, txid, vout, satoshis, script_hex, address_index, true)
+        self.upsert_received_utxo_with_confirmed(user_id, txid, vout, satoshis, script_hex, address_index, true, source)
     }
 
     /// Insert a received UTXO with explicit confirmed flag.
     ///
     /// `confirmed = true` for UTXOs from the confirmed bulk API.
     /// `confirmed = false` for UTXOs only seen in mempool (single-address API, height <= 0).
+    ///
+    /// ⛔ B5-T1-P4: `source` says how the script is known. An address-sync caller passes
+    /// `Observed` (read from the verified parent) or `Unchecked` (the address-derived
+    /// script, written with `script_length` NULL so it is never read as observed).
     pub fn upsert_received_utxo_with_confirmed(
         &self,
         user_id: i64,
@@ -492,14 +543,15 @@ impl<'a> OutputRepository<'a> {
         script_hex: &str,
         address_index: i32,
         confirmed: bool,
+        source: crate::ingest::ScriptSource,
     ) -> Result<usize> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
 
-        // Convert hex script to bytes
-        let locking_script = hex::decode(script_hex).ok();
+        let (locking_script, script_length, script_offset) =
+            crate::ingest::script_columns(self.conn, script_hex, source);
 
         // Determine derivation prefix/suffix from address index
         // Regular addresses (index >= 0): BRC-42 self-derivation
@@ -521,8 +573,9 @@ impl<'a> OutputRepository<'a> {
             "INSERT OR IGNORE INTO outputs (
                 user_id, txid, vout, satoshis, locking_script,
                 derivation_prefix, derivation_suffix,
-                spendable, change, provided_by, purpose, type, confirmed, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, 0, 'you', 'receive', 'P2PKH', ?8, ?9, ?10)",
+                spendable, change, provided_by, purpose, type, confirmed, created_at, updated_at,
+                script_length, script_offset
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, 0, 'you', 'receive', 'P2PKH', ?8, ?9, ?10, ?11, ?12)",
             rusqlite::params![
                 user_id,
                 txid,
@@ -534,6 +587,8 @@ impl<'a> OutputRepository<'a> {
                 confirmed_int,
                 now,
                 now,
+                script_length,
+                script_offset,
             ],
         )?;
 
@@ -632,13 +687,15 @@ impl<'a> OutputRepository<'a> {
         address_index: i32,
         derivation_method: &str,
         confirmed: bool,
+        source: crate::ingest::ScriptSource,
     ) -> Result<usize> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
 
-        let locking_script = hex::decode(script_hex).ok();
+        let (locking_script, script_length, script_offset) =
+            crate::ingest::script_columns(self.conn, script_hex, source);
 
         let (derivation_prefix, derivation_suffix): (Option<&str>, Option<String>) = if address_index == -1 {
             (None, None) // Master pubkey — no derivation
@@ -654,8 +711,8 @@ impl<'a> OutputRepository<'a> {
                 user_id, txid, vout, satoshis, locking_script,
                 derivation_prefix, derivation_suffix,
                 spendable, change, provided_by, purpose, type, created_at, updated_at,
-                confirmed
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, 0, 'you', 'receive', 'P2PKH', ?8, ?9, ?10)",
+                confirmed, script_length, script_offset
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, 0, 'you', 'receive', 'P2PKH', ?8, ?9, ?10, ?11, ?12)",
             rusqlite::params![
                 user_id,
                 txid,
@@ -667,6 +724,8 @@ impl<'a> OutputRepository<'a> {
                 now,
                 now,
                 if confirmed { 1i32 } else { 0i32 },
+                script_length,
+                script_offset,
             ],
         )?;
 
@@ -676,6 +735,19 @@ impl<'a> OutputRepository<'a> {
         }
 
         Ok(rows_affected)
+    }
+
+    /// The full locking script of `output`, wherever it is kept (B5-T1-P4).
+    ///
+    /// Inline in `locking_script` when it fits the cap; otherwise read from the raw
+    /// parent at `script_offset` (toolbox `maxOutputScript` rule). `None` when neither
+    /// is available, or the raw parent no longer hashes to the txid — never an empty
+    /// script, so a caller cannot sign over nothing.
+    pub fn locking_script_for(&self, output: &Output) -> Option<Vec<u8>> {
+        if let Some(s) = output.locking_script.as_ref().filter(|s| !s.is_empty()) {
+            return Some(s.clone());
+        }
+        script_in_parent(self.conn, output.txid.as_ref()?, output.script_length? as i64, output.script_offset? as i64)
     }
 
     /// Update output txid after signing (Phase 4C dual-write)
@@ -963,29 +1035,103 @@ impl<'a> OutputRepository<'a> {
         Ok(rows_affected)
     }
 
-    /// Update spending_description from placeholder to real txid (Phase 4C dual-write)
+
+    // ------------------------------------------------------------------------
+    // B5-T1-P3 — coins are owned by the transaction row that spends them
+    // ------------------------------------------------------------------------
+
+    /// Claim coins for transaction row `tx_id`. Call inside the caller's SQLite transaction
+    /// (a `Conflict` is only safe to act on if the caller then rolls back).
     ///
-    /// After signing, update the placeholder to the actual spending transaction ID,
-    /// and try to set the spent_by FK if the transaction exists.
+    /// Per coin: the money index first — `reserved_by = tx_id` only where it is NULL, so a
+    /// coin another spend holds updates **0 rows** (`R-NORACE`) — then `outputs`
+    /// (`spendable` 1 → 0, `spent_by = tx_id`). Index first, because the
+    /// `money_utxos_on_output_unspendable` trigger drops only *free* index rows.
     ///
-    /// # Arguments
-    /// * `placeholder` - The placeholder pattern (e.g., "pending-1234567890")
-    /// * `real_txid` - The actual signed transaction ID
-    pub fn update_spending_description_batch(&self, placeholder: &str, real_txid: &str) -> Result<usize> {
-        // ⭐ RIG SEAM for `PAYMENT_TEST_BATCH.md` M4 (`P8b-A1`) — and it is safe by
-        // construction, not by promise.
-        //
-        // P8b's rule is "if the wallet cannot record which coins a transaction
-        // spends, it must not broadcast that transaction". Proving it needs this
-        // function to fail ON DEMAND in a RELEASE build, because the dev browser is
-        // a release build, so `#[cfg(test)]` cannot reach it.
-        //
-        // ⛔ Two locks, both required: the env var must be set AND `hodos::is_dev()`
-        // must be true. `main.rs :: enforce_dev_safeguard` runs first in `main()` and
-        // SCRUBS `HODOS_DEV` from the environment of any binary that is not running
-        // from a build directory — so a shipped wallet cannot enter this branch even
-        // if someone sets the variable. That reuses a safeguard that already exists
-        // and is already trusted, rather than inventing a second one.
+    /// `strict` (wallet-selected money): a coin with no free index row, or whose output is
+    /// no longer spendable, is a `Conflict`. Not strict (dApp-named inputs, which need not
+    /// be money and need not be ours): coins we do not track are skipped, as before P3.
+    pub fn claim_coins(&self, tx_id: i64, outpoints: &[(String, u32)], strict: bool) -> Result<Claim> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let mut claimed = 0usize;
+        for (txid, vout) in outpoints {
+            let output_id: Option<i64> = self.conn.query_row(
+                "SELECT outputId FROM outputs WHERE txid = ?1 AND vout = ?2",
+                rusqlite::params![txid, *vout as i64],
+                |r| r.get(0),
+            ).optional()?;
+            let Some(output_id) = output_id else {
+                if strict {
+                    return Ok(Claim::Conflict { txid: txid.clone(), vout: *vout });
+                }
+                continue;
+            };
+
+            let indexed = self.conn.execute(
+                "UPDATE money_utxos SET reserved_by = ?1 WHERE output_id = ?2 AND reserved_by IS NULL",
+                rusqlite::params![tx_id, output_id],
+            )?;
+            if strict && indexed == 0 {
+                return Ok(Claim::Conflict { txid: txid.clone(), vout: *vout });
+            }
+
+            let marked = self.conn.execute(
+                "UPDATE outputs SET spendable = 0, spent_by = ?1, spending_description = NULL, updated_at = ?2
+                 WHERE outputId = ?3 AND spendable = 1",
+                rusqlite::params![tx_id, now, output_id],
+            )?;
+            if marked == 0 {
+                if strict {
+                    // The index said free but the output is not spendable: drift. Refuse
+                    // rather than spend a coin `outputs` says is gone (R-NODOUBLE).
+                    log::error!("   ⛔ money index offered {}:{} but its output is not spendable — refusing the claim",
+                        &txid[..txid.len().min(16)], vout);
+                    return Ok(Claim::Conflict { txid: txid.clone(), vout: *vout });
+                }
+                continue;
+            }
+            claimed += 1;
+        }
+        Ok(Claim::Claimed(claimed))
+    }
+
+    /// Free every coin transaction row `tx_id` holds **in the ordinary way**: `spent_by =
+    /// tx_id` and labelled either not at all (claimed, not yet signed) or with the
+    /// transaction's own txid. A coin carrying any other label — `dss:` (suspected double
+    /// spend), `double-spend-detected`, `phantom…`, `failed-tx-output` — is a hold its own
+    /// task releases, and is left alone. The money-index rows follow by trigger.
+    pub fn release_coins_of(&self, tx_id: i64) -> Result<usize> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let released = self.conn.execute(
+            "UPDATE outputs SET spendable = 1, spent_by = NULL, spending_description = NULL, updated_at = ?2
+             WHERE spent_by = ?1 AND spendable = 0
+               AND (spending_description IS NULL
+                    OR spending_description = (SELECT txid FROM transactions WHERE id = ?1))",
+            rusqlite::params![tx_id, now],
+        )?;
+        if released > 0 {
+            info!("   ♻️  Released {} coin(s) held by transaction row {}", released, tx_id);
+        }
+        Ok(released)
+    }
+
+    /// Label the coins transaction row `tx_id` holds with its txid, once it has one.
+    /// Readers that key on `spending_description = <txid>` (double-spend marking, unfail,
+    /// the failure cleanups) depend on this label. An error makes the caller refuse to
+    /// broadcast (P8b: if the wallet cannot record which coins a transaction spends, it
+    /// must not broadcast it).
+    ///
+    /// 🧪 The `P8b-A1` rig seam moved here from `update_spending_description_batch`,
+    /// unchanged: both `HODOS_FAIL_SPEND_RESOLUTION` and `HODOS_DEV=1` (which
+    /// `enforce_dev_safeguard` scrubs outside a build directory) are required.
+    pub fn label_coins_of(&self, tx_id: i64, txid: &str) -> Result<usize> {
         if std::env::var("HODOS_DEV").as_deref() == Ok("1")
             && std::env::var("HODOS_FAIL_SPEND_RESOLUTION").is_ok()
         {
@@ -996,29 +1142,12 @@ impl<'a> OutputRepository<'a> {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
-
-        // Try to get the spending transaction's ID
-        let spent_by: Option<i64> = self.conn.query_row(
-            "SELECT id FROM transactions WHERE txid = ?1",
-            rusqlite::params![real_txid],
-            |row| row.get(0),
-        ).ok();
-
-        let rows_affected = self.conn.execute(
-            "UPDATE outputs SET spending_description = ?1, spent_by = ?2, updated_at = ?3
-             WHERE spending_description = ?4 AND spendable = 0",
-            rusqlite::params![real_txid, spent_by, now, placeholder],
+        let labelled = self.conn.execute(
+            "UPDATE outputs SET spending_description = ?2, updated_at = ?3
+             WHERE spent_by = ?1 AND spendable = 0 AND spending_description IS NULL",
+            rusqlite::params![tx_id, txid, now],
         )?;
-
-        if rows_affected > 0 {
-            info!("   ✅ Updated spending_description on {} output(s): {} → {} (spent_by={:?})",
-                rows_affected,
-                &placeholder[..std::cmp::min(20, placeholder.len())],
-                &real_txid[..std::cmp::min(16, real_txid.len())],
-                spent_by);
-        }
-
-        Ok(rows_affected)
+        Ok(labelled)
     }
 
     /// List reservations still holding a `pending-%` placeholder older than
@@ -1228,6 +1357,10 @@ impl<'a> OutputRepository<'a> {
     ///
     /// # Returns
     /// The number of outputs restored
+    ///
+    /// B5-T1-P3: also restores coins owned by that transaction's row and not yet labelled
+    /// (claimed, never signed). Coins carrying another label (`dss:` …) are holds their own
+    /// task releases and are never matched.
     pub fn restore_spent_by_txid(&self, spending_txid: &str) -> Result<usize> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1236,7 +1369,10 @@ impl<'a> OutputRepository<'a> {
 
         let rows_affected = self.conn.execute(
             "UPDATE outputs SET spendable = 1, spent_by = NULL, spending_description = NULL, updated_at = ?1
-             WHERE spending_description = ?2 AND spendable = 0",
+             WHERE spendable = 0
+               AND (spending_description = ?2
+                    OR (spending_description IS NULL
+                        AND spent_by = (SELECT id FROM transactions WHERE txid = ?2)))",
             rusqlite::params![now, spending_txid],
         )?;
 
@@ -1395,6 +1531,7 @@ mod stale_reservation_tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
         migrations::create_schema_v1(&conn).unwrap();
+        migrations::install_money_index(&conn).unwrap();
         conn.execute(
             "INSERT INTO users (userId, identity_key, active_storage, created_at, updated_at)
              VALUES (1, 'test_identity_key', 'local', 0, 0)",
@@ -1572,6 +1709,7 @@ mod reservation_race_tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
         migrations::create_schema_v1(&conn).unwrap();
+        migrations::install_money_index(&conn).unwrap();
         conn.execute(
             "INSERT INTO users (userId, identity_key, active_storage, created_at, updated_at)
              VALUES (1, 'test_identity_key', 'local', 0, 0)",
@@ -1659,6 +1797,7 @@ mod token_reserved_exposure_tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
         migrations::create_schema_v1(&conn).unwrap();
+        migrations::install_money_index(&conn).unwrap();
         conn.execute(
             "INSERT INTO users (userId, identity_key, active_storage, created_at, updated_at)
              VALUES (1, 'test_identity_key', 'local', 0, 0)",
@@ -1680,9 +1819,10 @@ mod token_reserved_exposure_tests {
         let conn = seed_db();
         let repo = OutputRepository::new(&conn);
 
-        // ordinary money, default pool
-        repo.upsert_received_utxo_with_confirmed(1, "ord", 0, 50_000, SCRIPT, 0, true)
+        // ordinary money, default pool — stamped as the classifier would (B5-T1-P5)
+        repo.upsert_received_utxo_with_confirmed(1, "ord", 0, 50_000, SCRIPT, 0, true, crate::ingest::ScriptSource::Unchecked)
             .unwrap();
+        conn.execute("UPDATE outputs SET change = 1 WHERE txid = 'ord'", []).unwrap();
         let money_only = repo.calculate_balance(1).unwrap();
         assert_eq!(money_only, 50_000);
 
@@ -1703,29 +1843,30 @@ mod token_reserved_exposure_tests {
         // ⇒ so the balance must refuse it too
         assert_eq!(repo.calculate_balance(1).unwrap(), money_only,
                    "a basketed carrier must not move the displayed balance");
+        assert_eq!(repo.calculate_held(1).unwrap(), (0, 0),
+                   "B5-T1-P5: nor the held line — a filed carrier is T2's, not 'being held'");
     }
 
-    /// GREEN — a 1-satoshi payment arriving at a receive address becomes a fully
-    /// spendable, default-pool row with no user action and no recovery scan.
-    /// This is the exposure the ticket asked about, and it is real.
+    /// Before B5-T1-P5 this test pinned the defect: a 1-satoshi payment arriving at a
+    /// receive address became a spendable default-pool row ("the actual defect … the
+    /// real fix is classification on ingest"). P5 is that fix: ingest writes the row
+    /// **unstamped** (`change = 0`), so no spend path is offered it, and it is shown as
+    /// held instead of vanishing.
     #[test]
-    fn incoming_one_sat_payment_becomes_a_spendable_default_pool_row() {
+    fn incoming_one_sat_payment_is_held_not_spendable() {
         let conn = seed_db();
         let repo = OutputRepository::new(&conn);
 
         // Exactly what address sync does: address_index 0, confirmed.
         let inserted = repo
-            .upsert_received_utxo_with_confirmed(1, "ord", 0, 1, SCRIPT, 0, true)
+            .upsert_received_utxo_with_confirmed(1, "ord", 0, 1, SCRIPT, 0, true, crate::ingest::ScriptSource::Unchecked)
             .unwrap();
         assert_eq!(inserted, 1);
-
-        let spendable = repo.get_spendable_confirmed_by_user(1).unwrap();
-        assert_eq!(spendable.len(), 1,
-            "the 1-sat output IS returned to every spend path that reads this query");
-        assert_eq!(spendable[0].satoshis, 1);
-        assert!(spendable[0].basket_id.is_none(),
-            "no basket is assigned on ingest — this is the actual defect, and the \
-             reason the existing basket exclusion never fires for a token");
+        assert!(repo.get_spendable_confirmed_by_user(1).unwrap().is_empty()
+                && repo.get_spendable_by_user(1).unwrap().is_empty(),
+            "an unclassified row is offered to no spend path");
+        assert_eq!(repo.calculate_balance(1).unwrap(), 0);
+        assert_eq!(repo.calculate_held(1).unwrap(), (1, 1), "…and it is shown as held, not lost");
     }
 
     /// RED half — the same row filed into a non-default basket is excluded.
@@ -1739,7 +1880,7 @@ mod token_reserved_exposure_tests {
         let conn = seed_db();
         let repo = OutputRepository::new(&conn);
 
-        repo.upsert_received_utxo_with_confirmed(1, "ord", 0, 1, SCRIPT, 0, true)
+        repo.upsert_received_utxo_with_confirmed(1, "ord", 0, 1, SCRIPT, 0, true, crate::ingest::ScriptSource::Unchecked)
             .unwrap();
         conn.execute(
             "INSERT INTO output_baskets (basketId, user_id, name, created_at, updated_at)
@@ -1753,33 +1894,30 @@ mod token_reserved_exposure_tests {
             "a correctly-basketed token is already excluded from spending");
     }
 
-    /// The ingest path applies no value filter of any kind — a 1-satoshi output and
-    /// an ordinary one are written identically and both land in the spendable pool.
+    /// The ingest path applies no value filter — and since B5-T1-P5 it stamps nothing
+    /// either: a 1-satoshi output and an ordinary one are both written unstamped, both
+    /// held, neither in the spendable pool until the classifier has looked at them.
     #[test]
-    fn ingest_applies_no_value_filter() {
+    fn ingest_applies_no_value_filter_and_stamps_nothing() {
         let conn = seed_db();
         let repo = OutputRepository::new(&conn);
 
-        repo.upsert_received_utxo_with_confirmed(1, "ord", 0, 1, SCRIPT, 0, true).unwrap();
-        repo.upsert_received_utxo_with_confirmed(1, "coin", 0, 50_000, SCRIPT, 0, true).unwrap();
+        repo.upsert_received_utxo_with_confirmed(1, "ord", 0, 1, SCRIPT, 0, true, crate::ingest::ScriptSource::Unchecked).unwrap();
+        repo.upsert_received_utxo_with_confirmed(1, "coin", 0, 50_000, SCRIPT, 0, true, crate::ingest::ScriptSource::Unchecked).unwrap();
 
-        let mut sats: Vec<i64> = repo.get_spendable_confirmed_by_user(1).unwrap()
-            .iter().map(|o| o.satoshis).collect();
-        sats.sort();
-        assert_eq!(sats, vec![1, 50_000],
-            "both are tracked as spendable value; nothing on ingest tells them apart");
+        assert!(repo.get_spendable_confirmed_by_user(1).unwrap().is_empty());
+        assert_eq!(repo.calculate_held(1).unwrap(), (50_001, 2));
     }
 }
 
 /// `P8b-A2` — the abort branch added by Phase 8b must be **reachable**.
 ///
-/// The fix in `handlers.rs`, `certificate_handlers.rs` and `task_consolidate_dust.rs`
-/// turns a failed placeholder→txid resolution into a refusal to broadcast. That is only
-/// worth anything if `update_spending_description_batch` can actually return `Err` —
-/// otherwise the new branch is dead code that will never run and never be seen to run.
+/// B5-T1-P3 ported these from `update_spending_description_batch` (deleted) to
+/// `label_coins_of`, its replacement: the refusal to broadcast fires when labelling a
+/// transaction's coins fails, so that `Err` must be real and reachable.
 ///
 /// ⛔ This does **not** prove "nothing was broadcast". That assertion needs the running
-/// handler and a live network, and is recorded as owed (`P8b-A1`).
+/// handler (`P3-A8`).
 #[cfg(test)]
 mod resolution_failure_tests {
     use super::*;
@@ -1789,6 +1927,7 @@ mod resolution_failure_tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
         migrations::create_schema_v1(&conn).unwrap();
+        migrations::install_money_index(&conn).unwrap();
         conn.execute(
             "INSERT INTO users (userId, identity_key, active_storage, created_at, updated_at)
              VALUES (1, 'k', 'local', 0, 0)",
@@ -1798,27 +1937,39 @@ mod resolution_failure_tests {
         conn
     }
 
-    fn reserve(conn: &Connection, txid: &str, placeholder: &str) {
+    /// A transaction row (the owner) — returns its id.
+    fn row(conn: &Connection, reference: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO transactions (txid, reference_number, raw_tx, status, is_outgoing, satoshis, created_at, updated_at)
+             VALUES (?1, ?1, '', 'unsigned', 1, 0, 0, 0)",
+            [reference],
+        ).unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// A coin claimed by row `owner`, not yet labelled.
+    fn reserve(conn: &Connection, txid: &str, owner: i64) {
         conn.execute(
             "INSERT INTO outputs (user_id, spendable, change, vout, satoshis, provided_by,
-                                  purpose, type, txid, spending_description, confirmed,
+                                  purpose, type, txid, spent_by, confirmed,
                                   created_at, updated_at)
              VALUES (1, 0, 0, 0, 5000, 'you', '', 'P2PKH', ?1, ?2, 1, 0, 0)",
-            rusqlite::params![txid, placeholder],
+            rusqlite::params![txid, owner],
         )
         .unwrap();
     }
 
-    /// GREEN — the happy path resolves the reservation and sets the row's spending txid.
+    /// GREEN — labelling sets each owned coin's spending txid.
     #[test]
     fn resolution_succeeds_and_reports_the_row_count() {
         let conn = seed_db();
         let repo = OutputRepository::new(&conn);
-        reserve(&conn, "aa", "pending-1-0");
-        reserve(&conn, "bb", "pending-1-0");
+        let me = row(&conn, "ref-1");
+        reserve(&conn, "aa", me);
+        reserve(&conn, "bb", me);
 
-        let n = repo.update_spending_description_batch("pending-1-0", "realtxid").unwrap();
-        assert_eq!(n, 2, "both reserved inputs are resolved");
+        let n = repo.label_coins_of(me, "realtxid").unwrap();
+        assert_eq!(n, 2, "both reserved inputs are labelled");
 
         let desc: String = conn
             .query_row("SELECT spending_description FROM outputs WHERE txid='aa'", [], |r| r.get(0))
@@ -1827,61 +1978,53 @@ mod resolution_failure_tests {
     }
 
     /// `P8b-A2` — the failure the abort branch exists for is **real and reachable**.
-    ///
-    /// A SQLite write failure at this exact moment is what the ticket is about (disk
-    /// full, corruption, a busy timeout that outlasts the 5 s `busy_timeout`). Dropping
-    /// the table reproduces the same `Err` shape without needing any of those.
+    /// Dropping the table reproduces a SQLite write failure's `Err` shape.
     #[test]
     fn a_write_failure_surfaces_as_err_so_the_abort_branch_can_fire() {
         let conn = seed_db();
-        reserve(&conn, "aa", "pending-1-0");
+        let me = row(&conn, "ref-1");
+        reserve(&conn, "aa", me);
+        conn.execute("DROP TABLE money_utxos", []).unwrap();
         conn.execute("DROP TABLE outputs", []).unwrap();
 
         let repo = OutputRepository::new(&conn);
-        let result = repo.update_spending_description_batch("pending-1-0", "realtxid");
+        let result = repo.label_coins_of(me, "realtxid");
 
         assert!(result.is_err(),
             "if this ever becomes Ok, every abort added by Phase 8b is dead code");
     }
 
-    /// ⚠️ The failure mode the ticket does **not** mention: `Ok(0)`.
-    ///
-    /// A resolution that matches no rows is **not** an error, so the abort branch does
-    /// not fire — the wallet broadcasts having recorded nothing. Documented here rather
-    /// than guarded, because `Ok(0)` is also the legitimate answer when a transaction
-    /// spends only external inputs that were never in our table.
-    ///
-    /// ⭐ Checked and NOT a live double-spend path: `TaskSweepReservations` skips any
-    /// placeholder held by a live `PENDING_TRANSACTIONS` entry
-    /// (`task_sweep_reservations.rs:56-62`, *"however old the reservation looks"*), so a
-    /// slow createAction→signAction cannot have its reservation swept out from under it.
-    /// Closing the remaining gap needs the reserved count threaded to the resolution
-    /// site — deliberately out of scope; see the phase contract §8.
+    /// ⚠️ `Ok(0)` is not an error: a transaction that spends only inputs we do not track
+    /// owns no coins. B5-T1-P3 removed the gap this used to document — a slow
+    /// createAction → signAction can no longer have its reservation swept, because the
+    /// coins are owned by the row, not by a string a sweeper matches.
     #[test]
     fn a_resolution_matching_no_rows_is_ok_zero_not_an_error() {
         let conn = seed_db();
         let repo = OutputRepository::new(&conn);
+        let me = row(&conn, "ref-1");
 
-        let n = repo.update_spending_description_batch("pending-nothing-here", "realtxid").unwrap();
+        let n = repo.label_coins_of(me, "realtxid").unwrap();
         assert_eq!(n, 0, "no rows matched — and this is Ok, not Err");
     }
 
-    /// The resolution only claims rows holding *its own* placeholder. A concurrent
-    /// transaction's reservation must be untouched, or one send would resolve another's
-    /// inputs to the wrong txid.
+    /// Labelling only touches coins *its own* row owns. Another transaction's coins are
+    /// untouched, or one send would label another's inputs with the wrong txid.
     #[test]
     fn resolution_claims_only_its_own_placeholder() {
         let conn = seed_db();
         let repo = OutputRepository::new(&conn);
-        reserve(&conn, "mine", "pending-1-0");
-        reserve(&conn, "theirs", "pending-2-0");
+        let me = row(&conn, "ref-1");
+        let them = row(&conn, "ref-2");
+        reserve(&conn, "mine", me);
+        reserve(&conn, "theirs", them);
 
-        assert_eq!(repo.update_spending_description_batch("pending-1-0", "tx-a").unwrap(), 1);
+        assert_eq!(repo.label_coins_of(me, "tx-a").unwrap(), 1);
 
-        let other: String = conn
+        let other: Option<String> = conn
             .query_row("SELECT spending_description FROM outputs WHERE txid='theirs'", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(other, "pending-2-0", "the other transaction's reservation is untouched");
+        assert_eq!(other, None, "the other transaction's coin is untouched");
     }
 }
 
@@ -1900,6 +2043,7 @@ mod spent_reservation_resolution_tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
         migrations::create_schema_v1(&conn).unwrap();
+        migrations::install_money_index(&conn).unwrap();
         conn.execute(
             "INSERT INTO users (userId, identity_key, active_storage, created_at, updated_at)
              VALUES (1, 'k', 'local', 0, 0)",
@@ -2046,5 +2190,376 @@ mod spent_reservation_resolution_tests {
             .query_row("SELECT spending_description FROM outputs WHERE txid='aa'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(desc, "pending-1-0", "and it changed nothing while reporting Ok");
+    }
+}
+
+// ============================================================================
+// B5-T1-P3 — the money index and reservation by transaction row.
+// Contract: development-docs/0.4.0-beta.7/track-1-money-path/phase-P3-reservations-and-money-index/
+// Each test names the contract row it serves; its RED is recorded in the evidence table.
+// ============================================================================
+#[cfg(test)]
+mod p3_money_index_tests {
+    use super::*;
+    use crate::database::migrations;
+    use std::collections::BTreeSet;
+
+    const STATUSES: [&str; 7] = ["unsigned", "failed", "nosend", "nonfinal", "completed", "unproven", "sending"];
+
+    fn seed_conn(conn: &Connection) {
+        conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
+        migrations::create_schema_v1(conn).unwrap();
+        migrations::install_money_index(conn).unwrap();
+        conn.execute(
+            "INSERT INTO users (userId, identity_key, active_storage, created_at, updated_at) VALUES (1, 'k', 'local', 0, 0)",
+            [],
+        ).unwrap();
+        conn.execute("INSERT INTO output_baskets (basketId, user_id, name, created_at, updated_at) VALUES (1, 1, 'default', 0, 0)", []).unwrap();
+        conn.execute("INSERT INTO output_baskets (basketId, user_id, name, created_at, updated_at) VALUES (2, 1, '1sat', 0, 0)", []).unwrap();
+    }
+
+    fn db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        seed_conn(&conn);
+        conn
+    }
+
+    fn tx_row(conn: &Connection, reference: &str, status: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO transactions (txid, reference_number, raw_tx, status, is_outgoing, satoshis, created_at, updated_at)
+             VALUES (?1, ?1, '', ?2, 1, 0, 0, 0)",
+            rusqlite::params![reference, status],
+        ).unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// A coin the classifier has stamped money (`change = 1`, B5-T1-P5) — the fixtures
+    /// below test P3's mechanics, which act on stamped coins.
+    #[allow(clippy::too_many_arguments)]
+    fn out(conn: &Connection, txid: &str, sats: i64, spendable: bool, deriv: bool,
+           basket: Option<i64>, parent: Option<i64>, confirmed: bool) -> i64 {
+        out_c(conn, txid, sats, spendable, deriv, basket, parent, confirmed, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn out_c(conn: &Connection, txid: &str, sats: i64, spendable: bool, deriv: bool,
+             basket: Option<i64>, parent: Option<i64>, confirmed: bool, stamped: bool) -> i64 {
+        conn.execute(
+            "INSERT INTO outputs (user_id, transaction_id, basket_id, spendable, change, vout, satoshis, provided_by,
+                                  purpose, type, txid, derivation_prefix, confirmed, created_at, updated_at)
+             VALUES (1, ?1, ?2, ?3, ?8, 0, ?4, 'you', '', 'P2PKH', ?5, ?6, ?7, 0, 0)",
+            rusqlite::params![parent, basket, spendable as i64, sats, txid,
+                              if deriv { Some("2-receive address") } else { None }, confirmed as i64,
+                              stamped as i64],
+        ).unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn ids(v: Vec<Output>) -> BTreeSet<i64> {
+        v.into_iter().map(|o| o.output_id.unwrap()).collect()
+    }
+
+    /// The pre-P3 selectors, verbatim (origin/0.4.0 at 02fa1c6) — the parity reference —
+    /// plus the one term B5-T1-P5 adds on purpose: `AND o.change = 1` (owner decision 2).
+    fn legacy(conn: &Connection, confirmed_only: bool) -> BTreeSet<i64> {
+        let sql = if confirmed_only {
+            "SELECT o.outputId FROM outputs o
+             LEFT JOIN transactions t ON o.transaction_id = t.id
+             LEFT JOIN output_baskets b ON o.basket_id = b.basketId
+             WHERE o.user_id = ?1 AND o.spendable = 1
+               AND (t.status = 'completed' OR (o.transaction_id IS NULL AND o.confirmed = 1))
+               AND o.derivation_prefix IS NOT NULL
+               AND (o.basket_id IS NULL OR b.name = 'default')
+               AND o.change = 1"
+        } else {
+            "SELECT o.outputId FROM outputs o
+             LEFT JOIN transactions t ON o.transaction_id = t.id
+             LEFT JOIN output_baskets b ON o.basket_id = b.basketId
+             WHERE o.user_id = ?1 AND o.spendable = 1
+               AND (t.status IS NULL OR t.status NOT IN ('unsigned', 'failed', 'nosend', 'nonfinal'))
+               AND o.derivation_prefix IS NOT NULL
+               AND (o.basket_id IS NULL OR b.name = 'default')
+               AND (o.transaction_id IS NOT NULL OR o.confirmed = 1)
+               AND o.change = 1"
+        };
+        let mut stmt = conn.prepare(sql).unwrap();
+        let rows = stmt.query_map([1i64], |r| r.get::<_, i64>(0)).unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    }
+
+    /// Every combination of the predicate's inputs: stamped × spendable × derivation ×
+    /// basket × parent (none + confirmed 0/1, or a parent in each status).
+    /// 2·2·2·3·(2+7) = 216 rows (B5-T1-P5 added the stamp dimension).
+    fn every_combination(conn: &Connection) {
+        let parents: Vec<(&str, i64)> = STATUSES.iter().map(|s| (*s, tx_row(conn, &format!("parent-{}", s), s))).collect();
+        let mut n = 0;
+        for stamped in [false, true] {
+        for spendable in [false, true] {
+            for deriv in [false, true] {
+                for basket in [None, Some(1), Some(2)] {
+                    for confirmed in [false, true] {
+                        n += 1;
+                        out_c(conn, &format!("c{}", n), 1000 + n, spendable, deriv, basket, None, confirmed, stamped);
+                    }
+                    for (_, pid) in &parents {
+                        n += 1;
+                        out_c(conn, &format!("c{}", n), 1000 + n, spendable, deriv, basket, Some(*pid), false, stamped);
+                    }
+                }
+            }
+        }
+        }
+    }
+
+    /// `P3-A1` (T1 half) — parity: on every combination, each index-reading selector offers
+    /// exactly the outputs the pre-P3 selector offered, by id; after the triggers AND after
+    /// a rebuild. Two comparisons, because the two selectors have different predicates.
+    #[test]
+    fn p3_a1_index_selectors_match_the_pre_p3_selectors_on_every_combination() {
+        let conn = db();
+        every_combination(&conn);
+        let repo = OutputRepository::new(&conn);
+        let check = |label: &str| {
+            let new_all = ids(repo.get_spendable_by_user(1).unwrap());
+            let new_conf = ids(repo.get_spendable_confirmed_by_user(1).unwrap());
+            assert_eq!(new_all, legacy(&conn, false), "{}: get_spendable_by_user differs from the pre-P3 selector", label);
+            assert_eq!(new_conf, legacy(&conn, true), "{}: get_spendable_confirmed_by_user differs from the pre-P3 selector", label);
+            assert!(!new_all.is_empty() && !new_conf.is_empty() && new_conf != new_all,
+                "{}: the fixture must exercise both predicates non-trivially", label);
+        };
+        check("after triggers");
+        let r = migrations::rebuild_money_index(&conn).unwrap();
+        assert_eq!((r.added, r.removed), (0, 0), "the triggers left nothing for the rebuild to fix: {:?}", r);
+        check("after rebuild");
+    }
+
+    /// `P3-A1` RED, built in: the parity instrument CAN fail, and names the outpoint.
+    /// With the trigger that removes a non-money row disabled, moving one coin into a
+    /// token basket leaves it in the index — the diff is exactly that coin. (A comparison
+    /// that cannot go red here would pass with the index mirroring `outputs` blindly.)
+    #[test]
+    fn p3_a1_red_parity_names_the_outpoint_when_the_index_drifts() {
+        let conn = db();
+        every_combination(&conn);
+        let repo = OutputRepository::new(&conn);
+        let victim: i64 = conn.query_row(
+            "SELECT output_id FROM money_utxos ORDER BY satoshis DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+        conn.execute("DROP TRIGGER money_utxos_on_output_not_money", []).unwrap();
+        conn.execute("UPDATE outputs SET basket_id = 2 WHERE outputId = ?1", [victim]).unwrap();
+        let new_all = ids(repo.get_spendable_by_user(1).unwrap());
+        let diff: Vec<i64> = new_all.symmetric_difference(&legacy(&conn, false)).copied().collect();
+        assert_eq!(diff, vec![victim], "the diff must name exactly the drifted outpoint");
+    }
+
+    /// `P3-A2` (T1 half, the shared read) — a money output absent from the index is never
+    /// offered, by either selector. (Route-by-route: the handler tests.)
+    #[test]
+    fn p3_a2_an_output_missing_from_the_index_is_never_offered() {
+        let conn = db();
+        let big = out(&conn, "big", 900_000, true, true, None, None, true);
+        let small = out(&conn, "small", 5_000, true, true, None, None, true);
+        conn.execute("DELETE FROM money_utxos WHERE output_id = ?1", [big]).unwrap();
+        let repo = OutputRepository::new(&conn);
+        assert_eq!(ids(repo.get_spendable_by_user(1).unwrap()), BTreeSet::from([small]));
+        assert_eq!(ids(repo.get_spendable_confirmed_by_user(1).unwrap()), BTreeSet::from([small]));
+        // …and `outputs` still says it is spendable: the index is what refused it.
+        assert!(legacy(&conn, false).contains(&big));
+        // Second layer: even a route that selected it some other way cannot claim it.
+        let t = tx_row(&conn, "T", "unsigned");
+        assert_eq!(OutputRepository::new(&conn).claim_coins(t, &[("big".into(), 0)], true).unwrap(),
+                   Claim::Conflict { txid: "big".into(), vout: 0 });
+    }
+
+    fn index_row(conn: &Connection, output_id: i64) -> Option<Option<i64>> {
+        conn.query_row("SELECT reserved_by FROM money_utxos WHERE output_id = ?1", [output_id], |r| r.get(0)).ok()
+    }
+
+    /// The triggers' rules (install_money_index doc 1–5), one step at a time.
+    #[test]
+    fn p3_triggers_keep_the_index_in_step_with_outputs() {
+        let conn = db();
+        let c = out(&conn, "coin", 5_000, true, true, None, None, true);
+        assert_eq!(index_row(&conn, c), Some(None), "rule 1: spendable money ⇒ a free row");
+
+        conn.execute("UPDATE outputs SET spendable = 0 WHERE outputId = ?1", [c]).unwrap();
+        assert_eq!(index_row(&conn, c), None, "rule 2: not spendable ⇒ the free row goes");
+        conn.execute("UPDATE outputs SET spendable = 1 WHERE outputId = ?1", [c]).unwrap();
+        assert_eq!(index_row(&conn, c), Some(None), "rule 1: restored ⇒ free again");
+
+        conn.execute("UPDATE outputs SET basket_id = 2 WHERE outputId = ?1", [c]).unwrap();
+        assert_eq!(index_row(&conn, c), None, "rule 3: filed in a token basket ⇒ not money");
+        conn.execute("UPDATE outputs SET basket_id = 1 WHERE outputId = ?1", [c]).unwrap();
+        assert_eq!(index_row(&conn, c), Some(None), "back in the default basket ⇒ money");
+        conn.execute("UPDATE outputs SET derivation_prefix = NULL WHERE outputId = ?1", [c]).unwrap();
+        assert_eq!(index_row(&conn, c), None, "rule 3: no derivation ⇒ not money");
+        conn.execute("UPDATE outputs SET derivation_prefix = '2-receive address' WHERE outputId = ?1", [c]).unwrap();
+
+        let t = tx_row(&conn, "spend", "unsigned");
+        let repo = OutputRepository::new(&conn);
+        assert_eq!(repo.claim_coins(t, &[("coin".into(), 0)], true).unwrap(), Claim::Claimed(1));
+        assert_eq!(index_row(&conn, c), Some(Some(t)), "rule 2: a claimed row survives spendable → 0");
+
+        conn.execute("UPDATE transactions SET status = 'failed' WHERE id = ?1", [t]).unwrap();
+        assert_eq!(index_row(&conn, c), None, "rule 4: a failed reserver drops its rows");
+        repo.restore_spent_by_txid("spend").unwrap();
+        assert_eq!(index_row(&conn, c), Some(None), "rule 4 + 1: inputs restored ⇒ free again");
+
+        conn.execute("DELETE FROM outputs WHERE outputId = ?1", [c]).unwrap();
+        assert_eq!(index_row(&conn, c), None, "rule 5: deleted output ⇒ no row");
+    }
+
+    /// A restore by ANY path — including an older binary that knows nothing of the index —
+    /// frees a reserved row (rule 1). Before rule 1, a reserved row whose coin was restored
+    /// behind its back would hide money until the next restart.
+    #[test]
+    fn p3_a_restore_behind_the_index_frees_the_reservation() {
+        let conn = db();
+        let c = out(&conn, "coin", 5_000, true, true, None, None, true);
+        let t = tx_row(&conn, "spend", "unsigned");
+        OutputRepository::new(&conn).claim_coins(t, &[("coin".into(), 0)], true).unwrap();
+        // what a beta.4 binary's restore looks like
+        conn.execute("UPDATE outputs SET spendable = 1, spent_by = NULL, spending_description = NULL WHERE outputId = ?1", [c]).unwrap();
+        assert_eq!(index_row(&conn, c), Some(None));
+        assert!(ids(OutputRepository::new(&conn).get_spendable_by_user(1).unwrap()).contains(&c));
+    }
+
+    /// `P3-A3` (T1, sequential half): the second claim takes 0 rows and changes nothing.
+    #[test]
+    fn p3_a3_a_second_claim_of_the_same_coin_is_a_conflict_and_changes_nothing() {
+        let conn = db();
+        let c = out(&conn, "coin", 5_000, true, true, None, None, true);
+        let a = tx_row(&conn, "a", "unsigned");
+        let b = tx_row(&conn, "b", "unsigned");
+        let repo = OutputRepository::new(&conn);
+        assert_eq!(repo.claim_coins(a, &[("coin".into(), 0)], true).unwrap(), Claim::Claimed(1));
+        assert_eq!(repo.claim_coins(b, &[("coin".into(), 0)], true).unwrap(),
+                   Claim::Conflict { txid: "coin".into(), vout: 0 });
+        let spent_by: i64 = conn.query_row("SELECT spent_by FROM outputs WHERE outputId = ?1", [c], |r| r.get(0)).unwrap();
+        assert_eq!((spent_by, index_row(&conn, c)), (a, Some(Some(a))), "the coin stays A's");
+    }
+
+    /// `P3-A3` (T1, the overlap). Production has ONE connection behind a mutex, so two
+    /// spends never overlap inside SQLite — they overlap *logically*: both select the same
+    /// coin before either claims it. Two threads on a shared connection: each selects
+    /// (the barrier proves both selections saw the coin free), then each claims. Exactly
+    /// one wins; the other takes 0 rows. The sequential test cannot tell a closed race
+    /// from two calls that never overlapped — this one can.
+    /// RED (scratch): drop BOTH guards in `claim_coins` (`reserved_by IS NULL` on the
+    /// index, `spendable = 1` on outputs) ⇒ both report `Claimed(1)`. Each guard alone
+    /// keeps this green — they are independent.
+    #[test]
+    fn p3_a3_overlapping_claims_one_wins() {
+        use std::sync::{Arc, Barrier, Mutex};
+        let conn = db();
+        let c = out(&conn, "coin", 5_000, true, true, None, None, true);
+        let a = tx_row(&conn, "a", "unsigned");
+        let b = tx_row(&conn, "b", "unsigned");
+        let shared = Arc::new(Mutex::new(conn));
+        let both_selected = Arc::new(Barrier::new(2));
+
+        let spend = |row: i64| {
+            let (db, barrier) = (shared.clone(), both_selected.clone());
+            std::thread::spawn(move || {
+                let saw = {
+                    let conn = db.lock().unwrap();
+                    ids(OutputRepository::new(&conn).get_spendable_by_user(1).unwrap()).contains(&c)
+                };
+                barrier.wait(); // neither claims until both have selected
+                let conn = db.lock().unwrap();
+                let txn = conn.unchecked_transaction().unwrap();
+                let got = OutputRepository::new(&txn).claim_coins(row, &[("coin".into(), 0)], true).unwrap();
+                txn.commit().unwrap();
+                (saw, got)
+            })
+        };
+        let (ta, tb) = (spend(a), spend(b));
+        let (saw_a, got_a) = ta.join().unwrap();
+        let (saw_b, got_b) = tb.join().unwrap();
+        assert!(saw_a && saw_b, "SUBJECT: both selections saw the coin free — the calls overlapped");
+        let wins = [&got_a, &got_b].iter().filter(|g| matches!(g, Claim::Claimed(1))).count();
+        let conflicts = [&got_a, &got_b].iter().filter(|g| matches!(g, Claim::Conflict { .. })).count();
+        assert_eq!((wins, conflicts), (1, 1), "exactly one claim wins: {:?} / {:?}", got_a, got_b);
+    }
+
+    /// `P3-A6` (T1): a failed transaction frees EXACTLY its own coins — A's freed, B's kept.
+    /// REDs (scratch): release `WHERE reserved_by IS NOT NULL` / by outpoint ⇒ B's freed
+    /// too; release keyed on `A + 1` ⇒ A's stay held. Both halves asserted here.
+    #[test]
+    fn p3_a6_release_frees_exactly_the_failed_transactions_coins() {
+        let conn = db();
+        let a1 = out(&conn, "a1", 5_000, true, true, None, None, true);
+        let a2 = out(&conn, "a2", 6_000, true, true, None, None, true);
+        let b1 = out(&conn, "b1", 7_000, true, true, None, None, true);
+        let a = tx_row(&conn, "A", "unsigned");
+        let b = tx_row(&conn, "B", "unsigned");
+        let repo = OutputRepository::new(&conn);
+        repo.claim_coins(a, &[("a1".into(), 0), ("a2".into(), 0)], true).unwrap();
+        repo.claim_coins(b, &[("b1".into(), 0)], true).unwrap();
+
+        assert_eq!(repo.release_coins_of(a).unwrap(), 2);
+        let state = |id: i64| -> (i64, Option<i64>, Option<Option<i64>>) {
+            let (sp, sb) = conn.query_row("SELECT spendable, spent_by FROM outputs WHERE outputId = ?1", [id],
+                |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            (sp, sb, index_row(&conn, id))
+        };
+        assert_eq!(state(a1), (1, None, Some(None)), "A's first coin is free");
+        assert_eq!(state(a2), (1, None, Some(None)), "A's second coin is free");
+        assert_eq!(state(b1), (0, Some(b), Some(Some(b))), "B's coin is still B's");
+    }
+
+    /// A coin held under a special label — suspected double spend — is never released
+    /// by its transaction's release (`R-NODOUBLE`): its own task decides.
+    #[test]
+    fn p3_release_never_frees_a_suspected_double_spend_hold() {
+        let conn = db();
+        let c = out(&conn, "coin", 5_000, true, true, None, None, true);
+        let t = tx_row(&conn, "T", "unsigned");
+        let repo = OutputRepository::new(&conn);
+        repo.claim_coins(t, &[("coin".into(), 0)], true).unwrap();
+        conn.execute("UPDATE outputs SET spending_description = 'dss:T' WHERE outputId = ?1", [c]).unwrap();
+        assert_eq!(repo.release_coins_of(t).unwrap(), 0);
+        assert_eq!(repo.restore_spent_by_txid("T").unwrap(), 0);
+        let sp: i64 = conn.query_row("SELECT spendable FROM outputs WHERE outputId = ?1", [c], |r| r.get(0)).unwrap();
+        assert_eq!(sp, 0);
+    }
+
+    /// Strict claim refuses a coin the index says is free but `outputs` says is gone
+    /// (drift) — it never claims a spent coin (`R-NODOUBLE`), and rolls nothing forward.
+    #[test]
+    fn p3_strict_claim_refuses_a_drifted_index_row() {
+        let conn = db();
+        let c = out(&conn, "coin", 5_000, true, true, None, None, true);
+        conn.execute("DROP TRIGGER money_utxos_on_output_unspendable", []).unwrap();
+        conn.execute("UPDATE outputs SET spendable = 0 WHERE outputId = ?1", [c]).unwrap();
+        assert_eq!(index_row(&conn, c), Some(None), "drift seeded: free index row, spent output");
+        let t = tx_row(&conn, "T", "unsigned");
+        assert_eq!(OutputRepository::new(&conn).claim_coins(t, &[("coin".into(), 0)], true).unwrap(),
+                   Claim::Conflict { txid: "coin".into(), vout: 0 });
+        assert!(OutputRepository::new(&conn).get_spendable_by_user(1).unwrap().is_empty(),
+                "and the selector's spendable = 1 check never offered it");
+    }
+
+    /// `P3-A11` (T1 half): the rebuild repairs drift in both directions and reports it.
+    #[test]
+    fn p3_a11_rebuild_repairs_drift_both_ways_and_reports_it() {
+        let conn = db();
+        let spent = out(&conn, "spent", 5_000, true, true, None, None, true);
+        let missing = out(&conn, "missing", 6_000, true, true, None, None, true);
+        let done = tx_row(&conn, "done", "unsigned");
+        let held = out(&conn, "held", 7_000, true, true, None, None, true);
+        OutputRepository::new(&conn).claim_coins(done, &[("held".into(), 0)], true).unwrap();
+        // drift, as an older binary with no triggers would leave it
+        for t in ["money_utxos_on_output_unspendable", "money_utxos_on_tx_settled"] {
+            conn.execute(&format!("DROP TRIGGER {}", t), []).unwrap();
+        }
+        conn.execute("UPDATE outputs SET spendable = 0 WHERE outputId = ?1", [spent]).unwrap(); // spent elsewhere
+        conn.execute("DELETE FROM money_utxos WHERE output_id = ?1", [missing]).unwrap();       // received, unindexed
+        conn.execute("UPDATE transactions SET status = 'completed' WHERE id = ?1", [done]).unwrap();
+
+        let r = migrations::rebuild_money_index(&conn).unwrap();
+        assert_eq!((r.added, r.removed), (1, 1), "{:?}", r);
+        assert_eq!(index_row(&conn, spent), None, "a spent coin leaves the index");
+        assert_eq!(index_row(&conn, missing), Some(None), "a received coin enters it");
+        assert_eq!(index_row(&conn, held), None, "a completed reserver's row is pruned");
     }
 }

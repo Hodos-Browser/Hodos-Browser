@@ -4,8 +4,9 @@
 //! for listOutputs when include='entire transactions' is requested.
 
 use crate::beef::{Beef, ParsedTransaction};
-use crate::database::{WalletDatabase, TransactionRepository, ParentTransactionRepository, ProvenTxRepository, BlockHeaderRepository};
-use crate::cache_helpers::{fetch_parent_transaction_from_api, fetch_tsc_proof_from_api, get_cached_block_height, fetch_and_cache_block_header};
+use crate::database::{WalletDatabase, TransactionRepository, ParentTransactionRepository};
+use crate::cache_helpers::{fetch_parent_transaction_from_api, fetch_tsc_proof_from_api};
+use crate::proof_store::{ProofCheck, RootOracle};
 use crate::services::WalletServices;
 use std::sync::Mutex;
 use sha2::{Sha256, Digest};
@@ -151,6 +152,134 @@ pub async fn fetch_transaction_for_beef(
     }
 }
 
+/// One transaction's merkle proof for a BEEF we are building (B5-T1-P7a-2 `C9a`/`C9b`):
+/// - a stored proof, unless our own headers refute it;
+/// - otherwise one fetched now — **stored** only if our headers verify it, **embedded** unless they
+///   refute it (owner 2026-10-13, K-o: a block we do not hold — older than our checkpoint, or just
+///   mined — is unchecked, not wrong; whoever receives the BEEF checks it against their own headers).
+///
+/// A fetched proof names its block by hash. When our chain does not hold that block, the height to
+/// embed it at is an indexer's header lookup: a hint, used only for embedding, never stored.
+pub async fn proof_for_beef(
+    txid: &str,
+    raw_tx: &[u8],
+    db: &Mutex<WalletDatabase>,
+    services: &WalletServices,
+    chain: &dyn RootOracle,
+) -> Option<serde_json::Value> {
+    let stored = {
+        let db_guard = db.lock().unwrap();
+        crate::proof_store::stored_proof_for_beef(db_guard.connection(), chain, txid).unwrap_or(None)
+    };
+    if let Some(tsc) = stored {
+        log::info!("   ✅ Using stored Merkle proof for {}", txid);
+        return Some(tsc);
+    }
+
+    log::info!("   🌐 No usable stored proof - fetching TSC proof from API...");
+    let tsc = match fetch_tsc_proof_from_api(services, txid).await {
+        Ok(Some(tsc)) => tsc,
+        Ok(None) => {
+            log::warn!("   ⚠️  TSC proof not available (tx not confirmed)");
+            return None;
+        }
+        Err(e) => {
+            log::warn!("   ⚠️  Failed to fetch TSC proof: {}", e);
+            return None;
+        }
+    };
+
+    match crate::proof_store::check_tsc(chain, txid, &tsc) {
+        ProofCheck::Verified(proof) => {
+            let db_guard = db.lock().unwrap();
+            let conn = db_guard.connection();
+            let block_hash = tsc["target"].as_str().unwrap_or("");
+            match crate::proof_store::store(conn, chain, &proof, raw_tx, block_hash) {
+                Ok(row) => {
+                    let _ = crate::proof_store::link(conn, &row, txid);
+                    log::info!("   💾 Stored verified proof for {}", txid);
+                }
+                Err(e) => log::warn!("   ⚠️  Failed to store proof for {}: {}", txid, e),
+            }
+            Some(proof.tsc().clone())
+        }
+        ProofCheck::Wrong { height } => {
+            log::warn!("   ❌ fetched proof for {} does not match our header at {} — not used", txid, height);
+            None
+        }
+        ProofCheck::Malformed(e) => {
+            log::warn!("   ⚠️  fetched proof for {} unreadable: {}", txid, e);
+            None
+        }
+        ProofCheck::NotHeld => with_height_hint(txid, tsc, services, chain).await,
+    }
+}
+
+/// A proof for a block our chain does not hold, made ready to embed unchecked (K-o): at its own
+/// height, or at the height an indexer gives for its block hash — a hint, used only for embedding.
+async fn with_height_hint(txid: &str, mut tsc: serde_json::Value, services: &WalletServices, chain: &dyn RootOracle) -> Option<serde_json::Value> {
+    if tsc["height"].as_u64().unwrap_or(0) == 0 {
+        let target = tsc["target"].as_str().filter(|t| !t.is_empty())?.to_string();
+        let hint = match services.get_block_header(crate::services::BlockKey::Hash(target)).await {
+            Ok(h) if h.height > 0 => h.height,
+            _ => {
+                log::warn!("   ⚠️  no height for the block of {}'s proof — not embedded", txid);
+                return None;
+            }
+        };
+        tsc["height"] = serde_json::json!(hint);
+        // A hint is still checked wherever our chain can check it: a block that left our main chain
+        // (or a made-up one) named at a height we hold is refuted there (adversarial review).
+        match crate::proof_store::check_tsc(chain, txid, &tsc) {
+            ProofCheck::Verified(_) | ProofCheck::NotHeld => {}
+            ProofCheck::Wrong { height } => {
+                log::warn!("   ❌ {}'s proof does not match our header at its hinted height {} — not embedded", txid, height);
+                return None;
+            }
+            // xhigh 168 #5: a path that cannot produce a root is not embedded either.
+            ProofCheck::Malformed(e) => {
+                log::warn!("   ⚠️  {}'s proof is unreadable at its hinted height: {} — not embedded", txid, e);
+                return None;
+            }
+        }
+    }
+    log::info!("   ⏳ embedding {}'s proof unchecked: our headers do not hold its block", txid);
+    Some(tsc)
+}
+
+/// A fetched proof (TSC, possibly WhatsOnChain's array form or `blockHeight` field) made ready to
+/// embed in a BEEF, never stored (B5-T1-P7a-2 `C15`): checked against our own headers — `None` when
+/// they refute it or it cannot be read; at our chain's height when we hold its block; otherwise
+/// unchecked at a hinted height (K-o).
+pub async fn embeddable_proof(
+    txid: &str,
+    proof_json: &serde_json::Value,
+    services: &WalletServices,
+    chain: &dyn RootOracle,
+) -> Option<serde_json::Value> {
+    let mut tsc = match proof_json.as_array() {
+        Some(a) => a.first()?.clone(),
+        None => proof_json.clone(),
+    };
+    if tsc["height"].as_u64().unwrap_or(0) == 0 {
+        if let Some(h) = tsc.get("blockHeight").and_then(|v| v.as_u64()).filter(|h| *h > 0) {
+            tsc["height"] = serde_json::json!(h);
+        }
+    }
+    match crate::proof_store::check_tsc(chain, txid, &tsc) {
+        ProofCheck::Verified(p) => Some(p.tsc().clone()),
+        ProofCheck::Wrong { height } => {
+            log::warn!("   ❌ proof for {} does not match our header at {} — not embedded", txid, height);
+            None
+        }
+        ProofCheck::Malformed(e) => {
+            log::warn!("   ⚠️  proof for {} unreadable: {}", txid, e);
+            None
+        }
+        ProofCheck::NotHeld => with_height_hint(txid, tsc, services, chain).await,
+    }
+}
+
 /// Maximum number of ancestor transactions to include in a single BEEF build.
 /// Prevents runaway ancestry walks from freezing the app.
 const MAX_BEEF_ANCESTORS: usize = 50;
@@ -171,6 +300,7 @@ pub async fn build_beef_for_txid(
     beef: &mut Beef,
     db: &Mutex<WalletDatabase>,
     services: &WalletServices,
+    chain: &dyn RootOracle,
 ) -> Result<(), String> {
     use std::collections::HashSet;
 
@@ -234,9 +364,17 @@ pub async fn build_beef_for_txid(
             let db_guard = db.lock().unwrap();
             let conn = db_guard.connection();
             let tx_repo = TransactionRepository::new(conn);
+            // Reported mined in a block our chain holds (or at a height not recorded): only then can a
+            // fetched proof verify — an older block waits for B5-T1-P7a-3 (xhigh 168 #10).
+            let reported_mined = conn.query_row(
+                "SELECT confirmations > 0, block_height FROM transactions WHERE txid = ?1", [&current_txid],
+                |r| Ok((r.get::<_, bool>(0)?, r.get::<_, Option<i64>>(1)?)),
+            ).map(|(mined, h)| mined && h.map_or(true, |h| chain.holds_height(h as u32))).unwrap_or(false);
             match tx_repo.get_broadcast_status(&current_txid) {
-                // "completed" → has proof, include as proven leaf
-                Ok(Some(ref status)) if status == "completed" => false,
+                // "completed" → has proof, include as proven leaf. "unproven" an indexer reported mined
+                // may still lack a verified proof (decision 6) — try for it (B5-T1-P7a-2 review); a
+                // fresh unmined one is skipped, keeping proof fetches off the payment hot path.
+                Ok(Some(ref status)) if status == "completed" || (status == "unproven" && reported_mined) => false,
                 Ok(Some(ref status)) => {
                     log::info!("   ⏭️  Transaction {} has status '{}', skipping proof fetch", current_txid, status);
                     true
@@ -251,117 +389,15 @@ pub async fn build_beef_for_txid(
         let enhanced_tsc = if skip_proof_fetch {
             serde_json::Value::Null
         } else {
-            // Check proven_txs for cached proof
-            let cached_tsc = {
+            let raw_tx_bytes = {
                 let db_guard = db.lock().unwrap();
-                let conn = db_guard.connection();
-                let proven_tx_repo = ProvenTxRepository::new(conn);
-                proven_tx_repo.get_merkle_proof_as_tsc(&current_txid).unwrap_or(None)
+                match ParentTransactionRepository::new(db_guard.connection()).get_by_txid(&current_txid) {
+                    Ok(Some(cached)) => hex::decode(&cached.raw_hex).unwrap_or_default(),
+                    _ => tx_bytes.clone(),
+                }
             };
-
-            match cached_tsc {
-                Some(tsc) => {
-                    log::info!("   ✅ Using proven_txs Merkle proof for {}", current_txid);
-                    tsc
-                },
-                None => {
-                    log::info!("   🌐 No proven_txs record - fetching TSC proof from API...");
-                    match fetch_tsc_proof_from_api(services, &current_txid).await {
-                        Ok(Some(tsc_json)) => {
-                            // Enhance with block height (lock scoped, dropped before any network I/O)
-                            let enhanced_result = {
-                                let target_hash = tsc_json["target"].as_str()
-                                    .ok_or_else(|| "Missing target hash in TSC proof".to_string());
-                                match target_hash {
-                                    Ok(hash) => {
-                                        // Step A: Check cache (brief lock)
-                                        let cached_height = {
-                                            let db_guard = db.lock().unwrap();
-                                            let block_header_repo = BlockHeaderRepository::new(db_guard.connection());
-                                            get_cached_block_height(&block_header_repo, hash)
-                                        }; // lock dropped
-
-                                        // Step B: Fetch from API on miss (no lock held)
-                                        let height_result = match cached_height {
-                                            Ok(Some(h)) => Ok(h),
-                                            Ok(None) => fetch_and_cache_block_header(services, db, hash).await,
-                                            Err(e) => Err(e),
-                                        };
-
-                                        // Step C: Enhance TSC with height
-                                        height_result.map(|height| {
-                                            let mut enhanced = tsc_json.clone();
-                                            enhanced["height"] = serde_json::json!(height);
-                                            enhanced
-                                        })
-                                    }
-                                    Err(e) => Err(crate::cache_errors::CacheError::InvalidData(e)),
-                                }
-                            };
-
-                            match enhanced_result {
-                                Ok(enhanced_tsc) => {
-                                    // Cache as proven_txs record
-                                    {
-                                        let db_guard = db.lock().unwrap();
-                                        let conn = db_guard.connection();
-
-                                        let block_height = enhanced_tsc["height"].as_u64().unwrap_or(0) as u32;
-                                        let tx_index_val = enhanced_tsc["index"].as_u64().unwrap_or(0);
-                                        let block_hash = enhanced_tsc["target"].as_str().unwrap_or("");
-
-                                        let merkle_path_bytes = serde_json::to_vec(&enhanced_tsc).unwrap_or_default();
-
-                                        // Get raw_tx from parent_transactions cache or use empty
-                                        let raw_tx_bytes = {
-                                            let parent_tx_repo = ParentTransactionRepository::new(conn);
-                                            match parent_tx_repo.get_by_txid(&current_txid) {
-                                                Ok(Some(cached)) => hex::decode(&cached.raw_hex).unwrap_or_default(),
-                                                _ => tx_bytes.clone(), // Use the tx_bytes we already fetched
-                                            }
-                                        };
-
-                                        let proven_tx_repo = ProvenTxRepository::new(conn);
-                                        match proven_tx_repo.insert_or_get(
-                                            &current_txid, block_height, tx_index_val,
-                                            &merkle_path_bytes, &raw_tx_bytes,
-                                            block_hash, "",
-                                        ) {
-                                            Ok(proven_tx_id) => {
-                                                let _ = proven_tx_repo.link_transaction(&current_txid, proven_tx_id);
-                                                log::info!("   💾 Created proven_txs record for {}", current_txid);
-                                            }
-                                            Err(e) => {
-                                                log::warn!("   ⚠️  Failed to cache proven_tx for {}: {}", current_txid, e);
-                                            }
-                                        }
-                                    }
-                                    enhanced_tsc
-                                },
-                                Err(e) => {
-                                    // Enhancement failed (e.g. WoC block header 404),
-                                    // but if the proof already has a height (from ARC), use it as-is.
-                                    if tsc_json["height"].as_u64().unwrap_or(0) > 0 {
-                                        log::warn!("   ⚠️  Enhancement failed ({}), but proof already has height — using as-is", e);
-                                        tsc_json.clone()
-                                    } else {
-                                        log::warn!("   ⚠️  Failed to enhance TSC proof for {}: {}", current_txid, e);
-                                        serde_json::Value::Null
-                                    }
-                                },
-                            }
-                        },
-                        Ok(None) => {
-                            log::warn!("   ⚠️  TSC proof not available (tx not confirmed)");
-                            serde_json::Value::Null
-                        },
-                        Err(e) => {
-                            log::warn!("   ⚠️  Failed to fetch TSC proof: {}", e);
-                            serde_json::Value::Null
-                        },
-                    }
-                },
-            }
+            proof_for_beef(&current_txid, &raw_tx_bytes, db, services, chain).await
+                .unwrap_or(serde_json::Value::Null)
         };
 
         // Add Merkle proof to BEEF if available

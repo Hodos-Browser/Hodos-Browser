@@ -8,6 +8,12 @@
 //!
 //! This task is that backstop.
 //!
+//! ⚠️ B5-T1-P3: this binary no longer writes `pending-` placeholders — a spend owns its
+//! coins by its transaction row, and an abandoned row is failed (and its coins released)
+//! by `TaskFailAbandoned`. Any `pending-` row this task finds was written by an older
+//! binary (a crash before the upgrade, or a downgrade), so none is in flight here; the
+//! task stays as that rollback-compat path, with its on-chain gate unchanged.
+//!
 //! ## 🚨 Why this is not `UPDATE ... WHERE updated_at < cutoff`
 //!
 //! A row holding a `pending-` placeholder is *usually* a transaction that never broadcast —
@@ -48,18 +54,6 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
             .list_stale_pending_reservations(MAX_AGE_SECS)
             .map_err(|e| format!("Failed to list stale reservations: {}", e))?
     };
-    if candidates.is_empty() {
-        return Ok(());
-    }
-
-    // ---- 2. Drop anything still in flight ----
-    // A placeholder held by a live PENDING_TRANSACTIONS entry belongs to a createAction
-    // awaiting signAction, however old the reservation looks.
-    let live = crate::handlers::live_reservation_placeholders();
-    let candidates: Vec<_> = candidates
-        .into_iter()
-        .filter(|c| !live.contains(&c.placeholder))
-        .collect();
     if candidates.is_empty() {
         return Ok(());
     }

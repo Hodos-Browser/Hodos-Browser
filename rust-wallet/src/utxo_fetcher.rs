@@ -36,6 +36,22 @@ pub fn is_token_reserved_value(satoshis: i64) -> bool {
     satoshis <= TOKEN_RESERVED_SATS
 }
 
+/// Check if a locking script is standard P2PKH (OP_DUP OP_HASH160 <20 bytes> OP_EQUALVERIFY OP_CHECKSIG)
+/// This guards against accidentally trying to spend PushDrop tokens or other non-standard scripts.
+///
+/// ⚠️ B5-T1-P4: an inscription is P2PKH **plus** an envelope, so only the exact
+/// 25-byte form passes. A row whose script is unchecked (`script_length` NULL) still
+/// holds the address-derived script and passes regardless — for those rows the
+/// value floor ([`is_token_reserved_value`]) is what excludes tokens.
+pub fn is_p2pkh_script(script: &[u8]) -> bool {
+    script.len() == 25
+        && script[0] == 0x76  // OP_DUP
+        && script[1] == 0xa9  // OP_HASH160
+        && script[2] == 0x14  // Push 20 bytes
+        && script[23] == 0x88 // OP_EQUALVERIFY
+        && script[24] == 0xac // OP_CHECKSIG
+}
+
 /// UTXO structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UTXO {
@@ -193,7 +209,9 @@ async fn fetch_utxos_woc(client: &reqwest::Client, address: &str, address_index:
         };
 
         let p2pkh_script = generate_p2pkh_script_from_address(address)?;
-        let utxos: Vec<UTXO> = api_utxos.into_iter().map(|u| {
+        // Same skip as the bulk path (B5-T1-P4): an address re-fetched singly because
+        // bulk hit its cap must mean what the bulk answer would have meant.
+        let utxos: Vec<UTXO> = api_utxos.into_iter().filter(|u| !u.is_spent_in_mempool_tx).map(|u| {
             let confirmed = u.height > 0;
             UTXO {
                 txid: u.tx_hash,
@@ -417,6 +435,87 @@ async fn fetch_bulk_chunk(
     None
 }
 
+/// WhatsOnChain's bulk confirmed endpoint returns **at most 20 coins per address and
+/// does not page** (WoC docs, re-read at the B5-T1-P4 kickoff 2026-10-02). An address
+/// that comes back with exactly this many may hold more, so it is re-fetched singly
+/// and the single answer replaces the bulk one (`P4-A7`/`A8`).
+pub(crate) const WOC_BULK_CONFIRMED_CAP: usize = 20;
+
+/// The pure half of one bulk chunk: turn the confirmed (authoritative) and
+/// unconfirmed (best-effort) responses into coins. Returns
+/// `(coins, addresses read, addresses to re-fetch singly)`. An address whose
+/// confirmed list is at the cap contributes **no** coins here — not from either
+/// pass — because the single answer replaces it rather than adding to it.
+fn merge_bulk_chunk(
+    confirmed: Vec<WhatsOnChainBulkItem>,
+    unconfirmed: Option<Vec<WhatsOnChainBulkItem>>,
+    addr_to_index: &std::collections::HashMap<&str, i32>,
+    addr_to_script: &std::collections::HashMap<&str, String>,
+) -> (Vec<UTXO>, Vec<String>, Vec<String>) {
+    let mut coins = Vec::new();
+    let mut read = Vec::new();
+    let mut refetch: Vec<String> = Vec::new();
+    let mut mempool_spent_skipped = 0usize;
+    let mut unconfirmed_added = 0usize;
+
+    // `false` = confirmed pass (counts toward success), `true` = mempool pass.
+    for (is_mempool_pass, batch) in [(false, Some(confirmed)), (true, unconfirmed)] {
+        let Some(batch) = batch else { continue };
+        for item in batch {
+            if !item.error.is_empty() {
+                log::warn!("   Bulk API error for {}: {}", item.address, item.error);
+                continue;
+            }
+            if !is_mempool_pass {
+                // Count each address ONCE — on the confirmed pass only.
+                read.push(item.address.clone());
+                if item.utxos().len() >= WOC_BULK_CONFIRMED_CAP {
+                    log::info!("   Bulk returned {} coins for {} — re-fetching it singly (bulk caps at {})",
+                               item.utxos().len(), item.address, WOC_BULK_CONFIRMED_CAP);
+                    refetch.push(item.address.clone());
+                }
+            }
+            if refetch.contains(&item.address) {
+                continue;
+            }
+            let address_index = addr_to_index.get(item.address.as_str()).copied().unwrap_or(0);
+            let script = match addr_to_script.get(item.address.as_str()) {
+                Some(s) => s.clone(),
+                None => continue,
+            };
+            for u in item.utxos() {
+                // Already spent by a mempool tx — WoC still lists it as
+                // unspent on the confirmed endpoint. Counting it overstates
+                // the balance until the spend confirms.
+                if u.is_spent_in_mempool_tx {
+                    mempool_spent_skipped += 1;
+                    continue;
+                }
+                if is_mempool_pass {
+                    unconfirmed_added += 1;
+                }
+                coins.push(UTXO {
+                    txid: u.tx_hash.clone(),
+                    vout: u.tx_pos,
+                    satoshis: u.value,
+                    script: script.clone(),
+                    address_index,
+                    custom_instructions: None,
+                    // Derived, never assumed: mempool entries omit `height`
+                    // and default to 0.
+                    confirmed: u.height > 0,
+                });
+            }
+        }
+    }
+
+    if unconfirmed_added > 0 || mempool_spent_skipped > 0 {
+        log::info!("   Bulk chunk: +{} unconfirmed UTXO(s), {} skipped as spent-in-mempool",
+                  unconfirmed_added, mempool_spent_skipped);
+    }
+    (coins, read, refetch)
+}
+
 /// Fetch UTXOs for multiple addresses using WhatsOnChain bulk endpoints.
 ///
 /// Chunks addresses into groups of 20 and, for each chunk, reads **both** the
@@ -426,9 +525,9 @@ async fn fetch_bulk_chunk(
 /// costs mempool visibility for one tick, which must not trigger a 20×
 /// single-address fallback storm.
 ///
-/// Returns (utxos, success_count) where success_count is the number of addresses
-/// that were successfully checked (got a 200 response).
-async fn fetch_utxos_bulk(addresses: &[crate::json_storage::AddressInfo]) -> Result<(Vec<UTXO>, usize), String> {
+/// Returns `(utxos, failed)` where `failed` lists the addresses that could **not**
+/// be read — their absence from `utxos` means "unknown", never "empty".
+async fn fetch_utxos_bulk(addresses: &[crate::json_storage::AddressInfo]) -> Result<(Vec<UTXO>, Vec<String>), String> {
     const MAX_RETRIES: u32 = 3;
     const INITIAL_DELAY_MS: u64 = 1000;
 
@@ -437,14 +536,15 @@ async fn fetch_utxos_bulk(addresses: &[crate::json_storage::AddressInfo]) -> Res
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
     let mut all_utxos = Vec::new();
-    let mut total_success_count: usize = 0;
+    let mut read: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Build address→index lookup
     let addr_to_index: std::collections::HashMap<&str, i32> = addresses.iter()
         .map(|a| (a.address.as_str(), a.index))
         .collect();
 
-    // Pre-generate P2PKH scripts for each address
+    // Pre-generate P2PKH scripts for each address. ⚠️ B5-T1-P4: this is the ASSUMED
+    // script; callers observe the real one from the parent before writing a row.
     let mut addr_to_script: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
     for addr in addresses {
         match generate_p2pkh_script_from_address(&addr.address) {
@@ -481,56 +581,23 @@ async fn fetch_utxos_bulk(addresses: &[crate::json_storage::AddressInfo]) -> Res
         }
 
         if let Some(items) = confirmed_items {
-            let mut mempool_spent_skipped = 0usize;
-            let mut unconfirmed_added = 0usize;
-
-            // `false` = confirmed pass (counts toward success), `true` = mempool pass.
-            for (is_mempool_pass, batch) in [(false, Some(items)), (true, unconfirmed_items)] {
-                let Some(batch) = batch else { continue };
-                for item in batch {
-                    if !item.error.is_empty() {
-                        log::warn!("   Bulk API error for {}: {}", item.address, item.error);
-                        continue;
-                    }
-                    // Count each address ONCE — on the confirmed pass only, or the
-                    // success count would double and misreport coverage.
-                    if !is_mempool_pass {
-                        total_success_count += 1;
-                    }
-                    let address_index = addr_to_index.get(item.address.as_str()).copied().unwrap_or(0);
-                    let script = match addr_to_script.get(item.address.as_str()) {
-                        Some(s) => s.clone(),
-                        None => continue,
-                    };
-                    for u in item.utxos() {
-                        // Already spent by a mempool tx — WoC still lists it as
-                        // unspent on the confirmed endpoint. Counting it overstates
-                        // the balance until the spend confirms.
-                        if u.is_spent_in_mempool_tx {
-                            mempool_spent_skipped += 1;
-                            continue;
-                        }
-                        if is_mempool_pass {
-                            unconfirmed_added += 1;
-                        }
-                        all_utxos.push(UTXO {
-                            txid: u.tx_hash.clone(),
-                            vout: u.tx_pos,
-                            satoshis: u.value,
-                            script: script.clone(),
-                            address_index,
-                            custom_instructions: None,
-                            // Derived, never assumed: mempool entries omit `height`
-                            // and default to 0.
-                            confirmed: u.height > 0,
-                        });
+            let (mut coins, chunk_read, refetch) =
+                merge_bulk_chunk(items, unconfirmed_items, &addr_to_index, &addr_to_script);
+            all_utxos.append(&mut coins);
+            read.extend(chunk_read);
+            // Twenty is not "all": the single answer replaces the bulk one.
+            for address in refetch {
+                let index = addr_to_index.get(address.as_str()).copied().unwrap_or(0);
+                // WoC only (`unspent/all` covers mempool and flags mempool spends);
+                // never GorillaPool's confirmed-only fallback (adversarial review MED 3:
+                // `task_sweep_reservations` reads presence here as "unspent").
+                match fetch_utxos_single_address_with_unconfirmed(&address, index).await {
+                    Ok(mut utxos) => all_utxos.append(&mut utxos),
+                    Err(e) => {
+                        log::warn!("   Single re-fetch failed for {} (bulk hit its cap): {}", address, e);
+                        read.remove(&address);
                     }
                 }
-            }
-
-            if unconfirmed_added > 0 || mempool_spent_skipped > 0 {
-                log::info!("   Bulk chunk: +{} unconfirmed UTXO(s), {} skipped as spent-in-mempool",
-                          unconfirmed_added, mempool_spent_skipped);
             }
         }
         // Fallback: single-address fetch for this chunk if bulk failed
@@ -539,7 +606,7 @@ async fn fetch_utxos_bulk(addresses: &[crate::json_storage::AddressInfo]) -> Res
             for (i, addr) in chunk.iter().enumerate() {
                 match fetch_utxos_for_address(&addr.address, addr.index).await {
                     Ok(mut utxos) => {
-                        total_success_count += 1; // This address was successfully checked
+                        read.insert(addr.address.clone()); // This address was successfully checked
                         all_utxos.append(&mut utxos);
                     }
                     Err(e) => log::warn!("   Failed to fetch UTXOs for {}: {}", addr.address, e),
@@ -556,7 +623,11 @@ async fn fetch_utxos_bulk(addresses: &[crate::json_storage::AddressInfo]) -> Res
         }
     }
 
-    Ok((all_utxos, total_success_count))
+    let failed = addresses.iter()
+        .filter(|a| !read.contains(&a.address))
+        .map(|a| a.address.clone())
+        .collect();
+    Ok((all_utxos, failed))
 }
 
 /// Fetch UTXOs for all addresses in the wallet.
@@ -566,23 +637,30 @@ async fn fetch_utxos_bulk(addresses: &[crate::json_storage::AddressInfo]) -> Res
 ///
 /// Returns Err if NO addresses could be successfully checked (API is down).
 /// Returns Ok with empty vec only if addresses were checked and genuinely have no UTXOs.
+/// ⚠️ A PARTIAL failure still returns `Ok` — use [`fetch_all_utxos_detailed`] where an
+/// unread address must not read as an empty one.
 pub async fn fetch_all_utxos(addresses: &[crate::json_storage::AddressInfo]) -> Result<Vec<UTXO>, String> {
-    let (all_utxos, success_count) = fetch_utxos_bulk(addresses).await?;
+    fetch_all_utxos_detailed(addresses).await.map(|(utxos, _)| utxos)
+}
+
+/// [`fetch_all_utxos`], plus the addresses that could not be read (B5-T1-P4).
+pub async fn fetch_all_utxos_detailed(addresses: &[crate::json_storage::AddressInfo]) -> Result<(Vec<UTXO>, Vec<String>), String> {
+    let (all_utxos, failed) = fetch_utxos_bulk(addresses).await?;
 
     log::info!("📊 Total UTXOs across all addresses: {} ({} satoshis), {}/{} addresses checked successfully",
         all_utxos.len(),
         all_utxos.iter().map(|u| u.satoshis).sum::<i64>(),
-        success_count,
+        addresses.len() - failed.len(),
         addresses.len(),
     );
 
     // If no addresses were successfully checked, the API is likely down.
     // Return Err so callers don't reconcile against empty results.
-    if success_count == 0 && !addresses.is_empty() {
+    if failed.len() == addresses.len() && !addresses.is_empty() {
         return Err("UTXO API unavailable — no addresses could be checked".to_string());
     }
 
-    Ok(all_utxos)
+    Ok((all_utxos, failed))
 }
 
 #[cfg(test)]
@@ -596,5 +674,165 @@ mod tests {
         let result = fetch_utxos_for_address("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", 0).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 0);
+    }
+}
+
+/// B5-T1-P4 `P4-A7` / `P4-A8`: twenty is not "all".
+#[cfg(test)]
+mod bulk_cap_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    const X: &str = "1XaddrXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+    const Y: &str = "1YaddrYYYYYYYYYYYYYYYYYYYYYYYYYYYY";
+
+    fn item(address: &str, n: usize, height: i64) -> WhatsOnChainBulkItem {
+        let result: Vec<serde_json::Value> = (0..n)
+            .map(|i| serde_json::json!({"tx_hash": format!("{}{:04}", &address[..6], i), "tx_pos": 0, "value": 1000, "height": height}))
+            .collect();
+        serde_json::from_value(serde_json::json!({"address": address, "result": result, "error": ""})).unwrap()
+    }
+
+    fn maps() -> (HashMap<&'static str, i32>, HashMap<&'static str, String>) {
+        (HashMap::from([(X, 1), (Y, 2)]), HashMap::from([(X, "aa".to_string()), (Y, "bb".to_string())]))
+    }
+
+    /// The step `fetch_utxos_bulk` runs after the merge: each re-fetched address's
+    /// single answer is appended.
+    fn with_single(mut coins: Vec<UTXO>, single: Vec<UTXO>) -> Vec<UTXO> {
+        coins.extend(single);
+        coins
+    }
+
+    fn single(n: usize, confirmed: bool) -> Vec<UTXO> {
+        (0..n).map(|i| UTXO {
+            txid: format!("1Xaddr{:04}", i), vout: 0, satoshis: 1000, script: "aa".into(),
+            address_index: 1, custom_instructions: None, confirmed,
+        }).collect()
+    }
+
+    /// `P4-A7`: bulk returns 20 for X ⇒ X is re-fetched and contributes NO bulk coins,
+    /// from either pass, so the single answer (22) is what is used.
+    #[test]
+    fn p4_a7_exactly_twenty_is_refetched_and_replaced() {
+        let (idx, scr) = maps();
+        let (coins, read, refetch) = merge_bulk_chunk(
+            vec![item(X, 20, 900_000), item(Y, 3, 900_000)],
+            Some(vec![item(X, 1, 0)]),
+            &idx, &scr);
+        assert_eq!(refetch, vec![X.to_string()]);
+        assert!(read.contains(&X.to_string()));
+        assert_eq!(coins.iter().filter(|u| u.address_index == 1).count(), 0, "no bulk coins for X");
+        assert_eq!(coins.iter().filter(|u| u.address_index == 2).count(), 3);
+
+        // (ii) the single answer is the one used — its confirmation status, not bulk's.
+        let all = with_single(coins.clone(), single(22, false));
+        let xs: Vec<_> = all.iter().filter(|u| u.address_index == 1).collect();
+        assert_eq!(xs.len(), 22);
+        assert!(xs.iter().all(|u| !u.confirmed), "single's status, never bulk's");
+        // (iii) a coin spent between the calls: single says 21 ⇒ 21, never 22.
+        let all = with_single(coins, single(21, true));
+        assert_eq!(all.iter().filter(|u| u.address_index == 1).count(), 21);
+    }
+
+    /// `P4-A8`: an address with 19 coins is NOT re-fetched — bulk stays the path.
+    #[test]
+    fn p4_a8_nineteen_is_not_refetched() {
+        let (idx, scr) = maps();
+        let (coins, _, refetch) = merge_bulk_chunk(vec![item(X, 19, 900_000)], None, &idx, &scr);
+        assert!(refetch.is_empty());
+        assert_eq!(coins.len(), 19);
+    }
+
+    /// An address the bulk response reports an error for is not "read".
+    #[test]
+    fn bulk_item_error_is_not_read() {
+        let (idx, scr) = maps();
+        let bad: WhatsOnChainBulkItem = serde_json::from_value(
+            serde_json::json!({"address": X, "result": [], "error": "rate limited"})).unwrap();
+        let (_, read, _) = merge_bulk_chunk(vec![bad, item(Y, 1, 1)], None, &idx, &scr);
+        assert_eq!(read, vec![Y.to_string()]);
+    }
+}
+
+/// B5-T1-P4 live (T2) rows — network, `#[ignore]`d. Run with
+/// `cargo test --lib live_ -- --ignored --nocapture`.
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    /// `P4-A1` T2: the real test inscription minted 2026-10-04 to a dev-wallet address
+    /// (`964eaf33…:0`, 3,048-byte script — an asset, never spend it). WhatsOnChain's
+    /// address lookup does NOT list it (measured: it lists the plain change output of
+    /// the same tx, not the inscription), so it reaches the wallet only through the
+    /// GorillaPool fallback. That provider, real, reports it with the ASSUMED 25-byte
+    /// script; the production `observe_coins` path then reads the real parent and the
+    /// stored row carries the true length.
+    #[tokio::test]
+    #[ignore]
+    async fn live_p4_a1_inscription_via_gorillapool_is_stored_with_its_true_length() {
+        const ADDR: &str = "1B2QKQrpouDuEKJNmaUwmpBqnfgq2BzEc4";
+        const TXID: &str = "964eaf33fd1d6dad03b561d5997ccf376a80d58a5cc1832ab611b65b5cedc83c";
+        let client = reqwest::Client::new();
+
+        let woc = fetch_utxos_woc(&client, ADDR, 459).await.expect("WoC answered");
+        assert!(!woc.iter().any(|u| u.txid == TXID), "measured premise: WoC does not list the inscription");
+
+        let gp = fetch_utxos_gorillapool(&client, ADDR, 459).await.expect("GorillaPool answered");
+        let coin = gp.iter().find(|u| u.txid == TXID && u.vout == 0).expect("GorillaPool lists it").clone();
+        assert_eq!(coin.script.len() / 2, 25, "the provider hands us the ASSUMED script");
+
+        let path = std::env::temp_dir().join(format!("hodos_live_a1_{}.db", std::process::id()));
+        let db = std::sync::Mutex::new(crate::database::WalletDatabase::new(path).unwrap());
+        db.lock().unwrap().connection().execute(
+            "INSERT INTO users (userId, identity_key, active_storage, created_at, updated_at) VALUES (1, 'k', 'local', 0, 0)",
+            []).unwrap();
+        let fetch = |txid: String| {
+            let client = client.clone();
+            async move {
+                let hex = client.get(format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/hex", txid))
+                    .send().await.map_err(|e| e.to_string())?.text().await.map_err(|e| e.to_string())?;
+                hex::decode(hex.trim()).map_err(|e| e.to_string())
+            }
+        };
+        let observed = crate::ingest::observe_coins(&db, &[(coin.txid.clone(), coin.vout, coin.satoshis)], fetch).await;
+        {
+            let d = db.lock().unwrap();
+            crate::database::OutputRepository::new(d.connection())
+                .upsert_received_utxo_with_confirmed(1, &coin.txid, coin.vout, coin.satoshis, &coin.script, 459, coin.confirmed,
+                    crate::ingest::source_for(&observed, &coin.txid, coin.vout))
+                .unwrap();
+        }
+        let d = db.lock().unwrap();
+        let (len, inline): (Option<i64>, Option<Vec<u8>>) = d.connection().query_row(
+            "SELECT script_length, locking_script FROM outputs WHERE txid = ?1 AND vout = 0", [TXID],
+            |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        println!("stored row: script_length={:?} inline={:?}", len, inline.as_ref().map(|s| s.len()));
+        assert_eq!(len, Some(3_048), "the stored row carries the chain's length");
+        assert!(inline.is_none(), "above the 1,024 B cap: kept in the raw parent");
+    }
+
+    /// `P4-A7` T2: a real 22-output tx to one dev-wallet address (`dc757ff9…`, 2026-10-04,
+    /// 22 × 1,000 sats — our own money). Once CONFIRMED: WhatsOnChain's bulk confirmed
+    /// endpoint lists only 20 (the limit is real today), and the production
+    /// `fetch_all_utxos_detailed` returns all 22.
+    #[tokio::test]
+    #[ignore]
+    async fn live_p4_a7_twenty_two_coins_are_all_returned() {
+        const ADDR: &str = "1EPzirbag1sK5rMsmenbWb6EaS1qVjMoZu";
+        const TXID: &str = "dc757ff96f960770ffdccdedc1084270f4e84084048f4440772c85c04f343a00";
+        let client = reqwest::Client::new();
+        let body = serde_json::json!({ "addresses": [ADDR] });
+        let items = fetch_bulk_chunk(&client, WOC_BULK_CONFIRMED, &body, 2, 1000).await.expect("bulk answered");
+        let bulk: usize = items.iter().map(|i| i.utxos().iter().filter(|u| u.tx_hash == TXID).count()).sum();
+        println!("WoC bulk confirmed lists {} of the 22", bulk);
+        assert_eq!(bulk, 20, "measured premise: the bulk confirmed endpoint caps at 20 (tx must be confirmed)");
+
+        let info = crate::json_storage::AddressInfo { address: ADDR.into(), index: 460, public_key: String::new(), used: true, balance: 0 };
+        let (utxos, failed) = fetch_all_utxos_detailed(&[info]).await.expect("fetch");
+        let ours = utxos.iter().filter(|u| u.txid == TXID).count();
+        println!("fetch_all_utxos_detailed returns {} of the 22; failed = {:?}", ours, failed);
+        assert!(failed.is_empty());
+        assert_eq!(ours, 22, "all 22, not the bulk's 20");
     }
 }

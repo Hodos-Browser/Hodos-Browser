@@ -103,6 +103,27 @@ pub struct RecoveryResult {
     pub utxos_found: u32,
     pub total_balance: i64,
     pub addresses: Vec<RecoveredAddress>,
+    /// Inclusive index ranges the scan could **not** read (B5-T1-P4). Non-empty ⇒ the
+    /// scan is incomplete: "nothing found" there means "could not look".
+    pub unchecked_ranges: Vec<(u32, u32)>,
+}
+
+impl RecoveryResult {
+    pub fn complete(&self) -> bool {
+        self.unchecked_ranges.is_empty()
+    }
+
+    /// "incomplete — N ranges could not be checked (a–b, …)", or `None` when complete.
+    pub fn incomplete_message(&self) -> Option<String> {
+        if self.complete() {
+            return None;
+        }
+        let list: Vec<String> = self.unchecked_ranges.iter()
+            .map(|(a, b)| if a == b { a.to_string() } else { format!("{}–{}", a, b) })
+            .collect();
+        Some(format!("incomplete — {} range(s) of addresses could not be checked (indices {})",
+                     self.unchecked_ranges.len(), list.join(", ")))
+    }
 }
 
 /// Information about a recovered address
@@ -133,6 +154,11 @@ pub struct RecoveredAddress {
 /// # Returns
 /// * `Ok(RecoveryResult)` if recovery succeeded
 /// * `Err` if recovery failed
+///
+/// ⛔ B5-T1-P6 (owner, 2026-10-07, K1): no scan calls this any more — the wallet is
+/// BRC-42 and scans only its own receive addresses ([`scan_brc42_self`]). Kept for a
+/// future old-wallet import.
+#[allow(dead_code)]
 pub async fn recover_wallet_from_mnemonic(
     options: RecoveryOptions,
 ) -> Result<RecoveryResult> {
@@ -168,16 +194,134 @@ pub async fn recover_wallet_from_mnemonic(
     let master_pubkey = PublicKey::from_secret_key(&secp, &secret_key);
     let master_pubkey_bytes = master_pubkey.serialize();
 
-    // Derive addresses and check blockchain in batches of 20
+    // Derive addresses and check blockchain in batches of 20 (BIP32 only — BRC-42 disabled)
+    // BRC-42 scanning is disabled because it creates duplicate/phantom UTXOs
+    // when backup change outputs exist at derived addresses. The on-chain backup
+    // system handles BRC-42 address recovery. BRC-42 scanning will be revisited
+    // as a separate sprint after MVP.
+    let result = scan_indices(
+        &options,
+        "BIP32",
+        None,
+        |idx| derive_bip32_address(&master_key, idx).ok().map(|a| (a.address, a.public_key)),
+        |batch| async move { crate::utxo_fetcher::fetch_all_utxos_detailed(&batch).await },
+        |address| async move { crate::utxo_fetcher::address_has_history(&address).await },
+    ).await;
+
+    info!("   ✅ Recovery scan finished{}", if result.complete() { "" } else { " — INCOMPLETE" });
+    info!("   📊 Found {} addresses with {} UTXOs, total balance: {} satoshis; unchecked ranges: {:?}",
+          result.addresses_found, result.utxos_found, result.total_balance, result.unchecked_ranges);
+
+    Ok(result)
+}
+
+/// Indices read past the high-water mark before the gap limit starts counting (B5-T1-P6).
+pub const SCAN_MARGIN: u32 = 20;
+
+/// Above `high-water + SCAN_MARGIN`, the scan stops after this many indices in a row
+/// with no coin and no history. 👤 Owner, 2026-10-07 (K9): *"at least 20"* — a user can
+/// press "generate address" many times without being paid.
+pub const SCAN_GAP_LIMIT: u32 = 50;
+
+/// Hard stop: never read more than this many indices past `high-water + SCAN_MARGIN`.
+/// An indexer that reports history at every address would otherwise keep the scan going
+/// for ever; stopping here is reported as unchecked, never as "complete".
+pub const SCAN_CEILING_ABOVE: u32 = 5_000;
+
+/// B5-T1-P6: the scan of the wallet's **own** receive addresses — BRC-42,
+/// counterparty = self, invoice `2-receive address-{i}`. Reads every index
+/// `0..=high_water + SCAN_MARGIN`, then continues until [`SCAN_GAP_LIMIT`] unused
+/// indices in a row. Pure: it derives and asks `fetch` / `history`, and writes nothing.
+///
+/// ⛔ Only self-derived addresses can be found this way. A PeerPay / BRC-29 output is
+/// locked to a key derived from the **sender's** key and a random prefix/suffix; no scan
+/// can enumerate it.
+pub(crate) async fn scan_brc42_self<F, FF, H, HF>(
+    master_privkey: &[u8],
+    master_pubkey: &[u8],
+    high_water: u32,
+    fetch: F,
+    history: H,
+) -> RecoveryResult
+where
+    F: Fn(Vec<FetchAddressInfo>) -> FF,
+    FF: std::future::Future<Output = std::result::Result<(Vec<crate::utxo_fetcher::UTXO>, Vec<String>), String>>,
+    H: Fn(String) -> HF,
+    HF: std::future::Future<Output = std::result::Result<bool, String>>,
+{
+    let through = high_water.saturating_add(SCAN_MARGIN);
+    let ceiling = through.saturating_add(SCAN_CEILING_ABOVE);
+    let options = RecoveryOptions {
+        mnemonic: String::new(),
+        gap_limit: SCAN_GAP_LIMIT,
+        start_index: 0,
+        max_index: Some(ceiling),
+    };
+    info!("🔍 Scanning own receive addresses 0..={} (high-water {}), then until {} unused in a row (ceiling {})",
+          through, high_water, SCAN_GAP_LIMIT, ceiling);
+    let highest = std::cell::Cell::new(0u32);
+    let mut result = scan_indices(
+        &options,
+        "BRC-42",
+        Some(through),
+        |idx| derive_brc42_address(master_privkey, master_pubkey, idx).ok().map(|a| (a.address, a.public_key)),
+        |batch: Vec<FetchAddressInfo>| {
+            if let Some(top) = batch.iter().map(|a| a.index.max(0) as u32).max() {
+                highest.set(highest.get().max(top));
+            }
+            fetch(batch)
+        },
+        history,
+    ).await;
+    if highest.get() >= ceiling {
+        log::warn!("   ⚠️  Scan stopped at its ceiling ({}) — indices above it were not checked", ceiling);
+        result.unchecked_ranges.push((ceiling.saturating_add(1), u32::MAX));
+    }
+    result
+}
+
+/// Stop after this many consecutive indices that could not be read: the indexer is
+/// down, and carrying on would only lengthen an answer that is already "incomplete".
+const MAX_CONSECUTIVE_UNCHECKED: u32 = 40;
+
+/// The gap-limit scan, with its three dependencies injected so it can be tested
+/// without the network (B5-T1-P4 `P4-A9`/`A10`).
+///
+/// ⛔ An index that could not be read — its address's UTXO fetch failed, or its
+/// history check returned `Err` — is **unchecked**, never "unused": it is recorded in
+/// `unchecked_ranges` and the gap counter does not move over it. It used to count as
+/// unused (`fetch_all_utxos(..).unwrap_or_default()`, `if let Ok(true) = ..`), so an
+/// indexer outage ended the scan with "gap limit reached" and "N found".
+///
+/// `method` labels every hit (`RecoveredAddress::derivation_method`). With
+/// `no_gap_through = Some(n)` (B5-T1-P6), indices `0..=n` are all read whatever they
+/// hold — no history call, no gap counting — and the gap limit applies only above `n`.
+pub(crate) async fn scan_indices<D, F, FF, H, HF>(
+    options: &RecoveryOptions,
+    method: &str,
+    no_gap_through: Option<u32>,
+    derive: D,
+    fetch: F,
+    history: H,
+) -> RecoveryResult
+where
+    D: Fn(u32) -> Option<(String, String)>,
+    F: Fn(Vec<FetchAddressInfo>) -> FF,
+    FF: std::future::Future<Output = std::result::Result<(Vec<crate::utxo_fetcher::UTXO>, Vec<String>), String>>,
+    H: Fn(String) -> HF,
+    HF: std::future::Future<Output = std::result::Result<bool, String>>,
+{
     let mut recovered_addresses = Vec::new();
     let mut current_index = options.start_index;
     let mut unused_count: u32 = 0;
+    let mut consecutive_unchecked: u32 = 0;
+    let mut unchecked: Vec<u32> = Vec::new();
     let mut total_utxos: u32 = 0;
     let mut total_balance = 0i64;
 
     const BATCH_SIZE: u32 = 20;
 
-    loop {
+    'scan: loop {
         // Determine batch range
         let batch_start = current_index;
         let mut batch_end = batch_start + BATCH_SIZE;
@@ -188,119 +332,126 @@ pub async fn recover_wallet_from_mnemonic(
             }
             batch_end = batch_end.min(max + 1);
         }
-        let batch_count = batch_end - batch_start;
 
-        info!("   🔍 Checking indices {}..{} ({} addresses)...", batch_start, batch_end - 1, batch_count);
+        info!("   🔍 Checking indices {}..{} ({} addresses)...", batch_start, batch_end - 1, batch_end - batch_start);
 
-        // 1. Derive all addresses in this batch (BIP32 only — BRC-42 disabled)
-        // BRC-42 scanning is disabled because it creates duplicate/phantom UTXOs
-        // when backup change outputs exist at derived addresses. The on-chain backup
-        // system handles BRC-42 address recovery. BRC-42 scanning will be revisited
-        // as a separate sprint after MVP.
-        let mut batch_bip32: Vec<(u32, Option<AddressInfo>)> = Vec::new();
+        // 1. Derive all addresses in this batch
+        let batch: Vec<(u32, Option<(String, String)>)> =
+            (batch_start..batch_end).map(|idx| (idx, derive(idx))).collect();
 
-        for idx in batch_start..batch_end {
-            let bip32 = derive_bip32_address(&master_key, idx).ok();
-            batch_bip32.push((idx, bip32));
-        }
-
-        // 2. Build address list for bulk UTXO fetch (BIP32 only)
-        let mut fetch_addresses: Vec<FetchAddressInfo> = Vec::new();
-        for &(idx, ref addr) in &batch_bip32 {
-            if let Some(ref a) = addr {
-                fetch_addresses.push(FetchAddressInfo {
-                    index: idx as i32,
-                    address: a.address.clone(),
-                    public_key: a.public_key.clone(),
-                    used: false,
-                    balance: 0,
-                });
+        // 2. Bulk fetch UTXOs for all addresses in this batch
+        let fetch_addresses: Vec<FetchAddressInfo> = batch.iter()
+            .filter_map(|(idx, a)| a.as_ref().map(|(address, public_key)| FetchAddressInfo {
+                index: *idx as i32,
+                address: address.clone(),
+                public_key: public_key.clone(),
+                used: false,
+                balance: 0,
+            }))
+            .collect();
+        let (api_utxos, failed) = match fetch(fetch_addresses.clone()).await {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("   ⚠️  Indices {}..{} could not be read: {}", batch_start, batch_end - 1, e);
+                (Vec::new(), fetch_addresses.iter().map(|a| a.address.clone()).collect())
             }
-        }
+        };
 
-        // 3. Bulk fetch UTXOs for all addresses in this batch
-        let api_utxos = crate::utxo_fetcher::fetch_all_utxos(&fetch_addresses).await
-            .unwrap_or_default();
+        // 3. Process results per-index
+        for (idx, addr) in &batch {
+            let idx = *idx;
+            let Some((address, public_key)) = addr else {
+                // Underivable index: nothing can be held there.
+                if no_gap_through.map_or(false, |n| idx <= n) { continue; }
+                unused_count += 1;
+                if unused_count >= options.gap_limit { break 'scan; }
+                continue;
+            };
 
-        // 4. Process results per-index
-        for idx in batch_start..batch_end {
-            let bip32_addr = batch_bip32.iter().find(|(i, _)| *i == idx).and_then(|(_, a)| a.as_ref());
-
-            // Check BIP32 UTXOs
-            let bip32_utxos: Vec<_> = api_utxos.iter()
-                .filter(|u| u.address_index == idx as i32)
-                .cloned()
-                .collect();
-
-            let mut found_utxos = false;
-
-            if !bip32_utxos.is_empty() {
-                if let Some(addr) = bip32_addr {
-                    let address_balance: i64 = bip32_utxos.iter().map(|u| u.satoshis).sum();
-                    let utxo_count = bip32_utxos.len() as u32;
-                    info!("   ✅ Found {} UTXO(s) on BIP32 address {} ({} satoshis)",
-                          utxo_count, addr.address, address_balance);
-                    let mut fixed_utxos = bip32_utxos;
-                    for u in &mut fixed_utxos { u.address_index = idx as i32; }
+            if failed.contains(address) {
+                unchecked.push(idx);
+                consecutive_unchecked += 1;
+            } else {
+                let mut utxos: Vec<_> = api_utxos.iter()
+                    .filter(|u| u.address_index == idx as i32)
+                    .cloned()
+                    .collect();
+                if !utxos.is_empty() {
+                    let address_balance: i64 = utxos.iter().map(|u| u.satoshis).sum();
+                    let utxo_count = utxos.len() as u32;
+                    info!("   ✅ Found {} UTXO(s) on {} address {} (index {}, {} satoshis)",
+                          utxo_count, method, address, idx, address_balance);
+                    for u in &mut utxos { u.address_index = idx as i32; }
                     recovered_addresses.push(RecoveredAddress {
                         index: idx,
-                        address: addr.address.clone(),
-                        public_key: addr.public_key.clone(),
-                        derivation_method: "BIP32".to_string(),
+                        address: address.clone(),
+                        public_key: public_key.clone(),
+                        derivation_method: method.to_string(),
                         has_utxos: true,
                         balance: address_balance,
-                        utxos: fixed_utxos,
+                        utxos,
                     });
                     total_utxos += utxo_count;
                     total_balance += address_balance;
-                    found_utxos = true;
-                }
-            }
-
-            if found_utxos {
-                unused_count = 0;
-            } else {
-                // No UTXOs — check BIP32 tx history (spent addresses reset gap counter)
-                let mut has_history = false;
-                if let Some(addr) = bip32_addr {
-                    if let Ok(true) = crate::utxo_fetcher::address_has_history(&addr.address).await {
-                        info!("   📜 BIP32 address {} has tx history (spent), resetting gap counter", addr.address);
-                        has_history = true;
+                    unused_count = 0;
+                    consecutive_unchecked = 0;
+                } else if no_gap_through.map_or(false, |n| idx <= n) {
+                    // Below the mark: read, never counted toward the gap.
+                    consecutive_unchecked = 0;
+                } else {
+                    // No UTXOs — check tx history (spent addresses reset the gap counter)
+                    match history(address.clone()).await {
+                        Ok(true) => {
+                            info!("   📜 {} address {} has tx history (spent), resetting gap counter", method, address);
+                            unused_count = 0;
+                            consecutive_unchecked = 0;
+                        }
+                        Ok(false) => {
+                            unused_count += 1;
+                            consecutive_unchecked = 0;
+                        }
+                        Err(e) => {
+                            log::warn!("   ⚠️  History of index {} could not be read: {}", idx, e);
+                            unchecked.push(idx);
+                            consecutive_unchecked += 1;
+                        }
                     }
                 }
-                // BRC-42 history checking disabled — see comment above
-                if has_history {
-                    unused_count = 0;
-                } else {
-                    unused_count += 1;
-                }
             }
 
-            // Check gap limit after each index
             if unused_count >= options.gap_limit {
                 info!("   📊 Gap limit reached ({} unused addresses), stopping recovery", options.gap_limit);
-                break;
+                break 'scan;
             }
-        }
-
-        // If gap limit was met during the batch, stop
-        if unused_count >= options.gap_limit {
-            break;
+            if consecutive_unchecked >= MAX_CONSECUTIVE_UNCHECKED {
+                log::warn!("   ⚠️  {} consecutive indices could not be read — stopping; the scan is INCOMPLETE",
+                           consecutive_unchecked);
+                break 'scan;
+            }
         }
 
         current_index = batch_end;
     }
 
-    info!("   ✅ Recovery complete!");
-    info!("   📊 Found {} addresses with {} UTXOs, total balance: {} satoshis",
-          recovered_addresses.len(), total_utxos, total_balance);
-
-    Ok(RecoveryResult {
+    RecoveryResult {
         addresses_found: recovered_addresses.len() as u32,
         utxos_found: total_utxos,
         total_balance,
         addresses: recovered_addresses,
-    })
+        unchecked_ranges: to_ranges(&unchecked),
+    }
+}
+
+/// Sorted indices → inclusive `(from, to)` runs.
+fn to_ranges(indices: &[u32]) -> Vec<(u32, u32)> {
+    let mut ranges: Vec<(u32, u32)> = Vec::new();
+    for &i in indices {
+        match ranges.last_mut() {
+            Some((_, to)) if *to + 1 == i => *to = i,
+            _ => ranges.push((i, i)),
+        }
+    }
+    ranges
 }
 
 /// Derive address using BIP32
@@ -338,7 +489,7 @@ fn derive_bip32_address(master_key: &XPrv, index: u32) -> Result<AddressInfo, ru
     })
 }
 
-/// Derive address using BRC-42
+/// Derive address using BRC-42 (`2-receive address-{index}`, counterparty = self)
 fn derive_brc42_address(
     master_privkey: &[u8],
     master_pubkey: &[u8],
@@ -599,6 +750,30 @@ fn split_token_reserved(scanned: Vec<ExternalUTXO>) -> (Vec<ExternalUTXO>, Vec<E
     (sweepable, token_reserved, total_balance)
 }
 
+/// B5-T1-P5 (`R-NOSPEND` b): split scanned coins by their **observed** script.
+/// `observed` maps `(txid, vout)` to the script read from the verified parent
+/// (`ingest::observe_output`). A coin is swept only when that script is exactly the
+/// 25-byte P2PKH template and it holds more than 1 satoshi; its `script_hex` is
+/// replaced by the observed bytes (the scan's value was assumed from the address).
+/// Everything else is withheld with a reason — a multi-sat inscription is not money
+/// just because it is not 1 sat.
+pub fn split_by_observed_script(
+    utxos: Vec<ExternalUTXO>,
+    observed: &std::collections::HashMap<(String, u32), Vec<u8>>,
+) -> (Vec<ExternalUTXO>, Vec<(ExternalUTXO, &'static str)>) {
+    let mut sweep = Vec::new();
+    let mut withheld = Vec::new();
+    for mut u in utxos {
+        match observed.get(&(u.txid.clone(), u.vout)) {
+            None => withheld.push((u, "not_observed")),
+            Some(s) if !crate::utxo_fetcher::is_p2pkh_script(s) => withheld.push((u, "not_plain_payment")),
+            Some(_) if crate::utxo_fetcher::is_token_reserved_value(u.satoshis) => withheld.push((u, "one_sat")),
+            Some(s) => { u.script_hex = hex::encode(s); sweep.push(u); }
+        }
+    }
+    (sweep, withheld)
+}
+
 /// Build sweep transactions that move all external UTXOs to a single destination address.
 ///
 /// Batches UTXOs into groups of up to `max_inputs_per_tx` to avoid oversized transactions.
@@ -620,8 +795,11 @@ pub fn build_sweep_transactions(
     // dust check further down only inspects the resulting OUTPUT, never the inputs.
     // Borrowed, not cloned — `ExternalUTXO` carries private key bytes and there is no
     // reason to make a second copy of them in memory to run a filter.
+    // B5-T1-P5: and only a coin whose script is exactly the P2PKH template — the value
+    // floor alone sweeps a multi-sat inscription (`R-NOSPEND` b).
     let sweepable: Vec<&ExternalUTXO> = utxos.iter()
         .filter(|u| !crate::utxo_fetcher::is_token_reserved_value(u.satoshis))
+        .filter(|u| hex::decode(&u.script_hex).map_or(false, |s| crate::utxo_fetcher::is_p2pkh_script(&s)))
         .collect();
     let withheld = utxos.len() - sweepable.len();
     if withheld > 0 {
@@ -970,5 +1148,193 @@ mod token_reserved_sweep_tests {
         assert_eq!(sweepable[0].satoshis, 2);
         assert_eq!(total, 2);
         assert_eq!(reserved.len(), 1);
+    }
+
+    // ---- B5-T1-P5 `P5-A5b` (R-NOSPEND b) — the sweep classifies by script ----------
+
+    const INSCRIPTION_TXID: &str = "9999999999999999999999999999999999999999999999999999999999999999";
+
+    fn p2pkh() -> Vec<u8> {
+        let mut s = vec![0x76u8, 0xa9, 0x14];
+        s.extend_from_slice(&[0xab; 20]);
+        s.extend_from_slice(&[0x88, 0xac]);
+        s
+    }
+
+    /// P2PKH + `ord` envelope — a multi-sat inscription the 1-sat floor cannot see.
+    fn inscription() -> Vec<u8> {
+        let mut s = p2pkh();
+        s.extend(hex::decode("0063036f72645109").unwrap());
+        s.extend(b"image/png");
+        s.extend([0x00, 0x02, 0xbe, 0xef, 0x68]);
+        s
+    }
+
+    fn scanned_with_inscription() -> (Vec<ExternalUTXO>, std::collections::HashMap<(String, u32), Vec<u8>>) {
+        let coins = vec![
+            utxo(&"aa".repeat(32), 50_000),
+            utxo(INSCRIPTION_TXID, 10), // >= 2 sats: the value floor passes it
+            utxo(&"bb".repeat(32), 30_000),
+            utxo(&"cc".repeat(32), 20_000), // not observed
+        ];
+        let mut observed = std::collections::HashMap::new();
+        observed.insert(("aa".repeat(32), 0), p2pkh());
+        observed.insert((INSCRIPTION_TXID.to_string(), 0), inscription());
+        observed.insert(("bb".repeat(32), 0), p2pkh());
+        (coins, observed)
+    }
+
+    /// GREEN: the scan's coins are split by their observed script — the inscription and
+    /// the unobserved coin are withheld and named; the sweep's serialised inputs hold
+    /// only the two plain payments.
+    #[test]
+    fn p5_a5b_sweep_excludes_and_reports_a_multi_sat_inscription() {
+        let (coins, observed) = scanned_with_inscription();
+        let (sweep, withheld) = split_by_observed_script(coins, &observed);
+        let reasons: Vec<(String, &str)> = withheld.iter().map(|(u, r)| (u.txid.clone(), *r)).collect();
+        assert_eq!(reasons, vec![(INSCRIPTION_TXID.to_string(), "not_plain_payment"), ("cc".repeat(32), "not_observed")]);
+        assert_eq!(sweep.iter().map(|u| u.satoshis).sum::<i64>(), 80_000, "headline = plain coins only");
+
+        let txs = build_sweep_transactions(&sweep, DEST, 1000, 50).expect("sweep builds");
+        let raw = hex::decode(&txs[0].0).unwrap();
+        assert_eq!(raw[4], 2, "two inputs");
+        let mut ins_le = hex::decode(INSCRIPTION_TXID).unwrap();
+        ins_le.reverse();
+        assert!(!raw.windows(32).any(|w| w == ins_le.as_slice()), "the inscription is not an input");
+    }
+
+    /// Second layer: `build_sweep_transactions` is `pub` and must not trust its caller.
+    /// Handed the unfiltered slice — with the inscription carrying its observed script —
+    /// it still leaves the inscription out.
+    #[test]
+    fn p5_a5b_sweep_builder_refuses_a_non_template_script_itself() {
+        let (mut coins, observed) = scanned_with_inscription();
+        for c in coins.iter_mut() {
+            if let Some(s) = observed.get(&(c.txid.clone(), c.vout)) { c.script_hex = hex::encode(s); }
+        }
+        let txs = build_sweep_transactions(&coins, DEST, 1000, 50).expect("sweep builds");
+        let raw = hex::decode(&txs[0].0).unwrap();
+        let mut ins_le = hex::decode(INSCRIPTION_TXID).unwrap();
+        ins_le.reverse();
+        assert!(!raw.windows(32).any(|w| w == ins_le.as_slice()), "the builder swept the inscription");
+        assert_eq!(raw[4], 3, "the three P2PKH-scripted coins (one unobserved, assumed script) are inputs");
+    }
+}
+
+/// B5-T1-P4 `P4-A9` / `P4-A10`: the gap-limit scan with fake fetchers.
+#[cfg(test)]
+mod scan_tests {
+    use super::*;
+    use crate::utxo_fetcher::UTXO;
+
+    fn coin(idx: u32) -> UTXO {
+        UTXO {
+            txid: format!("{:064x}", idx),
+            vout: 0,
+            satoshis: 1000,
+            script: String::new(),
+            address_index: idx as i32,
+            custom_instructions: None,
+            confirmed: true,
+        }
+    }
+
+    fn opts() -> RecoveryOptions {
+        RecoveryOptions { mnemonic: String::new(), gap_limit: 20, start_index: 0, max_index: None }
+    }
+
+    fn derive(idx: u32) -> Option<(String, String)> {
+        Some((format!("addr{}", idx), "pk".into()))
+    }
+
+    fn index_of(address: &str) -> u32 {
+        address.trim_start_matches("addr").parse().unwrap()
+    }
+
+    /// `P4-A9`: the UTXO fetch for batch 1 (indices 20–39) fails. The scan reports
+    /// that range as unchecked, does not count it toward the gap, and still finds the
+    /// coin at index 45 (= 1·20 + 25), past the failed batch.
+    #[tokio::test]
+    async fn p4_a9_failed_batch_is_reported_and_not_counted_as_unused() {
+        let holders = [19u32, 45];
+        let result = scan_indices(
+            &opts(),
+            "BIP32",
+            None,
+            derive,
+            |batch: Vec<FetchAddressInfo>| async move {
+                if batch.first().map(|a| a.index) == Some(20) {
+                    return Err("indexer down".to_string());
+                }
+                Ok((batch.iter().filter(|a| holders.contains(&(a.index as u32))).map(|a| coin(a.index as u32)).collect(),
+                    Vec::new()))
+            },
+            |_| async { Ok(false) },
+        ).await;
+
+        assert_eq!(result.unchecked_ranges, vec![(20, 39)]);
+        assert!(!result.complete());
+        let found: Vec<u32> = result.addresses.iter().map(|a| a.index).collect();
+        assert_eq!(found, vec![19, 45], "the coin after the failed batch is found");
+        assert!(result.incomplete_message().unwrap().contains("20–39"));
+    }
+
+    /// `P4-A9`: everything fails ⇒ the scan stops (bounded) and says so; it never
+    /// returns "complete, 0 found".
+    #[tokio::test]
+    async fn p4_a9_total_outage_is_incomplete_not_empty() {
+        let result = scan_indices(
+            &opts(),
+            "BIP32",
+            None,
+            derive,
+            |_batch: Vec<FetchAddressInfo>| async { Err::<(Vec<UTXO>, Vec<String>), _>("down".to_string()) },
+            |_| async { Ok(false) },
+        ).await;
+        assert_eq!(result.unchecked_ranges, vec![(0, 39)]);
+        assert!(!result.complete());
+        assert_eq!(result.addresses_found, 0);
+    }
+
+    /// `P4-A10`: history checks fail (`Err`) for indices 5–24 and a coin sits at 30.
+    /// The unknown indices do not reach the gap limit, so the scan reaches 30.
+    #[tokio::test]
+    async fn p4_a10_history_error_is_unknown_not_unused() {
+        let result = scan_indices(
+            &opts(),
+            "BIP32",
+            None,
+            derive,
+            |batch: Vec<FetchAddressInfo>| async move {
+                Ok((batch.iter().filter(|a| a.index == 0 || a.index == 30).map(|a| coin(a.index as u32)).collect(),
+                    Vec::new()))
+            },
+            |address: String| async move {
+                let i = index_of(&address);
+                if (5..=24).contains(&i) { Err("history API down".to_string()) } else { Ok(false) }
+            },
+        ).await;
+
+        let found: Vec<u32> = result.addresses.iter().map(|a| a.index).collect();
+        assert_eq!(found, vec![0, 30], "index 30 is reached");
+        assert_eq!(result.unchecked_ranges, vec![(5, 24)]);
+    }
+
+    /// A partially failed batch: only the addresses the fetcher names as failed are
+    /// unchecked; the rest of the batch is read normally.
+    #[tokio::test]
+    async fn partially_failed_batch_marks_only_the_failed_addresses() {
+        let result = scan_indices(
+            &opts(),
+            "BIP32",
+            None,
+            derive,
+            |batch: Vec<FetchAddressInfo>| async move {
+                let failed = batch.iter().filter(|a| a.index == 3).map(|a| a.address.clone()).collect();
+                Ok((Vec::new(), failed))
+            },
+            |_| async { Ok(false) },
+        ).await;
+        assert_eq!(result.unchecked_ranges, vec![(3, 3)]);
     }
 }

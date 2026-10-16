@@ -10,7 +10,6 @@ use actix_web::{web, HttpRequest, HttpResponse};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use crate::AppState;
-use crate::certificate::types::CertificateError;
 use crate::database::CertificateRepository;
 use crate::transaction::{Transaction, TxInput, TxOutput, OutPoint, Script};
 use crate::script::pushdrop::{encode, LockPosition};
@@ -2637,479 +2636,6 @@ async fn acquire_certificate_issuance(
         response
     }
 }
-
-// ============================================================================
-// Certificate Transaction Creation (PRESERVED FOR FUTURE USE)
-// ============================================================================
-// NOTE: Currently, the certifier creates the transaction and sends us the
-// revocationOutpoint. This function is preserved for future use if we want
-// to act as a certifier ourselves.
-// ============================================================================
-
-/// Create a blockchain transaction embedding a certificate using PushDrop encoding
-///
-/// This function creates a transaction that embeds a BRC-52 certificate in a PushDrop-encoded
-/// output. The output becomes the certificate's revocation outpoint.
-///
-/// **Parameters**:
-/// - `certificate_json`: The certificate JSON object (as received from certifier)
-/// - `certifier_pubkey`: Certifier's identity key (33-byte compressed public key)
-/// - `state`: Application state (for database access, UTXO selection, etc.)
-///
-/// **Returns**: `(txid, revocation_outpoint)` where:
-/// - `txid`: Transaction ID (hex string)
-/// - `revocation_outpoint`: Outpoint string in format "txid.0"
-async fn create_certificate_transaction(
-    certificate_json: &serde_json::Value,
-    certifier_pubkey: &[u8],
-    state: &AppState,
-) -> Result<(String, String), CertificateError> {
-    use crate::database::WalletRepository;
-
-    // Step 1: Serialize certificate JSON to UTF-8 bytes
-    // The certificate JSON embedded in the PushDrop output will contain the original
-    // revocationOutpoint as signed by the certifier.
-    let certificate_json_string = serde_json::to_string(certificate_json)
-        .map_err(|e| CertificateError::InvalidFormat(format!("Failed to serialize certificate: {}", e)))?;
-    let certificate_bytes = certificate_json_string.as_bytes().to_vec();
-    log::info!("   📝 Certificate JSON size: {} bytes", certificate_bytes.len());
-
-    // Step 2: Create PushDrop script
-    let fields = vec![certificate_bytes];
-    let locking_script_bytes = encode(&fields, certifier_pubkey, LockPosition::Before)
-        .map_err(|e| CertificateError::InvalidFormat(format!("PushDrop encoding failed: {:?}", e)))?;
-    log::info!("   📜 PushDrop script created: {} bytes", locking_script_bytes.len());
-
-    // Step 3: Select UTXOs to fund transaction (reuse logic from createAction)
-    let certificate_output_amount = 600; // satoshis (above dust limit)
-
-    // Calculate fee based on transaction size
-    // Certificate tx: 1-2 inputs (P2PKH) + 1 certificate output + 1 change output
-    let certificate_script_len = locking_script_bytes.len();
-    let output_script_lengths = vec![certificate_script_len, 25, 25]; // certificate + service fee + P2PKH change
-    let fee_rate_sats_per_kb = state.fee_rate_cache.get_rate().await;
-    let estimated_fee = crate::handlers::estimate_fee_for_transaction(
-        2,  // Estimate 2 inputs
-        &output_script_lengths,
-        false,  // Change already included in output_script_lengths
-        fee_rate_sats_per_kb
-    ) as i64;
-    log::info!("   📊 Certificate tx fee estimate: {} satoshis (script: {} bytes, rate: {} sat/KB)",
-        estimated_fee, certificate_script_len, fee_rate_sats_per_kb);
-
-    let total_needed = certificate_output_amount + estimated_fee + crate::handlers::HODOS_SERVICE_FEE_SATS;
-
-    // Get addresses from database (reuse from createAction)
-    use crate::database::{address_to_address_info, output_to_fetcher_utxo};
-    let addresses = {
-        let db = state.database.lock().unwrap();
-        let wallet_repo = WalletRepository::new(db.connection());
-        let wallet = wallet_repo.get_primary_wallet()
-            .map_err(|e| CertificateError::Database(format!("Failed to get wallet: {}", e)))?
-            .ok_or_else(|| CertificateError::Database("No wallet found".to_string()))?;
-
-        let address_repo = AddressRepository::new(db.connection());
-        let db_addresses = address_repo.get_all_by_wallet(wallet.id.unwrap())
-            .map_err(|e| CertificateError::Database(format!("Failed to get addresses: {}", e)))?;
-        drop(db);
-
-        db_addresses.iter()
-            .map(|addr| address_to_address_info(addr))
-            .collect::<Vec<_>>()
-    };
-
-    if addresses.is_empty() {
-        return Err(CertificateError::Database("No wallet addresses found".to_string()));
-    }
-
-    // Fetch UTXOs (reuse caching logic from createAction)
-    use crate::database::{OutputRepository, AddressRepository};
-    const DEFAULT_USER_ID: i64 = 1;
-    let db = state.database.lock().unwrap();
-    let output_repo = OutputRepository::new(db.connection());
-
-    // Get spendable outputs from database cache first (same logic as createAction)
-    // Prefer confirmed UTXOs to avoid building on orphaned/unconfirmed parents
-    let confirmed_utxos: Vec<_> = output_repo.get_spendable_confirmed_by_user(DEFAULT_USER_ID)
-        .unwrap_or_default()
-        .iter()
-        .map(|output| output_to_fetcher_utxo(output))
-        .collect();
-    let mut all_utxos = match output_repo.get_spendable_by_user(DEFAULT_USER_ID) {
-        Ok(db_outputs) => {
-            // Convert database outputs to fetcher format
-            db_outputs.iter()
-                .map(|output| output_to_fetcher_utxo(output))
-                .collect::<Vec<_>>()
-        }
-        Err(e) => {
-            log::warn!("   Failed to get outputs from database: {}, falling back to API", e);
-            Vec::new()
-        }
-    };
-    drop(db);
-
-    // Check if we need to fetch from API (same logic as createAction)
-    let cached_balance: i64 = all_utxos.iter().map(|u| u.satoshis).sum();
-    if all_utxos.is_empty() {
-        log::info!("   Cache is empty, fetching UTXOs from API to populate cache...");
-    } else if cached_balance < total_needed {
-        log::info!("   Insufficient cached balance ({} < {}), fetching from API to check for new UTXOs...", cached_balance, total_needed);
-    } else {
-        log::info!("   ✅ Using cached UTXOs from database ({} UTXOs, {} satoshis)", all_utxos.len(), cached_balance);
-    }
-
-    if all_utxos.is_empty() || cached_balance < total_needed {
-        // Fetch from API
-        let api_utxos = crate::utxo_fetcher::fetch_all_utxos(&addresses).await
-            .map_err(|e| CertificateError::Database(format!("Failed to fetch UTXOs: {}", e)))?;
-
-        // Cache UTXOs to database (same logic as createAction)
-        let db = state.database.lock().unwrap();
-        let output_repo = OutputRepository::new(db.connection());
-
-        for utxo in &api_utxos {
-            // Upsert output (insert if not exists)
-            // Honour utxo.confirmed — see task_sync_pending.rs.
-            if let Err(e) = output_repo.upsert_received_utxo_with_confirmed(
-                DEFAULT_USER_ID,
-                &utxo.txid,
-                utxo.vout,
-                utxo.satoshis,
-                &utxo.script,
-                utxo.address_index,
-                utxo.confirmed,
-            ) {
-                log::warn!("   Failed to cache output {}:{}: {}", &utxo.txid[..std::cmp::min(16, utxo.txid.len())], utxo.vout, e);
-            }
-        }
-        drop(db);
-
-        // Invalidate balance cache after upserting outputs
-        state.balance_cache.invalidate();
-
-        // Use API UTXOs (they're more up-to-date)
-        all_utxos = api_utxos;
-    }
-
-    if all_utxos.is_empty() {
-        return Err(CertificateError::Database("No UTXOs available for certificate transaction".to_string()));
-    }
-
-    // Select UTXOs — prefer confirmed to avoid orphaned parents
-    let selected_utxos = crate::handlers::select_utxos_with_preference(
-        Some(&confirmed_utxos), &all_utxos, total_needed,
-        None, // No consolidation for certificate transactions
-        None, // Not a bundle-carrying send
-        crate::handlers::large_parent_bytes(), // unused while parent_sizes is None
-        None, // no channel budget — certificates are not bundle-carrying
-    );
-    if selected_utxos.is_empty() {
-        return Err(CertificateError::Database(format!(
-            "Insufficient funds: need {} satoshis for certificate transaction (have {} satoshis)",
-            total_needed,
-            all_utxos.iter().map(|u| u.satoshis).sum::<i64>()
-        )));
-    }
-
-    let total_input: i64 = selected_utxos.iter().map(|u| u.satoshis).sum();
-    log::info!("   💰 Selected {} UTXOs ({} satoshis)", selected_utxos.len(), total_input);
-
-    // Log each selected UTXO for debugging
-    for (i, utxo) in selected_utxos.iter().enumerate() {
-        log::info!("      UTXO {}: {}:{} ({} satoshis, address index {})",
-            i, utxo.txid, utxo.vout, utxo.satoshis, utxo.address_index);
-    }
-
-    // Step 4: Create transaction structure
-    let mut tx = Transaction::new();
-
-    // Add inputs
-    for utxo in &selected_utxos {
-        let outpoint = OutPoint::new(utxo.txid.clone(), utxo.vout);
-        tx.add_input(TxInput::new(outpoint));
-    }
-
-    // Add certificate output (with original placeholder revocationOutpoint as signed by certifier)
-    let certificate_output = TxOutput::new(certificate_output_amount, locking_script_bytes.clone());
-    tx.add_output(certificate_output);
-    log::info!("   📤 Added certificate output: {} satoshis", certificate_output_amount);
-
-    // Add Hodos service fee output
-    let fee_script = crate::recovery::address_to_p2pkh_script(crate::handlers::HODOS_FEE_ADDRESS)
-        .expect("HODOS_FEE_ADDRESS constant is invalid");
-    tx.add_output(TxOutput::new(crate::handlers::HODOS_SERVICE_FEE_SATS, fee_script));
-    log::info!("   💰 Added Hodos service fee: {} satoshis", crate::handlers::HODOS_SERVICE_FEE_SATS);
-
-    // Calculate fees (use same estimate as createAction)
-    let fee = estimated_fee; // Already calculated above
-
-    // Calculate change amount (accounts for miner fee + service fee)
-    let change_amount = total_input - certificate_output_amount - fee - crate::handlers::HODOS_SERVICE_FEE_SATS;
-
-    // Add change output if needed (reuse logic from createAction)
-    if change_amount > 546 {
-        // Generate new change address (reuse from createAction)
-        use crate::database::get_master_private_key_from_db;
-        use crate::database::get_master_public_key_from_db;
-        use crate::crypto::brc42::derive_child_public_key;
-        use crate::handlers::pubkey_to_address;
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        let db = state.database.lock().unwrap();
-        let wallet_repo = WalletRepository::new(db.connection());
-        let wallet = wallet_repo.get_primary_wallet()
-            .map_err(|e| CertificateError::Database(format!("Failed to get wallet: {}", e)))?
-            .ok_or_else(|| CertificateError::Database("No wallet found".to_string()))?;
-
-        let wallet_id = wallet.id.unwrap();
-        let current_index = wallet.current_index;
-
-        // Derive new address for change (reuse from createAction)
-        let master_privkey = get_master_private_key_from_db(&db)
-            .map_err(|e| CertificateError::Database(format!("Failed to get master key: {}", e)))?;
-        let master_pubkey = get_master_public_key_from_db(&db)
-            .map_err(|e| CertificateError::Database(format!("Failed to get master pubkey: {}", e)))?;
-
-        // Create BRC-43 invoice number for change address
-        let invoice_number = format!("2-receive address-{}", current_index);
-
-        // Derive child public key using BRC-42
-        let derived_pubkey = derive_child_public_key(&master_privkey, &master_pubkey, &invoice_number)
-            .map_err(|e| CertificateError::InvalidFormat(format!("Failed to derive change key: {}", e)))?;
-
-        // Convert to Bitcoin address
-        let change_address = pubkey_to_address(&derived_pubkey)
-            .map_err(|e| CertificateError::InvalidFormat(format!("Failed to create change address: {}", e)))?;
-
-        // Save new change address to database (reuse from createAction)
-        let address_repo = AddressRepository::new(db.connection());
-        let created_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-
-        let address_model = crate::database::Address {
-            id: None,
-            wallet_id,
-            index: current_index,
-            address: change_address.clone(),
-            public_key: hex::encode(&derived_pubkey),
-            used: true,
-            balance: 0,
-            pending_utxo_check: false,
-            created_at,
-        };
-
-        if let Err(e) = address_repo.create(&address_model) {
-            log::warn!("   Failed to save change address: {} (continuing anyway)", e);
-        } else {
-            if let Err(e) = wallet_repo.update_current_index(wallet_id, current_index + 1) {
-                log::warn!("   Failed to update wallet index: {}", e);
-            }
-            log::info!("   ✅ Generated new change address: {} (index {})", change_address, current_index);
-        }
-
-        drop(db);
-
-        // Build P2PKH script for change (reuse from createAction)
-        let pubkey_bytes = derived_pubkey;
-        let sha_hash = Sha256::digest(&pubkey_bytes);
-        let pubkey_hash = Ripemd160::digest(&sha_hash);
-
-        let change_script = Script::p2pkh_locking_script(&pubkey_hash)
-            .map_err(|e| CertificateError::InvalidFormat(format!("Failed to create change script: {}", e)))?;
-
-        tx.add_output(TxOutput::new(change_amount, change_script.bytes));
-        log::info!("   💸 Added change output: {} satoshis", change_amount);
-    } else if change_amount > 0 {
-        log::info!("   💸 Change below dust limit ({}), adding to fee", change_amount);
-    }
-
-    // Step 5: Sign transaction
-    log::info!("   🖊️  Signing certificate transaction...");
-    let secp = Secp256k1::new();
-
-    for (i, utxo) in selected_utxos.iter().enumerate() {
-        // Phase 7C: Derive private key directly from output's derivation fields
-        let db = state.database.lock().unwrap();
-        let private_key_bytes = {
-            let output_repo = crate::database::OutputRepository::new(db.connection());
-            match output_repo.get_by_txid_vout(&utxo.txid, utxo.vout) {
-                Ok(Some(output)) => {
-                    crate::database::derive_key_for_output(
-                        &db,
-                        output.derivation_prefix.as_deref(),
-                        output.derivation_suffix.as_deref(),
-                        output.sender_identity_key.as_deref(),
-                    ).map_err(|e| CertificateError::Database(format!("Failed to derive key for output {}:{}: {}", utxo.txid, utxo.vout, e)))?
-                }
-                Ok(None) => {
-                    return Err(CertificateError::Database(format!("Output not found: {}:{}", utxo.txid, utxo.vout)));
-                }
-                Err(e) => {
-                    return Err(CertificateError::Database(format!("Failed to look up output {}:{}: {}", utxo.txid, utxo.vout, e)));
-                }
-            }
-        };
-        drop(db);
-
-        // Decode prev script
-        let prev_script = hex::decode(&utxo.script)
-            .map_err(|e| CertificateError::InvalidHex(format!("Invalid script hex: {}", e)))?;
-
-        // Calculate signature hash
-        let sighash = calculate_sighash(
-            &tx,
-            i,
-            &prev_script,
-            utxo.satoshis,
-            SIGHASH_ALL_FORKID,
-        ).map_err(|e| CertificateError::InvalidFormat(format!("Failed to calculate sighash: {}", e)))?;
-
-        // Sign
-        let secret_key = SecretKey::from_slice(&private_key_bytes)
-            .map_err(|_| CertificateError::InvalidFormat("Invalid private key".to_string()))?;
-        let message = Message::from_digest_slice(&sighash)
-            .map_err(|_| CertificateError::InvalidFormat("Invalid sighash message".to_string()))?;
-        let signature = secp.sign_ecdsa(&message, &secret_key);
-
-        // Serialize signature as DER + sighash byte
-        let mut sig_der = signature.serialize_der().to_vec();
-        sig_der.push(SIGHASH_ALL_FORKID as u8);
-
-        // Get public key
-        use secp256k1::PublicKey;
-        let pubkey = PublicKey::from_secret_key(&secp, &secret_key);
-        let pubkey_bytes = pubkey.serialize();
-
-        // Build unlocking script: <signature> <pubkey>
-        use crate::transaction::Script;
-        let unlocking_script = Script::p2pkh_unlocking_script(&sig_der, &pubkey_bytes);
-
-        // Update input with unlocking script
-        tx.inputs[i].set_script(unlocking_script.bytes);
-
-        log::info!("   ✅ Input {} signed", i);
-    }
-
-    log::info!("   ✅ Transaction signed");
-
-    // Step 6: Calculate txid
-    // Note: The certificate embedded in the PushDrop output contains the original placeholder
-    // revocationOutpoint (as signed by the certifier). We calculate the txid once and return
-    // the actual revocationOutpoint (txid.0) in the response so the certifier can locate it.
-    let txid = tx.txid()
-        .map_err(|e| CertificateError::InvalidFormat(format!("Failed to calculate txid: {}", e)))?;
-    log::info!("   📝 Transaction ID: {}", txid);
-
-    // Step 7: Extract revocation outpoint (first output, index 0)
-    // Note: The certificate embedded on-chain has the original placeholder revocationOutpoint
-    // (as signed by the certifier). We return the actual txid.0 in the response so the
-    // certifier can locate the certificate on-chain.
-    let revocation_outpoint = format!("{}.0", txid);
-    log::info!("   📍 Revocation outpoint (for response): {}", revocation_outpoint);
-
-    // Step 8: Broadcast transaction
-    let raw_tx_hex = tx.to_hex()
-        .map_err(|e| CertificateError::InvalidFormat(format!("Failed to serialize transaction: {}", e)))?;
-
-    log::info!("   📡 Broadcasting certificate transaction...");
-    let broadcast_result = broadcast_transaction(&raw_tx_hex, &state.services, Some(&state.database), Some(&txid)).await;
-
-    // Handle "Missing inputs" error by checking UTXOs and retrying
-    if let Err(ref e) = broadcast_result {
-        let error_str = e.to_string().to_lowercase();
-        if error_str.contains("missing inputs") {
-            log::warn!("   ⚠️  Received 'Missing inputs' error - checking which UTXOs are spent...");
-
-            // Check each selected UTXO to see if it's spent on-chain
-            let mut spent_utxos = Vec::new();
-            for utxo in &selected_utxos {
-                let url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/outspend/{}", utxo.txid, utxo.vout);
-                let client = reqwest::Client::builder()
-                    .timeout(crate::services::CallClass::IndexerSync.timeout())
-                    .build()
-                    .unwrap_or_else(|_| reqwest::Client::new());
-                match client.get(&url).send().await {
-                    Ok(response) => {
-                        if response.status() == 404 {
-                            // 404 means likely spent
-                            log::warn!("      ⚠️  UTXO {}:{} returned 404 - likely SPENT", utxo.txid, utxo.vout);
-                            spent_utxos.push((utxo.txid.clone(), utxo.vout));
-                        } else if response.status().is_success() {
-                            if let Ok(json) = response.json::<serde_json::Value>().await {
-                                if let Some(spent) = json.get("spent").and_then(|v| v.as_bool()) {
-                                    if spent {
-                                        log::warn!("      ⚠️  UTXO {}:{} is SPENT on-chain", utxo.txid, utxo.vout);
-                                        spent_utxos.push((utxo.txid.clone(), utxo.vout));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        // Ignore API errors - we'll just mark all as potentially spent
-                    }
-                }
-            }
-
-            // Mark spent outputs in database
-            if !spent_utxos.is_empty() {
-                log::info!("   🔄 Marking {} output(s) as spent in database...", spent_utxos.len());
-                let db = state.database.lock().unwrap();
-                let output_repo = OutputRepository::new(db.connection());
-                for (txid, vout) in &spent_utxos {
-                    let _ = output_repo.mark_spent(txid, *vout, "unknown");
-                    log::info!("      ✅ Marked {}:{} as spent", txid, vout);
-                }
-                drop(db);
-                state.balance_cache.invalidate();
-
-                // Return error - the spent outputs are now marked, so a retry will work
-                return Err(CertificateError::Database(format!(
-                    "Transaction failed: {} output(s) were already spent on-chain. They have been marked as spent in the database. Please retry the certificate acquisition.",
-                    spent_utxos.len()
-                )));
-            }
-        }
-    }
-
-    // If we get here, either broadcast succeeded or it's a different error
-    match broadcast_result {
-        Ok(_) => {
-            log::info!("   ✅ Certificate transaction broadcast successful!");
-        }
-        Err(e) => {
-            log::error!("   ❌ Failed to broadcast certificate transaction: {}", e);
-            return Err(CertificateError::Database(format!("Failed to broadcast transaction: {}", e)));
-        }
-    }
-
-    // Mark outputs as spent in database (same as createAction)
-    {
-        let db = state.database.lock().unwrap();
-        use crate::database::OutputRepository;
-        let output_repo = OutputRepository::new(db.connection());
-        let outputs_to_mark: Vec<_> = selected_utxos.iter()
-            .map(|u| (u.txid.clone(), u.vout))
-            .collect();
-
-        match output_repo.mark_multiple_spent(&outputs_to_mark, &txid) {
-            Ok(count) => {
-                log::info!("   ✅ Marked {} outputs as spent in database", count);
-            }
-            Err(e) => {
-                log::warn!("   ⚠️  Failed to mark outputs as spent: {}", e);
-            }
-        }
-    }
-    state.balance_cache.invalidate();
-
-    // Step 9: Return txid and revocation outpoint
-    Ok((txid, revocation_outpoint))
-}
-
 // ============================================================================
 // Method 19: proveCertificate (Call Code 19)
 // ============================================================================
@@ -4165,7 +3691,6 @@ pub async fn publish_certificate(
     // - Transaction + output DB records
     use crate::handlers::{
         CreateActionRequest, CreateActionOutput, CreateActionOptions,
-        create_action_internal,
     };
 
     let pushdrop_script_hex = hex::encode(&locking_script_bytes);
@@ -4200,7 +3725,10 @@ pub async fn publish_certificate(
         version: None,
     };
 
-    let ca_resp = create_action_internal(state.clone(), ca_req).await;
+    // B5-T1-P2: Release on a temporary failure — this flow reports "unpublished" on any
+    // error and never follows a transaction that lands later (review M3).
+    let ca_resp = crate::handlers::create_action_internal_with(
+        state.clone(), ca_req, crate::handlers::OnTemporaryFailure::Release).await;
 
     if !ca_resp.status().is_success() {
         log::error!("   ❌ createAction failed with status {}", ca_resp.status());
@@ -4492,6 +4020,9 @@ async fn unpublish_certificate_core(
         2, &[25, 25], false, fee_rate,  // service fee output (25) + change (25)
     ) as i64;
 
+    // B5-T1-P3: selection and the claim run under `utxo_selection_lock` (this route used
+    // to take no lock); the claim's 0-rows check closes the race (`R-NORACE`).
+    let utxo_lock = state.utxo_selection_lock.lock().await;
     let funding_utxos = {
         let db = state.database.lock().unwrap();
         let output_repo = OutputRepository::new(db.connection());
@@ -4503,13 +4034,13 @@ async fn unpublish_certificate_core(
             .unwrap_or_default()
             .iter()
             .filter(exclude_pushdrop)
-            .map(|o| crate::database::output_to_fetcher_utxo(o))
+            .filter_map(|o| crate::database::output_to_fetcher_utxo(o))
             .collect();
         let all_utxos: Vec<_> = output_repo.get_spendable_by_user(state.current_user_id)
             .map_err(|e| format!("Failed to get UTXOs: {}", e))?
             .iter()
             .filter(exclude_pushdrop)
-            .map(|o| crate::database::output_to_fetcher_utxo(o))
+            .filter_map(|o| crate::database::output_to_fetcher_utxo(o))
             .collect();
         drop(db);
         let amount_needed = estimated_fee + crate::handlers::HODOS_SERVICE_FEE_SATS;
@@ -4530,17 +4061,29 @@ async fn unpublish_certificate_core(
     log::info!("   💰 Funding: {} UTXOs ({} sats) + PushDrop ({} sats), fee ~{} sats",
         funding_utxos.len(), funding_total, output_satoshis, estimated_fee);
 
-    // Reserve all inputs (prevents concurrent selection)
-    let placeholder_txid = format!("pending-unpub-{}", chrono::Utc::now().timestamp_millis());
-    {
-        let db = state.database.lock().unwrap();
-        let output_repo = OutputRepository::new(db.connection());
-        let mut utxos_to_reserve: Vec<(String, u32)> = funding_utxos.iter()
+    // Reserve all inputs — B5-T1-P3: the transaction row first, then the claim, in one
+    // SQLite transaction; the guard releases them on every early exit until the row is
+    // filled (this route used to leak them until the sweeper).
+    let (unpublish_row, reservation_guard) = {
+        let funding: Vec<(String, u32)> = funding_utxos.iter()
             .map(|u| (u.txid.clone(), u.vout))
             .collect();
-        utxos_to_reserve.push((publish_txid.to_string(), publish_vout));
-        let _ = output_repo.mark_multiple_spent(&utxos_to_reserve, &placeholder_txid);
-    }
+        let named = vec![(publish_txid.to_string(), publish_vout)];
+        let reference = format!("unpublish-{}", uuid::Uuid::new_v4().simple());
+        let db = state.database.lock().unwrap();
+        let reserved = crate::handlers::reserve_for_new_transaction_with(
+            db.connection(), &reference, Some("Unpublish identity certificate"), &funding, &named);
+        drop(db);
+        match reserved {
+            Ok(Ok(row)) => (row, crate::handlers::ReservationGuard::new(state, row)),
+            Ok(Err((t, v))) => {
+                log::warn!("   ⛔ Unpublish funding coin {}:{} is held by another payment", &t[..t.len().min(16)], v);
+                return Err("A coin this needs is being spent by another payment; please try again".to_string());
+            }
+            Err(e) => return Err(format!("Could not reserve inputs: {}", e)),
+        }
+    };
+    drop(utxo_lock);
     state.balance_cache.invalidate();
 
     // Build transaction
@@ -4572,9 +4115,9 @@ async fn unpublish_certificate_core(
             let wallet_id = wallet.id.unwrap();
 
             let address_repo = AddressRepository::new(db.connection());
-            let current_index = address_repo.get_max_index(wallet_id)
-                .ok().flatten().map(|i| i + 1)
-                .unwrap_or(wallet.current_index);
+            // B5-T1-P6: the one next-index source (never below an index already handed out).
+            let current_index = wallet_repo.claim_next_receive_index(wallet_id)
+                .map_err(|e| format!("Change index error: {}", e))?;
 
             let master_pubkey = crate::database::get_master_public_key_from_db(&db)
                 .map_err(|e| format!("Pubkey error: {}", e))?;
@@ -4591,7 +4134,6 @@ async fn unpublish_certificate_core(
                 pending_utxo_check: false, created_at,
             };
             let _ = address_repo.create(&addr_model);
-            let _ = wallet_repo.update_current_index(wallet_id, current_index + 1);
 
             let sha_hash = Sha256::digest(&derived_pubkey);
             let pubkey_hash = Ripemd160::digest(&sha_hash);
@@ -4712,7 +4254,7 @@ async fn unpublish_certificate_core(
                 continue;
             }
             match crate::beef_helpers::build_beef_for_txid(
-                ancestor_txid, &mut beef, &state.database, &state.services,
+                ancestor_txid, &mut beef, &state.database, &state.services, &*state.chain_tracker,
             ).await {
                 Ok(_) => log::info!("   ✅ Added ancestry for {}", &ancestor_txid[..16.min(ancestor_txid.len())]),
                 Err(e) => log::warn!("   ⚠️  Ancestry failed for {}: {}", &ancestor_txid[..16.min(ancestor_txid.len())], e),
@@ -4730,45 +4272,53 @@ async fn unpublish_certificate_core(
     };
     log::info!("   📦 Built BEEF with ancestry: {} bytes", beef_bytes.len());
 
-    // Create transaction record BEFORE updating spent_by (so FK lookup succeeds)
-    // This is the critical step that was missing — without it, spent_by stays NULL
-    // and TaskReviewStatus restores the outputs to spendable=1.
+    // Record the transaction (status: sending — about to broadcast). B5-T1-P3: the
+    // reservation row is filled in place; it already owns the inputs. The signed bytes
+    // are stored as hex, as createAction stores them (TaskSendWaiting reads text).
     let raw_tx_bytes = hex::decode(&raw_tx_hex).unwrap_or_default();
     let unpublish_tx_id: Option<i64> = {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
         let db = state.database.lock().unwrap();
         match db.connection().execute(
-            "INSERT OR IGNORE INTO transactions (
-                user_id, txid, status, reference_number,
-                description, raw_tx, is_outgoing, satoshis,
-                created_at, updated_at
-            ) VALUES (?1, ?2, 'sending', ?3, ?4, ?5, 1, ?6, ?7, ?8)",
+            // ⛔ Only if still `unsigned` — not failed by a backstop while this built
+            // (B5-T1-P3 review #1); 0 rows ⇒ refuse below. The clock restarts here.
+            "UPDATE transactions SET txid = ?1, status = 'sending', raw_tx = ?2, satoshis = ?3,
+                    user_id = 1, updated_at = ?4, created_at = ?4
+             WHERE id = ?5 AND status = 'unsigned'",
             rusqlite::params![
-                1i64, // user_id
                 txid,
-                format!("unpublish-{}", &txid[..8]),
-                "Unpublish identity certificate",
-                raw_tx_bytes,
+                raw_tx_hex,
                 estimated_fee + crate::handlers::HODOS_SERVICE_FEE_SATS, // Actual cost (fee + service fee)
-                now, now,
+                now,
+                unpublish_row,
             ],
         ) {
             Ok(rows) if rows > 0 => {
-                let id = db.connection().last_insert_rowid();
-                log::info!("   💾 Created transaction record for unpublish tx {} (id: {})", &txid[..16], id);
-                Some(id)
+                log::info!("   💾 Recorded unpublish tx {} on its reservation row (id: {})", &txid[..16], unpublish_row);
+                // best-effort: the reference unpublish rows have always carried
+                let _ = db.connection().execute(
+                    "UPDATE transactions SET reference_number = ?1 WHERE id = ?2",
+                    rusqlite::params![format!("unpublish-{}", &txid[..8]), unpublish_row],
+                );
+                Some(unpublish_row)
             }
             Ok(_) => {
-                log::error!("   ❌ INSERT OR IGNORE inserted 0 rows for unpublish tx {} — possible duplicate or constraint violation", &txid[..16]);
+                log::error!("   ❌ reservation row {} for unpublish tx {} not found", unpublish_row, &txid[..16]);
                 None
             }
             Err(e) => {
-                log::error!("   ❌ Failed to create transaction record: {}", e);
+                log::error!("   ❌ Failed to record the unpublish transaction: {}", e);
                 None
             }
         }
     };
+    let Some(_) = unpublish_tx_id else {
+        // The guard releases the inputs and removes the unbuilt row.
+        return Err("Could not record the unpublish transaction, not broadcasting".to_string());
+    };
+    // From here the row is `sending`: a failure is cleaned up below by status, not by the guard.
+    reservation_guard.commit();
 
     // Record change output in DB BEFORE broadcast (same as createAction pattern)
     if let (Some(addr_idx), Some(ref script_hex)) = (change_address_index, &change_script_hex) {
@@ -4783,6 +4333,7 @@ async fn unpublish_certificate_core(
             Some("2-receive address"), Some(&addr_idx.to_string()),
             None, None, true, // is_change
         );
+        crate::classify::after_write(&db, &txid, 1, "I6:unpublish-change");
         // Link change output to the transaction record
         if let Some(tx_id) = unpublish_tx_id {
             let _ = output_repo.link_outputs_to_transaction(&txid, tx_id);
@@ -4790,20 +4341,23 @@ async fn unpublish_certificate_core(
         log::info!("   💾 Change output recorded: {}:0 = {} sats", &txid[..16], change_amount);
     }
 
-    // Update input reservations from placeholder to real txid
-    // Now that the transaction record exists, spent_by will be set correctly
+    // Label the reserved inputs with the txid (B5-T1-P3: they are owned by the row).
     //
     // ⛔ Fatal — the broadcast below has not happened yet. If the wallet cannot record
-    // which coins this certificate transaction spends, it must not send it. The
-    // reservation is left standing: the outpoints are genuinely unspent, so
-    // TaskSweepReservations releases them after its on-chain check.
+    // which coins this certificate transaction spends, it must not send it; it is never
+    // sent, so its inputs are released now (as createAction's refusal does).
     {
         let db = state.database.lock().unwrap();
         let output_repo = OutputRepository::new(db.connection());
-        if let Err(e) = output_repo.update_spending_description_batch(&placeholder_txid, &txid) {
+        if let Err(e) = output_repo.label_coins_of(unpublish_row, &txid) {
+            log::error!("   ⛔ ABORTING BEFORE BROADCAST — could not record which coins \
+                         certificate tx {} spends: {}. No money has moved.", txid, e);
+            let tx_repo = crate::database::TransactionRepository::new(db.connection());
+            let _ = tx_repo.set_transaction_status(&txid, crate::action_storage::TransactionStatus::Failed);
+            let _ = output_repo.disable_by_txid(&txid);
+            let _ = output_repo.release_coins_of(unpublish_row);
             drop(db);
-            log::error!("   ⛔ ABORTING BEFORE BROADCAST — could not resolve certificate \
-                         reservation {} → {}: {}. No money has moved.", placeholder_txid, txid, e);
+            state.balance_cache.invalidate();
             return Err(format!("Could not record certificate transaction inputs, not broadcasting: {}", e));
         }
     }
@@ -4821,7 +4375,7 @@ async fn unpublish_certificate_core(
 
     // Broadcast using BEEF (not raw tx) so ARC can validate parent transactions
     let beef_hex = hex::encode(&beef_bytes);
-    match broadcast_transaction(&beef_hex, &state.services, Some(&state.database), Some(&txid)).await {
+    match broadcast_transaction(&beef_hex, &state.services, Some(crate::handlers::ProofSink::of(&state)), Some(&txid)).await {
         Ok(_) => {
             log::info!("   ✅ Unpublish broadcast successful");
             // Certificate unpublished — always trigger backup check
@@ -4840,7 +4394,7 @@ async fn unpublish_certificate_core(
             let output_repo = OutputRepository::new(db.connection());
             let _ = output_repo.disable_by_txid(&txid);
             let _ = output_repo.restore_by_spending_description(&txid);
-            let _ = output_repo.restore_by_spending_description(&placeholder_txid);
+            let _ = output_repo.release_coins_of(unpublish_row);
             drop(db);
             state.balance_cache.invalidate();
             return Err(format!("Broadcast failed: {}", e));
@@ -5047,7 +4601,7 @@ pub async fn admin_prepare_unpublish(
                     user_id, txid, status, reference_number,
                     description, raw_tx, is_outgoing, satoshis,
                     created_at, updated_at
-                ) VALUES (?1, ?2, 'completed', ?3, ?4, ?5, 1, ?6, ?7, ?8)",
+                ) VALUES (?1, ?2, 'unproven', ?3, ?4, ?5, 1, ?6, ?7, ?8)",
                 rusqlite::params![
                     state.current_user_id, txid,
                     format!("admin-{}", &txid[..8]),
@@ -5116,24 +4670,34 @@ pub async fn admin_prepare_unpublish(
     {
         let proof_result = crate::cache_helpers::fetch_tsc_proof_from_api(&state.services, &txid).await;
         match proof_result {
-            Ok(Some(tsc_json)) => {
-                let db = state.database.lock().unwrap();
-                let proven_tx_repo = crate::database::ProvenTxRepository::new(db.connection());
-                let height = tsc_json["height"].as_u64().unwrap_or(0) as u32;
-                let tx_index = tsc_json["index"].as_u64().unwrap_or(0) as u64;
-                let merkle_path_blob = serde_json::to_vec(&tsc_json).unwrap_or_default();
-                match proven_tx_repo.insert_or_get(&txid, height, tx_index, &merkle_path_blob, &tx_bytes, "", "") {
-                    Ok(proven_tx_id) => {
-                        let _ = proven_tx_repo.link_transaction(&txid, proven_tx_id);
-                        steps.push(format!("proven_txs: stored (height: {}, index: {})", height, tx_index));
-                        log::info!("   ✅ Stored merkle proof");
-                    }
-                    Err(e) => {
-                        steps.push(format!("proven_txs: insert failed: {}", e));
-                        log::warn!("   ⚠️  Failed to store merkle proof: {}", e);
+            // B5-T1-P7a-2 `C15` / `C14-i`: stored, and the transaction `completed`, only on a proof our
+            // own headers verify; otherwise it stays unproven and the proof task keeps asking.
+            Ok(Some(tsc_json)) => match crate::proof_store::check_tsc(&*state.chain_tracker, &txid, &tsc_json) {
+                crate::proof_store::ProofCheck::Verified(proof) => {
+                    let db = state.database.lock().unwrap();
+                    let conn = db.connection();
+                    let block_hash = tsc_json["target"].as_str().unwrap_or("");
+                    match crate::proof_store::store(conn, &*state.chain_tracker, &proof, &tx_bytes, block_hash) {
+                        Ok(row) => {
+                            let _ = crate::proof_store::link(conn, &row, &txid);
+                            let tx_repo = crate::database::TransactionRepository::new(conn);
+                            if !matches!(tx_repo.get_broadcast_status(&txid), Ok(Some(ref s)) if s == "failed") {
+                                let _ = tx_repo.update_broadcast_status(&txid, "confirmed");
+                            }
+                            steps.push(format!("proven_txs: stored, verified (height: {}, index: {})", row.height(), proof.tx_index()));
+                            log::info!("   ✅ Stored verified merkle proof");
+                        }
+                        Err(e) => {
+                            steps.push(format!("proven_txs: insert failed: {}", e));
+                            log::warn!("   ⚠️  Failed to store merkle proof: {}", e);
+                        }
                     }
                 }
-            }
+                other => {
+                    steps.push(format!("proven_txs: not stored — not verified by our headers ({:?})", other.verdict()));
+                    log::warn!("   ⚠️  Merkle proof not verified by our headers ({:?}) — not stored", other.verdict());
+                }
+            },
             Ok(None) => {
                 steps.push("proven_txs: no proof available yet".into());
                 log::warn!("   ⚠️  No merkle proof available yet");
@@ -5526,10 +5090,6 @@ async fn try_resubmit_spending_tx(
     // bsvb hosts silently failed validation and returned the ambiguous
     // STEAK shape we could not interpret without the anvil error.
     let mut beef = crate::beef::Beef::new();
-    let client = reqwest::Client::builder()
-        .timeout(crate::services::CallClass::IndexerBulk.timeout())
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
 
     // 1. Add publish tx as parent + its merkle proof via Services chain
     if let Ok(parent_hex) = crate::cache_helpers::fetch_parent_transaction_from_api(&state.services, &publish_txid).await {
@@ -5538,7 +5098,7 @@ async fn try_resubmit_spending_tx(
         }
     }
     if let Ok(Some(proof_json)) = crate::cache_helpers::fetch_tsc_proof_from_api(&state.services, &publish_txid).await {
-        if let Err(e) = resolve_and_add_tsc_proof_to_beef(&mut beef, &proof_json, &publish_txid, &client).await {
+        if let Err(e) = resolve_and_add_tsc_proof_to_beef(&mut beef, &proof_json, &publish_txid, &state.services, &*state.chain_tracker,).await {
             log::warn!("cleanup: failed to add merkle proof for publish tx {}: {}", &publish_txid[..16.min(publish_txid.len())], e);
         }
     }
@@ -5547,8 +5107,8 @@ async fn try_resubmit_spending_tx(
     beef.set_main_transaction(spending_raw_tx);
     {
         let db = state.database.lock().map_err(|e| format!("DB lock: {}", e))?;
-        let proven_tx_repo = crate::database::ProvenTxRepository::new(db.connection());
-        if let Ok(Some(tsc_json)) = proven_tx_repo.get_merkle_proof_as_tsc(&spending_txid) {
+        // B5-T1-P7a-2: a stored proof, unless our own headers refute it.
+        if let Ok(Some(tsc_json)) = crate::proof_store::stored_proof_for_beef(db.connection(), &*state.chain_tracker, &spending_txid) {
             if let Some(tx_idx) = beef.find_txid(&spending_txid) {
                 let _ = beef.add_tsc_merkle_proof(&spending_txid, tx_idx, &tsc_json);
             }
@@ -5595,11 +5155,6 @@ async fn try_cleanup_via_woc(
 
     let txid_short = &publish_txid[..16.min(publish_txid.len())];
     log::info!("cleanup/woc: checking {}:{}", txid_short, output_index);
-
-    let client = reqwest::Client::builder()
-        .timeout(crate::services::CallClass::IndexerSync.timeout())
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
 
     // Step 0: Check our own DB for an existing spending tx.
     // Try two methods: (a) outputs.spent_by for the PushDrop output, (b) description search.
@@ -5650,7 +5205,7 @@ async fn try_cleanup_via_woc(
         }
 
         if let Ok(Some(proof_json)) = crate::cache_helpers::fetch_tsc_proof_from_api(&state.services, publish_txid).await {
-            match resolve_and_add_tsc_proof_to_beef(&mut beef, &proof_json, publish_txid, &client).await {
+            match resolve_and_add_tsc_proof_to_beef(&mut beef, &proof_json, publish_txid, &state.services, &*state.chain_tracker,).await {
                 Ok(()) => log::info!("cleanup: added merkle proof for publish tx {}", txid_short),
                 Err(e) => log::warn!("cleanup: publish tx proof failed: {}", e),
             }
@@ -5660,8 +5215,8 @@ async fn try_cleanup_via_woc(
         beef.set_main_transaction(spending_raw_tx);
         {
             let db = state.database.lock().unwrap();
-            let proven_tx_repo = crate::database::ProvenTxRepository::new(db.connection());
-            if let Ok(Some(tsc_json)) = proven_tx_repo.get_merkle_proof_as_tsc(&spending_txid) {
+            // B5-T1-P7a-2: a stored proof, unless our own headers refute it.
+            if let Ok(Some(tsc_json)) = crate::proof_store::stored_proof_for_beef(db.connection(), &*state.chain_tracker, &spending_txid) {
                 if let Some(tx_idx) = beef.find_txid(&spending_txid) {
                     match beef.add_tsc_merkle_proof(&spending_txid, tx_idx, &tsc_json) {
                         Ok(()) => log::info!("cleanup: added merkle proof for spending tx {}", stxid_short),
@@ -5697,54 +5252,23 @@ async fn try_cleanup_via_woc(
 
     // FUTURE: Uncomment when force_spend parameter is added to the cleanup endpoint:
     // if force_spend {
-    //     auto_spend_pushdrop(state, publish_txid, output_index, overlay_beef_bytes, &client).await
+    //     auto_spend_pushdrop(state, publish_txid, output_index, overlay_beef_bytes).await
     // } else {
     //     Ok(false)
     // }
 }
 
-/// Helper: Resolve block height from a WoC TSC proof and add the proof to BEEF,
-/// properly linked to the transaction.
-///
-/// WoC TSC proofs have `target` (block hash) instead of `height`.
-/// We resolve the height by fetching the block header from WoC.
+/// Helper: add a fetched proof for `txid` to the BEEF, linked to the transaction — checked against
+/// our own headers first (B5-T1-P7a-2 `C15`, `beef_helpers::embeddable_proof`).
 async fn resolve_and_add_tsc_proof_to_beef(
     beef: &mut crate::beef::Beef,
     proof_json: &serde_json::Value,
     txid: &str,
-    client: &reqwest::Client,
+    services: &crate::services::WalletServices,
+    chain: &dyn crate::proof_store::RootOracle,
 ) -> Result<(), String> {
-    // Normalize: WoC may return array or single object
-    let proof_obj = if let Some(arr) = proof_json.as_array() {
-        arr.first().ok_or("Empty proof array".to_string())?.clone()
-    } else {
-        proof_json.clone()
-    };
-
-    // Resolve block height: try height/blockHeight fields first, then resolve via target
-    let block_height = if let Some(h) = proof_obj.get("height").and_then(|v| v.as_u64()).filter(|h| *h > 0) {
-        h as u32
-    } else if let Some(h) = proof_obj.get("blockHeight").and_then(|v| v.as_u64()).filter(|h| *h > 0) {
-        h as u32
-    } else if let Some(target) = proof_obj.get("target").and_then(|v| v.as_str()).filter(|t| !t.is_empty()) {
-        // Resolve height from block hash via WoC
-        let header_url = format!("https://api.whatsonchain.com/v1/bsv/main/block/hash/{}", target);
-        let resp = client.get(&header_url).send().await
-            .map_err(|e| format!("Failed to fetch block header for target {}: {}", target, e))?;
-        if !resp.status().is_success() {
-            return Err(format!("Block header API returned {} for target {}", resp.status(), target));
-        }
-        let header_json: serde_json::Value = resp.json().await
-            .map_err(|e| format!("Failed to parse block header: {}", e))?;
-        header_json.get("height").and_then(|v| v.as_u64())
-            .ok_or_else(|| "Block header missing height".to_string())? as u32
-    } else {
-        return Err("TSC proof has no height, blockHeight, or target".to_string());
-    };
-
-    // Build a TSC JSON object with the resolved height for beef.add_tsc_merkle_proof()
-    let mut tsc_for_beef = proof_obj.clone();
-    tsc_for_beef["height"] = serde_json::json!(block_height);
+    let tsc_for_beef = crate::beef_helpers::embeddable_proof(txid, proof_json, services, chain).await
+        .ok_or_else(|| format!("no usable proof for {} (refuted by our headers, unreadable, or no height)", txid))?;
 
     // Find the tx index in the BEEF structure
     let tx_idx = beef.find_txid(txid)
@@ -5762,7 +5286,6 @@ async fn auto_spend_pushdrop(
     publish_txid: &str,
     output_index: usize,
     overlay_beef_bytes: &[u8],
-    client: &reqwest::Client,
 ) -> Result<bool, String> {
     let txid_short = &publish_txid[..16.min(publish_txid.len())];
     log::info!("cleanup/auto-spend: building spending tx for {}:{}", txid_short, output_index);
@@ -5824,7 +5347,7 @@ async fn auto_spend_pushdrop(
     let service_fee = crate::handlers::HODOS_SERVICE_FEE_SATS;
     let fee_estimate: i64 = 300; // Conservative for 2-in, 2-out
 
-    let funding_utxo = {
+    let (funding_utxo, spend_row, reservation_guard) = {
         let _utxo_lock = state.utxo_selection_lock.lock().await;
         let db = state.database.lock().unwrap();
         let output_repo = crate::database::OutputRepository::new(db.connection());
@@ -5832,7 +5355,7 @@ async fn auto_spend_pushdrop(
             .map_err(|e| format!("Failed to get UTXOs: {}", e))?;
 
         // Convert to usable format and filter
-        spendable.into_iter()
+        let funding_utxo = spendable.into_iter()
             .filter(|u| {
                 let txid_match = u.txid.as_deref() == Some(publish_txid);
                 let vout_match = u.vout == output_index as i32;
@@ -5840,7 +5363,27 @@ async fn auto_spend_pushdrop(
             })
             .filter(|u| u.satoshis >= fee_estimate + service_fee)
             .min_by_key(|u| u.satoshis)
-            .ok_or_else(|| format!("No confirmed UTXO with >= {} sats for fee", fee_estimate + service_fee))?
+            .ok_or_else(|| format!("No confirmed UTXO with >= {} sats for fee", fee_estimate + service_fee))?;
+
+        // B5-T1-P3: claim the fee coin now, still under the lock — the transaction row
+        // first, then the claim (this route used to mark it spent only after building,
+        // outside the lock, without checking it was still free). The guard releases it
+        // on every early exit until the row is filled.
+        let outpoint = vec![(funding_utxo.txid.clone().ok_or("Funding UTXO has no txid")?, funding_utxo.vout as u32)];
+        let reference = format!("cleanup-unpub-{}", uuid::Uuid::new_v4().simple());
+        let description = format!("Cleanup: remove stale cert (publish tx {})", txid_short);
+        let reserved = crate::handlers::reserve_for_new_transaction(
+            db.connection(), &reference, Some(&description), &outpoint);
+        drop(db);
+        match reserved {
+            Ok(Ok(row)) => {
+                let guard = crate::handlers::ReservationGuard::new(state, row);
+                (funding_utxo, row, guard)
+            }
+            Ok(Err((t, v))) => return Err(format!(
+                "Fee coin {}:{} is being spent by another payment", &t[..t.len().min(16)], v)),
+            Err(e) => return Err(format!("Could not reserve the fee coin: {}", e)),
+        }
     };
 
     let funding_txid = funding_utxo.txid.clone().ok_or("Funding UTXO has no txid")?;
@@ -5877,9 +5420,9 @@ async fn auto_spend_pushdrop(
             let wallet_id = wallet.id.ok_or("Wallet has no ID")?;
 
             let addr_repo = crate::database::AddressRepository::new(db.connection());
-            let current_index = addr_repo.get_max_index(wallet_id)
-                .ok().flatten().map(|i| i + 1)
-                .unwrap_or(wallet.current_index);
+            // B5-T1-P6: the one next-index source (never below an index already handed out).
+            let current_index = wallet_repo.claim_next_receive_index(wallet_id)
+                .map_err(|e| format!("Change index error: {}", e))?;
 
             let master_pubkey = crate::database::get_master_public_key_from_db(&db)
                 .map_err(|e| format!("Pubkey error: {}", e))?;
@@ -5900,7 +5443,6 @@ async fn auto_spend_pushdrop(
                 pending_utxo_check: false, created_at,
             };
             let _ = addr_repo.create(&addr_model);
-            let _ = wallet_repo.update_current_index(wallet_id, current_index + 1);
 
             let pubkey_hash = {
                 let sha_hash = Sha256::digest(&derived_pubkey);
@@ -5968,29 +5510,41 @@ async fn auto_spend_pushdrop(
 
     log::info!("cleanup/auto-spend: built spending tx {} ({} bytes)", &spend_txid[..16], raw_tx_bytes.len());
 
-    // Step 8: Record tx in DB + mark funding UTXO spent
+    // Step 8: Record tx in DB — B5-T1-P3: fill the reservation row in place (it already
+    // owns the fee coin) and label the coin with the txid, before the broadcast. The
+    // signed bytes are stored as hex, as createAction stores them.
     {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
         let db = state.database.lock().unwrap();
+        let recorded = (|| -> rusqlite::Result<()> {
+            let txn = db.connection().unchecked_transaction()?;
+            // ⛔ Only if still `unsigned` (B5-T1-P3 review #1); the clock restarts here.
+            let n = txn.execute(
+                "UPDATE transactions SET txid = ?1, status = 'sending', raw_tx = ?2, satoshis = ?3,
+                        user_id = 1, updated_at = ?4, created_at = ?4
+                 WHERE id = ?5 AND status = 'unsigned'",
+                rusqlite::params![spend_txid, hex::encode(&raw_tx_bytes), fee_estimate + service_fee, now, spend_row],
+            )?;
+            if n != 1 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            crate::database::OutputRepository::new(&txn).label_coins_of(spend_row, &spend_txid)?;
+            txn.commit()
+        })();
+        if let Err(e) = recorded {
+            drop(db);
+            // ⛔ Not broadcast: the guard releases the fee coin and removes the row.
+            return Err(format!("Could not record the cleanup transaction, not broadcasting: {}", e));
+        }
+        // best-effort: the reference these rows have always carried
         let _ = db.connection().execute(
-            "INSERT OR IGNORE INTO transactions (
-                user_id, txid, status, reference_number,
-                description, raw_tx, is_outgoing, satoshis,
-                created_at, updated_at
-            ) VALUES (?1, ?2, 'sending', ?3, ?4, ?5, 1, ?6, ?7, ?8)",
-            rusqlite::params![
-                1i64, spend_txid,
-                format!("cleanup-unpub-{}", &spend_txid[..8]),
-                format!("Cleanup: remove stale cert (publish tx {})", txid_short),
-                raw_tx_bytes,
-                fee_estimate + service_fee,
-                now, now,
-            ],
+            "UPDATE transactions SET reference_number = ?1 WHERE id = ?2",
+            rusqlite::params![format!("cleanup-unpub-{}", &spend_txid[..8]), spend_row],
         );
-        let output_repo = crate::database::OutputRepository::new(db.connection());
-        let _ = output_repo.mark_spent(&funding_txid, funding_vout, &spend_txid);
     }
+    // From here the row is `sending`: a failure is cleaned up below by status.
+    reservation_guard.commit();
     state.balance_cache.invalidate();
 
     // Step 9: Build BEEF for broadcast
@@ -6005,12 +5559,12 @@ async fn auto_spend_pushdrop(
 
     // Add merkle proof for publish tx via Services (Phase 1.6d.C — was inline WoC)
     if let Ok(Some(proof_json)) = crate::cache_helpers::fetch_tsc_proof_from_api(&state.services, publish_txid).await {
-        let _ = resolve_and_add_tsc_proof_to_beef(&mut beef, &proof_json, publish_txid, client).await;
+        let _ = resolve_and_add_tsc_proof_to_beef(&mut beef, &proof_json, publish_txid, &state.services, &*state.chain_tracker,).await;
     }
 
     // Add ancestry for funding UTXO
     match crate::beef_helpers::build_beef_for_txid(
-        &funding_txid, &mut beef, &state.database, &state.services,
+        &funding_txid, &mut beef, &state.database, &state.services, &*state.chain_tracker,
     ).await {
         Ok(_) => log::info!("cleanup/auto-spend: added BEEF ancestry for funding UTXO"),
         Err(e) => log::warn!("cleanup/auto-spend: BEEF ancestry failed: {}", e),
@@ -6024,7 +5578,7 @@ async fn auto_spend_pushdrop(
 
     // Step 10: Broadcast
     let beef_hex = hex::encode(&beef_v1);
-    match broadcast_transaction(&beef_hex, &state.services, Some(&state.database), Some(&spend_txid)).await {
+    match broadcast_transaction(&beef_hex, &state.services, Some(crate::handlers::ProofSink::of(&state)), Some(&spend_txid)).await {
         Ok(msg) => {
             log::info!("cleanup/auto-spend: ✅ broadcast successful: {}", msg);
             let db = state.database.lock().unwrap();
@@ -6159,11 +5713,6 @@ async fn overlay_only_spend_pushdrop(
     // The overlay needs: grandparent txs (with merkle proofs) → publish tx → spending tx
     let mut out_beef = crate::beef::Beef::new();
 
-    let client = reqwest::Client::builder()
-        .timeout(crate::services::CallClass::IndexerBulk.timeout())
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
-
     // 6a: Fetch the publish tx's parent transactions (the "grandparents") via Services
     // (Phase 1.6d.C — was inline WoC). These should be confirmed on-chain since they're
     // old funding UTXOs.
@@ -6183,7 +5732,7 @@ async fn overlay_only_spend_pushdrop(
                     match crate::cache_helpers::fetch_tsc_proof_from_api(&state.services, parent_txid).await {
                         Ok(Some(proof_json)) => {
                             match resolve_and_add_tsc_proof_to_beef(
-                                &mut out_beef, &proof_json, parent_txid, &client,
+                                &mut out_beef, &proof_json, parent_txid, &state.services, &*state.chain_tracker,
                             ).await {
                                 Ok(()) => {
                                     log::info!("cleanup/overlay-spend: added merkle proof for {}", ptxid_short);

@@ -89,11 +89,26 @@ static const char* WALLET_CALL_BRIDGE_SCRIPT = R"JS(
             if (ok) {
                 p.resolve(payload);
             } else {
-                // Wallet error envelope: { error, code?, status? }
-                var msg = (payload && payload.error) ? payload.error : 'unknown error';
+                // Wallet error envelope: { error, code?, status? } — or, since B5-T1-P2,
+                // the BRC-100 wallet error { isError, code, name, message, ... } that
+                // @bsv/sdk decodes into WERR_REVIEW_ACTIONS (5) / WERR_INVALID_PARAMETER (6).
+                // Its fields are copied onto the Error so a dApp on this substrate reads
+                // e.name / e.code / e.txid / e.reviewActionResults as it would from the SDK.
+                var isWalletError = !!(payload && payload.isError === true);
+                var msg = (payload && (payload.message || payload.error))
+                    ? (isWalletError && payload.message ? payload.message : (payload.error || payload.message))
+                    : 'unknown error';
                 var err = new Error('[Hodos] ' + p.method + ' failed: ' + msg);
                 if (payload && payload.code)   err.code = payload.code;
                 if (payload && payload.status) err.status = payload.status;
+                if (isWalletError) {
+                    err.isError = true;
+                    if (typeof payload.name === 'string') err.name = payload.name;
+                    ['txid', 'tx', 'sendWithResults', 'reviewActionResults', 'noSendChange',
+                     'parameter', 'totalSatoshisNeeded', 'moreSatoshisNeeded'].forEach(function(k) {
+                        if (payload[k] !== undefined) err[k] = payload[k];
+                    });
+                }
                 err.body = payload;
                 p.reject(err);
             }

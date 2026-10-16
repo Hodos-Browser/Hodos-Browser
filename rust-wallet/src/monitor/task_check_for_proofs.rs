@@ -11,7 +11,7 @@ use log::{info, warn, error};
 use std::time::Duration;
 
 use crate::AppState;
-use crate::database::{TransactionRepository, OutputRepository, ProvenTxRepository, ProvenTxReqRepository, ParentTransactionRepository, BlockHeaderRepository};
+use crate::database::{TransactionRepository, OutputRepository, ProvenTxReqRepository, ParentTransactionRepository, BlockHeaderRepository};
 
 /// Maximum number of transactions to check per cycle (rate limit protection)
 const MAX_BATCH: usize = 20;
@@ -50,6 +50,9 @@ struct PendingTxInfo {
     txid: String,
     status: String,
     age_secs: i64,
+    /// An indexer has reported it mined (`confirmations > 0`). Such a transaction is never failed by a
+    /// timeout: it waits, `unproven`, for a proof our own headers verify (B5-T1-P7a-2 `C21`).
+    reported_mined: bool,
 }
 
 /// Run the TaskCheckForProofs task
@@ -60,10 +63,10 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
         let conn = db.connection();
 
         let mut stmt = conn.prepare(
-            "SELECT txid, status, (strftime('%s', 'now') - created_at) as age_secs
+            "SELECT txid, status, (strftime('%s', 'now') - created_at) as age_secs, confirmations > 0
              FROM transactions
              WHERE status IN ('sending', 'unproven', 'nosend')
-             ORDER BY created_at DESC LIMIT ?1"
+             ORDER BY confirmations > 0, created_at DESC LIMIT ?1"
         ).map_err(|e| format!("SQL prepare: {}", e))?;
 
         let rows = stmt.query_map(
@@ -72,6 +75,7 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
                 txid: row.get(0)?,
                 status: row.get(1)?,
                 age_secs: row.get(2)?,
+                reported_mined: row.get(3)?,
             }),
         ).map_err(|e| format!("SQL query: {}", e))?;
 
@@ -92,23 +96,19 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
         let timeout_secs = if is_nosend { NOSEND_TIMEOUT_SECS } else { UNPROVEN_TIMEOUT_SECS };
         let is_timed_out = tx_info.age_secs > timeout_secs;
 
-        // Check if a proven_txs record already exists (created by another path)
+        // A proof stored by another path counts only if our own headers verify it now (B5-T1-P7a-2:
+        // a row can come from an import, a restored file or an older build).
         let already_proven = {
             let db = match state.database.lock() {
                 Ok(g) => g,
                 Err(e) => { warn!("   ⚠️ DB lock failed: {}", e); continue; }
             };
-            let proven_tx_repo = ProvenTxRepository::new(db.connection());
-            match proven_tx_repo.get_by_txid(txid) {
-                Ok(Some(pt)) => Some(pt),
-                _ => None,
-            }
+            crate::proof_store::stored_verified_proof(db.connection(), &*state.chain_tracker, txid).ok().flatten()
         };
 
-        if let Some(proven_tx) = already_proven {
-            // Proof exists — reconcile statuses
-            info!("   ✅ {} already proven (ID {}), reconciling", txid, proven_tx.proven_tx_id);
-            reconcile_proven_tx(state, txid, proven_tx.proven_tx_id, proven_tx.height);
+        if let Some(row) = already_proven {
+            info!("   ✅ {} already proven (ID {}), reconciling", txid, row.proven_tx_id());
+            reconcile_proven_tx(state, txid, row);
             confirmed_count += 1;
             continue;
         }
@@ -116,7 +116,40 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
         // Hard timeout backstop — any tx past UNPROVEN_TIMEOUT (6h) or NOSEND_TIMEOUT (10m)
         // gets one final oracle check, then force-fail. Catches any status that slipped
         // through the normal handling paths (e.g. ARC returning mempool status indefinitely).
-        if is_timed_out {
+        // ⛔ Never for a transaction an indexer reported mined: under "completed only with a verified
+        // proof" it stays unproven until our headers hold its block, and failing it would take its
+        // coins out of the balance and make inputs the chain has spent selectable again (`C21`).
+        let provider_status = state.services.tx_status(txid).await;
+        let provider_says_mined = matches!(provider_status, Ok(ref t) if t.state == crate::services::TxState::Mined);
+        // Reported mined before, not now (a reorg, or a wrong report): only every oracle's
+        // authoritative "not found" fails it; an undecided vote waits (adversarial review: the
+        // exemption must not be a permanent latch).
+        if is_timed_out && tx_info.reported_mined && !provider_says_mined {
+            match oracle_quorum_check(client, txid).await {
+                OracleVerdict::AllNotFound => {
+                    warn!("   ❌ {} was reported mined, now not found on any oracle past its timeout — marking failed",
+                          &txid[..txid.len().min(16)]);
+                    mark_failed(state, txid);
+                    continue;
+                }
+                OracleVerdict::Present { any_confirmed: true } => {
+                    // Still on chain: ask the proof chain (xhigh 168 #2).
+                    if let Some(count) = try_whatsonchain_confirmation(state, client, txid).await {
+                        confirmed_count += count;
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    continue;
+                }
+                other => {
+                    info!("   ⏳ {} reported mined earlier; no authoritative answer now ({:?}) — waiting",
+                          &txid[..txid.len().min(16)], other);
+                    // The tick ends here: nothing else may fail it on this pass (fix review).
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    continue;
+                }
+            }
+        }
+        if is_timed_out && !tx_info.reported_mined && !provider_says_mined {
             let hours = tx_info.age_secs / 3600;
             let mins = (tx_info.age_secs % 3600) / 60;
             warn!("   ⏰ {} exceeded timeout ({}h{}m) — final oracle check",
@@ -169,7 +202,7 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
         // (ANNOUNCED_TO_NETWORK, SEEN_IN_ORPHAN_MEMPOOL, etc.). When a fallback
         // tier responds, that field is `None` and we map `TxState` → a synthetic
         // ARC-style label so the rich match below still works.
-        match state.services.tx_status(txid).await {
+        match provider_status {
             Ok(tx_status) => {
                 use crate::services::TxState;
                 let status: &str = match tx_status.raw_provider_status.as_deref() {
@@ -185,25 +218,23 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
 
                 match status {
                     "MINED" => {
-                        let block_height = tx_status.block_height.unwrap_or(0) as u64;
+                        let block_height = tx_status.block_height.unwrap_or(0);
                         info!("   ⛏️ {} MINED (block {})", txid, block_height);
 
-                        if let Some(ref merkle_path_hex) = tx_status.merkle_path_bump {
-                            match create_proven_tx_from_arc(
-                                state, client, txid, merkle_path_hex, block_height,
-                                tx_status.block_hash.as_deref().unwrap_or(""),
-                            ).await {
-                                Ok(proven_tx_id) => {
-                                    info!("   ✅ Created proven_txs {} for {}", proven_tx_id, txid);
-                                }
-                                Err(e) => {
-                                    warn!("   ⚠️ Failed to create proven_txs for {}: {}", txid, e);
-                                }
-                            }
-                        }
-
-                        // Update transaction status
-                        mark_confirmed(state, txid, block_height as u32);
+                        let verified = match tx_status.merkle_path_bump {
+                            Some(ref hex) => store_checked_proof(
+                                state, txid,
+                                crate::proof_store::check_bump_hex(&*state.chain_tracker, txid, hex),
+                                tx_status.block_hash.as_deref().unwrap_or(""), "ARC",
+                            ),
+                            // Only ARC sends a BUMP with its status: ask the proof chain otherwise —
+                            // when our chain holds that block (an older block cannot be checked
+                            // before P7a-3; asking every tick would only spend indexer calls).
+                            None if block_height == 0 || state.chain_tracker.header_for_height(block_height).is_some() =>
+                                fetch_and_store_woc_proof(state, txid).await,
+                            None => None,
+                        };
+                        settle_mined(state, txid, block_height, verified);
                         confirmed_count += 1;
                     }
                     "ANNOUNCED_TO_NETWORK" => {
@@ -289,10 +320,8 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
                             Ok(Some((confirmations, block_height))) => {
                                 if confirmations > 0 {
                                     info!("   ✅ {} confirmed on WoC despite orphan mempool status", &txid[..txid.len().min(16)]);
-                                    if let Err(e) = fetch_and_store_woc_proof(state, client, txid, block_height).await {
-                                        warn!("   ⚠️ Failed to store WoC proof for {}: {}", txid, e);
-                                    }
-                                    mark_confirmed(state, txid, block_height.unwrap_or(0));
+                                    let verified = fetch_and_store_woc_proof(state, txid).await;
+                                    settle_mined(state, txid, block_height.unwrap_or(0), verified);
                                     confirmed_count += 1;
                                 } else {
                                     // In mempool — tx exists despite ARC orphan status. Wait.
@@ -328,10 +357,8 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
                                     // Already confirmed — recover it
                                     info!("   ✅ {} actually mined despite DOUBLE_SPEND_ATTEMPTED ({} confirmations)",
                                           &txid[..txid.len().min(16)], confirmations);
-                                    if let Err(e) = fetch_and_store_woc_proof(state, client, txid, block_height).await {
-                                        warn!("   ⚠️ Failed to store WoC proof for {}: {}", txid, e);
-                                    }
-                                    mark_confirmed(state, txid, block_height.unwrap_or(0));
+                                    let verified = fetch_and_store_woc_proof(state, txid).await;
+                                    settle_mined(state, txid, block_height.unwrap_or(0), verified);
                                     confirmed_count += 1;
                                 } else {
                                     // In mempool (0 confirmations) — tx exists, don't fail.
@@ -431,12 +458,8 @@ async fn try_whatsonchain_confirmation(
         Ok(Some((confirmations, block_height))) if confirmations > 0 => {
             info!("   ⛏️ {} confirmed on WhatsOnChain ({} confirmations)", &txid[..txid.len().min(16)], confirmations);
 
-            // Fetch and store proof
-            if let Err(e) = fetch_and_store_woc_proof(state, client, txid, block_height).await {
-                warn!("   ⚠️ Failed to store WoC proof for {}: {}", txid, e);
-            }
-
-            mark_confirmed(state, txid, block_height.unwrap_or(0));
+            let verified = fetch_and_store_woc_proof(state, txid).await;
+            settle_mined(state, txid, block_height.unwrap_or(0), verified);
             Some(1)
         }
         Ok(Some(_)) => {
@@ -454,18 +477,37 @@ async fn try_whatsonchain_confirmation(
     }
 }
 
-/// Mark a transaction as confirmed (completed)
-fn mark_confirmed(state: &web::Data<AppState>, txid: &str, block_height: u32) {
+/// An indexer says `txid` is mined. It becomes `completed` only with a proof our own headers verified
+/// (owner decision 6, B5-T1-P7a-2 `C14`); otherwise it is `unproven` — its coins count in the balance,
+/// and the next pass asks for the proof again. `confirmations` records the indexer's report, which
+/// keeps the timeout from failing it (`C21`).
+fn settle_mined(state: &web::Data<AppState>, txid: &str, block_height: u32,
+                verified: Option<crate::proof_store::VerifiedRow>) {
     if let Ok(db) = state.database.lock() {
         let conn = db.connection();
         let tx_repo = TransactionRepository::new(conn);
-        if let Err(e) = tx_repo.update_broadcast_status(txid, "confirmed") {
-            warn!("   ⚠️ Failed to update status for {}: {}", txid, e);
-        }
-        if let Err(e) = tx_repo.update_confirmations(txid, 1, Some(block_height)) {
+        let height = verified.map(|r| r.height()).or((block_height > 0).then_some(block_height));
+        if let Err(e) = tx_repo.update_confirmations(txid, 1, height) {
             warn!("   ⚠️ Failed to update confirmations for {}: {}", txid, e);
         }
+        match verified {
+            Some(row) => {
+                if let Err(e) = crate::proof_store::link(conn, &row, txid) {
+                    warn!("   ⚠️ Failed to link proof for {}: {}", txid, e);
+                }
+                if let Err(e) = tx_repo.update_broadcast_status(txid, "confirmed") {
+                    warn!("   ⚠️ Failed to update status for {}: {}", txid, e);
+                }
+            }
+            None => {
+                if matches!(tx_repo.get_broadcast_status(txid), Ok(Some(ref s)) if s == "sending" || s == "nosend") {
+                    let _ = tx_repo.update_broadcast_status(txid, "broadcast"); // → unproven
+                }
+                info!("   ⏳ {} mined per indexer; unproven until our headers verify its proof", txid);
+            }
+        }
     }
+    state.balance_cache.invalidate();
 }
 
 /// Mark a transaction as failed with full ghost output cleanup.
@@ -529,8 +571,8 @@ fn mark_failed(state: &web::Data<AppState>, txid: &str) {
     state.balance_cache.invalidate();
 }
 
-/// Reconcile a transaction that already has a proven_txs record
-fn reconcile_proven_tx(state: &web::Data<AppState>, txid: &str, proven_tx_id: i64, height: u32) {
+/// Reconcile a transaction whose stored proof our headers verify.
+fn reconcile_proven_tx(state: &web::Data<AppState>, txid: &str, row: crate::proof_store::VerifiedRow) {
     if let Ok(db) = state.database.lock() {
         let conn = db.connection();
 
@@ -538,92 +580,67 @@ fn reconcile_proven_tx(state: &web::Data<AppState>, txid: &str, proven_tx_id: i6
         if let Err(e) = tx_repo.update_broadcast_status(txid, "confirmed") {
             warn!("   ⚠️ Failed to update status for {}: {}", txid, e);
         }
-        if let Err(e) = tx_repo.update_confirmations(txid, 1, Some(height)) {
+        if let Err(e) = tx_repo.update_confirmations(txid, 1, Some(row.height())) {
             warn!("   ⚠️ Failed to update confirmations for {}: {}", txid, e);
         }
-
-        let proven_tx_repo = ProvenTxRepository::new(conn);
-        let _ = proven_tx_repo.link_transaction(txid, proven_tx_id);
-
+        if let Err(e) = crate::proof_store::link(conn, &row, txid) {
+            warn!("   ⚠️ Failed to link proof for {}: {}", txid, e);
+        }
         let req_repo = ProvenTxReqRepository::new(conn);
         if let Ok(Some(req)) = req_repo.get_by_txid(txid) {
-            let _ = req_repo.update_status(req.proven_tx_req_id, "completed");
-            let _ = req_repo.link_proven_tx(req.proven_tx_req_id, proven_tx_id);
-            let _ = req_repo.add_history_note(
-                req.proven_tx_req_id,
-                "completed",
-                "Reconciled from existing proven_txs record",
-            );
+            let _ = req_repo.add_history_note(req.proven_tx_req_id, "completed", "Reconciled from an existing proof, verified against our headers");
         }
     }
 }
 
-/// Create a proven_txs record from ARC's MINED response.
-///
-/// Verifies the merkle root before storing to prevent corrupt proofs from
-/// ARC's occasionally wrong BUMP data.
-async fn create_proven_tx_from_arc(
+/// Store a checked proof through the one verified seam. `Some` only when our own headers verified it;
+/// a proof for a block we do not hold yet, or one our header refutes, stores nothing and leaves the
+/// `proven_tx_reqs` row open for the next pass (B5-T1-P7a-2: no "storing anyway").
+fn store_checked_proof(
     state: &web::Data<AppState>,
-    client: &reqwest::Client,
     txid: &str,
-    merkle_path_hex: &str,
-    block_height: u64,
+    check: crate::proof_store::ProofCheck,
     block_hash: &str,
-) -> Result<i64, String> {
-    let tsc_json = crate::beef::parse_bump_hex_to_tsc(merkle_path_hex)?;
-
-    let height = tsc_json["height"].as_u64().unwrap_or(block_height) as u32;
-    let tx_index = tsc_json["index"].as_u64().unwrap_or(0);
-
-    // Verify merkle root against actual block header before storing
-    match crate::verify_tsc_proof_against_block(client, txid, &tsc_json).await {
-        Ok(true) => {
-            // Proof verified — safe to store
+    source: &str,
+) -> Option<crate::proof_store::VerifiedRow> {
+    use crate::proof_store::ProofCheck;
+    let proof = match check {
+        ProofCheck::Verified(p) => p,
+        ProofCheck::NotHeld => {
+            info!("   ⏳ {} proof for {}: block not in our headers yet — kept pending", source, txid);
+            return None;
         }
-        Ok(false) => {
-            return Err(format!("ARC BUMP has wrong merkle root for {} at height {} — proof rejected", txid, height));
+        ProofCheck::Wrong { height } => {
+            warn!("   ❌ {} proof for {} does not match our header at {} — not stored", source, txid, height);
+            return None;
         }
-        Err(e) => {
-            // Can't verify — log warning but still store (better than no proof)
-            warn!("   ⚠️ Could not verify ARC proof against block header: {} — storing anyway", e);
-        }
-    }
-
-    let merkle_path_bytes = serde_json::to_vec(&tsc_json)
-        .map_err(|e| format!("Failed to serialize TSC: {}", e))?;
-
-    let db = state.database.lock().map_err(|e| format!("DB lock: {}", e))?;
-    let conn = db.connection();
-
-    let raw_tx_bytes: Vec<u8> = {
-        let tx_repo = TransactionRepository::new(conn);
-        match tx_repo.get_by_txid(txid) {
-            Ok(Some(stored)) => hex::decode(&stored.raw_tx).unwrap_or_default(),
-            _ => Vec::new(),
+        ProofCheck::Malformed(e) => {
+            warn!("   ⚠️ {} proof for {} unreadable: {}", source, txid, e);
+            return None;
         }
     };
-
-    let proven_tx_repo = ProvenTxRepository::new(conn);
-    let proven_tx_id = proven_tx_repo.insert_or_get(
-        txid, height, tx_index,
-        &merkle_path_bytes, &raw_tx_bytes,
-        block_hash, "",
-    ).map_err(|e| format!("Failed to insert proven_tx: {}", e))?;
-
-    let _ = proven_tx_repo.link_transaction(txid, proven_tx_id);
-
+    let db = state.database.lock().ok()?;
+    let conn = db.connection();
+    let raw_tx_bytes: Vec<u8> = match TransactionRepository::new(conn).get_by_txid(txid) {
+        Ok(Some(stored)) => hex::decode(&stored.raw_tx).unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    let row = match crate::proof_store::store(conn, &*state.chain_tracker, &proof, &raw_tx_bytes, block_hash) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("   ⚠️ Failed to store proof for {}: {}", txid, e);
+            return None;
+        }
+    };
     let req_repo = ProvenTxReqRepository::new(conn);
     if let Ok(Some(req)) = req_repo.get_by_txid(txid) {
-        let _ = req_repo.update_status(req.proven_tx_req_id, "completed");
-        let _ = req_repo.link_proven_tx(req.proven_tx_req_id, proven_tx_id);
         let _ = req_repo.add_history_note(
             req.proven_tx_req_id,
             "completed",
-            &format!("Proof acquired from ARC at height {} (merkle root verified)", height),
+            &format!("Proof from {} at height {} verified against our headers", source, row.height()),
         );
     }
-
-    Ok(proven_tx_id)
+    Some(row)
 }
 
 /// Check WhatsOnChain for transaction confirmation status
@@ -657,107 +674,22 @@ async fn check_whatsonchain_confirmation(
     Ok(Some((confirmations, block_height)))
 }
 
-/// Fetch merkle proof from WhatsOnChain and store as proven_txs record.
-///
-/// Verifies the merkle root before storing to prevent corrupt proofs.
-async fn fetch_and_store_woc_proof(
-    state: &web::Data<AppState>,
-    client: &reqwest::Client,
-    txid: &str,
-    block_height: Option<u32>,
-) -> Result<i64, String> {
-    let url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/proof/tsc", txid);
-
-    let response = client.get(&url)
-        .timeout(Duration::from_secs(15))
-        .send()
-        .await
-        .map_err(|e| format!("HTTP error: {}", e))?;
-
-    if !response.status().is_success() {
-        return Err(format!("WoC proof API status: {}", response.status()));
-    }
-
-    let tsc_json: serde_json::Value = response.json()
-        .await
-        .map_err(|e| format!("JSON parse: {}", e))?;
-
-    // Normalize array format
-    let tsc_json = if tsc_json.is_array() {
-        match tsc_json.as_array().and_then(|a| a.first()).cloned() {
-            Some(first) => first,
-            None => tsc_json,
-        }
-    } else {
-        tsc_json
-    };
-
-    if tsc_json.is_null() {
-        return Err("WoC returned null proof".to_string());
-    }
-
-    let height = tsc_json["height"].as_u64()
-        .or_else(|| block_height.map(|h| h as u64))
-        .ok_or("Missing height in TSC proof")? as u32;
-    let tx_index = tsc_json["index"].as_u64().unwrap_or(0);
-    let block_hash = tsc_json["target"].as_str().unwrap_or("").to_string();
-
-    // Inject height into TSC if missing (WoC often omits it)
-    let mut tsc_json = tsc_json;
-    if tsc_json.get("height").and_then(|h| h.as_u64()).is_none() {
-        if let Some(obj) = tsc_json.as_object_mut() {
-            obj.insert("height".to_string(), serde_json::json!(height as u64));
-        }
-    }
-
-    // Verify merkle root against actual block header before storing
-    match crate::verify_tsc_proof_against_block(client, txid, &tsc_json).await {
-        Ok(true) => {
-            // Proof verified — safe to store
-        }
-        Ok(false) => {
-            return Err(format!("WoC proof has wrong merkle root for {} at height {} — rejected", txid, height));
+/// Fetch the merkle proof through the Services chain and store it if our headers verify it.
+async fn fetch_and_store_woc_proof(state: &web::Data<AppState>, txid: &str) -> Option<crate::proof_store::VerifiedRow> {
+    let tsc = match crate::cache_helpers::fetch_tsc_proof_from_api(&state.services, txid).await {
+        Ok(Some(tsc)) => tsc,
+        Ok(None) => {
+            info!("   ⏳ no proof published yet for {}", txid);
+            return None;
         }
         Err(e) => {
-            warn!("   ⚠️ Could not verify WoC proof against block header: {} — storing anyway", e);
-        }
-    }
-
-    let merkle_path_bytes = serde_json::to_vec(&tsc_json)
-        .map_err(|e| format!("Serialize TSC: {}", e))?;
-
-    let db = state.database.lock().map_err(|e| format!("DB lock: {}", e))?;
-    let conn = db.connection();
-
-    let raw_tx_bytes: Vec<u8> = {
-        let tx_repo = TransactionRepository::new(conn);
-        match tx_repo.get_by_txid(txid) {
-            Ok(Some(stored)) => hex::decode(&stored.raw_tx).unwrap_or_default(),
-            _ => Vec::new(),
+            warn!("   ⚠️ proof fetch failed for {}: {}", txid, e);
+            return None;
         }
     };
-
-    let proven_tx_repo = ProvenTxRepository::new(conn);
-    let proven_tx_id = proven_tx_repo.insert_or_get(
-        txid, height, tx_index,
-        &merkle_path_bytes, &raw_tx_bytes,
-        &block_hash, "",
-    ).map_err(|e| format!("Insert proven_tx: {}", e))?;
-
-    let _ = proven_tx_repo.link_transaction(txid, proven_tx_id);
-
-    let req_repo = ProvenTxReqRepository::new(conn);
-    if let Ok(Some(req)) = req_repo.get_by_txid(txid) {
-        let _ = req_repo.update_status(req.proven_tx_req_id, "completed");
-        let _ = req_repo.link_proven_tx(req.proven_tx_req_id, proven_tx_id);
-        let _ = req_repo.add_history_note(
-            req.proven_tx_req_id,
-            "completed",
-            &format!("Proof acquired from WhatsOnChain at height {} (merkle root verified)", height),
-        );
-    }
-
-    Ok(proven_tx_id)
+    let block_hash = tsc["target"].as_str().unwrap_or("").to_string();
+    let check = crate::proof_store::check_tsc(&*state.chain_tracker, txid, &tsc);
+    store_checked_proof(state, txid, check, &block_hash, "the proof chain")
 }
 
 /// Per-oracle verdict for a single txid lookup.

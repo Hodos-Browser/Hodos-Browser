@@ -5898,11 +5898,14 @@ static void StopServers() {
     // stop — and on the way out, where the relaunched wallet would outlive the browser.
     StopBackendSupervisor();
 
-    // Graceful shutdown via HTTP
-    if (g_walletServerRunning) {
+    // Graceful shutdown via HTTP — only to a backend THIS process spawned (B5-T5-P4 P4-A1).
+    // ⛔ Not g_walletServerRunning: adopting an existing listener sets it too, and that
+    // listener may belong to another OS account (2026-09-24: account B quitting shut down
+    // account A's wallet). Mirrors Windows StopWalletServer's hProcess guard.
+    if (g_wallet_server_pid > 0) {
         SendShutdownRequest(hodos::WalletPort());
     }
-    if (g_adblockServerRunning) {
+    if (g_adblock_server_pid > 0) {
         SendShutdownRequest(hodos::AdblockPort());
     }
 

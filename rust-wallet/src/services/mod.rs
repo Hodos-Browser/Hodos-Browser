@@ -15,14 +15,14 @@ use std::time::Duration;
 use serde_json::Value;
 
 pub use call_class::CallClass;
-pub use collection::{BoxFut, ProviderCollection, ProviderStats};
+pub use collection::{BoxFut, FailureKind, ProviderCollection, ProviderFailure, ProviderStats};
 pub use provider::{
     BlockHeader, BlockKey, BroadcastResult, IndexerError, IndexerProvider, OutspendStatus,
     ProviderOp, TxState, TxStatus,
 };
 
 use providers::{
-    ArcGorillaPoolProvider, ArcTaalProvider, BitailsProvider, GorillaPoolMapiProvider,
+    ArcGorillaPoolProvider, BitailsProvider, GorillaPoolMapiProvider,
     GorillaPoolOrdinalsProvider, JungleBusProvider, WhatsOnChainProvider,
 };
 
@@ -70,7 +70,6 @@ impl WalletServices {
         // One Arc per provider instance, shared across the chains that include it.
         let arc_gp: Arc<dyn IndexerProvider> =
             Arc::new(ArcGorillaPoolProvider::new(client.clone()));
-        let arc_tl: Arc<dyn IndexerProvider> = Arc::new(ArcTaalProvider::new(client.clone()));
         let gp_mapi: Arc<dyn IndexerProvider> =
             Arc::new(GorillaPoolMapiProvider::new(client.clone()));
         let gp_ords: Arc<dyn IndexerProvider> =
@@ -83,7 +82,7 @@ impl WalletServices {
             client,
             // Bitails demoted from raw_tx/proof/header chains: it returns HTTP 500
             // (instead of a proper 404) for unknown txids, poisoning error messages.
-            // Kept on tx_status where its response shape is reliable.
+            // Kept on tx_status where its response shape is reliable, and on broadcast (B5-T1-P7b).
             raw_tx: ProviderCollection::new(vec![arc_gp.clone(), woc.clone(), jb.clone()]),
             proof: ProviderCollection::new(vec![arc_gp.clone(), woc.clone(), jb.clone()]),
             header: ProviderCollection::new(vec![woc.clone(), jb.clone()]),
@@ -95,8 +94,68 @@ impl WalletServices {
             ]),
             outspend_chain: ProviderCollection::new(vec![woc.clone(), jb.clone()]),
             utxo: ProviderCollection::new(vec![woc.clone(), gp_ords.clone()]),
-            broadcast: ProviderCollection::new(vec![arc_gp, arc_tl, gp_mapi, woc]),
+            // B5-T1-P7b (owner 2026-10-10): two independent operators before the raw-only GorillaPool
+            // MAPI and WhatsOnChain. TAAL ARC was removed: it answered 401 with and without our key.
+            broadcast: ProviderCollection::new(vec![arc_gp, bt, gp_mapi, woc]),
         }
+    }
+
+    /// Test-only (B5-T1-P7b): as `with_test_chains`, with an outspend chain too.
+    #[cfg(test)]
+    pub fn with_test_chains_and_outspend(
+        tx_status: Vec<Arc<dyn IndexerProvider>>,
+        broadcast: Vec<Arc<dyn IndexerProvider>>,
+        outspend: Vec<Arc<dyn IndexerProvider>>,
+    ) -> Self {
+        let mut s = Self::with_test_chains(tx_status, broadcast);
+        s.outspend_chain = ProviderCollection::new(outspend);
+        s
+    }
+
+    /// Test-only (B5-T1-P7a-2): one provider answers every chain (status, broadcast, proof, raw tx,
+    /// header), so a proof writer's fetch goes through the real facade to a scripted answer.
+    #[cfg(test)]
+    pub fn with_one_test_provider(p: Arc<dyn IndexerProvider>) -> Self {
+        let mut s = Self::with_test_chains(vec![p.clone()], vec![p.clone()]);
+        s.proof = ProviderCollection::new(vec![p.clone()]);
+        s.raw_tx = ProviderCollection::new(vec![p.clone()]);
+        s.header = ProviderCollection::new(vec![p]);
+        s
+    }
+
+    /// Test-only: the real facade with chosen `tx_status` and `broadcast` chains, so a
+    /// handler under test runs its real code against a scripted chain (B5-T1-P2). Every
+    /// other chain is empty and fails fast.
+    #[cfg(test)]
+    pub fn with_test_chains(
+        tx_status: Vec<Arc<dyn IndexerProvider>>,
+        broadcast: Vec<Arc<dyn IndexerProvider>>,
+    ) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            raw_tx: ProviderCollection::new(vec![]),
+            proof: ProviderCollection::new(vec![]),
+            header: ProviderCollection::new(vec![]),
+            tx_status_chain: ProviderCollection::new(tx_status),
+            outspend_chain: ProviderCollection::new(vec![]),
+            utxo: ProviderCollection::new(vec![]),
+            broadcast: ProviderCollection::new(broadcast),
+        }
+    }
+
+    /// Test-only (B5-T1-P7b `P7b-B7`): every chain's full provider order and the order `call`
+    /// would actually try for that chain's operation.
+    #[cfg(test)]
+    pub(crate) fn chain_orders(&self) -> Vec<(&'static str, Vec<&'static str>, Vec<&'static str>)> {
+        vec![
+            ("raw_tx", self.raw_tx.current_order(), self.raw_tx.eligible_order(ProviderOp::RawTx)),
+            ("proof", self.proof.current_order(), self.proof.eligible_order(ProviderOp::MerkleProof)),
+            ("header", self.header.current_order(), self.header.eligible_order(ProviderOp::BlockHeader)),
+            ("tx_status", self.tx_status_chain.current_order(), self.tx_status_chain.eligible_order(ProviderOp::TxStatus)),
+            ("outspend", self.outspend_chain.current_order(), self.outspend_chain.eligible_order(ProviderOp::Outspend)),
+            ("utxo", self.utxo.current_order(), self.utxo.eligible_order(ProviderOp::FetchUtxos)),
+            ("broadcast", self.broadcast.current_order(), self.broadcast.eligible_order(ProviderOp::BroadcastBeef)),
+        ]
     }
 
     // --- per-op wrappers (per DESIGN §2.3) ---
@@ -177,11 +236,21 @@ impl WalletServices {
     }
 
     pub async fn broadcast_beef(&self, beef: &[u8]) -> Result<BroadcastResult, IndexerError> {
+        self.broadcast_beef_traced(beef).await.0
+    }
+
+    /// `broadcast_beef`, plus every provider that failed on the way (B5-T1-P2: the
+    /// caller judges temporary vs permanent over the whole chain, and logs each
+    /// fall-through with the txid).
+    pub async fn broadcast_beef_traced(
+        &self,
+        beef: &[u8],
+    ) -> (Result<BroadcastResult, IndexerError>, Vec<ProviderFailure>) {
         let soft =
             ProviderCollection::<dyn IndexerProvider>::adaptive_soft_timeout_for_payload(beef.len());
         let beef = beef.to_vec();
         self.broadcast
-            .call(ProviderOp::BroadcastBeef, soft, move |p| {
+            .call_traced(ProviderOp::BroadcastBeef, soft, move |p| {
                 let beef = beef.clone();
                 Box::pin(async move { p.broadcast_beef(&beef).await })
             })

@@ -22,7 +22,6 @@ const BASE: &str = "https://arc.gorillapool.io/v1";
 /// ARC API response shape. Post-1.6d.D-3 this is the canonical wallet-side
 /// definition of an ARC `/v1/tx` response — the duplicate in `crate::handlers`
 /// was deleted when `query_arc_tx_status` migrated to `services.tx_status`.
-/// Shared with `arc_taal.rs` via `pub(crate)`.
 #[derive(Debug, serde::Deserialize)]
 #[allow(dead_code)]
 pub(crate) struct ArcResponse {
@@ -113,12 +112,17 @@ impl IndexerProvider for ArcGorillaPoolProvider {
         // Convert BUMP→TSC and inject blockHeight (TSC needs it; BUMP carries it inline).
         let status = self.tx_status(txid).await?;
         let bump_hex = status.merkle_path_bump.ok_or(IndexerError::NotFound)?;
-        let mut tsc = crate::beef::parse_bump_hex_to_tsc(&bump_hex).map_err(|e| {
-            IndexerError::InvalidResponse {
+        // B5-T1-P7a-2 (xhigh 168 #3): our own transaction's path — a BUMP can hold several.
+        let mut leaf: [u8; 32] = hex::decode(txid).ok().and_then(|b| b.try_into().ok()).ok_or_else(|| {
+            IndexerError::InvalidResponse { provider: NAME, reason: format!("txid '{}' is not 32 bytes of hex", txid) }
+        })?;
+        leaf.reverse();
+        let mut tsc = crate::beef::parse_bump_hex(&bump_hex)
+            .and_then(|bump| crate::beef::bump_path_tsc(&bump, &leaf))
+            .map_err(|e| IndexerError::InvalidResponse {
                 provider: NAME,
                 reason: format!("BUMP parse error: {}", e),
-            }
-        })?;
+            })?;
         if let Some(h) = status.block_height {
             tsc["height"] = serde_json::json!(h);
         }
@@ -183,7 +187,7 @@ pub(crate) fn arc_response_to_tx_status(
     }
 }
 
-pub(crate) fn interpret_broadcast_response(
+fn interpret_broadcast_response(
     http_status: u16,
     arc: &ArcResponse,
     raw_body: &str,

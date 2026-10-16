@@ -459,7 +459,7 @@ cmake --build . --config Release
 
 - For macOS build instructions, see `MACOS_BUILD_INSTRUCTIONS.md`
 - For macOS porting work, see `archived-docs/Final-MVP-Sprint/macos-port/MACOS-PORT-HANDOVER.md`
-- For development workflow, see `PROJECT_OVERVIEW.md`
+- For development workflow, see `docs/PROJECT_OVERVIEW.md`
 - For project architecture, see root `CLAUDE.md`
 
 ---

@@ -396,6 +396,26 @@ jobs:
           # otherwise the /MT hodos-update-helper fails to link (see the vcpkg-install comment).
           cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DOPENSSL_ROOT_DIR="$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows-static" -DHODOS_SILENT_AUTOUPDATE=ON -DAPP_VERSION="${{ steps.version.outputs.VERSION }}" -DAPP_BUILD_NUMBER="${{ steps.version.outputs.BUILD_NUMBER }}"
       
+      # B5-T0-P6 layout check (owner, 2026-10-13). BLOCKING: the pinned uBlock Origin
+      # release still fetches, matches UBO_SOURCES_SHA256 and converts identically to Node's
+      # own loading of it. Pinned inputs, so it only goes red when something we pinned moved.
+      - name: Ad-block layout check (pinned uBO scriptlets)
+        shell: pwsh
+        working-directory: adblock-engine
+        run: cargo test --release -- --ignored test_ubo_layout_pinned_release test_ubo_conversion_matches_node
+
+      # WARNING ONLY: the same engine against today's LIVE filter lists — every active YouTube
+      # +js() rule resolves, hodos-unbreak domains get no scriptlets, quick-fixes loads. Red
+      # here usually means uAssets now uses a scriptlet newer than our pin: bump UBO_TAG
+      # (adblock-engine/src/CLAUDE.md). Upstream drift must not block an urgent release.
+      # Also converts uBO's LATEST release (test_latest_ubo_release_converts): red there means
+      # a newer uBO changed its layout — fix the converter before bumping the pin.
+      - name: Ad-block live-list check (warning only)
+        continue-on-error: true
+        shell: pwsh
+        working-directory: adblock-engine
+        run: cargo test --release -- --ignored test_real_ test_build_loads_quick_fixes test_latest_ubo_release_converts
+
       # Run the existing build script (created by your dev)
       - name: Build with release script
         shell: pwsh
@@ -755,6 +775,17 @@ jobs:
         run: |
           cd rust-wallet
           cargo build --release
+
+      # B5-T0-P6 layout check — same as the Windows job (see there): pinned = blocking,
+      # live lists = warning only.
+      - name: Ad-block layout check (pinned uBO scriptlets)
+        working-directory: adblock-engine
+        run: cargo test --release -- --ignored test_ubo_layout_pinned_release test_ubo_conversion_matches_node
+
+      - name: Ad-block live-list check (warning only)
+        continue-on-error: true
+        working-directory: adblock-engine
+        run: cargo test --release -- --ignored test_real_ test_build_loads_quick_fixes test_latest_ubo_release_converts
 
       # Build adblock engine
       - name: Build adblock engine

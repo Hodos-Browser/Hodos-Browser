@@ -17,7 +17,8 @@ use log::{info, warn};
 use std::time::Duration;
 
 use crate::AppState;
-use crate::database::{TransactionRepository, OutputRepository, ProvenTxRepository, ProvenTxReqRepository};
+use crate::database::{TransactionRepository, OutputRepository, ProvenTxReqRepository};
+use crate::proof_store::{ProofCheck, VerifiedRow};
 
 /// Only check transactions failed within this window (seconds)
 /// Must be long enough for orphan mempool txs to get mined.
@@ -41,7 +42,8 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
             "SELECT id, txid FROM transactions
              WHERE status = 'failed'
              AND failed_at IS NOT NULL
-             AND failed_at >= ?1"
+             AND failed_at >= ?1
+             AND txid NOT LIKE 'unbuilt-%'"
         ).map_err(|e| format!("SQL prepare: {}", e))?;
 
         let rows = stmt.query_map(
@@ -64,44 +66,51 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
     for (_tx_id, txid) in &failed_txs {
         let short_txid = &txid[..txid.len().min(16)];
 
-        // Step 1: Check if proven_txs record already exists
+        // Step 1: a stored proof recovers it only if our own headers verify it now (B5-T1-P7a-2
+        // `C7`: a row's existence is not evidence — it can come from an import or an older build).
         let already_proven = {
             let db = match state.database.lock() {
                 Ok(g) => g,
                 Err(e) => { warn!("   ⚠️ DB lock: {}", e); continue; }
             };
-            let proven_tx_repo = ProvenTxRepository::new(db.connection());
-            match proven_tx_repo.get_by_txid(txid) {
-                Ok(Some(pt)) => Some((pt.proven_tx_id, pt.height)),
-                _ => None,
-            }
+            crate::proof_store::stored_verified_proof(db.connection(), &*state.chain_tracker, txid).ok().flatten()
         };
 
-        if let Some((proven_tx_id, height)) = already_proven {
-            info!("   ✅ {} has proof on-chain! Recovering from failed → completed", short_txid);
-            recover_transaction(state, txid, proven_tx_id, height);
+        if let Some(row) = already_proven {
+            info!("   ✅ {} has a verified proof! Recovering from failed → completed", short_txid);
+            recover_transaction(state, txid, row);
             recovered_count += 1;
             continue;
         }
 
         // Step 2: Query via Services chain (ARC GP → WoC → JungleBus → Bitails).
-        // Only ARC populates `merkle_path_bump` from tx_status; the other tiers
-        // return `None`, in which case we fall through to the inline WoC proof
-        // fetch below for the BUMP.
+        // Only ARC populates `merkle_path_bump` from tx_status; for the other tiers the
+        // proof is fetched from the proof chain (`/code-review xhigh 167` #8).
         match state.services.tx_status(txid).await {
             Ok(status) => {
                 use crate::services::TxState;
                 if matches!(status.state, TxState::Mined) {
-                    let block_height = status.block_height.unwrap_or(0);
-                    info!("   ⛏️ {} found MINED via Services chain! Recovering...", short_txid);
+                    info!("   ⛏️ {} found MINED via Services chain — checking its proof...", short_txid);
 
-                    if let Some(ref merkle_path_hex) = status.merkle_path_bump {
-                        match create_proven_tx_and_recover(
-                            state, txid, merkle_path_hex, block_height as u64,
-                            status.block_hash.as_deref().unwrap_or(""),
-                        ) {
-                            Ok(_) => { recovered_count += 1; }
-                            Err(e) => { warn!("   ⚠️ Recovery failed for {}: {}", short_txid, e); }
+                    let checked = match status.merkle_path_bump {
+                        Some(ref merkle_path_hex) => Some((
+                            crate::proof_store::check_bump_hex(&*state.chain_tracker, txid, merkle_path_hex),
+                            status.block_hash.clone().unwrap_or_default(),
+                        )),
+                        None => match crate::cache_helpers::fetch_tsc_proof_from_api(&state.services, txid).await {
+                            Ok(Some(tsc)) => Some((
+                                crate::proof_store::check_tsc(&*state.chain_tracker, txid, &tsc),
+                                tsc["target"].as_str().unwrap_or("").to_string(),
+                            )),
+                            Ok(None) => { info!("   ⏳ {} mined but no proof published yet", short_txid); None }
+                            Err(e) => { warn!("   ⚠️ proof fetch for {} failed: {}", short_txid, e); None }
+                        },
+                    };
+                    if let Some((check, block_hash)) = checked {
+                        if let Some(row) = store_verified(state, txid, check, None, &block_hash) {
+                            if recover_transaction(state, txid, row) {
+                                recovered_count += 1;
+                            }
                         }
                     }
                 }
@@ -116,38 +125,19 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
                             if confirmations > 0 {
                                 info!("   ⛏️ {} found confirmed on WhatsOnChain! Recovering...", short_txid);
 
-                                // Fetch proof and recover
-                                let block_height = json["blockheight"].as_u64().map(|h| h as u32);
-                                let proof_url = format!("https://api.whatsonchain.com/v1/bsv/main/tx/{}/proof/tsc", txid);
-                                if let Ok(proof_resp) = client.get(&proof_url).timeout(Duration::from_secs(15)).send().await {
-                                    if let Ok(tsc_json) = proof_resp.json::<serde_json::Value>().await {
-                                        let height = tsc_json["height"].as_u64()
-                                            .or_else(|| block_height.map(|h| h as u64))
-                                            .unwrap_or(0) as u32;
-                                        let tx_index = tsc_json["index"].as_u64().unwrap_or(0);
-                                        let block_hash = tsc_json["target"].as_str().unwrap_or("");
-
-                                        if let Ok(merkle_bytes) = serde_json::to_vec(&tsc_json) {
-                                            if let Ok(db) = state.database.lock() {
-                                                let conn = db.connection();
-                                                let raw_tx_bytes: Vec<u8> = {
-                                                    let tx_repo = TransactionRepository::new(conn);
-                                                    match tx_repo.get_by_txid(txid) {
-                                                        Ok(Some(stored)) => hex::decode(&stored.raw_tx).unwrap_or_default(),
-                                                        _ => Vec::new(),
-                                                    }
-                                                };
-                                                let proven_tx_repo = ProvenTxRepository::new(conn);
-                                                if let Ok(proven_tx_id) = proven_tx_repo.insert_or_get(
-                                                    txid, height, tx_index, &merkle_bytes, &raw_tx_bytes, block_hash, "",
-                                                ) {
-                                                    drop(db);
-                                                    recover_transaction(state, txid, proven_tx_id, height);
-                                                    recovered_count += 1;
-                                                }
+                                // Fetch the proof (Services chain) and recover only if our headers verify it.
+                                match crate::cache_helpers::fetch_tsc_proof_from_api(&state.services, txid).await {
+                                    Ok(Some(tsc)) => {
+                                        let block_hash = tsc["target"].as_str().unwrap_or("").to_string();
+                                        let check = crate::proof_store::check_tsc(&*state.chain_tracker, txid, &tsc);
+                                        if let Some(row) = store_verified(state, txid, check, None, &block_hash) {
+                                            if recover_transaction(state, txid, row) {
+                                                recovered_count += 1;
                                             }
                                         }
                                     }
+                                    Ok(None) => info!("   ⏳ {} confirmed but no proof published yet", short_txid),
+                                    Err(e) => warn!("   ⚠️ proof fetch for {} failed: {}", short_txid, e),
                                 }
                             }
                         }
@@ -171,7 +161,8 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
 /// Recover a failed transaction that was actually mined. Returns `true` iff the
 /// recovery transaction committed (callers that must know — e.g. reconcile's promotion
 /// path — rely on this; the Monitor callers ignore it).
-fn recover_transaction(state: &AppState, txid: &str, proven_tx_id: i64, height: u32) -> bool {
+pub(crate) fn recover_transaction(state: &AppState, txid: &str, row: VerifiedRow) -> bool {
+    let height = row.height();
     let committed = if let Ok(db) = state.database.lock() {
         let conn = db.connection();
         let short_txid = &txid[..txid.len().min(16)];
@@ -195,15 +186,10 @@ fn recover_transaction(state: &AppState, txid: &str, proven_tx_id: i64, height: 
             warn!("   ⚠️ Failed to update confirmations for {}: {}", short_txid, e);
         }
 
-        // Link proven_tx
-        let proven_tx_repo = ProvenTxRepository::new(&tx);
-        let _ = proven_tx_repo.link_transaction(txid, proven_tx_id);
-
-        // Update proven_tx_reqs if exists
+        // Link the verified proof (and the proven_tx_reqs row, if any)
+        let _ = crate::proof_store::link(&tx, &row, txid);
         let req_repo = ProvenTxReqRepository::new(&tx);
         if let Ok(Some(req)) = req_repo.get_by_txid(txid) {
-            let _ = req_repo.update_status(req.proven_tx_req_id, "completed");
-            let _ = req_repo.link_proven_tx(req.proven_tx_req_id, proven_tx_id);
             let _ = req_repo.add_history_note(
                 req.proven_tx_req_id,
                 "completed",
@@ -279,43 +265,29 @@ fn recover_transaction(state: &AppState, txid: &str, proven_tx_id: i64, height: 
     committed
 }
 
-/// Create proven_txs record from ARC merkle path and recover the transaction
-fn create_proven_tx_and_recover(
-    state: &web::Data<AppState>,
-    txid: &str,
-    merkle_path_hex: &str,
-    block_height: u64,
-    block_hash: &str,
-) -> Result<(), String> {
-    let tsc_json = crate::beef::parse_bump_hex_to_tsc(merkle_path_hex)?;
-    let height = tsc_json["height"].as_u64().unwrap_or(block_height) as u32;
-    let tx_index = tsc_json["index"].as_u64().unwrap_or(0);
-
-    let merkle_path_bytes = serde_json::to_vec(&tsc_json)
-        .map_err(|e| format!("Serialize TSC: {}", e))?;
-
-    let proven_tx_id = {
-        let db = state.database.lock().map_err(|e| format!("DB lock: {}", e))?;
-        let conn = db.connection();
-
-        let raw_tx_bytes: Vec<u8> = {
-            let tx_repo = TransactionRepository::new(conn);
-            match tx_repo.get_by_txid(txid) {
-                Ok(Some(stored)) => hex::decode(&stored.raw_tx).unwrap_or_default(),
-                _ => Vec::new(),
-            }
-        };
-
-        let proven_tx_repo = ProvenTxRepository::new(conn);
-        proven_tx_repo.insert_or_get(
-            txid, height, tx_index,
-            &merkle_path_bytes, &raw_tx_bytes,
-            block_hash, "",
-        ).map_err(|e| format!("Insert proven_tx: {}", e))?
+/// Store a checked proof through the one verified seam (B5-T1-P7a-2 `C6`). `Some` only when our own
+/// headers verified it; anything else stores nothing, and the transaction stays as it is.
+fn store_verified(state: &AppState, txid: &str, check: ProofCheck, raw: Option<&[u8]>, block_hash: &str) -> Option<VerifiedRow> {
+    let short = &txid[..txid.len().min(16)];
+    let proof = match check {
+        ProofCheck::Verified(p) => p,
+        ProofCheck::NotHeld => { info!("   ⏳ {} proof: block not in our headers yet — not recovered", short); return None; }
+        ProofCheck::Wrong { height } => { warn!("   ❌ {} proof does not match our header at {} — not recovered", short, height); return None; }
+        ProofCheck::Malformed(e) => { warn!("   ⚠️ {} proof unreadable: {}", short, e); return None; }
     };
-
-    recover_transaction(state, txid, proven_tx_id, height);
-    Ok(())
+    let db = state.database.lock().ok()?;
+    let conn = db.connection();
+    let raw_tx_bytes: Vec<u8> = match raw {
+        Some(r) => r.to_vec(),
+        None => match TransactionRepository::new(conn).get_by_txid(txid) {
+            Ok(Some(stored)) => hex::decode(&stored.raw_tx).unwrap_or_default(),
+            _ => Vec::new(),
+        },
+    };
+    match crate::proof_store::store(conn, &*state.chain_tracker, &proof, &raw_tx_bytes, block_hash) {
+        Ok(row) => Some(row),
+        Err(e) => { warn!("   ⚠️ storing proof for {} failed: {}", short, e); None }
+    }
 }
 
 /// Promote a mined-but-not-`completed` LOCAL transaction to completed, reusing the
@@ -332,8 +304,8 @@ fn create_proven_tx_and_recover(
 /// Returns `true` iff it promoted a local tx. `false` means `txid` is foreign (not in
 /// our `transactions` table) or already `completed`; the caller then marks explicitly.
 ///
-/// `tsc` is the TSC merkle proof (as from `services.get_merkle_proof_tsc`), already
-/// validated by `verify_tsc_proof_against_block`; `raw` is the txid-verified raw tx.
+/// `tsc` is the TSC merkle proof (as from `services.get_merkle_proof_tsc`), checked again here
+/// against our own headers (B5-T1-P7a-2); `raw` is the txid-verified raw tx.
 /// How the reconcile caller should treat the mark of the input a successor spent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PromoteOutcome {
@@ -373,26 +345,15 @@ pub(crate) fn promote_proven_local_tx(
         return PromoteOutcome::NotApplicable;
     }
 
-    let height = tsc.get("height").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-    let tx_index = tsc.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
-    let merkle_path_bytes = match serde_json::to_vec(tsc) {
-        Ok(b) => b,
-        Err(e) => { warn!("   ⚠️ reconcile-promote: serialize TSC for {} failed: {}", short, e); return PromoteOutcome::TransientFailed; }
-    };
-
-    let proven_tx_id = {
-        let db = match state.database.lock() {
-            Ok(d) => d,
-            Err(_) => return PromoteOutcome::TransientFailed,
-        };
-        let proven_tx_repo = ProvenTxRepository::new(db.connection());
-        match proven_tx_repo.insert_or_get(txid, height, tx_index, &merkle_path_bytes, raw, "", "") {
-            Ok(id) => id,
-            Err(e) => { warn!("   ⚠️ reconcile-promote: insert proven_tx for {} failed: {}", short, e); return PromoteOutcome::TransientFailed; }
-        }
+    // B5-T1-P7a-2 `C8`: promoted only on a proof our own headers verify, stored at the height our
+    // chain gives it (a WhatsOnChain proof names its block by hash, never by height — not 0).
+    let check = crate::proof_store::check_tsc(&*state.chain_tracker, txid, tsc);
+    let block_hash = tsc["target"].as_str().unwrap_or("").to_string();
+    let Some(row) = store_verified(state, txid, check, Some(raw), &block_hash) else {
+        return PromoteOutcome::TransientFailed;
     }; // lock dropped before recover_transaction re-locks
 
-    if recover_transaction(state, txid, proven_tx_id, height) {
+    if recover_transaction(state, txid, row) {
         info!("   ⤴️  reconcile-promote: {} was mined but not completed → recovered to completed", short);
         PromoteOutcome::Promoted
     } else {

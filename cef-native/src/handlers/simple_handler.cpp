@@ -1994,6 +1994,9 @@ void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
                             CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("inject_cosmetic_script");
                             CefRefPtr<CefListValue> args = msg->GetArgumentList();
                             args->SetString(0, cosmetic.injectedScript);
+                            // B5-T0-P6: the page this payload was computed for, so the renderer
+                            // can drop it if the frame has moved to another document since.
+                            args->SetString(1, pageUrl);
                             mainFrame->SendProcessMessage(PID_RENDERER, msg);
                         }
 

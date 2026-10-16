@@ -1,7 +1,0 @@
-{
-  "name": "g2-validator",
-  "private": true,
-  "type": "module",
-  "description": "beta.6 G2: run recorded Hodos wallet responses through @bsv/sdk result validators",
-  "dependencies": { "@bsv/sdk": "2.8.11" }
-}

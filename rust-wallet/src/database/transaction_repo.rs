@@ -60,7 +60,17 @@ impl<'a> TransactionRepository<'a> {
         )?;
 
         let transaction_id = tx.last_insert_rowid();
+        Self::insert_children(&tx, transaction_id, action, user_id, now)?;
 
+        tx.commit()?;
+
+        info!("   ✅ Transaction {} saved to database (ID: {})", action.txid, transaction_id);
+        Ok(transaction_id)
+    }
+
+    /// Labels, inputs and outputs of a stored action (shared by `add_transaction` and
+    /// `fill_reservation_row`). Runs inside the caller's SQLite transaction.
+    fn insert_children(tx: &Connection, transaction_id: i64, action: &StoredAction, user_id: i64, now: i64) -> Result<()> {
         // Insert transaction labels into tx_labels/tx_labels_map
         for label in &action.labels {
             let normalized = label.trim().to_lowercase();
@@ -121,11 +131,95 @@ impl<'a> TransactionRepository<'a> {
                 ],
             )?;
         }
+        Ok(())
+    }
 
+    /// The txid a reservation row carries until its transaction is built. Not hex, so it
+    /// can never collide with a real txid or be looked up on chain; readers that need a
+    /// non-NULL `txid` (activity, listActions) keep working while a spend is in flight.
+    pub fn unbuilt_txid(reference: &str) -> String {
+        format!("unbuilt-{}", reference)
+    }
+
+    /// B5-T1-P3: the row a spend owns its coins by, created **before** any coin is claimed
+    /// (wallet-toolbox `createAction.ts`: transaction row first, `status: 'unsigned'`).
+    /// Status `unsigned`, so a crash before it is filled is failed — and its coins
+    /// released — by `TaskFailAbandoned` after 5 minutes. Call inside the claim's SQLite
+    /// transaction.
+    pub fn create_reservation_row(&self, reference: &str, description: Option<&str>) -> Result<i64> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        self.conn.execute(
+            "INSERT INTO transactions (
+                txid, reference_number, raw_tx, description, status, is_outgoing,
+                satoshis, confirmations, version, lock_time, created_at, updated_at
+            ) VALUES (?1, ?2, '', ?3, 'unsigned', 1, 0, 0, 1, 0, ?4, ?4)",
+            rusqlite::params![Self::unbuilt_txid(reference), reference, description, now],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Fill a reservation row with the built transaction, keeping its id (the coins it
+    /// claimed stay owned by it). Same columns and children as `add_transaction`.
+    ///
+    /// ⛔ Only an `unsigned` row is filled: a backstop (`TaskFailAbandoned`, startup
+    /// cleanup) that failed the row while the spend was still building has already
+    /// released its coins, and filling would un-fail it and let the spend broadcast with
+    /// free inputs (B5-T1-P3 review #1). `created_at` restarts here: the row's age is the
+    /// age of a built transaction, as it was when the row was created at this point.
+    pub fn fill_reservation_row(&self, id: i64, action: &StoredAction, user_id: i64) -> Result<i64> {
+        let tx_status = TransactionStatus::from_legacy(&action.status, None);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let n = tx.execute(
+            "UPDATE transactions SET
+                txid = ?1, raw_tx = ?2, description = ?3, status = ?4, is_outgoing = ?5,
+                satoshis = ?6, block_height = ?7, confirmations = ?8, version = ?9, lock_time = ?10,
+                price_usd_cents = ?11, updated_at = ?12, created_at = ?12
+             WHERE id = ?13 AND reference_number = ?14 AND status = 'unsigned'",
+            rusqlite::params![
+                action.txid,
+                action.raw_tx,
+                action.description,
+                tx_status.as_str(),
+                action.is_outgoing,
+                action.satoshis,
+                action.block_height.map(|h| h as i32),
+                action.confirmations as i32,
+                action.version as i32,
+                action.lock_time as i32,
+                action.price_usd_cents,
+                now,
+                id,
+                action.reference_number,
+            ],
+        )?;
+        if n != 1 {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_NOTFOUND),
+                Some(format!("reservation row {} for {} not found or no longer unsigned", id, action.reference_number)),
+            ));
+        }
+        Self::insert_children(&tx, id, action, user_id, now)?;
         tx.commit()?;
+        info!("   ✅ Transaction {} saved to database (ID: {}, reserved first)", action.txid, id);
+        Ok(id)
+    }
 
-        info!("   ✅ Transaction {} saved to database (ID: {})", action.txid, transaction_id);
-        Ok(transaction_id)
+    /// Remove a reservation row that never got a transaction (a refusal before the
+    /// transaction was built). Only an **unbuilt** row is removed; the caller releases its
+    /// coins first, in the same SQLite transaction. Returns rows deleted (0 or 1).
+    pub fn discard_unbuilt_row(&self, id: i64) -> Result<usize> {
+        self.conn.execute("DELETE FROM money_utxos WHERE reserved_by = ?1", rusqlite::params![id])?;
+        self.conn.execute(
+            "DELETE FROM transactions WHERE id = ?1 AND txid LIKE 'unbuilt-%'",
+            rusqlite::params![id],
+        )
     }
 
     /// Get transaction by txid
@@ -293,68 +387,53 @@ impl<'a> TransactionRepository<'a> {
 
     /// Update transaction TXID (after signing)
     ///
-    /// `user_id` is forwarded to `add_transaction` for label deduplication.
-    pub fn update_txid(&self, reference_number: &str, new_txid: String, new_raw_tx: String, user_id: i64) -> Result<()> {
-        // Get old transaction
-        let old_tx = self.get_by_reference(reference_number)?
-            .ok_or_else(|| rusqlite::Error::SqliteFailure(
+    /// B5-T1-P3: the row is updated **in place** — its `id` never changes. The coins a
+    /// transaction reserves are owned by that id (`outputs.spent_by`,
+    /// `money_utxos.reserved_by`) from the moment they are claimed, so signing must not
+    /// re-create the row. (Until P3 this deleted the row and re-inserted it under a new id,
+    /// which detached `spent_by` for the length of the call and dropped the
+    /// `commissions` row recorded for it.)
+    ///
+    /// `user_id` is kept for signature compatibility; nothing is re-inserted any more.
+    pub fn update_txid(&self, reference_number: &str, new_txid: String, new_raw_tx: String, _user_id: i64) -> Result<()> {
+        let (id, old_txid): (i64, Option<String>) = self.conn.query_row(
+            "SELECT id, txid FROM transactions WHERE reference_number = ?1",
+            rusqlite::params![reference_number],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => rusqlite::Error::SqliteFailure(
                 rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_NOTFOUND),
-                Some(format!("Transaction not found: {}", reference_number))
-            ))?;
+                Some(format!("Transaction not found: {}", reference_number)),
+            ),
+            other => other,
+        })?;
 
-        // Delete old transaction and related data
-        let old_txid = old_tx.txid.clone(); // Capture old TXID before moving old_tx
-        let mut stmt = self.conn.prepare("SELECT id FROM transactions WHERE txid = ?1")?;
-        let old_id: i64 = stmt.query_row(rusqlite::params![&old_txid], |row| row.get(0))?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
 
-        // Detach outputs from old transaction record first (avoids FK constraint on DELETE)
-        self.conn.execute(
-            "UPDATE outputs SET transaction_id = NULL WHERE transaction_id = ?1",
-            rusqlite::params![old_id],
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE transactions SET txid = ?1, raw_tx = ?2, updated_at = ?3 WHERE id = ?4",
+            rusqlite::params![&new_txid, &new_raw_tx, now, id],
         )?;
 
-        // Also detach spent_by references (outputs SPENT by this transaction).
-        // Without this, the DELETE below fails with FK constraint error in two-phase signing
-        // where phase 1 sets spent_by and phase 2 tries to replace the transaction record.
-        self.conn.execute(
-            "UPDATE outputs SET spent_by = NULL WHERE spent_by = ?1",
-            rusqlite::params![old_id],
-        )?;
-
-        self.conn.execute("DELETE FROM commissions WHERE transaction_id = ?1", rusqlite::params![old_id])?;
-        self.conn.execute("DELETE FROM transaction_outputs WHERE transaction_id = ?1", rusqlite::params![old_id])?;
-        self.conn.execute("DELETE FROM transaction_inputs WHERE transaction_id = ?1", rusqlite::params![old_id])?;
-        self.conn.execute("DELETE FROM tx_labels_map WHERE transaction_id = ?1", rusqlite::params![old_id])?;
-        self.conn.execute("DELETE FROM transactions WHERE id = ?1", rusqlite::params![old_id])?;
-
-        // Create new transaction with new TXID
-        let mut new_action = old_tx;
-        new_action.txid = new_txid.clone();
-        new_action.raw_tx = new_raw_tx;
-        let new_id = self.add_transaction(&new_action, user_id)?;
-
-        // Re-link detached outputs to the new transaction record.
-        // Match by old txid since output txids haven't been renamed yet.
-        let relinked = self.conn.execute(
-            "UPDATE outputs SET transaction_id = ?1 WHERE transaction_id IS NULL AND txid = ?2",
-            rusqlite::params![new_id, &old_txid],
-        )?;
-        if relinked > 0 {
-            info!("   ✅ Re-linked {} output(s) from transaction {} → {}", relinked, old_id, new_id);
+        // Inputs labelled with the pre-signing txid (phase 1 of two-phase signing) follow
+        // the new txid and are owned by this row.
+        if let Some(ref old) = old_txid {
+            let relabelled = tx.execute(
+                "UPDATE outputs SET spent_by = ?1, spending_description = ?2
+                 WHERE spending_description = ?3 AND spendable = 0",
+                rusqlite::params![id, &new_txid, old],
+            )?;
+            if relabelled > 0 {
+                info!("   ✅ Re-labelled {} spent input(s) {} → {}", relabelled, old, new_txid);
+            }
         }
+        tx.commit()?;
 
-        // Re-link spent_by and update spending_description from old txid to new txid.
-        // These are outputs that were marked as spent by the old transaction in a previous
-        // signing phase (e.g., phase 1 of two-phase signing).
-        let relinked_spent = self.conn.execute(
-            "UPDATE outputs SET spent_by = ?1, spending_description = ?2 WHERE spent_by IS NULL AND spending_description = ?3",
-            rusqlite::params![new_id, &new_txid, &old_txid],
-        )?;
-        if relinked_spent > 0 {
-            info!("   ✅ Re-linked spent_by on {} output(s) from transaction {} → {}", relinked_spent, old_id, new_id);
-        }
-
-        info!("   ✅ Updated TXID for reference {}: {} → {}", reference_number, old_txid, new_txid);
+        info!("   ✅ Updated TXID for reference {} (id={}): {:?} → {}", reference_number, id, old_txid, new_txid);
         Ok(())
     }
 
@@ -550,7 +629,10 @@ impl<'a> TransactionRepository<'a> {
     /// List all transactions with optional filters
     pub fn list_transactions(&self, label_filter: Option<&Vec<String>>, label_mode: Option<&str>) -> Result<Vec<StoredAction>> {
         // Get all transaction IDs
-        let mut stmt = self.conn.prepare("SELECT txid FROM transactions ORDER BY created_at DESC")?;
+        // B5-T1-P3: a reservation row whose transaction is not built yet (`unbuilt-…`
+        // txid) is not a transaction — it is not listed.
+        let mut stmt = self.conn.prepare(
+            "SELECT txid FROM transactions WHERE txid NOT LIKE 'unbuilt-%' ORDER BY created_at DESC")?;
         let txids: Vec<String> = stmt.query_map([], |row| Ok(row.get(0)?))?
             .collect::<Result<Vec<_>>>()?;
 
@@ -574,5 +656,83 @@ impl<'a> TransactionRepository<'a> {
         }
 
         Ok(transactions)
+    }
+}
+
+// ============================================================================
+// B5-T1-P3 — signing keeps the transaction row's id.
+// The coins a transaction reserves are owned by `transactions.id`; a signing step that
+// re-creates the row orphans them and drops the row's commission record.
+// RED: the pre-P3 `update_txid` (delete + re-insert) ⇒ the id changes and the
+// commission count is 0.
+// ============================================================================
+#[cfg(test)]
+mod update_txid_keeps_id_tests {
+    use super::*;
+
+    fn db() -> crate::database::WalletDatabase {
+        let path = std::env::temp_dir().join(format!("hodos_t1p3_txid_{}.db", uuid::Uuid::new_v4()));
+        let db = crate::database::WalletDatabase::new(path).unwrap();
+        db.connection().execute(
+            "INSERT OR IGNORE INTO users (userId, identity_key, active_storage, created_at, updated_at)
+             VALUES (1, 'test_identity_key', 'local', 0, 0)", []).unwrap();
+        db
+    }
+
+    fn action(txid: &str, reference: &str) -> StoredAction {
+        StoredAction {
+            txid: txid.to_string(), reference_number: reference.to_string(), raw_tx: "00".into(),
+            description: Some("t".into()), labels: vec![], status: ActionStatus::Created,
+            is_outgoing: true, satoshis: -1000, timestamp: 0, block_height: None, confirmations: 0,
+            version: 1, lock_time: 0, inputs: vec![], outputs: vec![], price_usd_cents: None,
+        }
+    }
+
+    #[test]
+    fn signing_keeps_the_row_id_its_commission_and_its_inputs() {
+        let db = db();
+        let conn = db.connection();
+        let repo = TransactionRepository::new(conn);
+        let unsigned = "a".repeat(64);
+        let signed = "b".repeat(64);
+
+        let id = repo.add_transaction(&action(&unsigned, "ref-p3"), 1).unwrap();
+        conn.execute(
+            "INSERT INTO commissions (user_id, transaction_id, satoshis, key_offset, is_redeemed, locking_script, created_at, updated_at)
+             VALUES (1, ?1, 1000, 'hodos-service-fee', 0, x'00', 0, 0)", [id]).unwrap();
+        // an input reserved by this row in phase 1 of two-phase signing
+        conn.execute(
+            "INSERT INTO outputs (user_id, spendable, change, vout, satoshis, provided_by, purpose, type,
+                                  txid, spent_by, spending_description, confirmed, created_at, updated_at)
+             VALUES (1, 0, 0, 0, 5000, 'you', '', 'P2PKH', 'parent', ?1, ?2, 1, 0, 0)",
+            rusqlite::params![id, &unsigned]).unwrap();
+
+        repo.update_txid("ref-p3", signed.clone(), "01".into(), 1).unwrap();
+
+        let after: i64 = conn.query_row("SELECT id FROM transactions WHERE txid = ?1", [&signed], |r| r.get(0)).unwrap();
+        assert_eq!(after, id, "signing must not re-create the transaction row");
+        let commissions: i64 = conn.query_row("SELECT COUNT(*) FROM commissions WHERE transaction_id = ?1", [id], |r| r.get(0)).unwrap();
+        assert_eq!(commissions, 1, "the commission recorded for the row survives signing");
+        let (spent_by, desc): (Option<i64>, Option<String>) = conn.query_row(
+            "SELECT spent_by, spending_description FROM outputs WHERE txid = 'parent'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(spent_by, Some(id), "the input stays owned by the same row");
+        assert_eq!(desc.as_deref(), Some(signed.as_str()), "the input's label follows the signed txid");
+    }
+    /// B5-T1-P3 review #1: a reservation row a backstop failed while the spend was still
+    /// building (its coins already released) is never filled — filling would un-fail it
+    /// and the spend would broadcast with free inputs. RED (scratch): drop
+    /// `AND status = 'unsigned'` from `fill_reservation_row` ⇒ Ok, and the row is
+    /// `unsigned` again.
+    #[test]
+    fn a_failed_reservation_row_is_never_filled() {
+        let db = db();
+        let repo = TransactionRepository::new(db.connection());
+        let id = repo.create_reservation_row("ref-x", None).unwrap();
+        db.connection().execute("UPDATE transactions SET status = 'failed' WHERE id = ?1", [id]).unwrap();
+        let mut a = action(&"c".repeat(64), "ref-x");
+        a.status = ActionStatus::Created;
+        assert!(repo.fill_reservation_row(id, &a, 1).is_err(), "a failed row must not be filled");
+        let status: String = db.connection().query_row("SELECT status FROM transactions WHERE id = ?1", [id], |r| r.get(0)).unwrap();
+        assert_eq!(status, "failed");
     }
 }

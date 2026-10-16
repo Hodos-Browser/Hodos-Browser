@@ -13,6 +13,7 @@ pub mod migration;
 pub mod helpers;
 pub mod parent_transaction_repo;
 pub mod block_header_repo;
+pub mod verified_header_repo;  // B5-T1-P7a-1
 pub mod proven_tx_repo;
 pub mod proven_tx_req_repo;
 pub mod basket_repo;
@@ -53,6 +54,7 @@ pub use migration::migrate_json_to_database;
 pub use helpers::{get_master_private_key_from_db, get_master_public_key_from_db, derive_key_for_output, address_to_address_info, output_to_fetcher_utxo};
 pub use parent_transaction_repo::ParentTransactionRepository;
 pub use block_header_repo::BlockHeaderRepository;
+pub use verified_header_repo::VerifiedHeaderRepository;
 pub use proven_tx_repo::ProvenTxRepository;
 pub use proven_tx_req_repo::ProvenTxReqRepository;
 pub use basket_repo::BasketRepository;
@@ -60,7 +62,7 @@ pub use tag_repo::TagRepository;
 pub use certificate_repo::CertificateRepository;
 pub use message_relay_repo::{MessageRelayRepository, RelayMessage, MessageRelayStats};
 pub use user_repo::UserRepository;
-pub use output_repo::{OutputRepository, StaleReservation};
+pub use output_repo::{Claim, OutputRepository, StaleReservation};
 // Phase 5 repositories
 pub use tx_label_repo::TxLabelRepository;
 pub use commission_repo::CommissionRepository;
@@ -68,6 +70,6 @@ pub use settings_repo::SettingsRepository;
 pub use sync_state_repo::SyncStateRepository;
 pub use domain_permission_repo::DomainPermissionRepository;
 pub use domain_manifest_snapshot_repo::{DomainManifestSnapshot, DomainManifestSnapshotRepository};
-pub use peerpay_repo::PeerPayRepository;
+pub use peerpay_repo::{HeldMessage, PeerPayRepository};
 // Phase 2.6-A.5 — engine-to-Rust audit repo.
 pub use permission_audit_repo::{PermissionAuditEntry, PermissionAuditRepository};

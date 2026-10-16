@@ -1,3 +1,5 @@
+import HeldCoinsLine from '../HeldCoinsLine';
+import WaitingPaymentsLine from '../WaitingPaymentsLine';
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { walletFetch } from '../../services/walletApi';
 import { QRCodeSVG } from 'qrcode.react';
@@ -107,6 +109,9 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
   const [rejectedCount, setRejectedCount] = useState(0);
   // beta.3 Phase 10d — sent payments whose recipient was not notified
   const [undeliverableCount, setUndeliverableCount] = useState(0);
+  // B5-T1-P7b — incoming payments stored but not credited yet (held, retried)
+  const [heldCount, setHeldCount] = useState(0);
+  const [heldOverdueCount, setHeldOverdueCount] = useState(0);
   const notificationRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const prevNotificationCount = useRef(0);
 
@@ -198,11 +203,13 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
   useEffect(() => {
     const fetchNotification = () => {
       walletFetch('/wallet/peerpay/status')
-        .then(r => r.json())
+        // B5-T1-P7b (review 164 #6): an error answer is not "nothing held" — keep what is shown.
+        .then(r => { if (!r.ok) throw new Error(`peerpay status ${r.status}`); return r.json(); })
         .then((data: { unread_count?: number; unread_amount?: number;
                        receive_count?: number; receive_amount?: number;
                        failure_count?: number; failure_amount?: number;
-                       rejected_count?: number; undeliverable_count?: number }) => {
+                       rejected_count?: number; undeliverable_count?: number;
+                       held_count?: number | null; held_overdue_count?: number | null }) => {
           const receiveCount = data.receive_count || 0;
           const receiveAmount = data.receive_amount || 0;
           const failureCount = data.failure_count || 0;
@@ -210,6 +217,9 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
           const totalCount = (data.unread_count || 0);
           setRejectedCount(data.rejected_count || 0);
           setUndeliverableCount(data.undeliverable_count || 0);
+          // null = the held payments could not be read: keep what is shown (never "none held")
+          if (data.held_count != null) setHeldCount(data.held_count);
+          if (data.held_overdue_count != null) setHeldOverdueCount(data.held_overdue_count);
 
           if (receiveCount > 0) {
             setNotification({ count: receiveCount, amount: receiveAmount });
@@ -405,6 +415,8 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
                   <span className="wd-balance-rate">1 BSV = ${bsvPrice.toFixed(2)} USD</span>
                 )}
               </div>
+              {/* B5-T1-P5: coins held but not proven money. */}
+              <HeldCoinsLine bsvPrice={bsvPrice} onChanged={() => fetchBalance(true)} />
             </>
           )}
 
@@ -470,6 +482,10 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
               </button>
             </div>
           )}
+
+          {/* Held incoming payment banner (B5-T1-P7b — stored, not credited yet; clears itself when credited) */}
+          <WaitingPaymentsLine count={heldCount} overdueCount={heldOverdueCount}
+            className="wd-notification-bar wd-notification-warning" textClassName="wd-notification-text" />
 
           {/* Manual backup button */}
           <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '8px' }}>

@@ -295,8 +295,12 @@ impl<'a> ScopedCall<'a> {
 ///     backup baskets used for the on-chain wallet-backup feature.
 ///   - `admin *` (any name starting with `admin `) — administrative scoped
 ///     baskets reserved for wallet-management calls.
+///   - `1sat` / `bsv21` (B5-T2-P1) — the asset baskets the wallet's recogniser files
+///     tokens into. Viewing `1sat` goes through BRC-165's `p 1sat <scope>` grants;
+///     `bsv21` always prompts. No standing grant, and payment grants never cover them.
 pub fn is_protected_basket(name: &str) -> bool {
     name == "default" || name.starts_with("backup-") || name.starts_with("admin ")
+        || crate::tokens::is_asset_basket(name)
 }
 
 /// Dispatch the engine gate for a scoped-grant CallKind. Mirrors
@@ -432,10 +436,15 @@ pub fn dispatch_scoped_grant(
                 ScopedCall::Basket { basket, access } => {
                     // Phase 2.6-D protected-basket guardrail — force-Prompt by
                     // pretending no grant exists, regardless of what V18 says.
-                    if is_protected_basket(basket) {
+                    // Review #7: judge the NORMALIZED name — `"BSV21"` is the asset basket.
+                    if is_protected_basket(&basket.trim().to_lowercase()) {
                         false
                     } else {
+                        // B5-T2-P1: a BRC-165 `p 1sat all` grant covers every narrower
+                        // `p 1sat <scope> <value>` view ("Grant all also covers these").
                         repo.is_basket_granted(dp_id, basket, access).unwrap_or(false)
+                            || (basket.starts_with("p 1sat ")
+                                && repo.is_basket_granted(dp_id, "p 1sat all", access).unwrap_or(false))
                     }
                 }
             }

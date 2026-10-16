@@ -24,7 +24,16 @@ pub mod permission_service;
 // Phase 2.6-G — Rust ManifestFetcher port (dormant; wired into the unknown-domain dispatch in G.3).
 pub mod manifest;
 // Wallet-Hardening WS1 — spent-input reconcile primitives (c1 check_outpoint_spent; c2/c3 dormant).
+pub mod spv_checks;  // B5-T1-P7a-1
+pub mod header_chain;  // B5-T1-P7a-1
+pub mod chain_tracker;  // B5-T1-P7a-1
+pub mod proof_store;  // B5-T1-P7a-2
 pub mod reconcile;
+pub mod backup;  // classify/connection tests drive the production backup encode/decode
+pub mod tokens;  // B5-T2-P1 (classify.rs calls it)
+pub mod classify;  // B5-T1-P5 (ingest.rs calls it)
+pub mod ingest;
+pub mod scan;  // B5-T1-P6
 
 // Re-export commonly used modules for convenience
 pub use crypto::brc2;

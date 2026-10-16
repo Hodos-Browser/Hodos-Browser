@@ -1000,16 +1000,16 @@ fn t10_06_database_helpers() {
             spending_description: None,
             script_length: None,
             script_offset: None,
-            locking_script: Some(vec![0x76, 0xa9, 0x14]),
+            locking_script: Some(vec![0x76, 0xa9, 0x14, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0x88, 0xac]),
             created_at: 1000,
             updated_at: 1000,
         };
-        let utxo = output_to_fetcher_utxo(&output);
+        let utxo = output_to_fetcher_utxo(&output).ok_or("a row with a script must map")?;
         if utxo.txid != "abcd1234" { return Err(format!("txid: {}", utxo.txid)); }
         if utxo.vout != 0 { return Err(format!("vout: {}", utxo.vout)); }
         if utxo.satoshis != 25000 { return Err(format!("satoshis: {}", utxo.satoshis)); }
         if utxo.address_index != 7 { return Err(format!("address_index {} != 7", utxo.address_index)); }
-        if utxo.script != "76a914" { return Err(format!("script: {}", utxo.script)); }
+        if utxo.script != "76a914abababababababababababababababababababab88ac" { return Err(format!("script: {}", utxo.script)); }
         if utxo.custom_instructions.is_some() { return Err("should have no custom_instructions".into()); }
         Ok(())
     });
@@ -1042,12 +1042,21 @@ fn t10_06_database_helpers() {
             created_at: 0,
             updated_at: 0,
         };
-        let utxo = output_to_fetcher_utxo(&output);
+        // B5-T1-P4 `P4-A13` (owner decision 1(c)): a row with no script is REFUSED.
+        // This test used to assert the old fail-open mapping to `script = ""`.
+        if output_to_fetcher_utxo(&output).is_some() {
+            return Err("a row with no locking_script must not be offered for signing".into());
+        }
+        let mut empty = output.clone();
+        empty.locking_script = Some(vec![]);
+        if output_to_fetcher_utxo(&empty).is_some() {
+            return Err("an EMPTY locking_script must be refused like NULL".into());
+        }
+        let mut signable = output.clone();
+        signable.locking_script = Some(vec![0x76, 0xa9, 0x14, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0x88, 0xac]);
+        let utxo = output_to_fetcher_utxo(&signable).ok_or("a row with a script must map")?;
         if utxo.address_index != -1 {
             return Err(format!("master key should give address_index -1, got {}", utxo.address_index));
-        }
-        if !utxo.script.is_empty() {
-            return Err(format!("no locking_script should give empty script, got {}", utxo.script));
         }
         Ok(())
     });
@@ -1076,11 +1085,11 @@ fn t10_06_database_helpers() {
             spending_description: None,
             script_length: None,
             script_offset: None,
-            locking_script: Some(vec![0x00, 0x14]),
+            locking_script: Some(vec![0x76, 0xa9, 0x14, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0x88, 0xac]), // B5-T1-P4: only plain P2PKH maps
             created_at: 0,
             updated_at: 0,
         };
-        let utxo = output_to_fetcher_utxo(&output);
+        let utxo = output_to_fetcher_utxo(&output).ok_or("a row with a script must map")?;
         // "bip32" prefix is not "2-receive address", so address_index = -2
         if utxo.address_index != -2 {
             return Err(format!("custom derivation should give -2, got {}", utxo.address_index));
@@ -1115,11 +1124,11 @@ fn t10_06_database_helpers() {
             spending_description: None,
             script_length: None,
             script_offset: None,
-            locking_script: None,
+            locking_script: Some(vec![0x76, 0xa9, 0x14, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0x88, 0xac]), // B5-T1-P4: a row with no script is refused (helpers/04)
             created_at: 0,
             updated_at: 0,
         };
-        let utxo = output_to_fetcher_utxo(&output);
+        let utxo = output_to_fetcher_utxo(&output).ok_or("a row with a script must map")?;
         // Unparseable suffix should fall back to -1
         if utxo.address_index != -1 {
             return Err(format!("unparseable suffix should give -1, got {}", utxo.address_index));
@@ -1151,11 +1160,11 @@ fn t10_06_database_helpers() {
             spending_description: None,
             script_length: None,
             script_offset: None,
-            locking_script: None,
+            locking_script: Some(vec![0x76, 0xa9, 0x14, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0x88, 0xac]), // B5-T1-P4: a row with no script is refused (helpers/04)
             created_at: 0,
             updated_at: 0,
         };
-        let utxo = output_to_fetcher_utxo(&output);
+        let utxo = output_to_fetcher_utxo(&output).ok_or("a row with a script must map")?;
         if !utxo.txid.is_empty() {
             return Err(format!("None txid should give empty string, got '{}'", utxo.txid));
         }
@@ -1186,11 +1195,11 @@ fn t10_06_database_helpers() {
             spending_description: None,
             script_length: None,
             script_offset: None,
-            locking_script: None,
+            locking_script: Some(vec![0x76, 0xa9, 0x14, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0x88, 0xac]), // B5-T1-P4: a row with no script is refused (helpers/04)
             created_at: 0,
             updated_at: 0,
         };
-        let utxo = output_to_fetcher_utxo(&output);
+        let utxo = output_to_fetcher_utxo(&output).ok_or("a row with a script must map")?;
         if utxo.vout != 255 {
             return Err(format!("vout {} != 255", utxo.vout));
         }

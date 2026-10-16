@@ -657,6 +657,73 @@ impl Beef {
         Ok(hex::encode(bytes))
     }
 
+    /// The BEEF V1 to broadcast for `subject_txid` (B5-T1-P7b): the subject and its ancestry inside
+    /// this bundle (a transaction with a BUMP ends its branch), parents before children and the
+    /// subject LAST — the transaction ARC answers for — with unrelated transactions and unused BUMPs
+    /// dropped, as `@bsv/sdk` `Transaction.toAtomicBEEF` builds it.
+    pub fn broadcast_v1_for(&self, subject_txid: &str) -> Result<Vec<u8>, String> {
+        // Each transaction hashed once (a sender-sized bundle; `find_txid` per input re-hashes all of
+        // it — quadratic, adversarial review). The first of two identical transactions wins.
+        let mut by_txid: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for (i, tx) in self.transactions.iter().enumerate() {
+            use sha2::{Digest, Sha256};
+            let txid = hex::encode(Sha256::digest(Sha256::digest(tx)).iter().rev().copied().collect::<Vec<u8>>());
+            by_txid.entry(txid).or_insert(i);
+        }
+        let subject = *by_txid.get(&subject_txid.to_lowercase()).ok_or_else(|| format!("{} is not in this BEEF", subject_txid))?;
+        let mut keep = vec![false; self.transactions.len()];
+        let mut stack = vec![subject];
+        while let Some(i) = stack.pop() {
+            if std::mem::replace(&mut keep[i], true) {
+                continue;
+            }
+            if i != subject && self.tx_to_bump.get(i).copied().flatten().is_some() {
+                continue; // proven: its own parents are not needed
+            }
+            let parsed = ParsedTransaction::from_bytes(&self.transactions[i])?;
+            for input in &parsed.inputs {
+                if let Some(&p) = by_txid.get(&input.prev_txid) {
+                    stack.push(p);
+                }
+            }
+        }
+        let mut out = Beef::new();
+        out.version = BEEF_V1_MARKER;
+        let mut bump_map = std::collections::HashMap::new();
+        for (i, tx) in self.transactions.iter().enumerate() {
+            if !keep[i] || i == subject {
+                continue;
+            }
+            out.transactions.push(tx.clone());
+            let bump = match self.tx_to_bump.get(i).copied().flatten() {
+                Some(b) => {
+                    let len = out.bumps.len();
+                    let new_b = *bump_map.entry(b).or_insert(len);
+                    if new_b == len {
+                        out.bumps.push(self.bumps.get(b).ok_or("BUMP index out of range")?.clone());
+                    }
+                    Some(new_b)
+                }
+                None => None,
+            };
+            out.tx_to_bump.push(bump);
+        }
+        out.sort_topologically();
+        out.transactions.push(self.transactions[subject].clone());
+        out.tx_to_bump.push(match self.tx_to_bump.get(subject).copied().flatten() {
+            Some(b) => {
+                let len = out.bumps.len();
+                let new_b = *bump_map.entry(b).or_insert(len);
+                if new_b == len {
+                    out.bumps.push(self.bumps.get(b).ok_or("BUMP index out of range")?.clone());
+                }
+                Some(new_b)
+            }
+            None => None,
+        });
+        out.to_v1_bytes()
+    }
+
     /// Serialize to Atomic BEEF hex string (BRC-95)
     ///
     /// Atomic BEEF format:
@@ -799,6 +866,17 @@ fn read_u8(cursor: &mut Cursor<&[u8]>) -> Result<u8, String> {
     Ok(buf[0])
 }
 
+/// Refuse a length a counterparty declared that is longer than what is left to read. A declared
+/// length must never size an allocation unchecked: `vec![0; 2^48]` aborts the whole process
+/// (B5-T1-P7a-1 row `P7a-A14`).
+fn check_declared_len(cursor: &Cursor<&[u8]>, len: u64, what: &str) -> Result<(), String> {
+    let remaining = (cursor.get_ref().len() as u64).saturating_sub(cursor.position());
+    if len > remaining {
+        return Err(format!("{} declares {} but only {} bytes remain", what, len, remaining));
+    }
+    Ok(())
+}
+
 /// Read a variable-length integer (Bitcoin varint format)
 fn read_varint(cursor: &mut Cursor<&[u8]>) -> Result<u64, String> {
     let first = read_u8(cursor)?;
@@ -833,13 +911,18 @@ fn read_bump(cursor: &mut Cursor<&[u8]>) -> Result<MerkleProof, String> {
 
     // Read tree height
     let tree_height = read_u8(cursor)?;
+    if tree_height as usize > MAX_BUMP_TREE_HEIGHT {
+        return Err(format!("BUMP tree height {} exceeds {}", tree_height, MAX_BUMP_TREE_HEIGHT));
+    }
 
     // Read nodes grouped by level
     let mut levels = Vec::with_capacity(tree_height as usize);
 
     for _ in 0..tree_height {
-        let num_nodes_at_level = read_varint(cursor)? as usize;
-        let mut nodes_at_level = Vec::with_capacity(num_nodes_at_level);
+        let num_nodes_at_level = read_varint(cursor)?;
+        // Each node is at least two bytes (offset varint + flags).
+        check_declared_len(cursor, num_nodes_at_level.saturating_mul(2), "BUMP level node count")?;
+        let mut nodes_at_level = Vec::with_capacity(num_nodes_at_level as usize);
 
         for _ in 0..num_nodes_at_level {
             // Read offset
@@ -900,6 +983,7 @@ fn read_transaction(cursor: &mut Cursor<&[u8]>) -> Result<Vec<u8>, String> {
 
         // script length + script bytes
         let script_len = read_varint(cursor)?;
+        check_declared_len(cursor, script_len, "input script")?;
         let mut script = vec![0u8; script_len as usize];
         cursor.read_exact(&mut script)
             .map_err(|e| format!("Failed to read input script: {}", e))?;
@@ -922,6 +1006,7 @@ fn read_transaction(cursor: &mut Cursor<&[u8]>) -> Result<Vec<u8>, String> {
 
         // script length + script bytes
         let script_len = read_varint(cursor)?;
+        check_declared_len(cursor, script_len, "output script")?;
         let mut script = vec![0u8; script_len as usize];
         cursor.read_exact(&mut script)
             .map_err(|e| format!("Failed to read output script: {}", e))?;
@@ -999,6 +1084,7 @@ impl ParsedTransaction {
 
             // Read script
             let script_len = read_varint(&mut cursor)?;
+            check_declared_len(&cursor, script_len, "script")?;
             let mut script = vec![0u8; script_len as usize];
             cursor.read_exact(&mut script)
                 .map_err(|e| format!("Failed to read script: {}", e))?;
@@ -1029,6 +1115,7 @@ impl ParsedTransaction {
 
             // Read script
             let script_len = read_varint(&mut cursor)?;
+            check_declared_len(&cursor, script_len, "script")?;
             let mut script = vec![0u8; script_len as usize];
             cursor.read_exact(&mut script)
                 .map_err(|e| format!("Failed to read script: {}", e))?;
@@ -1058,6 +1145,265 @@ impl ParsedTransaction {
         let bytes = hex::decode(hex)
             .map_err(|e| format!("Invalid hex: {}", e))?;
         Self::from_bytes(&bytes)
+    }
+}
+
+/// B5-T1-P7a-1 row `P7a-A14`: a counterparty's BEEF / BUMP gets a typed error, never a panic,
+/// a stack overflow or an allocation abort. Two-sided: correct proofs (incl. a legitimate
+/// duplicate node) still compute the root an independent sha256d gives.
+#[cfg(test)]
+mod p7a2_bump_path_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    fn d(b: &[u8]) -> [u8; 32] {
+        Sha256::digest(Sha256::digest(b)).into()
+    }
+    fn pair(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
+        let mut c = a.to_vec();
+        c.extend_from_slice(b);
+        d(&c)
+    }
+    fn node(offset: u8, flag: u8, h: &[u8; 32]) -> Vec<u8> {
+        let mut n = vec![offset, flag];
+        n.extend_from_slice(h);
+        n
+    }
+
+    /// B5-T1-P7a-2 fix review #7: a two-level BUMP holding two transactions, whose level-1 sibling is
+    /// left out (computable from the two level-0 leaves at offsets 2 and 3). Our transaction's path must
+    /// give the block's root — the root is computed here, not by the code under test.
+    #[test]
+    fn a_shared_two_level_bump_gives_our_path_with_the_computed_sibling() {
+        let (ours, other, l2, l3) = (d(b"ours"), d(b"other"), d(b"leaf2"), d(b"leaf3"));
+        let root = pair(&pair(&ours, &other), &pair(&l2, &l3));
+        let bump = MerkleProof {
+            block_height: 1, tree_height: 2,
+            levels: vec![vec![node(0, 0x02, &ours), node(1, 0x02, &other), node(2, 0x00, &l2), node(3, 0x02, &l3)], vec![]],
+        };
+        for (leaf, index) in [(ours, 0u64), (l3, 3u64)] {
+            let tsc = bump_path_tsc(&bump, &leaf).unwrap();
+            assert_eq!(tsc["index"], index);
+            let mut txid = leaf;
+            txid.reverse();
+            let got = compute_merkle_root_from_tsc(&hex::encode(txid), 1, index, tsc["nodes"].as_array().unwrap()).unwrap();
+            let mut want = root;
+            want.reverse();
+            assert_eq!(got, hex::encode(want), "leaf at {}", index);
+        }
+    }
+}
+
+#[cfg(test)]
+mod p7a_hostile_input_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    fn sha256d(a: &[u8], b: &[u8]) -> Vec<u8> {
+        let mut c = a.to_vec();
+        c.extend_from_slice(b);
+        Sha256::digest(&Sha256::digest(&c)).to_vec()
+    }
+
+    fn node(offset: u64, flags: u8, hash: Option<&[u8]>) -> Vec<u8> {
+        let mut n = Vec::new();
+        write_varint(&mut n, offset);
+        n.push(flags);
+        if let Some(h) = hash {
+            n.extend_from_slice(h);
+        }
+        n
+    }
+
+    /// A BEEF V1 holding one transaction whose first input declares a script of `script_len` bytes.
+    fn beef_with_input_script_len(script_len: u64) -> Vec<u8> {
+        let mut b = BEEF_V1_MARKER.to_vec();
+        b.push(0); // no BUMPs
+        b.push(1); // one transaction
+        b.extend_from_slice(&1u32.to_le_bytes()); // version
+        b.push(1); // one input
+        b.extend_from_slice(&[0x11; 36]); // prevout
+        b.push(0xff);
+        b.extend_from_slice(&script_len.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn a14_hostile_script_length_in_a_beef_is_an_error_not_an_abort() {
+        // 2^48 bytes = 256 TB: allocating it aborts the process.
+        let r = Beef::from_bytes(&beef_with_input_script_len(1u64 << 48));
+        assert!(r.is_err(), "a script longer than the BEEF must be refused");
+    }
+
+    #[test]
+    fn a14_hostile_script_length_via_the_atomic_entry_is_an_error_not_an_abort() {
+        // SUBJECT: the entry internalizeAction and PeerPay call (`resolve_brc29_credit`).
+        let mut atomic = ATOMIC_BEEF_MARKER.to_vec();
+        atomic.extend_from_slice(&[0x66; 32]);
+        atomic.extend_from_slice(&beef_with_input_script_len(1u64 << 48));
+        assert!(Beef::from_atomic_beef_bytes(&atomic).is_err());
+    }
+
+    #[test]
+    fn a14_hostile_script_length_in_a_raw_tx_is_an_error_not_an_abort() {
+        let mut tx = 1u32.to_le_bytes().to_vec();
+        tx.push(1);
+        tx.extend_from_slice(&[0x11; 36]);
+        tx.push(0xff);
+        tx.extend_from_slice(&(1u64 << 48).to_le_bytes());
+        assert!(ParsedTransaction::from_bytes(&tx).is_err());
+    }
+
+    #[test]
+    fn a14_hostile_bump_node_count_is_an_error_not_an_abort() {
+        let mut b = BEEF_V1_MARKER.to_vec();
+        b.push(1); // one BUMP
+        b.push(0x01); // block height 1
+        b.push(1); // tree height 1
+        b.push(0xff);
+        b.extend_from_slice(&u64::MAX.to_le_bytes()); // nodes at level 0
+        assert!(Beef::from_bytes(&b).is_err());
+    }
+
+    #[test]
+    fn a14_bump_with_no_levels_is_an_error_not_a_panic() {
+        let proof = MerkleProof { block_height: 1, tree_height: 0, levels: vec![] };
+        assert!(compute_root_from_bump(&proof, &[0x22; 32]).is_err());
+    }
+
+    #[test]
+    fn a14_short_txid_is_an_error_not_a_panic() {
+        let proof = MerkleProof { block_height: 1, tree_height: 1, levels: vec![vec![node(0, 0x02, Some(&[0x22; 32]))]] };
+        assert!(compute_root_from_bump(&proof, &[0x22; 31]).is_err());
+    }
+
+    #[test]
+    fn a14_mutually_duplicate_siblings_return_not_a_stack_overflow() {
+        // Level 1 holds offsets 0 and 1, both flagged duplicate. The old redirect recursed between
+        // them forever (stack overflow, seen 2026-10-09). Under the SDK's semantics a duplicate
+        // sibling means "hash the working hash with itself", so the root is computed — and the
+        // header check, not the parser, then decides whether it is real.
+        let txid = [0x22u8; 32];
+        let proof = MerkleProof {
+            block_height: 1,
+            tree_height: 2,
+            levels: vec![
+                vec![node(0, 0x02, Some(&txid)), node(1, 0x00, Some(&[0x33; 32]))],
+                vec![node(0, 0x01, None), node(1, 0x01, None)],
+            ],
+        };
+        let level1 = sha256d(&txid, &[0x33; 32]);
+        assert_eq!(compute_root_from_bump(&proof, &txid).unwrap(), sha256d(&level1, &level1));
+    }
+
+    #[test]
+    fn a14_a_duplicate_left_child_is_an_error() {
+        let txid = [0x22u8; 32];
+        let proof = MerkleProof {
+            block_height: 1,
+            tree_height: 2,
+            levels: vec![
+                vec![node(0, 0x02, Some(&txid)), node(1, 0x00, Some(&[0x33; 32])), node(2, 0x01, None), node(3, 0x00, Some(&[0x44; 32]))],
+                vec![],
+            ],
+        };
+        assert!(compute_root_from_bump(&proof, &txid).is_err());
+    }
+
+    #[test]
+    fn a14_a_bump_deeper_than_64_levels_is_refused() {
+        let mut b = BEEF_V1_MARKER.to_vec();
+        b.push(1); // one BUMP
+        b.push(0x01); // block height 1
+        b.push(65); // tree height 65
+        assert!(Beef::from_bytes(&b).is_err());
+        let proof = MerkleProof { block_height: 1, tree_height: 65, levels: vec![vec![node(0, 0x02, Some(&[0x22; 32]))]; 65] };
+        assert!(compute_root_from_bump(&proof, &[0x22; 32]).is_err());
+    }
+
+    #[test]
+    fn a14_control_a_one_transaction_block_root_is_the_txid() {
+        let txid = [0x55u8; 32];
+        let proof = MerkleProof { block_height: 1, tree_height: 1, levels: vec![vec![node(0, 0x02, Some(&txid))]] };
+        assert_eq!(compute_root_from_bump(&proof, &txid).unwrap(), txid.to_vec());
+    }
+
+    /// Adversarial review HIGH (2026-10-09): a few-KB BUMP whose missing nodes each have a
+    /// duplicate-flagged right child. The old redirect recomputed the left subtree for every
+    /// duplicate — 2^depth work, no error, no stack overflow, just a spinning core (PeerPay never
+    /// acknowledges, so every Monitor task stops). Must finish within a fixed budget.
+    fn exponential_shape(depth: u32) -> (MerkleProof, [u8; 32]) {
+        let txid = [0x22u8; 32];
+        let mut levels: Vec<Vec<Vec<u8>>> = vec![Vec::new(); depth as usize];
+        levels[0].push(node(0, 0x02, Some(&txid)));
+        for j in 0..depth - 1 {
+            levels[j as usize].push(node(1, 0x00, Some(&[0x33; 32]))); // the txid path's siblings
+            levels[j as usize].push(node((1u64 << (depth - 1 - j)) + 1, 0x01, None)); // duplicate right child
+        }
+        levels[0].push(node(1u64 << (depth - 1), 0x00, Some(&[0x44; 32]))); // the one real leaf
+        (MerkleProof { block_height: 1, tree_height: depth as u8, levels }, txid)
+    }
+
+    #[test]
+    fn a14_review_high_duplicate_chain_finishes_in_bounded_time() {
+        let (proof, txid) = exponential_shape(40);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(compute_root_from_bump(&proof, &txid).is_ok());
+        });
+        assert!(rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok(), "the root computation did not finish within 5 s");
+    }
+
+    /// `/code-review max 159` F2: a BUMP that lists every leaf of a 2^16-transaction block and no
+    /// higher level makes the root computation look up ~2^17 nodes; scanning the level for each one
+    /// was quadratic (~2^31 node reads for a 2 MB BUMP, reachable before PeerPay acknowledges).
+    #[test]
+    fn a14_review_f2_a_wide_bump_finishes_in_bounded_time() {
+        let n: u64 = 1 << 16;
+        let txid = [0x22u8; 32];
+        let mut level0 = vec![node(0, 0x02, Some(&txid))];
+        for o in 1..n {
+            let mut h = [0u8; 32];
+            h[..8].copy_from_slice(&o.to_le_bytes());
+            level0.push(node(o, 0x00, Some(&h)));
+        }
+        let mut levels = vec![level0];
+        levels.extend((1..16).map(|_| Vec::new()));
+        let proof = MerkleProof { block_height: 1, tree_height: 16, levels };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(compute_root_from_bump(&proof, &txid).is_ok());
+        });
+        assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)), Ok(true), "a wide BUMP must compute within 5 s");
+    }
+
+    #[test]
+    fn a14_control_two_leaf_root_matches_independent_sha256d() {
+        let a = [0x22u8; 32];
+        let b = [0x33u8; 32];
+        let proof = MerkleProof {
+            block_height: 1,
+            tree_height: 1,
+            levels: vec![vec![node(0, 0x02, Some(&a)), node(1, 0x00, Some(&b))]],
+        };
+        assert_eq!(compute_root_from_bump(&proof, &a).unwrap(), sha256d(&a, &b));
+    }
+
+    #[test]
+    fn a14_control_legitimate_duplicate_still_computes() {
+        // Three transactions: proving the third (offset 2) — its sibling (offset 3) is the duplicate.
+        let c = [0x44u8; 32];
+        let h01 = [0x55u8; 32];
+        let proof = MerkleProof {
+            block_height: 1,
+            tree_height: 2,
+            levels: vec![
+                vec![node(2, 0x02, Some(&c)), node(3, 0x01, None)],
+                vec![node(0, 0x00, Some(&h01))],
+            ],
+        };
+        let expected = sha256d(&h01, &sha256d(&c, &c));
+        assert_eq!(compute_root_from_bump(&proof, &c).unwrap(), expected);
     }
 }
 
@@ -1249,15 +1595,45 @@ fn log_bump_structure(proof: &MerkleProof) {
     }
 }
 
+/// The deepest merkle tree a BUMP may describe: 2^64 transactions is past any block, and it keeps
+/// `offset << 1` inside a u64 (B5-T1-P7a-1, adversarial review).
+pub const MAX_BUMP_TREE_HEIGHT: usize = 64;
+
+/// A node found or computed at some level of a BUMP.
+#[derive(Clone)]
+enum BumpNode {
+    Hash(Vec<u8>),
+    /// Flagged duplicate: it stands for its left sibling's hash.
+    Duplicate,
+}
+
+fn sha256d_pair(left: &[u8], right: &[u8]) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    let mut combined = Vec::with_capacity(64);
+    combined.extend_from_slice(left);
+    combined.extend_from_slice(right);
+    Sha256::digest(Sha256::digest(&combined)).to_vec()
+}
+
 /// Compute the merkle root from a BUMP for a given txid hash (natural byte order).
 /// Returns the root hash in natural byte order.
 /// Uses SHA256d (double SHA256) as per Bitcoin merkle trees.
+///
+/// B5-T1-P7a-1: ported from `@bsv/sdk` `MerklePath.computeRoot` / `findOrComputeLeaf` — a duplicate
+/// node means "hash the working (left) hash with itself" and is never resolved by recursing into its
+/// sibling (that recursion made a few-KB hostile BUMP cost 2^depth work).
 fn compute_root_from_bump(proof: &MerkleProof, txid_natural: &[u8]) -> Result<Vec<u8>, String> {
-    use sha2::{Sha256, Digest};
+    if txid_natural.len() != 32 {
+        return Err(format!("txid must be 32 bytes, got {}", txid_natural.len()));
+    }
+    if proof.levels.len() > MAX_BUMP_TREE_HEIGHT {
+        return Err(format!("BUMP has {} levels; at most {}", proof.levels.len(), MAX_BUMP_TREE_HEIGHT));
+    }
+    let level0 = proof.levels.first().ok_or("BUMP has no levels")?;
 
     // Find the txid at level 0
     let mut working_offset: Option<u64> = None;
-    for node in &proof.levels[0] {
+    for node in level0 {
         let (offset, vl) = read_node_offset(node)?;
         let flag = if node.len() > vl { node[vl] } else { 0 };
         if flag & 0x02 != 0 {
@@ -1271,59 +1647,104 @@ fn compute_root_from_bump(proof: &MerkleProof, txid_natural: &[u8]) -> Result<Ve
     }
 
     let working_offset = working_offset.ok_or("txid not found at level 0 of BUMP")?;
+
+    // A block holding one transaction: its txid is the merkle root (`@bsv/sdk` `computeRoot`).
+    if proof.levels.len() == 1 && level0.len() == 1 && working_offset == 0 {
+        return Ok(txid_natural.to_vec());
+    }
+
+    let index = index_bump(proof)?;
+
     let mut current_hash = txid_natural.to_vec();
     let mut current_offset = working_offset;
 
     for level in 0..proof.levels.len() {
         let sibling_offset = current_offset ^ 1;
-
-        // Find sibling at this level
-        let sibling_hash = find_or_compute_node(proof, level, sibling_offset)?;
-
-        // Concatenate in correct order and double-SHA256
-        let (left, right) = if current_offset % 2 == 0 {
-            (current_hash.as_slice(), sibling_hash.as_slice())
-        } else {
-            (sibling_hash.as_slice(), current_hash.as_slice())
+        current_hash = match find_or_compute_node(&index, level, sibling_offset)? {
+            BumpNode::Duplicate => sha256d_pair(&current_hash, &current_hash),
+            BumpNode::Hash(sibling) if current_offset % 2 == 0 => sha256d_pair(&current_hash, &sibling),
+            BumpNode::Hash(sibling) => sha256d_pair(&sibling, &current_hash),
         };
-
-        let mut combined = Vec::with_capacity(64);
-        combined.extend_from_slice(left);
-        combined.extend_from_slice(right);
-
-        let hash1 = Sha256::digest(&combined);
-        let hash2 = Sha256::digest(&hash1);
-        current_hash = hash2.to_vec();
-
         current_offset >>= 1;
     }
 
     Ok(current_hash)
 }
 
-/// Find a node's hash at a given level and offset, or compute it recursively from children.
-/// Matches the TS SDK's findOrComputeLeaf method.
-fn find_or_compute_node(proof: &MerkleProof, level: usize, offset: u64) -> Result<Vec<u8>, String> {
-    use sha2::{Sha256, Digest};
-
-    // Check if node exists at this level
-    if level < proof.levels.len() {
-        for node in &proof.levels[level] {
+/// Every level of a BUMP indexed by offset once (first node wins, as a scan would): a lookup per
+/// level per node was quadratic in the BUMP's size (`/code-review max 159` F2).
+fn index_bump(proof: &MerkleProof) -> Result<Vec<std::collections::HashMap<u64, Result<BumpNode, String>>>, String> {
+    let mut index: Vec<std::collections::HashMap<u64, Result<BumpNode, String>>> = Vec::with_capacity(proof.levels.len());
+    for (level, nodes) in proof.levels.iter().enumerate() {
+        let mut m = std::collections::HashMap::with_capacity(nodes.len());
+        for node in nodes {
             let (node_offset, vl) = read_node_offset(node)?;
-            if node_offset == offset {
+            m.entry(node_offset).or_insert_with(|| {
                 let flag = if node.len() > vl { node[vl] } else { 0 };
                 if flag & 0x01 != 0 {
-                    // Duplicate — find sibling (offset ^ 1) and use its hash
-                    let sibling_offset = offset ^ 1;
-                    return find_or_compute_node(proof, level, sibling_offset);
+                    Ok(BumpNode::Duplicate)
+                } else if node.len() >= vl + 1 + 32 {
+                    Ok(BumpNode::Hash(node[vl + 1..vl + 33].to_vec()))
+                } else {
+                    Err(format!("Node at level {} offset {} has no hash data", level, node_offset))
                 }
-                // Regular hash or txid — extract 32-byte hash
-                if node.len() >= vl + 1 + 32 {
-                    return Ok(node[vl+1..vl+33].to_vec());
-                }
-                return Err(format!("Node at level {} offset {} has no hash data", level, offset));
-            }
+            });
         }
+        index.push(m);
+    }
+    Ok(index)
+}
+
+/// B5-T1-P7a-2: a BUMP (BRC-74 hex) parsed into its levels.
+pub fn parse_bump_hex(bump_hex: &str) -> Result<MerkleProof, String> {
+    let bytes = hex::decode(bump_hex).map_err(|e| format!("Invalid BUMP hex: {}", e))?;
+    let mut cursor = Cursor::new(bytes.as_slice());
+    read_bump(&mut cursor)
+}
+
+/// B5-T1-P7a-2: the TSC proof (`{index, nodes, height}`) for the transaction `txid_natural` out of a
+/// BUMP — its own leaf, and at each level the sibling of its own path (computed from the levels
+/// below when the BUMP leaves it out). Unlike `parse_bump_hex_to_tsc`, a BUMP holding several
+/// transactions (a merged or compound BUMP) gives this transaction's path, not the last leaf's.
+pub fn bump_path_tsc(proof: &MerkleProof, txid_natural: &[u8; 32]) -> Result<serde_json::Value, String> {
+    if proof.levels.len() > MAX_BUMP_TREE_HEIGHT {
+        return Err(format!("BUMP has {} levels; at most {}", proof.levels.len(), MAX_BUMP_TREE_HEIGHT));
+    }
+    let index = index_bump(proof)?;
+    let leaf = proof.levels.first().ok_or("BUMP has no levels")?.iter().find_map(|node| {
+        let (offset, vl) = read_node_offset(node).ok()?;
+        (node.len() >= vl + 33 && node[vl] & 0x02 != 0 && node[vl + 1..vl + 33] == txid_natural[..]).then_some(offset)
+    }).ok_or("txid not found at level 0 of BUMP")?;
+    let mut nodes = Vec::with_capacity(proof.levels.len());
+    for level in 0..proof.levels.len() {
+        nodes.push(match find_or_compute_node(&index, level, (leaf >> level) ^ 1)? {
+            BumpNode::Duplicate => serde_json::json!("*"),
+            BumpNode::Hash(h) => {
+                let mut display = h;
+                display.reverse();
+                serde_json::json!(hex::encode(display))
+            }
+        });
+    }
+    Ok(serde_json::json!({ "index": leaf, "nodes": nodes, "height": proof.block_height }))
+}
+
+/// The merkle root (internal byte order, as in a block header) a BUMP proves for a raw
+/// transaction. B5-T1-P7a-1: the one entry for checking a counterparty's BUMP.
+pub fn bump_root_for_tx(proof: &MerkleProof, raw_tx: &[u8]) -> Result<[u8; 32], String> {
+    use sha2::{Digest, Sha256};
+    let txid_natural = Sha256::digest(Sha256::digest(raw_tx));
+    let root = compute_root_from_bump(proof, &txid_natural)?;
+    root.try_into().map_err(|_| "merkle root is not 32 bytes".to_string())
+}
+
+/// Find a node at a given level and offset, or compute it from its children — `@bsv/sdk`
+/// `findOrComputeLeaf`. A duplicate right child reuses the left child's hash; a duplicate LEFT child
+/// is malformed. Every missing node either resolves through present children or fails, so the work
+/// is bounded by the nodes the BUMP actually carries.
+fn find_or_compute_node(index: &[std::collections::HashMap<u64, Result<BumpNode, String>>], level: usize, offset: u64) -> Result<BumpNode, String> {
+    if let Some(found) = index.get(level).and_then(|m| m.get(&offset)) {
+        return found.clone();
     }
 
     // Not found — compute from children at level below
@@ -1332,18 +1753,14 @@ fn find_or_compute_node(proof: &MerkleProof, level: usize, offset: u64) -> Resul
     }
 
     let child_left_offset = offset << 1;
-    let child_right_offset = child_left_offset + 1;
-
-    let left_hash = find_or_compute_node(proof, level - 1, child_left_offset)?;
-    let right_hash = find_or_compute_node(proof, level - 1, child_right_offset)?;
-
-    let mut combined = Vec::with_capacity(64);
-    combined.extend_from_slice(&left_hash);
-    combined.extend_from_slice(&right_hash);
-
-    let hash1 = Sha256::digest(&combined);
-    let hash2 = Sha256::digest(&hash1);
-    Ok(hash2.to_vec())
+    let left = match find_or_compute_node(index, level - 1, child_left_offset)? {
+        BumpNode::Hash(h) => h,
+        BumpNode::Duplicate => return Err(format!("Node at level {} offset {} is a duplicate on the left", level - 1, child_left_offset)),
+    };
+    Ok(BumpNode::Hash(match find_or_compute_node(index, level - 1, child_left_offset + 1)? {
+        BumpNode::Duplicate => sha256d_pair(&left, &left),
+        BumpNode::Hash(right) => sha256d_pair(&left, &right),
+    }))
 }
 
 /// Compute the merkle root from a proof using its first txid node.
@@ -1745,6 +2162,14 @@ pub fn compute_merkle_root_from_tsc(
     Ok(hex::encode(root_display))
 }
 
+/// Test-only: a BUMP as hex (the form ARC returns in `merklePath`).
+#[cfg(test)]
+pub(crate) fn bump_to_hex(bump: &MerkleProof) -> Result<String, String> {
+    let mut bytes = Vec::new();
+    write_bump(&mut bytes, bump)?;
+    Ok(hex::encode(bytes))
+}
+
 /// Write a merkle proof (BUMP)
 fn write_bump(bytes: &mut Vec<u8>, bump: &MerkleProof) -> Result<(), String> {
     // Write block height as varint (NOT fixed 4 bytes!)
@@ -2090,4 +2515,47 @@ pub struct MissingParent {
     pub child_txid: String,
     pub missing_parent_txid: String,
     pub input_vout: u32,
+}
+
+/// B5-T1-P7b `P7b-R6` (review LOW) — `broadcast_v1_for` keeps the subject's needed ancestry only:
+/// a proven parent ends its branch (its own parent is dropped), an unrelated transaction and its
+/// BUMP are dropped, the kept BUMP is re-indexed, and the subject is last.
+#[cfg(test)]
+mod p7b_broadcast_v1_for_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    fn tx(prev: [u8; 32], tag: u8) -> Vec<u8> {
+        let mut t = vec![1, 0, 0, 0, 1];
+        t.extend(prev);
+        t.extend([0, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 1]);
+        t.extend(1_000u64.to_le_bytes());
+        t.extend([1, tag, 0, 0, 0, 0]);
+        t
+    }
+    fn h(t: &[u8]) -> [u8; 32] { Sha256::digest(Sha256::digest(t)).into() }
+    fn display(t: &[u8]) -> String { hex::encode(h(t).iter().rev().copied().collect::<Vec<u8>>()) }
+    fn bump(height: u32, t: &[u8]) -> MerkleProof {
+        let mut node = vec![0x00, 0x02];
+        node.extend(h(t));
+        MerkleProof { block_height: height, tree_height: 1, levels: vec![vec![node]] }
+    }
+
+    #[test]
+    fn p7b_r6_keeps_needed_ancestry_remaps_bumps_subject_last() {
+        let unrelated = tx([0xaa; 32], 1);
+        let grandparent = tx([0xbb; 32], 2);
+        let parent = tx(h(&grandparent), 3);
+        let subject = tx(h(&parent), 4);
+        let beef = Beef {
+            version: BEEF_V1_MARKER,
+            bumps: vec![bump(100, &unrelated), bump(200, &parent)],
+            transactions: vec![subject.clone(), unrelated, grandparent, parent.clone()],
+            tx_to_bump: vec![None, Some(0), None, Some(1)],
+        };
+        let out = Beef::from_bytes(&beef.broadcast_v1_for(&display(&subject)).unwrap()).unwrap();
+        assert_eq!(out.transactions, vec![parent, subject], "only the proven parent, then the subject");
+        assert_eq!(out.bumps.iter().map(|b| b.block_height).collect::<Vec<_>>(), vec![200], "the unrelated BUMP was kept");
+        assert_eq!(out.tx_to_bump, vec![Some(0), None], "the parent's BUMP index was not remapped");
+    }
 }

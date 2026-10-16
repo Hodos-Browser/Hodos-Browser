@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import { walletFetch } from '../services/walletApi';
+import HeldCoinsLine from './HeldCoinsLine';
+import WaitingPaymentsLine from './WaitingPaymentsLine';
 import { TransactionForm } from './TransactionForm';
 import { useBalance } from '../hooks/useBalance';
 import { useAddress } from '../hooks/useAddress';
@@ -152,15 +154,20 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
   const [rejectedCount, setRejectedCount] = useState(0);
   // beta.3 Phase 10d — sent payments whose recipient was not notified
   const [undeliverableCount, setUndeliverableCount] = useState(0);
+  // B5-T1-P7b — incoming payments stored but not credited yet (held, retried)
+  const [heldCount, setHeldCount] = useState(0);
+  const [heldOverdueCount, setHeldOverdueCount] = useState(0);
 
   // Self-poll peerpay status every 10s while panel is visible (live updates)
   useEffect(() => {
     const pollStatus = () => {
       walletFetch('/wallet/peerpay/status')
-        .then(r => r.json())
+        // B5-T1-P7b (review 164 #6): an error answer is not "nothing held" — keep what is shown.
+        .then(r => { if (!r.ok) throw new Error(`peerpay status ${r.status}`); return r.json(); })
         .then((data: { receive_count?: number; receive_amount?: number;
                        failure_count?: number; failure_amount?: number;
-                       rejected_count?: number; undeliverable_count?: number }) => {
+                       rejected_count?: number; undeliverable_count?: number;
+                       held_count?: number | null; held_overdue_count?: number | null }) => {
           const rc = data.receive_count || 0;
           const ra = data.receive_amount || 0;
           const fc = data.failure_count || 0;
@@ -169,6 +176,9 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
           setFailureNotification(fc > 0 ? { count: fc, amount: fa } : null);
           setRejectedCount(data.rejected_count || 0);
           setUndeliverableCount(data.undeliverable_count || 0);
+          // null = the held payments could not be read: keep what is shown (never "none held")
+          if (data.held_count != null) setHeldCount(data.held_count);
+          if (data.held_overdue_count != null) setHeldOverdueCount(data.held_overdue_count);
         })
         .catch(() => {});
     };
@@ -620,6 +630,8 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
               </span>
             )}
           </div>
+          {/* B5-T1-P5: coins held but not proven money, directly under the balance. */}
+          <HeldCoinsLine bsvPrice={bsvPrice} onChanged={refreshBalance} />
           {/* P2a-A3: useBalance has always tracked `error`, and NOTHING rendered it. With
               the wallet unreachable the panel showed a stale figure with no hint that it
               was stale -- and, before the bridge fix, a confident $0.00. Say so plainly
@@ -751,6 +763,10 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
           </div>
         </div>
       )}
+
+      {/* Held incoming payment banner (B5-T1-P7b — stored, not credited yet; clears itself when credited) */}
+      <WaitingPaymentsLine count={heldCount} overdueCount={heldOverdueCount}
+        className="peerpay-banner-light peerpay-banner-warning" />
 
       {/* Action Buttons — 2x2 grid */}
       <div className="wallet-actions-light">

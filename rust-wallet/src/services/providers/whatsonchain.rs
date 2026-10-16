@@ -147,13 +147,12 @@ impl IndexerProvider for WhatsOnChainProvider {
     }
 
     async fn outspend(&self, txid: &str, vout: u32) -> Result<OutspendStatus, IndexerError> {
-        // WoC `/tx/{txid}/outspend/{vout}`: 200 `{"spent":bool}` → status. A 404 is AMBIGUOUS
-        // (spent OR the tx/output doesn't exist), so treat it as Unspent (FAIL-CLOSED) — never
-        // claim Spent without proof. The old `404 → Spent` was fail-open and could mark good
-        // UTXOs spent. For an authoritative spent-check use `reconcile::check_outpoint_spent`,
-        // which cross-validates the correct `/tx/{txid}/{vout}/spent` endpoint across providers.
+        // WoC `/tx/{txid}/{vout}/spent`: 200 `{"txid","vin","status"}` names the spender. A 404 is
+        // AMBIGUOUS (unspent, or the tx/output unknown), read as Unspent — never Spent without proof.
+        // B5-T1-P7b (review 164 #1, measured 2026-10-12): the old route `/tx/{txid}/outspend/{vout}`
+        // does not exist (404 "page not found" for a SPENT output), so this answered Unspent always.
         match self
-            .get_json(&format!("/tx/{}/outspend/{}", txid, vout))
+            .get_json(&format!("/tx/{}/{}/spent", txid, vout))
             .await
         {
             Ok(json) => Ok(parse_outspend(json)),
@@ -280,7 +279,9 @@ pub(crate) fn parse_tx_status(txid: &str, json: &Value) -> TxStatus {
 
 /// Parse WoC `/tx/{txid}/outspend/{vout}` response.
 pub(crate) fn parse_outspend(json: Value) -> OutspendStatus {
-    let spent = json.get("spent").and_then(|v| v.as_bool()).unwrap_or(false);
+    // `/spent` answers with the spender (`txid`); the legacy `{"spent": bool}` shape is kept.
+    let spent = json.get("spent").and_then(|v| v.as_bool()).unwrap_or(false)
+        || json.get("txid").and_then(|v| v.as_str()).map(|s| s.len() == 64 && s.bytes().all(|c| c.is_ascii_hexdigit())).unwrap_or(false);
     if spent {
         let spending_txid = json
             .get("txid")
@@ -433,6 +434,13 @@ mod tests {
             }
             _ => panic!("expected Spent"),
         }
+    }
+
+    /// B5-T1-P7b — the `/tx/{txid}/{vout}/spent` answer recorded live 2026-10-12.
+    #[test]
+    fn parse_spent_route_answer() {
+        let j = json!({"txid": "7d9d3ab1f46f8287ba37be3d5263f5f030c049ba47628e9fd469f1643d6db6dd", "vin": 0, "status": "confirmed"});
+        assert!(matches!(parse_outspend(j), OutspendStatus::Spent { spending_vin: Some(0), .. }));
     }
 
     #[test]

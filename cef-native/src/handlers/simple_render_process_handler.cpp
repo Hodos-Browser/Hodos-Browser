@@ -49,6 +49,19 @@ static std::unordered_map<std::string, std::string> s_scriptCache; // URL → sc
 // would double-wrap the very APIs they override.
 static std::unordered_map<std::string, std::string> s_contextRanUrl; // frameId → URL
 static std::unordered_map<std::string, std::string> s_injectedUrl;   // frameId → URL
+// The frame whose scriptlet payload a message path is running right now, OUTSIDE the lock
+// (B5-T0-P6). If that ExecuteJavaScript creates the frame's context, the re-entrant
+// OnContextCreated must not run a cached copy as well. Guarded by s_scriptCacheMutex.
+static std::string s_executingFrame;
+
+// scheme://host[:port] of a URL (the whole string if it has no scheme). Scriptlets are chosen
+// per host, so a payload is stale for a frame only when the frame is on another ORIGIN — a
+// same-site URL change (pushState, replaceState) must not discard it (B5-T0-P6).
+static std::string OriginOf(const std::string& u) {
+    const size_t scheme = u.find("://");
+    if (scheme == std::string::npos) return u;
+    return u.substr(0, u.find_first_of("/?#", scheme + 3));
+}
 
 // NOTE: the fingerprint seed cache (s_domainSeeds/s_seedMutex) and the per-site disable
 // set (s_fingerprintDisabledUrls/s_fpDisabledMutex) were DELETED 2026-08-09 along with
@@ -831,26 +844,44 @@ void SimpleRenderProcessHandler::OnContextCreated(
     // 8e-2: Inject pre-cached scriptlets IMMEDIATELY — before any page JS runs.
     // This is the earliest possible injection point in CEF.
     std::string url = frame->GetURL().ToString();
-    if (!url.empty() && url.find("127.0.0.1") == std::string::npos) {
+    std::string toInject;
+    {
         const std::string frameId = frame->GetIdentifier().ToString();
         std::lock_guard<std::mutex> lock(s_scriptCacheMutex);
 
         // P12: a context being created means a NEW document in this frame, so nothing has
         // been injected into it yet. Clearing first is what lets a RELOAD of the same URL
-        // inject again instead of being mistaken for the duplicate push.
+        // inject again instead of being mistaken for the duplicate push. B5-T0-P6: cleared
+        // for EVERY URL — the load-complete guard reads this entry as "this document already
+        // has its scriptlets", so a stale one would drop the next document's injection.
         if (!frameId.empty()) {
             s_injectedUrl.erase(frameId);
             s_contextRanUrl[frameId] = url;
         }
 
-        auto it = s_scriptCache.find(url);
-        if (it != s_scriptCache.end() && !it->second.empty()) {
-            LOG_INFO_RENDER("💉 OnContextCreated: injecting scriptlets for " + hodos::LogSafeUrl(url) +
-                " (" + std::to_string(it->second.size()) + " chars)");
-            frame->ExecuteJavaScript(it->second, url, 0);
-            s_scriptCache.erase(it); // One-shot: don't re-inject on subframe contexts
-            if (!frameId.empty()) s_injectedUrl[frameId] = url;
+        if (!url.empty() && url.find("127.0.0.1") == std::string::npos) {
+            auto it = s_scriptCache.find(url);
+            if (it != s_scriptCache.end() && !it->second.empty()) {
+                if (!frameId.empty() && s_executingFrame == frameId) {
+                    // This context is being created BY a payload this frame is running right now
+                    // (a message path called ExecuteJavaScript): that payload is the document's
+                    // scriptlets. Consume the cached copy without running it a second time.
+                    LOG_DEBUG_RENDER("💉 OnContextCreated: frame is running its payload -- cached copy consumed, not run");
+                    s_scriptCache.erase(it);
+                } else {
+                    LOG_INFO_RENDER("💉 OnContextCreated: injecting scriptlets for " + hodos::LogSafeUrl(url) +
+                        " (" + std::to_string(it->second.size()) + " chars)");
+                    // B5-T0-P6: take the script out and run it AFTER releasing the lock — script
+                    // that creates another frame's context re-enters this function.
+                    toInject = std::move(it->second);
+                    s_scriptCache.erase(it); // One-shot: don't re-inject on subframe contexts
+                    if (!frameId.empty()) s_injectedUrl[frameId] = url;
+                }
+            }
         }
+    }
+    if (!toInject.empty()) {
+        frame->ExecuteJavaScript(toInject, url, 0);
     }
 
     // Fingerprint farbling used to be INJECTED HERE as FINGERPRINT_PROTECTION_SCRIPT.
@@ -1568,7 +1599,7 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
 
             if (!url.empty() && !script.empty()) {
                 const std::string frameId = frame ? frame->GetIdentifier().ToString() : std::string();
-                std::lock_guard<std::mutex> lock(s_scriptCacheMutex);
+                std::unique_lock<std::mutex> lock(s_scriptCacheMutex);
 
                 // P12 MITIGATION. Three cases, and only the first is new:
                 //
@@ -1593,10 +1624,24 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
                 const bool alreadyInjected =
                     !frameId.empty() && s_injectedUrl[frameId] == url;
 
-                if (contextRan && !alreadyInjected) {
+                if (contextRan && !alreadyInjected && OriginOf(frame->GetURL().ToString()) != OriginOf(url)) {
+                    // The frame is on another site than the one its context ran for: this
+                    // payload is stale for it (B5-T0-P6). Origins, not URLs — a replaceState
+                    // between the context and this payload must not drop it.
+                    LOG_DEBUG_RENDER("💉 P12: payload for " + hodos::LogSafeUrl(url) +
+                        " is stale -- the frame has moved on; dropped");
+                } else if (contextRan && !alreadyInjected) {
                     LOG_INFO_RENDER("💉 P12: late-arrival inject for " + hodos::LogSafeUrl(url) +
                         " (" + std::to_string(script.size()) + " chars)");
+                    // B5-T0-P6: never run script under s_scriptCacheMutex — a context created by
+                    // the call re-enters OnContextCreated on this thread, which takes the lock;
+                    // s_executingFrame tells it not to run a cached copy too.
+                    const std::string previous = s_executingFrame;
+                    s_executingFrame = frameId;
+                    lock.unlock();
                     frame->ExecuteJavaScript(script, url, 0);
+                    lock.lock();
+                    s_executingFrame = previous;
                     s_injectedUrl[frameId] = url;
                 } else if (contextRan) {
                     LOG_DEBUG_RENDER("💉 P12: duplicate payload for " + hodos::LogSafeUrl(url) +
@@ -1666,10 +1711,64 @@ bool SimpleRenderProcessHandler::OnProcessMessageReceived(
             std::string script = args->GetString(0);
 
             if (!script.empty()) {
-                LOG_DEBUG_RENDER("💉 Injecting cosmetic scriptlets (" + std::to_string(script.size()) + " chars)");
+                // Once per DOCUMENT (B5-T0-P6). This load-complete path is the fallback for a
+                // document the early paths missed. Without the guard it ran a second copy into
+                // documents OnContextCreated had already injected, and again on every
+                // same-document URL change (YouTube's video clicks). Each copy wraps the APIs
+                // the previous copy wrapped -- and uBO's safeSelf captures the already-wrapped
+                // JSON.stringify -- so cost multiplies: measured 0.43 ms per JSON.stringify
+                // with one copy, 18.6 ms with two, 136 ms with three.
+                // s_injectedUrl is cleared in OnContextCreated, so a non-empty entry means
+                // "this document already has its scriptlets", whatever its URL is now.
+                // (Non-empty: the preload path reads it with operator[], which inserts "".)
+                //
+                // The lock is NOT held while the script runs: if this document has no V8
+                // context yet, ExecuteJavaScript creates one, which runs OnContextCreated on
+                // this thread, which takes s_scriptCacheMutex (a std::mutex) -- a self-deadlock.
+                const std::string frameId = frame ? frame->GetIdentifier().ToString() : std::string();
+                const std::string frameUrl = frame ? frame->GetURL().ToString() : std::string();
 
-                // Execute scriptlets directly — they are self-contained JS from adblock engine
-                frame->ExecuteJavaScript(script, "about:blank", 0);
+                // The payload names the page it was computed for. If this frame has moved on to
+                // another SITE since (www.youtube.com -> m.youtube.com), it is stale: injecting it
+                // would also block that document's own payload through the guard below. Origins,
+                // not full URLs: scriptlets are chosen per host, and a same-site URL change (a
+                // YouTube video click) must not discard a payload the document may still need.
+                const std::string payloadUrl = args->GetSize() >= 2 ? args->GetString(1).ToString() : std::string();
+                if (!payloadUrl.empty() && OriginOf(payloadUrl) != OriginOf(frameUrl)) {
+                    LOG_DEBUG_RENDER("💉 Cosmetic scriptlets for " + hodos::LogSafeUrl(payloadUrl) +
+                        " arrived after the frame moved to " + hodos::LogSafeUrl(frameUrl) + " -- dropped");
+                    return true;
+                }
+
+                bool inject = true;
+                std::string previous;
+                {
+                    std::lock_guard<std::mutex> lock(s_scriptCacheMutex);
+                    const auto injected = frameId.empty() ? s_injectedUrl.end() : s_injectedUrl.find(frameId);
+                    inject = !(injected != s_injectedUrl.end() && !injected->second.empty());
+                    // If running the script creates this document's context, the re-entrant
+                    // OnContextCreated sees s_executingFrame and does not run a cached copy too.
+                    // (Not an erase of the cache entry: that is keyed by URL and shared by every
+                    // frame and tab in the process — another tab may still need it.)
+                    if (inject) {
+                        previous = s_executingFrame;
+                        s_executingFrame = frameId;
+                    }
+                }
+                if (!inject) {
+                    LOG_DEBUG_RENDER("💉 Cosmetic scriptlets already in this document -- dropped (" +
+                        std::to_string(script.size()) + " chars)");
+                } else {
+                    LOG_DEBUG_RENDER("💉 Injecting cosmetic scriptlets (" + std::to_string(script.size()) + " chars)");
+
+                    // Execute scriptlets directly — they are self-contained JS from adblock engine
+                    frame->ExecuteJavaScript(script, "about:blank", 0);
+                    // Recorded AFTER running: a context created by the call above clears the
+                    // entry in OnContextCreated, and this document now has its scriptlets.
+                    std::lock_guard<std::mutex> lock(s_scriptCacheMutex);
+                    s_executingFrame = previous;
+                    if (!frameId.empty()) s_injectedUrl[frameId] = frame->GetURL().ToString();
+                }
             }
             return true;
         }

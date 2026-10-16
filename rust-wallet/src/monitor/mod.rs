@@ -310,7 +310,7 @@ impl Monitor {
             // TaskCheckPeerPay
             if now - last_check_peerpay >= self.schedule.check_peerpay {
                 last_check_peerpay = now;
-                if let Err(e) = task_check_peerpay::run(&self.state, &self.client).await {
+                if let Err(e) = task_check_peerpay::run(&self.state).await {
                     error!("   ❌ TaskCheckPeerPay failed: {}", e);
                     self.log_event("TaskCheckPeerPay:error", Some(&e));
                 }
@@ -348,7 +348,7 @@ impl Monitor {
             // TaskReplayOverlay — retry overlay notification for certs stuck in 'unpublished_pending_overlay'
             if now - last_replay_overlay >= self.schedule.replay_overlay {
                 last_replay_overlay = now;
-                if let Err(e) = task_replay_overlay::run(&self.state, &self.client).await {
+                if let Err(e) = task_replay_overlay::run(&self.state).await {
                     warn!("   ⚠️ TaskReplayOverlay failed: {}", e);
                     self.log_event("TaskReplayOverlay:error", Some(&e));
                 }

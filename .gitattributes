@@ -72,3 +72,5 @@ CMakeLists.txt text eol=lf
 *.db       binary
 *.sqlite   binary
 *.sqlite3  binary
+# B5-T1-P7a-1: compiled-in header checkpoints and header fixtures — never line-ending converted
+*.bin      binary

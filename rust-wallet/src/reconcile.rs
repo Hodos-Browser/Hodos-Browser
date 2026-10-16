@@ -7,7 +7,7 @@
 //!   - **c1 (this commit):** [`check_outpoint_spent`] — the authoritative,
 //!     cross-validated "is this outpoint spent?" check. Extracted from the inline
 //!     single-WoC block in `do_onchain_backup` (`handlers.rs`) and hardened.
-//!   - c2: `recover_change_index` (unwired).
+//!   - c2: `find_receive_index_upto` (was `recover_change_index`).
 //!   - c3: `reconcile_spent_inputs` (unwired).
 //!
 //! ## Spent-check decision rule (owner-locked 2026-07-10)
@@ -62,10 +62,6 @@ use crate::recovery;
 const WOC_BASE: &str = "https://api.whatsonchain.com/v1/bsv/main";
 const GORILLAPOOL_BASE: &str = "https://ordinals.gorillapool.io/api";
 
-/// Gap-scan window around `MAX(addresses.index)` for the uncached path (design §1
-/// step 4b / §9 minor). Symmetric `back`/`gap_limit`, capped by guardrail #9 (≤50).
-const GAP_BACK: i32 = 20;
-const GAP_LIMIT: i32 = 20;
 
 /// Authoritative result of a single-outpoint spent check. `Unknown` is the
 /// fail-closed value: the caller must treat it as "do nothing".
@@ -315,7 +311,8 @@ pub fn derive_receive_address(master_privkey: &[u8], master_pubkey: &[u8], index
 }
 
 // ---------------------------------------------------------------------------
-// c2 — recover_change_index
+// c2 — find_receive_index_upto (was recover_change_index; bound moved to the
+// wallet's high-water mark in B5-T1-P6)
 //
 // Given the locking script of one output of a spending tx `Y`, find the wallet
 // self-derivation index `N` such that BRC-42 `"2-receive address-{N}"` reproduces
@@ -329,7 +326,8 @@ pub fn derive_receive_address(master_privkey: &[u8], master_pubkey: &[u8], index
 //     even when `N` is far from `MAX(index)`. But the `addresses` table has NO
 //     derivation-method column, so a matched `index>=0` row could be BIP32, not
 //     BRC-42 (review D-K1). The match is therefore only a *candidate*.
-//   - Gap-scan: bounded window around `MAX(index)` for uncached indices.
+//   - Search: every index `0..=high_water + 50` for uncached indices (B5-T1-P6 —
+//     a window around `MAX(index)` missed change at addresses a restore stripped).
 //
 // Every candidate is verified by re-deriving `"2-receive address-{N}"` and
 // byte-comparing to the target (guardrail #4). `index<0` (master −1 / external −2 /
@@ -353,7 +351,7 @@ fn pubkey_to_p2pkh_script(pubkey: &[u8]) -> Vec<u8> {
 
 /// Derive the P2PKH script for self-derivation index `N` (`"2-receive address-{N}"`).
 /// `None` on any derivation error (index is then simply skipped).
-fn derive_receive_p2pkh_script(
+pub(crate) fn derive_receive_p2pkh_script(
     master_privkey: &[u8],
     master_pubkey: &[u8],
     index: i32,
@@ -368,7 +366,7 @@ fn derive_receive_p2pkh_script(
 
 /// True iff BRC-42 `"2-receive address-{index}"` reproduces `target_script` exactly.
 /// The authoritative ownership+method check (guardrail #4).
-fn verify_receive_index(
+pub(crate) fn verify_receive_index(
     master_privkey: &[u8],
     master_pubkey: &[u8],
     index: i32,
@@ -379,65 +377,30 @@ fn verify_receive_index(
         .unwrap_or(false)
 }
 
-/// Bounded gap-scan around `max_index` (design §1 step 4b). Returns the first index
-/// in `[max−back, max+gap_limit]` (clamped at 0) whose BRC-42 derivation verifies.
-fn gap_scan_receive_index(
-    master_privkey: &[u8],
-    master_pubkey: &[u8],
-    max_index: i32,
-    target_script: &[u8],
-    back: i32,
-    gap_limit: i32,
-) -> Option<i32> {
-    let lo = (max_index - back).max(0);
-    let hi = max_index + gap_limit;
-    (lo..=hi).find(|&i| verify_receive_index(master_privkey, master_pubkey, i, target_script))
-}
-
-/// Pure decision core: verify cache candidates first, else bounded gap-scan.
-/// Separated from the DB reads so the whole rule (incl. the D-K1 wrong-key guard)
-/// is unit-testable without a database.
-fn recover_change_index_pure(
+/// Pure decision core: verify cache candidates first (skipping special indices), else
+/// search every index `0..=high_water + SCAN_GAP_LIMIT`. Separated from the DB reads so
+/// the whole rule (incl. the D-K1 wrong-key guard) is unit-testable without a database.
+/// B5-T1-P6: bounded by the wallet's high-water mark — never a window around
+/// `MAX(addresses.index)`, which a restore's stripped address rows leave too low.
+pub(crate) fn find_receive_index_pure(
     master_privkey: &[u8],
     master_pubkey: &[u8],
     cache_candidates: &[i32],
-    max_index: i32,
+    high_water: i32,
     target_script: &[u8],
 ) -> Option<i32> {
-    // 1) Verify each cache-proposed candidate (skip special indices defensively).
-    for &n in cache_candidates {
-        if n >= 0 && verify_receive_index(master_privkey, master_pubkey, n, target_script) {
-            return Some(n);
-        }
-    }
-    // 2) Uncached — bounded gap-scan.
-    gap_scan_receive_index(
-        master_privkey,
-        master_pubkey,
-        max_index,
-        target_script,
-        GAP_BACK,
-        GAP_LIMIT,
-    )
+    cache_candidates
+        .iter()
+        .copied()
+        .find(|&n| n >= 0 && verify_receive_index(master_privkey, master_pubkey, n, target_script))
+        .or_else(|| (0..=high_water.max(0) + crate::recovery::SCAN_GAP_LIMIT as i32)
+            .find(|&i| verify_receive_index(master_privkey, master_pubkey, i, target_script)))
 }
 
-/// Find the verified BRC-42 self index that owns `target_script`, or `None`.
-///
-/// Behavior-neutral (c2): unwired — c3 calls this to recover the spending tx's
-/// wallet-owned change. Caller supplies the master keypair (fetched once via
-/// `get_master_{private,public}_key_from_db`) and holds the DB lock for `conn`.
-pub fn recover_change_index(
-    conn: &Connection,
-    master_privkey: &[u8],
-    master_pubkey: &[u8],
-    wallet_id: i64,
-    target_script: &[u8],
-) -> Option<i32> {
-    let addr_repo = AddressRepository::new(conn);
-
-    // Cache-first: index>=0 rows whose stored-address P2PKH byte-equals the target.
-    // (A match is only a candidate — it might be a BIP32 row; the pure core re-verifies.)
-    let cache_candidates: Vec<i32> = addr_repo
+/// `index>=0` address rows whose stored-address P2PKH byte-equals `target_script`. Only
+/// candidates: a matched row could be BIP32 (D-K1) — the caller re-derives.
+pub(crate) fn cached_receive_candidates(conn: &Connection, wallet_id: i64, target_script: &[u8]) -> Vec<i32> {
+    AddressRepository::new(conn)
         .get_all_by_wallet(wallet_id)
         .unwrap_or_default()
         .into_iter()
@@ -448,25 +411,30 @@ pub fn recover_change_index(
                 .unwrap_or(false)
         })
         .map(|a| a.index)
-        .collect();
+        .collect()
+}
 
-    let max_index = addr_repo.get_max_index(wallet_id).ok().flatten().unwrap_or(-1);
-
-    recover_change_index_pure(
-        master_privkey,
-        master_pubkey,
-        &cache_candidates,
-        max_index,
-        target_script,
-    )
+/// The verified BRC-42 self index that owns `target_script`, or `None` — the one change
+/// lookup (`reconcile_backup_tx`, `reconcile_spent_inputs`). Caller supplies the master
+/// keypair and the wallet's high-water mark (`WalletRepository :: receive_high_water`)
+/// and holds the DB lock for `conn`.
+pub fn find_receive_index_upto(
+    conn: &Connection,
+    master_privkey: &[u8],
+    master_pubkey: &[u8],
+    wallet_id: i64,
+    high_water: i32,
+    target_script: &[u8],
+) -> Option<i32> {
+    let cache_candidates = cached_receive_candidates(conn, wallet_id, target_script);
+    find_receive_index_pure(master_privkey, master_pubkey, &cache_candidates, high_water, target_script)
 }
 
 // ---------------------------------------------------------------------------
 // c3 — reconcile_spent_inputs building blocks (pure, lib-testable).
 //
 // The async orchestration `reconcile_spent_inputs(state: &AppState, ...)` lives in
-// `handlers.rs` (it needs `AppState` + `cache_helpers::verify_tsc_proof_against_block`,
-// both main-only). These pure helpers keep the parse + txid-verify + report logic
+// `handlers.rs` (it needs `AppState` and its chain tracker, both main-only). These pure helpers keep the parse + txid-verify + report logic
 // unit-testable here; the orchestration's full exercise is integration/smoke (§7).
 // ---------------------------------------------------------------------------
 
@@ -490,41 +458,67 @@ impl ReconcileReport {
 /// Pure + bounds-checked (a malformed/truncated tx → `Err`, never a panic), so the
 /// caller fails closed. Skips the input section; ignores witness (BSV has none).
 pub fn parse_tx_outputs(raw_tx: &[u8]) -> Result<Vec<(i64, Vec<u8>)>, String> {
+    Ok(parse_tx_output_spans(raw_tx)?
+        .into_iter()
+        .map(|(value, offset, len)| (value, raw_tx[offset..offset + len].to_vec()))
+        .collect())
+}
+
+/// Like [`parse_tx_outputs`] but returns `(satoshis, script_offset, script_length)`
+/// — where each locking script sits inside `raw_tx`, without copying it. The offset
+/// is what `outputs.script_offset` stores (B5-T1-P4), so a script too long to keep
+/// inline can be read back from the raw transaction.
+pub fn parse_tx_output_spans(raw_tx: &[u8]) -> Result<Vec<(i64, usize, usize)>, String> {
+    parse_tx_spans(raw_tx).map(|(_, outputs)| outputs)
+}
+
+/// [`parse_tx_output_spans`] plus every input's spent outpoint `(txid, vout)` (txid as
+/// lowercase display hex). Every offset is bounds- and overflow-checked: truncated or
+/// corrupt bytes are an `Err`, never a panic (B5-T1-P6 `P6-A14`; T3's BS-M8).
+pub fn parse_tx_spans(raw_tx: &[u8]) -> Result<(Vec<(String, u32)>, Vec<(i64, usize, usize)>), String> {
     use crate::transaction::decode_varint;
 
+    let truncated = || "truncated tx".to_string();
+    let advance = |pos: usize, by: u64| -> Result<usize, String> {
+        usize::try_from(by).ok().and_then(|b| pos.checked_add(b)).ok_or_else(truncated)
+    };
     let slice = |from: usize, len: usize| -> Result<&[u8], String> {
-        raw_tx
-            .get(from..from + len)
-            .ok_or_else(|| "truncated tx".to_string())
+        from.checked_add(len).and_then(|end| raw_tx.get(from..end)).ok_or_else(truncated)
     };
 
     let mut pos = 4usize; // skip version
     let (input_count, c) =
-        decode_varint(raw_tx.get(pos..).ok_or("truncated")?).map_err(|e| format!("input count: {:?}", e))?;
+        decode_varint(raw_tx.get(pos..).ok_or_else(truncated)?).map_err(|e| format!("input count: {:?}", e))?;
     pos += c;
+    let mut inputs = Vec::new();
     for _ in 0..input_count {
-        pos += 36; // prev txid (32) + vout (4)
-        let (script_len, c) = decode_varint(raw_tx.get(pos..).ok_or("truncated")?)
+        let outpoint = slice(pos, 36)?; // prev txid (32) + vout (4)
+        let txid: String = outpoint[..32].iter().rev().map(|b| format!("{:02x}", b)).collect();
+        let vout = u32::from_le_bytes([outpoint[32], outpoint[33], outpoint[34], outpoint[35]]);
+        inputs.push((txid, vout));
+        pos += 36;
+        let (script_len, c) = decode_varint(raw_tx.get(pos..).ok_or_else(truncated)?)
             .map_err(|e| format!("input script len: {:?}", e))?;
-        pos += c + script_len as usize + 4; // script + sequence
+        pos = advance(advance(pos + c, script_len)?, 4)?; // script + sequence
     }
 
     let (output_count, c) =
-        decode_varint(raw_tx.get(pos..).ok_or("truncated")?).map_err(|e| format!("output count: {:?}", e))?;
+        decode_varint(raw_tx.get(pos..).ok_or_else(truncated)?).map_err(|e| format!("output count: {:?}", e))?;
     pos += c;
 
-    let mut outputs = Vec::with_capacity(output_count as usize);
+    let mut outputs = Vec::new();
     for _ in 0..output_count {
         let value = u64::from_le_bytes(slice(pos, 8)?.try_into().unwrap());
         pos += 8;
-        let (script_len, c) = decode_varint(raw_tx.get(pos..).ok_or("truncated")?)
+        let (script_len, c) = decode_varint(raw_tx.get(pos..).ok_or_else(truncated)?)
             .map_err(|e| format!("output script len: {:?}", e))?;
         pos += c;
-        let script = slice(pos, script_len as usize)?.to_vec();
-        pos += script_len as usize;
-        outputs.push((value as i64, script));
+        let len = usize::try_from(script_len).map_err(|_| truncated())?;
+        slice(pos, len)?; // bounds check only
+        outputs.push((value as i64, pos, len));
+        pos += len;
     }
-    Ok(outputs)
+    Ok((inputs, outputs))
 }
 
 /// True iff `SHA256d(raw)` (little-endian hex, i.e. the on-chain txid) equals
@@ -719,7 +713,7 @@ mod tests {
         assert_eq!(parse_gorillapool_spend_body(200, &json!([1, 2, 3])), NoSignal);
     }
 
-    // --- c2: recover_change_index (derivation-verify + gap-scan) ---
+    // --- c2: find_receive_index_pure (derivation-verify + bounded search) ---
 
     /// Deterministic master keypair from a fixed 32-byte scalar.
     fn master_keys(seed: u8) -> (Vec<u8>, Vec<u8>) {
@@ -767,7 +761,7 @@ mod tests {
         let (pk, pub_) = master_keys(0x11);
         let target = receive_script(&pk, &pub_, 5);
         assert_eq!(
-            recover_change_index_pure(&pk, &pub_, &[5], 100, &target),
+            find_receive_index_pure(&pk, &pub_, &[5], 100, &target),
             Some(5)
         );
     }
@@ -781,7 +775,7 @@ mod tests {
         let (pk_foreign, pub_foreign) = master_keys(0x22);
         let foreign_target = receive_script(&pk_foreign, &pub_foreign, 3);
         assert_eq!(
-            recover_change_index_pure(&pk, &pub_, &[3], 10, &foreign_target),
+            find_receive_index_pure(&pk, &pub_, &[3], 10, &foreign_target),
             None
         );
     }
@@ -790,19 +784,19 @@ mod tests {
     fn recover_gap_scans_when_uncached() {
         let (pk, pub_) = master_keys(0x11);
         let target = receive_script(&pk, &pub_, 8);
-        // No cache, index 8 within [10-20, 10+20].
-        assert_eq!(recover_change_index_pure(&pk, &pub_, &[], 10, &target), Some(8));
+        // No cache, index 8 within 0..=10+50.
+        assert_eq!(find_receive_index_pure(&pk, &pub_, &[], 10, &target), Some(8));
     }
 
     #[test]
     fn recover_misses_far_uncached_index() {
         let (pk, pub_) = master_keys(0x11);
         let target = receive_script(&pk, &pub_, 100);
-        // No cache, index 100 far outside the window around max=10 → miss.
-        assert_eq!(recover_change_index_pure(&pk, &pub_, &[], 10, &target), None);
+        // No cache, index 100 above high-water 10 + 50 → miss.
+        assert_eq!(find_receive_index_pure(&pk, &pub_, &[], 10, &target), None);
         // ...but the cache rescues a far index.
         assert_eq!(
-            recover_change_index_pure(&pk, &pub_, &[100], 10, &target),
+            find_receive_index_pure(&pk, &pub_, &[100], 10, &target),
             Some(100)
         );
     }
@@ -812,7 +806,7 @@ mod tests {
         let (pk, pub_) = master_keys(0x11);
         let (pk_foreign, pub_foreign) = master_keys(0x33);
         let foreign = receive_script(&pk_foreign, &pub_foreign, 2);
-        assert_eq!(recover_change_index_pure(&pk, &pub_, &[], 10, &foreign), None);
+        assert_eq!(find_receive_index_pure(&pk, &pub_, &[], 10, &foreign), None);
     }
 
     #[test]
@@ -821,9 +815,22 @@ mod tests {
         let target = receive_script(&pk, &pub_, 5);
         // −3 (backup) proposed alongside 5 — must be skipped, 5 wins.
         assert_eq!(
-            recover_change_index_pure(&pk, &pub_, &[-3, 5], 100, &target),
+            find_receive_index_pure(&pk, &pub_, &[-3, 5], 100, &target),
             Some(5)
         );
+    }
+
+    #[test]
+    fn find_uses_the_high_water_not_the_stripped_rows() {
+        // B5-T1-P6 /code-review ultra #1: a restore left address rows only to index 2,
+        // the counter says 40; change at 35 is found (the old ±20 window around MAX(rows)
+        // = 2 searched 0..=22 and missed it).
+        let (pk, pub_) = master_keys(0x11);
+        let target = receive_script(&pk, &pub_, 35);
+        assert_eq!(find_receive_index_pure(&pk, &pub_, &[], 40, &target), Some(35));
+        assert_eq!(find_receive_index_pure(&pk, &pub_, &[], 2, &target), Some(35), "2 + 50 still covers 35");
+        let far = receive_script(&pk, &pub_, 95);
+        assert_eq!(find_receive_index_pure(&pk, &pub_, &[], 40, &far), None, "bounded: 95 > 40 + 50");
     }
 
     // --- c3: parse_tx_outputs / verify_raw_txid / ReconcileReport ---

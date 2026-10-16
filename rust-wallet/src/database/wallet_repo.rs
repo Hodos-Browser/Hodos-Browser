@@ -156,12 +156,45 @@ impl<'a> WalletRepository<'a> {
         }
     }
 
-    /// Update wallet's current_index
-    pub fn update_current_index(&self, wallet_id: i64, new_index: i32) -> Result<()> {
-        self.conn.execute(
-            "UPDATE wallets SET current_index = ?1 WHERE id = ?2",
-            rusqlite::params![new_index, wallet_id],
+    /// The highest receive index this wallet has ever handed out:
+    /// `max(wallets.current_index, MAX(addresses.index ≥ 0))` (B5-T1-P6). Both sources
+    /// count — a restore can strip address rows the counter remembers, and old rows can
+    /// sit above a counter that was reset. It is also the scan's high-water mark.
+    pub fn receive_high_water(&self, wallet_id: i64) -> Result<i32> {
+        self.conn.query_row(
+            "SELECT MAX(w.current_index,
+                        COALESCE((SELECT MAX(a.\"index\") FROM addresses a
+                                  WHERE a.wallet_id = w.id AND a.\"index\" >= 0), 0))
+             FROM wallets w WHERE w.id = ?1",
+            rusqlite::params![wallet_id],
+            |row| row.get(0),
+        )
+    }
+
+    /// The one next-receive-index source (B5-T1-P6, `P6-A11`): returns
+    /// `receive_high_water + 1` and records it as handed out, so every caller —
+    /// `generate_address`, change derivation — gets an index no other call has had.
+    /// The caller must hold the database lock across this call and its address insert.
+    pub fn claim_next_receive_index(&self, wallet_id: i64) -> Result<i32> {
+        let next = self.receive_high_water(wallet_id)? + 1;
+        self.raise_current_index(wallet_id, next)?;
+        Ok(next)
+    }
+
+    /// Move `current_index` up to `index`, never down. Errors unless exactly one wallet
+    /// row was updated — a write that silently matched nothing is how a restore lost its
+    /// counter (`P6-A10`).
+    pub fn raise_current_index(&self, wallet_id: i64, index: i32) -> Result<()> {
+        let n = self.conn.execute(
+            "UPDATE wallets SET current_index = MAX(current_index, ?1) WHERE id = ?2",
+            rusqlite::params![index, wallet_id],
         )?;
+        if n != 1 {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_NOTFOUND),
+                Some(format!("raise_current_index: {} wallet rows updated for id {}", n, wallet_id)),
+            ));
+        }
         Ok(())
     }
 

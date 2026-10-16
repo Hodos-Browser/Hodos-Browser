@@ -33,6 +33,26 @@ pub struct ProviderStats {
     pub last_used_at: Option<Instant>,
 }
 
+/// How one provider failed to answer. Kept for callers that must judge the whole
+/// chain rather than its last link (B5-T1-P2: a broadcast is permanently refused only
+/// if every provider that answered refused it — the last error alone can be a
+/// raw-tx-only "Missing inputs" after an earlier provider timed out holding the tx).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FailureKind {
+    SoftTimeout,
+    Transport,
+    Status(u16),
+    Invalid,
+    NotFound,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderFailure {
+    pub provider: &'static str,
+    pub kind: FailureKind,
+    pub message: String,
+}
+
 pub struct ProviderCollection<P: ?Sized> {
     /// Ordered provider list. Index 0 is the head. Demotion (`SoftTimeout`) moves the
     /// offending provider to the tail.
@@ -87,7 +107,13 @@ impl<P: IndexerProvider + ?Sized> ProviderCollection<P> {
         F: Fn(Arc<P>) -> BoxFut<Result<R, IndexerError>>,
         R: Send + 'static,
     {
-        match self.call_tracking(op, soft_timeout, f).await {
+        let (result, failures) = self.call_tracking(op, soft_timeout, f).await;
+        let failure = failures
+            .iter()
+            .rev()
+            .find(|f| f.kind != FailureKind::NotFound)
+            .map(|f| format!("{}: {}", f.provider, f.message));
+        match (result, failure) {
             (Err(IndexerError::NotFound), Some(failure)) => Err(IndexerError::InvalidResponse {
                 provider: "ProviderCollection",
                 reason: format!("not every provider answered: {}", failure),
@@ -96,13 +122,28 @@ impl<P: IndexerProvider + ?Sized> ProviderCollection<P> {
         }
     }
 
-    /// The fallback loop. Also returns the last failure that was not `NotFound`.
+    /// `call`, plus every provider that failed before the answer (or before giving up),
+    /// in chain order. Same fallback behaviour as `call`.
+    pub async fn call_traced<F, R>(
+        &self,
+        op: ProviderOp,
+        soft_timeout: Duration,
+        f: F,
+    ) -> (Result<R, IndexerError>, Vec<ProviderFailure>)
+    where
+        F: Fn(Arc<P>) -> BoxFut<Result<R, IndexerError>>,
+        R: Send + 'static,
+    {
+        self.call_tracking(op, soft_timeout, f).await
+    }
+
+    /// The fallback loop. Also returns every provider failure, in chain order.
     async fn call_tracking<F, R>(
         &self,
         op: ProviderOp,
         soft_timeout: Duration,
         f: F,
-    ) -> (Result<R, IndexerError>, Option<String>)
+    ) -> (Result<R, IndexerError>, Vec<ProviderFailure>)
     where
         F: Fn(Arc<P>) -> BoxFut<Result<R, IndexerError>>,
         R: Send + 'static,
@@ -114,7 +155,7 @@ impl<P: IndexerProvider + ?Sized> ProviderCollection<P> {
         };
 
         let mut last_err: Option<IndexerError> = None;
-        let mut failure: Option<String> = None;
+        let mut failures: Vec<ProviderFailure> = Vec::new();
 
         for provider in &snapshot {
             if !provider.supports(op) {
@@ -127,10 +168,15 @@ impl<P: IndexerProvider + ?Sized> ProviderCollection<P> {
             match tokio::time::timeout(soft_timeout, future).await {
                 Ok(Ok(value)) => {
                     self.bump(provider.name(), |s| s.successes += 1);
-                    return (Ok(value), failure);
+                    return (Ok(value), failures);
                 }
                 Ok(Err(IndexerError::NotFound)) => {
                     self.bump(provider.name(), |s| s.not_found += 1);
+                    failures.push(ProviderFailure {
+                        provider: provider.name(),
+                        kind: FailureKind::NotFound,
+                        message: "not found".to_string(),
+                    });
                     last_err = Some(IndexerError::NotFound);
                     // Advance to next provider. DESIGN §2.2 originally said NotFound
                     // should short-circuit as a positive "tx doesn't exist" signal — but
@@ -142,7 +188,18 @@ impl<P: IndexerProvider + ?Sized> ProviderCollection<P> {
                 }
                 Ok(Err(err)) => {
                     self.bump(provider.name(), |s| s.hard_errors += 1);
-                    failure = Some(format!("{}: {}", provider.name(), err));
+                    let kind = match &err {
+                        IndexerError::Transport(_) => FailureKind::Transport,
+                        IndexerError::SoftTimeout(_) => FailureKind::SoftTimeout,
+                        IndexerError::ProviderStatus { status, .. } => FailureKind::Status(*status),
+                        IndexerError::InvalidResponse { .. } => FailureKind::Invalid,
+                        IndexerError::NotFound => FailureKind::NotFound,
+                    };
+                    failures.push(ProviderFailure {
+                        provider: provider.name(),
+                        kind,
+                        message: err.to_string(),
+                    });
                     last_err = Some(err);
                     // Advance to next provider without demoting (transport/4xx/5xx is
                     // not the "slow provider" signal that demotion targets).
@@ -150,7 +207,11 @@ impl<P: IndexerProvider + ?Sized> ProviderCollection<P> {
                 Err(_elapsed) => {
                     self.bump(provider.name(), |s| s.soft_timeouts += 1);
                     self.demote(provider.name());
-                    failure = Some(format!("{}: soft timeout", provider.name()));
+                    failures.push(ProviderFailure {
+                        provider: provider.name(),
+                        kind: FailureKind::SoftTimeout,
+                        message: "soft timeout".to_string(),
+                    });
                     last_err = Some(IndexerError::SoftTimeout(soft_timeout));
                     // Advance to next provider; the demoted one is now at the tail for
                     // subsequent calls.
@@ -162,7 +223,7 @@ impl<P: IndexerProvider + ?Sized> ProviderCollection<P> {
         (Err(last_err.unwrap_or(IndexerError::InvalidResponse {
             provider: "ProviderCollection",
             reason: "no eligible providers for this op".to_string(),
-        })), failure)
+        })), failures)
     }
 
     /// 5s base + 50ms per KiB, capped at 30s. Matches canonical `postBeef` formula.
@@ -198,9 +259,16 @@ impl<P: IndexerProvider + ?Sized> ProviderCollection<P> {
     }
 
     #[cfg(test)]
-    fn current_order(&self) -> Vec<&'static str> {
+    pub(crate) fn current_order(&self) -> Vec<&'static str> {
         let guard = self.providers.lock().expect("providers mutex poisoned");
         guard.iter().map(|p| p.name()).collect()
+    }
+
+    /// Test-only (B5-T1-P7b): the providers `call` would try for `op`, in order.
+    #[cfg(test)]
+    pub(crate) fn eligible_order(&self, op: ProviderOp) -> Vec<&'static str> {
+        let guard = self.providers.lock().expect("providers mutex poisoned");
+        guard.iter().filter(|p| p.supports(op)).map(|p| p.name()).collect()
     }
 }
 

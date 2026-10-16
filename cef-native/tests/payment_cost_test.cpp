@@ -409,4 +409,35 @@ TEST(PaymentCostP3, OrdinaryAmountsStillPrice) {
     EXPECT_EQ(c.satoshis, 100000);
 }
 
+// B5-T1-P2 — the gold pill for a payment still being sent after a temporary failure.
+// Bodies are the exact shapes rust-wallet's review_actions_error_body produces.
+const char* kInFlight = R"({"isError":true,"code":5,"name":"WERR_REVIEW_ACTIONS","message":"m","error":"m","txid":"aa","sendWithResults":[{"txid":"aa","status":"sending"}],"reviewActionResults":[{"txid":"aa","status":"serviceError"}]})";
+const char* kAbandoned = R"({"isError":true,"code":5,"txid":"aa","error":"m","sendWithResults":[{"txid":"aa","status":"failed"}],"reviewActionResults":[{"txid":"aa","status":"serviceError"}]})";
+const char* kRefused = R"({"isError":true,"code":5,"txid":"aa","error":"m","sendWithResults":[{"txid":"aa","status":"failed"}],"reviewActionResults":[{"txid":"aa","status":"invalidTx"}]})";
+
+TEST(PaymentReplyLightsPill, InFlightPaymentLightsThePill) {
+    EXPECT_TRUE(hodos::IsInFlightPaymentReply(kInFlight));
+    EXPECT_TRUE(hodos::PaymentReplyLightsPill(/*ok=*/false, kInFlight));  // IPC: HTTP 400
+    EXPECT_TRUE(hodos::PaymentReplyLightsPill(/*ok=*/true, kInFlight));   // HTTP: UR_SUCCESS
+}
+
+TEST(PaymentReplyLightsPill, RefusedOrAbandonedDoesNot) {
+    EXPECT_FALSE(hodos::PaymentReplyLightsPill(false, kAbandoned));
+    EXPECT_FALSE(hodos::PaymentReplyLightsPill(true, kAbandoned));
+    EXPECT_FALSE(hodos::PaymentReplyLightsPill(false, kRefused));
+    EXPECT_FALSE(hodos::PaymentReplyLightsPill(false,
+        R"({"isError":true,"code":6,"parameter":"options.sendWith","message":"m","error":"m"})"));
+    // A sendWith entry "sending" that is NOT the subject does not count.
+    EXPECT_FALSE(hodos::IsInFlightPaymentReply(
+        R"({"isError":true,"code":5,"txid":"aa","sendWithResults":[{"txid":"bb","status":"sending"}]})"));
+}
+
+TEST(PaymentReplyLightsPill, UnchangedRuleForOrdinaryReplies) {
+    EXPECT_TRUE(hodos::PaymentReplyLightsPill(true, R"({"txid":"aa","tx":[1]})"));
+    EXPECT_TRUE(hodos::PaymentReplyLightsPill(true, "not json"));       // as before: no error found
+    EXPECT_FALSE(hodos::PaymentReplyLightsPill(true, R"({"error":"x"})"));
+    EXPECT_FALSE(hodos::PaymentReplyLightsPill(false, R"({"txid":"aa"})"));  // non-2xx without envelope
+    EXPECT_FALSE(hodos::PaymentReplyLightsPill(false, "not json"));
+}
+
 }  // namespace

@@ -13,7 +13,7 @@ use actix_web::web;
 use log::{info, warn};
 
 use crate::AppState;
-use crate::database::{TransactionRepository, ProvenTxRepository, ProvenTxReqRepository, OutputRepository};
+use crate::database::{TransactionRepository, ProvenTxReqRepository, OutputRepository};
 
 /// Run the TaskReviewStatus task
 pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
@@ -28,7 +28,6 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
     {
         let req_repo = ProvenTxReqRepository::new(conn);
         let tx_repo = TransactionRepository::new(conn);
-        let proven_tx_repo = ProvenTxRepository::new(conn);
 
         let mut stmt = conn.prepare(
             "SELECT provenTxReqId, txid, proven_tx_id FROM proven_tx_reqs
@@ -42,16 +41,24 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
         .filter_map(|r| r.ok())
         .collect();
 
-        for (req_id, txid, proven_tx_id) in &unnotified {
-            // Ensure transaction is marked completed
-            if let Err(e) = tx_repo.update_broadcast_status(&txid, "confirmed") {
-                warn!("   ⚠️ Failed to update tx {} status: {}", txid, e);
-                continue;
-            }
-
-            // Link proven_tx if available
-            if let Some(ptx_id) = proven_tx_id {
-                let _ = proven_tx_repo.link_transaction(&txid, *ptx_id);
+        for (req_id, txid, _proven_tx_id) in &unnotified {
+            // B5-T1-P7a-2 `C14-g`: a request marked completed is not evidence (it can come from an
+            // import, a restored file or an older build). The transaction is completed only with a
+            // stored proof our own headers verify; otherwise it is left to TaskCheckForProofs.
+            match crate::proof_store::stored_verified_proof(conn, &*state.chain_tracker, txid) {
+                // A failed row is TaskUnFail's: it recovers it from this proof with the bookkeeping
+                // (inputs re-marked, outputs re-enabled) a bare status write skips (xhigh 168 #1).
+                Ok(Some(_)) if matches!(tx_repo.get_broadcast_status(&txid), Ok(Some(ref s)) if s == "failed") => {
+                    info!("   ⏳ {} has a verified proof but is failed — left to TaskUnFail", txid);
+                }
+                Ok(Some(row)) => {
+                    if let Err(e) = tx_repo.update_broadcast_status(&txid, "confirmed") {
+                        warn!("   ⚠️ Failed to update tx {} status: {}", txid, e);
+                        continue;
+                    }
+                    let _ = crate::proof_store::link(conn, &row, txid);
+                }
+                _ => info!("   ⏳ {} request completed but no proof our headers verify — status left as is", txid),
             }
 
             // Mark as notified

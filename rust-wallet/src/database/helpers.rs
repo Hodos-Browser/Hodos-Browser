@@ -50,6 +50,25 @@ pub fn get_master_public_key_from_db(db: &WalletDatabase) -> Result<Vec<u8>> {
     Ok(public_key.serialize().to_vec())
 }
 
+/// Compressed master public key (hex) for a recovery phrase — the value this wallet
+/// stores as `users.identity_key` at creation (`connection.rs`, "identity_key =
+/// master pubkey hex"). Same derivation as `get_master_public_key_from_db`, from a
+/// phrase that is not (yet) the cached one. B5-T1-P2: used to check a phrase read
+/// from the OS credential store before it is trusted. ⛔ The error never carries
+/// the phrase.
+pub fn master_public_key_hex_from_phrase(phrase: &str) -> std::result::Result<String, String> {
+    use secp256k1::{Secp256k1, SecretKey, PublicKey};
+
+    let mnemonic = Mnemonic::parse_in(Language::English, phrase)
+        .map_err(|_| "not a valid BIP39 phrase".to_string())?;
+    let seed = mnemonic.to_seed("");
+    let master_key = XPrv::new(&seed).map_err(|e| format!("failed to create master key: {}", e))?;
+    let secret_key = SecretKey::from_slice(&master_key.private_key().to_bytes())
+        .map_err(|e| format!("invalid private key: {}", e))?;
+    let public_key = PublicKey::from_secret_key(&Secp256k1::new(), &secret_key);
+    Ok(hex::encode(public_key.serialize()))
+}
+
 /// Derive private key for spending an output — Phase 7B/7C direct derivation
 ///
 /// Derives the private key directly from the output's derivation_prefix/suffix
@@ -155,7 +174,19 @@ pub fn address_to_address_info(addr: &super::Address) -> crate::json_storage::Ad
 /// - `derivation_prefix="2-receive address"` + `derivation_suffix="{n}"` → `address_index = n`
 /// - `derivation_prefix=NULL` → `address_index = -1` (master pubkey or unknown)
 /// - `locking_script` (BLOB) → `script` (hex string)
-pub fn output_to_fetcher_utxo(output: &super::Output) -> crate::utxo_fetcher::UTXO {
+///
+/// ⛔ B5-T1-P4 (`P4-A13`, owner decision 1(c), inv 3 approved 2026-10-02): a row with
+/// no inline script — NULL (offloaded above the cap, or stripped by a restore) or an
+/// empty blob — returns `None` and so never enters a coin-selection pool. It used to
+/// map to `script = ""`, and the signer then signed over an empty prevout script.
+///
+/// ⛔ B5-T1-P4 (owner, 2026-10-04): a row whose script is not a plain 25-byte P2PKH is
+/// also refused. Once real scripts are stored, a multi-sat inscription at one of our
+/// addresses (P2PKH + envelope) would otherwise be validly signed and spent as money.
+/// Prior art: `wallet-toolbox` checks no script at selection — it admits only a
+/// byte-exact P2PKH into the change basket (`internalizeAction`); that admission
+/// rule is B5-T1-P5's classifier. This is the selection-time backstop.
+pub fn output_to_fetcher_utxo(output: &super::Output) -> Option<crate::utxo_fetcher::UTXO> {
     // Derive address_index from derivation_prefix/suffix
     let address_index: i32 = match (&output.derivation_prefix, &output.derivation_suffix) {
         (Some(prefix), Some(suffix)) if prefix == "2-receive address" => {
@@ -173,13 +204,19 @@ pub fn output_to_fetcher_utxo(output: &super::Output) -> crate::utxo_fetcher::UT
         }
     };
 
-    // Convert locking_script BLOB to hex string
-    let script = output.locking_script
-        .as_ref()
-        .map(|bytes| hex::encode(bytes))
-        .unwrap_or_default();
+    let Some(bytes) = output.locking_script.as_ref().filter(|b| !b.is_empty()) else {
+        log::warn!("   ⚠️  {}:{} has no inline locking script (script_length {:?}) — not offered for signing",
+            output.txid.as_deref().unwrap_or("?"), output.vout, output.script_length);
+        return None;
+    };
+    if !crate::utxo_fetcher::is_p2pkh_script(bytes) {
+        log::warn!("   ⚠️  {}:{} script is not plain P2PKH ({} B) — not offered for signing",
+            output.txid.as_deref().unwrap_or("?"), output.vout, bytes.len());
+        return None;
+    }
+    let script = hex::encode(bytes);
 
-    crate::utxo_fetcher::UTXO {
+    Some(crate::utxo_fetcher::UTXO {
         txid: output.txid.clone().unwrap_or_default(),
         vout: output.vout as u32,
         satoshis: output.satoshis,
@@ -187,5 +224,5 @@ pub fn output_to_fetcher_utxo(output: &super::Output) -> crate::utxo_fetcher::UT
         address_index,
         custom_instructions: output.custom_instructions.clone(),
         confirmed: true,
-    }
+    })
 }

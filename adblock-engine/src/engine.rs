@@ -1,12 +1,11 @@
 //! AdblockEngine — wrapper around Brave's `adblock` crate
 //!
-//! Manages filter list downloading, engine compilation, serialization for fast
-//! startup, and thread-safe request checking via `RwLock<Engine>`.
+//! Manages filter list downloading, engine compilation (from the cached lists at every
+//! startup), uBO's current scriptlets, and thread-safe request checking via `RwLock<Engine>`.
 //!
 //! Storage layout:
 //! ```
 //! %APPDATA%/HodosBrowser/adblock/
-//!   engine.dat          # Serialized compiled engine (binary, fast reload)
 //!   lists/
 //!     easylist.txt      # Raw downloaded filter list
 //!     easyprivacy.txt
@@ -34,18 +33,62 @@ const DEFAULT_EXPIRY_SECS: u64 = 4 * 24 * 3600;
 // Filter List URLs
 // ============================================================================
 
+/// A configured list: local filename and the URLs to try, in order (mirrors).
+type ListSource = (&'static str, &'static [&'static str]);
+
 /// Default filter lists — standard (no trusted scriptlet permission)
-const FILTER_LISTS: &[(&str, &str)] = &[
-    ("easylist.txt", "https://easylist.to/easylist/easylist.txt"),
-    ("easyprivacy.txt", "https://easylist.to/easylist/easyprivacy.txt"),
+const FILTER_LISTS: &[ListSource] = &[
+    ("easylist.txt", &["https://easylist.to/easylist/easylist.txt"]),
+    ("easyprivacy.txt", &["https://easylist.to/easylist/easyprivacy.txt"]),
 ];
 
 /// Trusted filter lists — loaded with PermissionMask::from_bits(1) to enable
 /// trusted scriptlets (trusted-replace-xhr-response, trusted-replace-fetch-response)
-const TRUSTED_FILTER_LISTS: &[(&str, &str)] = &[
-    ("ublock-filters.txt", "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/filters.txt"),
-    ("ublock-privacy.txt", "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/privacy.txt"),
+///
+/// ⛔ uBO's BUILT lists, not the raw `uAssets/master/filters/*.txt` sources (B5-T0-P6): the raw
+/// `filters.txt` pulls in 10 sub-lists with `!#include`, which adblock-rust ignores as comments —
+/// ~470 KB loaded of ~1.9 MB. The built lists have the includes inlined and real
+/// `! Last modified:` dates. Mirrors in the order uBO's own `assets.json` (1.75.0) lists them.
+const TRUSTED_FILTER_LISTS: &[ListSource] = &[
+    ("ublock-filters.txt", &[
+        "https://ublockorigin.github.io/uAssetsCDN/filters/filters.min.txt",
+        "https://ublockorigin.pages.dev/filters/filters.min.txt",
+        "https://cdn.jsdelivr.net/gh/uBlockOrigin/uAssetsCDN@main/filters/filters.min.txt",
+    ]),
+    ("ublock-privacy.txt", &[
+        "https://ublockorigin.github.io/uAssetsCDN/filters/privacy.min.txt",
+        "https://ublockorigin.pages.dev/filters/privacy.min.txt",
+        "https://cdn.jsdelivr.net/gh/uBlockOrigin/uAssetsCDN@main/filters/privacy.min.txt",
+    ]),
+    // Where uBO publishes fast site fixes (YouTube's land here first).
+    ("ublock-quick-fixes.txt", &[
+        "https://ublockorigin.github.io/uAssetsCDN/filters/quick-fixes.min.txt",
+        "https://ublockorigin.pages.dev/filters/quick-fixes.min.txt",
+        "https://cdn.jsdelivr.net/gh/uBlockOrigin/uAssetsCDN@main/filters/quick-fixes.min.txt",
+    ]),
 ];
+
+/// After a failed refresh, retry this soon instead of trusting the stale copy for a full expiry.
+/// Shorter than the hourly check, so the very next check retries.
+pub(crate) const RETRY_AFTER_FAILURE_SECS: u64 = 1800;
+
+/// A list due within this many seconds of an update check is treated as due.
+const DUE_SLACK_SECS: u64 = 300;
+
+/// Ceiling of the per-list retry backoff (`retry_after`).
+const MAX_RETRY_SECS: u64 = 6 * 3600;
+
+/// Cap on a downloaded list (uBO's built filters are ~2 MB, EasyList ~2 MB).
+const MAX_LIST_BYTES: usize = 32 * 1024 * 1024;
+
+/// Every configured list with its URLs and trust level — the one place both compile paths
+/// (`build_from_lists`, `compile_from_disk`) and the tests take them from.
+fn configured_lists() -> Vec<(&'static str, &'static [&'static str], ParseOptions)> {
+    let trusted = ParseOptions { permissions: PermissionMask::from_bits(1), ..ParseOptions::default() };
+    FILTER_LISTS.iter().map(|(f, u)| (*f, *u, ParseOptions::default()))
+        .chain(TRUSTED_FILTER_LISTS.iter().map(|(f, u)| (*f, *u, trusted)))
+        .collect()
+}
 
 /// uBlock Origin scriptlets resource file (pinned to 1.48.4 — last version using
 /// the old `///`-delimited format that `assemble_scriptlet_resources()` can parse.
@@ -53,15 +96,12 @@ const TRUSTED_FILTER_LISTS: &[(&str, &str)] = &[
 const SCRIPTLETS_URL: &str = "https://raw.githubusercontent.com/gorhill/uBlock/1.48.4/assets/resources/scriptlets.js";
 const SCRIPTLETS_FILE: &str = "scriptlets.js";
 
-/// Serialized engine filename
-const ENGINE_DAT: &str = "engine.dat";
-
 /// Metadata filename
 const META_JSON: &str = "meta.json";
 
 /// Configuration version — bump this when filter list URLs, features, or scriptlet
-/// loading changes. Forces engine.dat rebuild on next startup.
-const CONFIG_VERSION: u32 = 7; // v1 = easylist+easyprivacy only, v2 = +uBlock+scriptlets, v3 = fixed scriptlets URL, v4 = +hodos-unbreak, v5 = +entity-aware blocking, v6 = $generichide suppresses P1 CSS, v7 = +Cloudflare challenge exceptions
+/// loading changes. Forces a fresh download + rebuild on next startup.
+const CONFIG_VERSION: u32 = 9; // v1 = easylist+easyprivacy only, v2 = +uBlock+scriptlets, v3 = fixed scriptlets URL, v4 = +hodos-unbreak, v5 = +entity-aware blocking, v6 = $generichide suppresses P1 CSS, v7 = +Cloudflare challenge exceptions, v8 = +uBlock quick-fixes, v9 = uBO built lists + !#if pruning
 
 /// Hodos Browser compatibility exception list (embedded at compile time).
 /// Contains #@#+js() blanket exceptions for auth domains where scriptlet injection breaks login.
@@ -73,7 +113,7 @@ const HODOS_UNBREAK: &str = include_str!("hodos-unbreak.txt");
 /// License: CC BY-NC-SA 4.0 (same as Brave's usage).
 const ENTITIES_JSON: &str = include_str!("entities.json");
 
-/// Upstream URL for entity list auto-updates (checked every 6 hours alongside filter lists)
+/// Upstream URL for entity list auto-updates (refreshed whenever filter lists are rebuilt)
 const ENTITIES_URL: &str =
     "https://raw.githubusercontent.com/disconnectme/disconnect-tracking-protection/master/entities.json";
 const ENTITIES_FILE: &str = "entities.json";
@@ -101,6 +141,15 @@ pub struct FilterListInfo {
     /// Unix timestamp when this list expires (downloaded_at + expiry from list header)
     #[serde(default)]
     pub expires_at: u64,
+    /// The list's own `! Version:` header, if it has one
+    #[serde(default)]
+    pub version: Option<String>,
+    /// The list's own `! Last modified:` header, if it has one
+    #[serde(default)]
+    pub last_modified: Option<String>,
+    /// Consecutive failed refreshes (backoff); 0 after a successful download
+    #[serde(default)]
+    pub failures: u32,
 }
 
 impl Default for FilterListMeta {
@@ -136,6 +185,39 @@ pub struct AdblockStatus {
     pub last_update: u64,
     pub update_version: u64,
     pub lists: Vec<FilterListInfo>,
+    pub scriptlets: ScriptletStatus,
+}
+
+/// Which scriptlet set the engine is running (reported via /status).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ScriptletStatus {
+    /// e.g. "uBO 1.75.0", "uBO 1.48.4 (fallback)", or "none"
+    pub source: String,
+    /// Resources from that source.
+    pub count: usize,
+    /// Hodos's bundled extras that were added because the source lacks them.
+    pub extra: usize,
+}
+
+/// A scriptlet set as loaded, kept so a failed refresh can keep the previous one.
+#[derive(Clone, Default)]
+struct ScriptletSet {
+    resources: Vec<Resource>,
+    source: String,
+    /// Function name -> uBO priority, for scriptlets whose calls must run first.
+    priorities: HashMap<String, i64>,
+}
+
+impl ScriptletSet {
+    fn from_converted(converted: &[crate::ubo_resources::Converted], source: String) -> Self {
+        ScriptletSet {
+            resources: converted.iter().map(crate::ubo_resources::Converted::to_resource).collect(),
+            source,
+            priorities: converted.iter().filter(|c| c.priority != 0)
+                .filter_map(|c| c.function_name().map(|n| (n.to_string(), c.priority)))
+                .collect(),
+        }
+    }
 }
 
 // ============================================================================
@@ -145,7 +227,7 @@ pub struct AdblockStatus {
 /// Thread-safe ad & tracker blocking engine
 ///
 /// Wraps `adblock::Engine` with global enable/disable toggle,
-/// serialization for fast startup, and filter list management.
+/// compilation from the cached lists, and filter list management.
 pub struct AdblockEngine {
     engine: RwLock<Option<Engine>>,
     enabled: AtomicBool,
@@ -157,6 +239,11 @@ pub struct AdblockEngine {
     update_version: AtomicU64,
     /// disconnect.me entity map: same-org domains are treated as first-party
     entity_map: RwLock<EntityMap>,
+    /// The scriptlet set currently installed, and its status line.
+    scriptlets: RwLock<(ScriptletSet, ScriptletStatus)>,
+    /// Serializes `rebuild_engine` and `refresh_scriptlets`: each installs a set and then swaps
+    /// or patches the engine; interleaved, the live engine and `scriptlets` could disagree.
+    install_lock: tokio::sync::Mutex<()>,
 }
 
 // ============================================================================
@@ -389,6 +476,8 @@ impl AdblockEngine {
             meta: RwLock::new(FilterListMeta::default()),
             update_version: AtomicU64::new(0),
             entity_map: RwLock::new(entity_map),
+            scriptlets: RwLock::new(Default::default()),
+            install_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -402,48 +491,41 @@ impl AdblockEngine {
         std::fs::create_dir_all(&lists_dir)
             .map_err(|e| format!("Failed to create adblock directory: {}", e))?;
 
-        // Try loading serialized engine first (fast startup path)
-        let engine_path = self.adblock_dir.join(ENGINE_DAT);
+        // Compile from the lists already on disk (no network, ~0.15 s for ~154k rules).
+        // ⛔ Not from a serialized engine.dat: adblock 0.10.3's serialization drops each
+        // filter's permission mask, so every trusted-list scriptlet silently stopped resolving
+        // after a restart (B5-T0-P6; `test_adblock_serialization_drops_trusted_permission`).
         let meta_path = self.adblock_dir.join(META_JSON);
+        let disk_meta: Option<FilterListMeta> = std::fs::read_to_string(&meta_path).ok()
+            .and_then(|s| serde_json::from_str(&s).ok());
 
-        let (mut engine, meta) = if engine_path.exists() {
-            match Self::load_serialized(&engine_path, &meta_path) {
-                Ok((eng, meta)) => {
-                    // Check if config version matches — rebuild if filter list config changed
-                    if meta.config_version != CONFIG_VERSION {
-                        info!("Ad blocker: config version changed ({} → {}), rebuilding...",
-                            meta.config_version, CONFIG_VERSION);
-                        Self::build_from_lists(&self.adblock_dir).await?
-                    } else {
-                        info!("Ad blocker: loaded serialized engine ({} lists)", meta.lists.len());
-                        (eng, meta)
-                    }
+        let (mut engine, meta) = match disk_meta {
+            Some(mut meta) if meta.config_version == CONFIG_VERSION => match compile_from_disk(&self.adblock_dir) {
+                Ok((engine, loaded)) => {
+                    info!("Ad blocker: compiled engine from {} cached lists", loaded.len());
+                    reconcile_meta_with_disk(&mut meta, &loaded);
+                    (engine, meta)
                 }
                 Err(e) => {
-                    warn!("Ad blocker: failed to load serialized engine: {}", e);
-                    warn!("Ad blocker: rebuilding from filter lists...");
-                    Self::build_from_lists(&self.adblock_dir).await?
+                    // Reuse every list still fresh on disk; download only what is missing.
+                    warn!("Ad blocker: cannot compile from cached lists ({}), rebuilding...", e);
+                    Self::build_from_lists(&self.adblock_dir, Some(&meta), &http_client()).await?
                 }
+            },
+            Some(meta) => {
+                info!("Ad blocker: config version changed ({} → {}), rebuilding...",
+                    meta.config_version, CONFIG_VERSION);
+                Self::build_from_lists(&self.adblock_dir, None, &http_client()).await?
             }
-        } else {
-            info!("Ad blocker: no serialized engine found, downloading filter lists...");
-            Self::build_from_lists(&self.adblock_dir).await?
+            None => {
+                info!("Ad blocker: no list metadata, downloading filter lists...");
+                Self::build_from_lists(&self.adblock_dir, None, &http_client()).await?
+            }
         };
 
-        // Load scriptlet resources (needed for cosmetic filtering even on deserialized engines)
-        let scriptlets_path = self.adblock_dir.join("resources").join(SCRIPTLETS_FILE);
-        if scriptlets_path.exists() {
-            let resources = assemble_scriptlet_resources(&scriptlets_path);
-            let count = resources.len();
-            engine.use_resources(resources);
-            info!("Ad blocker: loaded {} scriptlet resources from cache", count);
-        }
-
-        // Load extra bundled scriptlets (newer ones missing from 1.48.4 old-format file)
-        let extra = load_extra_scriptlets(&mut engine);
-        if extra > 0 {
-            info!("Ad blocker: loaded {} extra bundled scriptlets", extra);
-        }
+        // Scriptlets are not part of the compiled lists; install them on every load — from disk only,
+        // so startup never waits on GitHub (`refresh_scriptlets` fetches afterwards).
+        self.install_scriptlets(&mut engine).await;
 
         // Store the engine
         {
@@ -542,7 +624,9 @@ impl AdblockEngine {
             resources.hide_selectors.into_iter().collect()
         };
 
-        (selectors, resources.injected_script, resources.generichide)
+        // Lock order: engine (held above), then scriptlets — as everywhere else.
+        let script = order_by_priority(&resources.injected_script, &self.scriptlets.read().unwrap().0.priorities);
+        (selectors, wrap_scriptlets(&script), resources.generichide)
     }
 
     /// Get generic cosmetic selectors matching DOM class names and IDs.
@@ -589,6 +673,12 @@ impl AdblockEngine {
         info!("Ad blocker: {}", if enabled { "enabled" } else { "disabled" });
     }
 
+    /// `load()` failed (e.g. a first start with no network): `Error`, so the update check retries
+    /// the load instead of waiting for a `Ready` that will never come.
+    pub fn mark_load_failed(&self) {
+        *self.status.write().unwrap() = EngineStatus::Error;
+    }
+
     /// Get current lifecycle status
     pub fn get_engine_status(&self) -> EngineStatus {
         *self.status.read().unwrap()
@@ -605,13 +695,19 @@ impl AdblockEngine {
             last_update: meta.engine_built_at,
             update_version: self.get_update_version(),
             lists: meta.lists.clone(),
+            scriptlets: self.scriptlets.read().unwrap().1.clone(),
         }
     }
 
     /// Rebuild the engine from downloaded filter lists (hot-swap).
     /// Used by the background update task.
     pub async fn rebuild_engine(&self) -> Result<(), String> {
-        let (engine, meta) = Self::build_from_lists(&self.adblock_dir).await?;
+        let _install = self.install_lock.lock().await;
+        let previous = self.meta.read().unwrap().clone();
+        let (mut engine, meta) = Self::build_from_lists(&self.adblock_dir, Some(&previous), &http_client()).await?;
+        // Scriptlets from disk: fetching the pin is refresh_scriptlets()' job, run on the same
+        // check — fetching here too would download uBO twice when it is unavailable.
+        self.install_scriptlets(&mut engine).await;
 
         {
             let mut eng = self.engine.write().unwrap();
@@ -640,8 +736,14 @@ impl AdblockEngine {
         if meta.lists.is_empty() {
             return false;
         }
+        // A configured list that never downloaded is missing from meta: retry it rather than
+        // waiting for an unrelated list to expire.
+        let missing = configured_lists().iter()
+            .any(|(f, _, _)| !meta.lists.iter().any(|l| l.filename == *f));
         let now = now_secs();
-        meta.lists.iter().any(|l| l.expires_at > 0 && now >= l.expires_at)
+        // Due within DUE_SLACK_SECS counts as due: a retry window equal to the check interval
+        // (e.g. the 1 h backoff step) must not slip a whole interval on timing drift.
+        missing || meta.lists.iter().any(|l| l.expires_at > 0 && now + DUE_SLACK_SECS >= l.expires_at)
     }
 
     /// Get the current update version (monotonically increasing on each rebuild).
@@ -649,36 +751,72 @@ impl AdblockEngine {
         self.update_version.load(Ordering::Relaxed)
     }
 
+    /// Install the best available scriptlet set into `engine`, then Hodos's extras for any
+    /// name the set lacks.
+    ///
+    /// Preference: uBO's pinned current release (`ubo_resources`), else the old 1.48.4
+    /// single-file set. A refresh never installs a smaller set than the one already running
+    /// (P6-A6): if the fresh set is smaller, or none is available, the previous one is kept.
+    ///
+    /// Disk only, so neither `load()` nor a rebuild waits on GitHub; `refresh_scriptlets()` is
+    /// the one place that fetches.
+    async fn install_scriptlets(&self, engine: &mut Engine) {
+        let fresh = obtain_scriptlets(&self.adblock_dir.join("resources"), false).await;
+        self.apply_scriptlets(engine, fresh);
+    }
+
+    /// Put `fresh` (or the running set, if `fresh` is missing or smaller) into `engine`, then
+    /// the extras, and record what was installed. No I/O.
+    fn apply_scriptlets(&self, engine: &mut Engine, fresh: Option<ScriptletSet>) {
+        let chosen = choose_scriptlets(fresh, &self.scriptlets.read().unwrap().0);
+        engine.use_resources(chosen.resources.clone());
+        let extra = load_extra_scriptlets(engine);
+        info!("Ad blocker: scriptlets: {} ({} resources, {} bundled extras)",
+            chosen.source, chosen.resources.len(), extra);
+        let status = ScriptletStatus { source: chosen.source.clone(), count: chosen.resources.len(), extra };
+        *self.scriptlets.write().unwrap() = (chosen, status);
+    }
+
+    /// If the engine is not running uBO's pinned set (first start after an upgrade, a lost
+    /// cache, a fetch that failed), fetch it and swap it into the live engine. Called after
+    /// `load()` and on every hourly check; a no-op once the pinned set runs.
+    pub async fn refresh_scriptlets(&self) {
+        let _install = self.install_lock.lock().await;
+        let pinned = pinned_scriptlet_source();
+        if self.scriptlets.read().unwrap().0.source == pinned {
+            return;
+        }
+        let Some(fresh) = obtain_scriptlets(&self.adblock_dir.join("resources"), true).await else {
+            return;
+        };
+        if fresh.source != pinned && !self.scriptlets.read().unwrap().0.resources.is_empty() {
+            return; // the pin is still unavailable; keep what runs
+        }
+        {
+            // Lock order: engine, then scriptlets (apply_scriptlets) — as everywhere else.
+            let mut guard = self.engine.write().unwrap();
+            match guard.as_mut() {
+                Some(engine) => self.apply_scriptlets(engine, Some(fresh)),
+                None => return,
+            }
+        }
+        let ver = self.update_version.fetch_add(1, Ordering::Relaxed) + 1;
+        info!("Ad blocker: scriptlets refreshed to {} (version {})", pinned, ver);
+    }
+
     // ========================================================================
     // Private helpers
     // ========================================================================
 
-    /// Load engine from serialized binary file
-    fn load_serialized(
-        engine_path: &Path,
-        meta_path: &Path,
-    ) -> Result<(Engine, FilterListMeta), String> {
-        let data = std::fs::read(engine_path)
-            .map_err(|e| format!("Failed to read engine.dat: {}", e))?;
-
-        let mut engine = Engine::default();
-        engine.deserialize(&data)
-            .map_err(|e| format!("Failed to deserialize engine: {:?}", e))?;
-
-        let meta = if meta_path.exists() {
-            let meta_str = std::fs::read_to_string(meta_path)
-                .map_err(|e| format!("Failed to read meta.json: {}", e))?;
-            serde_json::from_str(&meta_str)
-                .unwrap_or_default()
-        } else {
-            FilterListMeta::default()
-        };
-
-        Ok((engine, meta))
-    }
-
     /// Download filter lists and build engine from scratch
-    async fn build_from_lists(adblock_dir: &Path) -> Result<(Engine, FilterListMeta), String> {
+    /// With `previous` (the running meta), a list that has not expired is reused from disk with
+    /// its recorded metadata; only expired or missing lists are downloaded. Without it (first
+    /// start, config change), every list is downloaded.
+    async fn build_from_lists(
+        adblock_dir: &Path,
+        previous: Option<&FilterListMeta>,
+        client: &reqwest::Client,
+    ) -> Result<(Engine, FilterListMeta), String> {
         let lists_dir = adblock_dir.join("lists");
         let resources_dir = adblock_dir.join("resources");
         std::fs::create_dir_all(&lists_dir)
@@ -686,38 +824,42 @@ impl AdblockEngine {
         std::fs::create_dir_all(&resources_dir)
             .map_err(|e| format!("Failed to create resources directory: {}", e))?;
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
-
         let mut filter_set = FilterSet::new(false); // false = no debug info
         let mut list_infos = Vec::new();
         let now = now_secs();
 
-        // Load standard filter lists (EasyList, EasyPrivacy) — default permissions
-        for (filename, url) in FILTER_LISTS {
-            if let Some(info) = download_and_add_list(
-                &client, &lists_dir, filename, url, now, ParseOptions::default(), &mut filter_set
-            ).await {
-                list_infos.push(info);
+        // Standard lists (EasyList, EasyPrivacy) with default permissions; uBlock's lists trusted.
+        for (filename, urls, opts) in configured_lists() {
+            let prev = previous.and_then(|m| m.lists.iter().find(|l| l.filename == filename));
+            // A placeholder not yet due keeps its backoff: another list's expiry is no reason
+            // to try its dead mirrors again.
+            if let Some(p) = prev.filter(|p| p.downloaded_at == 0 && p.expires_at > now + DUE_SLACK_SECS) {
+                if !lists_dir.join(filename).exists() {
+                    list_infos.push(p.clone());
+                    continue;
+                }
+            }
+            match obtain_list(client, &lists_dir, filename, urls, prev, now).await {
+                Some((text, info)) => {
+                    add_list(&mut filter_set, &text, opts);
+                    info!("Ad blocker: loaded {} ({} rules, {} KB)", filename, info.rule_count, info.size_bytes / 1024);
+                    list_infos.push(info);
+                }
+                None => {
+                    // Never downloaded, nothing cached: a placeholder (0 rules, downloaded_at 0)
+                    // retried with the same backoff as a failed refresh, so an unreachable list
+                    // does not force a full rebuild every hour.
+                    let failures = prev.map_or(0, |p| p.failures).saturating_add(1);
+                    let retry = retry_after(failures);
+                    warn!("Ad blocker: {} unavailable; failure {}, retrying in {} s", filename, failures, retry);
+                    let mut placeholder = list_info(filename, urls[0], "", 0, now + retry);
+                    placeholder.failures = failures;
+                    list_infos.push(placeholder);
+                }
             }
         }
 
-        // Load trusted filter lists (uBlock Origin) — with PermissionMask::from_bits(1)
-        let trusted_opts = ParseOptions {
-            permissions: PermissionMask::from_bits(1),
-            ..ParseOptions::default()
-        };
-        for (filename, url) in TRUSTED_FILTER_LISTS {
-            if let Some(info) = download_and_add_list(
-                &client, &lists_dir, filename, url, now, trusted_opts.clone(), &mut filter_set
-            ).await {
-                list_infos.push(info);
-            }
-        }
-
-        if list_infos.is_empty() {
+        if list_infos.iter().all(|l| l.rule_count == 0) {
             return Err("No filter lists available — cannot build engine".to_string());
         }
 
@@ -727,37 +869,13 @@ impl AdblockEngine {
         filter_set.add_filter_list(&unbreak_text, ParseOptions::default());
         info!("Ad blocker: loaded hodos-unbreak ({} rules)", unbreak_rule_count);
 
-        // Compile the engine (optimize = true for better performance)
-        let mut engine = Engine::from_filter_set(filter_set, true);
-
-        // Download and load scriptlet resources (for cosmetic filtering + YouTube)
-        let scriptlets_path = resources_dir.join(SCRIPTLETS_FILE);
-        match download_filter_list(&client, SCRIPTLETS_URL).await {
-            Ok(text) => {
-                if let Err(e) = std::fs::write(&scriptlets_path, &text) {
-                    warn!("Ad blocker: failed to save scriptlets.js: {}", e);
-                }
-            }
-            Err(e) => {
-                warn!("Ad blocker: failed to download scriptlets.js: {}", e);
-            }
-        }
-        if scriptlets_path.exists() {
-            let resources = assemble_scriptlet_resources(&scriptlets_path);
-            let count = resources.len();
-            engine.use_resources(resources);
-            info!("Ad blocker: loaded {} scriptlet resources", count);
-        }
-
-        // Load extra bundled scriptlets (newer ones missing from 1.48.4 old-format file)
-        let extra = load_extra_scriptlets(&mut engine);
-        if extra > 0 {
-            info!("Ad blocker: loaded {} extra bundled scriptlets", extra);
-        }
+        // Compile the engine (optimize = true for better performance).
+        // Scriptlets are installed by the caller (`install_scriptlets`).
+        let engine = Engine::from_filter_set(filter_set, true);
 
         // Download updated entity list (disconnect.me same-org domain mapping)
         // Non-critical: if download fails, embedded version is used at runtime
-        match download_filter_list(&client, ENTITIES_URL).await {
+        match download_filter_list(client, ENTITIES_URL).await {
             Ok(text) => {
                 // Validate JSON before saving
                 if serde_json::from_str::<serde_json::Value>(&text).is_ok() {
@@ -773,21 +891,6 @@ impl AdblockEngine {
             }
             Err(e) => {
                 warn!("Ad blocker: failed to download entities.json: {} (using embedded fallback)", e);
-            }
-        }
-
-        // Serialize for fast startup
-        match engine.serialize() {
-            Ok(serialized) => {
-                let engine_path = adblock_dir.join(ENGINE_DAT);
-                if let Err(e) = std::fs::write(&engine_path, &serialized) {
-                    warn!("Ad blocker: failed to save engine.dat: {}", e);
-                } else {
-                    info!("Ad blocker: engine serialized ({} KB)", serialized.len() / 1024);
-                }
-            }
-            Err(e) => {
-                warn!("Ad blocker: failed to serialize engine: {:?}", e);
             }
         }
 
@@ -812,6 +915,197 @@ impl AdblockEngine {
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/// Wrap the engine's injected script in a private scope, as uBO's own injector does
+/// (`scriptlet-filtering-core.js`, 1.75.0):
+///
+/// - function-style scriptlets arrive as top-level `function` declarations; unwrapped, they
+///   would become page globals (`window.safeSelf`…) — a tell a site can test for;
+/// - current scriptlets read `scriptletGlobals` (`safe-self.js`), which the injector must
+///   define; without it they throw a ReferenceError inside their try/catch and do nothing.
+///
+/// Empty stays empty, so the shell still skips injection when there is nothing to inject.
+pub(crate) fn wrap_scriptlets(script: &str) -> String {
+    if script.is_empty() {
+        return String::new();
+    }
+    format!("(function() {{\nconst scriptletGlobals = {{}};\n{}\n}})();", script)
+}
+
+/// Compile the engine from the lists already in `<adblock_dir>/lists` — the same lists, trust
+/// levels and unbreak list as `build_from_lists`, with no network. A list missing on disk is
+/// skipped (the update check retries it); `Err` only if none is there. Returns the engine and
+/// the filenames actually compiled.
+fn compile_from_disk(adblock_dir: &Path) -> Result<(Engine, Vec<&'static str>), String> {
+    let lists_dir = adblock_dir.join("lists");
+    let mut filter_set = FilterSet::new(false);
+    let mut loaded = Vec::new();
+    for (filename, _, opts) in configured_lists() {
+        match std::fs::read_to_string(lists_dir.join(filename)) {
+            Ok(text) => {
+                add_list(&mut filter_set, &text, opts);
+                loaded.push(filename);
+            }
+            Err(e) => warn!("Ad blocker: {} not cached ({}); compiling without it", filename, e),
+        }
+    }
+    if loaded.is_empty() {
+        return Err("no cached lists".into());
+    }
+    filter_set.add_filter_list(&load_unbreak_list(adblock_dir), ParseOptions::default());
+    Ok((Engine::from_filter_set(filter_set, true), loaded))
+}
+
+/// After compiling from disk: a list meta still calls fresh but that was NOT on disk (deleted,
+/// quarantined, a failed write) is marked expired with 0 rules, so the first update check
+/// re-fetches it instead of waiting out its recorded expiry.
+fn reconcile_meta_with_disk(meta: &mut FilterListMeta, loaded: &[&str]) {
+    // A placeholder (downloaded_at 0) is never on disk: it keeps its own backoff.
+    for l in meta.lists.iter_mut().filter(|l| l.downloaded_at > 0 && !loaded.contains(&l.filename.as_str())) {
+        l.expires_at = 1;
+        l.rule_count = 0;
+    }
+}
+
+/// Order the calls as uBO does (`scriptlet-filtering-core.js :: sortedCalls`): higher priority
+/// first, then by call text. adblock 0.10.3 collects calls in a std `HashMap`, so without this
+/// their order — and the nesting of scriptlets that wrap the same API — changes per request.
+///
+/// adblock-rust's script is the dependency code followed by one block per call, each exactly
+/// `"try {\n" + call + "\n} catch ( e ) { }\n"` with the call on one line. Blocks are peeled off
+/// the end; anything that does not match that shape stops the parse (old template-style
+/// scriptlets span several lines and are left as they are). Ties compare bytes, where uBO uses
+/// `localeCompare`: the point is a fixed order.
+pub(crate) fn order_by_priority(script: &str, priorities: &HashMap<String, i64>) -> String {
+    const HEAD: &str = "try {\n";
+    const TAIL: &str = "\n} catch ( e ) { }\n";
+    let mut rest = script;
+    let mut calls: Vec<&str> = Vec::new();
+    while rest.ends_with(TAIL) {
+        let body_end = rest.len() - TAIL.len();
+        let Some(start) = rest[..body_end].rfind(HEAD) else { break };
+        let call = &rest[start + HEAD.len()..body_end];
+        if call.contains('\n') {
+            break;
+        }
+        calls.push(call);
+        rest = &rest[..start];
+    }
+    if calls.len() < 2 {
+        return script.to_string();
+    }
+    let prio = |call: &str| call.split('(').next().and_then(|n| priorities.get(n.trim())).copied().unwrap_or(0);
+    calls.sort_by(|a, b| prio(b).cmp(&prio(a)).then_with(|| a.cmp(b)));
+    let mut out = rest.to_string();
+    for call in calls {
+        out.push_str(HEAD);
+        out.push_str(call);
+        out.push_str(TAIL);
+    }
+    out
+}
+
+/// HTTP client for list and resource downloads.
+fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+/// Pick the set to install: uBO's pinned set always (a newer pin may merge scriptlets and be
+/// smaller — counts across versions mean nothing); otherwise the fresh set unless it is
+/// missing or smaller than `current`.
+fn choose_scriptlets(fresh: Option<ScriptletSet>, current: &ScriptletSet) -> ScriptletSet {
+    match fresh {
+        Some(f) if f.source == pinned_scriptlet_source() => f,
+        // Never replace a running pinned set with an older or fallback one.
+        Some(_) if current.source == pinned_scriptlet_source() => current.clone(),
+        Some(f) if f.resources.len() >= current.resources.len() => f,
+        Some(f) => {
+            warn!("Ad blocker: {} has {} scriptlets, fewer than the running {} ({}); keeping the running set",
+                f.source, f.resources.len(), current.source, current.resources.len());
+            current.clone()
+        }
+        None if !current.resources.is_empty() => {
+            warn!("Ad blocker: no scriptlet set available; keeping the running {}", current.source);
+            current.clone()
+        }
+        None => ScriptletSet { source: "none".into(), ..Default::default() },
+    }
+}
+
+/// The `ScriptletSet::source` of uBO's pinned current set.
+fn pinned_scriptlet_source() -> String {
+    format!("uBO {}", crate::ubo_resources::UBO_TAG)
+}
+
+/// The best scriptlet set obtainable now: uBO's pinned current release, else the 1.48.4
+/// single-file set. `None` if neither is available. With `network: false` only what is
+/// already on disk is used (the converted cache, the 1.48.4 file) — nothing is downloaded.
+async fn obtain_scriptlets(resources_dir: &Path, network: bool) -> Option<ScriptletSet> {
+    if let Err(e) = std::fs::create_dir_all(resources_dir) {
+        warn!("Ad blocker: cannot create {}: {}", resources_dir.display(), e);
+    }
+    let client = http_client();
+    let pinned = if network {
+        crate::ubo_resources::obtain(resources_dir, &client).await
+    } else {
+        crate::ubo_resources::cached(resources_dir).ok_or_else(|| "not cached yet".to_string())
+    };
+    match pinned {
+        Ok(converted) => return Some(ScriptletSet::from_converted(&converted, pinned_scriptlet_source())),
+        Err(e) => warn!("Ad blocker: uBO {} scriptlets unavailable: {}", crate::ubo_resources::UBO_TAG, e),
+    }
+    // After a pin bump that could not fetch yet: the last converted set (hash-verified when it
+    // was written) beats the 2023 single-file set. refresh_scriptlets() keeps trying the pin.
+    if let Some((tag, converted)) = crate::ubo_resources::cached_any(resources_dir) {
+        return Some(ScriptletSet::from_converted(&converted, format!("uBO {} (cached; pin {} not fetched yet)", tag, crate::ubo_resources::UBO_TAG)));
+    }
+
+    let resources = obtain_legacy(resources_dir, network.then_some((&client, SCRIPTLETS_URL))).await;
+    if !resources.is_empty() {
+        return Some(ScriptletSet { resources, source: "uBO 1.48.4 (fallback)".into(), priorities: HashMap::new() });
+    }
+    None
+}
+
+/// The 1.48.4 single-file set: used if present and readable; downloaded (when `download` is
+/// given) if missing or unreadable. A download that yields no scriptlets is not kept — a portal
+/// page saved as scriptlets.js would otherwise disable this fallback for good.
+async fn obtain_legacy(resources_dir: &Path, download: Option<(&reqwest::Client, &str)>) -> Vec<Resource> {
+    let legacy = resources_dir.join(SCRIPTLETS_FILE);
+    // adblock's assembler panics (`expect`) on an unreadable or malformed file; contain it.
+    let assemble = |p: &Path| {
+        if !p.exists() {
+            return Vec::new();
+        }
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| assemble_scriptlet_resources(p)))
+            .unwrap_or_else(|_| {
+                warn!("Ad blocker: {} is unreadable as uBO 1.48.4 scriptlets", p.display());
+                Vec::new()
+            })
+    };
+    let mut resources = assemble(&legacy);
+    if let (true, Some((client, url))) = (resources.is_empty(), download) {
+        match download_filter_list(client, url).await {
+            Ok(text) => {
+                let tmp = resources_dir.join("scriptlets.js.download");
+                if std::fs::write(&tmp, &text).is_ok() {
+                    resources = assemble(&tmp);
+                    if resources.is_empty() {
+                        warn!("Ad blocker: downloaded scriptlets.js has no scriptlets; not kept");
+                        let _ = std::fs::remove_file(&tmp);
+                    } else if let Err(e) = std::fs::rename(&tmp, &legacy) {
+                        warn!("Ad blocker: failed to save scriptlets.js: {}", e);
+                    }
+                }
+            }
+            Err(e) => warn!("Ad blocker: failed to download scriptlets.js: {}", e),
+        }
+    }
+    resources
+}
 
 /// Parse `! Expires: N days` or `! Expires: N hours` from a filter list header.
 /// Returns expiry duration in seconds. Defaults to 4 days if not found.
@@ -838,62 +1132,112 @@ fn parse_list_expiry(list_text: &str) -> u64 {
     DEFAULT_EXPIRY_SECS
 }
 
-/// Download a filter list, add to FilterSet, return metadata on success
-async fn download_and_add_list(
+/// Metadata for a list's text as downloaded (or reused) at `downloaded_at`.
+fn list_info(filename: &str, url: &str, text: &str, downloaded_at: u64, expires_at: u64) -> FilterListInfo {
+    FilterListInfo {
+        filename: filename.to_string(),
+        url: url.to_string(),
+        downloaded_at,
+        size_bytes: text.len() as u64,
+        rule_count: text.lines().count(),
+        expires_at,
+        version: parse_list_header(text, "Version"),
+        last_modified: parse_list_header(text, "Last modified"),
+        failures: 0,
+    }
+}
+
+/// Add a list to the filter set after dropping the `!#if` branches that do not apply to Hodos
+/// (`preparser`). Every path that compiles a list goes through here.
+fn add_list(filter_set: &mut FilterSet, text: &str, opts: ParseOptions) {
+    filter_set.add_filter_list(&crate::preparser::prune(text, crate::preparser::HODOS_ENV), opts);
+}
+
+/// Reject a download that is not a filter list: a captive portal or error page answers 200
+/// with HTML, and writing that over the cached list would switch blocking off. A list starts
+/// with `[Adblock …]` or `! Title:`; an HTML page does not. (No size-ratio rule: a list that
+/// legitimately shrinks must still replace its cache.)
+fn check_plausible(text: &str) -> Result<(), String> {
+    if !text.lines().take(20).any(|l| l.starts_with("! Title:") || l.starts_with("[Adblock")) {
+        return Err("no filter-list header in the first 20 lines".into());
+    }
+    Ok(())
+}
+
+/// One configured list's text and metadata:
+/// - `prev` not expired and the file on disk: reuse both, no download;
+/// - else try each URL in turn (mirrors); a plausible answer is saved and used;
+/// - else the cached file, retried with backoff (`retry_after`), never a full fresh expiry;
+/// - else `None`: the caller records a 0-rule placeholder with the same backoff.
+async fn obtain_list(
     client: &reqwest::Client,
     lists_dir: &Path,
     filename: &str,
-    url: &str,
+    urls: &[&str],
+    prev: Option<&FilterListInfo>,
     now: u64,
-    parse_options: ParseOptions,
-    filter_set: &mut FilterSet,
-) -> Option<FilterListInfo> {
-    let list_path = lists_dir.join(filename);
-
-    let list_text = match download_filter_list(client, url).await {
-        Ok(text) => {
-            if let Err(e) = std::fs::write(&list_path, &text) {
-                warn!("Ad blocker: failed to save {}: {}", filename, e);
-            }
-            text
+) -> Option<(String, FilterListInfo)> {
+    let path = lists_dir.join(filename);
+    let cached = std::fs::read_to_string(&path).ok();
+    if let (Some(p), Some(text)) = (prev, &cached) {
+        // A placeholder (downloaded_at 0) is never "fresh": a file that has appeared since must
+        // get real metadata, so try the download and fall back to the file.
+        if p.expires_at > now && p.downloaded_at > 0 {
+            return Some((text.clone(), p.clone()));
         }
-        Err(e) => {
-            warn!("Ad blocker: failed to download {}: {}", filename, e);
-            match std::fs::read_to_string(&list_path) {
-                Ok(text) => {
-                    info!("Ad blocker: using cached {} from disk", filename);
-                    text
+    }
+    for url in urls {
+        match download_filter_list(client, url).await {
+            Ok(text) => match check_plausible(&text) {
+                Ok(()) => {
+                    // Temp file + rename: an interrupted write must not leave a truncated
+                    // list that the next start would load as fresh.
+                    let tmp = path.with_extension("txt.download");
+                    if let Err(e) = std::fs::write(&tmp, &text).and_then(|_| std::fs::rename(&tmp, &path)) {
+                        warn!("Ad blocker: failed to save {}: {}", filename, e);
+                        let _ = std::fs::remove_file(&tmp);
+                    }
+                    let expires_at = now + parse_list_expiry(&text);
+                    let info = list_info(filename, url, &text, now, expires_at);
+                    return Some((text, info));
                 }
-                Err(_) => {
-                    warn!("Ad blocker: no cached {} available, skipping", filename);
-                    return None;
-                }
-            }
+                Err(e) => warn!("Ad blocker: rejected {} from {}: {}", filename, url, e),
+            },
+            Err(e) => warn!("Ad blocker: failed to download {} from {}: {}", filename, url, e),
         }
-    };
+    }
+    let text = cached?;
+    let failures = prev.map_or(0, |p| p.failures).saturating_add(1);
+    let retry = retry_after(failures);
+    warn!("Ad blocker: using cached {}; failure {}, retrying in {} s", filename, failures, retry);
+    let url = prev.map(|p| p.url.clone()).unwrap_or_else(|| urls[0].to_string());
+    let downloaded_at = prev.map(|p| p.downloaded_at).filter(|d| *d > 0).unwrap_or(now);
+    let mut info = list_info(filename, &url, &text, downloaded_at, now + retry);
+    info.failures = failures;
+    Some((text, info))
+}
 
-    let rule_count = list_text.lines().count();
-    let size_bytes = list_text.len() as u64;
-    let expiry_secs = parse_list_expiry(&list_text);
-    let expires_at = now + expiry_secs;
+/// Retry delay after `failures` consecutive failed refreshes: 30 min, 1 h, 2 h, 4 h, then 6 h.
+/// The first retry lands within the next hourly check; an unreachable list does not cost a
+/// full rebuild every hour.
+fn retry_after(failures: u32) -> u64 {
+    let doubled = RETRY_AFTER_FAILURE_SECS.saturating_mul(1u64 << failures.saturating_sub(1).min(16));
+    doubled.min(MAX_RETRY_SECS)
+}
 
-    filter_set.add_filter_list(&list_text, parse_options);
-
-    info!("Ad blocker: loaded {} ({} rules, {} KB)", filename, rule_count, size_bytes / 1024);
-
-    Some(FilterListInfo {
-        filename: filename.to_string(),
-        url: url.to_string(),
-        downloaded_at: now,
-        size_bytes,
-        rule_count,
-        expires_at,
+/// Read `! <key>: value` from a filter list header (first 50 lines). Unfilled template
+/// placeholders such as uAssets' raw `%timestamp%` are treated as absent.
+fn parse_list_header(list_text: &str, key: &str) -> Option<String> {
+    let prefix = format!("! {}:", key);
+    list_text.lines().take(50).find_map(|line| {
+        let v = line.trim().strip_prefix(&prefix)?.trim();
+        (!v.is_empty() && !v.contains('%')).then(|| v.to_string())
     })
 }
 
-/// Download a filter list from URL
+/// Download a filter list from URL, refusing bodies over `MAX_LIST_BYTES` as they arrive.
 async fn download_filter_list(client: &reqwest::Client, url: &str) -> Result<String, String> {
-    let response = client.get(url)
+    let mut response = client.get(url)
         .send()
         .await
         .map_err(|e| format!("HTTP error: {}", e))?;
@@ -902,9 +1246,17 @@ async fn download_filter_list(client: &reqwest::Client, url: &str) -> Result<Str
         return Err(format!("HTTP {} from {}", response.status(), url));
     }
 
-    response.text()
-        .await
-        .map_err(|e| format!("Failed to read response body: {}", e))
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| format!("Failed to read response body: {}", e))? {
+        if bytes.len() + chunk.len() > MAX_LIST_BYTES {
+            return Err(format!("{} is larger than {} bytes", url, MAX_LIST_BYTES));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    // Lenient like reqwest's text(): a stray invalid byte must not reject a whole list, and a
+    // leading byte-order mark must not hide the `! Title:` header.
+    let text = String::from_utf8_lossy(&bytes);
+    Ok(text.strip_prefix('\u{feff}').unwrap_or(&text).to_string())
 }
 
 /// Load the Hodos compatibility exception list.
@@ -1144,21 +1496,6 @@ youtube.com##.ad-showing
     }
 
     #[test]
-    fn test_engine_serialize_deserialize() {
-        let rules = "||ads.example.com^\n||tracker.net^";
-        let engine = engine_from_rules(rules);
-
-        let serialized = engine.serialize().expect("serialize should succeed");
-        assert!(!serialized.is_empty(), "serialized data should not be empty");
-
-        let mut engine2 = Engine::default();
-        engine2.deserialize(&serialized).expect("deserialize should succeed");
-
-        let req = Request::new("https://ads.example.com/banner.js", "https://news.com", "script").unwrap();
-        assert!(engine2.check_network_request(&req).matched, "deserialized engine should block ads");
-    }
-
-    #[test]
     fn test_parse_list_expiry() {
         // EasyList header: "! Expires: 4 days"
         let list = "[Adblock Plus 2.0]\n! Title: EasyList\n! Expires: 4 days\n||ads.example.com^";
@@ -1182,6 +1519,725 @@ youtube.com##.ad-showing
         let engine = AdblockEngine::new(PathBuf::from("/tmp/test-adblock"));
         // No lists loaded → should not need update
         assert!(!engine.needs_update());
+    }
+
+    fn list_info(filename: &str, expires_at: u64) -> FilterListInfo {
+        FilterListInfo {
+            filename: filename.to_string(),
+            url: String::new(),
+            downloaded_at: 1,
+            size_bytes: 1,
+            rule_count: 1,
+            expires_at,
+            version: None,
+            last_modified: None,
+            failures: 0,
+        }
+    }
+
+    /// P6-A7: quick-fixes expires every 8 h while the other lists last days. One expired
+    /// list must be enough to trigger the update, or quick-fixes waits for the slowest list.
+    #[test]
+    fn test_needs_update_when_only_quick_fixes_expired() {
+        let engine = AdblockEngine::new(PathBuf::from("/tmp/test-adblock"));
+        let now = now_secs();
+        let fresh = now + 4 * 24 * 3600;
+        let mut lists: Vec<FilterListInfo> = FILTER_LISTS.iter().chain(TRUSTED_FILTER_LISTS)
+            .map(|(f, _)| list_info(f, fresh))
+            .collect();
+        *engine.meta.write().unwrap() = FilterListMeta { lists: lists.clone(), engine_built_at: now, config_version: CONFIG_VERSION };
+        assert!(!engine.needs_update(), "all lists fresh -> no update");
+
+        lists.iter_mut().find(|l| l.filename == "ublock-quick-fixes.txt")
+            .expect("quick-fixes must be a configured list").expires_at = now - 1;
+        *engine.meta.write().unwrap() = FilterListMeta { lists, engine_built_at: now, config_version: CONFIG_VERSION };
+        assert!(engine.needs_update(), "an expired quick-fixes alone must trigger an update");
+    }
+
+    fn set(source: &str, n: usize) -> ScriptletSet {
+        let resources = (0..n).map(|i| Resource {
+            name: format!("s{}.js", i),
+            aliases: vec![],
+            kind: ResourceType::Template,
+            content: BASE64.encode("(function(){})();"),
+            dependencies: vec![],
+            permission: PermissionMask::default(),
+        }).collect();
+        ScriptletSet { resources, source: source.into(), priorities: HashMap::new() }
+    }
+
+    /// P6-A5: list versions come from the list's own header; an unfilled placeholder is absent.
+    #[test]
+    fn test_list_header_versions() {
+        let easylist = "[Adblock Plus 2.0]\n! Version: 202610141505\n! Title: EasyList\n! Last modified: 14 Oct 2026 15:05 UTC\n! Expires: 4 days\n||ads.example^";
+        assert_eq!(parse_list_header(easylist, "Version").as_deref(), Some("202610141505"));
+        assert_eq!(parse_list_header(easylist, "Last modified").as_deref(), Some("14 Oct 2026 15:05 UTC"));
+        let uassets_raw = "! Title: uBlock filters – Quick fixes\n! Last modified: %timestamp%\n! Expires: 8 hours";
+        assert_eq!(parse_list_header(uassets_raw, "Last modified"), None);
+        assert_eq!(parse_list_header(uassets_raw, "Version"), None);
+    }
+
+    /// P6-A5: /status reports which scriptlet set is installed, from the install itself.
+    #[tokio::test]
+    async fn test_status_reports_installed_scriptlet_set() {
+        let adblock = AdblockEngine::new(PathBuf::from("/tmp/test-status-scriptlets"));
+        assert_eq!(adblock.get_status().scriptlets.source, "", "nothing installed yet");
+        let mut engine = engine_from_rules("||ads.example.com^");
+        adblock.apply_scriptlets(&mut engine, Some(set("uBO 1.75.0", 151)));
+        let s = adblock.get_status().scriptlets;
+        // The 6 extras' names are not in this synthetic set, so all six are added.
+        assert_eq!((s.source.as_str(), s.count, s.extra), ("uBO 1.75.0", 151, 6));
+        // A smaller fresh set leaves the status (and the set) as it was.
+        adblock.apply_scriptlets(&mut engine, Some(set("uBO 1.48.4 (fallback)", 90)));
+        assert_eq!(adblock.get_status().scriptlets.source, "uBO 1.75.0");
+    }
+
+    fn temp_adblock_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("hodos-p6-{}-{}", tag, std::process::id()));
+        std::fs::create_dir_all(d.join("resources")).unwrap();
+        d
+    }
+
+    /// Startup installs from disk only: with no cache and no 1.48.4 file nothing is
+    /// downloaded (it would need the network), and the source reads "none".
+    #[tokio::test]
+    async fn test_startup_install_never_downloads() {
+        let dir = temp_adblock_dir("startup-none");
+        let adblock = AdblockEngine::new(dir.clone());
+        let mut engine = engine_from_rules("||ads.example.com^");
+        adblock.install_scriptlets(&mut engine).await;
+        assert_eq!(adblock.get_status().scriptlets.source, "none");
+        assert!(!dir.join("resources").join(SCRIPTLETS_FILE).exists(), "startup must not download the 1.48.4 file");
+        // With the pinned set cached, startup uses it.
+        crate::ubo_resources::write_test_cache(&dir.join("resources"), crate::ubo_resources::test_converted_set());
+        adblock.install_scriptlets(&mut engine).await;
+        assert_eq!(adblock.get_status().scriptlets.source, pinned_scriptlet_source());
+    }
+
+    /// After load, refresh_scriptlets swaps the pinned set into the LIVE engine and bumps
+    /// update_version so the shell drops its cached results.
+    #[tokio::test]
+    async fn test_refresh_swaps_pinned_set_into_live_engine() {
+        let dir = temp_adblock_dir("refresh");
+        let adblock = AdblockEngine::new(dir.clone());
+        *adblock.engine.write().unwrap() = Some(engine_from_rules("example.com##+js(main-one, x)"));
+        assert!(adblock.cosmetic_resources("https://example.com/").1.is_empty(), "no scriptlets before refresh");
+        let v0 = adblock.get_update_version();
+
+        crate::ubo_resources::write_test_cache(&dir.join("resources"), crate::ubo_resources::test_converted_set());
+        adblock.refresh_scriptlets().await;
+        assert_eq!(adblock.get_status().scriptlets.source, pinned_scriptlet_source());
+        assert!(adblock.cosmetic_resources("https://example.com/").1.contains("mainOne("), "live engine runs the new set");
+        assert_eq!(adblock.get_update_version(), v0 + 1);
+        // Already on the pinned set: a second refresh is a no-op.
+        adblock.refresh_scriptlets().await;
+        assert_eq!(adblock.get_update_version(), v0 + 1);
+    }
+
+    /// WHY startup compiles from the lists instead of loading engine.dat (B5-T0-P6):
+    /// adblock 0.10.3's serialization drops each filter's permission mask, so a trusted-only
+    /// scriptlet resolves on the fresh engine and NOT after serialize -> deserialize.
+    /// ⚠️ If this test fails after a crate upgrade, serialization now keeps permissions and a
+    /// serialized fast path could be reconsidered — the startup test below still guards it.
+    #[test]
+    fn test_adblock_serialization_drops_trusted_permission() {
+        let trusted = ParseOptions { permissions: PermissionMask::from_bits(1), ..ParseOptions::default() };
+        let mut fs = FilterSet::new(false);
+        fs.add_filter_list("youtube.com##+js(trusted-probe, a)", trusted);
+        let mut fresh = Engine::from_filter_set(fs, true);
+        let res = vec![Resource { name: "trusted-probe.js".into(), aliases: vec![],
+            kind: ResourceType::Mime(adblock::resources::MimeType::ApplicationJavascript),
+            content: BASE64.encode("function trustedProbe(a) {}"), dependencies: vec![], permission: PermissionMask::from_bits(1) }];
+        fresh.use_resources(res.clone());
+        let url = "https://www.youtube.com/watch?v=x";
+        assert!(!fresh.url_cosmetic_resources(url).injected_script.is_empty(), "fresh engine resolves the trusted rule");
+
+        let data = fresh.serialize().unwrap();
+        let mut loaded = Engine::default();
+        loaded.deserialize(&data).unwrap();
+        loaded.use_resources(res);
+        assert!(loaded.url_cosmetic_resources(url).injected_script.is_empty(),
+            "adblock serialization now keeps the trusted permission — see the doc comment");
+    }
+
+    /// The production startup path keeps trusted scriptlets: load() on a dir with every
+    /// configured list on disk (a trusted rule in uBO's list) and the pinned set cached —
+    /// offline — injects that trusted scriptlet.
+    #[tokio::test]
+    async fn test_startup_keeps_trusted_scriptlets() {
+        let dir = temp_adblock_dir("startup-trusted");
+        std::fs::create_dir_all(dir.join("lists")).unwrap();
+        let mut lists = Vec::new();
+        for (f, _) in FILTER_LISTS.iter().chain(TRUSTED_FILTER_LISTS) {
+            let text = if *f == "ublock-filters.txt" { "example.com##+js(trusted-edit, x)\n" } else { "! empty\n" };
+            std::fs::write(dir.join("lists").join(f), text).unwrap();
+            lists.push(list_info(f, now_secs() + 3600));
+        }
+        let meta = FilterListMeta { lists, engine_built_at: now_secs(), config_version: CONFIG_VERSION };
+        std::fs::write(dir.join(META_JSON), serde_json::to_string(&meta).unwrap()).unwrap();
+        crate::ubo_resources::write_test_cache(&dir.join("resources"), crate::ubo_resources::test_converted_set());
+
+        let adblock = AdblockEngine::new(dir);
+        adblock.load().await.expect("load from disk, offline");
+        let (_, script, _) = adblock.cosmetic_resources("https://example.com/");
+        assert!(script.contains("editFn("), "trusted scriptlet missing after startup: {:?}", &script[..script.len().min(120)]);
+    }
+
+    /// P6-A6: a refresh never installs fewer scriptlets than are running.
+    #[test]
+    fn test_choose_scriptlets_never_shrinks() {
+        let running = set("uBO 1.75.0", 151);
+        assert_eq!(choose_scriptlets(Some(set("uBO 1.75.0", 151)), &running).resources.len(), 151);
+        assert_eq!(choose_scriptlets(Some(set("uBO 1.48.4 (fallback)", 90)), &running).source, "uBO 1.75.0");
+        assert_eq!(choose_scriptlets(None, &running).source, "uBO 1.75.0");
+        // First load: whatever is available, or none.
+        let empty = ScriptletSet::default();
+        assert_eq!(choose_scriptlets(Some(set("uBO 1.48.4 (fallback)", 90)), &empty).resources.len(), 90);
+        assert_eq!(choose_scriptlets(None, &empty).source, "none");
+    }
+
+    /// Function-style scriptlets must run in a private scope that defines scriptletGlobals.
+    #[test]
+    fn test_injected_script_is_wrapped_privately() {
+        assert_eq!(wrap_scriptlets(""), "", "nothing to inject stays empty");
+        let adblock = AdblockEngine::new(PathBuf::from("/tmp/test-wrap"));
+        {
+            let mut filter_set = FilterSet::new(false);
+            filter_set.add_filter_list("youtube.com##+js(probe)", ParseOptions::default());
+            let mut engine = Engine::from_filter_set(filter_set, true);
+            engine.use_resources([
+                Resource { name: "probe.js".into(), aliases: vec![], kind: ResourceType::Mime(adblock::resources::MimeType::ApplicationJavascript),
+                    content: BASE64.encode("function probeFn() { helperFn(); }"), dependencies: vec!["helper.fn".into()], permission: PermissionMask::default() },
+                Resource { name: "helper.fn".into(), aliases: vec![], kind: ResourceType::Mime(adblock::resources::MimeType::FnJavascript),
+                    content: BASE64.encode("function helperFn() { return scriptletGlobals; }"), dependencies: vec![], permission: PermissionMask::default() },
+            ]);
+            *adblock.engine.write().unwrap() = Some(engine);
+        }
+        let (_, script, _) = adblock.cosmetic_resources("https://www.youtube.com/watch?v=x");
+        assert!(script.starts_with("(function() {\nconst scriptletGlobals = {};\n"), "got: {}", script);
+        assert!(script.ends_with("\n})();"));
+        assert!(script.contains("function helperFn()") && script.contains("probeFn()"));
+        let (_, none, _) = adblock.cosmetic_resources("https://example.org/");
+        assert!(none.is_empty());
+    }
+
+    /// Rules (text, from a trusted list?) whose `+js()` produces no script in an engine with
+    /// exactly that rule and `resources` — the engine's own answer to "does it resolve".
+    fn unresolved_scriptlet_rules(rules: &[(String, bool)], resources: &[Resource]) -> Vec<String> {
+        let mut missing = Vec::new();
+        for (rule, trusted) in rules {
+            let host = rule.split("##").next().unwrap_or("").split(',')
+                .find(|d| d.contains("youtube") && !d.starts_with('~'))
+                .unwrap_or("www.youtube.com")
+                .replace(".*", ".com");
+            let opts = ParseOptions {
+                permissions: if *trusted { PermissionMask::from_bits(1) } else { PermissionMask::default() },
+                ..ParseOptions::default()
+            };
+            let mut fs = FilterSet::new(false);
+            fs.add_filter_list(rule, opts);
+            let mut engine = Engine::from_filter_set(fs, true);
+            engine.use_resources(resources.to_vec());
+            load_extra_scriptlets(&mut engine);
+            if engine.url_cosmetic_resources(&format!("https://{}/watch?v=x", host)).injected_script.is_empty() {
+                missing.push(rule.clone());
+            }
+        }
+        missing
+    }
+
+    /// The instrument for P6-A2 can fail: it names a rule whose scriptlet is absent.
+    #[test]
+    fn test_unresolved_scriptlet_rules_names_missing() {
+        let resources = vec![Resource { name: "present.js".into(), aliases: vec![],
+            kind: ResourceType::Mime(adblock::resources::MimeType::ApplicationJavascript),
+            content: BASE64.encode("function presentFn(a) {}"), dependencies: vec![], permission: PermissionMask::from_bits(1) }];
+        let rules = vec![
+            ("youtube.com##+js(present, x)".to_string(), true),
+            ("www.youtube.com##+js(absent-scriptlet, x)".to_string(), true),
+            // A trusted-only scriptlet from an untrusted list does not resolve either.
+            ("youtube.com##+js(present, y)".to_string(), false),
+        ];
+        assert_eq!(unresolved_scriptlet_rules(&rules, &resources), vec![
+            "www.youtube.com##+js(absent-scriptlet, x)".to_string(),
+            "youtube.com##+js(present, y)".to_string(),
+        ]);
+    }
+
+    /// A real engine in a temp dir, built by the production `load()` path (network).
+    async fn real_engine(tag: &str) -> (AdblockEngine, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("hodos-p6-{}-{}", tag, std::process::id()));
+        let adblock = AdblockEngine::new(dir.clone());
+        // As main.rs does: load (disk only), then fetch uBO's pinned scriptlets.
+        adblock.load().await.expect("load");
+        adblock.refresh_scriptlets().await;
+        (adblock, dir)
+    }
+
+    /// P6-A2: every YouTube `+js()` rule in the loaded lists resolves to a script in the engine,
+    /// and every resolved script parses. Network + Node:
+    /// `cargo test -- --ignored test_real_youtube_scriptlets_resolve`.
+    #[tokio::test]
+    #[ignore]
+    async fn test_real_youtube_scriptlets_resolve() {
+        let (adblock, dir) = real_engine("a2").await;
+        let status = adblock.get_status();
+        assert!(status.scriptlets.source.starts_with("uBO 1.75"), "running {:?}", status.scriptlets.source);
+
+        let trusted: Vec<&str> = TRUSTED_FILTER_LISTS.iter().map(|(f, _)| *f).collect();
+        let mut rules = Vec::new();
+        for l in &status.lists {
+            let text = std::fs::read_to_string(dir.join("lists").join(&l.filename)).unwrap();
+            for line in text.lines() {
+                let line = line.trim();
+                // A YouTube rule names YouTube in a domain it APPLIES to; `~youtube.com` excludes it.
+                let applies_to_youtube = line.split("##").next().unwrap().split(',')
+                    .any(|d| !d.starts_with('~') && d.contains("youtube"));
+                if !line.starts_with('!') && line.contains("##+js(") && applies_to_youtube {
+                    rules.push((line.to_string(), trusted.contains(&l.filename.as_str())));
+                }
+            }
+        }
+        assert!(rules.len() > 30, "only {} YouTube scriptlet rules found", rules.len());
+        let resources = adblock.scriptlets.read().unwrap().0.resources.clone();
+        let missing = unresolved_scriptlet_rules(&rules, &resources);
+        assert!(missing.is_empty(), "{} of {} YouTube rules do not resolve:\n{}", missing.len(), rules.len(), missing.join("\n"));
+
+        // Everything YouTube actually receives must at least parse.
+        let mut all = String::new();
+        for url in ["https://www.youtube.com/watch?v=x", "https://m.youtube.com/", "https://www.youtube.com/"] {
+            let (_, script, _) = adblock.cosmetic_resources(url);
+            assert!(!script.is_empty(), "{} gets no scriptlets", url);
+            all.push_str(&script);
+            all.push_str("\n;\n");
+        }
+        let f = dir.join("youtube-injected.js");
+        std::fs::write(&f, &all).unwrap();
+        let check = std::process::Command::new("node").arg("--check").arg(&f).output().expect("node");
+        assert!(check.status.success(), "injected script does not parse: {}", String::from_utf8_lossy(&check.stderr));
+        println!("{} YouTube rules resolve; {} bytes injected parse", rules.len(), all.len());
+    }
+
+    /// P6-A4: hodos-unbreak domains get no scriptlets and generichide on the real engine with
+    /// quick-fixes and uBO's current scriptlets — and the check has teeth: without the unbreak
+    /// list, some of those domains would receive scriptlets. Network:
+    /// `cargo test -- --ignored test_real_unbreak_domains_get_no_scriptlets`.
+    #[tokio::test]
+    #[ignore]
+    async fn test_real_unbreak_domains_get_no_scriptlets() {
+        let (adblock, dir) = real_engine("a4").await;
+        let domains: Vec<String> = HODOS_UNBREAK.lines()
+            .filter_map(|l| l.trim().strip_suffix("#@#+js()").map(str::to_string))
+            .collect();
+        assert!(domains.len() >= 20);
+        for d in &domains {
+            let (_, script, _) = adblock.cosmetic_resources(&format!("https://{}/", d));
+            assert!(script.is_empty(), "{} receives scriptlets despite hodos-unbreak", d);
+        }
+        for d in ["accounts.google.com", "github.com", "paypal.com", "chase.com", "login.microsoftonline.com"] {
+            let (selectors, _, generichide) = adblock.cosmetic_resources(&format!("https://{}/", d));
+            assert!(generichide && selectors.is_empty(), "{} lost generichide", d);
+        }
+
+        // Teeth: the same lists and scriptlets WITHOUT hodos-unbreak inject into some of them.
+        // Same lists, trust and pruning as production (configured_lists + add_list).
+        let mut fs = FilterSet::new(false);
+        for (f, _, opts) in configured_lists() {
+            add_list(&mut fs, &std::fs::read_to_string(dir.join("lists").join(f)).unwrap(), opts);
+        }
+        let mut bare = Engine::from_filter_set(fs, true);
+        bare.use_resources(adblock.scriptlets.read().unwrap().0.resources.clone());
+        let exposed: Vec<&String> = domains.iter()
+            .filter(|d| !bare.url_cosmetic_resources(&format!("https://{}/", d)).injected_script.is_empty())
+            .collect();
+        assert!(!exposed.is_empty(), "no unbreak domain would get scriptlets anyway — this test has no teeth");
+        println!("{} unbreak domains protected; {} of them would otherwise get scriptlets: {:?}",
+            domains.len(), exposed.len(), exposed);
+    }
+
+    /// A local HTTP server answering every request with `status` and `body` — a captive
+    /// portal, an error page. Returns its base URL.
+    async fn serve(status: &'static str, body: &'static str) -> (String, std::sync::Arc<AtomicU64>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = std::sync::Arc::new(AtomicU64::new(0));
+        let counter = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { return };
+                counter.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let _ = sock.read(&mut buf).await;
+                    let resp = format!("HTTP/1.1 {}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        status, body.len(), body);
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        (format!("http://{}", addr), hits)
+    }
+
+    const PORTAL: &str = "<!DOCTYPE html><html><body>Sign in to the Wi-Fi</body></html>";
+
+    /// A portal's 200 HTML never replaces a cached list; the cache is used and retried soon.
+    #[tokio::test]
+    async fn test_portal_page_never_replaces_a_cached_list() {
+        let dir = temp_adblock_dir("portal-list");
+        std::fs::create_dir_all(dir.join("lists")).unwrap();
+        let good = "! Title: EasyList\n! Expires: 4 days\n||ads.example^\n";
+        std::fs::write(dir.join("lists").join("easylist.txt"), good).unwrap();
+        let (base, hits) = serve("200 OK", PORTAL).await;
+        let url = format!("{}/easylist.txt", base);
+        let now = now_secs();
+        let (text, info) = obtain_list(&http_client(), &dir.join("lists"), "easylist.txt", &[url.as_str()], None, now)
+            .await.expect("cached copy");
+        assert_eq!(text, good);
+        assert_eq!(std::fs::read_to_string(dir.join("lists").join("easylist.txt")).unwrap(), good, "cache not overwritten");
+        assert_eq!(info.expires_at, now + RETRY_AFTER_FAILURE_SECS);
+        assert!(hits.load(Ordering::SeqCst) > 0, "the portal was never asked: this test proved nothing");
+    }
+
+    /// A portal page is never kept as the 1.48.4 fallback file.
+    #[tokio::test]
+    async fn test_portal_page_is_not_kept_as_legacy_scriptlets() {
+        let dir = temp_adblock_dir("portal-legacy");
+        let (base, hits) = serve("200 OK", PORTAL).await;
+        let url = format!("{}/scriptlets.js", base);
+        let resources = obtain_legacy(&dir.join("resources"), Some((&http_client(), url.as_str()))).await;
+        assert!(resources.is_empty());
+        assert!(!dir.join("resources").join(SCRIPTLETS_FILE).exists(), "portal page must not be saved");
+        assert!(!dir.join("resources").join("scriptlets.js.download").exists());
+        assert!(hits.load(Ordering::SeqCst) > 0, "the portal was never asked: this test proved nothing");
+    }
+
+    /// A list that never downloaded gets a 0-rule placeholder retried on its own cadence, so
+    /// needs_update() does not force an hourly rebuild; startup compiles without it.
+    #[tokio::test]
+    async fn test_unobtainable_list_backs_off_and_startup_compiles_without_it() {
+        let dir = temp_adblock_dir("missing-list");
+        write_lists(&dir, |f| format!("! Title: {}\n||{}.example^\n", f, f.replace('.', "-")));
+        std::fs::remove_file(dir.join("lists").join("ublock-quick-fixes.txt")).unwrap();
+        let now = now_secs();
+        let (_e, meta) = AdblockEngine::build_from_lists(&dir, None, &offline_client()).await.expect("build from cache");
+        let qf = meta.lists.iter().find(|l| l.filename == "ublock-quick-fixes.txt").expect("placeholder");
+        assert_eq!((qf.rule_count, qf.downloaded_at, qf.failures), (0, 0, 1));
+        assert!(qf.expires_at >= now + RETRY_AFTER_FAILURE_SECS);
+        let engine = AdblockEngine::new(PathBuf::from("/tmp/test-adblock"));
+        *engine.meta.write().unwrap() = meta.clone();
+        assert!(!engine.needs_update(), "a placeholder does not trigger an immediate rebuild");
+
+        // Startup: compiles the four cached lists, no download needed. A rebuild would stamp a
+        // new engine_built_at — checked below, so this holds online and offline alike.
+        let mut meta = meta;
+        meta.engine_built_at = 12345;
+        std::fs::write(dir.join(META_JSON), serde_json::to_string(&meta).unwrap()).unwrap();
+        let adblock = AdblockEngine::new(dir);
+        adblock.load().await.expect("startup compiles without the missing list");
+        assert!(adblock.check_request("https://easylist-txt.example/x.js", "https://site.example/", "script").0);
+        let qf_after = adblock.get_status().lists.into_iter().find(|l| l.filename == "ublock-quick-fixes.txt").unwrap();
+        assert_eq!(qf_after.rule_count, 0, "startup must not have gone to the network for the missing list");
+        assert_eq!(adblock.get_status().last_update, 12345, "startup compiled from disk; it did not rebuild");
+        assert!(!adblock.needs_update(), "startup must keep the placeholder's backoff, not force a rebuild");
+    }
+
+    /// A list meta calls fresh but that is gone from disk is marked for re-fetch at startup.
+    #[tokio::test]
+    async fn test_startup_refetches_a_list_missing_on_disk() {
+        let dir = temp_adblock_dir("gone-from-disk");
+        write_lists(&dir, |f| format!("! Title: {}\n||{}.example^\n", f, f.replace('.', "-")));
+        let lists = configured_lists().iter().map(|(f, _, _)| list_info(f, now_secs() + 4 * 24 * 3600)).collect();
+        let meta = FilterListMeta { lists, engine_built_at: 7, config_version: CONFIG_VERSION };
+        std::fs::write(dir.join(META_JSON), serde_json::to_string(&meta).unwrap()).unwrap();
+        std::fs::remove_file(dir.join("lists").join("easylist.txt")).unwrap();
+        let adblock = AdblockEngine::new(dir);
+        adblock.load().await.expect("load");
+        assert!(adblock.needs_update(), "EasyList is gone from disk: the first check must re-fetch it");
+        let el = adblock.get_status().lists.into_iter().find(|l| l.filename == "easylist.txt").unwrap();
+        assert_eq!(el.rule_count, 0, "/status must not report rules that are not loaded");
+    }
+
+    /// A list due within the slack counts as due: a retry window equal to the check interval
+    /// would otherwise slip a whole interval (/code-review 173 #4).
+    #[test]
+    fn test_needs_update_counts_a_list_due_within_the_slack() {
+        let engine = AdblockEngine::new(PathBuf::from("/tmp/test-adblock"));
+        let now = now_secs();
+        let lists = configured_lists().iter()
+            .map(|(f, _, _)| list_info(f, if *f == "easylist.txt" { now + 60 } else { now + 4 * 24 * 3600 }))
+            .collect();
+        *engine.meta.write().unwrap() = FilterListMeta { lists, engine_built_at: now, config_version: CONFIG_VERSION };
+        assert!(engine.needs_update());
+    }
+
+    /// A placeholder not yet due is carried over untouched — its mirrors are not retried
+    /// because some other list expired (/code-review 173 #5).
+    #[tokio::test]
+    async fn test_placeholder_not_due_is_not_retried_by_another_lists_rebuild() {
+        let dir = temp_adblock_dir("placeholder-wait");
+        write_lists(&dir, |f| format!("! Title: {}\n||{}.example^\n", f, f.replace('.', "-")));
+        std::fs::remove_file(dir.join("lists").join("ublock-quick-fixes.txt")).unwrap();
+        let now = now_secs();
+        let mut lists: Vec<FilterListInfo> = configured_lists().iter().map(|(f, _, _)| {
+            let mut i = list_info(f, if *f == "easyprivacy.txt" { now - 1 } else { now + 4 * 24 * 3600 });
+            i.downloaded_at = 50;
+            i
+        }).collect();
+        let qf = lists.iter_mut().find(|l| l.filename == "ublock-quick-fixes.txt").unwrap();
+        qf.downloaded_at = 0;
+        qf.rule_count = 0;
+        qf.failures = 2;
+        qf.expires_at = now + 3600;
+        let prev = FilterListMeta { lists, engine_built_at: now, config_version: CONFIG_VERSION };
+        let (_e, meta) = AdblockEngine::build_from_lists(&dir, Some(&prev), &offline_client()).await.unwrap();
+        let qf_after = meta.lists.iter().find(|l| l.filename == "ublock-quick-fixes.txt").unwrap();
+        assert_eq!((qf_after.failures, qf_after.expires_at), (2, now + 3600), "placeholder must be carried over untouched");
+    }
+
+    /// The failure counter saturates (a corrupt meta.json must not wrap the backoff to 0).
+    #[tokio::test]
+    async fn test_failure_counter_saturates() {
+        let dir = temp_adblock_dir("saturate");
+        write_lists(&dir, |f| format!("! Title: {}\n", f));
+        let now = now_secs();
+        let mut prev = list_info("easylist.txt", now - 1);
+        prev.failures = u32::MAX;
+        let (_t, info) = obtain_list(&offline_client(), &dir.join("lists"), "easylist.txt", &["http://127.0.0.1:9/x"], Some(&prev), now)
+            .await.unwrap();
+        assert_eq!(info.failures, u32::MAX);
+        assert_eq!(info.expires_at, now + MAX_RETRY_SECS);
+    }
+
+    #[test]
+    fn test_retry_backoff_doubles_to_a_ceiling() {
+        assert_eq!(retry_after(1), RETRY_AFTER_FAILURE_SECS);
+        assert_eq!(retry_after(2), 2 * RETRY_AFTER_FAILURE_SECS);
+        assert_eq!(retry_after(3), 4 * RETRY_AFTER_FAILURE_SECS);
+        assert_eq!(retry_after(10), MAX_RETRY_SECS);
+        assert_eq!(retry_after(u32::MAX), MAX_RETRY_SECS);
+    }
+
+    /// Consecutive failures back off; a placeholder is never reused as if it were a real list.
+    #[tokio::test]
+    async fn test_failed_refreshes_back_off_and_placeholders_are_not_reused() {
+        let dir = temp_adblock_dir("backoff");
+        write_lists(&dir, |f| format!("! Title: {}\n||{}.example^\n", f, f.replace('.', "-")));
+        let now = now_secs();
+        let mut prev = list_info("easylist.txt", now - 1);
+        prev.failures = 2;
+        prev.downloaded_at = 99;
+        let (_t, info) = obtain_list(&offline_client(), &dir.join("lists"), "easylist.txt", &["http://127.0.0.1:9/x"], Some(&prev), now)
+            .await.unwrap();
+        assert_eq!(info.failures, 3);
+        assert_eq!(info.expires_at, now + 4 * RETRY_AFTER_FAILURE_SECS);
+        assert_eq!(info.downloaded_at, 99);
+        // A placeholder that has not expired is still not "fresh": the file on disk is read and
+        // gets real metadata (here via the cache fallback, since the client is offline).
+        let mut placeholder = list_info("easylist.txt", now + 3600);
+        placeholder.downloaded_at = 0;
+        placeholder.rule_count = 0;
+        let (_t, info) = obtain_list(&offline_client(), &dir.join("lists"), "easylist.txt", &["http://127.0.0.1:9/x"], Some(&placeholder), now)
+            .await.unwrap();
+        assert!(info.rule_count > 0 && info.downloaded_at > 0, "placeholder metadata must not stick: {:?}", info);
+    }
+
+    /// A corrupt 1.48.4 file must not panic the engine (adblock's assembler uses `expect`).
+    #[tokio::test]
+    async fn test_corrupt_legacy_file_does_not_panic() {
+        let dir = temp_adblock_dir("corrupt-legacy");
+        std::fs::create_dir_all(dir.join("resources")).unwrap();
+        std::fs::write(dir.join("resources").join(SCRIPTLETS_FILE), b"/// broken\n\xff\xfe not utf-8").unwrap();
+        assert!(obtain_legacy(&dir.join("resources"), None).await.is_empty());
+    }
+
+    #[test]
+    fn test_running_pinned_set_is_not_replaced_by_a_fallback() {
+        let running = set(&pinned_scriptlet_source(), 150);
+        let older = set("uBO 1.70.0 (cached; pin not fetched yet)", 151);
+        assert_eq!(choose_scriptlets(Some(older), &running).source, pinned_scriptlet_source());
+    }
+
+    /// A served byte-order mark does not hide the list header. (Lenient decoding of an invalid byte
+    /// is not covered: this test server sends &str bodies.)
+    #[tokio::test]
+    async fn test_download_strips_a_byte_order_mark() {
+        let (base, _hits) = serve("200 OK", "\u{feff}! Title: x\n||a^\n").await;
+        let text = download_filter_list(&http_client(), &format!("{}/l.txt", base)).await.unwrap();
+        assert!(text.starts_with("! Title: x"), "{:?}", &text[..12]);
+        assert!(check_plausible(&text).is_ok());
+    }
+
+    #[test]
+    fn test_choose_prefers_the_pinned_set_even_if_smaller() {
+        let running = set("uBO 1.70.0 (cached; pin not fetched yet)", 151);
+        let pinned = set(&pinned_scriptlet_source(), 150);
+        assert_eq!(choose_scriptlets(Some(pinned), &running).resources.len(), 150);
+    }
+
+    #[test]
+    fn test_order_by_priority() {
+        let deps = "function low(a) {}\nfunction config(a) {}\n";
+        let block = |c: &str| format!("try {{\n{}\n}} catch ( e ) {{ }}\n", c);
+        let script = format!("{}{}{}{}", deps, block("low(\"3\")"), block("config(\"2\")"), block("low(\"1\")"));
+        let prio: HashMap<String, i64> = [("config".to_string(), 100)].into();
+        assert_eq!(order_by_priority(&script, &prio),
+            format!("{}{}{}{}", deps, block("config(\"2\")"), block("low(\"1\")"), block("low(\"3\")")),
+            "priority call first; equal priorities by call text");
+        // No priorities: still a fixed order (by call text) — adblock's own order is random.
+        assert_eq!(order_by_priority(&script, &HashMap::new()),
+            format!("{}{}{}{}", deps, block("config(\"2\")"), block("low(\"1\")"), block("low(\"3\")")));
+        // Template-style (multi-line) invocations are left as they are.
+        let template = format!("{}try {{\n(function() {{\n}})();\n}} catch ( e ) {{ }}\n", deps);
+        assert_eq!(order_by_priority(&template, &prio), template);
+    }
+
+    /// End to end: the script the engine hands the shell has the priority call first and the
+    /// rest in a fixed order — on every lookup. adblock collects calls in a fresh HashMap per
+    /// lookup (random order), so one lookup could pass by chance; 30 cannot (/code-review 171 #6).
+    #[test]
+    fn test_priority_scriptlet_runs_first_in_injected_script() {
+        let mut converted = crate::ubo_resources::test_converted_set();
+        converted.iter_mut().find(|c| c.name == "trusted-edit.js").unwrap().priority = 100;
+        let adblock = AdblockEngine::new(PathBuf::from("/tmp/test-priority"));
+        let trusted = ParseOptions { permissions: PermissionMask::from_bits(1), ..ParseOptions::default() };
+        let mut fs = FilterSet::new(false);
+        fs.add_filter_list("example.com##+js(main-one, c)\nexample.com##+js(main-one, a)\n\
+                            example.com##+js(trusted-edit, z)\nexample.com##+js(main-one, b)", trusted);
+        let mut engine = Engine::from_filter_set(fs, true);
+        adblock.apply_scriptlets(&mut engine, Some(ScriptletSet::from_converted(&converted, "uBO test".into())));
+        *adblock.engine.write().unwrap() = Some(engine);
+        for _ in 0..30 {
+            let (_, script, _) = adblock.cosmetic_resources("https://example.com/");
+            let at = |c: &str| script.find(c).unwrap_or_else(|| panic!("{} missing", c));
+            let order = [at("editFn(\"z\")"), at("mainOne(\"a\")"), at("mainOne(\"b\")"), at("mainOne(\"c\")")];
+            assert!(order.windows(2).all(|w| w[0] < w[1]), "calls out of order: {:?}", order);
+        }
+    }
+
+    /// After a pin bump that has not been fetched yet, startup uses the previous pin's
+    /// converted set rather than the 2023 single-file set.
+    #[tokio::test]
+    async fn test_startup_falls_back_to_previous_pin_cache() {
+        let dir = temp_adblock_dir("prev-pin");
+        crate::ubo_resources::write_test_cache_for_other_pin(&dir.join("resources"), "1.70.0", crate::ubo_resources::test_converted_set());
+        let set = obtain_scriptlets(&dir.join("resources"), false).await.expect("a set");
+        assert!(set.source.starts_with("uBO 1.70.0 (cached"), "got {:?}", set.source);
+        assert_ne!(set.source, pinned_scriptlet_source(), "refresh_scriptlets must still try the pin");
+    }
+
+    /// A configured list that never downloaded (absent from meta) triggers an update.
+    #[test]
+    fn test_needs_update_when_a_configured_list_is_missing() {
+        let engine = AdblockEngine::new(PathBuf::from("/tmp/test-adblock"));
+        let now = now_secs();
+        let lists: Vec<FilterListInfo> = FILTER_LISTS.iter().chain(TRUSTED_FILTER_LISTS)
+            .filter(|(f, _)| *f != "ublock-quick-fixes.txt")
+            .map(|(f, _)| list_info(f, now + 4 * 24 * 3600))
+            .collect();
+        *engine.meta.write().unwrap() = FilterListMeta { lists, engine_built_at: now, config_version: CONFIG_VERSION };
+        assert!(engine.needs_update(), "quick-fixes never downloaded -> retry now, not when another list expires");
+    }
+
+    #[test]
+    fn test_check_plausible_rejects_portals_and_collapses() {
+        let list = "[Adblock Plus 2.0]\n! Title: EasyList\n||a^\n||b^\n||c^\n||d^\n";
+        assert!(check_plausible(list).is_ok());
+        assert!(check_plausible("! Title: uBlock filters\n||a^\n").is_ok());
+        assert!(check_plausible("<!DOCTYPE html><html>Sign in to Wi-Fi</html>").is_err());
+        assert!(check_plausible("\u{feff}  <html>").is_err());
+        assert!(check_plausible("||a^\n||b^\n").is_err(), "no header");
+        // A list that legitimately shrank a lot is still a list (/code-review 171 #1).
+        assert!(check_plausible("! Title: x\n||a^\n").is_ok());
+    }
+
+    /// A client whose every request fails fast (nothing listens on port 9).
+    fn offline_client() -> reqwest::Client {
+        reqwest::Client::builder().proxy(reqwest::Proxy::all("http://127.0.0.1:9").unwrap()).build().unwrap()
+    }
+
+    fn write_lists(dir: &Path, text_for: impl Fn(&str) -> String) {
+        std::fs::create_dir_all(dir.join("lists")).unwrap();
+        for (f, _, _) in configured_lists() {
+            std::fs::write(dir.join("lists").join(f), text_for(f)).unwrap();
+        }
+    }
+
+    /// A rebuild reuses unexpired lists as they are and, when an expired list cannot be
+    /// fetched, keeps the cached copy but retries within the hour — never a full fresh expiry.
+    #[tokio::test]
+    async fn test_rebuild_reuses_fresh_lists_and_retries_failed_ones_soon() {
+        let dir = temp_adblock_dir("perlist");
+        write_lists(&dir, |f| format!("! Title: {}\n! Expires: 4 days\n||{}.example^\n", f, f.replace('.', "-")));
+        let now = now_secs();
+        let fresh_until = now + 3 * 24 * 3600;
+        let prev = FilterListMeta {
+            lists: FILTER_LISTS.iter().chain(TRUSTED_FILTER_LISTS).map(|(f, _)| {
+                let mut i = list_info(f, if *f == "ublock-quick-fixes.txt" { now - 10 } else { fresh_until });
+                i.downloaded_at = 1234;
+                i
+            }).collect(),
+            engine_built_at: now - 100,
+            config_version: CONFIG_VERSION,
+        };
+        let (_engine, meta) = AdblockEngine::build_from_lists(&dir, Some(&prev), &offline_client()).await.expect("build offline from cache");
+        for l in &meta.lists {
+            if l.filename == "ublock-quick-fixes.txt" {
+                assert!(l.expires_at <= now_secs() + RETRY_AFTER_FAILURE_SECS && l.expires_at > now,
+                    "failed refresh retries within the hour, got {}", l.expires_at - now);
+                assert_eq!(l.downloaded_at, 1234, "the cached copy is still the old download");
+            } else {
+                assert_eq!(l.expires_at, fresh_until, "{} was fresh and must be reused untouched", l.filename);
+            }
+        }
+        assert_eq!(meta.lists.len(), 5);
+
+        // First start, nothing cached, offline: no engine rather than an empty one.
+        let empty = temp_adblock_dir("perlist-empty");
+        assert!(AdblockEngine::build_from_lists(&empty, None, &offline_client()).await.is_err());
+    }
+
+    /// Startup compiles only the `!#if` branches that apply to Hodos (env_chromium, ublock).
+    #[tokio::test]
+    async fn test_startup_prunes_inapplicable_branches() {
+        let dir = temp_adblock_dir("startup-prune");
+        write_lists(&dir, |f| if f == "ublock-filters.txt" {
+            "! Title: t\n!#if env_firefox\n||firefox-only.example^\n!#else\n||not-firefox.example^\n!#endif\n\
+             !#if ext_ubol\n||ubol-only.example^\n!#endif\n".to_string()
+        } else { "! Title: t\n".to_string() });
+        let lists = FILTER_LISTS.iter().chain(TRUSTED_FILTER_LISTS).map(|(f, _)| list_info(f, now_secs() + 3600)).collect();
+        let meta = FilterListMeta { lists, engine_built_at: now_secs(), config_version: CONFIG_VERSION };
+        std::fs::write(dir.join(META_JSON), serde_json::to_string(&meta).unwrap()).unwrap();
+        let adblock = AdblockEngine::new(dir);
+        adblock.load().await.expect("load");
+        let blocked = |host: &str| adblock.check_request(&format!("https://{}/x.js", host), "https://site.example/", "script").0;
+        assert!(blocked("not-firefox.example"), "the applicable branch is loaded");
+        assert!(!blocked("firefox-only.example"), "Firefox-only branch must not load");
+        assert!(!blocked("ubol-only.example"), "uBO Lite branch must not load");
+    }
+
+    /// P6-A1: a fresh build loads quick-fixes as a list, records it in meta.json, and takes
+    /// its expiry from the list's own `! Expires:` header (8 hours today).
+    /// Network-bound: `cargo test -- --ignored test_build_loads_quick_fixes`.
+    #[tokio::test]
+    #[ignore]
+    async fn test_build_loads_quick_fixes() {
+        let dir = std::env::temp_dir().join(format!("hodos-p6-a1-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let (_engine, meta) = AdblockEngine::build_from_lists(&dir, None, &http_client()).await.expect("build");
+
+        // Read what the build persisted, not the value it returned.
+        let saved: FilterListMeta = serde_json::from_str(
+            &std::fs::read_to_string(dir.join(META_JSON)).unwrap()).unwrap();
+        assert_eq!(saved.config_version, CONFIG_VERSION);
+        let qf = saved.lists.iter().find(|l| l.filename == "ublock-quick-fixes.txt")
+            .unwrap_or_else(|| panic!("quick-fixes missing from meta.json: {:?}",
+                saved.lists.iter().map(|l| &l.filename).collect::<Vec<_>>()));
+        assert!(qf.rule_count > 0);
+        let on_disk = std::fs::read_to_string(dir.join("lists").join("ublock-quick-fixes.txt")).unwrap();
+        assert_eq!(qf.expires_at - qf.downloaded_at, parse_list_expiry(&on_disk));
+        assert!(qf.expires_at - qf.downloaded_at <= 24 * 3600, "quick-fixes should expire within a day");
+        assert_eq!(meta.lists.len(), saved.lists.len());
     }
 
     #[test]
@@ -1264,47 +2320,6 @@ youtube.com##.ad-showing
             let result = engine.check_network_request(&req);
             assert!(!result.matched, "Should NOT block: {}", url);
         }
-    }
-
-    /// Test with the serialized engine.dat to verify it works after deserialization
-    #[test]
-    fn test_real_engine_dat_deserialization() {
-        let engine_path = {
-            #[cfg(target_os = "windows")]
-            {
-                PathBuf::from(std::env::var("APPDATA").unwrap_or_default())
-                    .join(app_dir_name()).join("adblock").join("engine.dat")
-            }
-            #[cfg(target_os = "macos")]
-            {
-                PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
-                    .join("Library").join("Application Support")
-                    .join(app_dir_name()).join("adblock").join("engine.dat")
-            }
-            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-            {
-                PathBuf::from(".").join("adblock").join("engine.dat")
-            }
-        };
-
-        if !engine_path.exists() {
-            eprintln!("SKIP: No engine.dat found — run the engine once first");
-            return;
-        }
-
-        let data = std::fs::read(&engine_path).unwrap();
-        let mut engine = Engine::default();
-        engine.deserialize(&data).expect("engine.dat should deserialize");
-
-        // Test a known blocked URL
-        let req = Request::new(
-            "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js",
-            "https://news.com",
-            "script",
-        ).unwrap();
-        let result = engine.check_network_request(&req);
-        println!("  googlesyndication => matched={}, filter={:?}", result.matched, result.filter);
-        assert!(result.matched, "Deserialized engine should block googlesyndication");
     }
 
     // ========================================================================

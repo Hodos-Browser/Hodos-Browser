@@ -122,14 +122,14 @@ pub const CONFIRMED_DOUBLE_SPEND: &str = "double-spend-detected";
 /// Sets `spending_description` to `dss:{our_txid}` so `TaskVerifyDoubleSpend` knows
 /// which of our transactions to check against the network.
 ///
-/// Searches for outputs reserved by `our_txid` (and optionally a `reservation_placeholder`)
-/// that are currently non-spendable (`spendable = 0`).
+/// Searches for outputs reserved by `our_txid`: labelled with it, or (B5-T1-P3) owned by its
+/// transaction row and not yet labelled — the case a reservation placeholder used to cover.
+/// Only rows that are currently non-spendable (`spendable = 0`).
 ///
 /// Returns the number of inputs marked.
 pub fn mark_inputs_suspected(
     conn: &rusqlite::Connection,
     our_txid: &str,
-    reservation_placeholder: Option<&str>,
 ) -> usize {
     let suspected_desc = format!("{}{}", SUSPECTED_DOUBLE_SPEND_PREFIX, our_txid);
 
@@ -139,15 +139,12 @@ pub fn mark_inputs_suspected(
         rusqlite::params![&suspected_desc, our_txid],
     ).unwrap_or(0);
 
-    let marked2 = if let Some(placeholder) = reservation_placeholder {
-        conn.execute(
-            "UPDATE outputs SET spending_description = ?1
-             WHERE spending_description = ?2 AND spendable = 0",
-            rusqlite::params![&suspected_desc, placeholder],
-        ).unwrap_or(0)
-    } else {
-        0
-    };
+    let marked2 = conn.execute(
+        "UPDATE outputs SET spending_description = ?1
+         WHERE spending_description IS NULL AND spendable = 0
+           AND spent_by = (SELECT id FROM transactions WHERE txid = ?2)",
+        rusqlite::params![&suspected_desc, our_txid],
+    ).unwrap_or(0);
 
     let total = marked + marked2;
     if total > 0 {

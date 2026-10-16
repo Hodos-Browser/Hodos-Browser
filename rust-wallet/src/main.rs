@@ -28,16 +28,22 @@ mod script;  // Bitcoin script parsing and PushDrop (BRC-48)
 mod certificate;  // Certificate management (BRC-52)
 mod authfetch;  // BRC-103 AuthFetch client for authenticated HTTP requests
 mod messagebox;  // MessageBox API client with BRC-2 encryption
+mod messagebox_lookup;  // B5-T5-P7a: where a recipient reads their MessageBox mail (ls_messagebox advertisements)
 mod paymail;  // Paymail (bsvalias) client for human-readable address resolution
 mod identity_resolver;  // Identity resolution via BSV Overlay Services (BRC-52 certificates)
 mod overlay;  // BSV Overlay Services client for certificate publish/unpublish
 mod services;  // Phase 1.6d.B: WalletServices facade — IndexerProvider trait + provider chains
 mod permission_service;  // Phase 2.6-A.5: wrapper around hodos_permission_engine pure crate (dormant in A.5; wired into AppState in A.6)
 mod manifest;  // Phase 2.6-G: Rust port of C++ ManifestFetcher (fetch + lenient parse of .well-known/wallet-manifest.json)
+mod tokens;  // B5-T2-P1: token recognisers (ordinal, BSV-21, Mandala) the seam runs before the money rule
+mod classify;  // B5-T1-P5: the classification seam — money only when proven (`change = 1`)
+mod ingest;  // B5-T1-P4: a synced coin's script is read from its verified parent, never synthesised
+mod scan;  // B5-T1-P6: find late payments to the wallet's own receive addresses (one scan, one writer)
+mod spv_checks;  // B5-T1-P7a-1: BRC-67 checks 2 + 4 and the BEEF proof check
+mod header_chain;  // B5-T1-P7a-1: the verified block-header chain (pure)
+mod chain_tracker;  // B5-T1-P7a-1: the one place block / header / tip lookups live (step 0: indexer answers, unverified)
+mod proof_store;  // B5-T1-P7a-2: the one door into proven_txs — a proof is stored only on a Valid verdict from our own chain
 mod reconcile;  // Wallet-Hardening WS1: spent-input reconcile primitives (c1 check_outpoint_spent; c2/c3 dormant)
-
-// Re-export for monitor tasks (avoids rust-analyzer resolution issues when only lib is checked)
-pub use cache_helpers::verify_tsc_proof_against_block;
 
 /// Phase 2.6-G — universal domain-trust gate (actix middleware).
 ///
@@ -240,6 +246,9 @@ async fn domain_trust_mw(
                 || path.starts_with("/wallet/backup")
                 || path.starts_with("/wallet/recover")
                 || path.starts_with("/wallet/broadcast-nosend")
+                // B5-T1-P5 (P5-X1): "Treat as money" promotes a held coin into the
+                // money a dApp's payments draw on — the user's decision, never a site's.
+                || path.starts_with("/wallet/held-outputs")
         }
         let hits_surface =
             is_permission_surface(&raw_path) || is_permission_surface(&decoded_path);
@@ -455,6 +464,7 @@ pub struct AppState {
     pub recovery_just_completed: Arc<std::sync::atomic::AtomicBool>,  // Set after on-chain recovery — triggers immediate TaskCheckForProofs + TaskValidateUtxos
     pub pay402_reuse: Arc<Mutex<HashMap<(String, i64), handlers::Pay402ReuseEntry>>>,  // (URL, sats) → unbroadcast retry context, ~25s TTL — see pay_402
     pub permission: Arc<permission_service::PermissionService>,  // Phase 2.6-A.6: actix wrapper around hodos_permission_engine pure crate (dormant — all 5 flags default OFF)
+    pub chain_tracker: Arc<chain_tracker::ChainTracker>,  // B5-T1-P7a-1: the wallet's own verified header chain — ask it, never an indexer, for a header, a root or the tip
 }
 
 impl AppState {
@@ -668,7 +678,9 @@ async fn main() -> std::io::Result<()> {
                                 }
 
                                 // 2. Restore input outputs that were marked as spent by this tx
-                                match output_repo.restore_by_spending_description(txid) {
+                                //    (B5-T1-P3: labelled with its txid, or owned by its row and
+                                //    not yet labelled)
+                                match output_repo.restore_spent_by_txid(txid) {
                                     Ok(count) if count > 0 => {
                                         log::info!("   ♻️  Restored {} input output(s) from tx {}", count, &txid[..std::cmp::min(16, txid.len())]);
                                     }
@@ -743,7 +755,7 @@ async fn main() -> std::io::Result<()> {
                                     crate::action_storage::TransactionStatus::Failed,
                                 );
                                 let deleted = output_repo.delete_by_txid(txid).unwrap_or(0);
-                                let restored = output_repo.restore_by_spending_description(txid).unwrap_or(0);
+                                let restored = output_repo.restore_spent_by_txid(txid).unwrap_or(0);
                                 log::info!(
                                     "🧹 Cleaned up stuck backup tx {}: deleted {} ghost output(s), restored {} input(s)",
                                     &txid[..16.min(txid.len())], deleted, restored
@@ -789,23 +801,12 @@ async fn main() -> std::io::Result<()> {
                     }
                 }
 
-                // Fix master key outputs (index -1) that have NULL derivation.
-                // These are service fee outputs synced from chain before the
-                // derivation_prefix='master' fix. They need the prefix to be
-                // selectable for spending. Exclude 546-sat outputs (orphaned
-                // backup markers at index -3 that also have NULL derivation).
-                {
-                    let conn = db.connection();
-                    let fixed = conn.execute(
-                        "UPDATE outputs SET derivation_prefix = 'master', derivation_suffix = '-1' \
-                         WHERE derivation_prefix IS NULL AND derivation_suffix IS NULL \
-                         AND spendable = 1 AND satoshis != 546",
-                        [],
-                    ).unwrap_or(0);
-                    if fixed > 0 {
-                        log::info!("🧹 Tagged {} master-key output(s) with derivation prefix", fixed);
-                    }
-                }
+                // B5-T1-P5 (W1): the "Fix master key outputs" UPDATE that stood here is
+                // DELETED. On every boot it tagged any NULL-derivation spendable row as
+                // master-key money (`derivation_prefix = 'master'`) without looking at
+                // its script. The classification seam (`classify.rs`) now writes that
+                // label only when the master key's P2PKH equals the row's observed
+                // script. ⛔ Do not restore it without its own review (contract §7).
             }
 
             // Get default user ID for AppState (multi-user foundation, Phase 3)
@@ -877,6 +878,10 @@ async fn main() -> std::io::Result<()> {
     let shutdown_token = tokio_util::sync::CancellationToken::new();
 
     // Phase 1.6d.B: WalletServices facade — dormant infrastructure; 1.6d.C wires call sites
+    // B5-T1-P7a-1: the verified header chain — the compiled checkpoint plus every stored header
+    // that still passes every rule (rows that fail are deleted). Synced in the background below.
+    let chain_tracker = Arc::new(chain_tracker::ChainTracker::load(&database.lock().unwrap()));
+
     let services = Arc::new(services::WalletServices::new());
     log::info!("✅ WalletServices facade initialized (dormant — 1.6d.C wires call sites)");
 
@@ -915,7 +920,28 @@ async fn main() -> std::io::Result<()> {
         recovery_just_completed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         pay402_reuse: Arc::new(Mutex::new(HashMap::new())),
         permission,  // Phase 2.6-A.6: hodos_permission_engine actix wrapper (dormant)
+        chain_tracker: chain_tracker.clone(),
     });
+
+    // B5-T1-P7a-1: headers by push (BSVA Arcade's tip stream), polling as backup — whether or
+    // not a wallet exists yet, so the chain is current before the first payment arrives.
+    {
+        let push = Arc::new(tokio::sync::Notify::new());
+        let client = reqwest::Client::builder()
+            .timeout(services::CallClass::IndexerAsync.timeout())
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        tokio::spawn(chain_tracker::run_header_sync(
+            chain_tracker.clone(),
+            app_state.database.clone(),
+            chain_tracker::default_header_sources(client),
+            push.clone(),
+            chain_tracker::HEADER_POLL,
+            shutdown_token.clone(),
+        ));
+        tokio::spawn(chain_tracker::run_tip_stream(chain_tracker::TIP_STREAM_URL.to_string(), push, shutdown_token.clone()));
+        log::info!("✅ Header sync started (push + {}s poll), tip {}", chain_tracker::HEADER_POLL.as_secs(), chain_tracker.current_height());
+    }
     log::info!("✅ UTXO selection lock initialized");
     log::info!("✅ createAction serialization lock initialized");
 
@@ -1263,6 +1289,8 @@ async fn main() -> std::io::Result<()> {
             .route("/wallet/create", web::post().to(handlers::wallet_create))
             .route("/wallet/delete", web::post().to(handlers::wallet_delete))
             .route("/wallet/balance", web::get().to(handlers::wallet_balance))
+            .route("/wallet/held-outputs", web::get().to(handlers::wallet_held_outputs))
+            .route("/wallet/held-outputs/treat-as-money", web::post().to(handlers::wallet_treat_as_money))
             .route("/wallet/sync", web::post().to(handlers::wallet_sync))
             .route("/wallet/address/generate", web::post().to(handlers::generate_address))
             .route("/wallet/addresses", web::get().to(handlers::get_all_addresses))

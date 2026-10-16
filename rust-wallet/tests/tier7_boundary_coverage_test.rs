@@ -391,13 +391,21 @@ fn t7_02_brc2_encryption() {
 
 #[test]
 fn t7_03_dpapi() {
+    #[cfg(not(target_os = "macos"))]
     use hodos_wallet::crypto::dpapi::{dpapi_encrypt, dpapi_decrypt};
 
     eprintln!("\n=== TIER 7 [3/9] DPAPI Platform Stubs ===\n");
     let before = PASS.load(Ordering::Relaxed) + FAIL.load(Ordering::Relaxed);
 
-    // On non-Windows (Linux/WSL test environment), stubs return error
-    #[cfg(not(windows))]
+    // On Linux/WSL, stubs return error. ⛔ NOT macOS: there `dpapi_encrypt` is a real
+    // Keychain write, and this file builds the library without cfg(test), so the test
+    // store does not apply (M-06 §0). On macOS before 2026-10-12 this block wrote
+    // "test data", then "" (dpapi/03), into the PRODUCTION item. macOS coverage lives in
+    // `dpapi.rs` (`macos_dpapi_encrypt_in_a_test_build_never_writes_the_keychain`,
+    // opt-in `test_keychain_round_trip`).
+    #[cfg(target_os = "macos")]
+    eprintln!("  SKIP  dpapi/*  macOS: a real Keychain write — covered in src/crypto/dpapi.rs, not here");
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     {
         check!("dpapi/01", "encrypt-stub-errors-on-linux", {
             let result = dpapi_encrypt(b"test data");

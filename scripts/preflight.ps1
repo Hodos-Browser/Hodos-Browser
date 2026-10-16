@@ -255,6 +255,86 @@ $Gates = @(
         Exclude  = '(rfind\([^)]*, *0\)|find\([^)]*\) *!= *0|:5137)'
         Probe    = 'bool probe = url.find("127.0.0.1:31301") != std::string::npos;'
         ProbeExt = '.cpp'
+    },
+    [pscustomobject]@{
+        Id       = 'G13'
+        Name     = 'Raw reads of spendable outputs outside the money index (coin selection must go through money_utxos)'
+        Owner    = 'B5-T1-P5'
+        # beta.7 decision 2a + HARNESS_DELTA.md section 3 (the candidate T0 gate, accepted
+        # by B5-T1-P5, P5-A14): after B5-T1-P3/P5 every spend route chooses coins through
+        # OutputRepository :: get_spendable_by_user / get_spendable_confirmed_by_user, which
+        # read the money index. A raw SQL read of spendable outputs anywhere else is the
+        # shape a new coin selector would take. Writes (UPDATE/SET) are not reads.
+        # Baseline MEASURED BY THIS SCRIPT in its own commit; every counted line is a
+        # NON-selecting read, named in HARNESS_DELTA.md section 3 (coin-choosing reads: 0).
+        Baseline = 8
+        Target   = 0
+        Paths    = @('rust-wallet/src')
+        Include  = @('*.rs')
+        ExcludeFiles = @('rust-wallet/src/database/*', 'rust-wallet/src/classify.rs', 'rust-wallet/src/classify_tests.rs')
+        Pattern  = 'spendable = 1'
+        Exclude  = '(UPDATE|SET +spendable)'
+        Probe    = 'let sql = "SELECT * FROM outputs WHERE spendable = 1";'
+        ProbeExt = '.rs'
+    },
+    [pscustomobject]@{
+        Id       = 'G14'
+        Name     = 'The money stamp (outputs.change) written outside the classification seam'
+        Owner    = 'B5-T1-P5'
+        # Owner decision 2: an output is money only when stamped change = 1 by classify.rs.
+        # The stamp is a plain column, so a route that writes it forges it (P5-A2's second
+        # switch; contract 4a). Allowed writers: classify.rs, and the V28 one-time reset
+        # in database/migrations.rs (money_eligible's text matches too). Test fixtures that
+        # stamp a coin on purpose are counted and named. Baseline MEASURED BY THIS SCRIPT.
+        Baseline = 8
+        Target   = 0
+        Paths    = @('rust-wallet/src')
+        Include  = @('*.rs')
+        ExcludeFiles = @('rust-wallet/src/classify.rs', 'rust-wallet/src/classify_tests.rs')
+        Pattern  = '(SET +change\b|\bchange *= *1\b)'
+        Probe    = 'conn.execute("UPDATE outputs SET change = 1 WHERE outputId = ?1", [id]);'
+        ProbeExt = '.rs'
+    },
+    [pscustomobject]@{
+        Id       = 'G15'
+        Name     = 'An indexer block / header / tip / proof URL outside the chain tracker (headers and roots come from our own verified chain)'
+        Owner    = 'B5-T1-P7a-1'
+        # Owner 2026-10-07 + P7a-1 contract scope 5 (row P7a-D1): no code asks an indexer for a
+        # block, a header, the tip or a merkle proof except chain_tracker.rs (its header sources
+        # and the named legacy_* lookups P7a-2 retires) and the Services providers (which the
+        # tracker and the proof fetch call). Full URLs and relative route fragments both count.
+        # Whole-line comments are not counted (documented limit). Widened 2026-10-09 (adversarial
+        # review): the header routes the phase's own research lists, without counting the
+        # tests/fixtures/headers/ include paths. Baseline MEASURED BY THIS SCRIPT in its own
+        # commit; every counted line is named in HARNESS_DELTA.md section 3b.
+        Baseline = 2
+        Target   = 0
+        Paths    = @('rust-wallet/src')
+        Include  = @('*.rs')
+        ExcludeFiles = @('rust-wallet/src/chain_tracker.rs', 'rust-wallet/src/services/providers/*')
+        Pattern  = '(whatsonchain\.com/v1/bsv/main/(block|chain/info)|/block/(height|hash)/|/block/\{[^}]*\}/header|/block/headers|/block_header/|/headers(\.bin|\?)|/header/(height|hash)/|/proof/tsc|chain/info|/tip(\.bin|/stream)|/getPresentHeight|/findHeaderHex|/findChainTip)'
+        Probe    = 'let u = format!("https://api.whatsonchain.com/v1/bsv/main/block/height/{}", h);'
+        ProbeExt = '.rs'
+    },
+    [pscustomobject]@{
+        Id       = 'G16'
+        Name     = 'A proven_txs write outside the verified-store seam (a proof is stored only when our own headers verify it)'
+        Owner    = 'B5-T1-P7a-2'
+        # Row P7a-D2: every proven_txs write goes through proof_store.rs (store / fill_restored_*
+        # / link), whose VerifiedProof only a Valid verdict from our own chain can make. This
+        # catches a writer that skips the check without touching any indexer URL, which G15
+        # cannot see. Allowed: database/* (the repository the seam calls) and proof_store.rs.
+        # Test fixtures that plant rows on purpose are counted and named, as G14 does.
+        # Whole-line comments are not counted. Baseline MEASURED BY THIS SCRIPT in its own
+        # commit; every counted line is named in HARNESS_DELTA.md section 3c.
+        Baseline = 8
+        Target   = 0
+        Paths    = @('rust-wallet/src')
+        Include  = @('*.rs')
+        ExcludeFiles = @('rust-wallet/src/database/*', 'rust-wallet/src/proof_store.rs')
+        Pattern  = '(insert_or_get\(|INSERT +(OR +[A-Z]+ +)?INTO +proven_txs|UPDATE +proven_txs|DELETE +FROM +proven_txs|replace_proof\(|replace_with_verified\(|insert_verified\(|fill_empty_(merkle_path|raw_tx)\(|link_transaction\()'
+        Probe    = 'proven_tx_repo.insert_or_get(&txid, 1, 0, &[], &[], "", "");'
+        ProbeExt = '.rs'
     }
 )
 
@@ -268,6 +348,14 @@ function Get-GateHits {
         $full = Join-Path $RepoRoot $p
         if (-not (Test-Path $full)) { continue }
         $files += Get-ChildItem -Path $full -Recurse -File -Include $Gate.Include -ErrorAction SilentlyContinue
+    }
+    # Per-gate file exclusion (repo-relative globs) - the module that legitimately owns
+    # the pattern (B5-T1-P5: the money index and the classification seam).
+    if ($Gate.PSObject.Properties.Name -contains 'ExcludeFiles' -and $Gate.ExcludeFiles) {
+        $files = @($files | Where-Object {
+            $rel = $_.FullName.Substring($RepoRoot.Length + 1) -replace '\\', '/'
+            -not ($Gate.ExcludeFiles | Where-Object { $rel -like $_ })
+        })
     }
     if ($files.Count -eq 0) { return @() }
     $hits = @($files | Select-String -Pattern $Gate.Pattern -CaseSensitive)

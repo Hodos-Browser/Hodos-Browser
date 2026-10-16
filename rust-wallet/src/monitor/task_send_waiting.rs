@@ -153,13 +153,28 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
             }
         }
 
-        // Step 2: Check if too old — give up instead of endlessly retrying
+        // Step 2: Too old — give up, but only on chain evidence (B5-T1-P3, beta.8 ticket
+        // `TICKET_send_waiting_gives_up_and_frees_coins_without_asking_the_chain.md`,
+        // owner Q3). The signed bytes may have left the wallet (handed to a dApp, or a
+        // broadcast whose answer was lost), so the clock alone never frees the inputs:
+        // only "not found" from EVERY provider does. Anything else keeps the row
+        // `sending` with its inputs reserved, and the re-broadcast below keeps trying.
+        // (wallet-toolbox never un-fails, and keeps `serviceError` rows `sending`.)
         if age_secs > GIVE_UP_THRESHOLD_SECS {
-            warn!("   ⏰ {} stuck in 'sending' for {}s (> {}s) — giving up, marking failed",
-                  short_txid, age_secs, GIVE_UP_THRESHOLD_SECS);
-            cleanup_failed_sending(state, &txid, *tx_id);
-            failed += 1;
-            continue;
+            match state.services.tx_status_unanimous(&txid).await {
+                Err(crate::services::IndexerError::NotFound) => {
+                    warn!("   ⏰ {} stuck in 'sending' for {}s (> {}s) and every provider says not found — giving up, marking failed",
+                          short_txid, age_secs, GIVE_UP_THRESHOLD_SECS);
+                    cleanup_failed_sending(state, &txid, *tx_id);
+                    failed += 1;
+                    continue;
+                }
+                other => {
+                    warn!("   ⏰ {} stuck in 'sending' for {}s, but the chain did not say 'not found' ({}) — keeping it 'sending', inputs reserved",
+                          short_txid, age_secs,
+                          match other { Ok(s) => format!("{:?}", s.state), Err(e) => e.to_string() });
+                }
+            }
         }
 
         // Step 3: Re-broadcast — prefer BEEF if available (stored raw_tx may be BEEF from createAction,
@@ -170,10 +185,12 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
         } else {
             info!("   📡 Re-broadcasting {} with raw tx (stuck for {}s)...", short_txid, age_secs);
         }
-        match crate::handlers::broadcast_transaction(
+        // B5-T1-P2: temporary vs permanent over the whole provider chain, not the last
+        // error's text — the same verdict `sign_action` / `create_action` act on.
+        match crate::handlers::broadcast_transaction_classified(
             &broadcast_hex,
             &state.services,
-            Some(&state.database),
+            Some(crate::handlers::ProofSink::of(&state)),
             Some(&txid),
         ).await {
             Ok(msg) => {
@@ -181,10 +198,11 @@ pub async fn run(state: &web::Data<AppState>, client: &reqwest::Client) -> Resul
                 promote_to_unproven(state, &txid);
                 recovered += 1;
             }
-            Err(e) => {
-                if is_permanent_error(&e) {
+            Err(f) => {
+                let e = f.reason;
+                if f.permanent {
                     warn!("   ❌ Permanent broadcast failure for {}: {}", short_txid, e);
-                    if crate::arc_status::is_double_spend_error(&e) {
+                    if f.double_spend {
                         // Mark as suspected — TaskVerifyDoubleSpend will verify independently.
                         cleanup_failed_sending_suspected(state, &txid, *tx_id);
                     } else {
@@ -251,7 +269,7 @@ fn cleanup_failed_sending_suspected(state: &web::Data<AppState>, txid: &str, tx_
     cleanup_failed_sending_impl(state, txid, tx_id, true);
 }
 
-fn cleanup_failed_sending_impl(state: &web::Data<AppState>, txid: &str, tx_id: i64, is_double_spend: bool) {
+pub(crate) fn cleanup_failed_sending_impl(state: &web::Data<AppState>, txid: &str, tx_id: i64, is_double_spend: bool) {
     if let Ok(db) = state.database.lock() {
         let conn = db.connection();
         let short_txid = &txid[..txid.len().min(16)];
@@ -332,12 +350,6 @@ fn cleanup_failed_sending_impl(state: &web::Data<AppState>, txid: &str, tx_id: i
 
     // 4. Invalidate balance cache
     state.balance_cache.invalidate();
-}
-
-/// Determine if a broadcast error is permanent (never retry) vs transient (worth retrying).
-/// Delegates to the centralized arc_status module.
-fn is_permanent_error(error: &str) -> bool {
-    crate::arc_status::is_fatal_broadcast_error(error)
 }
 
 /// Get the best available hex for re-broadcasting a stuck transaction.

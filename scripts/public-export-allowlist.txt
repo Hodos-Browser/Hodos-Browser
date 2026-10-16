@@ -1,0 +1,37 @@
+# What the public release repo (Hodos-Browser/Hodos-Browser) receives.
+# Read by scripts/publish-public.sh and by the .githooks/pre-push guard.
+#
+# ALLOWLIST: anything not included here stays private, so a new top-level folder is private
+# until someone adds it on purpose. Approved by the owner 2026-10-16.
+#
+#   + <path>   include       - <path>   exclude (wins over any include)
+#   dir/       everything under dir
+#   **/name    a file with that name at any depth   **/dir/  a folder with that name at any depth
+#   anything else is one exact file
+
++ .github/
++ adblock-engine/
++ cef-native/
++ frontend/
++ rust-wallet/
++ installer/
++ scripts/
++ build-instructions/
++ docs/
++ test-fixtures/
++ demos/
++ README.md
++ Brewfile
++ LICENSE
++ COPYRIGHT
++ NOTICE.md
++ TRADEMARK.md
++ .gitattributes
++ .gitignore
++ dev-wallet.ps1
++ dev-wallet.sh
++ dev-adblock.ps1
++ dev-adblock.sh
+
+- **/CLAUDE.md
+- rust-wallet/archive/

@@ -71,13 +71,8 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
     }
 
     // 3. Delete old confirmed parent_transactions (older than 7 days)
-    // Confirmed txs have merkle proofs — their parents aren't needed for BEEF.
-    // Only deletes records that are both old AND confirmed on chain (proven_txs exists).
-    let parent_cutoff = now - PARENT_TX_RETENTION_SECS;
-    match conn.execute(
-        "DELETE FROM parent_transactions WHERE cached_at < ?1 AND txid IN (SELECT txid FROM proven_txs)",
-        rusqlite::params![parent_cutoff],
-    ) {
+    // ⛔ B5-T1-P4 (`P4-A6`): parents holding an offloaded script are exempt — see the fn.
+    match crate::ingest::purge_parent_transactions(conn, now - PARENT_TX_RETENTION_SECS) {
         Ok(count) if count > 0 => {
             info!("🧹 TaskPurge: deleted {} old confirmed parent_transaction(s)", count);
             total_purged += count;

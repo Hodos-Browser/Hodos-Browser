@@ -95,7 +95,14 @@ pub async fn status(engine: web::Data<AdblockEngine>) -> HttpResponse {
             "sizeBytes": l.size_bytes,
             "ruleCount": l.rule_count,
             "expiresAt": l.expires_at,
+            "version": l.version,
+            "lastModified": l.last_modified,
         })).collect::<Vec<_>>(),
+        "scriptlets": {
+            "source": status.scriptlets.source,
+            "count": status.scriptlets.count,
+            "extra": status.scriptlets.extra,
+        },
     }))
 }
 

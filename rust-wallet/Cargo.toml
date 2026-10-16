@@ -33,7 +33,11 @@ winresource = "0.1"
 # money-handling process, so it deserves at least the same treatment.
 # 4.11.0 is the version already resolved in Cargo.lock — this records current
 # behaviour rather than changing it. Bump deliberately, with a test run.
-actix-web = "=4.11.0"
+# Default features minus `http2` (B5-T1-P1, owner 2026-10-02): the server binds
+# plain-TCP HTTP/1.1 (`HttpServer::bind` -> `.tcp()`, no TLS, no h2c), so the h2
+# code was compiled in but unreachable, and it kept h2 0.3.27 (RUSTSEC-2026-0258)
+# in Cargo.lock after reqwest moved to h2 0.4.
+actix-web = { version = "=4.11.0", default-features = false, features = ["macros", "compress-brotli", "compress-gzip", "compress-zstd", "cookies", "unicode", "compat"] }
 actix-cors = "0.7"
 # P0.5 panel #2 finding 1.3. The first-party gate in main.rs has to match the
 # path actix ROUTES on, and actix-router decodes percent-escapes before
@@ -75,6 +79,9 @@ bs58 = "0.5"
 hmac = "0.12"
 pbkdf2 = "0.12"
 hex = "0.4"
+# B5-T1-P7a-1: 256-bit arithmetic for block-header targets and chain work. Already in the tree
+# (elliptic-curve depends on it); pinned to the version Cargo.lock resolved, no default features.
+crypto-bigint = { version = "=0.5.5", default-features = false }
 thiserror = "1.0"
 aes-gcm = "0.10"
 aes = "0.8"
@@ -91,7 +98,7 @@ bip39 = "2.2"
 bip32 = "0.5"
 
 # HTTP client for blockchain API calls
-reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "http2", "charset", "system-proxy"], default-features = false }
 
 # Compression (gzip for on-chain backup)
 flate2 = "1"
@@ -107,6 +114,7 @@ tokio-util = "0.7"
 
 # Async trait support for IndexerProvider (Phase 1.6d.B Services facade)
 async-trait = "0.1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }  # B5-T5-P7a: post to / list from several MessageBox hosts at once
 
 # Phase 2.6 — pure decision logic for the wallet permission engine.
 # Workspace member; the path dep keeps Cargo aware of the crate so any change

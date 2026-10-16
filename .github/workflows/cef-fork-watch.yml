@@ -37,6 +37,9 @@ env:
 
 jobs:
   watch:
+    # Private dev repo only. On the public release repo it opened a public issue saying the
+    # engine is behind on upstream security fixes (#36, 2026-10-12). Owner, 2026-10-16.
+    if: github.repository == 'BSVArchie/Hodos-Browser'
     runs-on: ubuntu-latest
     steps:
       - name: Compare upstream branch against our fork's integration branch

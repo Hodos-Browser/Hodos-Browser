@@ -18,11 +18,34 @@ impl<'a> ProvenTxRepository<'a> {
         Self { conn }
     }
 
-    /// Insert a proven transaction record, or return the existing ID if txid already exists.
-    ///
-    /// This enforces immutability: if a record for this txid already exists, we return
-    /// its ID without modifying it. INSERT OR IGNORE + SELECT pattern.
+    /// Insert a proof our chain verified (B5-T1-P7a-2: only `proof_store::store` calls this), or
+    /// return the existing ID if txid already exists (INSERT OR IGNORE + SELECT).
+    pub fn insert_verified(
+        &self,
+        proof: &crate::proof_store::VerifiedProof,
+        merkle_path: &[u8],
+        raw_tx: &[u8],
+        block_hash: &str,
+    ) -> CacheResult<i64> {
+        self.insert_or_get_raw(proof.txid(), proof.height(), proof.tx_index(), merkle_path, raw_tx, block_hash, "")
+    }
+
+    /// Test-only: plant a row with no check (fixtures for unverified and wrong proofs).
+    #[cfg(test)]
     pub fn insert_or_get(
+        &self,
+        txid: &str,
+        height: u32,
+        tx_index: u64,
+        merkle_path: &[u8],
+        raw_tx: &[u8],
+        block_hash: &str,
+        merkle_root: &str,
+    ) -> CacheResult<i64> {
+        self.insert_or_get_raw(txid, height, tx_index, merkle_path, raw_tx, block_hash, merkle_root)
+    }
+
+    fn insert_or_get_raw(
         &self,
         txid: &str,
         height: u32,
@@ -162,6 +185,25 @@ impl<'a> ProvenTxRepository<'a> {
         }
     }
 
+    /// Restore: fill a row's stripped `merkle_path` with a proof our chain verified — only when the
+    /// row is empty and the proof agrees with the row's height and index (B5-T1-P7a-2 `C11`; only
+    /// `proof_store::fill_restored_proof` calls this). Returns rows updated.
+    pub fn fill_empty_merkle_path(&self, proof: &crate::proof_store::VerifiedProof, merkle_path: &[u8]) -> CacheResult<usize> {
+        Ok(self.conn.execute(
+            "UPDATE proven_txs SET merkle_path = ?1, height = ?3
+             WHERE txid = ?2 AND (height = ?3 OR height = 0) AND tx_index = ?4 AND (merkle_path IS NULL OR LENGTH(merkle_path) = 0)",
+            rusqlite::params![merkle_path, proof.txid(), proof.height() as i64, proof.tx_index() as i64],
+        )?)
+    }
+
+    /// Restore: fill a row's stripped `raw_tx` (the caller has checked the bytes hash to `txid`).
+    pub fn fill_empty_raw_tx(&self, txid: &str, raw_tx: &[u8]) -> CacheResult<usize> {
+        Ok(self.conn.execute(
+            "UPDATE proven_txs SET raw_tx = ?1 WHERE txid = ?2 AND (raw_tx IS NULL OR LENGTH(raw_tx) = 0)",
+            rusqlite::params![raw_tx, txid],
+        )?)
+    }
+
     /// Link a transaction to its proven_txs record by setting proven_tx_id on the transactions table.
     pub fn link_transaction(&self, txid: &str, proven_tx_id: i64) -> CacheResult<()> {
         self.conn.execute(
@@ -175,10 +217,18 @@ impl<'a> ProvenTxRepository<'a> {
     ///
     /// Used to clean up corrupt or invalid merkle proofs (e.g., ARC returned
     /// wrong BUMP data). Also unlinks any transactions referencing this record.
-    pub fn delete_by_txid(&self, txid: &str) -> CacheResult<usize> {
+    /// Private (xhigh 168 #11): only `replace_with_verified` deletes a stored proof.
+    fn delete_by_txid(&self, txid: &str) -> CacheResult<usize> {
         // Unlink any transactions first
         self.conn.execute(
             "UPDATE transactions SET proven_tx_id = NULL WHERE txid = ?1",
+            rusqlite::params![txid],
+        )?;
+        // ...and any proof request (a foreign key: with foreign_keys=ON the delete fails otherwise —
+        // B5-T1-P7a-2 adversarial review).
+        self.conn.execute(
+            "UPDATE proven_tx_reqs SET proven_tx_id = NULL
+             WHERE proven_tx_id IN (SELECT provenTxId FROM proven_txs WHERE txid = ?1)",
             rusqlite::params![txid],
         )?;
 
@@ -190,21 +240,28 @@ impl<'a> ProvenTxRepository<'a> {
         Ok(count)
     }
 
-    /// Replace an existing proven_txs record with corrected data.
-    ///
-    /// Deletes the old record and inserts the new one. Used when a previously
-    /// stored proof is found to have an invalid merkle root.
-    pub fn replace_proof(
+    /// Replace an existing row with a proof our chain verified (only `proof_store::store` calls this).
+    /// Deletes the old record (unlinking its transaction) and inserts the new one.
+    pub fn replace_with_verified(
         &self,
-        txid: &str,
-        height: u32,
-        tx_index: u64,
+        proof: &crate::proof_store::VerifiedProof,
         merkle_path: &[u8],
         raw_tx: &[u8],
         block_hash: &str,
-        merkle_root: &str,
     ) -> CacheResult<i64> {
-        self.delete_by_txid(txid)?;
-        self.insert_or_get(txid, height, tx_index, merkle_path, raw_tx, block_hash, merkle_root)
+        // One unit: a failure part-way must not leave the transaction unlinked from both rows.
+        self.conn.execute_batch("SAVEPOINT replace_with_verified")?;
+        let r = self.delete_by_txid(proof.txid())
+            .and_then(|_| self.insert_verified(proof, merkle_path, raw_tx, block_hash));
+        let released = match r {
+            Ok(_) => self.conn.execute_batch("RELEASE replace_with_verified"),
+            Err(_) => self.conn.execute_batch("ROLLBACK TO replace_with_verified; RELEASE replace_with_verified"),
+        };
+        if let Err(e) = released {
+            // Never leave the savepoint open on the shared connection (fix review).
+            let _ = self.conn.execute_batch("ROLLBACK TO replace_with_verified; RELEASE replace_with_verified");
+            return Err(e.into());
+        }
+        r
     }
 }

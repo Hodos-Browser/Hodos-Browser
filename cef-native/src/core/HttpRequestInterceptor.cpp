@@ -2528,15 +2528,10 @@ void runIpcEngineCascade(const std::string& requestId,
             // payment success (mirrors the HTTP path's
             // AsyncHTTPClient::OnRequestComplete derivation). Local-only:
             // payment endpoint + UR_SUCCESS + no "error" in response body.
-            bool isErrorInResponse = false;
-            if (ok && isPaymentKind) {
-                try {
-                    auto rj = nlohmann::json::parse(payload);
-                    isErrorInResponse = rj.contains("error");
-                } catch (...) {}
-            }
+            // B5-T1-P2: one rule (PaymentCost.h) — success with no error, or a payment
+            // still being sent after a temporary broadcast failure.
             const bool wasAutoApprovedPayment =
-                ok && isPaymentKind && !isErrorInResponse;
+                isPaymentKind && hodos::PaymentReplyLightsPill(ok, payload);
 
             CefPostTask(TID_UI, base::BindOnce([](
                 std::string requestId, bool ok, std::string payload,
@@ -3641,15 +3636,10 @@ static void resumeInternalResponse(const PendingAuthRequest& req,
             AsyncWalletResourceHandler::computePaymentCost(endpoint, body);
         const bool isPaymentKind = cost.isPayment;
         const int64_t cents = cost.cents;
-        bool isErrorInResponse = false;
-        if (ok && isPaymentKind) {
-            try {
-                auto rj = nlohmann::json::parse(payload);
-                isErrorInResponse = rj.contains("error");
-            } catch (...) {}
-        }
-        const bool wasAutoApprovedPayment =
-            ok && isPaymentKind && !isErrorInResponse;
+        // B5-T1-P2: one rule (PaymentCost.h) — success with no error, or a payment
+        // still being sent after a temporary broadcast failure.
+        const bool lightsPill = isPaymentKind && hodos::PaymentReplyLightsPill(ok, payload);
+        const bool wasAutoApprovedPayment = lightsPill;
 
         CefPostTask(TID_UI, base::BindOnce([](
             std::string requestId, bool ok, std::string payload,
@@ -3759,15 +3749,10 @@ static void resumeHttpCallbackResponse(const PendingAuthRequest& req,
             AsyncWalletResourceHandler::computePaymentCost(endpoint, body);
         const bool isPaymentKind = cost.isPayment;
         const int64_t cents = cost.cents;
-        bool isErrorInResponse = false;
-        if (ok && isPaymentKind) {
-            try {
-                auto rj = nlohmann::json::parse(payload);
-                isErrorInResponse = rj.contains("error");
-            } catch (...) {}
-        }
-        const bool wasAutoApprovedPayment =
-            ok && isPaymentKind && !isErrorInResponse;
+        // B5-T1-P2: one rule (PaymentCost.h) — success with no error, or a payment
+        // still being sent after a temporary broadcast failure.
+        const bool lightsPill = isPaymentKind && hodos::PaymentReplyLightsPill(ok, payload);
+        const bool wasAutoApprovedPayment = lightsPill;
 
         CefPostTask(TID_UI, base::BindOnce([](
             std::string payload, CefRefPtr<CefResourceHandler> handler,
@@ -3868,18 +3853,13 @@ static void resumeIpcResponse(const PendingAuthRequest& req,
             AsyncWalletResourceHandler::computePaymentCost(endpoint, body);
         const bool isPaymentKind = cost.isPayment;
         const int64_t cents = cost.cents;
-        bool isErrorInResponse = false;
-        if (ok && isPaymentKind) {
-            try {
-                auto rj = nlohmann::json::parse(payload);
-                isErrorInResponse = rj.contains("error");
-            } catch (...) {}
-        }
+        // B5-T1-P2: one rule (PaymentCost.h) — success with no error, or a payment
+        // still being sent after a temporary broadcast failure.
+        const bool lightsPill = isPaymentKind && hodos::PaymentReplyLightsPill(ok, payload);
         // 6.d.BE+1: dropped `cents > 0` — tiny payments still deserve the
         // gold-pill animation as the user-visible safeguard (matches
         // legacy AsyncHTTPClient::OnRequestComplete behavior).
-        const bool wasAutoApprovedPayment =
-            ok && isPaymentKind && !isErrorInResponse;
+        const bool wasAutoApprovedPayment = lightsPill;
 
         CefPostTask(TID_UI, base::BindOnce([](
             std::string requestId, bool ok, std::string payload,
@@ -4126,15 +4106,9 @@ public:
         int64_t cents = parent_->getPreCalculatedCents();
         const bool isPaymentKind =
             AsyncWalletResourceHandler::isPaymentEndpoint(parent_->getEndpoint());
-        bool successAndNotError = false;
-        if (status == UR_SUCCESS && isPaymentKind) {
-            bool isError = false;
-            try {
-                auto rj = nlohmann::json::parse(responseData_);
-                isError = rj.contains("error");
-            } catch (...) {}
-            successAndNotError = !isError;
-        }
+        // B5-T1-P2: one rule (PaymentCost.h). UR_SUCCESS plays the role of `ok`.
+        const bool successAndNotError = status == UR_SUCCESS && isPaymentKind
+            && hodos::PaymentReplyLightsPill(true, responseData_);
         OnWalletCallSuccess(parent_->getBrowserId(),
                             parent_->getRequestDomain(),
                             cents,

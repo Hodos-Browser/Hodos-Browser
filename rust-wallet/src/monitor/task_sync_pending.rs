@@ -57,8 +57,62 @@ static FIRST_RUN: AtomicBool = AtomicBool::new(true);
 static LAST_RECENT_CHECK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static LAST_OLD_CHECK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// B5-T1-P4: rows completed per tick by the unchecked-script sweep, and where the
+/// next tick resumes (so a row that can never be completed cannot starve the rest).
+const UNCHECKED_SWEEP_LIMIT: usize = 10;
+static UNCHECKED_SWEEP_AFTER: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// Retry rows whose script is still unchecked (`script_length IS NULL`): a parent that
+/// could not be fetched when the coin was found, and every row written before
+/// B5-T1-P4 (owner decision 1(a): the backfill is this same observation).
+async fn sweep_unchecked_scripts(state: &web::Data<AppState>) {
+    let after = UNCHECKED_SWEEP_AFTER.load(Ordering::Relaxed);
+    let report = crate::ingest::complete_unchecked_from_chain(
+        &state.database, &state.services, after, UNCHECKED_SWEEP_LIMIT).await;
+    UNCHECKED_SWEEP_AFTER.store(report.next_after_id, Ordering::Relaxed);
+    if report.completed > 0 || report.still_unchecked > 0 {
+        info!("   🔎 TaskSyncPending: scripts observed for {} row(s), {} still unchecked",
+              report.completed, report.still_unchecked);
+    }
+}
+
 /// Run the TaskSyncPending task
 pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
+    // B5-T1-P5: classify FIRST as well. The startup tick's address sweep can take
+    // minutes (measured: ~3 min for 444 addresses on the dev wallet), and after the V28
+    // upgrade every coin is held until the pass runs — the balance read 0 for that long.
+    // The pass is local (no network), so running it before the sweep costs nothing.
+    classify_pending(state);
+    let result = check_pending(state).await;
+    // B5-T1-P4: every tick, AFTER receive detection so it never delays a payment
+    // showing up (adversarial review MED 1), and whatever the address check returned.
+    sweep_unchecked_scripts(state).await;
+    // B5-T1-P5: then classify every coin not yet proven money — the one-time migration
+    // of pre-P5 rows, rows whose script the sweep just observed, and decision 7 ④'s
+    // automatic retry of held coins. Local only (no network), skipped while locked.
+    classify_pending(state);
+    result
+}
+
+/// B5-T1-P5: where the next tick's classification pass resumes.
+static CLASSIFY_AFTER: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+fn classify_pending(state: &web::Data<AppState>) {
+    let after = CLASSIFY_AFTER.load(Ordering::Relaxed);
+    let report = match state.database.lock() {
+        Ok(db) => crate::classify::stamp_pending(&db, "tick", after),
+        Err(e) => { warn!("   🏷️ classify pass: DB lock: {}", e); return; }
+    };
+    match report {
+        Ok((r, next)) => {
+            CLASSIFY_AFTER.store(next, Ordering::Relaxed);
+            if r.stamped > 0 || r.unstamped > 0 { state.balance_cache.invalidate(); }
+        }
+        Err(e) => warn!("   🏷️ classify pass failed: {} — coins stay held, retried next tick", e),
+    }
+}
+
+async fn check_pending(state: &web::Data<AppState>) -> Result<(), String> {
     let is_startup = FIRST_RUN.swap(false, Ordering::SeqCst);
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -179,6 +233,11 @@ async fn check_addresses_individually(
             continue;
         }
 
+        // B5-T1-P4: the parent is fetched, verified and cached BEFORE the row is written
+        // (it used to be cached after), and the row stores the script it holds.
+        let observed = crate::ingest::observe_coins_from_chain(&state.database, &state.services,
+            &crate::ingest::coin_keys(&utxos)).await;
+
         // Insert new UTXOs into DB
         {
             let db = state.database.lock().map_err(|e| format!("DB lock: {}", e))?;
@@ -186,20 +245,22 @@ async fn check_addresses_individually(
             let address_repo = AddressRepository::new(db.connection());
 
             for utxo in &utxos {
+                let source = crate::ingest::source_for(&observed, &utxo.txid, utxo.vout);
                 let insert_result = if utxo.confirmed {
                     output_repo.upsert_received_utxo(
                         state.current_user_id, &utxo.txid, utxo.vout,
-                        utxo.satoshis, &utxo.script, addr.index,
+                        utxo.satoshis, &utxo.script, addr.index, source,
                     )
                 } else {
                     output_repo.upsert_received_utxo_with_confirmed(
                         state.current_user_id, &utxo.txid, utxo.vout,
-                        utxo.satoshis, &utxo.script, addr.index, false,
+                        utxo.satoshis, &utxo.script, addr.index, false, source,
                     )
                 };
 
                 match insert_result {
                     Ok(1) => {
+                        crate::classify::after_write(&db, &utxo.txid, utxo.vout, "I1:sync-individual");
                         new_utxo_count += 1;
                         new_sats_total += utxo.satoshis;
                         if let Err(e) = PeerPayRepository::insert_address_sync_notification(
@@ -274,6 +335,10 @@ async fn check_addresses_bulk(
         .or_else(|| state.price_cache.get_stale())
         .map(|p| (p * 100.0) as i64);
 
+    // B5-T1-P4: observe before writing (see the individual tier).
+    let observed = crate::ingest::observe_coins_from_chain(&state.database, &state.services,
+        &crate::ingest::coin_keys(&api_utxos)).await;
+
     let mut new_utxo_count = 0u32;
     let mut new_sats_total: i64 = 0;
     let mut new_txids: Vec<String> = Vec::new();
@@ -306,8 +371,10 @@ async fn check_addresses_bulk(
                 match output_repo.upsert_received_utxo_with_confirmed(
                     state.current_user_id, &utxo.txid, utxo.vout,
                     utxo.satoshis, &utxo.script, addr.index, utxo.confirmed,
+                    crate::ingest::source_for(&observed, &utxo.txid, utxo.vout),
                 ) {
                     Ok(1) => {
+                        crate::classify::after_write(&db, &utxo.txid, utxo.vout, "I1:sync-bulk");
                         new_utxo_count += 1;
                         new_sats_total += utxo.satoshis;
                         if let Err(e) = PeerPayRepository::insert_address_sync_notification(
@@ -371,6 +438,10 @@ async fn cache_parent_transactions(state: &web::Data<AppState>, txids: &[String]
     // local parent_transactions cache — keep that behavior.
     for txid in txids {
         match crate::cache_helpers::fetch_parent_transaction_from_api(&state.services, txid).await {
+            // B5-T1-P4: never cache bytes that are not this txid (caches must not self-poison).
+            Ok(raw_hex) if !hex::decode(&raw_hex).map(|b| crate::reconcile::verify_raw_txid(&b, txid)).unwrap_or(false) => {
+                warn!("   ⚠️  Parent tx {} failed the txid check — not cached", txid);
+            }
             Ok(raw_hex) => {
                 if let Ok(db) = state.database.lock() {
                     let parent_tx_repo = ParentTransactionRepository::new(db.connection());

@@ -146,13 +146,83 @@ fn keychain_service() -> &'static str {
 #[cfg(target_os = "macos")]
 const KEYCHAIN_ACCOUNT: &str = "wallet-mnemonic";
 
+// ⛔ M-06 §0 (2026-10-10): plain `cargo test` on macOS replaced the installed wallet's
+// Keychain phrase with a random test phrase — wallet-creating tests reach `dpapi_encrypt`.
+// So in a unit-test build the macOS store never touches the Keychain: the phrase travels
+// in the returned blob, as a Windows DPAPI blob carries its data. No test can overwrite a
+// real item, parallel tests cannot race on one slot, no ACL dialog. The real Keychain is
+// reached only with HODOS_KEYCHAIN_TEST=1, and never the production item.
+// ⚠️ `tests/*.rs` build the library WITHOUT cfg(test): see
+// `no_integration_test_reaches_the_credential_store`.
+
+/// Prefix of the blob a unit-test build returns instead of writing the Keychain.
+#[cfg(all(test, target_os = "macos"))]
+const TEST_STORE_PREFIX: &[u8] = b"HODOS-TEST-STORE:";
+
+/// Which store a credential call may use in a unit-test build.
+#[cfg(test)]
+#[derive(Debug, PartialEq)]
+enum TestStore {
+    /// The phrase stays in the blob; the Keychain is not touched.
+    InBlob,
+    /// Opted in (HODOS_KEYCHAIN_TEST=1) and a non-production service.
+    Keychain,
+    /// Opted in but the call would reach the production item.
+    Refused,
+}
+
+#[cfg(test)]
+fn test_store_for(opted_in: bool, service: &str) -> TestStore {
+    match (opted_in, service == "HodosBrowser") {
+        (false, _) => TestStore::InBlob,
+        (true, true) => TestStore::Refused,
+        (true, false) => TestStore::Keychain,
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+fn test_store() -> TestStore {
+    test_store_for(std::env::var("HODOS_KEYCHAIN_TEST").unwrap_or_default() == "1", keychain_service())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+const TEST_REFUSED: &str =
+    "refusing the PRODUCTION Keychain item in a test build (HODOS_KEYCHAIN_TEST=1 needs HODOS_DEV=1)";
+
 /// Store mnemonic in macOS Keychain (tied to current user account).
 /// Returns a sentinel value for the DB column (the real secret is in Keychain).
 #[cfg(target_os = "macos")]
 pub fn dpapi_encrypt(plaintext: &[u8]) -> Result<Vec<u8>, String> {
-    use security_framework::passwords::{set_generic_password, delete_generic_password};
+    #[cfg(test)]
+    match test_store() {
+        TestStore::InBlob => return Ok([TEST_STORE_PREFIX, plaintext].concat()),
+        TestStore::Refused => return Err(TEST_REFUSED.to_string()),
+        TestStore::Keychain => {}
+    }
+    keychain_set(keychain_service(), plaintext)?;
+    // Return sentinel — the DB column stores this, not the actual secret
+    Ok(KEYCHAIN_SENTINEL.to_vec())
+}
 
-    let service = keychain_service();
+/// Retrieve mnemonic from macOS Keychain (requires same macOS user account).
+/// The `_encrypted` parameter is the sentinel value from the DB — ignored.
+#[cfg(target_os = "macos")]
+pub fn dpapi_decrypt(_encrypted: &[u8]) -> Result<Vec<u8>, String> {
+    #[cfg(test)]
+    match test_store() {
+        TestStore::InBlob => {
+            return _encrypted.strip_prefix(TEST_STORE_PREFIX).map(|p| p.to_vec()).ok_or_else(||
+                "not a test-store blob: a test build does not read the Keychain (opt in: HODOS_KEYCHAIN_TEST=1 HODOS_DEV=1)".to_string())
+        }
+        TestStore::Refused => return Err(TEST_REFUSED.to_string()),
+        TestStore::Keychain => {}
+    }
+    keychain_get(keychain_service())
+}
+
+#[cfg(target_os = "macos")]
+fn keychain_set(service: &str, plaintext: &[u8]) -> Result<(), String> {
+    use security_framework::passwords::{set_generic_password, delete_generic_password};
 
     // Delete any existing entry first (set_generic_password fails if entry exists)
     let _ = delete_generic_password(service, KEYCHAIN_ACCOUNT);
@@ -162,22 +232,15 @@ pub fn dpapi_encrypt(plaintext: &[u8]) -> Result<Vec<u8>, String> {
 
     log::info!("   Mnemonic stored in macOS Keychain (service={}, account={})",
         service, KEYCHAIN_ACCOUNT);
-
-    // Return sentinel — the DB column stores this, not the actual secret
-    Ok(KEYCHAIN_SENTINEL.to_vec())
+    Ok(())
 }
 
-/// Retrieve mnemonic from macOS Keychain (requires same macOS user account).
-/// The `_encrypted` parameter is the sentinel value from the DB — ignored.
 #[cfg(target_os = "macos")]
-pub fn dpapi_decrypt(_encrypted: &[u8]) -> Result<Vec<u8>, String> {
+fn keychain_get(service: &str) -> Result<Vec<u8>, String> {
     use security_framework::passwords::get_generic_password;
 
-    let service = keychain_service();
-    let password = get_generic_password(service, KEYCHAIN_ACCOUNT)
-        .map_err(|e| format!("Keychain retrieve failed (service={}): {}", service, e))?;
-
-    Ok(password)
+    get_generic_password(service, KEYCHAIN_ACCOUNT)
+        .map_err(|e| format!("Keychain retrieve failed (service={}): {}", service, e))
 }
 
 // =============================================================================
@@ -278,24 +341,74 @@ mod tests {
         // would have destroyed their production wallet's auto-unlock AND left it pointing
         // at a foreign mnemonic. Found 2026-08-26 while diagnosing a locked dev wallet.
         //
-        // Three guards now: opt-in, dev namespace only, and cleanup.
+        // Guards now: opt-in, and a service that is never a wallet's (2026-10-12: it used
+        // to set HODOS_DEV=1 for the whole process and delete the DEV wallet's item).
         if std::env::var("HODOS_KEYCHAIN_TEST").unwrap_or_default() != "1" {
             eprintln!("skipped: set HODOS_KEYCHAIN_TEST=1 to run (writes to the real Keychain)");
             return;
         }
-        std::env::set_var("HODOS_DEV", "1");
-        assert_eq!(keychain_service(), "HodosBrowserDev",
-                   "refusing to run against the production Keychain service");
+        const SERVICE: &str = "HodosBrowserKeychainRoundTrip";
 
         let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-        let sentinel = dpapi_encrypt(mnemonic.as_bytes()).expect("keychain store should succeed");
-        assert_eq!(sentinel, KEYCHAIN_SENTINEL);
-
-        let retrieved = dpapi_decrypt(&sentinel).expect("keychain retrieve should succeed");
+        keychain_set(SERVICE, mnemonic.as_bytes()).expect("keychain store should succeed");
+        let retrieved = keychain_get(SERVICE).expect("keychain retrieve should succeed");
+        let _ = security_framework::passwords::delete_generic_password(SERVICE, KEYCHAIN_ACCOUNT);
         assert_eq!(retrieved, mnemonic.as_bytes());
+    }
 
-        let _ = security_framework::passwords::delete_generic_password(
-            keychain_service(), KEYCHAIN_ACCOUNT);
+    /// M-06 §0 — a unit-test build never reaches a real Keychain item unless opted in, and
+    /// never the production item even then. Pure half, run on every platform.
+    #[test]
+    fn a_test_build_keeps_the_phrase_out_of_the_keychain() {
+        assert_eq!(test_store_for(false, "HodosBrowser"), TestStore::InBlob);
+        assert_eq!(test_store_for(false, "HodosBrowserDev"), TestStore::InBlob);
+        assert_eq!(test_store_for(true, "HodosBrowser"), TestStore::Refused);
+        assert_eq!(test_store_for(true, "HodosBrowserDev"), TestStore::Keychain);
+    }
+
+    /// M-06 §0 — the wired half: `dpapi_encrypt`, the function every wallet-creating test
+    /// reaches, returns the test blob, never the Keychain sentinel. ⭐ macOS RED: delete
+    /// the `#[cfg(test)] match test_store()` arm in `dpapi_encrypt` ⇒ this fails (and the
+    /// Keychain item's `cdat` changes).
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_dpapi_encrypt_in_a_test_build_never_writes_the_keychain() {
+        if std::env::var("HODOS_KEYCHAIN_TEST").unwrap_or_default() == "1" {
+            eprintln!("skipped: HODOS_KEYCHAIN_TEST=1 opts into the real Keychain");
+            return;
+        }
+        let phrase = b"abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        let blob = dpapi_encrypt(phrase).expect("test store");
+        assert_ne!(blob, KEYCHAIN_SENTINEL, "a test build wrote the real Keychain");
+        assert!(blob.starts_with(TEST_STORE_PREFIX));
+        assert_eq!(dpapi_decrypt(&blob).unwrap(), phrase.to_vec());
+        assert!(dpapi_decrypt(KEYCHAIN_SENTINEL).is_err(), "a test build read the real Keychain");
+    }
+
+    /// M-06 §0 — `tests/*.rs` build the library WITHOUT `cfg(test)`, so the test store does
+    /// not protect them. No integration test may reach the credential store, except
+    /// tier7's DPAPI section, which must stay off macOS.
+    #[test]
+    fn no_integration_test_reaches_the_credential_store() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+        const REACH: [&str; 5] = ["dpapi_encrypt", "dpapi_decrypt", "create_wallet", "store_dpapi_blob", "try_dpapi_unlock"];
+        let mut seen = 0;
+        for entry in std::fs::read_dir(&dir).expect("tests/ exists") {
+            let path = entry.unwrap().path();
+            if path.extension().map_or(true, |x| x != "rs") { continue; }
+            seen += 1;
+            let text = std::fs::read_to_string(&path).unwrap();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if name == "tier7_boundary_coverage_test.rs" {
+                assert!(text.contains("#[cfg(all(not(windows), not(target_os = \"macos\")))]"),
+                    "tier7's DPAPI section must not run on macOS");
+                continue;
+            }
+            for r in REACH {
+                assert!(!text.contains(r), "{name} reaches the credential store via `{r}`");
+            }
+        }
+        assert!(seen > 5, "read {seen} files from {}", dir.display());
     }
 
     #[test]

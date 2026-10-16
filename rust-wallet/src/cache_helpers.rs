@@ -3,9 +3,7 @@
 //! Provides reusable functions for fetching data from APIs and managing cache operations.
 
 use crate::cache_errors::{CacheError, CacheResult};
-use crate::database::{BlockHeaderRepository, WalletDatabase};
-use crate::services::{BlockKey, IndexerError, WalletServices};
-use reqwest::Client;
+use crate::services::{IndexerError, WalletServices};
 use serde_json::Value;
 
 /// Map a Services `IndexerError` into the cache-layer `CacheError` taxonomy.
@@ -44,9 +42,8 @@ pub async fn fetch_parent_transaction_from_api(
 ///
 /// Post-processing: roundtrip verifies the returned TSC, and on failure attempts a
 /// byte-order fix (WoC quirk — sometimes returns natural-order hashes rather than
-/// display-order). If both fail, returns the proof as-is (matches pre-1.6d.C behavior
-/// — caller may still find it usable for the height/index parts even if nodes are
-/// malformed).
+/// display-order). If both fail, the proof is an error (B5-T1-P7a-2 `C13`: a proof that does not
+/// put the txid where it claims is not a proof).
 ///
 /// `NotFound` from the chain → `Ok(None)` (proof not yet available / tx still in mempool).
 pub async fn fetch_tsc_proof_from_api(
@@ -77,7 +74,7 @@ pub async fn fetch_tsc_proof_from_api(
     }
 
     log::error!("   ❌ Could not fix TSC proof byte order for {}", txid);
-    Ok(Some(tsc))
+    Err(CacheError::InvalidData(format!("merkle proof for {} does not contain the transaction at its index", txid)))
 }
 
 /// Verify a TSC proof by doing a roundtrip: TSC → BUMP → check that the txid
@@ -159,123 +156,6 @@ fn fix_tsc_byte_order(txid: &str, tsc: &Value) -> Option<Value> {
     } else {
         None
     }
-}
-
-/// Verify a TSC proof's merkle root against the actual block header.
-///
-/// Returns Ok(true) if the proof's computed root matches the block's merkle root,
-/// Ok(false) if they don't match, or Err if the block header can't be fetched.
-pub async fn verify_tsc_proof_against_block(
-    client: &Client,
-    txid: &str,
-    tsc: &Value,
-) -> CacheResult<bool> {
-    let block_height = match tsc["height"].as_u64() {
-        Some(h) if h > 0 => h as u32,
-        _ => {
-            // WoC TSC proofs often lack height — try target (block hash) to look it up
-            if let Some(target) = tsc["target"].as_str().filter(|t| !t.is_empty()) {
-                let header_url = format!("https://api.whatsonchain.com/v1/bsv/main/block/hash/{}", target);
-                let resp = client.get(&header_url).send().await
-                    .map_err(|e| CacheError::Api(format!("Failed to fetch block header for target {}: {}", target, e)))?;
-                if !resp.status().is_success() {
-                    return Err(CacheError::Api(format!("Block header API returned {} for target {}", resp.status(), target)));
-                }
-                let header_json: Value = resp.json().await
-                    .map_err(|e| CacheError::Api(format!("Failed to parse block header JSON: {}", e)))?;
-                match header_json["height"].as_u64() {
-                    Some(h) if h > 0 => h as u32,
-                    _ => return Err(CacheError::InvalidData("Could not resolve height from target block hash".to_string())),
-                }
-            } else {
-                return Err(CacheError::InvalidData("No height or target in TSC proof".to_string()));
-            }
-        }
-    };
-
-    let tx_index = tsc["index"].as_u64().unwrap_or(0);
-    let nodes = match tsc["nodes"].as_array() {
-        Some(n) => n,
-        None => return Ok(false),
-    };
-
-    // Compute merkle root from the proof
-    let computed_root = match crate::beef::compute_merkle_root_from_tsc(txid, block_height, tx_index, nodes) {
-        Ok(root) => root,
-        Err(e) => {
-            log::warn!("   Failed to compute merkle root for {}: {}", txid, e);
-            return Ok(false);
-        }
-    };
-
-    // Fetch the actual block header from WoC
-    let block_url = format!("https://api.whatsonchain.com/v1/bsv/main/block/height/{}", block_height);
-    let response = client.get(&block_url).send().await
-        .map_err(|e| CacheError::Api(format!("Failed to fetch block {}: {}", block_height, e)))?;
-
-    if !response.status().is_success() {
-        return Err(CacheError::Api(format!(
-            "Block API returned status {} for height {}", response.status(), block_height
-        )));
-    }
-
-    let block_json: Value = response.json().await
-        .map_err(|e| CacheError::Api(format!("Failed to parse block JSON: {}", e)))?;
-
-    let actual_root = block_json["merkleroot"].as_str()
-        .ok_or_else(|| CacheError::InvalidData("Missing merkleroot in block header".to_string()))?;
-
-    if computed_root == actual_root {
-        log::info!("   Merkle root verified for {} at height {}", txid, block_height);
-        Ok(true)
-    } else {
-        log::error!("   Merkle root MISMATCH for {} at height {}!", txid, block_height);
-        log::error!("      Computed: {}", computed_root);
-        log::error!("      Actual:   {}", actual_root);
-        Ok(false)
-    }
-}
-
-/// Check block header cache for a known height (sync, no network)
-pub fn get_cached_block_height(
-    block_header_repo: &BlockHeaderRepository,
-    target_hash: &str,
-) -> CacheResult<Option<u32>> {
-    match block_header_repo.get_by_hash(target_hash)? {
-        Some(header) => Ok(Some(header.height)),
-        None => Ok(None),
-    }
-}
-
-/// Fetch block header via the Services facade and cache it (async, manages own lock).
-///
-/// Phase 1.6d.C: was WoC-only (`/v1/bsv/main/block/hash/{hash}`), now routes through
-/// `WalletServices::get_block_header(BlockKey::Hash(...))` chain (WoC → JungleBus →
-/// Bitails per DESIGN §3). Soft timeout 8s.
-///
-/// JungleBus's provider impl returns an empty `header_hex` (the JungleBus block_header
-/// endpoint doesn't expose prev_hash, so the full 80-byte header can't be reconstructed).
-/// The cache write tolerates an empty header_hex — the height is what most callers need.
-/// Cache-no-poison invariant preserved: a failed fetch returns `Err` and writes nothing.
-pub async fn fetch_and_cache_block_header(
-    services: &WalletServices,
-    db: &std::sync::Mutex<WalletDatabase>,
-    target_hash: &str,
-) -> CacheResult<u32> {
-    let header = services
-        .get_block_header(BlockKey::Hash(target_hash.to_string()))
-        .await
-        .map_err(indexer_to_cache_err)?;
-
-    // Brief lock to cache the header. Empty header_hex is acceptable — JungleBus
-    // returns it that way and callers that only need height are unaffected.
-    {
-        let db_guard = db.lock().unwrap();
-        let block_header_repo = BlockHeaderRepository::new(db_guard.connection());
-        block_header_repo.upsert(target_hash, header.height, &header.header_hex)?;
-    }
-
-    Ok(header.height)
 }
 
 /// Verify that transaction bytes match expected TXID

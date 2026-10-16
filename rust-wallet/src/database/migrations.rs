@@ -3,7 +3,7 @@
 //! Single clean V1 migration creating the final target schema.
 //! All 24 incremental migrations have been consolidated.
 
-use rusqlite::{Connection, Result};
+use rusqlite::{Connection, OptionalExtension, Result};
 use log::info;
 
 /// Create schema version 1 — consolidated final schema
@@ -1384,5 +1384,326 @@ pub fn migrate_v24_to_v25(conn: &Connection) -> Result<()> {
     }
 
     info!("   ✅ V25 migration applied (default_bundled_scope_grant)");
+    Ok(())
+}
+
+/// Migrate V25 → V26 — B5-T1-P4 (ingest truth). **Data only, no schema change.**
+///
+/// `settings.max_output_script` (default 500000) was never read until B5-T1-P4; it is
+/// now the inline cap for `outputs.locking_script` (`@bsv/wallet-toolbox`'s
+/// `maxOutputScript`). The phase's §12 Q1, accepted by the owner 2026-10-02, sets it to
+/// 1,024 B: every money coin, an 860 B OrdLock listing and a BSV-21 prefix fit. Only
+/// the untouched default is changed; a value someone set on purpose is kept.
+///
+/// The backfill of `outputs.script_length` (owner decision 1(a)) is deliberately NOT
+/// here: a row may only gain a length from verified parent bytes, which needs the
+/// network — `ingest::complete_unchecked`, run by TaskSyncPending, does it.
+pub fn migrate_v25_to_v26(conn: &Connection) -> Result<()> {
+    let n = conn.execute(
+        "UPDATE settings SET max_output_script = 1024 WHERE max_output_script = 500000",
+        [],
+    )?;
+    info!("   ✅ V26 migration applied (inline script cap 1024 B; {} settings row(s))", n);
+    Ok(())
+}
+
+// ============================================================================
+// V27 — B5-T1-P3: the money index (`money_utxos`)
+// ============================================================================
+
+/// The output-local half of "this output is money". `o` is the outputs row alias.
+/// B5-T1-P5 (owner decision 2): money only when **stamped** `change = 1` by the
+/// classification seam (`classify.rs`); the derivation and basket terms are P3's rule,
+/// kept. ⚠️ The triggers carry a copy of this text: changing it changes nothing in an
+/// existing DB until [`ensure_money_index_current`] reinstalls them.
+/// The transaction-status half (`unsigned/failed/nosend/nonfinal`) and the
+/// confirmed-only rule of S3/S5/S6 are applied by the selectors' join, because they
+/// change on `transactions`, not on the output (contract §2a).
+fn money_eligible(o: &str) -> String {
+    format!(
+        "{o}.change = 1
+         AND {o}.derivation_prefix IS NOT NULL
+         AND ({o}.basket_id IS NULL OR EXISTS (SELECT 1 FROM output_baskets mb
+                                               WHERE mb.basketId = {o}.basket_id AND mb.name = 'default'))",
+        o = o
+    )
+}
+
+/// Create `money_utxos` and the triggers that keep it, if absent. Idempotent: run by
+/// V27, at every open (`WalletDatabase::migrate`'s repair step — a DB stamped V27
+/// without the table is repaired, not trusted), and by test fixtures.
+///
+/// Shape follows go-wallet-toolbox v0.187.1 `models/user_utxo.go :: UserUTXO`
+/// (`UserID`, `OutputID`, `Satoshis`, `ReservedByID`). Dropped, on purpose:
+/// - `BasketName` — money is the `default` basket only; the eligibility rule says so.
+/// - `UTXOStatus` — confirmation stays in `outputs`/`transactions`; the selectors join it.
+/// - `EstimatedInputSize` — every money coin is P2PKH; the selector already assumes it.
+///
+/// ⭐ The rules the triggers encode (`outputs.spendable` stays authoritative):
+/// 1. An output that becomes spendable money gets a **free** row (`reserved_by` NULL);
+///    a reserved row for it is freed — whatever path restored the coin, including an
+///    older binary that knows nothing of this table.
+/// 2. An output that stops being spendable loses its **free** row only. A claim marks
+///    the index row first and `outputs` second, so the claimed row survives this.
+/// 3. An output that stops being money (basket, derivation) loses its row outright.
+/// 4. A transaction that is consumed or fails drops the rows it reserved; if its inputs
+///    are then restored, rule 1 re-adds them free.
+/// 5. Deleting an output deletes its row (FK cascade, and a trigger for a connection
+///    with `foreign_keys` off).
+pub fn install_money_index(conn: &Connection) -> Result<()> {
+    conn.execute_batch(&format!("
+        CREATE TABLE IF NOT EXISTS money_utxos (
+            output_id   INTEGER PRIMARY KEY REFERENCES outputs(outputId) ON DELETE CASCADE,
+            user_id     INTEGER NOT NULL,
+            satoshis    INTEGER NOT NULL,
+            reserved_by INTEGER REFERENCES transactions(id),
+            created_at  INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_money_utxos_user_free ON money_utxos(user_id, reserved_by, satoshis);
+        CREATE INDEX IF NOT EXISTS idx_money_utxos_reserved_by ON money_utxos(reserved_by);
+
+        CREATE TRIGGER IF NOT EXISTS money_utxos_on_output_insert
+        AFTER INSERT ON outputs
+        WHEN NEW.spendable = 1 AND {elig}
+        BEGIN
+            INSERT OR IGNORE INTO money_utxos (output_id, user_id, satoshis, reserved_by, created_at)
+            VALUES (NEW.outputId, NEW.user_id, NEW.satoshis, NULL, CAST(strftime('%s','now') AS INTEGER));
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS money_utxos_on_output_spendable
+        AFTER UPDATE OF spendable, change, derivation_prefix, basket_id, satoshis, user_id ON outputs
+        WHEN NEW.spendable = 1 AND {elig}
+        BEGIN
+            UPDATE money_utxos SET reserved_by = NULL, satoshis = NEW.satoshis, user_id = NEW.user_id
+             WHERE output_id = NEW.outputId;
+            INSERT OR IGNORE INTO money_utxos (output_id, user_id, satoshis, reserved_by, created_at)
+            VALUES (NEW.outputId, NEW.user_id, NEW.satoshis, NULL, CAST(strftime('%s','now') AS INTEGER));
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS money_utxos_on_output_unspendable
+        AFTER UPDATE OF spendable ON outputs
+        WHEN NEW.spendable = 0
+        BEGIN
+            DELETE FROM money_utxos WHERE output_id = NEW.outputId AND reserved_by IS NULL;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS money_utxos_on_output_not_money
+        AFTER UPDATE OF change, derivation_prefix, basket_id ON outputs
+        WHEN NOT ({elig})
+        BEGIN
+            DELETE FROM money_utxos WHERE output_id = NEW.outputId;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS money_utxos_on_output_delete
+        AFTER DELETE ON outputs
+        BEGIN
+            DELETE FROM money_utxos WHERE output_id = OLD.outputId;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS money_utxos_on_tx_settled
+        AFTER UPDATE OF status ON transactions
+        WHEN NEW.status IN ('unproven', 'completed', 'failed')
+        BEGIN
+            DELETE FROM money_utxos WHERE reserved_by = NEW.id;
+        END;
+    ", elig = money_eligible("NEW")))
+}
+
+/// What a rebuild changed. A non-zero `added`/`removed` on a running wallet means the
+/// index had drifted from `outputs` — logged at `warn`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct MoneyIndexRebuild {
+    pub free_before: usize,
+    pub free_after: usize,
+    pub added: usize,
+    pub removed: usize,
+}
+
+/// Recompute `money_utxos` from `outputs` (the index is derived — contract §2, §7).
+/// One SQLite transaction. Free rows are recomputed from scratch; a reserved row is kept
+/// only while it is consistent (its output is `spendable=0`, `spent_by` = the reserver,
+/// and the reserver is still in flight). Run at every open, by V27, and after a backup
+/// import.
+pub fn rebuild_money_index(conn: &Connection) -> Result<MoneyIndexRebuild> {
+    let report = rebuild_money_index_quiet(conn)?;
+    if report.added > 0 || report.removed > 0 {
+        log::warn!("   ⚠️ Money index rebuilt with changes: {:?}", report);
+    } else {
+        info!("   ✅ Money index rebuilt: {} free coin(s), no drift", report.free_after);
+    }
+    Ok(report)
+}
+
+/// The rebuild without the drift log — for V27's first fill of an empty index, where
+/// every row is "added" and none of it is drift.
+fn rebuild_money_index_quiet(conn: &Connection) -> Result<MoneyIndexRebuild> {
+    fn free_ids(c: &Connection) -> Result<std::collections::BTreeSet<i64>> {
+        let mut stmt = c.prepare("SELECT output_id FROM money_utxos WHERE reserved_by IS NULL")?;
+        let ids = stmt.query_map([], |r| r.get::<_, i64>(0))?.collect::<Result<_>>()?;
+        Ok(ids)
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    let before = free_ids(&tx)?;
+    tx.execute_batch(&format!("
+        DELETE FROM money_utxos WHERE output_id NOT IN (SELECT outputId FROM outputs);
+        DELETE FROM money_utxos WHERE reserved_by IS NULL;
+        DELETE FROM money_utxos WHERE reserved_by IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM outputs o JOIN transactions t ON t.id = money_utxos.reserved_by
+             WHERE o.outputId = money_utxos.output_id
+               AND o.spendable = 0 AND o.spent_by = money_utxos.reserved_by
+               AND t.status NOT IN ('unproven', 'completed', 'failed'));
+        INSERT OR IGNORE INTO money_utxos (output_id, user_id, satoshis, reserved_by, created_at)
+            SELECT o.outputId, o.user_id, o.satoshis, NULL, CAST(strftime('%s','now') AS INTEGER)
+              FROM outputs o
+             WHERE o.spendable = 1 AND {elig};
+    ", elig = money_eligible("o")))?;
+    let after = free_ids(&tx)?;
+    tx.commit()?;
+
+    Ok(MoneyIndexRebuild {
+        free_before: before.len(),
+        free_after: after.len(),
+        added: after.difference(&before).count(),
+        removed: before.difference(&after).count(),
+    })
+}
+
+/// The six triggers [`install_money_index`] creates.
+const MONEY_INDEX_TRIGGERS: [&str; 6] = [
+    "money_utxos_on_output_insert",
+    "money_utxos_on_output_spendable",
+    "money_utxos_on_output_unspendable",
+    "money_utxos_on_output_not_money",
+    "money_utxos_on_output_delete",
+    "money_utxos_on_tx_settled",
+];
+
+/// Install the money index, replacing triggers written by an older rule.
+/// `install_money_index` uses `CREATE TRIGGER IF NOT EXISTS`, so a trigger body from a
+/// V27 binary (no `change` term) would otherwise survive forever. Any trigger whose
+/// stored SQL lacks the current eligibility text ⇒ all six are dropped and reinstalled.
+/// Returns whether it reinstalled. Run by V28 and at every open.
+pub fn ensure_money_index_current(conn: &Connection) -> Result<bool> {
+    let want = money_eligible("NEW");
+    let want: String = want.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut stale = false;
+    for name in ["money_utxos_on_output_insert", "money_utxos_on_output_spendable", "money_utxos_on_output_not_money"] {
+        let sql: Option<String> = conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?1", [name], |r| r.get(0),
+        ).optional()?;
+        match sql {
+            Some(sql) if sql.split_whitespace().collect::<Vec<_>>().join(" ").contains(&want) => {}
+            Some(_) => stale = true,
+            None => {}
+        }
+    }
+    if stale {
+        for name in MONEY_INDEX_TRIGGERS {
+            conn.execute_batch(&format!("DROP TRIGGER IF EXISTS {name};"))?;
+        }
+    }
+    install_money_index(conn)?;
+    Ok(stale)
+}
+
+/// V28 (B5-T1-P5, owner decisions 2 + 7, invariant 2 approved 2026-10-05): the money
+/// index admits only rows the classification seam stamped `change = 1`.
+///
+/// Every existing `change` value is reset to 0 first: before P5 `change` meant "the
+/// wallet built this as change", never "proven money", and a backup could carry any
+/// value. The seam re-stamps what it proves (`classify::stamp_pending`, run at every
+/// `TaskSyncPending` tick once the wallet is unlocked). Until then those coins are held
+/// and **shown** (`/wallet/balance` `held`), never dropped from view. No column added.
+pub fn migrate_v27_to_v28(conn: &Connection) -> Result<()> {
+    let reset = conn.execute("UPDATE outputs SET change = 0 WHERE change != 0", [])?;
+    ensure_money_index_current(conn)?;
+    let r = rebuild_money_index_quiet(conn)?;
+    info!("   ✅ V28 migration applied (money = stamped only; {} change mark(s) reset; index {} → {} free coin(s), re-stamped by the classifier)",
+          reset, r.free_before, r.free_after);
+    Ok(())
+}
+
+/// V29 (B5-T1-P7a-1, owner decision 1, invariant 2 approved 2026-10-09): the wallet's own verified
+/// block-header chain above the compiled checkpoint (`header_chain.rs`). Derived data: never exported
+/// or backed up, and every row is re-checked against every header rule at startup
+/// (`chain_tracker::ChainTracker::load`), so a copied or planted row is never trusted.
+/// `chainwork` is 32 bytes big-endian; `is_active` = on the most-work chain.
+pub fn migrate_v28_to_v29(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS verified_headers (
+            hash TEXT PRIMARY KEY,
+            height INTEGER NOT NULL,
+            prev_hash TEXT NOT NULL,
+            header BLOB NOT NULL CHECK (length(header) = 80),
+            chainwork BLOB NOT NULL CHECK (length(chainwork) = 32),
+            is_active INTEGER NOT NULL CHECK (is_active IN (0, 1))
+        );
+        CREATE INDEX IF NOT EXISTS idx_verified_headers_height_active ON verified_headers(height, is_active);
+        CREATE INDEX IF NOT EXISTS idx_verified_headers_prev ON verified_headers(prev_hash);",
+    )?;
+    info!("   ✅ V29 migration applied (verified_headers)");
+    Ok(())
+}
+
+/// V30 (B5-T1-P7b, owner decision 1, invariant 2 approved 2026-10-10): PeerPay messages the wallet
+/// cannot credit yet, stored BEFORE the MessageBox message is acknowledged — so no payment is lost
+/// when it is deleted from the server. `body` is the decrypted message exactly as received (NULL only
+/// for a row restored from a backup, which carries the derivation and txid alone). `next_check_at`
+/// NULL = re-checked at wallet start; `lock_time` set = re-checked once our chain passes it.
+pub fn migrate_v29_to_v30(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS peerpay_held_messages (
+            message_id TEXT PRIMARY KEY,
+            sender TEXT NOT NULL,
+            derivation_prefix TEXT,
+            derivation_suffix TEXT,
+            txid TEXT,
+            reason TEXT NOT NULL,
+            held_at INTEGER NOT NULL,
+            lock_time INTEGER,
+            next_check_at INTEGER,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            checked_at INTEGER,
+            body BLOB
+        );
+        CREATE INDEX IF NOT EXISTS idx_peerpay_held_sender ON peerpay_held_messages(sender);",
+    )?;
+    info!("   ✅ V30 migration applied (peerpay_held_messages)");
+    Ok(())
+}
+
+/// V31 (B5-T5-P7a; invariant 2 approved by the owner 2026-10-15): per outbox row, the MessageBox hosts
+/// that took the message (`delivered_hosts`, a JSON array; NULL = none) and the exact request posted
+/// (`message_request`; NULL for a row written before V31 — prepared again at its next attempt).
+/// ⭐ DEVELOPER NOTE (owner, 2026-10-15). Hodos posts one PeerPay message to SEVERAL MessageBox servers
+/// because finding out which server a wallet reads is not reliable yet: few wallets publish an
+/// `ls_messagebox` advertisement (BSV Browser cannot; BSV Desktop only on request), the lookup hosts
+/// disagree (2026-10-14: Babbage's had none of the owner's three), and the servers are separate
+/// mailboxes. So the outbox remembers which servers took each message and re-posts the SAME message
+/// (same id) only to the ones that did not. Once discovery matures — most recipients advertised,
+/// our own advertisement published (B5-T5-P7 Part B) — most sends go to one host and this per-host
+/// record can be simplified.
+pub fn migrate_v30_to_v31(conn: &Connection) -> Result<()> {
+    let cols: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(peerpay_outbox)")?;
+        let cols = stmt.query_map([], |row| row.get::<_, String>(1))?.collect::<Result<Vec<_>>>()?;
+        cols
+    };
+    if !cols.iter().any(|c| c == "delivered_hosts") {
+        conn.execute("ALTER TABLE peerpay_outbox ADD COLUMN delivered_hosts TEXT", [])?;
+    }
+    if !cols.iter().any(|c| c == "message_request") {
+        conn.execute("ALTER TABLE peerpay_outbox ADD COLUMN message_request BLOB", [])?;
+    }
+    info!("   ✅ V31 migration applied (peerpay_outbox per-host delivery)");
+    Ok(())
+}
+
+/// V27 (B5-T1-P3, owner decision 2a + kickoff Q5): the money index.
+pub fn migrate_v26_to_v27(conn: &Connection) -> Result<()> {
+    install_money_index(conn)?;
+    let r = rebuild_money_index_quiet(conn)?;
+    info!("   ✅ V27 migration applied (money index filled: {} free coin(s))", r.free_after);
     Ok(())
 }
