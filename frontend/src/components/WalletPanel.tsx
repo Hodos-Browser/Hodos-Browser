@@ -37,7 +37,7 @@ interface WalletPanelProps {
 }
 
 export default function WalletPanel({ onClose }: WalletPanelProps) {
-  const { balance, usdValue, bsvPrice, isLoading, isRefreshing, refreshBalance, error: balanceError } = useBalance();
+  const { balance, usdValue, bsvPrice, isLoading, isRefreshing, isChecking, refreshBalance, error: balanceError } = useBalance();
   const { currentAddress, isGenerating, generateAndCopy } = useAddress();
 
   const [showSendForm, setShowSendForm] = useState(false);
@@ -614,6 +614,18 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
           </HodosButton>
         </div>
         <div className="balance-content-light">
+          {isChecking ? (
+            // The wallet is still proving coins (after an update): never show a balance
+            // that leaves them out.
+            <div className="balance-checking-light" role="status"
+                 style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0' }}>
+              <div className="sync-spinner" />
+              <div>
+                <div style={{ fontWeight: 600 }}>Checking your coins…</div>
+                <div style={{ fontSize: 12, opacity: 0.75 }}>This can take a minute or two after an update.</div>
+              </div>
+            </div>
+          ) : (<>
           <div className="balance-primary-light">
             <span className="balance-amount-light">
               {isLoading ? '...' : `$${usdValue.toFixed(2)}`}
@@ -632,6 +644,7 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
           </div>
           {/* B5-T1-P5: coins held but not proven money, directly under the balance. */}
           <HeldCoinsLine bsvPrice={bsvPrice} onChanged={refreshBalance} />
+          </>)}
           {/* P2a-A3: useBalance has always tracked `error`, and NOTHING rendered it. With
               the wallet unreachable the panel showed a stale figure with no hint that it
               was stale -- and, before the bridge fix, a confident $0.00. Say so plainly
@@ -872,6 +885,7 @@ export default function WalletPanel({ onClose }: WalletPanelProps) {
             onTransactionCreated={handleSendSubmit}
             balance={balance}
             bsvPrice={bsvPrice}
+            isLoading={isChecking}
             initialRecipient={qrRecipient}
             initialAmount={qrAmount}
           />

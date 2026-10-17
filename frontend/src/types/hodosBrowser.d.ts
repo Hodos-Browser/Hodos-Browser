@@ -19,7 +19,7 @@ declare global {
         // ⛔ Takes a JSON STRING, not an object — the caller stringifies, matching what
         // the legacy path already put on the wire.
         sendTransaction: (payloadJson: string) => Promise<TransactionResponse>;
-        getBalance: () => Promise<{ balance: number; bsvPrice?: number }>;
+        getBalance: () => Promise<{ balance: number; bsvPrice?: number; checking?: boolean }>;
         // Stage 3 batch 2. Backs `address.generate()`.
         generateAddress: () => Promise<AddressData>;
         // (getInfo / markBackedUp / getBackupModalState / setBackupModalState were deleted
@@ -97,7 +97,7 @@ declare global {
         // caller; C++ round trips removed). Address generation is `address.generate`.
         // ⛔ `getInfo`, `markBackedUp`, `getBackupModalState`, `setBackupModalState` were
         // DELETED with the backup overlay (Phase 8c O8, 2026-09-12).
-        getBalance: () => Promise<{ balance: number; bsvPrice?: number }>;
+        getBalance: () => Promise<{ balance: number; bsvPrice?: number; checking?: boolean }>;
         sendTransaction: (data: { recipient: string; amount: number }) => Promise<TransactionResponse>;
       };
       address: {

@@ -3106,6 +3106,13 @@ pub async fn wallet_unlock(
 // The price fetch is async but cached with 5-min TTL so it's fast on most calls.
 // UTXO syncing is the responsibility of POST /wallet/sync.
 pub async fn wallet_balance(state: web::Data<AppState>) -> HttpResponse {
+    let done = crate::monitor::task_sync_pending::STARTUP_CHECK_DONE.load(std::sync::atomic::Ordering::SeqCst);
+    wallet_balance_with(state, done).await
+}
+
+/// `wallet_balance` with the startup check's state passed in (tests pass it directly:
+/// other tests start the monitor, whose check sets the process-wide flag).
+async fn wallet_balance_with(state: web::Data<AppState>, startup_check_done: bool) -> HttpResponse {
     log::info!("💰 /wallet/balance called");
 
     // Fetch BSV/USD price (async, cached with 5-min TTL)
@@ -3119,11 +3126,17 @@ pub async fn wallet_balance(state: web::Data<AppState>) -> HttpResponse {
         crate::database::OutputRepository::new(db.connection())
             .calculate_held(state.current_user_id).ok()
     });
-    let reply = |balance: i64| {
+    // Upgrade fix (owner, 2026-10-17): while the startup check may still turn held coins
+    // into money, say so — the UI shows "checking", never a balance missing those coins.
+    let checking = crate::monitor::task_sync_pending::balance_checking(startup_check_done, held);
+    let reply = |balance: i64, checking: bool| {
         let mut body = serde_json::json!({ "balance": balance, "bsvPrice": bsv_usd_price });
         if let Some((sats, count)) = held {
             body["held"] = serde_json::json!(sats);
             body["heldCount"] = serde_json::json!(count);
+        }
+        if checking {
+            body["checking"] = serde_json::json!(true);
         }
         HttpResponse::Ok().json(body)
     };
@@ -3131,7 +3144,7 @@ pub async fn wallet_balance(state: web::Data<AppState>) -> HttpResponse {
     // Check balance cache first (fast path)
     if let Some(cached_balance) = state.balance_cache.get() {
         log::info!("   ✅ Using cached balance: {} satoshis, price: ${:.2}", cached_balance, bsv_usd_price);
-        return reply(cached_balance);
+        return reply(cached_balance, checking);
     }
 
     log::info!("   🔄 Cache miss - calculating balance from database...");
@@ -3155,19 +3168,24 @@ pub async fn wallet_balance(state: web::Data<AppState>) -> HttpResponse {
             // DB is busy (background task holding lock) — return stale balance
             if let Some(stale) = state.balance_cache.get_or_stale() {
                 log::info!("   ⏳ DB busy, returning last known balance: {} satoshis", stale);
-                return reply(stale);
+                return reply(stale, checking);
             } else {
+                // Not measured: "checking", never a confident 0.
                 log::warn!("   ⏳ DB busy, no cached balance available");
-                return reply(0);
+                return reply(0, true);
             }
         }
     };
 
-    // Cache the calculated balance
-    state.balance_cache.set(balance);
+    // Cache the calculated balance — never a `checking` one: it leaves out coins the
+    // startup check has not proven yet, and the DB-busy path would serve it as whole
+    // after the check ends (delta review #1).
+    if !checking {
+        state.balance_cache.set(balance);
+    }
     log::info!("   ✅ Balance: {} satoshis, price: ${:.2}", balance, bsv_usd_price);
 
-    reply(balance)
+    reply(balance, checking)
 }
 
 /// GET /wallet/held-outputs — B5-T1-P5 (decision 7 ④): every coin the wallet holds but
@@ -25113,3 +25131,53 @@ mod p7a2_tests;  // B5-T1-P7a-2
 #[cfg(test)]
 #[path = "p6_restore_tests.rs"]
 mod p6_restore_tests;
+
+// ============================================================================
+// beta.7 upgrade fix (#179): `/wallet/balance` says `checking` — and caches nothing —
+// until the startup check has proven the held coins; then the whole balance.
+// ============================================================================
+#[cfg(test)]
+mod balance_checking_endpoint_tests {
+    use super::*;
+
+    async fn body(state: &web::Data<AppState>, startup_check_done: bool) -> serde_json::Value {
+        let resp = wallet_balance_with(state.clone(), startup_check_done).await;
+        let bytes = actix_web::body::to_bytes(resp.into_body()).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// Before the check ends a held coin makes the reply `checking` and nothing is cached;
+    /// after it, a plain balance that is cached; DB busy with nothing cached = `checking`.
+    /// The check's state is passed in, not read from the process-wide flag (round 4 review:
+    /// restore tests start the monitor, whose check sets that flag).
+    /// Negative controls: drop the `checking` field, cache unconditionally, busy path.
+    #[actix_web::test]
+    async fn checking_until_the_startup_check_ends_and_never_cached_meanwhile() {
+        let state = super::abort_action_tests::app_state();
+        state.price_cache.seed_for_test(18.0);
+        {
+            let db = state.database.lock().unwrap();
+            crate::database::OutputRepository::new(db.connection()).upsert_received_utxo_with_confirmed(
+                1, &"ab".repeat(32), 0, 5_000, "76a914000000000000000000000000000000000000000088ac",
+                0, true, crate::ingest::ScriptSource::Unchecked).unwrap();
+        }
+
+        let b = body(&state, false).await;
+        assert_eq!(b["checking"], serde_json::json!(true), "held coin before the check ends: {b}");
+        assert_eq!(b["heldCount"], serde_json::json!(1));
+        assert_eq!(state.balance_cache.get_or_stale(), None, "a checking balance must not be cached");
+
+        let b = body(&state, true).await;
+        // After the check, with the DB busy and nothing cached: not measured, so
+        // `checking` — never a confident 0 (a fresh state, so nothing is cached).
+        let fresh = super::abort_action_tests::app_state();
+        fresh.price_cache.seed_for_test(18.0);
+        let busy_reply = {
+            let _busy = fresh.database.lock().unwrap();
+            body(&fresh, true).await
+        };
+        assert!(b.get("checking").is_none(), "after the check: a plain balance: {b}");
+        assert_eq!(state.balance_cache.get_or_stale(), Some(0), "after the check the balance is cached");
+        assert_eq!(busy_reply["checking"], serde_json::json!(true), "DB busy, nothing cached: {busy_reply}");
+    }
+}

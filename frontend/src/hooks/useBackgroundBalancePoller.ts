@@ -22,7 +22,9 @@ export function useBackgroundBalancePoller() {
         if (!window.hodosBrowser?.wallet) return;
         const response = await window.hodosBrowser.wallet.getBalance();
         if (mountedRef.current) {
-          setCachedBalance(response.balance);
+          // The wallet is still checking coins (after an update): its balance leaves
+          // them out, so it must not replace the last whole figure in the cache.
+          if (!response.checking) setCachedBalance(response.balance);
           // Price comes from backend alongside balance
           if (response.bsvPrice && response.bsvPrice > 0) {
             setCachedPrice(response.bsvPrice);

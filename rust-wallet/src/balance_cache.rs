@@ -106,6 +106,12 @@ impl BalanceCache {
         }
     }
 
+    /// Forget the figure entirely. Unlike [`invalidate`](Self::invalidate), nothing is left
+    /// for [`get_or_stale`](Self::get_or_stale) to serve — for a figure known to be partial.
+    pub fn clear(&self) {
+        *self.cache.write().unwrap() = None;
+    }
+
     /// Invalidate and update with new balance (atomic)
     ///
     /// Convenience method that invalidates and sets a new balance in one operation.

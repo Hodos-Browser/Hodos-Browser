@@ -186,6 +186,12 @@ impl PriceCache {
         }
     }
 
+    /// Tests: a fresh price, so a handler under test makes no network call.
+    #[cfg(test)]
+    pub fn seed_for_test(&self, usd_price: f64) {
+        self.set(usd_price, "test".to_string());
+    }
+
     /// Get cached price if still fresh (within TTL).
     pub fn get_cached(&self) -> Option<f64> {
         let cache = self.cache.read().unwrap();

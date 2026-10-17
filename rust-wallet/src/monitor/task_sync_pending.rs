@@ -76,6 +76,162 @@ async fn sweep_unchecked_scripts(state: &web::Data<AppState>) {
     }
 }
 
+/// Set once [`startup_check`] has ended. Until then `/wallet/balance` answers
+/// `checking` (see [`balance_checking`]) instead of a balance that leaves out the coins
+/// not checked yet. 👤 Owner, 2026-10-17: the beta.7 upgrade showed $0, then a balance
+/// creeping up over several minutes, while the V28 reset was re-proven 10 coins a tick.
+pub static STARTUP_CHECK_DONE: AtomicBool = AtomicBool::new(false);
+static STARTUP_CHECK_STARTED: AtomicBool = AtomicBool::new(false);
+/// The startup check has finished reading scripts (it may still be waiting for the keys).
+/// The tick's own script sweep waits for this, not for DONE, so a locked wallet does not
+/// stop newly arrived coins being read.
+static STARTUP_OBSERVATION_DONE: AtomicBool = AtomicBool::new(false);
+
+/// How long the startup check keeps retrying coins whose parent could not be fetched.
+pub(crate) struct RetryPolicy {
+    /// First pause between passes; doubles up to `max_pause`, reset by progress.
+    pub first_pause: std::time::Duration,
+    pub max_pause: std::time::Duration,
+    /// Give up on the unavailable coins after this long without reading any coin
+    /// (a provider down or rate-limiting for longer than this; or a coin whose parent no
+    /// provider has — that must not hold the spinner for the whole budget on every start).
+    pub stall: std::time::Duration,
+    /// Hard limit for the whole observation phase.
+    pub budget: std::time::Duration,
+}
+
+const STARTUP_POLICY: RetryPolicy = RetryPolicy {
+    first_pause: std::time::Duration::from_secs(2),
+    max_pause: std::time::Duration::from_secs(8),
+    stall: std::time::Duration::from_secs(30),
+    budget: std::time::Duration::from_secs(120),
+};
+const STARTUP_SWEEP_BATCH: usize = 50;
+
+/// `checking` for `/wallet/balance`: the startup check has not ended and there are held
+/// coins it may still turn into money — or the held figure could not be read at all.
+pub fn balance_checking(done: bool, held: Option<(i64, i64)>) -> bool {
+    !done && held.map_or(true, |(_, count)| count > 0)
+}
+
+/// What the observation phase ended with.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ObserveOutcome {
+    pub observed: u32,
+    /// Coins whose parent was still unavailable when the phase ended (the tick retries).
+    pub unavailable: u32,
+    pub gave_up: bool,
+}
+
+/// Run `pass` (one full pass over every unchecked coin) until no coin is waiting on an
+/// unavailable parent, retrying with a growing pause. Stops after `stall` without progress
+/// or at `budget`. Coins that cannot be observed by waiting (`still_unchecked` minus
+/// `unavailable`) never hold it — review of #179, finding 1.
+pub(crate) async fn observe_with_retry<F, Fut>(mut pass: F, policy: &RetryPolicy) -> ObserveOutcome
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = crate::ingest::SweepReport>,
+{
+    let started = std::time::Instant::now();
+    let mut last_progress = started;
+    let mut pause = policy.first_pause;
+    let mut observed = 0u32;
+    loop {
+        let r = pass().await;
+        observed += r.completed;
+        if r.completed > 0 {
+            last_progress = std::time::Instant::now();
+            pause = policy.first_pause;
+        }
+        if r.unavailable == 0 {
+            return ObserveOutcome { observed, unavailable: 0, gave_up: false };
+        }
+        let now = std::time::Instant::now();
+        if now.duration_since(last_progress) >= policy.stall
+            || now.duration_since(started) + pause >= policy.budget {
+            return ObserveOutcome { observed, unavailable: r.unavailable, gave_up: true };
+        }
+        tokio::time::sleep(pause).await;
+        pause = std::cmp::min(pause * 2, policy.max_pause);
+    }
+}
+
+/// One full pass over every unchecked coin, in batches (the tick's sweep, unbounded).
+async fn full_pass(state: &web::Data<AppState>) -> crate::ingest::SweepReport {
+    let mut total = crate::ingest::SweepReport::default();
+    let mut after = 0;
+    loop {
+        let r = crate::ingest::complete_unchecked_from_chain(
+            &state.database, &state.services, after, STARTUP_SWEEP_BATCH).await;
+        total.completed += r.completed;
+        total.still_unchecked += r.still_unchecked;
+        total.unavailable += r.unavailable;
+        if r.next_after_id == 0 { return total; }
+        after = r.next_after_id;
+    }
+}
+
+/// Sets DONE however the check ends. If it did not finish normally (panic, shutdown, a
+/// DB error), the cached balance may be the partial figure seeded at startup: forget it,
+/// so nothing serves it as whole (review of #179, finding 7).
+struct StartupCheckGuard { state: web::Data<AppState>, finished: bool }
+impl Drop for StartupCheckGuard {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.state.balance_cache.clear();
+        }
+        STARTUP_OBSERVATION_DONE.store(true, Ordering::SeqCst);
+        STARTUP_CHECK_DONE.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Once per process, spawned at monitor start: observe every coin whose script was never
+/// read (`ingest::complete_unchecked`, the verified path the tick uses), wait for the keys
+/// if the wallet is locked, then classify every coin and cache the whole balance under one
+/// lock. Each coin is written as it is observed, so a stop part-way loses nothing and the
+/// next start resumes. Ends on shutdown.
+pub async fn startup_check(state: web::Data<AppState>) {
+    if STARTUP_CHECK_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let mut guard = StartupCheckGuard { state: state.clone(), finished: false };
+    let shutdown = state.shutdown.clone();
+    tokio::select! {
+        _ = shutdown.cancelled() => {}
+        finished = run_startup_check(&state) => guard.finished = finished,
+    }
+}
+
+async fn run_startup_check(state: &web::Data<AppState>) -> bool {
+    let started = std::time::Instant::now();
+    // The hard limit also covers a pass that hangs inside one fetch.
+    match tokio::time::timeout(STARTUP_POLICY.budget, observe_with_retry(|| full_pass(state), &STARTUP_POLICY)).await {
+        Ok(o) if o.gave_up => warn!("   🔎 startup check: {} coin(s) observed; {} still waiting on an unavailable parent after {:?} — they stay held and the tick finishes them",
+                                    o.observed, o.unavailable, started.elapsed()),
+        Ok(o) => info!("   🔎 startup check: scripts observed for {} coin(s), none waiting on a parent ({:?})", o.observed, started.elapsed()),
+        Err(_) => warn!("   🔎 startup check: stopped at its {:?} limit — the rest stay held and the tick finishes them", STARTUP_POLICY.budget),
+    }
+    STARTUP_OBSERVATION_DONE.store(true, Ordering::SeqCst);
+    // Classifying needs the keys. Locked: keep `checking` until the unlock, so nothing
+    // caches a figure in which every coin is still held (review of #179, finding 5).
+    loop {
+        match state.database.lock() {
+            Ok(db) if db.get_cached_mnemonic().is_ok() => break,
+            Ok(_) => {}
+            Err(e) => { warn!("   🏷️ startup check: DB lock: {}", e); return false; }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    // Stamp, then cache the whole balance under the same lock: `invalidate` alone keeps
+    // the old figure, which the DB-busy path serves (delta review #1).
+    let Ok(db) = state.database.lock() else { return false; };
+    crate::classify::stamp_all(&db, "startup");
+    match OutputRepository::new(db.connection()).calculate_balance(state.current_user_id) {
+        Ok(balance) => { state.balance_cache.set(balance); true }
+        Err(e) => { warn!("   🏷️ startup check: balance: {}", e); false }
+    }
+}
+
 /// Run the TaskSyncPending task
 pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
     // B5-T1-P5: classify FIRST as well. The startup tick's address sweep can take
@@ -86,7 +242,11 @@ pub async fn run(state: &web::Data<AppState>) -> Result<(), String> {
     let result = check_pending(state).await;
     // B5-T1-P4: every tick, AFTER receive detection so it never delays a payment
     // showing up (adversarial review MED 1), and whatever the address check returned.
-    sweep_unchecked_scripts(state).await;
+    // Not while the startup check runs: both would fetch the same parents from the
+    // provider that is already rate-limiting (review of #179, finding 9).
+    if STARTUP_OBSERVATION_DONE.load(Ordering::SeqCst) {
+        sweep_unchecked_scripts(state).await;
+    }
     // B5-T1-P5: then classify every coin not yet proven money — the one-time migration
     // of pre-P5 rows, rows whose script the sweep just observed, and decision 7 ④'s
     // automatic retry of held coins. Local only (no network), skipped while locked.
@@ -513,6 +673,97 @@ pub(crate) fn chain_output_matches(body: &serde_json::Value, vout: u32, satoshis
     match out.get("scriptPubKey").and_then(|s| s.get("hex")).and_then(|h| h.as_str()) {
         Some(chain_script) => Some(chain_script == hex::encode(script).as_str()),
         None => None,  // the body carries no script — cannot compare
+    }
+}
+
+#[cfg(test)]
+mod startup_check_tests {
+    use super::{balance_checking, observe_with_retry, ObserveOutcome, RetryPolicy};
+    use crate::ingest::SweepReport;
+    use std::cell::RefCell;
+    use std::time::Duration;
+
+    const MS: RetryPolicy = RetryPolicy {
+        first_pause: Duration::from_millis(2),
+        max_pause: Duration::from_millis(8),
+        // Generous next to the ~30 ms of pauses: under full-suite load a 60 ms window
+        // was exceeded by scheduling alone.
+        stall: Duration::from_millis(1_500),
+        budget: Duration::from_millis(5_000),
+    };
+
+    fn rep(completed: u32, unavailable: u32, unreadable: u32) -> SweepReport {
+        SweepReport { completed, still_unchecked: unavailable + unreadable, unavailable, next_after_id: 0 }
+    }
+
+    /// Replays scripted pass results; the last one repeats.
+    async fn run(script: Vec<SweepReport>) -> (ObserveOutcome, usize) {
+        let calls = RefCell::new(0usize);
+        let out = observe_with_retry(|| {
+            let i = { let mut c = calls.borrow_mut(); *c += 1; *c - 1 };
+            let r = script[i.min(script.len() - 1)].clone();
+            async move { r }
+        }, &MS).await;
+        let n = *calls.borrow();
+        (out, n)
+    }
+
+    #[tokio::test]
+    async fn every_parent_available_ends_after_one_pass() {
+        assert_eq!(run(vec![rep(95, 0, 0)]).await,
+                   (ObserveOutcome { observed: 95, unavailable: 0, gave_up: false }, 1));
+    }
+
+    /// Review of #179 finding 1: an outage of more than three passes (the old rule's limit)
+    /// but shorter than `stall` is waited out, so the balance is whole when shown.
+    /// Negative control: the old "3 passes without progress" rule gives up at pass 4.
+    #[tokio::test]
+    async fn an_outage_longer_than_three_passes_is_waited_out() {
+        let mut script = vec![rep(0, 17, 0); 5];
+        script.push(rep(17, 0, 0));
+        assert_eq!(run(script).await,
+                   (ObserveOutcome { observed: 17, unavailable: 0, gave_up: false }, 6));
+    }
+
+    /// A coin that cannot be observed by waiting (bad parent bytes) never holds it.
+    #[tokio::test]
+    async fn unreadable_coins_do_not_hold_the_check() {
+        assert_eq!(run(vec![rep(10, 0, 3)]).await,
+                   (ObserveOutcome { observed: 10, unavailable: 0, gave_up: false }, 1));
+    }
+
+    /// A parent no provider has: gives up after `stall` without progress, well inside the budget.
+    #[tokio::test]
+    async fn a_parent_that_never_arrives_gives_up_after_the_stall_window() {
+        let t = std::time::Instant::now();
+        let (out, _) = run(vec![rep(5, 1, 0), rep(0, 1, 0)]).await;
+        assert_eq!(out, ObserveOutcome { observed: 5, unavailable: 1, gave_up: true });
+        assert!(t.elapsed() < MS.budget, "ended by the stall window, not the budget: {:?}", t.elapsed());
+    }
+
+    /// The upgrade case: check not ended, held coins it may still prove ⇒ checking.
+    #[test]
+    fn checking_while_the_check_runs_and_coins_are_held() {
+        assert!(balance_checking(false, Some((40_334_735, 33))));
+    }
+
+    /// Held figure unreadable (DB busy) before the check ends ⇒ not measured ⇒ checking.
+    #[test]
+    fn checking_when_held_could_not_be_read() {
+        assert!(balance_checking(false, None));
+    }
+
+    /// Nothing held (a new wallet) ⇒ the balance is already whole.
+    #[test]
+    fn not_checking_with_nothing_held() {
+        assert!(!balance_checking(false, Some((0, 0))));
+    }
+
+    /// Check ended ⇒ never checking again, whatever stays held (bounded spinner).
+    #[test]
+    fn not_checking_once_the_check_ended() {
+        assert!(!balance_checking(true, Some((186_884, 19))));
+        assert!(!balance_checking(true, None));
     }
 }
 

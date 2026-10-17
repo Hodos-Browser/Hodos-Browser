@@ -189,6 +189,9 @@ impl Monitor {
         // restore that used to run inline in main().
         let mut last_sweep_reservations: u64 = 0;
 
+        // Not behind the tick: its first pass runs every other task first (minutes).
+        tokio::spawn(task_sync_pending::startup_check(self.state.clone()));
+
         // Small initial delay to let the server finish starting up
         tokio::time::sleep(Duration::from_secs(5)).await;
 

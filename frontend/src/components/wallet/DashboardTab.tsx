@@ -58,6 +58,9 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
   const [balance, setBalance] = useState(0);
   const [bsvPrice, setBsvPrice] = useState(0);
   const [balanceLoading, setBalanceLoading] = useState(true);
+  // The wallet answered `checking` (still proving coins after an update): show that,
+  // never a balance that leaves those coins out.
+  const [balanceChecking, setBalanceChecking] = useState(false);
 
   // Receive state
   const [currentAddress, setCurrentAddress] = useState('');
@@ -133,8 +136,10 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
       const data = await res.json();
       const newBalance = data.balance || 0;
       const newPrice = data.bsvPrice || 0;
+      const checking = data.checking === true;
+      setBalanceChecking(checking);
       // Only update state if values actually changed
-      if (newBalance !== balanceRef.current) {
+      if (!checking && newBalance !== balanceRef.current) {
         const balanceChanged = balanceRef.current !== 0; // skip initial load
         balanceRef.current = newBalance;
         setBalance(newBalance);
@@ -353,9 +358,9 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
       onTransactionCreated={handleTransactionCreated}
       balance={balance}
       bsvPrice={bsvPrice}
-      isLoading={balanceLoading}
+      isLoading={balanceLoading || balanceChecking}
     />
-  ), [handleTransactionCreated, balance, bsvPrice, balanceLoading]);
+  ), [handleTransactionCreated, balance, bsvPrice, balanceLoading, balanceChecking]);
 
   const formatBsv = (sats: number): string => (sats / 100000000).toFixed(8);
   const formatUsd = (sats: number, price: number): string => {
@@ -405,6 +410,14 @@ const DashboardTab: React.FC<DashboardTabProps> = ({ onNavigateToActivity }) => 
           {balanceLoading ? (
             <div className="wd-loading" style={{ padding: '12px 0' }}>
               <div className="wd-spinner" />
+            </div>
+          ) : balanceChecking ? (
+            <div className="wd-loading" role="status" style={{ padding: '12px 0', gap: 10 }}>
+              <div className="wd-spinner" />
+              <div>
+                <div style={{ fontWeight: 600 }}>Checking your coins…</div>
+                <div style={{ fontSize: 12, opacity: 0.75 }}>This can take a minute or two after an update.</div>
+              </div>
             </div>
           ) : (
             <>

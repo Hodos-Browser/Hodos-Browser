@@ -304,6 +304,9 @@ pub async fn complete_unchecked_from_chain(
 pub struct SweepReport {
     pub completed: u32,
     pub still_unchecked: u32,
+    /// Of `still_unchecked`: rows whose parent could not be fetched this pass — worth
+    /// retrying (an indexer refusing or down). The rest cannot be observed by waiting.
+    pub unavailable: u32,
     /// Resume after this `outputId` next pass (0 = start over).
     pub next_after_id: i64,
 }
@@ -354,7 +357,7 @@ where
         }
         let obs = match raws.get(&txid).and_then(|r| r.as_ref()) {
             Some(raw) => observe_output(raw, &txid, vout, sats),
-            None => { report.still_unchecked += 1; continue; }
+            None => { report.still_unchecked += 1; report.unavailable += 1; continue; }
         };
         match obs {
             Ok(o) => {
@@ -746,8 +749,26 @@ mod tests {
         }).await;
         assert_eq!(row(&db, &good, 0).1, Some(25), "completed from the local parent");
         assert_eq!(row(&db, &bad, 0).1, None, "disagreeing local parent ⇒ stays unchecked");
-        assert_eq!(report, SweepReport { completed: 1, still_unchecked: 1, next_after_id: 0 });
+        assert_eq!(report, SweepReport { completed: 1, still_unchecked: 1, unavailable: 1, next_after_id: 0 });
         assert_eq!(calls.load(Ordering::SeqCst), 1, "only the bad parent went to the network");
+    }
+
+    /// A coin the verified parent contradicts (wrong value, or no such vout) cannot be
+    /// observed by waiting: it is `still_unchecked` but never `unavailable`, so it never
+    /// holds the startup check (/code-review 179 round 2, #11).
+    #[tokio::test]
+    async fn a_coin_its_parent_contradicts_is_not_counted_unavailable() {
+        let raw = raw_tx(&[(3000, hex::decode(P2PKH).unwrap())]);
+        let txid = txid_of(&raw);
+        let db = test_db("unreadable");
+        {
+            let d = db.lock().unwrap();
+            let repo = OutputRepository::new(d.connection());
+            repo.upsert_received_utxo_with_confirmed(1, &txid, 0, 9999, P2PKH, 0, true, ScriptSource::Unchecked).unwrap();
+            repo.upsert_received_utxo_with_confirmed(1, &txid, 5, 3000, P2PKH, 0, true, ScriptSource::Unchecked).unwrap();
+        }
+        let report = complete_unchecked(&db, 0, 25, fetch_ok(raw)).await;
+        assert_eq!(report, SweepReport { completed: 0, still_unchecked: 2, unavailable: 0, next_after_id: 0 });
     }
 
     // ---- P4-A15 --------------------------------------------------------------

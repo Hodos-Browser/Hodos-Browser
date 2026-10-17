@@ -459,11 +459,9 @@ nlohmann::json WalletService::getBalance(const nlohmann::json& balanceData) {
         LOG_DEBUG_BROWSER("💵 Total Balance: " + std::to_string(totalBalance)
                           + " satoshis, BSV/USD: $" + std::to_string(bsvPrice));
 
-        // Return balance + price in expected format
-        nlohmann::json balanceResponse;
-        balanceResponse["balance"] = totalBalance;
-        balanceResponse["bsvPrice"] = bsvPrice;
-        return balanceResponse;
+        // The wallet's reply whole, as on macOS (WalletService_mac.cpp): a field rebuilt
+        // by hand here (`checking`, `held`) silently existed on one platform only.
+        return response;
     } else {
         const std::string err = response.value("error", std::string("unknown error"));
         LOG_ERROR_BROWSER("❌ Failed to get total balance: " + err);

@@ -7,7 +7,7 @@ import { useBalance } from '../hooks/useBalance';
 import type { TransactionResponse } from '../types/transaction';
 
 export const SendPage: React.FC = () => {
-  const { balance, usdValue, bsvPrice, isLoading: balanceLoading, isRefreshing: balanceRefreshing, refreshBalance } = useBalance();
+  const { balance, usdValue, bsvPrice, isLoading: balanceLoading, isRefreshing: balanceRefreshing, isChecking: balanceChecking, refreshBalance } = useBalance();
   const {
     transactions,
     isLoading: transactionLoading,
@@ -88,7 +88,7 @@ Status: ${result.status}`);
           <BalanceDisplay
             balance={balance}
             usdValue={usdValue}
-            isLoading={balanceLoading}
+            isLoading={balanceLoading || balanceChecking}
             isRefreshing={balanceRefreshing}
             onRefresh={handleRefresh}
           />
